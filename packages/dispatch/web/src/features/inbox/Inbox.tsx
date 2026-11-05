@@ -736,21 +736,22 @@ export function Inbox({
       : (listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`) ?? null);
   /** The row `l` was pressed on: the row Escape returns the focus to from inside the column,
    *  which is another row than the selected one whenever `j` moved the selection while the
-   *  focus stayed in the list. Null for every other way into the column, where Escape returns
-   *  to the row the column is showing, as it always has.
+   *  focus stayed in the list. Every other way into the column leaves it null, or names the row
+   *  of the question the column shows (below), and either way Escape returns to that row, as it
+   *  always has.
    *
-   *  It is written by one key - `read-pane`'s `run` - and only where no record stands, so the
-   *  press that carries the focus in is the press that writes it: a second `l`, and the `l` a
-   *  reader comes back in on after an unmount inside the column left the record standing, both
-   *  leave it alone, where either would otherwise write the row the column is showing over the
-   *  row the reader came from. That is what makes re-entry by key and re-entry by click, which
-   *  writes nothing at all, leave the same record. The test is the record alone, with no check
-   *  of where the focus is, because none is needed: a press from inside the column with no
-   *  record standing finds no focused row there (`focusedRow()` is null in the column), so it
-   *  writes the row of the question the column shows, or null where that question has no listed
-   *  row, and either sends Escape exactly where `paneWayBack`'s fallback already would. It is
-   *  read by one accessor, `paneWayBack`, which both halves of Escape ask, so the `when` and the
-   *  `run` cannot disagree about where the key goes.
+   *  It is written by one key - `read-pane`'s `run` - and only where no record stands: a second
+   *  `l`, and the `l` a reader comes back in on after an unmount inside the column left the
+   *  record standing, both leave it alone, where either would otherwise write the row the
+   *  column is showing over the row the reader came from. So re-entry by key and re-entry by
+   *  click, which writes nothing at all, leave a standing record alike. The test is the record
+   *  alone, with no check of where the focus is, because none is needed: a press from inside
+   *  the column with no record standing finds no focused row there (`focusedRow()` is null in
+   *  the column), so it writes the row of the question the column shows, or null where that
+   *  question has no listed row, and either sends Escape exactly where `paneWayBack`'s fallback
+   *  already would - the stored value differs from a click's null, the row Escape reaches does
+   *  not. It is read by one accessor, `paneWayBack`, which both halves of Escape ask, so the
+   *  `when` and the `run` cannot disagree about where the key goes.
    *
    *  The record stands exactly while two facts hold of the reader, each with its own drops;
    *  between them no route can outlive the record.
@@ -1015,10 +1016,10 @@ export function Inbox({
       run: () => {
         // From the reading column, Escape is the way back to the row the reader came from: `l`
         // recorded that row, which is not the selected one whenever `j` moved the selection
-        // without moving the focus. Every other way in records nothing and returns, as it
-        // always has, to the row the column is showing. `paneWayBack` is both of those, and the
-        // `when` below asks it the same question, so the key never fires on a way back the run
-        // then cannot find.
+        // without moving the focus. Every other way in records nothing, or the row the column
+        // is showing, and returns, as it always has, to that row. `paneWayBack` is both of
+        // those, and the `when` below asks it the same question, so the key never fires on a way
+        // back the run then cannot find.
         if (paneShown && focusInPane()) {
           paneWayBack()?.focus();
           return;
@@ -1048,11 +1049,10 @@ export function Inbox({
       keys: "l",
       label: "Move the focus into the reading pane",
       run: () => {
-        // The record Escape reads, written only where no record stands: the press that carries
-        // the focus in is the press that makes it, and it names the row the reader came from -
-        // the one holding the focus, or the selected one where the focus is on nothing
-        // (`document.body`, where a reader who has pressed no key yet stands) or on something
-        // that is not a row.
+        // The record Escape reads, written only where no record stands. It names the row the
+        // reader came from - the one holding the focus, or the selected one where the focus is
+        // on nothing (`document.body`, where a reader who has pressed no key yet stands) or on
+        // something that is not a row, which includes a press from inside the column itself.
         //
         // A press with a record standing writes nothing, whether the reader is in the column
         // already or on the body an unmount inside the column dropped their focus to: both

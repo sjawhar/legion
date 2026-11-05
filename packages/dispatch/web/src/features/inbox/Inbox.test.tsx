@@ -3324,9 +3324,10 @@ test("a focus landing outside the column drops the record an unmount inside it l
 
 // The third route through that same unmount, and the one that tells the record's writer apart
 // from a writer gated on where the focus is: from the body the unmount leaves the focus on, `l`
-// is the keyboard's only way back into the column, and the press finds a record already
-// standing. It must leave that record alone, exactly as the click back in two rows above does,
-// or the two ways back into a column the reader never left would owe them different rows.
+// is the keyboard's way back to the document (Enter is the other, into the answer box, and
+// writes nothing), and the press finds a record already standing. It must leave that record
+// alone, exactly as the click back in two rows above does, or the two ways back into a column
+// the reader never left would owe them different rows.
 test("l back into a column an unmount dropped the focus out of leaves the record standing", async () => {
   const narrow = widenToReadingPane();
   const rows = [
