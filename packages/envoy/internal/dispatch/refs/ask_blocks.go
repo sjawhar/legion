@@ -349,35 +349,73 @@ type AskIDs struct {
 // id rather than another part's; the revision the ask's parts have reached is still its own. An
 // ask with no state row, which no build with the part index has written, carries no id and
 // revision 0, so a read of an ask never depends on the index being current.
+//
+// It is the sequential half of the one read: QueueAskPartIDs queues the same statement, reads it
+// with the same scan and matches the parts the same way, for a caller that reads the ids beside
+// its other reads (api.queueAskDetails, for the issue read's batch and every list of asks), so
+// the two paths cannot drift.
 func AskPartIDs(ctx context.Context, q Queryer, asks []*model.Ask) ([]AskIDs, error) {
 	if len(asks) == 0 {
 		return nil, nil
 	}
-	ids := make([]AskIDs, len(asks))
-	askIDs := make([]string, 0, len(asks))
-	for index, ask := range asks {
-		ids[index].Options = make([]string, len(ask.Options))
-		askIDs = append(askIDs, ask.ID)
-	}
-	rows, err := askPartRows(ctx, q, askIDs)
+	stored, err := askPartRows(ctx, q, askRowIDs(asks))
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]AskIDs, len(asks))
+	askPartIDsOf(asks, stored, ids)
+	return ids, nil
+}
+
+// QueueAskPartIDs is the batched half: it queues AskPartIDs' statement in b and reads its rows
+// into ids, one entry per ask in the order they were given, for a caller that reads the part ids
+// beside its other reads instead of spending a round trip on it (api.queueAskDetails). ids holds
+// one entry per ask and is filled once the batch is closed; no ask queues nothing and leaves ids
+// as it is, so a caller need not ask whether it has any.
+func QueueAskPartIDs(b *pgx.Batch, asks []*model.Ask, ids []AskIDs) {
+	if len(asks) == 0 {
+		return
+	}
+	b.Queue(askPartRowsStatement, askRowIDs(asks)).Query(func(rows pgx.Rows) error {
+		stored, err := scanAskPartRows(rows, len(asks))
+		if err != nil {
+			return err
+		}
+		askPartIDsOf(asks, stored, ids)
+		return nil
+	})
+}
+
+// askRowIDs is the id of each ask, in the order the asks were given: the argument the part rows
+// are read by, which lists the same ask twice when the caller did - two event payloads of one
+// ask - since the statement matches each by id.
+func askRowIDs(asks []*model.Ask) []string {
+	askIDs := make([]string, 0, len(asks))
+	for _, ask := range asks {
+		askIDs = append(askIDs, ask.ID)
+	}
+	return askIDs
+}
+
+// askPartIDsOf fills ids with the part ids of each ask from the parts stored for it, matching
+// them as AskPartIDs describes: an ask with no stored parts carries no id and revision 0, and
+// every ask carries one entry per option whatever the index holds.
+func askPartIDsOf(asks []*model.Ask, stored map[string]storedAskParts, ids []AskIDs) {
 	for index, ask := range asks {
-		stored, indexed := rows[ask.ID]
-		if !indexed {
+		ids[index] = AskIDs{Options: make([]string, len(ask.Options))}
+		indexed, found := stored[ask.ID]
+		if !found {
 			continue
 		}
 		// AskParts' order: the question, then the options in the ask's order, then the answer
 		// while the ask holds one.
-		parts := stored.idsOf(AskParts(*ask))
-		ids[index].Revision = stored.revision
+		parts := indexed.idsOf(AskParts(*ask))
+		ids[index].Revision = indexed.revision
 		copy(ids[index].Options, parts[1:])
 		if ask.Answer != nil {
 			ids[index].Answer = parts[len(parts)-1]
 		}
 	}
-	return ids, nil
 }
 
 // storedAskParts is one ask's indexed parts as askPartRows reads them: the revision its parts
@@ -409,12 +447,11 @@ func (stored storedAskParts) idsOf(parts []itemblocks.Block) []string {
 	return ids
 }
 
-// askPartRows reads the indexed parts of each ask, keyed by ask id; an ask with no state row,
-// which no build with the part index has written, is absent. One statement for the whole list,
-// with the parts of each ask as arrays in position order, as a comment's blocks are read; an ask
-// whose state row holds no part yet reads as an empty list.
-func askPartRows(ctx context.Context, q Queryer, askIDs []string) (map[string]storedAskParts, error) {
-	rows, err := q.Query(ctx, `
+// askPartRowsStatement reads the indexed parts of each ask, one row per ask with a state row,
+// with the parts of each as arrays in position order, as a comment's blocks are read; an ask
+// whose state row holds no part yet reads as an empty list. One statement for the whole list,
+// run by both halves of the read (AskPartIDs, QueueAskPartIDs).
+const askPartRowsStatement = `
 		select s.ask_id::text, s.revision,
 		       coalesce(array_agg(b.block_id order by b.position) filter (where b.block_id is not null), '{}') as ids,
 		       coalesce(array_agg(b.type order by b.position) filter (where b.block_id is not null), '{}') as types,
@@ -423,12 +460,27 @@ func askPartRows(ctx context.Context, q Queryer, askIDs []string) (map[string]st
 		left join ask_blocks b on b.ask_id = s.ask_id and b.position is not null
 		where s.ask_id = any($1::uuid[])
 		group by s.ask_id, s.revision
-	`, askIDs)
+	`
+
+// askPartRows runs askPartRowsStatement on q, keyed by ask id; an ask with no state row, which
+// no build with the part index has written, is absent.
+func askPartRows(ctx context.Context, q Queryer, askIDs []string) (map[string]storedAskParts, error) {
+	rows, err := q.Query(ctx, askPartRowsStatement, askIDs)
 	if err != nil {
 		return nil, fmt.Errorf("read ask parts: %w", err)
 	}
 	defer rows.Close()
-	parts := make(map[string]storedAskParts, len(askIDs))
+	return scanAskPartRows(rows, len(askIDs))
+}
+
+// scanAskPartRows reads the rows askPartRowsStatement returns, keyed by ask id. A batch can hand
+// it rows that already hold an error - one the sequential Query would have returned itself - and
+// that error is wrapped here as askPartRows wraps its Query's.
+func scanAskPartRows(rows pgx.Rows, expected int) (map[string]storedAskParts, error) {
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read ask parts: %w", err)
+	}
+	parts := make(map[string]storedAskParts, expected)
 	for rows.Next() {
 		var askID string
 		var stored storedAskParts
