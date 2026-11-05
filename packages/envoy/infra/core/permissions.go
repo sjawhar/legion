@@ -92,8 +92,9 @@ func listenerGrant(machineID string) Permissions {
 // every consumer of the stream, other listeners' durables and Dispatch's included, and a consumer
 // created through them can deliver the stream's messages to any subject. That reach is the
 // listener user's alone: DispatchPermissions and HostPermissions keep their per-durable scope and
-// hold none of these, so the listener those users run answers every registration that asks for
-// consumer delivery core (bus.ErrConsumerNotGranted) and keeps only its own durable.
+// hold none of these, so the listener those users run refuses every registration that asks for
+// consumer delivery 503 no_grant (the consumer call returns bus.ErrConsumerNotGranted), writes
+// nothing of the session it names, and keeps only its own durable.
 func sessionConsumerCalls() []string {
 	return []string{
 		jsAPI + "CONSUMER.CREATE." + bus.Stream + ".*",
@@ -110,7 +111,8 @@ func sessionConsumerCalls() []string {
 // (listenerGrant), then the session consumers' calls (sessionConsumerCalls), which only this set
 // and ListenerHostPermissions hold. A hub that renders this set for its own listener gives that
 // listener consumer delivery; a listener connecting as a host or Dispatch user does not have it,
-// and its sessions stay on the core path.
+// and has no session of its own registered at all: every registration it cannot give a consumer
+// is refused by name and writes nothing.
 func ListenerPermissions(machineID string) Permissions {
 	grant := listenerGrant(machineID)
 	grant.Publish.Allow = append(grant.Publish.Allow, sessionConsumerCalls()...)
@@ -169,8 +171,9 @@ func DispatchDurables() []string {
 // DispatchPermissions is the grant of Dispatch's one NATS user, which envoy-dispatch and the
 // envoy-listener beside it share: the listener grant (listenerGrant) of the listener's machine id,
 // then what Dispatch itself needs. It holds no session-consumer call (sessionConsumerCalls), so
-// the listener beside envoy-dispatch keeps its own durable alone and answers every registration
-// that asks for consumer delivery core. No session connects as this user either, so it holds none
+// the listener beside envoy-dispatch keeps its own durable alone and refuses every registration
+// that asks for consumer delivery 503 no_grant (bus.ErrConsumerNotGranted), writing nothing of
+// the session it names. No session connects as this user either, so it holds none
 // of SessionPermissions: it is a direct publish to a session's frames, or a subscription to its
 // control subject, that is refused. The seed's reach is the whole server even so: its _INBOX.>
 // subscription receives every reply any client gets, other listeners' durable push deliveries

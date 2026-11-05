@@ -117,8 +117,8 @@ func TestListenerHostPermissions(t *testing.T) {
 
 // The one set a listener may hold with consumer delivery and the plain notifications.>
 // subscribe both, which no queue group narrows. The plain host set, which a host's sessions
-// share, carries that subscribe and no consumer call, so a listener connecting as it answers
-// every registration core.
+// share, carries that subscribe and no consumer call, so a listener connecting as it refuses
+// every registration that asks for consumer delivery by name and writes nothing.
 func TestListenerHostPermissionsHoldTheConsumerCallsAndEveryTopic(t *testing.T) {
 	grant := core.ListenerHostPermissions("example-host-a")
 	require.Subset(t, grant.Publish.Allow, sessionConsumerPublish)

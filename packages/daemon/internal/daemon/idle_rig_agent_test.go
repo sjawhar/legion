@@ -625,8 +625,9 @@ func (p *idleRigRoleProcess) plan() (idleRigPlan, error) {
 // one — the machine it runs on, every topic it follows beside its own agent subject, and the
 // delivery it asks for: its own durable consumer, relayed to the NATS connection openDelivery
 // opened, under this process's epoch. The answer says which delivery the session got, and a
-// session left on the core path would be given nothing here, so anything but the consumer's is
-// this process's failure to start (`core` with the listener's reason).
+// registration this listener can give no consumer is refused with an HTTP status and carries no
+// `delivery` at all, so an answer with none, and one whose mode is not the consumer's, are each
+// this process's failure to start.
 func (p *idleRigRoleProcess) subscribe(topics []string) error {
 	if topics == nil {
 		topics = []string{}
