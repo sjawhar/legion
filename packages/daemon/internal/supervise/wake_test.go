@@ -8,6 +8,7 @@ package supervise
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -417,6 +418,194 @@ func TestTheControllersClaimLaunchesAtOnce(t *testing.T) {
 
 	h.wantStarts(token, 1)
 	h.wantWakeLine(token, "kind=launch", "waited=false", "paced=false")
+}
+
+// waveToken is the token of the nth claim of a wave: a daemon that must wake forty claims at
+// once is what the pacing exists for, and each of them is a claim of its own.
+func waveToken(n int) claim.Token {
+	return claim.Token(fmt.Sprintf("legion-LEGION-209-worker-%02d", n))
+}
+
+// stalePluginClaim is c as a live worker of an earlier release, which is what a plugin wave finds:
+// ready, recording the process the stale-plugin lane decides and the session a relaunch resumes,
+// at the plugin contract its registration declared.
+func stalePluginClaim(c Claim, contract int) Claim {
+	c.State = StateReady
+	c.Generation = 1
+	c.Session, c.SessionFile = session, sessionFile
+	c.PluginContract = contract
+	c.Locator = &runtime.Locator{
+		Runtime:     runtime.RuntimeTmux,
+		Claim:       c.Token,
+		Incarnation: "4242:77",
+		Tmux:        &runtime.TmuxLocator{Window: "@1", Pane: "%1"},
+	}
+	return c
+}
+
+// A plugin wave is forty stale live claims found in one pass, each of them able to answer a round:
+// their update tasks are wakes of the daemon's own — each wakes a live session in place of a
+// launch — so they go out at the same paced spacing a wave of launches does, one claim's round
+// opening at each turn. Nothing is relaunched: the whole of what a claim that can answer costs is
+// the task.
+func TestAWaveOfStalePluginsPostsItsUpdateTasksAtThePacedSpacing(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.deps.PluginContract = PodUpdateContract + 1
+	const wave = 40
+	machines := make([]*Machine, wave)
+	for i := range machines {
+		machines[i] = h.machineFor(stalePluginClaim(wakeClaim(waveToken(i), StateReady), PodUpdateContract))
+	}
+
+	for i, m := range machines {
+		h.mustPostTo(m, StalePlugin{Claim: waveToken(i), Trigger: "sweep"})
+	}
+
+	round := PluginRound(h.deps.PluginContract)
+	for i, m := range machines {
+		if i > 0 {
+			if got := m.Claim().UpdateRound; got != "" {
+				t.Fatalf("claim %d holds round %q before its turn, want none: its update task waits for the pacing", i, got)
+			}
+			h.clock.Advance(wakeInterval + wakePart)
+			m.Wait()
+		}
+		if got := m.Claim().UpdateRound; got != round {
+			t.Fatalf("claim %d holds round %q at its turn, want %q", i, got, round)
+		}
+	}
+	for i := range machines {
+		h.wantStarts(waveToken(i), 0)
+		h.wantWakeLine(waveToken(i), "kind=plugin-task")
+	}
+}
+
+// The sweep posts StalePlugin to every stale live claim at every tick, and a claim whose update
+// task is merely queued is not one it skips, so the same claim is posted again every minute of a
+// wave. Those re-posts must be free: the claim already holds a wake, so each of them returns
+// having taken no token and opened no second round. What the limiter did is read through the claim
+// behind it — one that waits two turns rather than sixty-two.
+func TestAMinuteOfStalePluginRePostsOverAWaitingWakeTakesNoSecondToken(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.deps.PluginContract = PodUpdateContract + 1
+	stale := h.machineFor(stalePluginClaim(wakeClaim(secondToken, StateReady), PodUpdateContract))
+	behind := h.machineFor(wakeClaim(thirdToken, StateQueued))
+
+	h.must(RequestSpawn{Claim: h.token})
+	h.mustPostTo(stale, StalePlugin{Claim: secondToken, Trigger: "boot"})
+	for range 60 {
+		h.mustPostTo(stale, StalePlugin{Claim: secondToken, Trigger: "sweep"})
+	}
+	h.mustPostTo(behind, RequestSpawn{Claim: thirdToken})
+
+	if stored := h.store.load(secondToken); stored.State != StateReady || stored.Locator == nil || stored.UpdateRound != "" {
+		t.Fatalf("the stored claim is %s recording %+v in round %q, want %s recording its process in none: the gate left it as it stands",
+			stored.State, stored.Locator, stored.UpdateRound, StateReady)
+	}
+	h.clock.Advance(wakeInterval + wakePart)
+	stale.Wait()
+
+	if got, want := stale.Claim().UpdateRound, PluginRound(h.deps.PluginContract); got != want {
+		t.Fatalf("the claim holds round %q at its turn, want %q", got, want)
+	}
+	if opened := h.logs.lines("supervise: an update round is open on this claim", "claim="+string(secondToken)); len(opened) != 1 {
+		t.Fatalf("the claim opened %d rounds, want 1: %s", len(opened), strings.Join(opened, " | "))
+	}
+	h.wantStarts(secondToken, 0)
+	h.wantWakeLine(secondToken, "kind=plugin-task", "waited=true", "waitedFor="+(wakeInterval+wakePart).String())
+
+	h.clock.Advance(wakeInterval + wakePart)
+	behind.Wait()
+
+	h.wantStarts(thirdToken, 1)
+	h.wantWakeLine(thirdToken, "kind=launch", "waitedFor="+(2*(wakeInterval+wakePart)).String())
+}
+
+// A post that becomes a relaunch rather than a task — a worker whose plugin has no
+// ready_for_update op to answer a round with — reserves nothing in refreshPlugin: its launch takes
+// the one token, at the gate every launch passes (launchAfter). One token, one wake line, and the
+// claim behind it waits two turns rather than three.
+func TestAStalePluginRelaunchTakesItsOneTokenAtTheLaunchGate(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.deps.PluginContract = PodUpdateContract + 1
+	stale := h.machineFor(stalePluginClaim(wakeClaim(secondToken, StateReady), PodUpdateContract-1))
+	behind := h.machineFor(wakeClaim(thirdToken, StateQueued))
+
+	h.must(RequestSpawn{Claim: h.token})
+	h.mustPostTo(stale, StalePlugin{Claim: secondToken, Trigger: "sweep"})
+	h.mustPostTo(behind, RequestSpawn{Claim: thirdToken})
+
+	h.wantStarts(secondToken, 0)
+	h.clock.Advance(wakeInterval + wakePart)
+	stale.Wait()
+
+	h.wantStarts(secondToken, 1)
+	if got := stale.Claim().UpdateRound; got != "" {
+		t.Fatalf("the relaunched claim holds round %q, want none: a worker that cannot answer is relaunched instead", got)
+	}
+	h.wantWakeLine(secondToken, "kind=launch", "waited=true", "waitedFor="+(wakeInterval+wakePart).String())
+
+	h.clock.Advance(wakeInterval + wakePart)
+	behind.Wait()
+
+	h.wantStarts(thirdToken, 1)
+	h.wantWakeLine(thirdToken, "kind=launch", "waitedFor="+(2*(wakeInterval+wakePart)).String())
+}
+
+// The project controller's own claim is held by neither branch of the stale-plugin lane, whatever
+// the queue holds. It is relaunched at once rather than asked: the `legion` tool its session holds
+// has no ready_for_update op, so a round over it would stay open for ever — and the relaunch takes
+// no token, since the operator's own read of a running wave is this one session's.
+func TestTheControllersStalePluginIsHeldByNeitherBranch(t *testing.T) {
+	for _, state := range []ClaimState{StateReady, StateWorking} {
+		t.Run(string(state), func(t *testing.T) {
+			h := pacedHarness(t, wakeRate)
+			h.deps.PluginContract = PodUpdateContract + 1
+			c := stalePluginClaim(controllerClaim(), PodUpdateContract)
+			c.State = state
+			if state == StateWorking {
+				c.Pending = &Delivery{ID: "delivery-1", Task: "Legion controller start", QueuedAt: epoch, DeliveredAt: epoch, ConfirmedAt: epoch}
+			}
+			controller := h.machineFor(c)
+
+			h.must(RequestSpawn{Claim: h.token})
+			h.mustPostTo(controller, StalePlugin{Claim: c.Token, Trigger: "sweep"})
+
+			h.wantStarts(c.Token, 1)
+			if got := controller.Claim().UpdateRound; got != "" {
+				t.Fatalf("the controller holds round %q, want none: no controller turn can answer one", got)
+			}
+			h.wantWakeLine(c.Token, "kind=launch", "waited=false", "paced=false")
+		})
+	}
+}
+
+// A registration that lands while the update task waits its turn takes the claim past the fact
+// the task was reserved for, so the turn opens no round: a round over a worker already on this
+// daemon's plugin would ask it to push and answer, hold its next phase's tasks behind that ask,
+// and end hours later in a relaunch of a current process (openPluginUpdateIfStale). The token is
+// spent either way — the limiter charges on the reserve — which is why the pass that reserves
+// and the turn that runs each make the comparison for themselves.
+func TestAPluginWakeWhoseClaimRegisteredCurrentOpensNoRound(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.deps.PluginContract = PodUpdateContract + 1
+	stale := h.machineFor(stalePluginClaim(wakeClaim(secondToken, StateReady), PodUpdateContract))
+
+	h.must(RequestSpawn{Claim: h.token})
+	h.mustPostTo(stale, StalePlugin{Claim: secondToken, Trigger: "sweep"})
+	h.mustPostTo(stale, RequestRegister{
+		Claim: secondToken, Generation: 1, Session: session, SessionFile: sessionFile,
+		CapabilityHash: []byte("capability"), PluginContract: h.deps.PluginContract,
+	})
+
+	h.clock.Advance(wakeInterval + wakePart)
+	stale.Wait()
+
+	if got := stale.Claim().UpdateRound; got != "" {
+		t.Fatalf("the claim holds round %q, want none: it registered on this daemon's plugin while its update task waited its turn", got)
+	}
+	h.wantStarts(secondToken, 0)
+	h.wantWakeLine(secondToken, "kind=plugin-task", "waited=true")
 }
 
 // suspendHeld is whether err is the answer a suspension held for later gives its caller.

@@ -1306,10 +1306,11 @@ func (m *Machine) launchNow(ctx context.Context, charged, exempt bool) error {
 	}
 }
 
-// wakeLaunch is the kind of wake this package reserves: a role process a launch starts. The two
-// other kinds the wake line names are their own callers' — "plugin-task", the update task a
-// plugin round queues to a live session in place of a launch, and "catch-up", the one the
-// daemon's outbox queues to it — and each reserves from the same limiter.
+// wakeLaunch is the kind of wake a launch reserves: a role process this package starts. The lane
+// beside it in this package is the stale-plugin lane's update task (wakePluginTask), which wakes
+// a live session in place of a launch, and "catch-up" is the daemon's outbox's, the notice it
+// queues to an architect already running. Each reserves from the same limiter, and the kind is
+// what the line a wake writes says it was (wakeRan).
 const wakeLaunch = "launch"
 
 // wake is a launch the pacing holds until its turn: the moment it may run (at), the moment it was

@@ -51,6 +51,13 @@ func CannotAnswerUpdate(c Claim) bool {
 	return HoldsCapability(c.State) && c.PluginContract < PodUpdateContract
 }
 
+// wakePluginTask is the kind of wake the stale-plugin lane reserves: the update task a plugin
+// round queues to a live session in place of a launch (refreshPlugin, openPluginUpdate). It is
+// paced from the same limiter as the role processes a launch starts (wakeLaunch) and named apart
+// only in the line each wake writes (wakeRan), because what the organization's per-minute cap
+// counts is the context a woken session reads, not whether the daemon started a process for it.
+const wakePluginTask = "plugin-task"
+
 // refreshPlugin is the claim's process found to speak a plugin contract this daemon does not: at
 // boot, re-adopting a claim whose recorded contract is an earlier daemon's, or none at all (the
 // first boot on this release); or, uncharged, a registration that still differs from the daemon's
@@ -117,12 +124,39 @@ func CannotAnswerUpdate(c Claim) bool {
 // of keeping launch whole, the same price relaunchAfterFailure already pays (budgets.go).
 // Interrupting an already-interrupted turn (interrupted) is itself a no-op, the pending delivery
 // already marked, so a retried attempt never re-delivers or charges a task twice.
+//
+// The round's own task is a wake of the daemon's own — it wakes a live session in place of a
+// launch, and the context that session reads in the minute after is what an organization's
+// per-minute uncached-input cap counts — so it waits its turn in the pacing like every launch
+// (reserveWake, wakePluginTask). The claim records a process in this branch, so the gate leaves
+// it exactly as it stands: nothing is written, the round opens at the wake's turn (wakeNow,
+// openPluginUpdateIfStale), and a sweep meanwhile reads a live claim rather than one parked
+// launching.
+//
+// A claim that already holds a wake of any kind is decided nothing at all, whichever branch it
+// would reach: it returns here having taken no token and changed nothing. That is what makes the
+// sweep's re-posts free — the sweep posts StalePlugin to every stale live claim at every tick and
+// skips a claim that already holds a round, one whose process is gone and one no install can
+// move (refreshStalePlugins in internal/daemon), so a claim whose plugin task is merely queued
+// is posted again every minute of a wave, and a second reserve would charge it the rate again
+// each time. It is right for the two relaunch branches too: the wake that waits is a launch of
+// this same claim, which brings its process up on this daemon's plugin by itself, so a relaunch
+// raised over it would replace that wake, take a second token, and do what the wake was already
+// going to do. Nothing is lost by returning: the sweep's next post decides the claim again as it
+// stands then, once its wake has run.
 func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	if m.claim.PluginContract == m.deps.PluginContract {
 		return nil
 	}
+	// A claim already queued for a wake takes no second one, whichever branch it would reach.
+	if m.wake != nil {
+		return nil
+	}
 	controller := claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree)
 	if !CannotAnswerUpdate(m.claim) && !controller {
+		if waits, err := m.reserveWake(ctx, wakePluginTask, false, m.openPluginUpdateIfStale); waits || err != nil {
+			return err
+		}
 		return m.openPluginUpdate(ctx)
 	}
 	if m.claim.State == StateWorking && !controller {
@@ -195,6 +229,22 @@ func (m *Machine) openPluginUpdate(ctx context.Context) error {
 		Reasons: reasons,
 		Task:    UpdateTask(round, reasons),
 	})
+}
+
+// openPluginUpdateIfStale is openPluginUpdate at the wake's turn (wakeNow): the comparison
+// refreshPlugin makes before it reserves is made again here, because the turn runs as much later
+// as the whole queue's wait, and a registration that landed meanwhile may have recorded this
+// daemon's own contract. It is the same fact refreshPlugin re-checks for the boot's own post,
+// over a longer wait: a round opened over a current process would ask its worker to push and
+// answer, hold every task of its next phase behind the ask, and end hours later in a relaunch of
+// a process that is already on this daemon's plugin.
+func (m *Machine) openPluginUpdateIfStale(ctx context.Context) error {
+	if m.claim.PluginContract == m.deps.PluginContract {
+		m.log.Info("supervise: the claim registered on this daemon's plugin while its update task waited its turn; no round is opened",
+			"pluginContract", m.claim.PluginContract)
+		return nil
+	}
+	return m.openPluginUpdate(ctx)
 }
 
 // refreshStalePlugin is the StalePlugin event's row, for the four states a claim's relaunched
