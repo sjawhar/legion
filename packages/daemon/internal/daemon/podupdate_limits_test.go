@@ -564,9 +564,9 @@ const limitChangedPod = "00000009-7a92-4c1f-8d35-2f6b9c0ad417"
 // before its machine took the post, and a claim of the same issue now records another pod. No
 // claim of changed can ever record that round from here — the claim the post went to ignores it
 // (supervise's table), and the pod it is over is gone — while a claim of the issue goes on
-// recording a pod, which is the reading that kept the opening in this daemon's record for ever
-// (podUpdateOpenings). It answers the rig, with the issue behind changed still waiting for the
-// slot.
+// recording a pod. Read only as "a claim records a pod", the opening would stay in this daemon's
+// record for ever (podUpdateOpenings). It answers the rig, with the issue behind changed still
+// waiting for the slot.
 //
 // The architect is the one claim the round asks: it has a session, so it blocks the round and
 // the post goes to it. The implementer is a process that has started whose agent has not

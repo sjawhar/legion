@@ -115,8 +115,10 @@ func (sweep *podUpdateSweep) charge(issue string) {
 // operator reads names it in a round rather than waiting for one, which is where it is
 // (recordPodUpdateSweep).
 //
-// An entry naming another round says the pod changed under that opening, and the round over the
-// pod the claims record now is an opening of its own, charged like any other.
+// An entry for this issue always names this round, when there is one: an entry whose pod no
+// claim records a process in is dropped before the walk (podUpdateOpenings), and the walk passes
+// over an issue whose claims run in two pods. So false here means no opening of this daemon's
+// own is in flight for the issue.
 func (sweep *podUpdateSweep) reasks(issue, round string) bool {
 	if sweep.inFlight[issue] != round {
 		return false
@@ -177,14 +179,13 @@ func (s *supervision) beginPodUpdateSweep(now time.Time, byIssue map[string][]su
 //
 // An opening is dropped from the record as soon as a claim of its issue records that round,
 // because the claims then count the slot themselves. It is dropped too when no claim of the
-// group records a process in that round's own pod (podProcess), which is the one reading the
-// other two are each a shape of. No claim of the issue records a pod at all: the issue holds no
-// slot then, however the post went, and the next sweep reads its pod round from the claims as it
-// reads every other. Or a claim records another pod, which says the pod changed under the
-// opening — the reading podUpdateSweep.reasks already rests on — and the round over the pod the
-// claims record now is an opening of its own, charged like any other.
+// group records a process in that round's own pod (podProcess). That covers two cases. In the
+// first, no claim of the issue records a pod at all: the issue holds no slot then, however the
+// post went, and the next sweep reads its pod round from the claims as it reads every other. In
+// the second, a claim records another pod, which says the pod changed under the opening, and the
+// round over the pod the claims record now is an opening of its own, charged like any other.
 //
-// That third reading is what keeps a lost opening from holding its slot for ever. The post that
+// The second case is what keeps a lost opening from holding its slot for ever. The post that
 // carries a round to a machine is asynchronous, and a machine whose claim has failed or retired
 // ignores it (supervise's table), so where every claim the round asked fails before its machine
 // takes the post, no claim of that issue ever records the round. Read only as "a claim records a

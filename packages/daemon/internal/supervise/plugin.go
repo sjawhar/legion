@@ -42,9 +42,10 @@ const PodUpdateContract = 46
 //
 // refreshPlugin is its one caller, and what it decides there is the whole of what this is for: a
 // claim that cannot answer is relaunched onto this daemon's plugin, once a turn of it has ended,
-// and one that can is given a plugin round of its own and keeps running until it answers.
-// internal/daemon's reaskedForPushCheck reads the contract for a decision of its own, under a
-// rule its own comment states.
+// and one that can is given a plugin round of its own and keeps running until it answers. The
+// controller's claim is the exception: it is relaunched at once either way. internal/daemon's
+// reaskedForPushCheck reads the contract for a decision of its own, under a rule its own comment
+// states.
 //
 // The running process is half the rule, and the half a reading of the contract alone would get
 // wrong, because what the contract records is a statement about a process rather than about a
