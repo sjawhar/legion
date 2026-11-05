@@ -5,8 +5,8 @@
 # refusals; for `release-push.sh tagged`, which finds the tag an earlier
 # attempt pushed and refuses one whose name is not <prefix>X.Y.Z; for
 # `release-push.sh tag`, which makes the release tag on $GITHUB_SHA, commits
-# nothing and pushes nothing; for the two pair_member functions of
-# release.yaml, which read each plugin's released version from the tags; for
+# nothing and pushes nothing; for `release-push.sh pair-version`, which prints
+# a plugin's released version or its newest tag's; for
 # `release-push.sh release`, which makes a GitHub release carry the run's
 # assets; for `release-push.sh release-section`, which writes one section into
 # a release's body, replacing the one that heading already holds and editing
@@ -25,8 +25,10 @@
 # directories with a checked build and refuses a bad one untouched; for
 # `release-push.sh handed`, which checks the version and the files a build job
 # hands a publish job and prints the release tag; for `release-push.sh
-# no-credential`, the build job's tripwire; and for `release-push.sh
-# fold-plan`, `fold-orphans` and `fold-notes`, the changelog fragments.
+# no-credential`, the build job's tripwire; for `release-push.sh fold-notes`,
+# `fold-check` and `fold-orphans`, the changelog fragments; and for
+# release.yaml's worker_image_release step, which needs the checkout this
+# change gives its job.
 #
 # The `tagged`, `version` and `tag` cases each build a bare origin holding one
 # seed commit (packages/pkg at 1.0.0, a bun.lock whose workspace entries hold
@@ -46,10 +48,10 @@
 # checked too. The publish-job case runs `tag` and `push-tag` for two packages
 # from one clone, as release.yaml's publish job does, each from the run's
 # commit, then a re-run of both, with no commit added to either clone and
-# origin's main left where it was. The pair_member case reads both functions
-# out of release.yaml and runs them over a repository whose manifest holds an
-# older version than its newest tag, with the script under test reachable at
-# .github/scripts/release-push.sh, the path those functions read the tags by.
+# origin's main left where it was. The pair-version cases run over a
+# repository whose manifest holds an older version than its newest tag: a
+# released version wins, a package that released nothing takes its newest tag,
+# and a newest tag that is no release prints nothing.
 # The `release` cases run against a stub `gh` first on PATH, which answers `gh
 # release view` for a release that does not exist, is a draft or is published,
 # can fail an upload, an edit or a create, and logs every call it gets. The
@@ -110,15 +112,19 @@
 # archives a release ships, change one thing as a compromised build job could,
 # and run `handed` on it. The `no-credential`
 # cases run it under `env -i` with a throwaway HOME, plant one credential at a
-# time, and check it is named but never shown. The `fold-plan` and `fold-notes`
-# cases build one repository with released and unreleased packages, fragments
-# added before, between and after hand-made release tags of both shapes (one
-# on a child of the built commit, one on the built commit itself, and a name
-# off <prefix>X.Y.Z), committed near midnight in zones other than UTC; the
-# `fold-notes` cases render that repository's fragments with the real changie,
-# hold each label's own run equal to the whole plan's run for that label, byte
-# for byte, render one package from the shipped packages/pi-legion/.changie.yaml
-# itself, and print a SKIP line where changie is not on PATH.
+# time, and check it is named but never shown. The `fold-notes` cases build one
+# repository holding a released package, with fragments added before, between
+# and after hand-made release tags of both shapes (one on a child of the built
+# commit, one on the built commit itself, and a name off <prefix>X.Y.Z), and
+# check it out at each release's own commit, as that release's build job has
+# it: each release renders the entries its own commits added and no others, a
+# release whose commits a lower tag already holds renders no file, and a
+# fragment renamed with git mv or named with a glob character keeps the release
+# that first shipped it. An entry that is no .yaml file is refused by name, by
+# fold-notes and `fold-check` alike. The `fold-check` cases render the shipped
+# packages/pi-legion/.changie.yaml's own fragments and a kind it does not list,
+# which it names with what changie said. The cases that render print a SKIP
+# line where changie is not on PATH; the refusals above need none.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in ci.yaml's test job.
@@ -733,27 +739,12 @@ check "re-run: no commit is added to the clone" "$(is "$(state "$pj/rerun")" "$b
 check "re-run: origin's main and tags are unchanged" "$(is "$(publish_refs)" "$refs")"
 
 echo
-echo "Case: release.yaml's pair_member reads the plugin pair from the tags, not from the manifest"
+echo "Case: pair-version prints a plugin's released version, else its newest tag's"
 # A release commits nothing, so a package's committed manifest keeps whatever version was last
-# written to it and the tags alone say what npm carries. Both pair_member functions of
-# release.yaml — legion_build's "Resolve plugin versions for the smoke test and worker image" and
-# publish's "Check the plugin pair npm carries" — are read out of the workflow and run here over a
-# repository whose manifest holds an older version than its newest tag. Each reads the tags by
-# `release-push.sh newest-version`, at the path a job runs it from, so the repository gets the
-# script under test at .github/scripts/release-push.sh.
-workflow="$script_dir/../workflows/release.yaml"
-# pair_member_fn <step id>: the pair_member function that step defines, from its `pair_member() {`
-# line through the `}` that closes it, so the case runs the workflow's own code.
-pair_member_fn() {
-  awk -v id="        id: $1" '
-    $0 == id { step = 1 }
-    step && $0 == "          pair_member() {" { inside = 1 }
-    inside { print }
-    inside && $0 == "          }" { exit }
-  ' "$workflow"
-}
-check "the workflow defines a pair_member in each of the two steps" \
-  "$(is "$(pair_member_fn plugin_versions | grep -c 'pair_member() {')|$(pair_member_fn pair | grep -c 'pair_member() {')" '1|1')"
+# written to it and the tags alone say what npm carries. release.yaml's two steps —
+# legion_build's "Resolve plugin versions for the smoke test and worker image" and publish's
+# "Check the plugin pair npm carries" — each work out what their own run released and hand that
+# over; this command answers from the tags when they hand over nothing.
 pm="$work/pair"
 mkdir -p "$pm/packages/pi-envoy"
 git init -q -b main "$pm"
@@ -763,38 +754,40 @@ git -C "$pm" add -A
 git -C "$pm" commit -q -m "seed"
 git -C "$pm" tag pi-envoy-v1.9.0
 git -C "$pm" tag pi-envoy-v1.10.0
-mkdir -p "$pm/.github/scripts"
-ln -s "$release_push" "$pm/.github/scripts/release-push.sh"
-# run_pair_member <step id> <arg>...: that step's pair_member, run from the repository.
-run_pair_member() {
-  local id=$1
-  shift
-  (cd "$pm" && eval "$(pair_member_fn "$id")" && pair_member "$@")
+# pair_version <arg>...: runs `release-push.sh pair-version <arg>...` in that repository; leaves
+# its exit code in rc, its stdout in out and its stderr in err.
+pair_version() {
+  set +e
+  out=$(cd "$pm" && "$release_push" pair-version "$@" 2>"$work/pair.err")
+  rc=$?
+  set -e
+  err=$(<"$work/pair.err")
 }
-skipped=$(printf 'version=\ntag=\nskip=true')
-released=$(printf 'version=1.11.0\ntag=pi-envoy-v1.11.0\nskip=false')
-check "legion_build, the plugin skips: the newest tag's version, not the manifest's older one" \
-  "$(is "$(run_pair_member plugin_versions "$skipped" pi-envoy-v)" 1.10.0)"
-check "legion_build, the plugin releases: the version it releases" \
-  "$(is "$(run_pair_member plugin_versions "$released" pi-envoy-v)" 1.11.0)"
-check "publish, the plugin skips: the newest tag's version, not the manifest's older one" \
-  "$(is "$(run_pair_member pair success true success 1.11.0 pi-envoy-v)" 1.10.0)"
-check "publish, the plugin released: the version its release published" \
-  "$(is "$(run_pair_member pair success false success 1.11.0 pi-envoy-v)" 1.11.0)"
-check "publish, the release did not finish: nothing, which the step's guard refuses" \
-  "$(is "$(run_pair_member pair success false failure 1.11.0 pi-envoy-v)" "")"
-# A newest tag whose name is no release, and no tag at all: each prints nothing, and the step's
-# ::error::Could not resolve guard fires.
+pair_version pi-envoy-v 1.11.0
+check "a released version: that version, not the newest tag's" "$(is "$rc|$out" "0|1.11.0")"
+pair_version pi-envoy-v ''
+check "a package that released nothing: the newest tag's version, not the manifest's older one" \
+  "$(is "$rc|$out" "0|1.10.0")"
+pair_version pi-envoy-v
+check "no released version at all: the same newest tag's version" "$(is "$rc|$out" "0|1.10.0")"
+# A newest tag whose name is no release, and no tag at all: each prints nothing, which the two
+# steps' ::error::Could not resolve guards refuse.
 git -C "$pm" tag -d pi-envoy-v1.10.0 >/dev/null
 git -C "$pm" tag -d pi-envoy-v1.9.0 >/dev/null
 git -C "$pm" tag pi-envoy-v1.9.0-rc.1
-check "legion_build, the newest tag is no release: prints nothing" \
-  "$(is "$(run_pair_member plugin_versions "$skipped" pi-envoy-v)" "")"
-check "publish, the newest tag is no release: prints nothing" \
-  "$(is "$(run_pair_member pair success true success 1.11.0 pi-envoy-v)" "")"
+pair_version pi-envoy-v ''
+check "the newest tag is no release: prints nothing" "$(is "$rc|$out" "0|")"
+pair_version pi-envoy-v 1.11.0
+check "the newest tag is no release, with a released version: that version" "$(is "$rc|$out" "0|1.11.0")"
 git -C "$pm" tag -d pi-envoy-v1.9.0-rc.1 >/dev/null
-check "legion_build, no tag of the prefix at all: prints nothing" \
-  "$(is "$(run_pair_member plugin_versions "$skipped" pi-envoy-v)" "")"
+pair_version pi-envoy-v ''
+check "no tag of the prefix at all: prints nothing" "$(is "$rc|$out" "0|")"
+pair_version
+check "no tag prefix: refused, naming the usage" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh pair-version: usage: release-push\.sh pair-version <tag-prefix> \[<released version>\]$')" "1||true")"
+pair_version pi-envoy-v 1.11.0 extra
+check "an argument past the released version: refused, naming the usage" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh pair-version: usage')" "1||true")"
 
 echo
 echo "Case 11: release creates a missing release, publishes a draft, and reuses a published one"
@@ -1009,6 +1002,70 @@ done
 section_run '## Changelog'
 check "a missing argument: exits 2, calling no gh, naming what is needed" \
   "$(is "$rc|$calls|$(contains "$out" 'a tag, a heading and a content file are needed; usage: release-push\.sh release-section <tag> <heading> <content-file>$')" '2||true')"
+
+echo
+echo "Case: release.yaml's worker_image_release names the image on the release from a checkout"
+# That job's last step runs release-push.sh out of the checkout, and the job made none until this
+# change, so the step exited 127 on every legion release and the release body never got its
+# "## Worker image" section. The step's `run:` is read out of the workflow by name and run twice
+# against the stub gh above: in a directory holding no checkout, as the job was, and in one
+# holding the script where the step names it, as the job's checkout leaves it.
+workflow="$script_dir/../workflows/release.yaml"
+# workflow_step_run <job> <step name>: the body of that step's `run:` block in the workflow,
+# dedented, so the case runs the workflow's own code.
+workflow_step_run() {
+  awk -v job="  $1:" -v name="      - name: $2" '
+    $0 == job { in_job = 1; next }
+    in_job && /^  [A-Za-z_]+:/ { in_job = 0 }
+    in_job && $0 == name { step = 1; next }
+    step && /^      - / { exit }
+    step && $0 == "        run: |" { body = 1; next }
+    body && $0 != "" && $0 !~ /^          / { exit }
+    body { sub(/^          /, ""); print }
+  ' "$workflow"
+}
+# worker_image_release's first step, from `steps:` to the step after it.
+first_step=$(awk '
+  $0 == "  worker_image_release:" { in_job = 1; next }
+  in_job && /^  [A-Za-z_]+:/ { exit }
+  started && /^      - / { exit }
+  in_job && /^      - / { started = 1 }
+  started { print }
+' "$workflow")
+check "worker_image_release's first step is a pinned actions/checkout of the run's commit" \
+  "$(is "$(contains "$first_step" '^      - uses: actions/checkout@[0-9a-f]\{40\} ')|$(contains "$first_step" '^          ref: \${{ github\.sha }}$')|$(contains "$first_step" '^          persist-credentials: false$')" "true|true|true")"
+name_step=$(workflow_step_run worker_image_release "Name the worker image on the legion release")
+check "that job's last step runs release-section over the worker image reference" \
+  "$(contains "$name_step" 'release-push\.sh release-section "\$RELEASE_TAG" .## Worker image. -')"
+ref='ghcr.io/example/repo/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111'
+printf 'Generated notes\n' > "$work/body.md"
+# run_name_step <dir>: that step's body in <dir>, under the shell GitHub runs a `run:` with and
+# with the environment worker_image_release gives it; leaves rc, out (combined) and the stub's
+# call log in calls.
+run_name_step() {
+  : > "$work/calls"
+  rm -f "$work/edited.md"
+  set +e
+  out=$(cd "$1" && env GITHUB_REPOSITORY=example/repo GH_TEST_DIR="$work" GH_TEST_RELEASE=published \
+    GH_TEST_FAIL='' GH_TOKEN=token REF="$ref" RELEASE_TAG=legion-v1.2.3 PATH="$work/bin:$PATH" \
+    bash -e -o pipefail -c "$name_step" 2>&1)
+  rc=$?
+  set -e
+  calls=$(<"$work/calls")
+}
+mkdir -p "$work/wir-bare" "$work/wir-checkout/.github/scripts"
+ln -sf "$release_push" "$work/wir-checkout/.github/scripts/release-push.sh"
+run_name_step "$work/wir-bare"
+check "with no checkout: the step exits 127, having called no gh, as every legion release did" \
+  "$(is "$rc|$calls|$(contains "$out" 'release-push\.sh: No such file or directory')" "127||true")"
+run_name_step "$work/wir-checkout"
+# The notes file release-section hands gh is its own temporary one, so the last argument of the
+# edit call is cut away before the two calls are compared.
+check "with the checkout: the step exits 0, viewing the body and editing it once" \
+  "$(is "$rc|$(wc -l <<<"$calls")|$(sed -n 1p <<<"$calls")|$(sed -n '2s/\[[^]]*\]$//p' <<<"$calls")" \
+    "0|2|$(argv release view legion-v1.2.3 --repo example/repo --json body -q .body)|$(argv release edit legion-v1.2.3 --repo example/repo --notes-file)")"
+check "with the checkout: the body keeps its notes and gets the digest under ## Worker image" \
+  "$(is "$(<"$work/edited.md")" "$(printf 'Generated notes\n\n## Worker image\n\n`%s`' "$ref")")"
 
 echo
 echo "Case 11b: restart leaves the release to a later unfinished run that holds this commit, else starts one"
@@ -2156,12 +2213,13 @@ check "an unreadable git configuration: exits 1, naming git config's exit code" 
   "$(is "$rc|$(contains "$out" '^::error::git config --get-regexp exited 128, so the git configuration could not be read$')" '1|true')"
 
 echo
-echo "Case: fold-plan labels each fragment with the release that first shipped it"
-# The template: clone a, detached at the base (the fold's checkout), and a bare origin whose main
-# is the base. packages/rel is released under rel-v; packages/side and packages/plain have no
-# release of their own; packages/empty has no fragment; packages/nolog has no CHANGELOG.md and no
-# fragment either, since fold-plan warns on stderr about a fragment of a package no spec names and
-# this case's first check expects an empty stderr.
+echo "Case: fold-notes refuses a version, a spec or an entry no release can render"
+# The template: clone a, whose main holds packages/rel, released under rel-v, with fragments
+# added before, between and after release tags of both shapes; packages/empty, which has a
+# changie configuration and no fragment; and packages/nolog, which has a fragment and no
+# configuration. The rendering cases below check it out at each release's own commit, detached,
+# as that release's build job has it.
+u=.changes/unreleased
 ft="$work/fold-template"
 mkdir -p "$ft/a"
 git init -q -b main "$ft/a"
@@ -2178,44 +2236,11 @@ fragment() {
   mkdir -p "$ft/a/packages/$1/.changes/unreleased"
   printf 'kind: %s\nbody: %s\n' "$3" "$4" > "$ft/a/packages/$1/.changes/unreleased/$2.yaml"
 }
-mkdir -p "$ft/a/packages/rel" "$ft/a/packages/side" "$ft/a/packages/plain" "$ft/a/packages/empty" "$ft/a/packages/nolog"
-rel_log='# Changelog
-
-## [2.0.0] - 2026-01-01
-
-### Added
-
-- a release on top
-
-## [Unreleased]
-
-### Added
-
-- an old unreleased entry
-
-## [1.5.0]
-
-### Fixed
-
-- an old fix'
-side_log='# Changelog
-
-## [Unreleased]
-
-- an old side entry'
-plain_log='# Changelog
-
-No release yet.'
-printf '%s\n' "$rel_log" > "$ft/a/packages/rel/CHANGELOG.md"
-printf '%s\n' "$side_log" > "$ft/a/packages/side/CHANGELOG.md"
-printf '%s\n' "$plain_log" > "$ft/a/packages/plain/CHANGELOG.md"
-printf '# Changelog\n' > "$ft/a/packages/empty/CHANGELOG.md"
-printf '{"name": "rel", "version": "1.5.0"}\n' > "$ft/a/packages/rel/package.json"
-printf 'no changelog\n' > "$ft/a/packages/nolog/README.md"
-# One changie configuration per package that holds fragments, which fold-notes renders them with.
-# No custom field, since the fragments below are written by hand with a kind and a body alone.
-for package in rel side plain empty; do
-  cat > "$ft/a/packages/$package/.changie.yaml" <<'CHANGIE'
+# changie_config <package dir>: this file's own minimal changie configuration, which renders a
+# fragment of a kind and a body and nothing else. The shipped configuration gets a case of its
+# own below.
+changie_config() {
+  cat > "$1/.changie.yaml" <<'CHANGIE'
 changesDir: .changes
 unreleasedDir: unreleased
 changelogPath: CHANGELOG.md
@@ -2231,88 +2256,92 @@ kinds:
   - label: Changed
   - label: Fixed
 CHANGIE
-done
+}
+mkdir -p "$ft/a/packages/rel" "$ft/a/packages/empty" "$ft/a/packages/nolog"
+printf '{"name": "rel", "version": "1.5.0"}\n' > "$ft/a/packages/rel/package.json"
+printf 'no changie configuration\n' > "$ft/a/packages/nolog/README.md"
+changie_config "$ft/a/packages/rel"
+changie_config "$ft/a/packages/empty"
 commit_at 2026-02-01T12:00:00+00:00 "chore: seed"
 fragment rel INFRA-1-first Added "the first entry"
 fragment rel INFRA-1-another Added "another entry"
-fragment side INFRA-1-side Changed "a side entry"
 commit_at 2026-02-10T12:00:00+00:00 "feat: first"
-# The bump-shaped release tag: on a child of the built commit that main never holds, committed
-# at 23:30 on March 1 in UTC-5, which is March 2 in UTC.
+c1=$(git -C "$ft/a" rev-parse HEAD)
+# The bump-shaped release tag: on a child of the built commit that main never holds, which
+# contains every commit up to the one the release built.
 git -C "$ft/a" checkout -q --detach
 printf '{"name": "rel", "version": "1.9.0"}\n' > "$ft/a/packages/rel/package.json"
 commit_at 2026-03-01T23:30:00-05:00 "chore: release rel v1.9.0 [skip ci]"
 git -C "$ft/a" tag rel-v1.9.0
 git -C "$ft/a" checkout -q main
 fragment rel INFRA-2-second Fixed "the second entry"
-# The listener-shaped tag, on the built commit itself, at 01:00 on March 5 in UTC+9.
+# The listener-shaped tag, on the built commit itself.
 commit_at 2026-03-05T01:00:00+09:00 "feat: second"
+c2=$(git -C "$ft/a" rev-parse HEAD)
 git -C "$ft/a" tag rel-v1.10.0
-fragment rel INFRA-3-third Added "in no release yet"
-fragment side INFRA-3-side Fixed "another side entry"
-fragment plain INFRA-3-plain Added "a plain entry"
+fragment rel INFRA-3-third Added "the third entry"
+fragment nolog INFRA-3-nolog Added "an entry of a package with no configuration"
 commit_at 2026-04-10T22:15:00-07:00 "feat: third"
+c3=$(git -C "$ft/a" rev-parse HEAD)
+# A name under the prefix that is no release: it bounds no group and is rendered nowhere.
 git -C "$ft/a" tag rel-v1.11.0-rc.1
-base=$(git -C "$ft/a" rev-parse HEAD)
-c2=$(git -C "$ft/a" rev-parse HEAD~1)
-main_label="main@${base:0:12}"
-git clone -q --bare "$ft/a" "$ft/origin.git"
-git -C "$ft/a" checkout -q --detach
-# Only in the working tree, never committed: not a fragment of HEAD.
-printf 'kind: Added\nbody: untracked\n' > "$ft/a/packages/rel/.changes/unreleased/INFRA-9-untracked.yaml"
 
-# fold_plan_run <spec>...: runs fold-plan in the template's clone; leaves rc, out (stdout) and
-# err (stderr).
-fold_plan_run() {
+# notes_run <commit> <version> <spec>: checks the template's clone out at <commit>, detached, and
+# runs fold-notes there into one notes file; leaves rc, out (stdout), err, wrote (whether the
+# file is there) and notes (its content, empty when none was written).
+notes_file="$work/fold-notes.md"
+notes_run() {
+  rm -f "$notes_file"
+  git -C "$ft/a" checkout -q --detach "$1"
   set +e
-  out=$(cd "$ft/a" && "$release_push" fold-plan "$@" 2>"$work/fold-plan.err")
+  out=$(cd "$ft/a" && "$release_push" fold-notes "$2" "$notes_file" "$3" 2>"$work/fold-notes.err")
   rc=$?
   set -e
-  err=$(<"$work/fold-plan.err")
+  err=$(<"$work/fold-notes.err")
+  notes='' wrote=false
+  [ ! -f "$notes_file" ] || { notes=$(<"$notes_file"); wrote=true; }
 }
-u=.changes/unreleased
-rel_plan="packages/rel	1.9.0	2026-03-02	packages/rel/$u/INFRA-1-another.yaml
-packages/rel	1.9.0	2026-03-02	packages/rel/$u/INFRA-1-first.yaml
-packages/rel	1.10.0	2026-03-04	packages/rel/$u/INFRA-2-second.yaml"
-side_plan="packages/side	$main_label	2026-04-11	packages/side/$u/INFRA-1-side.yaml
-packages/side	$main_label	2026-04-11	packages/side/$u/INFRA-3-side.yaml"
-plain_plan="packages/plain	$main_label	2026-04-11	packages/plain/$u/INFRA-3-plain.yaml"
-# Every package of the template that holds a fragment, since fold-plan warns on stderr about a
-# fragment of a package no spec names.
-full_plan="$rel_plan"$'\n'"$side_plan"$'\n'"$plain_plan"
-fold_plan_run packages/rel=rel-v packages/side packages/plain
-check "fold-plan: exits 0, saying nothing on stderr" "$(is "$rc|$err" "0|")"
-check "fold-plan: a fragment under two tags gets the lower version, one under the listener-shaped tag its version, one in no release none, in version order, dated in UTC" \
-  "$(is "$out" "$full_plan")"
-fold_plan_run packages/plain packages/side packages/rel=rel-v
-check "fold-plan: the packages come in the specs' order" \
-  "$(is "$out" "$plain_plan"$'\n'"$side_plan"$'\n'"$rel_plan")"
-fold_plan_run packages/rel=rel-v packages/side packages/plain packages/empty
-check "fold-plan: a package without fragments plans nothing" "$(is "$rc|$out" "0|$full_plan")"
-fold_plan_run
-check "fold-plan: no spec is refused" "$(is "$rc|$(contains "$err" '^::error::release-push.sh fold-plan: no package spec')" "1|true")"
+notes_run "$c3" 1.9 packages/rel=rel-v
+check "fold-notes: a version that is not X.Y.Z is refused, writing nothing" \
+  "$(is "$rc|$wrote|$(contains "$err" '^::error::release-push\.sh fold-notes: the release version 1\.9 is not X\.Y\.Z')" "1|false|true")"
+notes_run "$c3" 1.11.0 packages/rel
+check "fold-notes: a spec with no tag prefix is refused: a release line is what bounds a release" \
+  "$(is "$rc|$wrote|$(contains "$err" '^::error::release-push\.sh fold-notes: package spec packages/rel names no tag prefix')" "1|false|true")"
 for spec in packages/rel= ../rel 'packages/rel=rel v' /packages/rel; do
-  fold_plan_run "$spec"
+  notes_run "$c3" 1.11.0 "$spec"
   printf -v shown '%q' "$spec"
-  check "fold-plan: the spec $shown is refused" \
-    "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh fold-plan: package spec .* is not <package-dir>\[=<tag-prefix>\]')" "1||true")"
+  check "fold-notes: the spec $shown is refused" \
+    "$(is "$rc|$wrote|$(contains "$err" '^::error::release-push\.sh fold-notes: package spec .* is not <package-dir>\[=<tag-prefix>\]')" "1|false|true")"
 done
-fold_plan_run packages/side other/side
-check "fold-plan: two specs of one basename are refused" "$(is "$rc|$(contains "$err" 'two package specs name a directory side')" "1|true")"
-fold_plan_run packages/rel=rel-v packages/nolog
-check "fold-plan: a package without CHANGELOG.md is refused, printing no plan" \
-  "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh fold-plan: packages/nolog holds no CHANGELOG.md at HEAD')" "1||true")"
+# usage_run <arg>...: runs fold-notes with those arguments in the template's clone, as it stands;
+# leaves rc and out (combined).
+usage_run() {
+  set +e
+  out=$(cd "$ft/a" && "$release_push" fold-notes "$@" 2>&1)
+  rc=$?
+  set -e
+}
+usage='usage: release-push\.sh fold-notes <version> <notes-file> <package-dir>=<tag-prefix>'
+usage_run 1.11.0 "$notes_file"
+check "fold-notes: no spec at all is refused, naming the usage" \
+  "$(is "$rc|$(contains "$out" "^::error::release-push\.sh fold-notes: $usage\$")" "1|true")"
+usage_run 1.11.0 "$notes_file" packages/rel=rel-v packages/empty=rel-v
+check "fold-notes: a second spec is refused: one release of one package goes into one file" \
+  "$(is "$rc|$(contains "$out" "^::error::release-push\.sh fold-notes: $usage\$")" "1|true")"
+notes_run "$c3" 1.11.0 packages/nolog=rel-v
+check "fold-notes: a package whose entries are in the release but holds no .changie.yaml is refused" \
+  "$(is "$rc|$wrote|$(contains "$err" '^::error::release-push\.sh fold-notes: packages/nolog holds no \.changie\.yaml at HEAD to render its fragments with$')" "1|false|true")"
 
 # Anything directly in an unreleased directory but a regular file whose name ends in .yaml is
-# refused, by name, with no plan printed: the fold would never fold it. Each package of this
-# repository holds one fragment and one such entry: a subdirectory, a .yml file, a README.md and
-# a symlink.
+# refused, by name, with nothing rendered: no release would ever render it. Each package of this
+# repository holds one fragment and one such entry — a subdirectory, a .yml file, a README.md, a
+# symlink — and packages/two holds two of them. fold-check refuses them the same way, from the
+# same listing, and neither command reaches changie to do it.
 rt="$work/fold-refuse"
 git init -q -b main "$rt"
 identity "$rt"
-for package in sub yml readme link; do
+for package in sub yml readme link two; do
   mkdir -p "$rt/packages/$package/$u"
-  printf '# Changelog\n' > "$rt/packages/$package/CHANGELOG.md"
   printf 'kind: Added\nbody: fine\n' > "$rt/packages/$package/$u/INFRA-1-fine.yaml"
 done
 mkdir -p "$rt/packages/sub/$u/sjawhar"
@@ -2320,221 +2349,121 @@ printf 'kind: Added\nbody: nested\n' > "$rt/packages/sub/$u/sjawhar/fix-thing.ya
 printf 'kind: Added\nbody: yml\n' > "$rt/packages/yml/$u/INFRA-1-a.yml"
 printf 'not a fragment\n' > "$rt/packages/readme/$u/README.md"
 ln -s INFRA-1-fine.yaml "$rt/packages/link/$u/link.yaml"
+printf 'kind: Added\nbody: yml\n' > "$rt/packages/two/$u/INFRA-1-a.yml"
+printf 'not a fragment\n' > "$rt/packages/two/$u/README.md"
 git -C "$rt" add -A
 git -C "$rt" commit -q -m "feat: odd entries"
-# refuse_run <spec>...: runs fold-plan in that repository; leaves rc, out and err.
+refuse_notes="$work/fold-refuse.md"
+# refuse_run <command> <arg>...: runs that command of the script under test in the refusal
+# repository; leaves rc, out and err.
 refuse_run() {
+  rm -f "$refuse_notes"
   set +e
-  out=$(cd "$rt" && "$release_push" fold-plan "$@" 2>"$work/fold-refuse.err")
+  out=$(cd "$rt" && "$release_push" "$@" 2>"$work/fold-refuse.err")
   rc=$?
   set -e
   err=$(<"$work/fold-refuse.err")
 }
 refused='at HEAD: each entry in a package.s \.changes/unreleased/ must be a regular file whose name ends in \.yaml'
 for entry in sub/sjawhar yml/INFRA-1-a.yml readme/README.md link/link.yaml; do
-  refuse_run "packages/${entry%%/*}"
-  check "fold-plan: packages/${entry%%/*}/$u/${entry#*/} is refused by name, with no plan" \
-    "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/${entry%%/*}/$u/${entry#*/} $refused")" "1||true")"
+  refuse_run fold-notes 1.0.0 "$refuse_notes" "packages/${entry%%/*}=odd-v"
+  check "fold-notes: packages/${entry%%/*}/$u/${entry#*/} is refused by name, writing no file" \
+    "$(is "$rc|$([ -e "$refuse_notes" ] && echo true || echo false)|$(contains "$err" "^::error::release-push\.sh fold-notes: packages/${entry%%/*}/$u/${entry#*/} $refused")" "1|false|true")"
+  refuse_run fold-check "packages/${entry%%/*}"
+  check "fold-check: packages/${entry%%/*}/$u/${entry#*/} is refused the same way" \
+    "$(is "$rc|$(contains "$err" "^::error::release-push\.sh fold-check: packages/${entry%%/*}/$u/${entry#*/} $refused")" "1|true")"
 done
-refuse_run packages/sub packages/yml packages/readme packages/link
-check "fold-plan: one error names every refused entry of every spec, sorted, with no plan" \
-  "$(is "$rc|$out|$(grep -c '^::error::' <<<"$err")|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/link/$u/link\.yaml packages/readme/$u/README\.md packages/sub/$u/sjawhar packages/yml/$u/INFRA-1-a\.yml $refused")" "1||1|true")"
+refuse_run fold-notes 1.0.0 "$refuse_notes" packages/two=odd-v
+check "fold-notes: one error names every refused entry of the package, sorted" \
+  "$(is "$rc|$(grep -c '^::error::' <<<"$err")|$(contains "$err" "^::error::release-push\.sh fold-notes: packages/two/$u/INFRA-1-a\.yml packages/two/$u/README\.md $refused")" "1|1|true")"
+check "fold-notes: that refusal says to move or rename a fragment in one commit with git mv" \
+  "$(contains "$err" 'in one commit, with git mv')"
+refuse_run fold-check
+check "fold-check: no spec is refused" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-check: no package spec given')" "1||true")"
 
-# A file under the .changes/ of a package no spec names does not stop the fold: fold-plan names it
-# in one ::warning::, prints the plan all the same and exits 0, since the fold runs on main, where
-# a refusal would fold no package at all. fold-orphans is that check made strict, for ci.yaml's
-# lint job, which runs it on every pull request and refuses the file before it reaches main.
-# packages/envoy is folded, under envoy-v; packages/daemon, which has no CHANGELOG.md and no
-# .changie.yaml, is not.
-ot="$work/fold-orphan"
-git init -q -b main "$ot"
-identity "$ot"
-mkdir -p "$ot/packages/envoy/$u" "$ot/packages/daemon/$u"
-printf '# Changelog\n' > "$ot/packages/envoy/CHANGELOG.md"
-printf 'kind: Added\nbody: an envoy entry\n' > "$ot/packages/envoy/$u/pr-1-envoy.yaml"
-printf 'kind: Added\nbody: a daemon entry\n' > "$ot/packages/daemon/$u/pr-1-daemon.yaml"
-git -C "$ot" add -A
-GIT_COMMITTER_DATE=2026-07-01T12:00:00+00:00 git -C "$ot" commit -q -m "feat: two fragments"
-git -C "$ot" tag envoy-v1.0.0
-envoy_plan="packages/envoy	1.0.0	2026-07-01	packages/envoy/$u/pr-1-envoy.yaml"
-# orphan_run: runs fold-plan over packages/envoy alone in that repository; leaves rc, out and err.
-orphan_run() {
-  set +e
-  out=$(cd "$ot" && "$release_push" fold-plan packages/envoy=envoy-v 2>"$work/fold-orphan.err")
-  rc=$?
-  set -e
-  err=$(<"$work/fold-orphan.err")
-}
-orphan_run
-check "fold-plan: a fragment of a package no spec names is one ::warning::, not an ::error::" \
-  "$(is "$rc|$out|$(grep -c "^::warning::release-push\.sh fold-plan: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")|$(grep -c '^::error::' <<<"$err")" "0|$envoy_plan|1|0")"
-check "fold-plan: that warning names the specs it was given and says what to do about the file" \
-  "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
-# A release's build job runs fold-plan through fold-notes over its own package, and ci.yaml's
-# lint job runs fold-orphans over .github/changelog-packages on every pull request. An orphan
-# fragment that reaches main all the same must not stop the plan of the packages a command is
-# given: the plan still lists packages/envoy's fragment, and the orphan is named on stderr for
-# someone to remove.
-check "fold-plan: an orphan fragment on main does not stop the plan of the packages it is given" \
-  "$(is "$rc|$out|$(contains "$err" "packages/daemon/$u/pr-1-daemon\.yaml")" "0|$envoy_plan|true")"
-# orphans_run <spec>...: runs fold-orphans in that repository; leaves rc, out and err.
-orphans_run() {
-  set +e
-  out=$(cd "$ot" && "$release_push" fold-orphans "$@" 2>"$work/fold-orphans.err")
-  rc=$?
-  set -e
-  err=$(<"$work/fold-orphans.err")
-}
-orphans_run packages/envoy=envoy-v
-check "fold-orphans: the same file is refused, with one error naming it and nothing on stdout" \
-  "$(is "$rc|$out|$(grep -c "^::error::release-push\.sh fold-orphans: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")" "1||1")"
-check "fold-orphans: that refusal names the specs it was given and says what to do about the file" \
-  "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
-git -C "$ot" rm -q "packages/daemon/$u/pr-1-daemon.yaml"
-GIT_COMMITTER_DATE=2026-07-02T12:00:00+00:00 git -C "$ot" commit -q -m "chore: remove the daemon fragment"
-orphan_run
-check "fold-plan: with the file removed in a commit, the plan is printed and nothing is said" \
-  "$(is "$rc|$err|$out" "0||$envoy_plan")"
-orphans_run packages/envoy=envoy-v
-check "fold-orphans: with the file removed in a commit, it exits 0 saying nothing" "$(is "$rc|$out|$err" "0||")"
-# Only HEAD's tree counts: a file the working tree alone holds is no fragment of the fold.
-mkdir -p "$ot/packages/daemon/$u"
-printf 'kind: Added\nbody: uncommitted\n' > "$ot/packages/daemon/$u/pr-2-daemon.yaml"
-orphan_run
-check "fold-plan: a file under .changes/ in the working tree alone is not refused" \
-  "$(is "$rc|$err|$out" "0||$envoy_plan")"
-orphans_run packages/envoy=envoy-v
-check "fold-orphans: a file under .changes/ in the working tree alone is not refused" "$(is "$rc|$out|$err" "0||")"
-rm -r "$ot/packages/daemon/.changes"
-# Anywhere under .changes/, not only in unreleased/: the fold reads nothing of that package.
-mkdir -p "$ot/packages/daemon/.changes"
-printf 'A header\n' > "$ot/packages/daemon/.changes/header.tpl.md"
-git -C "$ot" add -A
-GIT_COMMITTER_DATE=2026-07-03T12:00:00+00:00 git -C "$ot" commit -q -m "chore: a daemon .changes file"
-orphan_run
-check "fold-plan: a file under .changes/ outside unreleased/ is warned about too, with the plan printed" \
-  "$(is "$rc|$out|$(contains "$err" "^::warning::release-push\.sh fold-plan: packages/daemon/\.changes/header\.tpl\.md at HEAD: ")" "0|$envoy_plan|true")"
-orphans_run packages/envoy=envoy-v
-check "fold-orphans: a file under .changes/ outside unreleased/ is refused too, printing no plan" \
-  "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-orphans: packages/daemon/\.changes/header\.tpl\.md at HEAD: ")" "1||true")"
-orphans_run
-check "fold-orphans: no spec is refused" \
-  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-orphans: no package spec given')" "1||true")"
-
-# A fragment name holding a glob character is still one file: fold-plan finds the commit that
-# added that file, never one that added another file the name matches as a pattern. Here
-# INFRA-7-[a].yaml ships in glob-v1.0.0, and INFRA-7-a.yaml, which `[a]` matches as a glob, is
-# added after it and ships in glob-v1.1.0.
-gt="$work/fold-glob"
-mkdir -p "$gt/packages/glob/.changes/unreleased"
-git init -q -b main "$gt"
-identity "$gt"
-printf '# Changelog\n' > "$gt/packages/glob/CHANGELOG.md"
-printf 'kind: Added\nbody: bracketed\n' > "$gt/packages/glob/.changes/unreleased/INFRA-7-[a].yaml"
-git -C "$gt" add -A
-GIT_COMMITTER_DATE=2026-05-01T12:00:00+00:00 git -C "$gt" commit -q -m "feat: bracketed"
-git -C "$gt" tag glob-v1.0.0
-printf 'kind: Added\nbody: plain\n' > "$gt/packages/glob/.changes/unreleased/INFRA-7-a.yaml"
-git -C "$gt" add -A
-GIT_COMMITTER_DATE=2026-05-02T12:00:00+00:00 git -C "$gt" commit -q -m "feat: plain"
-git -C "$gt" tag glob-v1.1.0
-set +e
-out=$(cd "$gt" && "$release_push" fold-plan packages/glob=glob-v 2>/dev/null)
-rc=$?
-set -e
-check "fold-plan: a fragment whose name holds a glob character gets the release of the commit that added that very file" \
-  "$(is "$rc|$out" "0|packages/glob	1.0.0	2026-05-01	packages/glob/$u/INFRA-7-[a].yaml
-packages/glob	1.1.0	2026-05-02	packages/glob/$u/INFRA-7-a.yaml")"
-
-# A fragment renamed with git mv keeps the release of the commit that first added it. Here
-# sjawhar/fix.yaml, in a subdirectory fold-plan refuses, ships in ren-v1.0.0; a later commit moves
-# it to sjawhar-fix.yaml, and INFRA-8-later.yaml, alike enough to read to git as a copy of it, is
-# added after that and ships in ren-v1.1.0 (`git log --follow` would follow that copy).
-nt="$work/fold-rename"
-mkdir -p "$nt/packages/ren/$u/sjawhar"
-git init -q -b main "$nt"
-identity "$nt"
-printf '# Changelog\n' > "$nt/packages/ren/CHANGELOG.md"
-printf 'component: ren\nkind: Fixed\nbody: a nested fix\n' > "$nt/packages/ren/$u/sjawhar/fix.yaml"
-git -C "$nt" add -A
-GIT_COMMITTER_DATE=2026-06-01T12:00:00+00:00 git -C "$nt" commit -q -m "fix: nested"
-git -C "$nt" tag ren-v1.0.0
-set +e
-out=$(cd "$nt" && "$release_push" fold-plan packages/ren=ren-v 2>"$work/fold-rename.err")
-rc=$?
-set -e
-err=$(<"$work/fold-rename.err")
-check "fold-plan: the refusal of a misplaced entry says to move or rename a fragment in one commit with git mv" \
-  "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/ren/$u/sjawhar $refused.* in one commit, with git mv")" "1||true")"
-git -C "$nt" mv "packages/ren/$u/sjawhar/fix.yaml" "packages/ren/$u/sjawhar-fix.yaml"
-GIT_COMMITTER_DATE=2026-06-02T12:00:00+00:00 git -C "$nt" commit -q -m "chore: move the fragment"
-printf 'component: ren\nkind: Fixed\nbody: a later fix\n' > "$nt/packages/ren/$u/INFRA-8-later.yaml"
-git -C "$nt" add -A
-GIT_COMMITTER_DATE=2026-06-03T12:00:00+00:00 git -C "$nt" commit -q -m "fix: later"
-git -C "$nt" tag ren-v1.1.0
-set +e
-out=$(cd "$nt" && "$release_push" fold-plan packages/ren=ren-v 2>/dev/null)
-rc=$?
-set -e
-check "fold-plan: a fragment renamed with git mv gets the release of the commit that first added it, and one alike enough to read as its copy its own" \
-  "$(is "$rc|$out" "0|packages/ren	1.0.0	2026-06-01	packages/ren/$u/sjawhar-fix.yaml
-packages/ren	1.1.0	2026-06-03	packages/ren/$u/INFRA-8-later.yaml")"
-
-# fold-notes renders the plan's groups with the real changie, which the release build jobs install
-# with .github/actions/install-changie. Without changie on PATH these cases are skipped, not
-# counted.
+# The rendering cases need the real changie, which the release build jobs install with
+# .github/actions/install-changie. Without it on PATH they are skipped, not counted.
 echo
-echo "Case: fold-notes renders the plan's groups, and --label renders one release's own"
+echo "Case: fold-notes renders the changelog entries a release's own commits added"
 if command -v changie >/dev/null; then
-  # notes_run <dir> [option]...: runs fold-notes over the template's three packages that hold
-  # fragments, writing into $work/<dir>; leaves rc, out, err and listed (the files written, in C
-  # order, space-separated).
-  notes_run() {
-    local out_dir="$work/$1"
-    shift
-    set +e
-    out=$(cd "$ft/a" && "$release_push" fold-notes "$@" "$out_dir" \
-      packages/rel=rel-v packages/side packages/plain 2>"$work/fold-notes.err")
-    rc=$?
-    set -e
-    err=$(<"$work/fold-notes.err")
-    listed=$(ls -A "$out_dir" | LC_ALL=C sort | tr '\n' ' ')
-    listed=${listed% }
-  }
-  notes_run notes-label --label 1.9.0
-  check "fold-notes --label: writes the notes of that label's group alone" \
-    "$(is "$rc|$err|$listed" "0||rel_1.9.0.md")"
-  rel_notes=$(<"$work/notes-label/rel_1.9.0.md")
-  check "fold-notes --label: those notes hold that release's entries under their kind, and no other release's" \
-    "$(is "$(contains "$rel_notes" '^### Added$')|$(contains "$rel_notes" '^- the first entry$')|$(contains "$rel_notes" '^- another entry$')|$(contains "$rel_notes" 'the second entry')" "true|true|true|false")"
-  notes_run notes-no-group --label 9.9.9
-  check "fold-notes --label: a label no group has writes nothing and exits 0" \
-    "$(is "$rc|$listed|$(contains "$out" '^Nothing to render$')" "0||true")"
-  notes_run notes-every-group
-  check "fold-notes: without the option, every group of the plan is rendered" \
-    "$(is "$rc|$listed" "0|plain_$main_label.md rel_1.10.0.md rel_1.9.0.md side_$main_label.md")"
-  notes_run notes-prerelease --label 1.11.0-rc.1
-  check "fold-notes --label: a label that is no X.Y.Z, though a tag of the prefix carries it, renders nothing" \
-    "$(is "$rc|$listed|$(contains "$out" '^Nothing to render$')" "0||true")"
+  notes_run "$c1" 1.9.0 packages/rel=rel-v
+  check "fold-notes: the first release of a line, with no tag below it, renders the entries it ships" \
+    "$(is "$rc|$err|$(contains "$out" "^Wrote $notes_file from 2 fragments\$")" "0||true")"
+  check "fold-notes: those notes hold that release's entries under their kind, and no later release's" \
+    "$(is "$(contains "$notes" '^### Added$')|$(contains "$notes" '^- the first entry$')|$(contains "$notes" '^- another entry$')|$(contains "$notes" 'the second entry')" "true|true|true|false")"
+  notes_run "$c2" 1.10.0 packages/rel=rel-v
+  check "fold-notes: the next release holds its own entry alone, the bump-shaped tag below it bounding the rest" \
+    "$(is "$rc|$(contains "$out" "from 1 fragments\$")|$(contains "$notes" '^- the second entry$')|$(contains "$notes" 'the first entry')" "0|true|true|false")"
+  notes_run "$c3" 1.11.0 packages/rel=rel-v
+  check "fold-notes: a release with no tag of its own yet holds the entries added since the newest release" \
+    "$(is "$rc|$(contains "$notes" '^- the third entry$')|$(contains "$notes" 'the second entry')" "0|true|false")"
+  check "fold-notes: rel-v1.11.0-rc.1, a name under the prefix that is no release, bounded nothing" \
+    "$(is "$(contains "$notes" '^- the third entry$')" true)"
+  notes_run "$c1" 1.10.0 packages/rel=rel-v
+  check "fold-notes: a release whose commits a lower tag already holds writes no file and exits 0" \
+    "$(is "$rc|$wrote|$(contains "$out" '^No changelog fragment of packages/rel is new in 1\.10\.0; wrote no notes file$')" "0|false|true")"
+  notes_run "$c3" 1.11.0 packages/empty=rel-v
+  check "fold-notes: a package holding no fragment at all writes no file and exits 0" \
+    "$(is "$rc|$wrote|$(contains "$out" '^No changelog fragment of packages/empty is new in 1\.11\.0; wrote no notes file$')" "0|false|true")"
+  # Only HEAD's tree counts: a file the working tree alone holds is in no release.
+  printf 'kind: Added\nbody: untracked\n' > "$ft/a/packages/rel/$u/INFRA-9-untracked.yaml"
+  notes_run "$c3" 1.11.0 packages/rel=rel-v
+  rm -f "$ft/a/packages/rel/$u/INFRA-9-untracked.yaml"
+  check "fold-notes: a fragment the working tree alone holds is rendered nowhere" \
+    "$(is "$rc|$(contains "$notes" 'untracked')" "0|false")"
 
-  echo
-  echo "Case: fold-notes --label writes exactly what the whole plan writes for that label"
-  # With a label and a tag prefix, a spec's group is read once from the tag's own commits; without
-  # one, each fragment asks the tags which release first shipped it. The two rules must answer the
-  # same, so every label the whole plan wrote above is rendered again on its own and compared byte
-  # for byte, the labels of the packages with no release of their own included.
-  every="$work/notes-every-group"
-  for label in $(for file in "$every"/*.md; do file=${file##*/}; printf '%s\n' "${file%.md}"; done |
-    sed 's/^[^_]*_//' | LC_ALL=C sort -u); do
-    notes_run "notes-one-$label" --label "$label"
-    want='' same=true
-    for file in "$every"/*_"$label".md; do
-      want+="${file##*/} "
-      cmp -s "$file" "$work/notes-one-$label/${file##*/}" || same=false
-    done
-    check "fold-notes --label $label: exactly that label's group of the whole plan, byte for byte" \
-      "$(is "$rc|$listed|$same" "0|${want% }|true")"
-  done
+  # A fragment name holding a glob character is still one file: the commit that added that very
+  # file decides which release ships it, never one that added another file the name matches as a
+  # pattern. Here INFRA-7-[a].yaml ships in glob-v1.0.0, and INFRA-7-a.yaml, which `[a]` matches
+  # as a glob, is added after it and ships in glob-v1.1.0.
+  gt="$work/fold-glob"
+  mkdir -p "$gt/packages/glob/$u"
+  git init -q -b main "$gt"
+  identity "$gt"
+  changie_config "$gt/packages/glob"
+  printf 'kind: Added\nbody: bracketed\n' > "$gt/packages/glob/$u/INFRA-7-[a].yaml"
+  git -C "$gt" add -A
+  GIT_COMMITTER_DATE=2026-05-01T12:00:00+00:00 git -C "$gt" commit -q -m "feat: bracketed"
+  git -C "$gt" tag glob-v1.0.0
+  printf 'kind: Added\nbody: plain\n' > "$gt/packages/glob/$u/INFRA-7-a.yaml"
+  git -C "$gt" add -A
+  GIT_COMMITTER_DATE=2026-05-02T12:00:00+00:00 git -C "$gt" commit -q -m "feat: plain"
+  git -C "$gt" tag glob-v1.1.0
+  set +e
+  out=$(cd "$gt" && "$release_push" fold-notes 1.1.0 "$work/fold-glob.md" packages/glob=glob-v 2>&1)
+  rc=$?
+  set -e
+  glob_notes=$(<"$work/fold-glob.md")
+  check "fold-notes: a fragment whose name holds a glob character ships in the release of the commit that added that very file" \
+    "$(is "$rc|$(contains "$glob_notes" '^- plain$')|$(contains "$glob_notes" 'bracketed')" "0|true|false")"
+
+  # A fragment renamed with git mv keeps the release that first shipped it. Here sjawhar/fix.yaml
+  # ships in ren-v1.0.0; a later commit moves it to sjawhar-fix.yaml, and INFRA-8-later.yaml,
+  # alike enough to read to git as a copy of it, is added after that and ships in ren-v1.1.0
+  # (`git log --follow` would follow that copy and give it the older release).
+  nt="$work/fold-rename"
+  mkdir -p "$nt/packages/ren/$u/sjawhar"
+  git init -q -b main "$nt"
+  identity "$nt"
+  changie_config "$nt/packages/ren"
+  printf 'kind: Fixed\ntime: 2026-06-01T12:00:00Z\nbody: a nested fix\n' > "$nt/packages/ren/$u/sjawhar/fix.yaml"
+  git -C "$nt" add -A
+  GIT_COMMITTER_DATE=2026-06-01T12:00:00+00:00 git -C "$nt" commit -q -m "fix: nested"
+  git -C "$nt" tag ren-v1.0.0
+  git -C "$nt" mv "packages/ren/$u/sjawhar/fix.yaml" "packages/ren/$u/sjawhar-fix.yaml"
+  GIT_COMMITTER_DATE=2026-06-02T12:00:00+00:00 git -C "$nt" commit -q -m "chore: move the fragment"
+  printf 'kind: Fixed\ntime: 2026-06-03T12:00:00Z\nbody: a later fix\n' > "$nt/packages/ren/$u/INFRA-8-later.yaml"
+  git -C "$nt" add -A
+  GIT_COMMITTER_DATE=2026-06-03T12:00:00+00:00 git -C "$nt" commit -q -m "fix: later"
+  git -C "$nt" tag ren-v1.1.0
+  set +e
+  out=$(cd "$nt" && "$release_push" fold-notes 1.1.0 "$work/fold-rename.md" packages/ren=ren-v 2>&1)
+  rc=$?
+  set -e
+  ren_notes=$(<"$work/fold-rename.md")
+  check "fold-notes: a fragment renamed with git mv keeps the release that first shipped it, and one alike enough to read as its copy gets its own" \
+    "$(is "$rc|$(contains "$ren_notes" '^- a later fix$')|$(contains "$ren_notes" 'a nested fix')" "0|true|false")"
 
   echo
   echo "Case: fold-notes renders a package with the shipped packages/pi-legion/.changie.yaml"
@@ -2547,7 +2476,6 @@ if command -v changie >/dev/null; then
   git init -q -b main "$sc"
   identity "$sc"
   cp "$script_dir/../../packages/pi-legion/.changie.yaml" "$sc/packages/shipped/.changie.yaml"
-  printf '# Changelog\n' > "$sc/packages/shipped/CHANGELOG.md"
   cat > "$sc/packages/shipped/$u/INFRA-20-Added-20260101-120000.yaml" <<'YAML'
 kind: Added
 body: a plain addition
@@ -2569,21 +2497,125 @@ YAML
   git -C "$sc" add -A
   GIT_COMMITTER_DATE=2026-01-02T12:00:00+00:00 git -C "$sc" commit -q -m "feat: two entries"
   git -C "$sc" tag shipped-v3.1.0
+  shipped_notes="$work/notes-shipped.md"
   set +e
-  out=$(cd "$sc" && "$release_push" fold-notes --label 3.1.0 "$work/notes-shipped" packages/shipped=shipped-v 2>&1)
+  out=$(cd "$sc" && "$release_push" fold-notes 3.1.0 "$shipped_notes" packages/shipped=shipped-v 2>&1)
   rc=$?
   set -e
-  check "the shipped config: fold-notes exits 0, writing the release's one notes file" \
-    "$(is "$rc|$(ls -A "$work/notes-shipped")" "0|shipped_3.1.0.md")"
+  check "the shipped config: fold-notes exits 0, writing the release's notes file" \
+    "$(is "$rc|$([ -f "$shipped_notes" ] && echo true || echo false)" "0|true")"
   # What that config's kindFormat, changeFormat and newlines render, byte for byte: a heading per
   # kind in the config's order, one bullet per entry, and the second and later lines of a body two
   # spaces under the bullet, with its blank line left empty.
   printf '\n\n### Added\n\n- a plain addition\n\n### Changed\n\n- a change whose entry runs\n  onto a second line\n\n  and a second paragraph' \
     > "$work/shipped-expected.md"
   check "the shipped config: the entries render under their kind, each body line after the first two spaces under the bullet" \
-    "$(cmp -s "$work/shipped-expected.md" "$work/notes-shipped/shipped_3.1.0.md" && echo true || echo false)"
+    "$(cmp -s "$work/shipped-expected.md" "$shipped_notes" && echo true || echo false)"
+
+  echo
+  echo "Case: fold-check renders every fragment of a pull request's checkout and names what changie refuses"
+  # The pull request's gate, over the same repository and the same shipped configuration: after
+  # the merge nothing renders a fragment before the release that first ships it, so a fragment
+  # changie refuses would fail that release's build job on every run until a fix merges.
+  # check_run <spec>...: runs fold-check in that repository; leaves rc and out (combined).
+  check_run() {
+    set +e
+    out=$(cd "$sc" && "$release_push" fold-check "$@" 2>&1)
+    rc=$?
+    set -e
+  }
+  check_run packages/shipped
+  check "fold-check: a checkout whose every fragment renders exits 0, saying nothing" "$(is "$rc|$out" "0|")"
+  check_run packages/shipped packages/none
+  check "fold-check: a spec whose package holds no fragment renders nothing and exits 0" "$(is "$rc|$out" "0|")"
+  check_run packages/shipped=shipped-v
+  check "fold-check: a spec's tag prefix is accepted and ignored" "$(is "$rc|$out" "0|")"
+  bad="$sc/packages/shipped/$u/INFRA-22-Fixd-20260101-140000.yaml"
+  cat > "$bad" <<'YAML'
+kind: Fixd
+body: a kind the configuration does not list
+time: 2026-01-01T14:00:00Z
+custom:
+  Issue: INFRA-22
+YAML
+  git -C "$sc" add -A
+  GIT_COMMITTER_DATE=2026-01-03T12:00:00+00:00 git -C "$sc" commit -q -m "feat: a kind changie refuses"
+  check_run packages/shipped
+  check "fold-check: a kind the configuration does not list fails it, with one ::error:: naming that fragment and what changie said" \
+    "$(is "$rc|$(grep -c '^::error::' <<<"$out")|$(contains "$out" "packages/shipped/$u/INFRA-22-Fixd-20260101-140000\.yaml, where changie said: .*Fixd")" "1|1|true")"
+  check "fold-check: the error names no fragment changie renders" \
+    "$(is "$(contains "$out" 'INFRA-20')|$(contains "$out" 'INFRA-21')" "false|false")"
+  cat > "$sc/packages/shipped/$u/INFRA-23-Chnged-20260101-150000.yaml" <<'YAML'
+kind: Chnged
+body: another kind the configuration does not list
+time: 2026-01-01T15:00:00Z
+custom:
+  Issue: INFRA-23
+YAML
+  git -C "$sc" add -A
+  GIT_COMMITTER_DATE=2026-01-04T12:00:00+00:00 git -C "$sc" commit -q -m "feat: a second kind changie refuses"
+  check_run packages/shipped
+  check "fold-check: both refused fragments are named, each with what changie said, in the one error" \
+    "$(is "$rc|$(grep -c '^::error::' <<<"$out")|$(contains "$out" "INFRA-22-Fixd-20260101-140000\.yaml, where changie said: .*Fixd")|$(contains "$out" "INFRA-23-Chnged-20260101-150000\.yaml, where changie said: .*Chnged")" "1|1|true|true")"
+  # What fold-check is there to stop: the release that first ships such a fragment fails its own
+  # build job, naming it the same way, on every run until a fix merges.
+  set +e
+  out=$(cd "$sc" && "$release_push" fold-notes 3.2.0 "$work/notes-refused.md" packages/shipped=shipped-v 2>&1)
+  rc=$?
+  set -e
+  check "fold-notes: the release that first ships a fragment changie refuses fails, naming each one" \
+    "$(is "$rc|$(contains "$out" "^::error::release-push\.sh fold-notes: changie could not render packages/shipped's notes for 3\.2\.0; refused alone: .*INFRA-22-Fixd.*INFRA-23-Chnged.*; changie said: ")" "1|true")"
 else
-  echo "  SKIP: the fold-notes cases (changie is not on PATH)"
+  echo "  SKIP: the cases that render with changie (changie is not on PATH)"
 fi
 
-summary "release-push.sh version, tagged, tag, release, release-section, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and fold-notes, and release.yaml's pair_member"
+echo
+echo "Case: fold-orphans refuses a fragment of a package it was not given"
+# ci.yaml's lint job runs it over .github/changelog-packages on every pull request, inside a
+# required check, so a fragment no release renders is caught before it reaches main.
+# packages/envoy is released under envoy-v; packages/daemon, which has no .changie.yaml, is not.
+ot="$work/fold-orphan"
+git init -q -b main "$ot"
+identity "$ot"
+mkdir -p "$ot/packages/envoy/$u" "$ot/packages/daemon/$u"
+printf 'kind: Added\nbody: an envoy entry\n' > "$ot/packages/envoy/$u/pr-1-envoy.yaml"
+printf 'kind: Added\nbody: a daemon entry\n' > "$ot/packages/daemon/$u/pr-1-daemon.yaml"
+git -C "$ot" add -A
+GIT_COMMITTER_DATE=2026-07-01T12:00:00+00:00 git -C "$ot" commit -q -m "feat: two fragments"
+git -C "$ot" tag envoy-v1.0.0
+# orphans_run <spec>...: runs fold-orphans in that repository; leaves rc, out and err.
+orphans_run() {
+  set +e
+  out=$(cd "$ot" && "$release_push" fold-orphans "$@" 2>"$work/fold-orphans.err")
+  rc=$?
+  set -e
+  err=$(<"$work/fold-orphans.err")
+}
+orphans_run packages/envoy=envoy-v
+check "fold-orphans: the daemon's fragment is refused, with one error naming it and nothing on stdout" \
+  "$(is "$rc|$out|$(grep -c "^::error::release-push\.sh fold-orphans: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")" "1||1")"
+check "fold-orphans: that refusal names the specs it was given and says what to do about the file" \
+  "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
+git -C "$ot" rm -q "packages/daemon/$u/pr-1-daemon.yaml"
+GIT_COMMITTER_DATE=2026-07-02T12:00:00+00:00 git -C "$ot" commit -q -m "chore: remove the daemon fragment"
+orphans_run packages/envoy=envoy-v
+check "fold-orphans: with the file removed in a commit, it exits 0 saying nothing" "$(is "$rc|$out|$err" "0||")"
+# Only HEAD's tree counts: a file the working tree alone holds is no fragment of this repository.
+mkdir -p "$ot/packages/daemon/$u"
+printf 'kind: Added\nbody: uncommitted\n' > "$ot/packages/daemon/$u/pr-2-daemon.yaml"
+orphans_run packages/envoy=envoy-v
+check "fold-orphans: a file under .changes/ in the working tree alone is not refused" "$(is "$rc|$out|$err" "0||")"
+rm -r "$ot/packages/daemon/.changes"
+# Anywhere under .changes/, not only in unreleased/: no release reads anything of that package.
+mkdir -p "$ot/packages/daemon/.changes"
+printf 'A header\n' > "$ot/packages/daemon/.changes/header.tpl.md"
+git -C "$ot" add -A
+GIT_COMMITTER_DATE=2026-07-03T12:00:00+00:00 git -C "$ot" commit -q -m "chore: a daemon .changes file"
+orphans_run packages/envoy=envoy-v
+check "fold-orphans: a file under .changes/ outside unreleased/ is refused too" \
+  "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-orphans: packages/daemon/\.changes/header\.tpl\.md at HEAD: ")" "1||true")"
+orphans_run
+check "fold-orphans: no spec is refused" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-orphans: no package spec given')" "1||true")"
+
+summary "release-push.sh version, tagged, tag, pair-version, release, release-section, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-notes, fold-check and fold-orphans, and release.yaml's worker_image_release step"

@@ -475,35 +475,23 @@ jobs:
         run: |
           # shellcheck disable=SC2086 # $LEGION_ENVOY_VERSION_ARGS is the argument list, split on purpose
           .github/scripts/release-push.sh version legion-envoy-v $LEGION_ENVOY_VERSION_ARGS >> "$GITHUB_OUTPUT"
-      # The release tag, made in this checkout and nowhere else in this job: nothing here pushes
-      # it (release_publish's "Tag release" does, and this checkout is discarded), and it is what
-      # labels this release's changelog fragments for the step below, which gives each fragment
-      # the lowest legion-envoy-v tag that contains the commit which added it.
-      - name: Tag this release in this checkout
-        if: steps.version.outputs.skip != 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: .github/scripts/release-push.sh tag "$VERSION" "$TAG"
       - uses: ./.github/actions/install-changie
         if: steps.version.outputs.skip != 'true'
       # This release's own changelog entries, which release_publish writes into the GitHub
       # release's body. A fragment stays under packages/envoy/.changes/unreleased/ after the
-      # release that ships it, so the plan holds one group per release of this package and --label
-      # keeps it to this release's own. A release no fragment belongs to renders nothing, and
-      # `notes` says which of the two it was, since release_publish cannot look into the artifact
-      # before it downloads it.
+      # release that ships it, so fold-notes renders the ones this release's own commits first
+      # added, which are the ones its tag will hold. A release no fragment belongs to renders no
+      # file, and `notes` says which of the two it was, since release_publish cannot look into
+      # the artifact before it downloads it.
       - name: Render this release's changelog entries
         id: notes
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # With --label the directory holds this release's one notes file or nothing at all, so
-          # the name release-push.sh gives that file is spelled nowhere in this workflow.
-          .github/scripts/release-push.sh fold-notes --label "$VERSION" \
-            "$RUNNER_TEMP/release-notes" packages/envoy=legion-envoy-v
-          if [ -n "$(ls -A "$RUNNER_TEMP/release-notes")" ]; then
+          .github/scripts/release-push.sh fold-notes "$VERSION" \
+            "$RUNNER_TEMP/release-notes.md" packages/envoy=legion-envoy-v
+          if [ -s "$RUNNER_TEMP/release-notes.md" ]; then
             echo "notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "notes=false" >> "$GITHUB_OUTPUT"
@@ -516,7 +504,8 @@ jobs:
         if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
         with:
           name: envoy-release-notes
-          path: ${{ runner.temp }}/release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.version.outputs.skip != 'true'
         with:
@@ -936,19 +925,13 @@ jobs:
           path: ${{ runner.temp }}/release-notes
       # release_build's entries become the release body's one "## Changelog" section, below the
       # fixed sentence above. release-section replaces a section that heading already holds, and
-      # says there why the write is a replace and not an append.
+      # says there why the write is a replace and not an append. The artifact holds the one file
+      # fold-notes wrote, under the name the build job gave it.
       - name: Write the changelog into the release body
         if: steps.notes.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.assets.outputs.tag }}
         run: |
-          # release_build rendered one file with --label, whose name is release-push.sh's to
-          # choose, and the artifact holds that file alone.
-          shopt -s nullglob
-          notes=("$RUNNER_TEMP/release-notes"/*)
-          if [ ${#notes[@]} -ne 1 ]; then
-            echo "::error::the envoy-release-notes artifact holds ${#notes[@]} entries, not the one file the build job rendered"
-            exit 1
-          fi
-          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' "${notes[0]}"
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/release-notes/release-notes.md"

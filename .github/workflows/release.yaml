@@ -214,16 +214,17 @@ jobs:
       - name: Resolve plugin versions for the smoke test and worker image
         id: plugin_versions
         run: |
-          # pair_member <version output> <tag prefix>: the version it releases, or, when it skips,
-          # the version of the newest <tag prefix> tag, which is what npm carries. A newest tag
-          # whose name is not <tag prefix>X.Y.Z, and no such tag at all, print nothing, which the
-          # guards below refuse.
+          # pair_member <version output> <tag prefix>: the version npm carries for the plugin in
+          # this run. This step's own dispatch is which that is: the version the plugin releases,
+          # or, when it skips, nothing, and release-push.sh pair-version then reads the version of
+          # its newest tag, which is what npm carries. A newest tag whose name is not <tag
+          # prefix>X.Y.Z, and no such tag at all, print nothing, which the guards below refuse.
           pair_member() {
+            local released=''
             if [ "$(sed -n 's/^skip=//p' <<<"$1")" != true ]; then
-              sed -n 's/^version=//p' <<<"$1"
-              return 0
+              released=$(sed -n 's/^version=//p' <<<"$1")
             fi
-            .github/scripts/release-push.sh newest-version "$2"
+            .github/scripts/release-push.sh pair-version "$2" "$released"
           }
           # The plugins' own build jobs write their "No release published" summary lines; with
           # GITHUB_STEP_SUMMARY empty these two calls write none into this job's summary.
@@ -350,36 +351,24 @@ jobs:
           # shellcheck disable=SC2086 # $PI_ENVOY_VERSION_ARGS is the argument list, split on purpose
           .github/scripts/release-push.sh version pi-envoy-v $PI_ENVOY_VERSION_ARGS >> "$GITHUB_OUTPUT"
 
-      # The release tag, made in this checkout and nowhere else in this job: nothing here pushes
-      # it (publish's "pi-envoy: Push tag" does, and this checkout is discarded), and it is what
-      # labels this release's changelog fragments for the step below, which gives each fragment
-      # the lowest pi-envoy-v tag that contains the commit which added it.
-      - name: Tag this release in this checkout
-        if: steps.version.outputs.skip != 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: .github/scripts/release-push.sh tag "$VERSION" "$TAG"
-
       - uses: ./.github/actions/install-changie
         if: steps.version.outputs.skip != 'true'
 
       # This release's own changelog entries, which publish writes into the GitHub release's body.
       # A fragment stays under packages/pi-envoy/.changes/unreleased/ after the release that ships
-      # it, so the plan holds one group per release of this package and --label keeps it to this
-      # release's own. A release no fragment belongs to renders nothing, and `notes` says which of
-      # the two it was, since publish cannot look into the artifact before it downloads it.
+      # it, so fold-notes renders the ones this release's own commits first added, which are the
+      # ones its tag will hold. A release no fragment belongs to renders no file, and `notes` says
+      # which of the two it was, since publish cannot look into the artifact before it downloads
+      # it.
       - name: Render this release's changelog entries
         id: notes
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # With --label the directory holds this release's one notes file or nothing at all, so
-          # the name release-push.sh gives that file is spelled nowhere in this workflow.
-          .github/scripts/release-push.sh fold-notes --label "$VERSION" \
-            "$RUNNER_TEMP/release-notes" packages/pi-envoy=pi-envoy-v
-          if [ -n "$(ls -A "$RUNNER_TEMP/release-notes")" ]; then
+          .github/scripts/release-push.sh fold-notes "$VERSION" \
+            "$RUNNER_TEMP/release-notes.md" packages/pi-envoy=pi-envoy-v
+          if [ -s "$RUNNER_TEMP/release-notes.md" ]; then
             echo "notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "notes=false" >> "$GITHUB_OUTPUT"
@@ -390,7 +379,8 @@ jobs:
         if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
         with:
           name: pi-envoy-notes
-          path: ${{ runner.temp }}/release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
 
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
@@ -496,30 +486,21 @@ jobs:
           # shellcheck disable=SC2086 # $PI_LEGION_VERSION_ARGS is the argument list, split on purpose
           .github/scripts/release-push.sh version pi-legion-v $PI_LEGION_VERSION_ARGS >> "$GITHUB_OUTPUT"
 
-      # The release tag and this release's changelog entries, as in pi_envoy_build and for the
-      # reasons given there: the tag stays in this discarded checkout, nothing here pushes it, and
-      # it is what labels the fragments the step after it renders.
-      - name: Tag this release in this checkout
-        if: steps.version.outputs.skip != 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: .github/scripts/release-push.sh tag "$VERSION" "$TAG"
-
       - uses: ./.github/actions/install-changie
         if: steps.version.outputs.skip != 'true'
 
+      # This release's own changelog entries, as in pi_envoy_build and for the reasons given
+      # there: the fragments this release's own commits first added, and `notes` says whether
+      # there were any.
       - name: Render this release's changelog entries
         id: notes
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # As in pi_envoy_build: with --label the directory holds this release's one notes file
-          # or nothing, so its name is spelled nowhere here either.
-          .github/scripts/release-push.sh fold-notes --label "$VERSION" \
-            "$RUNNER_TEMP/release-notes" packages/pi-legion=pi-legion-v
-          if [ -n "$(ls -A "$RUNNER_TEMP/release-notes")" ]; then
+          .github/scripts/release-push.sh fold-notes "$VERSION" \
+            "$RUNNER_TEMP/release-notes.md" packages/pi-legion=pi-legion-v
+          if [ -s "$RUNNER_TEMP/release-notes.md" ]; then
             echo "notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "notes=false" >> "$GITHUB_OUTPUT"
@@ -530,7 +511,8 @@ jobs:
         if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
         with:
           name: pi-legion-notes
-          path: ${{ runner.temp }}/release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
 
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
@@ -745,22 +727,16 @@ jobs:
 
       # pi_envoy_build's entries become the release body's one "## Changelog" section, below the
       # notes `release-push.sh release` generated for it. release-section replaces a section that
-      # heading already holds, and says there why the write is a replace and not an append.
+      # heading already holds, and says there why the write is a replace and not an append. The
+      # artifact holds the one file fold-notes wrote, under the name the build job gave it.
       - name: "pi-envoy: Write the changelog into the release body"
         if: ${{ !cancelled() && steps.pi_envoy_notes.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.pi_envoy_handed.outputs.tag }}
         run: |
-          # pi_envoy_build rendered one file with --label, whose name is release-push.sh's to
-          # choose, and the artifact holds that file alone.
-          shopt -s nullglob
-          notes=("$RUNNER_TEMP/pi-envoy-notes"/*)
-          if [ ${#notes[@]} -ne 1 ]; then
-            echo "::error::the pi-envoy-notes artifact holds ${#notes[@]} entries, not the one file the build job rendered"
-            exit 1
-          fi
-          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' "${notes[0]}"
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/pi-envoy-notes/release-notes.md"
 
       # pi-legion: what pi_legion_build packed, published as pi-envoy's above is.
       - name: "pi-legion: Download the tarball"
@@ -841,14 +817,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.pi_legion_handed.outputs.tag }}
         run: |
-          # pi_legion_build's one rendered file, found as pi-envoy's is above.
-          shopt -s nullglob
-          notes=("$RUNNER_TEMP/pi-legion-notes"/*)
-          if [ ${#notes[@]} -ne 1 ]; then
-            echo "::error::the pi-legion-notes artifact holds ${#notes[@]} entries, not the one file the build job rendered"
-            exit 1
-          fi
-          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' "${notes[0]}"
+          # pi_legion_build's one rendered file, written into the body as pi-envoy's is above.
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/pi-legion-notes/release-notes.md"
 
       # The plugin pair npm carries for this run, which legion links and the worker image installs:
       # for each Oh My Pi plugin, the version its build released when "Create GitHub release", the
@@ -873,13 +844,17 @@ jobs:
         run: |
           # pair_member <build result> <skip> <release outcome> <released version> <tag prefix>:
           # the version npm carries for the package, or nothing when its release did not publish.
-          # A package that released nothing in this run carries the version of its newest tag.
+          # This step's own dispatch is which of the three a run is in; release-push.sh
+          # pair-version turns that answer into a version, reading the newest tag for a package
+          # that released nothing in this run.
           pair_member() {
-            if [ "$1" = success ] && [ "$2" = true ]; then
-              .github/scripts/release-push.sh newest-version "$5"
-            elif [ "$1" = success ] && [ "$3" = success ]; then
-              printf '%s\n' "$4"
+            local released=''
+            [ "$1" = success ] || return 0
+            if [ "$2" != true ]; then
+              [ "$3" = success ] || return 0
+              released=$4
             fi
+            .github/scripts/release-push.sh pair-version "$5" "$released"
           }
           pi_envoy=$(pair_member "$PI_ENVOY_RESULT" "$PI_ENVOY_SKIP" "$PI_ENVOY_RELEASED" "$PI_ENVOY_VERSION" pi-envoy-v)
           pi_legion=$(pair_member "$PI_LEGION_RESULT" "$PI_LEGION_SKIP" "$PI_LEGION_RELEASED" "$PI_LEGION_VERSION" pi-legion-v)
@@ -1110,6 +1085,14 @@ jobs:
       VERSION: ${{ needs.publish.outputs.version }}
       RELEASE_TAG: ${{ needs.publish.outputs.tag }}
     steps:
+      # For release-push.sh, which the last step runs: nothing else checks this job out, and that
+      # step would exit 127. The run's commit by sha, the commit the release this names was built
+      # from; no credential is left in the checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io

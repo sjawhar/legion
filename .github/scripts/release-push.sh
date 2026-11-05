@@ -9,7 +9,8 @@
 # is one). `version`, `check-built`, `extract-built`, `no-credential` and
 # `fold-notes` are the build job's; `release`, `release-section`, `restart`,
 # `push-tag` and `push-built` the publish job's; `tag`, `tagged`,
-# `newest-version`, `handed` and `fold-plan` serve both.
+# `newest-version`, `pair-version` and `handed` serve both; `fold-orphans` and
+# `fold-check` are a pull request's.
 #
 # version:   the one version step every build job calls: print the release
 #            this checkout gets, as the three lines `version=`, `tag=` and
@@ -62,10 +63,9 @@
 #            nothing (`push-tag` pushes) and commits nothing. Nothing of a
 #            release is committed: the tags record every version, so no file
 #            of this checkout is written and a package's committed manifest
-#            keeps whatever version was last written to it. A release's build
-#            job runs it too, before `fold-notes`: there the tag is local, no
-#            step of that job pushes it, and it is what labels this release's
-#            fragments in the plan fold-notes renders. <version> is the
+#            keeps whatever version was last written to it. Only a publish job
+#            runs it: nothing else needs the tag, since fold-notes bounds a
+#            release's entries by HEAD, the commit this tags. <version> is the
 #            release's version, X.Y.Z, and $GITHUB_SHA must be 40 lower-case
 #            hex; either one refused is an ::error:: and exit 1. The tags are
 #            fetched first, so a tag pushed since the checkout is seen. A tag
@@ -91,6 +91,17 @@
 #            instead of reaching past it to an older one. release.yaml reads
 #            it for the version npm carries for a plugin that releases nothing
 #            in a run, and `version` bumps from the same tag.
+# pair-version: print the version npm carries for a package in this run:
+#            <released version> when the caller gives one and it is X.Y.Z,
+#            else the version of the newest <tag-prefix> tag when that tag's
+#            name is <tag-prefix>X.Y.Z, else nothing. release.yaml's
+#            legion_build and publish each decide for themselves which build
+#            result, skip output and step outcome mean "this run released it"
+#            and hand the version over; a package that released nothing in the
+#            run carries the version of its newest tag, since a release
+#            commits nothing and the tags alone say what was published.
+#            Nothing printed is a release that did not publish, which both
+#            callers refuse.
 # release:   make the GitHub release of <tag>, in $GITHUB_REPOSITORY, carry
 #            this run's <asset>s and be published. A release that does not
 #            exist is created (`--verify-tag`, with generated notes, or the
@@ -291,88 +302,73 @@
 #            ran in the job could have planted a `git` for this very step, so
 #            the build/publish split is the boundary and this only catches a
 #            credential wired into a build job by mistake.
-# fold-plan: print which release each changelog fragment of the <spec>s
-#            belongs to, one tab-separated line per fragment:
-#            <package-dir>, <label>, <date> (YYYY-MM-DD, UTC), <path>, sorted by
-#            package in the order of the specs, then by label as versions
-#            (`sort -V`), then by path; nothing printed means no fragment of
-#            the specs is in a release yet. fold-notes renders the groups of
-#            this plan, one of which is a release's own entries.
-#            Each <spec> is <package-dir>[=<tag-prefix>], and the package must
-#            hold a CHANGELOG.md at HEAD. The fragments are the entries directly
-#            in <package-dir>/.changes/unreleased/ that HEAD holds (git's tree,
-#            never the working tree). Each must be a regular file (mode 100644
-#            or 100755) whose name ends in .yaml: any other entry there, such as
-#            a subdirectory, a symlink, a submodule or a .yml file, is in no
-#            plan and is rendered nowhere, so fold-plan fails with one
-#            ::error:: that names every such entry of every spec, sorted, and
-#            tells the author to move or rename a fragment in one commit with
-#            `git mv`, and prints no plan.
-#            A file under the .changes/ of a package no <spec> names is not
-#            refused: a refusal would leave the specs' own fragments unplanned
-#            with it. One ::warning:: on stderr names every such path HEAD's
-#            tree holds, sorted, and the specs it was given; the plan is
-#            printed and the command exits 0 all the same. The warning says to
-#            remove the file, or to give its package a .changie.yaml and a
-#            CHANGELOG.md and add it to .github/changelog-packages.
-#            fold-orphans below is that check made strict, and ci.yaml's lint
-#            job runs it on every pull request, so such a file is caught
-#            before it reaches main; fold-notes makes neither check, since it
-#            renders one release's group of the plan of that release's own
-#            package.
-#            With a tag prefix (a package with releases of its own), a
-#            fragment's label is X.Y.Z of the lowest <tag-prefix>X.Y.Z tag
-#            that contains the commit which first added the entry, following
-#            renames: the release that first shipped the entry, whose tag
-#            sits on the commit the release run built; other names under the
-#            prefix are not releases and are skipped. A commit that
-#            deletes a file and adds one git pairs with it as a rename, as
-#            `git mv` does, renames the entry; a fragment deleted in one commit
-#            and added again in another is a new entry, and a copy is never
-#            followed. A fragment no such tag contains is in no release yet,
-#            and is unprinted until one ships it.
-#            The date is the tag's commit's committer date. Without a prefix (a
-#            package with no release of its own), every fragment's label is
-#            main@<HEAD's first 12 hex digits>, dated by HEAD's committer date.
-#            A fragment's path is one file to git, never a pattern: a name
-#            holding a glob character gets the commit that added that file. It
-#            reads only git, so it computes the same plan from the same
-#            checkout and tags.
 # fold-orphans: fail when HEAD's tree holds a file under the .changes/ of a
-#            package no <spec> names, the strict form of the warning fold-plan
-#            gives: one ::error:: naming every such path, sorted, the specs it
-#            was given and what to do (remove the file, or give its package a
-#            .changie.yaml and a CHANGELOG.md and add it to
-#            .github/changelog-packages), and exit 1; nothing is printed and
-#            the exit is 0 when HEAD holds no such file. It reads HEAD's tree
-#            alone - no history, no tag, no working tree, no CHANGELOG.md - so
-#            a shallow checkout without the tags is enough for it. ci.yaml's
-#            lint job runs it over .github/changelog-packages on every pull
-#            request, inside a required check: a fragment of a package no
-#            release and no documentation page renders is refused there, while
-#            fold-plan only warns about it. Each <spec> is
-#            <package-dir>[=<tag-prefix>], as fold-plan's is, and only the
+#            package no <spec> names: one ::error:: naming every such path,
+#            sorted, the specs it was given and what to do (remove the file,
+#            or give its package a .changie.yaml and a CHANGELOG.md and add it
+#            to .github/changelog-packages), and exit 1; nothing is printed
+#            and the exit is 0 when HEAD holds no such file. It reads HEAD's
+#            tree alone - no history, no tag, no working tree, no CHANGELOG.md
+#            - so a shallow checkout without the tags is enough for it.
+#            ci.yaml's lint job runs it over .github/changelog-packages on
+#            every pull request, inside a required check: a fragment of a
+#            package no release and no documentation page renders is refused
+#            there. Each <spec> is <package-dir>[=<tag-prefix>] and only the
 #            <package-dir> counts; no spec at all, or one of another shape, is
-#            refused as fold-plan refuses it.
-# fold-notes: render changelog entries with changie, which is dependency code,
-#            into <notes-dir>, which must be absent or empty and is created.
-#            Each (package, label) of fold-plan's plan gets a directory of its
-#            own holding a copy of the package's .changie.yaml and only that
-#            group's fragments as HEAD holds them, where `changie batch 0.0.0`
-#            renders them, and the rendered notes become
-#            <notes-dir>/<package basename>_<label>.md. --label <label> narrows
-#            the plan to the groups labelled <label> before anything is
-#            rendered: a release's build job renders the entries of its own
-#            release, and every fragment a release ever shipped stays under
-#            .changes/unreleased/, so rendering the whole plan would run one
-#            changie per release ever made. A plan left with no group writes
-#            nothing and exits 0, as an empty plan does. A fragment changie
-#            refuses fails the command with an ::error:: naming the package,
-#            the label, each fragment changie refuses on its own and changie's
-#            output.
+#            refused.
+# fold-notes: render one release of one package: the changelog entries
+#            <version> ships, with changie, which is dependency code, into
+#            <notes-file>. The <spec> is <package-dir>=<tag-prefix>, the
+#            package and the tags of its own release line, and the prefix is
+#            needed: a package with no release line ships no release notes.
+#            The entries are the fragments directly in
+#            <package-dir>/.changes/unreleased/ that HEAD holds (git's tree,
+#            never the working tree) whose first-adding commit is in the
+#            release's group: the commits HEAD holds that no lower
+#            <tag-prefix>X.Y.Z tag holds (`git rev-list HEAD --not <every
+#            lower tag>`), which are exactly the commits the release's own tag
+#            will contain and no release before it did. HEAD is the commit
+#            that tag names, so nothing need be tagged before this runs, and
+#            other names under the prefix are no releases and bound nothing.
+#            The first-adding commit is the one that gave the file its name,
+#            following renames: a commit that deletes a file and adds one git
+#            pairs with it as a rename, as `git mv` does, renames the entry; a
+#            fragment deleted in one commit and added again in another is a
+#            new entry, and a copy is never followed. A fragment's path is one
+#            file to git, never a pattern: a name holding a glob character
+#            gets the commit that added that very file.
+#            Each entry directly in the unreleased directory must be a regular
+#            file (mode 100644 or 100755) whose name ends in .yaml: any other
+#            entry, such as a subdirectory, a symlink, a submodule or a .yml
+#            file, is rendered nowhere, so the command fails with one
+#            ::error:: naming every such entry, sorted, and tells the author
+#            to move or rename a fragment in one commit with `git mv`.
+#            A release whose group holds no fragment writes no file, says so
+#            on stdout and exits 0, so its caller decides from `[ -s
+#            <notes-file> ]` alone. Otherwise the group's fragments are
+#            rendered by `changie batch 0.0.0` in a directory of their own
+#            beside a copy of <package-dir>/.changie.yaml, as HEAD holds both,
+#            and the notes become <notes-file>. A package holding no
+#            .changie.yaml at HEAD is an ::error::, and so is a fragment
+#            changie refuses, naming the package, the version, each fragment
+#            changie refuses on its own and changie's output.
+# fold-check: render every changelog fragment HEAD holds under each <spec>'s
+#            .changes/unreleased/ with changie, writing nothing, and fail with
+#            one ::error:: naming every fragment changie refuses, each with
+#            what changie said about it; a spec with no fragment renders
+#            nothing, and no fragment at all exits 0. This is the pull
+#            request's check that every fragment renders: nothing renders a
+#            fragment between the merge and the release that first ships it,
+#            and a fragment changie refuses - one of a kind the package's
+#            .changie.yaml does not list, say - would fail that release's
+#            build job, and through the publish job's pair check the legion
+#            release and the image attestation, on every run until a fix
+#            merges. The fragments and their refusals are fold-notes', and
+#            each <spec> is <package-dir>[=<tag-prefix>], as fold-orphans' is,
+#            with only the <package-dir> counting.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <version> <tag> | release-push.sh tagged <tag-prefix> | release-push.sh newest-version <tag-prefix> | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh release-section <tag> <heading> <content-file> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes [--label <label>] <notes-dir> <spec>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <version> <tag> | release-push.sh tagged <tag-prefix> | release-push.sh newest-version <tag-prefix> | release-push.sh pair-version <tag-prefix> [<released version>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh release-section <tag> <heading> <content-file> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes <version> <notes-file> <package-dir>=<tag-prefix> | release-push.sh fold-check <spec>... | release-push.sh no-credential}
 
 # The identity of the commit this script makes, push-built's rebuild: GitHub
 # Actions' own bot.
@@ -749,9 +745,6 @@ check_hand_over() {
   fi
 }
 
-# commit_date <rev>: the UTC date, YYYY-MM-DD, of <rev>'s commit.
-commit_date() { TZ=UTC git log -1 --date=format-local:%Y-%m-%d --format=%cd "$1"; }
-
 # first_added <path>: print the commit that first added <path>, a file HEAD
 # holds, following renames. The commit that gave the file its name is the one
 # that added <path>; when that commit also deleted a file git pairs with it as a
@@ -780,19 +773,19 @@ first_added() {
   printf '%s\n' "$commit"
 }
 
-# A package spec, which fold-plan, fold-orphans and fold-notes all
-# take: <package-dir>[=<tag-prefix>]. The package dir goes into paths and
-# pathspecs, the prefix into a tag pattern, and the dir's basename names the
-# notes file of each group. package_dir_re keeps the dir free of pathspec magic
-# (a leading ':') and of glob characters, so it needs no --literal-pathspecs; a
-# fragment's name is anything git holds, so each git call given one reads it
-# literally.
+# A package spec, which fold-orphans, fold-notes and fold-check all take:
+# <package-dir>[=<tag-prefix>], the prefix being the tags of the package's own
+# release line, which fold-notes needs and the other two ignore. The package
+# dir goes into paths and pathspecs, the prefix into a tag pattern.
+# package_dir_re keeps the dir free of pathspec magic (a leading ':') and of
+# glob characters, so it needs no --literal-pathspecs; a fragment's name is
+# anything git holds, so each git call given one reads it literally.
 package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
 
 # check_specs <spec>...: fail unless at least one <spec> is given and each is
-# <package-dir>[=<tag-prefix>]. fold_plan checks this and more of every spec (a
-# repeated basename, a package holding no CHANGELOG.md); fold-orphans, which
-# reads the <package-dir>s and nothing else, checks this alone.
+# <package-dir>[=<tag-prefix>]. fold-notes checks its one spec for a tag prefix
+# as well; fold-orphans and fold-check, which read the <package-dir>s and
+# nothing else, check this alone.
 check_specs() {
   local spec dir prefix
   [ $# -gt 0 ] || fail_error "no package spec given; each is <package-dir>[=<tag-prefix>]"
@@ -805,124 +798,68 @@ check_specs() {
   done
 }
 
-# group_commits <tag-prefix> <label>: set group_tag to the tag
-# <tag-prefix><label> and in_group to the commits it contains that no lower
-# <tag-prefix>X.Y.Z tag contains, one key each; true when there is such a tag,
-# false when <label> is no X.Y.Z or the repository holds no such tag, where no
-# fragment carries the label and the group is empty.
-#
-# Those commits are exactly the ones whose lowest tag of the prefix is this
-# label, which is the rule fold_plan applies to the commit that first added a
-# fragment. Reading them in one `git rev-list` is what keeps a release's build
-# job from walking every tag of the prefix once per fragment, and every
-# fragment a release ever shipped stays under .changes/unreleased/.
+# The commits of the release fold-notes renders, one key each, which
+# group_commits fills. Declared here, with its type: `in_group=()` on an
+# undeclared name would make an indexed array, where a commit sha is read as
+# arithmetic.
+declare -A in_group=()
+
+# group_commits <tag-prefix> <version>: set in_group to the commits the release
+# <version> ships: the commits HEAD holds that no lower <tag-prefix>X.Y.Z tag
+# holds. HEAD is the commit the release tags, so these are exactly the commits
+# that tag will contain and no release before it did, whether or not it exists
+# yet; other names under the prefix are no releases and bound nothing, and with
+# no lower tag at all the group is everything HEAD holds, as a first release's
+# tag would contain it. Reading them in one `git rev-list` is what keeps a
+# release's build job from walking every tag of the prefix once per fragment,
+# and every fragment a release ever shipped stays under .changes/unreleased/.
 group_commits() {
-  local prefix=$1 label=$2 candidate version commit
+  local prefix=$1 version=$2 candidate tag_version commit
   local -a lower=()
-  group_tag=$prefix$label
   in_group=()
-  is_plain_version "$label" || return 1
-  git rev-parse -q --verify "refs/tags/$group_tag^{commit}" >/dev/null || return 1
   for candidate in $(git tag --list "$prefix*"); do
-    version=${candidate#"$prefix"}
-    is_plain_version "$version" || continue
-    version_gt "$label" "$version" || continue
+    tag_version=${candidate#"$prefix"}
+    is_plain_version "$tag_version" || continue
+    version_gt "$version" "$tag_version" || continue
     lower+=("$candidate")
   done
   while IFS= read -r commit; do
     in_group[$commit]=1
-  done < <(git rev-list "$group_tag" --not "${lower[@]}")
+  done < <(git rev-list HEAD --not "${lower[@]}")
 }
 
-# fold_plan <label> <spec>...: set plan to the lines fold-plan prints (the
-# header's fold-plan paragraph), each ending in a newline; empty when no
-# fragment of the <spec>s is in a release yet. Sets groups to its distinct
-# <package-dir><TAB><label> pairs, in the plan's order. <label> is empty for
-# the whole plan, or the one label fold-notes renders: a spec with a tag
-# prefix then reads that group's commits once (group_commits) instead of
-# asking the tags about each fragment.
-fold_plan() {
-  local only=$1
-  shift
-  check_specs "$@"
-  local spec dir prefix index=0 names=' ' head head_label head_date entry meta path commit candidate tag version label date lines=''
-  local group_tag='' group_date=''
-  local unexpected=()
-  local -A in_group=() tag_dates=()
-  head=$(git rev-parse HEAD)
-  head_label="main@${head:0:12}"
-  head_date=$(commit_date HEAD)
-  for spec in "$@"; do
-    dir=${spec%%=*} prefix=''
-    [[ $spec != *=* ]] || prefix=${spec#*=}
-    [[ $names != *" ${dir##*/} "* ]] || fail_error "two package specs name a directory ${dir##*/}; the notes files are named by it, so each must differ"
-    names+="${dir##*/} "
-    git cat-file -e "HEAD:$dir/CHANGELOG.md" 2>/dev/null || fail_error "$dir holds no CHANGELOG.md at HEAD, which every package whose fragments are rendered holds"
-    index=$((index + 1))
-    if [ -n "$prefix" ] && [ -n "$only" ]; then
-      # The whole group at once, and the date of its tag with it: a spec whose
-      # label no tag of the prefix carries holds no fragment of the group.
-      group_commits "$prefix" "$only" || continue
-      group_date=$(commit_date "$group_tag^{commit}")
+# fragments_of <package-dir>: set fragments to the changelog fragments of
+# <package-dir> that HEAD holds, in name order, which fold-notes and fold-check
+# both render: the entries directly in <package-dir>/.changes/unreleased/
+# (git's tree, never the working tree) that are regular .yaml files. Any other
+# entry there is rendered nowhere, so one ::error:: names every such entry of
+# the package, sorted, and the command fails.
+fragments_of() {
+  local dir=$1 entry meta path
+  local -a unexpected=()
+  fragments=()
+  # No -r, so a subdirectory is one tree entry, refused below with the rest.
+  while IFS= read -r -d '' entry; do
+    meta=${entry%%$'\t'*} path=${entry#*$'\t'}
+    if ! [[ $meta == 100644\ blob\ * || $meta == 100755\ blob\ * ]] || [[ $path != *.yaml ]]; then
+      unexpected+=("$path")
+      continue
     fi
-    # Every entry directly in the unreleased directory, as HEAD's tree holds
-    # them (no -r, so a subdirectory is one tree entry): a regular .yaml file
-    # is a fragment, and anything else is refused below.
-    while IFS= read -r -d '' entry; do
-      meta=${entry%%$'\t'*} path=${entry#*$'\t'}
-      if ! [[ $meta == 100644\ blob\ * || $meta == 100755\ blob\ * ]] || [[ $path != *.yaml ]]; then
-        unexpected+=("$path")
-        continue
-      fi
-      [[ $path != *[$'\t\n']* ]] || fail_error "fragment $(quote_all "$path") has a tab or a newline in its name; rename it"
-      if [ -z "$prefix" ]; then
-        label=$head_label date=$head_date
-      elif [ -n "$only" ]; then
-        commit=$(first_added "$path")
-        [ -n "${in_group[$commit]:-}" ] || continue
-        label=$only date=$group_date
-      else
-        commit=$(first_added "$path")
-        label='' tag=''
-        for candidate in $(git tag --list "$prefix*" --contains "$commit"); do
-          version=${candidate#"$prefix"}
-          is_plain_version "$version" || continue
-          if [ -z "$label" ] || version_gt "$label" "$version"; then
-            label=$version tag=$candidate
-          fi
-        done
-        [ -n "$label" ] || continue
-        # Every fragment of a group has the same tag, so its date is read once.
-        if [ -z "${tag_dates[$tag]:-}" ]; then
-          tag_dates[$tag]=$(commit_date "$tag^{commit}")
-        fi
-        date=${tag_dates[$tag]}
-      fi
-      lines+="$index"$'\t'"$dir"$'\t'"$label"$'\t'"$date"$'\t'"$path"$'\n'
-    done < <(git ls-tree -z HEAD -- "$dir/.changes/unreleased/")
-  done
+    [[ $path != *[$'\t\n']* ]] || fail_error "fragment $(quote_all "$path") has a tab or a newline in its name; rename it"
+    fragments+=("$path")
+  done < <(git ls-tree -z HEAD -- "$dir/.changes/unreleased/")
   if [ ${#unexpected[@]} -gt 0 ]; then
     mapfile -d '' -t unexpected < <(printf '%s\0' "${unexpected[@]}" | LC_ALL=C sort -z)
-    fail_error "$(quote_all "${unexpected[@]}") at HEAD: each entry in a package's .changes/unreleased/ must be a regular file whose name ends in .yaml, a changie fragment, or no release renders it; move it, rename it or remove it. Move or rename a fragment in one commit, with git mv: a fragment removed in one commit and added again in another is a new entry, which the release after it labels"
+    fail_error "$(quote_all "${unexpected[@]}") at HEAD: each entry in a package's .changes/unreleased/ must be a regular file whose name ends in .yaml, a changie fragment, or no release renders it; move it, rename it or remove it. Move or rename a fragment in one commit, with git mv: a fragment removed in one commit and added again in another is a new entry, which the release after it ships"
   fi
-  set_plan "$(printf '%s' "$lines" | LC_ALL=C sort -t $'\t' -k1,1n -k3,3V -k5,5 | cut -f2-)"
-}
-
-# set_plan <lines>: set plan to <lines>, plan lines without the last newline,
-# each then ending in a newline (empty when <lines> is), and groups to its
-# distinct <package-dir><TAB><label> pairs, in the plan's order.
-set_plan() {
-  plan=$1
-  [ -z "$plan" ] || plan+=$'\n'
-  groups=$(printf '%s' "$plan" | cut -f1,2 | uniq)
 }
 
 # unlisted_files <spec>...: set unlisted to every path HEAD's tree holds under
 # the .changes/ of a package no <spec> names, sorted; an empty array when there
-# is none. fold-plan warns about them and fold-orphans refuses them (the
-# header's paragraph for each). It reads HEAD's tree, as fold_plan does, never
-# the working tree, and the package a path belongs to is read from the path
-# with a bash regex, so the only pathspec is packages/, which holds no magic.
+# is none. fold-orphans refuses them (the header's paragraph for it). It reads
+# HEAD's tree, as fragments_of does, never the working tree, and the package a
+# path belongs to is read from the path with a bash regex, so the only pathspec
+# is packages/, which holds no magic.
 unlisted_files() {
   local spec path listed=' '
   unlisted=()
@@ -936,21 +873,12 @@ unlisted_files() {
   [ ${#unlisted[@]} -eq 0 ] || mapfile -d '' -t unlisted < <(printf '%s\0' "${unlisted[@]}" | LC_ALL=C sort -z)
 }
 
-# unlisted_message <spec>...: what fold-plan's ::warning:: and fold-orphans'
-# ::error:: both say about the paths unlisted_files left in unlisted: every one
-# of them, the specs the command was given, and what to do with the file.
+# unlisted_message <spec>...: what fold-orphans' ::error:: says about the paths
+# unlisted_files left in unlisted: every one of them, the specs the command was
+# given, and what to do with the file.
 unlisted_message() {
   printf '%s at HEAD: each is under the .changes/ of a package this command was not given, here %s, and it reads the fragments of the packages it is given alone, so no release renders it and it stays where it is; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
 }
-
-# group_paths <dir> <label>: the path, the plan's fourth column, on each line
-# of that group.
-group_paths() {
-  awk -F '\t' -v dir="$1" -v label="$2" '$1 == dir && $2 == label { print $4 }' <<<"$plan"
-}
-
-# notes_name <package-dir> <label>: the name of the notes file of that group.
-notes_name() { printf '%s\n' "${1##*/}_$2.md"; }
 
 # render_notes <package-dir> <out> <fragment>...: run `changie batch 0.0.0` over
 # those fragments, as HEAD holds them, in a directory of their own beside a copy
@@ -1053,6 +981,26 @@ case "$command" in
     # prints nothing rather than reaching past it to an older tag.
     if is_plain_version "$version"; then
       printf '%s\n' "$version"
+    fi
+    ;;
+  pair-version)
+    [ $# -ge 2 ] && [ $# -le 3 ] ||
+      fail_error "usage: release-push.sh pair-version <tag-prefix> [<released version>]"
+    prefix=$2
+    # The version the caller says this run released, which wins; a package
+    # that released nothing in the run hands over nothing, and carries the
+    # version of its newest tag, which npm has.
+    if is_plain_version "${3:-}"; then
+      printf '%s\n' "$3"
+    else
+      tag=$(newest_tag "$prefix")
+      version=${tag#"$prefix"}
+      # The newest tag decides, and is checked after, as newest-version does
+      # it: a name no release made prints nothing rather than reaching past it
+      # to an older tag.
+      if is_plain_version "$version"; then
+        printf '%s\n' "$version"
+      fi
     fi
     ;;
   version)
@@ -1435,13 +1383,6 @@ case "$command" in
     check_hand_over "$dir" "the release does not ship" "$@"
     printf '%s\n' "$prefix$version"
     ;;
-  fold-plan)
-    shift
-    fold_plan '' "$@"
-    unlisted_files "$@"
-    [ ${#unlisted[@]} -eq 0 ] || echo "::warning::release-push.sh $command: $(unlisted_message "$@")" >&2
-    printf '%s' "$plan"
-    ;;
   fold-orphans)
     shift
     check_specs "$@"
@@ -1450,60 +1391,77 @@ case "$command" in
     ;;
   fold-notes)
     shift
-    usage='usage: release-push.sh fold-notes [--label <label>] <notes-dir> <spec>...'
-    only_label=''
-    while [ $# -gt 0 ]; do
-      case $1 in
-        --label)
-          [ $# -ge 2 ] || fail_error "--label needs a label; $usage"
-          only_label=$2
-          shift 2
-          ;;
-        --) shift; break ;;
-        -*) fail_error "unknown option $(quote_all "$1"); $usage" ;;
-        *) break ;;
-      esac
+    [ $# -eq 3 ] ||
+      fail_error "usage: release-push.sh fold-notes <version> <notes-file> <package-dir>=<tag-prefix>"
+    version=$1 notes_file=$2 spec=$3
+    is_plain_version "$version" ||
+      fail_error "the release version $(quote_all "$version") is not X.Y.Z, each field a number without leading zeros; refusing it"
+    check_specs "$spec"
+    dir=${spec%%=*} prefix=''
+    [[ $spec != *=* ]] || prefix=${spec#*=}
+    [ -n "$prefix" ] ||
+      fail_error "package spec $(quote_all "$spec") names no tag prefix; fold-notes renders one release of a package with a release line of its own, as <package-dir>=<tag-prefix>"
+    fragments_of "$dir"
+    group_commits "$prefix" "$version"
+    # The release's own entries: the fragments the commits of this release
+    # first added, which is what its tag will hold and no tag before it does.
+    group=()
+    for fragment in "${fragments[@]}"; do
+      commit=$(first_added "$fragment")
+      [ -z "${in_group[$commit]:-}" ] || group+=("$fragment")
     done
-    [ $# -ge 2 ] || fail_error "$usage"
-    notes_dir=${1%/}
-    shift
-    if [ -e "$notes_dir" ] || [ -L "$notes_dir" ]; then
-      if [ ! -d "$notes_dir" ] || [ -L "$notes_dir" ] || [ -n "$(ls -A "$notes_dir")" ]; then
-        fail_error "$(quote_all "$notes_dir") exists and is not an empty directory; the notes go into a directory of their own"
-      fi
-    fi
-    # The label reaches fold_plan, which renders one release's own group: the
-    # plan holds a group for every release the fragments have ever shipped in,
-    # and a spec with no tag prefix labels its fragments main@<commit> all the
-    # same, so the plan is narrowed here too.
-    fold_plan "$only_label" "$@"
-    if [ -n "$only_label" ]; then
-      set_plan "$(printf '%s' "$plan" | awk -F '\t' -v label="$only_label" '$2 == label')"
-    fi
-    mkdir -p "$notes_dir"
-    if [ -z "$plan" ]; then
-      echo "Nothing to render"
+    if [ ${#group[@]} -eq 0 ]; then
+      echo "No changelog fragment of $dir is new in $version; wrote no notes file"
       exit 0
     fi
-    while IFS=$'\t' read -r dir label; do
-      git cat-file -e "HEAD:$dir/.changie.yaml" 2>/dev/null || fail_error "$dir holds no .changie.yaml at HEAD to render its fragments with"
-      mapfile -t fragments < <(group_paths "$dir" "$label")
-      notes_file="$notes_dir/$(notes_name "$dir" "$label")"
-      if ! render_notes "$dir" "$notes_file" "${fragments[@]}"; then
-        # changie does not name the fragment of every refusal (an unknown kind):
-        # each fragment is rendered alone to find the ones it refuses.
-        output=$changie_output
-        refused=()
-        for fragment in "${fragments[@]}"; do
-          render_notes "$dir" '' "$fragment" || refused+=("$fragment")
-        done
-        if [ ${#refused[@]} -gt 0 ]; then
-          output="refused alone: $(quote_all "${refused[@]}"); changie said: $output"
-        fi
-        fail_error "changie could not render $dir's notes for $label; ${output//$'\n'/ }"
+    git cat-file -e "HEAD:$dir/.changie.yaml" 2>/dev/null ||
+      fail_error "$dir holds no .changie.yaml at HEAD to render its fragments with"
+    if ! render_notes "$dir" "$notes_file" "${group[@]}"; then
+      # changie does not name the fragment of every refusal (an unknown kind):
+      # each fragment is rendered alone to find the ones it refuses.
+      output=$changie_output
+      refused=()
+      for fragment in "${group[@]}"; do
+        render_notes "$dir" '' "$fragment" || refused+=("$fragment")
+      done
+      if [ ${#refused[@]} -gt 0 ]; then
+        output="refused alone: $(quote_all "${refused[@]}"); changie said: $output"
       fi
-      echo "Wrote $notes_file from ${#fragments[@]} fragments"
-    done <<<"$groups"
+      fail_error "changie could not render $dir's notes for $version; ${output//$'\n'/ }"
+    fi
+    echo "Wrote $notes_file from ${#group[@]} fragments"
+    ;;
+  fold-check)
+    shift
+    check_specs "$@"
+    refused=()
+    for spec in "$@"; do
+      dir=${spec%%=*}
+      fragments_of "$dir"
+      [ ${#fragments[@]} -gt 0 ] || continue
+      git cat-file -e "HEAD:$dir/.changie.yaml" 2>/dev/null ||
+        fail_error "$dir holds no .changie.yaml at HEAD to render its fragments with"
+      if ! render_notes "$dir" '' "${fragments[@]}"; then
+        # changie does not name the fragment of every refusal (an unknown
+        # kind): each is rendered alone to find which ones it refuses and what
+        # it says about each.
+        batch=${changie_output//$'\n'/ }
+        named=false
+        for fragment in "${fragments[@]}"; do
+          if ! render_notes "$dir" '' "$fragment"; then
+            refused+=("$(quote_all "$fragment"), where changie said: ${changie_output//$'\n'/ }")
+            named=true
+          fi
+        done
+        # Every fragment renders alone but not together: changie's own words
+        # about the package are all there is to name.
+        "$named" || refused+=("every fragment of $dir, which render one by one but not together, where changie said: $batch")
+      fi
+    done
+    if [ ${#refused[@]} -gt 0 ]; then
+      joined=$(printf '%s; ' "${refused[@]}")
+      fail_error "changie refuses a changelog fragment of this checkout, and the release that first ships it would fail its build job: ${joined%; }"
+    fi
     ;;
   no-credential)
     status=0
