@@ -33,24 +33,80 @@ describe("sessionIdFromTranscript", () => {
 
 describe("exportJjSessionAttribution", () => {
   const dirs: string[] = [];
-  async function stateDir(): Promise<string> {
-    const dir = await mkdtemp(path.join(tmpdir(), "jj-attribution-"));
+  async function stateDir(prefix = "jj-attribution-"): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), prefix));
     dirs.push(dir);
     return dir;
   }
   afterEach(async () => {
     await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
+  const sessionLine = `[templates]\ncommit_trailers = '"Omp-Session: ${ROOT_ID}"'\n`;
 
   it("writes the trailer overlay and chains it after the resolved user config", async () => {
     const dir = await stateDir();
     const env: NodeJS.ProcessEnv = {};
-    await exportJjSessionAttribution(ROOT_TRANSCRIPT, dir, env, async () => "/u/a.toml:/u/b.toml");
+    const chain = await exportJjSessionAttribution(ROOT_ID, dir, {
+      env,
+      resolveBase: async () => "/u/a.toml:/u/b.toml",
+    });
 
     const overlay = path.join(dir, `omp-attribution-${ROOT_ID}.toml`);
-    expect(env.JJ_CONFIG).toBe(`/u/a.toml:/u/b.toml:${overlay}`);
+    expect(chain).toBe(`/u/a.toml:/u/b.toml:${overlay}`);
+    expect(env.JJ_CONFIG).toBe(chain);
+    expect(await readFile(overlay, "utf8")).toBe(sessionLine);
+  });
+
+  it("adds the Dispatch line for an issue key of the accepted shape", async () => {
+    const dir = await stateDir();
+    const env: NodeJS.ProcessEnv = {};
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "ACME-7",
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
+    expect(await readFile(path.join(dir, `omp-attribution-${ROOT_ID}.toml`), "utf8")).toBe(
+      `[templates]\ncommit_trailers = '"Omp-Session: ${ROOT_ID}\\nDispatch: ACME-7"'\n`
+    );
+  });
+
+  // Containment as much as correctness: the value is interpolated into a jj template inside a
+  // TOML literal, so anything but a whole key writes the session line alone.
+  it.each([
+    ["no key", undefined],
+    ["an empty key", ""],
+    ["a key with a prefix", "legion/ACME-7"],
+    ["a key with a trailing space", "ACME-7 "],
+    ["a value holding a single quote", "ACME-7'"],
+    ["a value holding a backslash", "ACME\\-7"],
+    ["a value holding a newline", "ACME-7\nDispatch: OTHER-1"],
+    ["a project part over ten characters", "ABCDEFGHIJK-7"],
+    ["a lowercase key", "acme-7"],
+  ])("writes the session line alone for %s", async (_name, issueKey) => {
+    const dir = await stateDir();
+    const env: NodeJS.ProcessEnv = {};
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey,
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
+    expect(await readFile(path.join(dir, `omp-attribution-${ROOT_ID}.toml`), "utf8")).toBe(
+      sessionLine
+    );
+  });
+
+  it("carries a state directory holding a space and a single quote whole", async () => {
+    const dir = path.join(await stateDir(), "state 'dir");
+    const env: NodeJS.ProcessEnv = {};
+    const chain = await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "ACME-7",
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
+    const overlay = path.join(dir, `omp-attribution-${ROOT_ID}.toml`);
+    expect(chain).toBe(`/u/base.toml:${overlay}`);
     expect(await readFile(overlay, "utf8")).toBe(
-      `[templates]\ncommit_trailers = '"Omp-Session: ${ROOT_ID}"'\n`
+      `[templates]\ncommit_trailers = '"Omp-Session: ${ROOT_ID}\\nDispatch: ACME-7"'\n`
     );
   });
 
@@ -59,8 +115,11 @@ describe("exportJjSessionAttribution", () => {
     const env: NodeJS.ProcessEnv = {
       JJ_CONFIG: `/u/base.toml:/home/x/.cache/omp/jj/omp-attribution-${ROOT_ID.replace("b4a9", "dead")}.toml`,
     };
-    await exportJjSessionAttribution(ROOT_TRANSCRIPT, dir, env, async () => {
-      throw new Error("must not resolve");
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      env,
+      resolveBase: async () => {
+        throw new Error("must not resolve");
+      },
     });
     expect(env.JJ_CONFIG).toBe(`/u/base.toml:${path.join(dir, `omp-attribution-${ROOT_ID}.toml`)}`);
   });
@@ -68,39 +127,67 @@ describe("exportJjSessionAttribution", () => {
   it("re-resolves the base when the inherited chain was only stale overlays", async () => {
     const dir = await stateDir();
     const env: NodeJS.ProcessEnv = { JJ_CONFIG: "/tmp/omp-attribution-old.toml" };
-    await exportJjSessionAttribution(ROOT_TRANSCRIPT, dir, env, async () => "/u/base.toml");
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
     expect(env.JJ_CONFIG).toBe(`/u/base.toml:${path.join(dir, `omp-attribution-${ROOT_ID}.toml`)}`);
   });
 
-  it("is idempotent when the overlay is already chained", async () => {
+  it("returns the live chain and leaves the file alone when the overlay is already chained", async () => {
     const dir = await stateDir();
+    const env: NodeJS.ProcessEnv = {};
+    const first = await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "ACME-7",
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
     const overlay = path.join(dir, `omp-attribution-${ROOT_ID}.toml`);
-    const env: NodeJS.ProcessEnv = { JJ_CONFIG: `/u/base.toml:${overlay}` };
-    await exportJjSessionAttribution(ROOT_TRANSCRIPT, dir, env, async () => "/u/base.toml");
-    expect(env.JJ_CONFIG).toBe(`/u/base.toml:${overlay}`);
+    const written = await readFile(overlay, "utf8");
+
+    const again = await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "OTHER-9",
+      env,
+      resolveBase: async () => {
+        throw new Error("must not resolve");
+      },
+    });
+    expect(again).toBe(first);
+    expect(env.JJ_CONFIG).toBe(first);
+    expect(await readFile(overlay, "utf8")).toBe(written);
   });
 
-  it("publishes the clean base when the overlay cannot be written", async () => {
+  it("publishes the clean base and exports nothing when the overlay cannot be written", async () => {
     const dir = await stateDir();
     const blocked = path.join(dir, "not-a-directory");
     await Bun.write(blocked, "occupied");
     const env: NodeJS.ProcessEnv = { JJ_CONFIG: "/u/base.toml:/tmp/omp-attribution-old.toml" };
-    await exportJjSessionAttribution(ROOT_TRANSCRIPT, path.join(blocked, "nested"), env);
+    const chain = await exportJjSessionAttribution(ROOT_ID, path.join(blocked, "nested"), {
+      issueKey: "ACME-7",
+      env,
+    });
+    expect(chain).toBeUndefined();
     expect(env.JJ_CONFIG).toBe("/u/base.toml"); // stale overlay gone, no new one
+    expect(await readFile(blocked, "utf8")).toBe("occupied");
   });
 
   it("leaves the environment untouched when jj is unavailable", async () => {
     const dir = await stateDir();
     const env: NodeJS.ProcessEnv = {};
-    await exportJjSessionAttribution(ROOT_TRANSCRIPT, dir, env, async () => undefined);
+    expect(
+      await exportJjSessionAttribution(ROOT_ID, dir, { env, resolveBase: async () => undefined })
+    ).toBeUndefined();
     expect(env.JJ_CONFIG).toBeUndefined();
   });
 
-  it("leaves the environment untouched for subagent transcripts", async () => {
+  it("leaves the environment untouched for an empty session id", async () => {
     const dir = await stateDir();
     const env: NodeJS.ProcessEnv = {};
-    await exportJjSessionAttribution(`${path.dirname(ROOT_TRANSCRIPT)}/x_1/Worker.jsonl`, dir, env);
+    expect(await exportJjSessionAttribution("", dir, { env })).toBeUndefined();
     expect(env.JJ_CONFIG).toBeUndefined();
+    expect(
+      await readFile(path.join(dir, "omp-attribution-.toml"), "utf8").catch(() => undefined)
+    ).toBeUndefined();
   });
 });
 
@@ -157,9 +244,10 @@ describe("userConfigChain", () => {
     dirs.push(dir);
     const exported: NodeJS.ProcessEnv = {};
     const started = Date.now();
-    await exportJjSessionAttribution(ROOT_TRANSCRIPT, dir, exported, () =>
-      userConfigChain(200, env)
-    );
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      env: exported,
+      resolveBase: () => userConfigChain(200, env),
+    });
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(exported.JJ_CONFIG).toBeUndefined();
   });

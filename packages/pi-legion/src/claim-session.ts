@@ -1,5 +1,9 @@
 import type { LegionCapabilityReportBody } from "@legion/contracts/legion-api";
 import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import {
+  exportJjSessionAttribution,
+  sessionIdFromTranscript,
+} from "@legion/pi-shared/jj-attribution";
 import { bootLegionClaim } from "@legion/pi-shared/legion-claim-core";
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
 import type { SessionContext } from "@legion/pi-shared/pi-types";
@@ -7,7 +11,6 @@ import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-clai
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
 import pkg from "../package.json";
 import { requiredEnvironment, requiredSecret } from "./classify";
-import { exportJjSessionAttribution } from "./jj-attribution";
 
 export interface ClaimSession {
   /** Boots the claim behind a root architect's or a phase worker's pane (`legion.ts` calls it for
@@ -17,6 +20,33 @@ export interface ClaimSession {
   /** The claim `sessionID` registered, or undefined: before its registration, and for any other
    * session. */
   readonly capability: (sessionID: string) => ClaimCapability | undefined;
+}
+
+/**
+ * What this pane's jj attribution overlay is written from
+ * (`exportJjSessionAttribution`, `@legion/pi-shared/jj-attribution`): the Oh My Pi session id read
+ * off the transcript (undefined for a subagent's, which owns no claim), the state directory the
+ * daemon names, and the issue key the trailer's `Dispatch:` line carries.
+ *
+ * That key comes from `LEGION_ISSUE_TRAILER` alone, never from `LEGION_ISSUE`: a pane works an
+ * issue of this deployment's own Dispatch project, and only the daemon knows whether its
+ * repository is one the deployment names, so a key reaches a commit only when the daemon put it
+ * in this variable (dispatch://INFRA-472). Absent or empty is no key, and the trailer is the
+ * session line alone.
+ */
+export function attributionInputs(
+  sessionFile: string,
+  env: NodeJS.ProcessEnv
+): {
+  readonly sessionId: string | undefined;
+  readonly stateDir: string;
+  readonly issueKey: string | undefined;
+} {
+  return {
+    sessionId: sessionIdFromTranscript(sessionFile),
+    stateDir: requiredEnvironment(env, "LEGION_STATE_DIR"),
+    issueKey: env.LEGION_ISSUE_TRAILER || undefined,
+  };
 }
 
 /**
@@ -71,11 +101,10 @@ export function createClaimSession(deps: {
           issue: claim.issue,
           promptAgents: claim.promptAgents,
         }),
-      afterRegister: () =>
-        exportJjSessionAttribution(
-          sessionFile,
-          requiredEnvironment(process.env, "LEGION_STATE_DIR")
-        ),
+      afterRegister: async () => {
+        const { sessionId, stateDir, issueKey } = attributionInputs(sessionFile, process.env);
+        if (sessionId) await exportJjSessionAttribution(sessionId, stateDir, { issueKey });
+      },
       setCapability: (registered) => {
         capability = registered;
       },
