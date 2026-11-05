@@ -36,10 +36,10 @@ than reuse the values.
 - `gh` 2.98.0 (`/home/ubuntu/.mise/installs/gh/latest/gh_2.98.0_linux_amd64/bin/gh` on the
   development box), run as `legion gh -- …` under a Legion grant, so every request carried the
   implement App's installation token, never a personal one.
-- Repositories: `sjawhar/legion` (private, rulesets; the repository this skill lives in) and
+- Repositories: `cybermonklabs/legion` (private, rulesets; the repository this skill lives in) and
   `sjawhar/legion-smoke` (private, GitHub free plan; the smoke rig's sandbox).
 
-## Exit codes and buckets (2026-09-12, `sjawhar/legion`)
+## Exit codes and buckets (2026-09-12, `cybermonklabs/legion`)
 
 With `--json`, the command exited 0 whenever rows existed, whatever their buckets: a `pending`
 row and a `fail` row both came back with exit 0. Exit 1 appeared only with no rows, with one of
@@ -62,7 +62,7 @@ legion gh -- api repos/<owner>/<repo>/rules/branches/<base> --jq '[.[] | select(
 legion gh -- api repos/<owner>/<repo>/branches/<base> --jq '.protection.required_status_checks.contexts'
 ```
 
-- `sjawhar/legion`: rulesets `["lint","typecheck","test"]`; classic summary `[]`. It uses
+- `cybermonklabs/legion`: rulesets `["lint","typecheck","test"]`; classic summary `[]`. It uses
   rulesets, so the "genuinely requires no checks" exception never applies there.
 - `sjawhar/legion-smoke`: rulesets query HTTP 403 with body
   `{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.", …}`
@@ -81,9 +81,9 @@ legion gh -- api repos/<owner>/<repo>/branches/<base> --jq '.protection.required
   substring of the `message` field — the sentence ends with a period inside a JSON wrapper, so
   literal equality never matches.
 
-## Reviewer re-read (2026-09-13, `sjawhar/legion`, pull request #961 round 4)
+## Reviewer re-read (2026-09-13, `cybermonklabs/legion`, pull request #961 round 4)
 
-The classic-summary query on `sjawhar/legion`, read as `{protected, contexts}`, answered
+The classic-summary query on `cybermonklabs/legion`, read as `{protected, contexts}`, answered
 `{protected: true, contexts: []}`. An unprotected branch answers `[]` for `contexts` too, which is
 the same answer for this gate. A response with no `protection` object at all yields `null`,
 which fails the gate's `[]` match and leaves the gate pending — the safe side.

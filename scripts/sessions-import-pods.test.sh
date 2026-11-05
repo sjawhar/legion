@@ -65,7 +65,7 @@ EOF
 chmod +x "${bin}/kubectl"
 
 readonly project=acme-widgets
-readonly image=ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+readonly image=ghcr.io/cybermonklabs/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
 readonly pool='{"key":"legion.dev/pool","operator":"Equal","value":"legion","effect":"NoSchedule"}'
 readonly dedicated='{"key":"example.internal/dedicated","operator":"Exists","effect":"NoSchedule"}'
 

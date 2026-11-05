@@ -319,7 +319,7 @@ func main() {
 		_, err := host.NewListener(ctx, "example-host-a", &host.ListenerArgs{
 			MachineId: "example-host-a",
 			NatsUrls:  pulumi.StringArray{pulumi.String("nats://127.0.0.1:4222")},
-			Image:     "ghcr.io/sjawhar/legion/envoy:example",
+			Image:     "ghcr.io/cybermonklabs/legion/envoy:example",
 			Seed:      pulumi.String("SUEXAMPLESEED"),
 			Adopt:     host.AdoptArgs{Container: pulumi.String("listener-example-host-a")},
 		})

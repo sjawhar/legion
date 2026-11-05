@@ -134,7 +134,22 @@ func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
 		return model.Actor{}, false, errorf(http.StatusServiceUnavailable, "BROKER_UNAVAILABLE",
 			"the secrets broker cannot be reached; try again in a minute")
 	}
-	actor := model.Actor{Kind: "session", ID: caller.Session, Owner: &caller.Person}
+	// Both scopes go to a token the broker scoped to its person: that token is the person's own
+	// agent acting for them, so it may do what they may, approvals included. A token scoped to a
+	// project gets none, because the deployment mapped that token to a project and not to the
+	// person: it proves a session, not that any person stands behind the request.
+	var scopes []string
+	if caller.ProjectScope == brokertoken.ProjectScopePerson {
+		scopes = model.Scopes
+	}
+	actor := model.Actor{
+		Kind:  "session",
+		ID:    caller.Session,
+		Owner: &caller.Person,
+		// The broker proved this session, so the credential already names the agent behind the
+		// request and no request body has to name it.
+		Credential: &model.Credential{Scopes: scopes, Session: caller.Session},
+	}
 	// Only a token the broker scoped to one project names one, which brokertoken.callerOf has
 	// already read: a dev box session's token is scoped to its person, who may write wherever
 	// they may, so it carries no project at all.

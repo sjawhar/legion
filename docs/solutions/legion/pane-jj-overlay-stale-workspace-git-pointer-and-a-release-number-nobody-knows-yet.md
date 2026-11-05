@@ -63,7 +63,7 @@ the workspace because they do not probe git. Open the PR from a directory with n
 every coordinate explicit:
 
 ```bash
-cd -- "$LEGION_WORKSPACE" && cd /tmp && legion gh -- pr create --repo sjawhar/legion --base main \
+cd -- "$LEGION_WORKSPACE" && cd /tmp && legion gh -- pr create --repo cybermonklabs/legion --base main \
   --head legion/<KEY> --title "…" --body-file /tmp/<KEY>-pr-body.md
 ```
 

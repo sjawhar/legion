@@ -1,6 +1,7 @@
 import {
   type AskAnswer,
   type AskResolution,
+  actorActText,
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
   SEARCH_KIND_DEPTH,
   type SearchAsk,
@@ -39,7 +40,7 @@ function answerLines(lead: string, answer: AskAnswer): string[] {
   const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
   const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
   return [
-    `  ${lead} by ${answer.user} at ${answer.at} · options chosen: ${selected}`,
+    `  ${lead} by ${actorActText(answer.user, answer.act)} at ${answer.at} · options chosen: ${selected}`,
     `  Answer text: ${text}`,
   ];
 }

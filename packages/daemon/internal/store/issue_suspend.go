@@ -26,13 +26,14 @@ type IssueClose struct {
 // the run it closed is over (the root no longer lingers at its generation, and the issue is no
 // child that left the workflow done), a later start of the issue was written, or the tree's
 // cleanup is reserved, which deletes the Sandbox this close would; a wait while one of the close's
-// role stops (a suspend or an issue close) is unfinished or a stored claim of the issue may still
-// hold a process. The close deletes the issue's Sandbox once its pod is gone, which costs a claim
-// of the issue nothing it still holds: the role Secrets go with it and the issue's next launch
-// writes its own, and no session lives there — an issue pod's disk goes with the pod. The caller
-// holds the runtime's launch turn of the issue's pod through this check and its Sandbox patch,
-// never this transaction. outOfWorkflow is the workflow's rule for a status that takes an issue
-// out of it (record.OutOfWorkflow), which the store does not restate.
+// role stops (a suspend, an issue close, or a role stop of an idle release) is unfinished or a
+// stored claim of the issue may still hold a process. The close deletes the issue's Sandbox once
+// its pod is gone, which costs a claim of the issue nothing it still holds: the role Secrets go
+// with it and the issue's next launch writes its own, and no session lives there — an issue pod's
+// disk goes with the pod. The caller holds the runtime's launch turn of the issue's pod through
+// this check and its Sandbox patch, never this transaction. outOfWorkflow is the workflow's rule
+// for a status that takes an issue out of it (record.OutOfWorkflow), which the store does not
+// restate.
 func (s *Store) IssueSuspension(ctx context.Context, project string, close IssueClose, outOfWorkflow func(status string) bool) (bool, error) {
 	if close.Issue == "" || close.Tree == "" || close.IssueGeneration == 0 || close.TreeGeneration == 0 || close.Row <= 0 {
 		return false, errors.New("issue suspension requires issue, tree, both generations and its outbox row")
@@ -68,38 +69,56 @@ func (s *Store) IssueSuspension(ctx context.Context, project string, close Issue
 		if restarted {
 			return nil
 		}
-		var reserved bool
-		if err := tx.QueryRow(ctx, `select exists (select 1 from tree_lifecycles
-			where project = $1 and tree = $2 and cleanup_started)`, project, close.Tree).Scan(&reserved); err != nil {
+		may, err := issueStopFences(ctx, tx, project, close.Issue, close.Tree, "suspension", close.Row, close.IssueGeneration)
+		if err != nil {
 			return err
 		}
-		if reserved {
-			return nil
-		}
-		var stopping bool
-		if err := tx.QueryRow(ctx, `select exists (
-			select 1 from outbox where issue = $1 and id < $2 and kind = 'supervise'
-			and payload->>'op' in ('suspend', 'issue_close') and (payload->>'generation')::bigint = $3)`,
-			close.Issue, close.Row, close.IssueGeneration).Scan(&stopping); err != nil {
-			return err
-		}
-		if stopping {
-			return wait.Errorf("issue %s suspension waits for its role stop effects", close.Issue)
-		}
-		var pending string
-		err = tx.QueryRow(ctx, `select token || ':' || state from claims where project = $1 and issue = $2 and `+claimMayRun+`
-			order by token limit 1`, project, close.Issue).Scan(&pending)
-		if err == nil {
-			return wait.Errorf("issue %s suspension waits for stored claim %s", close.Issue, pending)
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		act = true
+		act = may
 		return nil
 	})
 	if err != nil {
 		return false, fmt.Errorf("authorize issue suspension: %w", err)
 	}
 	return act, nil
+}
+
+// issueStopFences are the last three checks a close's authorizer and a release's both make, in
+// the order both make them and against the caller's own transaction: the tree's cleanup
+// reservation, the issue's own unfinished role stops, and a stored claim of the issue that may
+// still hold a process. what is the noun the caller's waits are read with ("suspension",
+// "release").
+//
+// It answers false with no error for a reserved cleanup, which deletes the Sandbox the caller
+// would and so finishes the caller without acting, and a wait error for each of the other two,
+// which the caller is retried on. A close and a release order against each other here: both read
+// the same `suspend`, `issue_close` and `release` ops, so each waits on the other's role stops.
+func issueStopFences(ctx context.Context, tx pgx.Tx, project, issue, tree, what string, row int64, generation uint64) (bool, error) {
+	var reserved bool
+	if err := tx.QueryRow(ctx, `select exists (select 1 from tree_lifecycles
+		where project = $1 and tree = $2 and cleanup_started)`, project, tree).Scan(&reserved); err != nil {
+		return false, err
+	}
+	if reserved {
+		return false, nil
+	}
+	var stopping bool
+	if err := tx.QueryRow(ctx, `select exists (
+		select 1 from outbox where issue = $1 and id < $2 and kind = 'supervise'
+		and payload->>'op' in ('suspend', 'issue_close', 'release') and (payload->>'generation')::bigint = $3)`,
+		issue, row, generation).Scan(&stopping); err != nil {
+		return false, err
+	}
+	if stopping {
+		return false, wait.Errorf("issue %s %s waits for its role stop effects", issue, what)
+	}
+	var pending string
+	err := tx.QueryRow(ctx, `select token || ':' || state from claims where project = $1 and issue = $2 and `+claimMayRun+`
+		order by token limit 1`, project, issue).Scan(&pending)
+	if err == nil {
+		return false, wait.Errorf("issue %s %s waits for stored claim %s", issue, what, pending)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	return true, nil
 }

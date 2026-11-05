@@ -1,5 +1,40 @@
 # Changelog
 
+## [main@27c52d310319] - 2026-11-05
+
+### Added
+
+- A Claude Code role tells the Legion daemon at each `Stop` hook whether it runs background work
+  and when its next phase reminder is due, so the daemon can release an issue pod that is idle
+  and bring it back on the next wake.
+
+### Changed
+
+- The eight guidance rules a Claude Code role now loads, which main's Rebuild Claude Envoy
+  plugin workflow copies into `legion/` from this commit's source after the merge. The simplify
+  pass covers every file of its scope, documentation and workflow files as much as code, and
+  reports a defect it sees rather than dropping it as out of scope. A documented procedure is
+  passed only by running it, and no check is recorded until it has been seen to fail once. A
+  fix and a forward merge are followed by a search of the pushed head for the class of every
+  earlier round's finding. A planner waits on a decision its plan needs instead of completing
+  around it, and a plan an answer changed is always reviewed again. A review agent's result is
+  the report itself, and a reviewer neither approves nor reviews in the agent's place when a
+  half of the round has no review. Every role prompt and every shipped agent that runs bash
+  reads a pipe's status with `${PIPESTATUS[0]}`, never sets `pipefail` at the top level of its
+  shell and never pipes a Dispatch write into a pager; the two prompt parts a worker and an
+  architect compose, the three agents that may write and both thermonuclear skills also make
+  scratch with `mktemp -d` and never delete by a glob in the `$TMPDIR` every role of an issue
+  shares. Retro and the merge gate point at the merger's own prompt part for the full list of
+  what `READY_UNREVIEWED_CHANGE` refuses.
+
+## [main@94a8820232f0] - 2026-11-05
+
+### Added
+
+- The plugin ships `claude-envoy:agent-secrets`, the secrets broker's client skill, as its
+  eighth skill: a Claude Code session that needs a token, a key or a password reads how to get
+  one, and what to check before it reports a service out of reach.
+
 ## [main@6f23228e01f0] - 2026-11-04
 
 ### Changed

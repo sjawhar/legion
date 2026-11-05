@@ -128,82 +128,88 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
   const alice = { login: "alice" };
 
   await setLiveSessions(workspaceSessions);
-  await createProject({ key: "CORE", name: "Core" });
-  await createProject({ key: "OPS", name: "Ops" });
+  await Promise.all([
+    createProject({ key: "CORE", name: "Core" }),
+    createProject({ key: "OPS", name: "Ops" }),
+  ]);
 
-  // A human's issue is assigned to its creator, so every issue here is alice's.
+  // A human's issue is assigned to its creator, so every issue here is alice's. The issues are
+  // written in one round: only the child names another, and no row here reads their order.
   const workflow = await createIssue({
     project: "CORE",
     spec: workflowSpec,
     title: "Local testing workflow for Dispatch",
   });
-  await patchIssue(workflow.key, { labels: ["dispatch"], priority: 1, status: "in_progress" });
-  const child = await createIssue({
-    parent: workflow.key,
-    project: "CORE",
-    title: "Seed the local corpus",
-  });
-  const broadcastOrder = await createIssue({
-    project: "CORE",
-    title: "Broadcast recipients keep their send order",
-  });
-  await patchIssue(broadcastOrder.key, { status: "needs_review" });
-  const snooze = await createIssue({
-    project: "CORE",
-    title: "Snooze an Inbox row until tomorrow",
-  });
-  const folds = await createIssue({ project: "CORE", title: "Agents page freshness folds" });
-  await patchIssue(folds.key, { status: "backlog" });
-  const phone = await createIssue({ project: "CORE", title: "Phone layout of the review sheet" });
-  await patchIssue(phone.key, { status: "done" });
-  const retracted = await createIssue({
-    project: "CORE",
-    title: "A retracted ask stays in history",
-  });
-  const rotate = await createIssue({ project: "OPS", title: "Rotate the agent token" });
-  await patchIssue(rotate.key, { status: "triage" });
+  const [child, broadcastOrder, snooze, folds, phone, retracted, rotate] = await Promise.all([
+    createIssue({ parent: workflow.key, project: "CORE", title: "Seed the local corpus" }),
+    createIssue({
+      project: "CORE",
+      title: "Broadcast recipients keep their send order",
+    }),
+    createIssue({ project: "CORE", title: "Snooze an Inbox row until tomorrow" }),
+    createIssue({ project: "CORE", title: "Agents page freshness folds" }),
+    createIssue({ project: "CORE", title: "Phone layout of the review sheet" }),
+    createIssue({ project: "CORE", title: "A retracted ask stays in history" }),
+    createIssue({ project: "OPS", title: "Rotate the agent token" }),
+  ]);
+  await Promise.all([
+    patchIssue(workflow.key, { labels: ["dispatch"], priority: 1, status: "in_progress" }),
+    patchIssue(broadcastOrder.key, { status: "needs_review" }),
+    patchIssue(folds.key, { status: "backlog" }),
+    patchIssue(phone.key, { status: "done" }),
+    patchIssue(rotate.key, { status: "triage" }),
+  ]);
 
-  const blocking = await createAsk(
-    folds.key,
-    { question: "Fold a session unseen for ten minutes under Inactive?", urgency: "blocking" },
-    { actor: actor(sessionIds.planner, { tmux: "legion:1.2" }), as: "agent" }
-  );
-  const snoozed = await createAsk(
-    snooze.key,
-    { question: "Snooze until tomorrow morning, or for a full day?", urgency: "high" },
-    as(sessionIds.tester)
-  );
-  await snoozeAsk(snoozed.id, new Date(Date.now() + 24 * 3_600_000).toISOString(), alice);
-  const answered = await createAsk(
-    broadcastOrder.key,
-    { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship the recipient-order fix?" },
-    as(sessionIds.reviewer)
-  );
-  await answerAsk(answered.id, { expected_edited_at: null, selected: ["Ship"] }, alice);
-  const withdrawn = await createAsk(
-    retracted.key,
-    { question: "Keep the retracted ask out of the Inbox?" },
-    as(sessionIds.planner)
-  );
-  await resolveAsk(
-    withdrawn.id,
-    { kind: "retracted", reason: "Answered live." },
-    as(sessionIds.planner)
-  );
-  const rotation = await createAsk(
-    rotate.key,
-    { question: "Rotate the token before or after the deploy?", urgency: "med" },
-    as(sessionIds.reviewer)
-  );
-  const runbook = await createProjectDocument("CORE", {
-    content: "# Runbook\n\nRestart, reseed, reopen the signed-in URL.\n",
-    name: "Runbook",
-  });
-  const documentAsk = await createArtifactAsk(
-    runbook.artifact.id,
-    { question: "Keep the runbook in the repository?" },
-    as(sessionIds.tester)
-  );
+  // Five asks and the runbook in one round: each names a different issue, and the writes that
+  // follow each ask below are what order it.
+  const [blocking, snoozed, answered, withdrawn, rotation, runbook] = await Promise.all([
+    createAsk(
+      folds.key,
+      { question: "Fold a session unseen for ten minutes under Inactive?", urgency: "blocking" },
+      { actor: actor(sessionIds.planner, { tmux: "legion:1.2" }), as: "agent" }
+    ),
+    createAsk(
+      snooze.key,
+      { question: "Snooze until tomorrow morning, or for a full day?", urgency: "high" },
+      as(sessionIds.tester)
+    ),
+    createAsk(
+      broadcastOrder.key,
+      {
+        options: [{ label: "Ship" }, { label: "Hold" }],
+        question: "Ship the recipient-order fix?",
+      },
+      as(sessionIds.reviewer)
+    ),
+    createAsk(
+      retracted.key,
+      { question: "Keep the retracted ask out of the Inbox?" },
+      as(sessionIds.planner)
+    ),
+    createAsk(
+      rotate.key,
+      { question: "Rotate the token before or after the deploy?", urgency: "med" },
+      as(sessionIds.reviewer)
+    ),
+    createProjectDocument("CORE", {
+      content: "# Runbook\n\nRestart, reseed, reopen the signed-in URL.\n",
+      name: "Runbook",
+    }),
+  ]);
+  const [documentAsk] = await Promise.all([
+    createArtifactAsk(
+      runbook.artifact.id,
+      { question: "Keep the runbook in the repository?" },
+      as(sessionIds.tester)
+    ),
+    snoozeAsk(snoozed.id, new Date(Date.now() + 24 * 3_600_000).toISOString(), alice),
+    answerAsk(answered.id, { expected_edited_at: null, selected: ["Ship"] }, alice),
+    resolveAsk(
+      withdrawn.id,
+      { kind: "retracted", reason: "Answered live." },
+      as(sessionIds.planner)
+    ),
+  ]);
 
   const review = await createComment(
     broadcastOrder.key,

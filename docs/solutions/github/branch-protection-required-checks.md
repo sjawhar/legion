@@ -34,7 +34,7 @@ the expected App IDs:
 
 ```bash
 gh api -H 'Accept: application/vnd.github+json' \
-  "repos/sjawhar/legion/commits/<scratch-pr-head-sha>/check-runs" \
+  "repos/cybermonklabs/legion/commits/<scratch-pr-head-sha>/check-runs" \
   --jq '.check_runs[] | select(.name == "CI" or .name == "tester" or .name == "architect") | {name, app_id: .app.id, app_slug: .app.slug}'
 ```
 
@@ -50,11 +50,11 @@ token for the reviewer App, keep it in `REVIEWER_APP_TOKEN`, and set
 
 ```bash
 scratch_pr=<scratch-pr-number>
-head_sha="$(gh pr view "$scratch_pr" --repo sjawhar/legion --json headRefOid --jq .headRefOid)"
+head_sha="$(gh pr view "$scratch_pr" --repo cybermonklabs/legion --json headRefOid --jq .headRefOid)"
 
 created="$(GH_TOKEN="$REVIEWER_APP_TOKEN" gh api -X POST \
   -H 'Accept: application/vnd.github+json' \
-  "repos/sjawhar/legion/check-runs" \
+  "repos/cybermonklabs/legion/check-runs" \
   -f name=tester \
   -f head_sha="$head_sha" \
   -f status=completed \
@@ -66,7 +66,7 @@ test "$(jq -r .app.id <<<"$created")" = "$REVIEWER_APP_ID"
 
 GH_TOKEN="$REVIEWER_APP_TOKEN" gh api \
   -H 'Accept: application/vnd.github+json' \
-  "repos/sjawhar/legion/commits/${head_sha}/check-runs" \
+  "repos/cybermonklabs/legion/commits/${head_sha}/check-runs" \
   --jq '.check_runs[] | select(.name == "tester") | {id, name, head_sha, status, conclusion, app_id: .app.id, app_slug: .app.slug}'
 ```
 
@@ -76,7 +76,7 @@ App does not prove the reviewer App can publish the required verdict.
 
 ## Apply the prepared policy
 
-The script is dry-run by default and only targets `sjawhar/legion:main`. It
+The script is dry-run by default and only targets `cybermonklabs/legion:main`. It
 requires a credential with repository Administration write access and never
 runs as part of CI.
 

@@ -935,7 +935,7 @@ The `EXIT` trap stops every process and container, copies every Oh My Pi session
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
-LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest of the branch's image> \
+LEGION_E2E_IMAGE=ghcr.io/cybermonklabs/legion-worker@sha256:<digest of the branch's image> \
 LEGION_E2E_STORAGE_CLASS=gp2 \
 LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> \
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
@@ -957,7 +957,7 @@ LEGION_E2E_SESSION_DB_PORT=<port> \
 LEGION_E2E_OPERATOR_CONTEXT=<operator context> \
 LEGION_E2E_RUNTIME_KUBECONFIG=<file> \
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
-LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest of the branch's image> \
+LEGION_E2E_IMAGE=ghcr.io/cybermonklabs/legion-worker@sha256:<digest of the branch's image> \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
 LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> \
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key, or the gateway key> \
@@ -1022,7 +1022,7 @@ The checks, in order, which is the tmux proof's:
 
 The image.
 `LEGION_E2E_IMAGE` must be the branch's own published worker image, by digest:
-a pull-request run of `.github/workflows/worker-image.yaml` publishes `ghcr.io/sjawhar/legion-worker:sha-<the first 12 hex of the built commit>` and records that tag's digest, so the image must be built from the branch under test
+a pull-request run of `.github/workflows/worker-image.yaml` publishes `ghcr.io/cybermonklabs/legion-worker:sha-<the first 12 hex of the built commit>` and records that tag's digest, so the image must be built from the branch under test
 — the one carrying Claude Code's pin and the `@sjawhar/claude-envoy` plugin in the image — before this proof can run, and a tag is refused.
 Iteration may run the same script body against a throwaway kind cluster with Agent Sandbox and gVisor ([`lib/kind-sandbox.sh`](#libkind-sandboxsh), the pattern of the three kind proofs), which loads the same image by digest into the node's containerd;
 the recorded run is the one against the cluster.
@@ -1212,7 +1212,7 @@ A Claude Code sandbox run under `aws-private-ip` takes all six and names every o
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role \
 LEGION_E2E_PLATFORM=eks \
-LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+LEGION_E2E_IMAGE=ghcr.io/cybermonklabs/legion-worker@sha256:<digest> \
 LEGION_E2E_POD_REACHABILITY=aws-private-ip \
 LEGION_E2E_MODEL_ROUTE=gateway \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
@@ -1228,7 +1228,7 @@ LEGION_E2E_PREVIOUS_IMAGE=<worker image of main at contract 37 or 38, before one
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernetes-service-account \
 LEGION_E2E_PLATFORM=gke-autopilot \
-LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+LEGION_E2E_IMAGE=ghcr.io/cybermonklabs/legion-worker@sha256:<digest> \
 LEGION_E2E_POD_REACHABILITY=bridge \
 LEGION_E2E_MODEL_ROUTE=key-file \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
@@ -1951,7 +1951,7 @@ It sets `linger_hours: 0.5` (tree 1's linger runs from the close its last child'
 15 minutes, after the first look's report, since a look open at the bound defers it by the look's own two-hour bound).
 
 ```sh
-LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/cybermonklabs/legion-worker@sha256:<digest> \
   LEGION_E2E_POD_SERVICE_ACCOUNT=<ServiceAccount the pods run as> \
   LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
   LEGION_E2E_DISPATCH_URL=https://<dispatch> LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
@@ -3292,7 +3292,7 @@ Each item below names a check, then what it holds.
 
 - `agent-token-refused`
 
-  `POST /api/v1/agents/<id>/messages` with the body `/model <the other model>` and the session's Dispatch bearer gets 403 `HUMAN_ONLY`.
+  `POST /api/v1/agents/<id>/messages` with the body `/model <the other model>` and the session's Dispatch bearer gets 403 `OAUTH_SCOPE_REQUIRED`: that bearer holds no `person` scope.
   Dispatch stores nothing new, and the session is unchanged
 
 - `other-session-unchanged`
@@ -5233,7 +5233,7 @@ an id that is not a number of at most 12 digits, or a secret name that is not le
 A refusal never prints the value.
 With both roles read it also refuses one id or one secret for both Apps.
 `app_token_command NAME` prints the token command for the github-app secret `NAME`, `agent-secrets NAME --reason=legion-live-proof-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$NAME"'`, whose two `${…}` expansions the daemon's `sh` expands:
-the daemon sets `LEGION_GITHUB_OWNER` to the owner it needs a token for (empty for every installation) and `LEGION_GITHUB_READ_ONLY` to `1` for a read-only token (contents, metadata and pull requests read).
+the daemon sets `LEGION_GITHUB_OWNER` to the owner it needs a token for (empty for every installation) and `LEGION_GITHUB_READ_ONLY` to `1` for a read-only token (contents, metadata, pull requests and Actions read, the last left out for an installation that does not hold it).
 It depends on nothing but `NAME`.
 `write_github_apps [--token-dir DIR] ROLE...` writes `$work/github-apps.yaml`, the `github_apps` block a run's `legion.yaml` includes as it is:
 each App's `app_id` and a `token_command`, `app_token_command`'s, or, given `--token-dir DIR`, a command that reads `DIR/<role>/${owner:-_all}${LEGION_GITHUB_READ_ONLY:+.read}.json` with `cat --`, the owner lowercased and refused unless it is letters, digits and `-`, in any POSIX `sh` (busybox's included).

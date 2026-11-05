@@ -729,7 +729,7 @@ func decisionKeeps(ctx context.Context, q queryer, artifactID string) (map[strin
 // on. Any other block - one that is no decision heading, or a decision under `## Replaced`,
 // which is no longer the design - is 404 TARGET_NOT_FOUND.
 func (s *server) keepDecision(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -829,7 +829,7 @@ func (s *server) keptDecision(ctx context.Context, document model.Artifact, bloc
 // getDocumentRead is GET /api/v1/me/documents/{id}/read: the caller's last read version of the
 // document, null when they have read none. It is per-person state, as GET /api/v1/me/state is.
 func (s *server) getDocumentRead(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -856,7 +856,7 @@ func (s *server) getDocumentRead(w http.ResponseWriter, r *http.Request) {
 // document through that version. It is the caller's own view state, written as PUT
 // /api/v1/me/issues/{key}/state is, and announces nothing.
 func (s *server) putDocumentRead(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

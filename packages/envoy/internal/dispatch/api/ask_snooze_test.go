@@ -324,7 +324,7 @@ func TestInboxSurfacesASnoozeWhoseMomentHasPassed(t *testing.T) {
 	}
 }
 
-func TestAskSnoozeRefusesBadInputAndNonHumans(t *testing.T) {
+func TestAskSnoozeRefusesBadInputAndACredentialWithoutThePersonScope(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -368,7 +368,8 @@ func TestAskSnoozeRefusesBadInputAndNonHumans(t *testing.T) {
 		}
 	}
 
-	// The inbox is human-only, so the snooze that folds one of its rows away is too.
+	// The inbox needs the person scope, so the snooze that folds one of its rows away needs it
+	// too, and the deployment's shared token holds none.
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
 		response := sessionRequest(t, handler, method, "/api/v1/me/asks/"+askID+"/snooze", map[string]any{
 			"snoozed_until": future,

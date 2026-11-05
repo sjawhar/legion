@@ -18,11 +18,11 @@
     "AGENTS.md"
   ],
   "legion": {
-    "daemonApiVersion": 46
+    "daemonApiVersion": 48
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sjawhar/legion"
+    "url": "https://github.com/cybermonklabs/legion"
   },
   "scripts": {
     "channel": "bun bin/envoy-channel.ts",
