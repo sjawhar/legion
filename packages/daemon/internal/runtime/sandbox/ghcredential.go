@@ -61,13 +61,13 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // launcher (credentialFromSecret), the default, the annotations, and the keys of an owner the
 // render no longer holds, which the pod's projection may still name, stay as they are. Every live
 // issue pod's provisioning Secret is brought to the implement App's current lease too
-// (refreshProvisioningToken), whatever its workspace-fetch has already done: a pod's init
-// containers can run again at any point in its life, a retried launch's fetch included, and the
-// fetch re-reads the token's file before every transfer, so a pod whose boot token has aged past
-// the hour GitHub gives an installation token cannot fetch its repository again. The lease is
-// minted once per repository owner a tick, however many of that owner's pods the walk holds, and
-// an owner whose mint fails is logged once and left to the next tick, where its pods are tried
-// again.
+// (refreshProvisioningToken), whatever its workspace-fetch has already done: the kubelet runs a
+// pod's init containers afresh whenever it rebuilds the pod's sandbox, at any point in the pod's
+// life (a relaunch that replaces the pod provisions it anew instead), and the fetch re-reads the
+// token's file before every transfer, so a pod left on its boot token, aged past the hour GitHub
+// gives an installation token, could not fetch its repository again. The lease is minted once per
+// repository owner a tick, however many of that owner's pods the walk holds, and an owner whose
+// mint fails is logged once and left to the next tick, where its pods are tried again.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	// mints memoizes this tick's provisioning leases by lower-cased owner — nothing here knows of a
 	// configured repository rename, which the daemon's adapter maps, so Acme and acme are one call —
@@ -128,10 +128,10 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 // owner this tick — into the provisioning Secret of pod, owned by the Sandbox with uid. The fetch
 // reads the token's file anew before every transfer from GitHub (workspace.Fetch), and the kubelet
 // rewrites the projected file within its sync period, so a fetch that starts long after the pod
-// did, the fetch of a retried launch included, never presents an expired token. Only the token is
-// written; the cache's token beside it stays. A Secret another Sandbox owns, or one that already
-// holds the lease, is left; a write that fails is logged and tried at the next tick, and a write
-// that conflicts is retried once on a fresh read.
+// did, one the kubelet runs again after it rebuilds the pod's sandbox included, never presents an
+// expired token. Only the token is written; the cache's token beside it stays. A Secret another
+// Sandbox owns, or one that already holds the lease, is left; a write that fails is logged and
+// tried at the next tick, and a write that conflicts is retried once on a fresh read.
 func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod, uid types.UID, repo ghrepo.Repository, token string) {
 	name := secretName(pod.Name)
 	failed := func(err error) {
