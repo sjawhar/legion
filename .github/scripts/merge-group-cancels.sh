@@ -56,11 +56,20 @@
 # (createdAt strictly earlier, the asking run excluded): the queue builds a newer group for a pull
 # request when it rebuilds after a change below it, and the older group then tests a tree that will
 # not land. The order is createdAt's, never the order the runs started in — a run created earlier
-# can start later, and the newer group is still the one that will land. Then it prints
-# `self-doomed` when this run's chain of parents reaches a group whose head carries a ci-ok of
-# `failure` in CI_OK: that group cannot merge, and this group is built on it. The commit the walk
-# stops at dooms nothing even when its ci-ok failed, because it is a commit of main, and a red run
-# on main is not a failed group.
+# can start later, and the newer group is still the one that will land. It cancels nothing at all
+# when RUNS does not hold the asking run: GitHub's run list lags seconds behind a run that has
+# just started, and this act runs in that run's first job, so the list it was given can hold a
+# group of the same pull request created after this one while this one is still missing. Without
+# this run's own createdAt no listed group can be shown to be the older one, and dating this run
+# `now` would make a newer group — the group that will land — look older and cancel it. The cost
+# is that one lagging start reclaims no runner: those older groups are reclaimed by the next
+# merge-group run of that pull request, whose own start cancels every group of it created before
+# itself. Then it prints `self-doomed` when this run's chain of parents reaches a group whose head
+# carries a ci-ok of `failure` in CI_OK: that group cannot merge, and this group is built on it.
+# That half is answered whether or not the list holds the asking run, since the walk reads
+# HEAD_SHA and HEAD_BRANCH and no run's createdAt. The commit the walk stops at dooms nothing even
+# when its ci-ok failed, because it is a commit of main, and a red run on main is not a failed
+# group.
 #
 # It prints one token per line on stdout, in the order the caller must act on them: `cancel <run
 # id>` for each other run, descendants before anything else, then `self` as the last line of the
@@ -113,18 +122,6 @@ bad_times=$(jq -r --arg re "$rfc3339" \
 ci_ok=${CI_OK:-}
 if [ "$ACT" = started ]; then
   [ -n "$ci_ok" ] || fail "the started act reads each ancestor group's ci-ok, so it needs CI_OK in its environment"
-  # The act orders by the asking run's createdAt, so that run must be in the list. GitHub's run
-  # list can lag seconds behind a run that has just started, and this act runs in that run's first
-  # job, so the list it read may not hold it yet. A run that has just started is the newest
-  # merge-group run there is, so standing it at the time of this read orders the rest rightly:
-  # every group of its pull request the list holds was created before it.
-  if ! jq -e --argjson id "$RUN_ID" 'any(.[]; .databaseId == $id)' <<<"$RUNS" >/dev/null 2>&1; then
-    echo "the run list does not hold the asking run $RUN_ID yet, so it stands as the newest merge-group run, created now" >&2
-    RUNS=$(jq -c --argjson id "$RUN_ID" --arg sha "$HEAD_SHA" --arg branch "$HEAD_BRANCH" \
-      --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '. + [{databaseId: $id, headSha: $sha, headBranch: $branch, status: "in_progress",
-             conclusion: null, createdAt: $now}]' <<<"$RUNS")
-  fi
 fi
 [ -n "$ci_ok" ] || ci_ok='{}'
 jq -e 'type == "object" and all(.[]; type == "string")' <<<"$ci_ok" >/dev/null 2>&1 ||
@@ -176,17 +173,26 @@ def ts: sub("[.][0-9]+Z$"; "Z") | fromdateiso8601;
       ["log", "run \($run_id)'s own remaining jobs are force-cancelled last, after the descendants it had to cancel first"],
       ["out", "self"]
   else
-    ($runs[] | select(.databaseId == $run_id)) as $self
+    ([$runs[] | select(.databaseId == $run_id)] | first) as $self
     | ($head_branch | parsed) as $me
-    | [$runs[]
-       | select(.databaseId != $run_id and .status != "completed")
-       | select((.headBranch | parsed) as $parsed | $parsed != null and $parsed.pr == $me.pr)
-       | select((.createdAt | ts) < ($self.createdAt | ts))]
+    # Which groups of this pull request are older than this run is a question only this run's own
+    # createdAt answers, so a list that does not hold the asking run yet cancels nothing: the same
+    # lag can leave a group created after this run in the list, and standing this run at the time
+    # of the read would make that newer group — the one that will land — look older.
+    | (if $self == null then []
+       else [$runs[]
+             | select(.databaseId != $run_id and .status != "completed")
+             | select((.headBranch | parsed) as $parsed | $parsed != null and $parsed.pr == $me.pr)
+             | select((.createdAt | ts) < ($self.createdAt | ts))]
+       end)
       | sort_by(.createdAt, .databaseId) as $older
     | walk($head_sha; $head_branch) as $chain
     | [$chain.steps[] | select($ci_ok[.headSha] == "failure")] as $doomed
-    | (select($older | length == 0)
-       | ["log", "no group of pull request \($me.pr) created before this run (\($self.createdAt)) is still going"]),
+    | (if $self == null then
+         ["log", "the run list does not hold the asking run \($run_id) yet, so no group of pull request \($me.pr) can be shown to be older than this one and none is cancelled: the next merge-group run of this pull request cancels them when it starts"]
+       elif ($older | length) == 0 then
+         ["log", "no group of pull request \($me.pr) created before this run (\($self.createdAt)) is still going"]
+       else empty end),
       ($older[]
        | ["log", "run \(.databaseId) (\(.headBranch)) is a group of pull request \($me.pr) created at \(.createdAt), before this run's \($self.createdAt), and is \(.status), so it tests a tree that will not land: cancel it"],
          ["out", "cancel \(.databaseId)"]),

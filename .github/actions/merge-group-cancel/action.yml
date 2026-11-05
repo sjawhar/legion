@@ -7,9 +7,23 @@ description: >-
   force-cancel leaves a warning rather than a red job: the run it names may have completed
   between the list and the call. The job needs `actions: write`, and a checkout of .github.
 
+  `cancel-self: 'false'` leaves this run alone and cancels the descendants only. One follower
+  needs that: `cancel-changes`. Every other job of ci.yaml ends with the ci-ok-report step, so by
+  the time its follower runs, the failing ci-ok of this group is already posted; `changes` has no
+  such step, and the jobs that post for a run whose `changes` failed (lint, typecheck and test,
+  whose `if:` admits a `changes` that did not succeed) are still running when its follower fires.
+  Force-cancelling the run there would leave every `if: always()` step skipped and the group with
+  no ci-ok at all, which holds it in the queue until GitHub's 180-minute check timeout. Three
+  jobs' runner time is the lesser cost.
+
   `cancel-started` is no caller: it holds its own body, which differs in ACT, in the CI_OK it
   gathers for the walk and in the `self-doomed` token it acts on.
 
+inputs:
+  cancel-self:
+    description: Force-cancel this run too, after the descendants (`false` leaves it running).
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -17,6 +31,7 @@ runs:
       shell: bash
       env:
         ACT: failed
+        CANCEL_SELF: ${{ inputs.cancel-self }}
         GH_TOKEN: ${{ github.token }}
         HEAD_BRANCH: ${{ github.ref_name }}
         HEAD_SHA: ${{ github.sha }}
@@ -27,7 +42,17 @@ runs:
         export RUNS
         acts=$("$GITHUB_ACTION_PATH/../../scripts/merge-group-cancels.sh")
         while read -r act id; do
-          case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+          case $act in
+            cancel) ;;
+            self)
+              if [ "$CANCEL_SELF" != true ]; then
+                echo "::notice::this run is left to finish, so the jobs that post this group's failing ci-ok can post it"
+                continue
+              fi
+              id=$GITHUB_RUN_ID
+              ;;
+            *) continue ;;
+          esac
           gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
             echo "::warning::force-cancel of run $id failed; it may have completed already"
         done <<<"$acts"

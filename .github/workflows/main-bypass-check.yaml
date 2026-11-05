@@ -57,7 +57,19 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
 
+      # `shell: bash` runs the step as `bash --noprofile --norc -eo pipefail {0}`; naming no
+      # shell would run it as `bash -e {0}`, which has no `pipefail` (docs.github.com, "Workflow
+      # syntax for GitHub Actions", the default shell table). Every read below ends in a `jq -s`,
+      # which exits 0 on an empty input, so without `pipefail` a `gh` that GitHub answered with a
+      # 502 or a rate limit handed the decision an empty push, and this job went green having
+      # started nothing — the one outcome this backstop exists to prevent. Under `pipefail` a
+      # refused compare read ends the step, and so does a refusal on the last head of either
+      # gather; a head refused earlier in a gather leaves its sha out of RUNS or CI_OK, and
+      # main-bypass-check.sh then fails naming that commit, because a gather that read nothing is
+      # a refusal here and never a commit silently read as untested. No read in the step wants a
+      # pipeline's last stage to hide an earlier failure.
       - name: Start ci.yaml when a commit of this push was never tested
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           PAYLOAD_COMMITS: ${{ toJSON(github.event.commits) }}

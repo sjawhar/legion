@@ -20,9 +20,12 @@ name: CI (dequeued pull request)
 # `beforeCommit.oid` is the head of the group the queue had built, and its `reason` is read from
 # the same item. GitHub can show the event before the timeline holds it, so the read is made up to
 # seven times, ten seconds apart: a fixed list of attempts, which bounds the wait at one minute and
-# cannot spin. A run left alive by that bound is still stopped by the queue: when the pull request
-# is added again, the new group's `cancel-started` cancels the older groups of the same pull
-# request.
+# cannot spin. A read GitHub refuses counts as one of those attempts and leaves a warning: the
+# attempts are there for an answer that has not come yet, and a 502 or a rate limit is as good a
+# reason to ask again as a timeline that has not caught up, where a step that died on the first
+# refusal would cancel nothing and leave the run it was to end holding its runners. A run left
+# alive by that bound is still stopped by the queue: when the pull request is added again, the
+# new group's `cancel-started` cancels the older groups of the same pull request.
 #
 # What it deliberately does not do:
 #   * a removal whose reason is `merged` cancels nothing: that group's run tested the tree that
@@ -82,8 +85,11 @@ jobs:
             | [$nodes[(($added // -1) + 1):][]
                | select(.__typename == "RemovedFromMergeQueueEvent")] | last // empty'
           for attempt in 1 2 3 4 5 6 7; do
-            removal=$(gh api graphql -F owner="${GITHUB_REPOSITORY%%/*}" -F name="${GITHUB_REPOSITORY#*/}" \
-              -F number="$PR_NUMBER" -f query="$query" --jq "$select")
+            if ! removal=$(gh api graphql -F owner="${GITHUB_REPOSITORY%%/*}" -F name="${GITHUB_REPOSITORY#*/}" \
+              -F number="$PR_NUMBER" -f query="$query" --jq "$select"); then
+              removal=
+              echo "::warning::GitHub refused read $attempt of 7 of pull request #$PR_NUMBER's timeline; it counts as a read that found no removal"
+            fi
             [ -z "$removal" ] || break
             echo "read $attempt of 7 of pull request #$PR_NUMBER's timeline holds no removal after its newest queue entry"
             [ "$attempt" = 7 ] || sleep 10

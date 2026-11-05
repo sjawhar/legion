@@ -23,8 +23,16 @@
 # A commit whose own message carries a skip marker is passed over, whatever its checks. The
 # markers are GitHub's own set, from its "Skipping workflow runs" page: `[skip ci]`, `[ci skip]`,
 # `[no ci]`, `[skip actions]` and `[actions skip]` anywhere in the message, and the trailer
-# `skip-checks:true` or `skip-checks: true` on a line of its own. This repository's release,
-# rebuild and changelog-fold pushes put the marker in the commit subject, so the whole message is
+# `skip-checks:true` or `skip-checks: true` at the end of it. The trailer rule read here is the
+# page's own: "The trailers section should be included at the end of your commit message and be
+# preceded by two empty lines. If you already have other trailers in your commit message,
+# `skip-checks` should be last." So those words count only as the message's last non-empty line,
+# with an empty line before it; one empty line is enough, because git's own cleanup, which the
+# same page names, folds the two a person writes into one before the message reaches GitHub.
+# The words anywhere else — quoted in a body, written into the subject, followed by another
+# paragraph — are no trailer: GitHub started every workflow for that commit, so it reached main
+# past the queue like any other commit and is read here. This repository's release, rebuild and
+# changelog-fold pushes put a bracket marker in the commit subject, so the whole message is
 # read, subject and body. The spelling is GitHub's, letter for letter: a marker in another letter
 # case reads here as no marker, which costs one dispatched run and misses nothing.
 #
@@ -101,13 +109,21 @@ read -r -d '' program <<'JQ' || true
 def markers: ["[skip ci]", "[ci skip]", "[no ci]", "[skip actions]", "[actions skip]"];
 
 # The skip marker this message carries, or null: one of GitHub's five bracket markers anywhere in
-# it, or the skip-checks trailer on a line of its own (trailing blanks and a carriage return, which
-# a message from a Windows client can carry, are not part of the line).
+# it, or the skip-checks trailer, which is that line and only that line when it is the message's
+# last non-empty one and an empty line comes before it (the header says why, and quotes GitHub's
+# rule). Trailing blanks and a carriage return, which a message from a Windows client can carry,
+# are not part of a line.
+def skip_trailer:
+  (split("\n") | map(sub("[[:space:]]+$"; ""))) as $lines
+  | ([$lines | to_entries[] | select(.value != "") | .key] | last) as $last
+  | if $last == null or $last == 0 or $lines[$last - 1] != "" then null
+    elif $lines[$last] == "skip-checks:true" or $lines[$last] == "skip-checks: true" then $lines[$last]
+    else null
+    end;
 def skip_marker:
   . as $message
   | [markers[] | . as $marker | select($message | contains($marker))]
-    + [$message | split("\n")[] | sub("[[:space:]]+$"; "")
-       | select(. == "skip-checks:true" or . == "skip-checks: true")]
+    + [$message | skip_trailer | select(. != null)]
   | first;
 
 def subject: split("\n") | first // "";

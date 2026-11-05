@@ -16,9 +16,17 @@
 #
 # It does not wait on a merge_group run whose verdict is already decided: one where `changes`
 # failed, or where the reporting job's own report (its artifact, uploaded before the list is
-# read) is a failure. ci.yaml's merge-group follower then force-cancels the rest of that run, so
-# no later report can post at all, and the failing ci-ok must be posted by the failing job
-# itself, before the cancel. Such a run reads the jobs route (below) and records every still
+# read) is a failure or a cancellation. ci.yaml's merge-group followers fire on `failure` or
+# `cancelled` alike — `cancelled` is what a job its own `timeout-minutes` cut off reports — and
+# the follower then force-cancels the rest of that run, so no later report can post at all: the
+# failing ci-ok must be posted by that job itself, before the cancel, or the group gets no
+# ci-ok at all and sits in the queue until GitHub's 180-minute check timeout takes it out. The
+# `cancelled` half also admits a merge_group run a person or another workflow cancelled
+# gracefully, where this job's own `job.status` is `cancelled` and its `always()` steps still
+# run: that run is over and will post no ci-ok later either, so the failing one posted now takes
+# the pull request out of the queue at once rather than at that same timeout. A force-cancelled
+# run reaches none of this: its steps are left skipped, so this script does not run there at
+# all. A decided run reads the jobs route (below) and records every still
 # unreported job at its live status: a job GitHub shows completed at its conclusion, one still
 # queued or running at that status (`queued`, `in_progress`), one the route does not list at all
 # as `unlisted`. None of those is `success`, so ci-ok.sh's verdict is failure, which is right: a
@@ -118,16 +126,24 @@ decision=$(jq -n -L "$script_dir" --argjson changes "$CHANGES" --arg event "$EVE
   --argjson names "$(jq -R . <<<"$names" | jq -s 'map(select(. != ""))')" "$program")
 
 # A merge_group run whose verdict is already decided: `changes` failed, or this job's own report
-# (the artifact it uploaded before the list was read) is a failure. ci.yaml's follower cancels
-# the rest of the run, so a job that has not reported never will, and this job posts the verdict
-# now rather than waiting for a report that the cancel prevents.
+# (the artifact it uploaded before the list was read) is a failure or a cancellation — the
+# result a job its `timeout-minutes` cut off carries, and one ci.yaml's follower fires on just
+# as it does on a failure. The follower cancels the rest of the run, so a job that has not
+# reported never will, and this job posts the verdict now rather than waiting for a report that
+# the cancel prevents. The line below names which of the three it was, so the posted summary
+# says what decided the run.
 decided=false
 decided_by="the last job of the run to report"
-if [ "$EVENT" = merge_group ] \
-  && jq -e --arg job "$JOB" '.needs.changes.result == "failure" or .needs[$job].result == "failure"' \
-    <<<"$decision" >/dev/null; then
-  decided=true
-  decided_by="whose failure decides this merge-group run before its follower cancels the rest"
+if [ "$EVENT" = merge_group ]; then
+  reason=$(jq -r --arg job "$JOB" '
+    if .needs[$job].result == "failure" then "whose failure"
+    elif .needs[$job].result == "cancelled" then "whose cancellation"
+    elif .needs.changes.result == "failure" then "reporting after changes failed, which"
+    else "" end' <<<"$decision")
+  if [ -n "$reason" ]; then
+    decided=true
+    decided_by="$reason decides this merge-group run before its follower cancels the rest"
+  fi
 fi
 
 # A job that ended before its first step ran (a service container that never started, a runner

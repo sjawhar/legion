@@ -192,17 +192,20 @@ run_cancels started 41865489886 "$head_2734" "$(queue_branch 2734 "$head_2720")"
 check "the started act without CI_OK fails" "$(is "$status" 1)"
 check "names it" "$(contains "$err" "^::error::the started act reads each ancestor group's ci-ok, so it needs CI_OK in its environment\$")"
 
-echo "case: the started act stands in for a run the list does not hold yet"
+echo "case: the started act cancels nothing when the list does not hold the asking run yet"
 run_cancels started 41999999999 "$head_2734" "$(queue_branch 2734 "$head_2720")" "$stack" '{}'
 check "it decides rather than failing" "$(is "$status" 0)"
-check "it says the asking run stands as the newest" \
-  "$(contains "$err" "^the run list does not hold the asking run 41999999999 yet, so it stands as the newest merge-group run, created now\$")"
+check "it cancels nothing" "$(is "$out" "")"
+check "it says why, and what reclaims those groups instead" \
+  "$(contains "$err" "^the run list does not hold the asking run 41999999999 yet, so no group of pull request 2734 can be shown to be older than this one and none is cancelled: the next merge-group run of this pull request cancels them when it starts\$")"
+check "it still walks the chain and answers the self-doomed half" \
+  "$(contains "$err" 'this run is not doomed$')"
 
 echo "case: the stand-in must not cancel a newer group of the same pull request"
 # `gh run list` can already hold a group created after the asking run while it still does not
-# hold the asking run itself: that is the same index lag the stand-in above exists for. Dating
-# the asking run `now` then makes the newer group look older, and the act cancels the group that
-# will land.
+# hold the asking run itself: the same index lag that leaves the asking run missing. Dating the
+# asking run `now`, as a stand-in entry in RUNS once did, then makes the newer group look older,
+# and the act cancels the group that will land.
 lagging=$(runs "$(mg_run 41874000200 2700 "$main_older" "$pr2700_new" in_progress "" 2026-11-04T19:05:10Z)")
 run_cancels started 41874000100 "$pr2700_old" "$(queue_branch 2700 "$main_older")" "$lagging" '{}'
 check "it decides rather than failing" "$(is "$status" 0)"
