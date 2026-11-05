@@ -85,8 +85,9 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 
 // resolveRoleHolders resolves the holder of every role a batch's events route to and have not
 // reached yet, once per role and every role at once, within ctx (resolveRole), and gives each
-// such role destination its forward (forwardOf). Events that are not due are resolved too: their
-// unreached role destinations hold later events back from the holder's agent subject.
+// such role destination its forward (forwardOf) and the dedupe key its copy carries, which the
+// holder the forward names decides (roleFallbackKey). Events that are not due are resolved too:
+// their unreached role destinations hold later events back from the holder's agent subject.
 func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 	var routed []string
 	seen := map[string]struct{}{}
@@ -123,9 +124,56 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 			dest := &event.destinationsOf[index]
 			if result, ok := resolved[dest.role]; ok {
 				dest.forward = forwardOf(dest.role, event.item, result.resolution, result.err, now)
+				if dest.dedupeKey == "" {
+					dest.dedupeKey = roleFallbackKey(dest.mentionKeys, dest.forward)
+				}
 			}
 		}
 	}
+}
+
+// roleFallbackKey is the dedupe key a role route's copy of a new comment carries in place of the
+// event's own (destination.dedupeKey): the key the failed mention of the session that copy
+// reaches went under, "" where the comment has no failed mention of it, which leaves the copy on
+// the event's key. keys is the comment's failed mentions by session, which only a role route
+// carries (destination.mentionKeys, mentionDeliveries.fallbackKeys), and is empty for every
+// other event.
+//
+// It is the rule a session route's copy follows (destinations.addSession), applied to the
+// session the role resolved to rather than to the one a route names: a mention's send can land
+// and its attempt still fail - a receipt timeout, whose message the listener had already
+// published - so the holder's host has the comment under that key already, and a copy keyed by
+// the event would be a second one. contracts.RoleForwardDedupeKey carries the holder's own agent
+// send key as it is and prefixes every other, so the host that claimed it drops this copy and
+// the session is shown the comment once, while a holder no mention of it reached is shown the
+// copy under a prefixed key, which is right (roleForward.forward).
+//
+// A copy kept for a role no live holder can take (roleForward.keptFor) has no holder to choose
+// by, and the same defect is one step later: the session that claims the role next is forwarded
+// the stored key, by the lane's drain or by the handover behind the keep, and both apply that
+// same rule (walkKeptRole in cmd/listener/role_keep.go, handOverKept), so a copy stored under
+// the event's key shows the comment twice to a later holder whose own mention failed. It
+// therefore carries the lowest session's failed mention, the way fallbackKeys itself picks one
+// key per session. That is safe for every other holder: a host drops only a key it has claimed
+// itself, and a key naming another session is one this holder never saw, so it is shown the
+// comment, which is right.
+func roleFallbackKey(keys map[string]string, forward *roleForward) string {
+	if forward == nil || len(keys) == 0 {
+		return ""
+	}
+	if forward.holder != "" {
+		return keys[forward.holder]
+	}
+	if forward.keptFor == "" {
+		return ""
+	}
+	lowest := ""
+	for sessionID := range keys {
+		if lowest == "" || sessionID < lowest {
+			lowest = sessionID
+		}
+	}
+	return keys[lowest]
 }
 
 // fallbackRoleForward is how a fallback copy whose destination is a role topic reaches the role's

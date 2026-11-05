@@ -248,16 +248,21 @@ func readRows(ctx context.Context, deps Deps, inFlight []string) (pending []pend
 // role route's subject is its role topic and role its role; forward is how the batch reaches the
 // role's holder (resolveRoleHolders), nil for every other destination, which is published to
 // subject itself. dedupeKey is the dedupe key this copy carries in place of the event's own
-// (envelope), "" for every destination that carries the event's: only the copy of a new comment
-// sent to a session whose mention failed sets it, to that mention's send's key
-// (destinations.addSession).
+// (envelope), "" for every destination that carries the event's: the copy of a new comment sent
+// to a session whose mention failed sets it, to that mention's send's key
+// (destinations.addSession), and so does a role route's copy of such a comment, once the holder
+// it reaches is known (resolveRoleHolders, roleFallbackKey). mentionKeys is what that choice is
+// made from: the dedupe keys of the failed mentions of the comment the event is of, by session
+// (mentionDeliveries.fallbackKeys), carried by a role route alone and nil for every other
+// destination and every other event.
 type destination struct {
-	subject   string
-	label     string
-	id        string
-	role      string
-	dedupeKey string
-	forward   *roleForward
+	subject     string
+	label       string
+	id          string
+	role        string
+	dedupeKey   string
+	mentionKeys map[string]string
+	forward     *roleForward
 }
 
 // ownerTopicKey is the destination key of an owner's topic family (destinationKey).

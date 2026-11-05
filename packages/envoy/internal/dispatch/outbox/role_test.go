@@ -892,6 +892,59 @@ func TestARoleCopyToTheHolderWhoseOwnMentionFailedCarriesTheMentionsKey(t *testi
 	}
 }
 
+// The same comment, its role claimed by nobody, is kept on that role's kept lane under the failed
+// mention's key rather than the event's: the session that claims the role next is forwarded the
+// stored key by the listener's drain or by the handover behind the keep, both of which apply
+// contracts.RoleForwardDedupeKey (walkKeptRole in cmd/listener/role_keep.go, handOverKept), so a
+// copy stored under dispatch-<event id> shows the comment a second time to a later holder whose
+// own mention of it failed, exactly as the forward under that key did. No holder is known when
+// the copy is kept, so it carries the lowest mentioned session's failed key, which is right for
+// every other holder too: a host drops only a key it claimed itself, and a key naming another
+// session is one this holder never saw, so it is shown the comment.
+func TestARoleCopyKeptForARoleNobodyHoldsCarriesTheFailedMentionsKey(t *testing.T) {
+	ctx := store.WithTransactionTracking(context.Background())
+	const role, mentioned, target = "unclaimed-mentioned", "s1", "session:s1"
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	publisher := &keepRecorder{}
+	deps := Deps{Store: database, Publisher: publisher, Broker: broker,
+		RoleClaims: unclaimedRoles, Sessions: unclaimedRoles}
+	route := "role:" + role
+	seedIssue(t, database, "T-1", &route)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	commentID := seedComment(t, database, "T-1", alice, "@s1 are you there?", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID: commentID, IssueKey: new("T-1"), Body: "@s1 are you there?", Mentions: mentionOf(mentioned),
+			},
+			SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new(mentioned),
+		},
+	})
+	seedMentionDelivery(t, database, commentID, mentioned, "failed")
+
+	holding(t, deps).scan(ctx, unfenced{})
+
+	if publishedAt(t, database, event.ID) == nil {
+		_, failure, _ := eventState(t, database, event.ID)
+		t.Fatalf("the event whose only route is the unclaimed role was not published: publish_error %v", failure)
+	}
+	kept := publisher.keeps()
+	if len(kept) != 1 {
+		t.Fatalf("the outbox made %d kept publishes, want the one copy kept for %s's next holder: %+v", len(kept), role, kept)
+	}
+	want := contracts.AgentSendDedupeKey(mentioned, model.CommentMentionIdempotencyKey(commentID, target, "steer"))
+	if kept[0].item.DedupeKey != want {
+		t.Fatalf("the copy kept for %s's next holder is keyed %q, want the failed mention's own key %q, which the holder it names drops",
+			role, kept[0].item.DedupeKey, want)
+	}
+	if kept[0].msgID != bus.KeptMsgID(want, role) {
+		t.Fatalf("the keep was made under %q, want %q, the id every writer of the lane keeps that copy under",
+			kept[0].msgID, bus.KeptMsgID(want, role))
+	}
+}
+
 // heldPendingCopy holds what one pass that reached no holder left of the copy held for
 // destination: the row unsettled and unpublished with its one attempt and its back-off, one
 // logged failure naming why the holder was not reached, and that destination counted under its

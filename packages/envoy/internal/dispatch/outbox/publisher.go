@@ -907,7 +907,11 @@ func eventDestinations(ctx context.Context, deps Deps, item *batchEvent, look lo
 }
 
 // addRoute adds the owner's route: a session route is the session's own subject, and a role route
-// its role topic, which the batch forwards to the role's holder (resolveRoleHolders).
+// its role topic, which the batch forwards to the role's holder (resolveRoleHolders). A role
+// route carries the failed mentions of a new comment, keyed by session, so that the copy it
+// forwards to that holder, or keeps for the role's next one, carries the key of the mention of
+// the session it reaches, as a session route's copy does (destination.mentionKeys,
+// roleFallbackKey).
 func addRoute(d *destinations, route *string) error {
 	if route == nil || *route == "" {
 		return nil
@@ -918,7 +922,8 @@ func addRoute(d *destinations, route *string) error {
 	}
 	switch parsed.Kind {
 	case "role":
-		d.addDestination(destination{subject: contracts.RoleTopicPrefix + parsed.ID, label: "publish route", id: *route, role: parsed.ID})
+		d.addDestination(destination{subject: contracts.RoleTopicPrefix + parsed.ID, label: "publish route", id: *route,
+			role: parsed.ID, mentionKeys: d.mentions.fallbackKeys})
 	case "session":
 		d.addSession(parsed.ID, "publish route", *route)
 	default:
@@ -1204,7 +1209,8 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 // Every destination the event reaches carries the event id and the dedupe key dispatch-<event
 // id>, so a host handed one event on several subjects shows it once - except the copy of a new
 // comment sent to a session whose mention failed, which carries that mention's dedupe key
-// instead (destinations.addSession, destination.dedupeKey).
+// instead, whether that session is a destination of its own or the holder a role route reaches
+// (destinations.addSession, roleFallbackKey, destination.dedupeKey).
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 	payload, err := json.Marshal(struct {
 		model.Event
