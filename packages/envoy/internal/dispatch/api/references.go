@@ -92,7 +92,9 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ref.Kind == "person" || ref.Kind == "session" || ref.Kind == "role" {
-		if _, ok := s.requireHuman(w, r); !ok {
+		if !s.callerHoldsScope(r, model.ScopePerson) {
+			writeError(w, "REFERENCE_FORBIDDEN", http.StatusForbidden,
+				"a person, session or role reference is read with the person scope")
 			return
 		}
 	}

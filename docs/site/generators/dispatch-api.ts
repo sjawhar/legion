@@ -17,11 +17,6 @@ const CALLERS: Record<string, { label: string; meaning: string }> = {
     label: "Agent only",
     meaning: "an agent's bearer token; a browser session is refused.",
   },
-  "own-inbox": {
-    label: "Human, own inbox only",
-    meaning:
-      "a signed-in human, reading only their own inbox; the person comes from the credential, never from a selector, and an agent's bearer token is refused.",
-  },
 };
 
 /** What each OAuth scope a route can name lets the credential holding it do (`routeScopes` in
