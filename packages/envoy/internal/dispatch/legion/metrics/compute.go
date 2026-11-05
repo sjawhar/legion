@@ -126,8 +126,8 @@ type RoleBar struct {
 // Rework is metric 3.
 type Rework struct {
 	MedianReviewRounds float64 `json:"median_review_rounds"`
-	// SentBackShare is the share of finished issues moved from testing, reviewing or accepting
-	// back to implementing at least once.
+	// SentBackShare is the share of finished issues moved from testing, reviewing, accepting or
+	// the merger's phase back to implementing at least once.
 	SentBackShare float64 `json:"sent_back_share"`
 	// HoursAfterFirstReview is the implementing and testing hours after the first review, across
 	// the finished issues, and its median per issue.
@@ -175,7 +175,7 @@ type FiledIssue struct {
 	Filer      string `json:"filer"`
 	FilerIssue string `json:"filer_issue"`
 	// FilerPhase is the phase the filer's issue was in when it filed, which the table names for
-	// an issue filed in the tree after design.
+	// every class; it is empty for a filing by the controller, which works no issue.
 	FilerPhase string `json:"filer_phase"`
 }
 
@@ -537,10 +537,14 @@ func reviewRounds(issue *Issue, timeline phaseTimeline) int {
 	return rounds
 }
 
-// sentBackOnce is "a move from `testing`, `reviewing` or `accepting` to `implementing`": off the
-// observed timeline where the sampler drew one, and off the status history before observations,
-// as the review rounds beside it are, since `needs_review` is the status of both reviewing and
-// accepting and `in_progress` the status of implementing.
+// sentBackOnce is "a move from `testing`, `reviewing`, `accepting` or the merger's phase to
+// `implementing`": off the observed timeline where the sampler drew one, and off the status
+// history before observations, as the review rounds beside it are, since `needs_review` is the
+// status of both reviewing and accepting, `retro` the status of the merger's phase and
+// `in_progress` the status of implementing. The merger's phase is three of the daemon's
+// (`retro`, `merging` and `awaiting_merge`, the three the merger's bar holds), and a red check
+// sends an issue back to implementing out of any of them, so the observed half counts all three
+// where the fallback half counts the one status that names them.
 func sentBackOnce(issue *Issue, timeline phaseTimeline) bool {
 	if !timeline.observed {
 		return statusMoved(issue, sentBackStatuses, statusImplementing)
@@ -550,7 +554,8 @@ func sentBackOnce(issue *Issue, timeline phaseTimeline) bool {
 			continue
 		}
 		switch timeline.spans[index-1].Phase {
-		case legion.PhaseTesting, legion.PhaseReviewing, legion.PhaseAccepting:
+		case legion.PhaseTesting, legion.PhaseReviewing, legion.PhaseAccepting,
+			legion.PhaseRetro, legion.PhaseMerging, legion.PhaseAwaitingMerge:
 			return true
 		}
 	}
@@ -654,6 +659,11 @@ func (c *computation) classify(filed Filed) FiledIssue {
 	if filer == nil {
 		return row
 	}
+	// "For every class, the table names the filer's phase at the filing", so the phase is read
+	// off the filer's own timeline before the class is decided, and an out-of-tree filing carries
+	// it as an in-tree one does. A filing by the controller carries none: the controller works no
+	// issue, so there is no timeline to read a phase off.
+	row.FilerPhase = tablePhase(phaseAt(c.phasesOf(filer), filed.At))
 	// The tree of a filed issue: walk up from the parent it had at its `issue.created` event,
 	// through each issue's parent as Dispatch records it, and take the top it reaches; the filer
 	// walks the same way. The new issue is in the filer's tree when both walks reach the same
@@ -664,7 +674,6 @@ func (c *computation) classify(filed Filed) FiledIssue {
 	if filed.Parent == "" || c.treeRoot(filed.Parent) != root {
 		return row
 	}
-	row.FilerPhase = tablePhase(phaseAt(c.phasesOf(filer), filed.At))
 	// "created before the filer's issue had its first implementer event": an issue whose filer
 	// never reached an implementer never passed that moment, so its filings are at design.
 	implementer, started := filer.FirstRoleEvent["implementer"]

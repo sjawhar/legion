@@ -4641,10 +4641,10 @@ export interface LegionSplittingWeek {
 
 /** One issue a Legion session created in the window: its class, the role that filed it and the
  *  issue that role was working (the controller files under no issue), and the phase that issue
- *  was in then, which the table names for an issue filed in the tree after design. The phase is
- *  named by the bar it falls on, as every table of this section names one: `design`, `planning`,
- *  `implementing`, `testing`, `reviewing`, `accepting` and `merging`, the last of which holds the
- *  daemon's `retro`, `merging` and `awaiting_merge`. */
+ *  was in then, which the table names for every class and which is empty only for a filing by
+ *  the controller. The phase is named by the bar it falls on, as every table of this section
+ *  names one: `design`, `planning`, `implementing`, `testing`, `reviewing`, `accepting` and
+ *  `merging`, the last of which holds the daemon's `retro`, `merging` and `awaiting_merge`. */
 export interface LegionFiledIssue {
   readonly key: string;
   readonly title: string;

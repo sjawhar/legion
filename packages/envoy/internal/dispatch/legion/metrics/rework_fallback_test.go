@@ -51,10 +51,11 @@ func TestReviewRoundsStillCountStatusEntriesWhenTheOnlyObservationFollowsTheClos
 }
 
 // TestASendBackIsCountedFromTheStatusHistoryBeforeObservations: "the share of issues sent back at
-// least once (a move from `testing`, `reviewing` or `accepting` to `implementing`)". Before
-// observations the Design reads those phases off the status the workflow wrote, as it does for
-// the review rounds beside them — `needs_review` is the status of both reviewing and accepting,
-// and `testing` is its own. `sentBackOnce` reads the phase timeline alone, and the event-log
+// least once (a move from `testing`, `reviewing`, `accepting` or the merger's phase to
+// `implementing`)". Before observations the Design reads those phases off the status the workflow
+// wrote, as it does for the review rounds beside them — `needs_review` is the status of both
+// reviewing and accepting, `retro` the status of the merger's phase, and `testing` is its own.
+// `sentBackOnce` reads the phase timeline alone, and the event-log
 // fallback places one span per phase in workflow order, so no fallback timeline can hold a
 // send-back: over the A2 corpus 219 of 289 finished issues record a `needs_review` →
 // `in_progress` move while only 10 showed one in the timeline.

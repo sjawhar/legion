@@ -572,6 +572,41 @@ func TestReviewRoundsAndSendBacksComeFromThePhaseTimeline(t *testing.T) {
 	}
 }
 
+// TestASendBackOutOfTheMergersPhaseIsCountedOnTheObservedTimeline: metric 3 counts "a move from
+// `testing`, `reviewing`, `accepting` or the merger's phase to `implementing`", and the merger's
+// phase is three of the daemon's - `retro`, `merging` and `awaiting_merge`. A red check in any
+// of them sends the issue back (the daemon's workflow table, TriggerChecksRed), so the observed
+// half counts it, as the status half counts the `retro` that names them.
+func TestASendBackOutOfTheMergersPhaseIsCountedOnTheObservedTimeline(t *testing.T) {
+	fromRetro := newIssue("INFRA-1").worked("implementer", hour(0)).closedAt(hour(6)).
+		observeString(legion.FieldPhase, hour(0), "implementing").
+		observeString(legion.FieldPhase, hour(1), "testing").
+		observeString(legion.FieldPhase, hour(2), "reviewing").
+		observeString(legion.FieldPhase, hour(3), "retro").
+		// The head's CI went red while the merger worked.
+		observeString(legion.FieldPhase, hour(4), "implementing").
+		observeString(legion.FieldPhase, hour(6), "done")
+	straight := newIssue("INFRA-2").worked("implementer", hour(0)).closedAt(hour(6)).
+		observeString(legion.FieldPhase, hour(0), "implementing").
+		observeString(legion.FieldPhase, hour(1), "testing").
+		observeString(legion.FieldPhase, hour(2), "reviewing").
+		observeString(legion.FieldPhase, hour(3), "retro").
+		observeString(legion.FieldPhase, hour(6), "done")
+
+	report := Compute(fixture(hour(-24), hour(24), fromRetro, straight), ScopeAll, hour(24))
+
+	for _, row := range report.Rework.Issues {
+		want := row.Key == "INFRA-1"
+		if row.SentBack != want {
+			t.Errorf("%s sent_back = %t, want %t: only the issue the red check took out of retro was sent back",
+				row.Key, row.SentBack, want)
+		}
+	}
+	if report.Rework.SentBackShare != 0.5 {
+		t.Errorf("sent-back share = %g, want 0.5", report.Rework.SentBackShare)
+	}
+}
+
 // TestBeforeObservationsReviewRoundsAreEntriesIntoNeedsReview: an issue the sampler never saw
 // counts its review rounds from the status the workflow set, and its send-back from the same
 // statuses: the move out of `needs_review` into `in_progress` at hour 3 is the reviewer asking
@@ -622,8 +657,20 @@ func TestEachClassOfFiledIssue(t *testing.T) {
 	if !reflect.DeepEqual(classOf, want) {
 		t.Fatalf("the filings are classed %v, want %v", classOf, want)
 	}
+	// "For every class, the table names the filer's phase at the filing": the in-tree filings and
+	// the one outside the tree all name it, and only the controller's, which works no issue,
+	// leaves it empty.
 	if phaseOf["INFRA-3"] != legion.PhaseImplementing {
 		t.Errorf("the later filing names the filer's phase %q, want implementing", phaseOf["INFRA-3"])
+	}
+	if phaseOf["INFRA-2"] != phaseDesign {
+		t.Errorf("the at-design filing names the filer's phase %q, want design", phaseOf["INFRA-2"])
+	}
+	if phaseOf["CORE-9"] != legion.PhaseImplementing {
+		t.Errorf("the out-of-tree filing names the filer's phase %q, want implementing", phaseOf["CORE-9"])
+	}
+	if phaseOf["INFRA-4"] != "" {
+		t.Errorf("the controller's filing names the phase %q, want none: the controller works no issue", phaseOf["INFRA-4"])
 	}
 	if len(report.Splitting.Weeks) != 1 {
 		t.Fatalf("the filings fall in %d weeks, want one", len(report.Splitting.Weeks))
