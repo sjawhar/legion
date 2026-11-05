@@ -169,3 +169,50 @@ func TestResolveBootConfigRefusesEveryAnswererShapeItCannotUse(t *testing.T) {
 		})
 	}
 }
+
+// Each place builds the client it names, identified by its endpoint's host and the model that
+// answers, and logs exactly one line naming the place and that identity and no credential: the
+// key to reading the boot of a deployment that answers questions. A deployment that configured
+// no model builds none and says so, and boots.
+func TestNewAnswererBuildsEachPlaceAndLogsTheOneLine(t *testing.T) {
+	for place, env := range map[string]map[string]string{
+		placeAnswererAzure:    azureChatEnvironment(nil),
+		placeAnswererEndpoint: endpointChatEnvironment(nil),
+	} {
+		t.Run(place, func(t *testing.T) {
+			cfg := resolveWith(t, env).Answerer
+			logged := capturedLog(t)
+			answerer, err := newAnswerer(cfg)
+			if err != nil {
+				t.Fatalf("newAnswerer: %v", err)
+			}
+			if answerer == nil {
+				t.Fatal("newAnswerer built no answerer, want the client the settings name")
+			}
+			identity := place + ":chat.example/" + cfg.Model
+			if got := answerer.Identity(); got != identity {
+				t.Errorf("Identity() = %q, want %q", got, identity)
+			}
+			want := `level=INFO msg="dispatch: answers questions with a configured text model" place=` + place + " identity=" + identity + "\n"
+			line := logged.String()
+			if !strings.HasSuffix(line, want) || strings.Count(line, "\n") != 1 {
+				t.Fatalf("logged %q, want the one line %q", line, want)
+			}
+			for _, credential := range []string{cfg.TokenFile, cfg.TenantID, cfg.ClientID, cfg.FederatedToken} {
+				if credential != "" && strings.Contains(line, credential) {
+					t.Errorf("logged %q, which names the credential %q", line, credential)
+				}
+			}
+		})
+	}
+
+	logged := capturedLog(t)
+	answerer, err := newAnswerer(resolveWith(t, nil).Answerer)
+	if err != nil || answerer != nil {
+		t.Fatalf("no DISPATCH_ANSWERER: newAnswerer = %v, %v, want no answerer and no error", answerer, err)
+	}
+	want := `level=WARN msg="dispatch: no text model configured, so this server cannot answer questions" setting=DISPATCH_ANSWERER` + "\n"
+	if line := logged.String(); !strings.HasSuffix(line, want) || strings.Count(line, "\n") != 1 {
+		t.Fatalf("logged %q, want the one line %q", line, want)
+	}
+}

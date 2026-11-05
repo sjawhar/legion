@@ -4,10 +4,12 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/sjawhar/envoy/going"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 )
 
@@ -180,4 +182,51 @@ func resolveEndpointAnswerer(env settingValues) (answererConfig, error) {
 		return answererConfig{}, errors.New("DISPATCH_CHAT_MODEL is required when DISPATCH_ANSWERER is endpoint: the model each request names")
 	}
 	return cfg, nil
+}
+
+// newAnswerer builds the answerer cfg names, or nil when the deployment configured no model
+// (DISPATCH_ANSWERER unset), which is a server that boots and says it cannot answer rather than
+// one that refuses to boot: the capability route then says no model is configured, and a
+// question asked of it is recorded and its stream carries that. It is built from settings
+// resolveAnswerer has already checked, so an error here is a shape that check missed; it calls
+// nothing and reads no token file, so a model service or a sign-in being down fails an answer
+// later, never the boot. The one line it logs names the place and the model that answers, never
+// a credential, as the embedder's does.
+func newAnswerer(cfg answererConfig) (*going.Answerer, error) {
+	if cfg.Place == "" {
+		slog.Warn("dispatch: no text model configured, so this server cannot answer questions", "setting", "DISPATCH_ANSWERER")
+		return nil, nil
+	}
+	chat := going.HTTPConfig{
+		Place:      cfg.Place,
+		Endpoint:   cfg.Endpoint,
+		APIVersion: cfg.APIVersion,
+		Model:      cfg.Model,
+		TokenFile:  cfg.TokenFile,
+	}
+	if cfg.Place == placeAnswererAzure {
+		// The chat form of Azure signs in keylessly, at the scope the settings name: an Azure
+		// resource's inference families differ in it, so it is configuration here and not
+		// embed.DefaultEntraScope.
+		tokens, err := embed.NewEntraTokenSource(embed.EntraConfig{
+			TenantID:  cfg.TenantID,
+			ClientID:  cfg.ClientID,
+			TokenFile: cfg.FederatedToken,
+			Scope:     cfg.Scope,
+		})
+		if err != nil {
+			return nil, err
+		}
+		chat.Tokens = tokens
+	}
+	client, err := going.NewHTTPClient(chat)
+	if err != nil {
+		return nil, err
+	}
+	answerer, err := going.NewAnswerer(going.AnswererConfig{Model: client, TokensPerMinute: cfg.TokensPerMinute})
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("dispatch: answers questions with a configured text model", "place", cfg.Place, "identity", answerer.Identity())
+	return answerer, nil
 }
