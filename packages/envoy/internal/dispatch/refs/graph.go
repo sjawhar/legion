@@ -42,7 +42,9 @@ type Query struct {
 	// ExcludeKinds drops edge kinds the caller never means by "referenced by": an ask's
 	// inbound `replies_to` edges are its own clarification thread, which its card renders.
 	ExcludeKinds []string
-	Since        *int64
+	// All reads sibling edge views for a named query; legacy default reads stay unchanged.
+	All   bool
+	Since *int64
 	// Through bounds a Since read at a safe horizon of the event log (events.Horizon), at or
 	// below which every event is final: event ids are not commit order, so a caller that moved
 	// its since past a returned edge's source_seq would never be shown an edge whose event
@@ -273,7 +275,10 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 		args = append(args, query.ID)
 	}
 	relation := "graph_edges"
-	if query.Kind == "person" || query.Kind == "session" || query.Kind == "role" || slices.Contains(query.Kinds, "authored_by") || slices.Contains(query.Kinds, "delivered_to") || slices.Contains(query.Kinds, "participates_in") {
+	if query.All || query.Kind == "person" || query.Kind == "session" || query.Kind == "role" ||
+		slices.Contains(query.Kinds, "duplicate_of") || slices.Contains(query.Kinds, "filed_from") ||
+		slices.Contains(query.Kinds, "authored_by") || slices.Contains(query.Kinds, "delivered_to") ||
+		slices.Contains(query.Kinds, "participates_in") {
 		relation = AllEdgesSQL
 	}
 	var arms string

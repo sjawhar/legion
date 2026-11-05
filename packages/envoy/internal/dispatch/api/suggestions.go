@@ -353,14 +353,16 @@ type relatedPick struct {
 // as a write's, and the no-write related route. It never fails and never returns nil: what it did
 // not do, it says in the result. It waits at most relatedAllowance.
 //
-// It resolves the project when the input does not name it, then starts two things at once: stage
-// 1, which picks the text's rarest words (pickRelatedTerms) and runs search's keyword query over
-// them, and, when an embedder is configured and keywords alone were not asked for, the text's
+// It resolves the project when the input does not name it, then starts three things at once:
+// stage 1, which picks the text's rarest words (pickRelatedTerms) and runs search's keyword query
+// over them; when an embedder is configured and keywords alone were not asked for, the text's
 // embedding followed by stage 2, search's meaning query, which fuses the same keyword arms with
-// the nearest vectors. Stage 2's answer within relatedMeaningAllowance is the result, searched by
-// meaning and keywords; otherwise stage 1's is, searched by keywords only, with the reason. If
-// stage 1 has not answered when the allowance ends, the check was not made, for time; if the
-// request that ran it goes away first, it was not made, cancelled.
+// the nearest vectors; and, for an issue source alone, the graph neighbourhood query
+// (startGraphRelated), which is joined before the result is returned and whose time therefore
+// comes out of nobody else's. Stage 2's answer within relatedMeaningAllowance is the result,
+// searched by meaning and keywords; otherwise stage 1's is, searched by keywords only, with the
+// reason. If stage 1 has not answered when the allowance ends, the check was not made, for time;
+// if the request that ran it goes away first, it was not made, cancelled.
 //
 // The source's own items are left out, each owner keeps its best-ranked item, open owners come
 // before done issues, and the best three are Related; the decision is the first answered ask in
@@ -433,6 +435,22 @@ func (s *server) runRelatedCheck(
 		record.project = project
 	}
 	project := record.project
+	input.project = project
+	// Join before returning so the caller never observes suggestions being mutated.
+	// This defer runs before cancel, preserving the graph stage's allowance.
+	graph := s.startGraphRelated(bounded, input)
+	defer func() {
+		if graph == nil {
+			return
+		}
+		answer := <-graph
+		if answer.err != nil {
+			slog.Warn("dispatch: graph related-item check unavailable", "error", answer.err)
+			suggestions.GraphMissing = "the graph neighbourhood query did not answer"
+			return
+		}
+		suggestions.GraphRelated = answer.items
+	}()
 	// A blank text has nothing to pick terms from; the same answer for stopwords alone comes from
 	// the picker, which tokenizes as stored vectors are built.
 	if strings.TrimSpace(input.text) == "" {

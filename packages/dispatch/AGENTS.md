@@ -29,6 +29,8 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   `GET /api/v1/me/threads` is one caller-only named query over `participates_in`: threads the person authored or answered, was recorded as mentioned in, or was addressed in, including read threads, newest actual write first.
   `user_threads` stays the indexed issue/document authorship and read-state projection; mentions, addresses and authored direct conversations can add threads beyond it.
   `GET /api/v1/me/threads/shadow` compares each cause with its source in a read-only snapshot and reports missing/unexpected counts separately from those expansions.
+- `features/issue/IssueLinks.tsx` shows the issue header's Links section from `GET /issues/{key}/links`, in the existing `GraphReferences` shape.
+  It lists outgoing typed relations, including `duplicate_of` from an explicit closing note and `filed_from` from the creation source, and refreshes when the issue's event sequence changes.
 
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/lib/timestamps.ts`'s `compareTimestamps` is how the SPA orders two server timestamps.

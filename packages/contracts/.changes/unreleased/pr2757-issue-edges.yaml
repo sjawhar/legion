@@ -1,0 +1,5 @@
+kind: Added
+body: Add optional issue filing provenance and graph-neighbourhood related issues beside the existing text suggestion response.
+time: 2026-11-04T09:01:47Z
+custom:
+  Issue: pr2757

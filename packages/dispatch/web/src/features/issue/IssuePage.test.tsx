@@ -150,6 +150,7 @@ function stubIssuePage(
   agents: Agent[] = []
 ): () => void {
   const originalGetIssue = api.getIssue;
+  const originalGetIssueLinks = api.getIssueLinks;
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListIssueAsks = api.listIssueAsks;
   const originalListIssueAskThreads = api.listIssueAskThreads;
@@ -161,6 +162,7 @@ function stubIssuePage(
   const originalListAgents = api.listAgents;
   const originalGetIssueSubscribers = api.getIssueSubscribers;
   api.getIssue = async () => nextIssue;
+  api.getIssueLinks = async () => ({ edges: [], node: { kind: "issue", id: nextIssue.key } });
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
@@ -175,6 +177,7 @@ function stubIssuePage(
   api.getIssueSubscribers = async () => subscribers;
   return () => {
     api.getIssue = originalGetIssue;
+    api.getIssueLinks = originalGetIssueLinks;
     api.getInbox = originalGetInbox;
     api.getMyState = originalGetMyState;
     api.getIssueEvents = originalGetIssueEvents;

@@ -66,6 +66,10 @@ function header(issue: Issue): { unmount: () => void } {
   // The header reads the project's repository mappings at once for an issue that resolves to
   // none, as these do; a project that maps none shows no repository item.
   const mappings = spyOn(api, "listRepoProjects").mockResolvedValue([]);
+  const links = spyOn(api, "getIssueLinks").mockResolvedValue({
+    edges: [],
+    node: { kind: "issue", id: issue.key },
+  });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <MemoryRouter>
       <QueryClientProvider client={client}>
@@ -87,6 +91,7 @@ function header(issue: Issue): { unmount: () => void } {
     unmount: () => {
       view.unmount();
       mappings.mockRestore();
+      links.mockRestore();
     },
   };
 }

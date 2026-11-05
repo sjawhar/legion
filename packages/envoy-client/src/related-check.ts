@@ -49,6 +49,14 @@ export function relatedCheckLines(
     ];
   }
   try {
+    if (suggestions.graph_missing !== undefined) {
+      lines.push(`Graph-neighbourhood check unavailable: ${suggestions.graph_missing}`);
+    }
+    for (const item of suggestions.graph_related ?? []) {
+      lines.push(
+        `Related by graph neighbourhood: ${item.key} [${item.status}] ${item.title} (shared ${item.shared.join(", ")}) → ${absoluteHref(item.href, context.configUrl)}`
+      );
+    }
     const { decision } = suggestions;
     if (decision !== undefined && decision !== null) {
       const when = decision.answered_at === undefined ? "" : ` on ${decision.answered_at}`;

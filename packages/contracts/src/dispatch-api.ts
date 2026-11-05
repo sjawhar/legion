@@ -2253,9 +2253,19 @@ export interface Suggestions {
   readonly search_note?: string;
   readonly search_query?: string;
   readonly related: WriteSuggestion[];
+  readonly graph_related?: GraphRelatedIssue[];
+  readonly graph_missing?: string;
   readonly decision?: WriteSuggestion;
   readonly missing?: string;
   readonly title_matches?: DuplicateCandidate[];
+}
+
+export interface GraphRelatedIssue {
+  readonly key: string;
+  readonly title: string;
+  readonly status: string;
+  readonly href: string;
+  readonly shared: string[];
 }
 
 /** One new decision block's related-item check in a document edit's advice
@@ -2418,6 +2428,8 @@ export type GraphEdgeKind =
   | "affects"
   | "authored_by"
   | "delivered_to"
+  | "duplicate_of"
+  | "filed_from"
   | (string & {});
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
@@ -3328,6 +3340,7 @@ export interface CreateIssueInput {
   readonly blocked_by?: string[];
   readonly external?: string;
   readonly spec?: string;
+  readonly filed_from?: string;
   readonly force?: boolean;
   readonly labels?: string[];
   readonly priority?: IssuePriority | null;

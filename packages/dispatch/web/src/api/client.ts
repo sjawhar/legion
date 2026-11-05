@@ -1452,6 +1452,10 @@ export class DispatchApiClient {
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
   }
+  getIssueLinks(key: string): Promise<GraphReferences> {
+    return this.json<GraphReferences>(`/api/v1/issues/${pathSegment(key)}/links`);
+  }
+
   /** The edges at a node; `kind` keeps those of one kind - `part_of` lists a document's blocks,
    *  which a document's read otherwise leaves out. */
   getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {

@@ -98,6 +98,7 @@ func (s *server) answerRelated(w http.ResponseWriter, r *http.Request, request r
 		project:      project,
 		text:         request.checkText(),
 		title:        request.Title,
+		source:       suggestionSource{kind: "issue"},
 		excludeIssue: request.ExcludeIssue,
 		keywordsOnly: request.KeywordsOnly,
 	}))

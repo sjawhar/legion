@@ -77,6 +77,8 @@ func TestPersonNodesListsGraphRelationsAndDoesNotWidenMessageReads(t *testing.T)
 	if len(page.Rows) != 1 || page.Rows[0].Title != "Authored first line" {
 		t.Fatalf("second page = %+v", page)
 	}
+	// The route's gate is its routeScopes row: a credential that does not act for its person is
+	// refused before the handler runs, and the same person's own token holding the scope reads.
 	for _, target := range []string{"/api/v1/people/alice/nodes", "/api/v1/people/bob/nodes"} {
 		response := sessionRequest(t, handler, http.MethodGet, target, nil)
 		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) ||

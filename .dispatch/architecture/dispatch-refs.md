@@ -11,4 +11,8 @@ Person nodes use canonical logins from `person_aliases`, and a mentioned session
 `mentiongraph.Recorded` reads those records independently of the graph; `census --mentions` compares sources active in the last 30 days, including empty source sets.
 `participates_in` runs from a person to a guarded thread root; `user_threads` remains the indexed issue/document authorship and read-state projection, expanded by recorded mentions, addresses and direct authorship without a second writer.
 `rebuild.go` reconciles reference rows including identity addresses; it restores unknown records an old build drops, and marks document blocks owed their existing reconciliation.
+Mentions, structural containment, and typed relations are derived by `graph_edges`; identity and recorded delivery by `graph_person_edges`; duplicate closure and explicit filing provenance by `graph_issue_edges`.
+`AllEdgesSQL` is their shared union for new named reads, leaving existing builds' graph reads unchanged during a rollout or rollback.
+Person nodes use canonical logins from `person_aliases`; `authored_by` identifies a person or session, and `delivered_to` identifies a recorded session or role destination.
+`rebuild.go` reconciles the citation rows the existing writers index, not person or delivery edges.
 Like the broker, the package works through a caller's transaction rather than opening a database of its own.
