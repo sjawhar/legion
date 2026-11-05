@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -412,6 +413,126 @@ func TestAWorkerLaunchIsOnItsIssuesRecordedRepository(t *testing.T) {
 	}
 	if len(asked) != 3 {
 		t.Fatalf("asked for the repositories of %v, want each launch's issue once", asked)
+	}
+}
+
+// A launch stamps `Dispatch: <KEY>` into its commits exactly where the project names its
+// repository (projects.<KEY>.commit_issue_trailer_repos): the spec carries the claim's own issue
+// key, which each runtime tells the agent as LEGION_ISSUE_TRAILER, and carries nothing for a
+// repository the project does not name or for a launch that works none. The two names are
+// compared as every repository comparison of the daemon is — without case, and through the
+// deployment's configured repository_renames — so a claim on the name a transfer moved a
+// repository away from stamps exactly as one on the name the project wrote.
+func TestASpecStampsTheIssueKeyOnlyOnARepositoryTheProjectNames(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	recorded := map[string]string{
+		"ACME-2": "acme/widgets",
+		"ACME-3": "ACME/Widgets",
+		"ACME-4": "acme/widgets-legacy",
+		"ACME-5": "acme/gadgets",
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "acme", prompts: composer, repositories: noRepositoriesView,
+		commitIssueTrailerRepos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+		renames:                 ghrepo.MustRenames(ghrepo.MustRename("acme/widgets-legacy", "acme/widgets")),
+		repository: func(_ context.Context, issue string) (ghrepo.Repository, string, error) {
+			name, recorded := recorded[issue]
+			if !recorded {
+				return ghrepo.Repository{}, "", nil
+			}
+			return ghrepo.MustParse(name), "main", nil
+		},
+	}
+	stamp := func(t *testing.T, s specs, issue string) string {
+		t.Helper()
+		token, err := claim.NewToken("acme", issue, claim.RoleImplementer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: issue, Tree: "ACME-1", Role: claim.RoleImplementer})
+		if err != nil {
+			t.Fatalf("SpawnSpec of %s: %v", issue, err)
+		}
+		return spec.IssueTrailer
+	}
+	for _, tc := range []struct{ name, issue, want string }{
+		{"the repository the project names", "ACME-2", "ACME-2"},
+		{"that repository as GitHub capitalizes it", "ACME-3", "ACME-3"},
+		{"the name a configured rename moved it away from", "ACME-4", "ACME-4"},
+		{"a repository the project does not name", "ACME-5", ""},
+		{"an issue that works no repository", "ACME-6", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stamp(t, s, tc.issue); got != tc.want {
+				t.Errorf("the launch on %s carries IssueTrailer %q, want %q", tc.issue, got, tc.want)
+			}
+		})
+	}
+	// A project that names no repository stamps nothing, whatever its launches work.
+	none := s
+	none.commitIssueTrailerRepos = nil
+	if got := stamp(t, none, "ACME-2"); got != "" {
+		t.Errorf("a project naming no repository carries IssueTrailer %q, want \"\"", got)
+	}
+	// The controller works no repository and no issue, so it stamps nothing and every runtime
+	// refuses a controller spec that says otherwise (runtime.validateControllerShape).
+	controller, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("acme"), Project: "acme", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("the controller's SpawnSpec: %v", err)
+	}
+	if controller.IssueTrailer != "" {
+		t.Errorf("the controller carries IssueTrailer %q, want \"\"", controller.IssueTrailer)
+	}
+}
+
+// The Claude lane is told the issue key by the builders every role uses. The daemon reads the
+// claim's repository alone, whatever harness the role runs and whichever runtime launches it: the
+// backend decides the process and, under Kubernetes, the plugin install (stalePluginInstall), and
+// nothing of the launch's environment. Each runtime then builds one environment for every role —
+// a pane's -e pairs (runtime/tmux's panePairs, read here through PaneVariables) and a pod's main
+// container (runtime/sandbox's mainEnvironment over issuePod.agentEnv, which that runtime's own
+// TestAPodIsToldTheIssueKeyItStampsItsCommitsWith reads) — so a Claude Code launch carries
+// LEGION_ISSUE_TRAILER exactly as an Oh My Pi one does.
+func TestAClaudeLaunchCarriesTheIssueKeyItStampsUnderEachRuntime(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	for _, runtimeName := range []string{"tmux", "kubernetes"} {
+		for _, backend := range []runtime.Backend{runtime.BackendOmp, runtime.BackendClaude} {
+			t.Run(runtimeName+"/"+string(runtime.Of(backend)), func(t *testing.T) {
+				s := specs{
+					stateDir: t.TempDir(), project: "acme", prompts: composer, repositories: noRepositoriesView,
+					runtimeName:             runtimeName,
+					commitIssueTrailerRepos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+					backend:                 func(claim.Role) runtime.Backend { return backend },
+					repository: func(context.Context, string) (ghrepo.Repository, string, error) {
+						return ghrepo.MustParse("acme/widgets"), "main", nil
+					},
+				}
+				token, err := claim.NewToken("acme", "ACME-7", claim.RoleImplementer)
+				if err != nil {
+					t.Fatal(err)
+				}
+				spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "ACME-7", Tree: "ACME-1", Role: claim.RoleImplementer})
+				if err != nil {
+					t.Fatalf("SpawnSpec: %v", err)
+				}
+				if spec.Backend != backend || spec.IssueTrailer != "ACME-7" {
+					t.Fatalf("the launch runs %q carrying IssueTrailer %q, want %q and ACME-7", spec.Backend, spec.IssueTrailer, backend)
+				}
+				variables, err := tmux.PaneVariables(spec, tmux.PaneInputs{StateDir: t.TempDir()}, nil)
+				if err != nil {
+					t.Fatalf("PaneVariables: %v", err)
+				}
+				if !slices.Contains(variables, "LEGION_ISSUE_TRAILER=ACME-7") {
+					t.Errorf("the pane is told %q, want LEGION_ISSUE_TRAILER=ACME-7 among them", variables)
+				}
+			})
+		}
 	}
 }
 
