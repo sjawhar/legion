@@ -326,14 +326,6 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 		return attempts > 0 || publishedAt(t, database, event.ID) != nil ||
 			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
 	})
-	// The counter and the log below are the publisher's, and the publisher is still running: it
-	// backs the denied event off and attempts it again, and that attempt is denied the same way
-	// and counts again, so an exact count read from a running publisher is a race - the one
-	// denial asserted here becomes two the moment the back-off fires between the read of
-	// attempt_count above and the read of /metrics below. Stopping it here holds the counter and
-	// the log still for every assertion that follows; the deferred stop() is then the no-op that
-	// covers a failure before this line (runDeps).
-	stop()
 	destinations, attempts := publishedDestinations(t, database, event.ID)
 	if at := publishedAt(t, database, event.ID); at != nil {
 		t.Fatalf("event marked published at %s with destinations %v, though NATS denied its issue topic", at, destinations)
@@ -380,8 +372,11 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	// The publisher is still running, so a count read here is the count at the moment of the read.
+	// The denial log goes in the message because the counter alone cannot say which send raised
+	// it: a count above the one asserted is one more send, and only the log names it.
 	if body := response.Body.String(); !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 1`) {
-		t.Fatalf("/metrics body = %q, want the denied publish counted once", body)
+		t.Fatalf("/metrics body = %q, want the denied publish counted once; the publisher logged:\n%s", body, logged.String())
 	}
 }
 
@@ -435,13 +430,6 @@ func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 		return attempts > 0 || publishedAt(t, database, event.ID) != nil ||
 			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
 	})
-	// The counter below is the publisher's, and the publisher is still running: it backs the
-	// denied event off and attempts it again, and that attempt denies both destinations again
-	// and counts both, so the exact count of two read from a running publisher is a race - it
-	// reads four when the back-off fires between the read of attempt_count below and the read of
-	// /metrics. Stopping it here holds the counter still for the assertions that follow; the
-	// deferred stop() is then the no-op that covers a failure before this line (runDeps).
-	stop()
 	for _, line := range strings.Split(logged.String(), "\n") {
 		if strings.Contains(line, bus.ErrUnavailable.Error()) {
 			t.Fatalf("line %q reports a denied publish as an outage of the bus", line)
@@ -460,11 +448,24 @@ func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 	response := httptest.NewRecorder()
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := response.Body.String()
+	// This read has gone red once in CI, with `denied` 4 at an attempt_count of 1: both
+	// destinations denied twice, so a second send the test never asked for. Three causes have
+	// been proposed and two are refuted. A deadline race, which would leave one destination
+	// under `unanswered` (batch.go) and `denied` at 1, cannot give 4. A back-off retry cannot
+	// either: a denied send is answered at publishAcknowledgementTimeout (5 s, bus/async.go) and
+	// the first retry waits retry.Delay(1) = 1 s, so its denials are counted no earlier than
+	// about 11 s, and that run failed at 10.32 s. The third, a batch left unrecorded when the
+	// publisher hold's deadline passes during the ack wait (settleAndRecord in publisher.go,
+	// publisherHoldOptions in lease.go), fits both numbers and is unproven. So the log goes in
+	// the messages below: a count above the one asserted is one more send, and only the log
+	// names which send it was, which is what the next occurrence needs and the last one lacked.
 	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 2`) {
-		t.Fatalf("/metrics body = %q, want both denied destinations counted as denials", body)
+		t.Fatalf("/metrics body = %q, want both denied destinations counted as denials; the publisher logged:\n%s",
+			body, logged.String())
 	}
 	if strings.Contains(body, `reason="failed"`) {
-		t.Fatalf("/metrics body = %q counts a denied destination as a failure", body)
+		t.Fatalf("/metrics body = %q counts a denied destination as a failure; the publisher logged:\n%s",
+			body, logged.String())
 	}
 }
 
@@ -530,12 +531,6 @@ func TestRunCountsADeniedSubjectOncePerRefusedMessage(t *testing.T) {
 		return (firstAttempts > 0 && secondAttempts > 0) ||
 			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
 	})
-	// The counter below is the publisher's, and the publisher is still running: it backs both
-	// denied events off and attempts them again, and each attempt is denied again and counts
-	// again, so the exact count of two read from a running publisher is a race. Stopping it here
-	// holds the counter still for the assertions that follow; the deferred stop() is then the
-	// no-op that covers a failure before this line (runDeps).
-	stop()
 	for _, line := range strings.Split(logged.String(), "\n") {
 		if strings.Contains(line, bus.ErrUnavailable.Error()) {
 			t.Fatalf("line %q reports a denied publish as an outage of the bus", line)
@@ -558,10 +553,12 @@ func TestRunCountsADeniedSubjectOncePerRefusedMessage(t *testing.T) {
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := response.Body.String()
 	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 2`) {
-		t.Fatalf("/metrics body = %q, want each refused message counted as a denial", body)
+		t.Fatalf("/metrics body = %q, want each refused message counted as a denial; the publisher logged:\n%s",
+			body, logged.String())
 	}
 	if strings.Contains(body, `reason="failed"`) {
-		t.Fatalf("/metrics body = %q counts a denied publish as a failure", body)
+		t.Fatalf("/metrics body = %q counts a denied publish as a failure; the publisher logged:\n%s",
+			body, logged.String())
 	}
 }
 
