@@ -284,6 +284,11 @@ jobs:
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              # The daemon reads the Envoy session timings (heartbeat, record lifetime, claim
+              # staleness and the listener call's attempts) through this one public package: it
+              # is a module of its own, so Go's internal rule bars it from internal/contracts,
+              # where the generated values are.
+              - 'packages/envoy/sessiontiming/*'
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
@@ -439,6 +444,10 @@ jobs:
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
               # migrations are held to, in the envoy module so both sets keep one rule.
               - 'packages/envoy/migrationid/*'
+              # The one public door onto the generated Envoy session timings the daemon's
+              # liveness and notice rules read: it sits in the envoy module because the
+              # daemon, a module of its own, cannot reach internal/contracts, where they are.
+              - 'packages/envoy/sessiontiming/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
@@ -814,7 +823,8 @@ jobs:
               # daemon-pane.go inside the daemon module in workspace mode.
               - 'packages/daemon/internal/**'
               # daemon-pane.go compiles the daemon module, which reaches these envoy packages:
-              # the migration identifier rule, and the Dispatch body check the close route and
+              # the migration identifier rule, the generated session timings the daemon reads
+              # through their one public package, and the Dispatch body check the close route and
               # the merger's READY completion make with the server's own splitter
               # (packages/envoy/dispatchbody, and the parser and contracts under it).
               - 'packages/envoy/dispatchbody/*'
@@ -824,6 +834,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/sessiontiming/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
               - 'AGENTS.md'
@@ -1318,6 +1329,7 @@ jobs:
               - 'packages/envoy/loadtest/**'
               - 'packages/envoy/migrationid/**'
               - 'packages/envoy/scripts/**'
+              - 'packages/envoy/sessiontiming/**'
               - 'packages/envoy/testnatsimages/**'
               - '.omp-pin'
               - '.bun-version'
