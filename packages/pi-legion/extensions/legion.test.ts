@@ -4247,7 +4247,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // topic, reports ready, which is when the daemon hands it the start message, so it marks the
   // start turn sent just before that report. The state it reads first is the daemon's own while
   // that daemon holds the controller's claim (internal/projection's golden), which the plugin's
-  // strict client parses. The pod carries no LEGION_CONTROLLER_START_MESSAGE, and the session
+  // client parses. The pod carries no LEGION_CONTROLLER_START_MESSAGE, and the session
   // sends no start message of its own: the daemon's delivery at ready is its one start message.
   test("a controller the daemon launched registers with its boot token, then reports ready once it holds the role", async () => {
     const markAtReady: EnvoyPluginInterface["startupTurn"][] = [];

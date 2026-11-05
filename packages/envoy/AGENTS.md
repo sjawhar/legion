@@ -2218,8 +2218,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A request while the latest version is approved returns the approval and opens nothing.
 
 - Answering an approval ask (the `person` and `approve` scopes;
-  `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`.
+  `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id, content_sha256?, content_sha256_source?}`) on the document's owner alongside `ask.answered`.
+  Each review also pins `content_sha256` of that version's stored UTF-8 bytes and `content_sha256_source`: `insert` at approval, `backfill` at boot, or both null when the version has no text; pins never change.
   `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (the `person` and `approve` scopes) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread.
+  Review, document approval and review-event reads carry both fields, and a document version read carries `sha256` of its own bytes.
   Both write their row through `docs.WriteReview`, which appends the review's event and keeps that event's sequence on the owner in the row (`artifact_reviews.event_seq`, migration 0120, in the same transaction; null for a review recorded before it).
   Migration 0120's deferred constraint trigger `artifact_reviews_event_seq` writes the same column at the commit of any transaction that inserted a review without it - the release before 0120, still serving during a rollout and again during a rollback, inserts every review naming no `event_seq` - from that transaction's own event of the review's type, document and version on the owner, which the owner's row lock keeps the newest there until the commit;
   a row `WriteReview` already sequenced is left as it is.
@@ -3434,7 +3436,8 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   The watch delivers every record as it starts, and an on-prem listener reaches production NATS only through a relay:
   there the burst trips the server's 10 s write deadline (`Slow Consumer Detected`) and holds up the replies `store.Open` waits on past their 10 s deadline, so the start fails.
 
-- A check_run or check_suite webhook writes the CI record of its commit in each pull request it names, so every check of a head writes one record, and the CI store combines concurrent observations of a record into one compare-and-swap write (`update`), and a burst of a pull request's checks costs far fewer writes than it has observations.
+- A check_run or check_suite webhook writes the CI record of its commit in each pull request it names, and, when it names none and its check suite's `head_branch` is exactly `refs/pull/<n>/head`, in pull request n, since that is the ref GitHub fetches that pull request's head by (`refs/pull/<n>/merge`, a merge queue's branch and a branch push name no pull request and still write nothing).
+  So every check of a head writes one record, and the CI store combines concurrent observations of a record into one compare-and-swap write (`update`), and a burst of a pull request's checks costs far fewer writes than it has observations.
   A write retries a lost compare-and-swap, or a transient KV error, from a fresh read for up to two seconds (`recordBudget`).
   One that runs out answers every delivery in its batch 503, which Dispatch's redelivery sweep resends, and logs one JSON line at ERROR, `ci record exceeded its retry budget`, carrying `owner`, `repo`, `number`, `sha`, `checks` (the record's checks with the batch applied, or 0 when no attempt could read the record), `attempts`, `observations` (the deliveries it answered 503) and `error` (`cistore: record exceeded CAS budget` when the last attempt lost its compare-and-swap).
   It is an ERROR because each one means GitHub was answered 503, and it is meant for an alarm on the CI-record budget to count.
@@ -4353,7 +4356,7 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   A finished Actions job on the default branch, of a run with no pull request, publishes `job.<run_id>.completed`:
   a completed `check_run` that lists no pull request, from the GitHub Actions App, whose `check_suite.head_branch` is the repository's `default_branch` and whose `details_url` names `/actions/runs/<run_id>/job/<job_id>`.
   Its payload fields are `kind: "job"`, `repo`, `run_id`, `job_id`, `name`, `status`, `conclusion`, `started_at`, `completed_at`, `head_sha` and `url` (the job's page).
-  A check run that lists a pull request goes to the CI store instead, and any other check run or suite with no pull request (a merge queue's commit, a branch push) is published nowhere.
+  A check run that lists a pull request goes to the CI store instead, as does one whose check suite is on `refs/pull/<n>/head`, and any other check run or suite with no pull request (a merge queue's commit, a branch push) is published nowhere and recorded nowhere by the listener; Dispatch's CI reconcile pass (`cmd/dispatch/README.md`, "CI reconcile") reads GitHub every 5 minutes and records the completed checks of an open pull request's head that no webhook put in its record.
 
 - Every other text a webhook payload copies from its body (a title, a ref, a path, a workflow name, a URL) is capped at 2,048 runes with a trailing `…` too (`maxEnvelopeTextRunes`;
   a comment's or review's body is cut there without one and says so in `body_truncated`), and so is every text a check run copies into the CI store (its name, URL, status, conclusion and times), so no envelope or record grows with the body it came from.

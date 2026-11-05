@@ -8075,6 +8075,66 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("doc-read names the version bytes and the approval's pin and provenance", async () => {
+    const hash = "ab".repeat(32);
+    for (const state of ["approved", "stale", "changes_requested"] as const) {
+      for (const source of ["insert", "backfill", undefined] as const) {
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          if (target.pathname === "/api/v1/issues/DSP-42") {
+            return response({
+              key: "DSP-42",
+              primary_artifact_id: "artifact-42",
+              open_asks: [],
+              artifacts: [
+                {
+                  id: "artifact-42",
+                  slug: "spec",
+                  name: "spec.md",
+                  primary: true,
+                  approval: {
+                    state,
+                    latest_version: 4,
+                    version: 3,
+                    by: { kind: "user", id: "alice" },
+                    ...(source === undefined
+                      ? {}
+                      : { content_sha256: hash, content_sha256_source: source }),
+                  },
+                },
+              ],
+            });
+          }
+          if (target.pathname === "/api/v1/artifacts/artifact-42/versions/3") {
+            return response({ markdown: "# Spec", number: 3, sha256: hash });
+          }
+          if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = await executeDispatchTool({
+          tool: "dispatch_doc_read",
+          args: { issue: "DSP-42", version: 3 },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+        expect(result.text).toContain(`Content: sha256:${hash}\nApproval:`);
+        const line = result.text.split("\n").find((row) => row.startsWith("Approval:"));
+        if (source === undefined) {
+          expect(line).not.toContain("content sha256:");
+          if (state === "approved") expect(line).toBe("Approval: approved v3 by alice");
+        } else {
+          expect(line).toEndWith(
+            `, content sha256:${hash}${source === "backfill" ? " (hashed after approval)" : ""}`
+          );
+        }
+      }
+    }
+  });
+
   test("dispatch_doc_read tells the agent when the document's approval went stale", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
