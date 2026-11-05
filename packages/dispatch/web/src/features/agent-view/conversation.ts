@@ -9,6 +9,7 @@ import {
   type AgentStreamSettingsReported,
   type AgentStreamToolResult,
   isTypableCommandName,
+  pictureSyntax,
 } from "@legion/contracts";
 import { dispatchMetadata, type KeyedMessage } from "./dispatch-marks";
 
@@ -401,19 +402,40 @@ export interface DispatchTurn {
 }
 
 /**
+ * A body and a streamed turn's text as they are compared, line by line: the pictures the body
+ * embeds taken out, each line trimmed and the empty lines dropped.
+ *
+ * A picture reaches the session as an image block beside the person's text, which the stream
+ * names in a part of its own (`[image]`), so the markdown it stood as is no line of what the
+ * session says: measured on Claude Code 2.1.310, a Legion pane answering
+ * `What colour is this picture? ![blue](dispatch://agent/<id>/artifact/i3-blue96-png@v1)` drew
+ * the person's text and that `[image]` and the stored copy beside them, the markdown having
+ * nothing in the row to match (INFRA-1026). Both sides are read the same way, so a row that does
+ * carry the markdown says its body too.
+ */
+function comparedLines(text: string): string[] {
+  return text
+    .replace(pictureSyntax(), "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+
+/**
  * Whether a streamed turn says exactly what the person wrote, so Dispatch's stored copy of that
  * message gives way to the streamed row (INFRA-1026). The turn's lines are read against the
- * body's own lines in order: each must be the body line that comes next, except a placeholder
- * line the body has no line left for, which is the stream naming what the message carried rather
- * than a word the person wrote. So a message carrying a picture, which reaches the session as the
- * person's text and the picture beside it, says its body still: the `[image]` is the stream's. A
- * body that is the bracketed word `[ack]` says itself, picture or no picture, because the body
- * has that line of its own.
+ * body's own lines in order (`comparedLines`): each must be the body line that comes next, except
+ * a placeholder line the body has no line left for, which is the stream naming what the message
+ * carried rather than a word the person wrote. So a message carrying a picture, which reaches the
+ * session as the person's text and the picture beside it, says its body still: the `[image]` is
+ * the stream's, and the markdown the person's body held is no line of either side. A body that is
+ * the bracketed word `[ack]` says itself, picture or no picture, because the body has that line
+ * of its own.
  */
 export function turnSaysBody(turn: DispatchTurn, body: string): boolean {
-  const lines = body.split("\n");
+  const lines = comparedLines(body);
   let next = 0;
-  for (const line of turn.text.split("\n")) {
+  for (const line of comparedLines(turn.text)) {
     if (line === lines[next]) next += 1;
     else if (!PLACEHOLDER_PART.test(line)) return false;
   }

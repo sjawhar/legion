@@ -802,3 +802,38 @@ test("in a Legion pane the person's message goes to the bridge's inbox and its r
     await rm(session.directory, { recursive: true, force: true })
   }
 })
+
+// A person's message that embeds a picture reaches the session as its text and the picture
+// beside it, and the row written back for it holds the text alone - measured live on a Legion
+// pane (Claude Code 2.1.310), with the picture's markdown gone from it, the picture having become
+// a block of its own. Read against the stored body as it stands, that row is recognised as no
+// message at all, so nothing records which Dispatch message it is and the Agents page draws its
+// stored copy beside it (INFRA-1026).
+test("in a Legion pane the row of a message embedding a picture is recognised without its markdown", async () => {
+  const body =
+    "What colour is this picture? ![blue](dispatch://agent/ses_claude/artifact/i3-blue96-png@v1)"
+  const lines: { content: string; blocks?: unknown; eventId?: string }[] = []
+  const mod = fakeMod({})
+  const session = await harness({
+    link: mod.link,
+    accept: () => accepted(body),
+    inbox: async (line) => {
+      lines.push(line)
+    },
+  })
+  try {
+    expect(await session.router.route(frame(personSends(body)))).toBe(true)
+    expect(lines.map((line) => line.content)).toEqual([body])
+
+    session.observe({
+      kind: "append",
+      uuid: "row-picture",
+      door: "prompt",
+      origin: { kind: "user" },
+      message: { type: "user", content: [{ type: "text", text: "What colour is this picture? " }] },
+    })
+    expect(session.state.messageOf("row-picture")).toBe(MESSAGE)
+  } finally {
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})

@@ -631,6 +631,67 @@ test("a person's message that is a bracketed word with a picture shows once", as
   ).toEqual(["[ack][image]"]);
 });
 
+/** A person's message that embeds a picture, as the session streams it back: the text the row
+ *  carries, and the `[image]` part the stream names the picture in. */
+function pictureTurn(seq: number, at: number, dispatchMessageId: string, text: string) {
+  return {
+    kind: "message",
+    message: {
+      at,
+      dispatchMessageId,
+      id: `u${at}`,
+      parts: [
+        { text, type: "text" },
+        { text: "[image]", type: "text" },
+      ],
+      role: "user",
+      streaming: false,
+    },
+    seq,
+    v: 1,
+  } as const satisfies AgentStreamFrame;
+}
+
+// A person's message whose body embeds the picture, which is what the composer writes: the
+// markdown is in the stored body and the picture reaches the session as a block of its own, which
+// the stream names `[image]`. Measured live on a Legion pane (Claude Code 2.1.310): a Send of
+// `What colour is this picture? ![blue](dispatch://agent/<id>/artifact/i3-blue96-png@v1)` drew the
+// stored copy beside the streamed row, the body's markdown having nothing in the row to match.
+// A row that carries the markdown as the person wrote it says the same body, which is how a
+// terminal session's row records it (INFRA-1026).
+test("a person's message embedding a picture shows once, with or without the markdown in the row", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  const picture = "dispatch://agent/f376a3a9-6e75-461b-806b-22dea4e83ddf/artifact/i3-blue96-png@v1";
+  renderLiveView({
+    agentState: {},
+    messages: [
+      {
+        message: message("m1", `What colour is this picture? ![blue](${picture})`),
+        replies: [],
+      },
+      {
+        message: message("m2", `And this one? ![blue](${picture})`, {
+          created_at: "2026-09-27T21:17:15Z",
+        }),
+        replies: [],
+      },
+    ],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [
+      // The row the pane streamed: the picture's markdown is gone from the text, the `[image]`
+      // part standing where it was.
+      pictureTurn(1, at, "m1", "What colour is this picture? "),
+      // The row a terminal session streams, which carries the body exactly as the person wrote it.
+      pictureTurn(2, at + 60_000, "m2", `And this one? ![blue](${picture})`),
+    ],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await waitFor(() => expect(within(thread).getAllByText("[image]")).toHaveLength(2));
+  // Two messages, two rows: each is the streamed one, which is the row carrying `[image]`.
+  expect(within(thread).getAllByTestId("agent-message-user")).toHaveLength(2);
+});
+
 // Send is the terminal's Enter: the default wherever the session takes a steer. A session that
 // advertises Aside and no Send would refuse one, so Aside is its default.
 test("the live view sends as Send by default where the session takes it, and as Aside where it does not", async () => {

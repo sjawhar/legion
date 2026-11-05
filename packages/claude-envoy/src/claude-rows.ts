@@ -1,4 +1,4 @@
-// The rows Claude Code writes for a slash command, parsed (INFRA-1026).
+// The rows Claude Code writes of its own bookkeeping, parsed (INFRA-1026).
 //
 // One command a person runs writes three rows by the `command` door - the caveat, the echo of
 // what was typed, and the output - and two readers of this plugin parse them. The live view draws
@@ -7,6 +7,10 @@
 // (`./agent-stream-claude`). The session reads the output row to answer the person who sent the
 // command, since most commands resolve `$.command.run` with no output in the result at all
 // (`./mod-session`, `runCommand`).
+//
+// A picture a person sent writes a row of the same kind: Claude Code's note of where it put the
+// bytes (`isPictureAttachmentRow`), which the live view drops as it drops the command's
+// bookkeeping.
 import type { ModContentBlock } from "../hooks/mod-protocol"
 
 /**
@@ -109,4 +113,26 @@ export function claudeCommandOutput(content: readonly ModContentBlock[]): string
 export function isCommandBookkeeping(content: readonly ModContentBlock[]): boolean {
   const text = claudeRowText(content)
   return COMMAND_BOOKKEEPING_TAGS.some((tag) => text.startsWith(tag))
+}
+
+/**
+ * The row Claude Code writes of where it put a picture's bytes: one text block holding
+ * `[Image: source: <absolute path>]` and nothing else.
+ *
+ * Measured on 2.1.310: a person's message carrying a picture reaches the session as its text and
+ * an image block, and Claude Code writes the bytes under the session's own images directory and
+ * records a companion row for them - `type: "user"`, `isMeta: true`, `turnCompanion: true`, its
+ * one text block
+ * `[Image: source: /legion/scratch/tmp/i3-k5-pane/tmp/claude-1000/-legion-scratch-tmp-i3-k5-pane-cwd/f376a3a9-6e75-461b-806b-22dea4e83ddf/images/1.png]`
+ * (`/legion/scratch/tmp/i3-k5-pane/config/projects/-legion-scratch-tmp-i3-k5-pane-cwd/f376a3a9-6e75-461b-806b-22dea4e83ddf.jsonl:123`,
+ * a Legion pane answering a picture sent from the Agents page). The path is Claude Code saying
+ * where the bytes went, not a message anybody wrote, so the row is no part of the conversation.
+ */
+const PICTURE_ATTACHMENT_ROW = /^\[Image: source: \/[^\]]+\]$/
+
+/** Whether a row is that note of Claude Code's rather than anything a person wrote
+ *  (`PICTURE_ATTACHMENT_ROW`), so the live view drops it as it drops a command's bookkeeping:
+ *  drawn, it is a second user row for the one message the person sent (INFRA-1026). */
+export function isPictureAttachmentRow(content: readonly ModContentBlock[]): boolean {
+  return PICTURE_ATTACHMENT_ROW.test(claudeRowText(content).trim())
 }

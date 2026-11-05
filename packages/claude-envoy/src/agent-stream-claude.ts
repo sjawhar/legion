@@ -30,7 +30,12 @@ import type {
   ModEffort,
   ModEvent,
 } from "../hooks/mod-protocol"
-import { claudeEchoedCommandLine, claudeRowText, isCommandBookkeeping } from "./claude-rows"
+import {
+  claudeEchoedCommandLine,
+  claudeRowText,
+  isCommandBookkeeping,
+  isPictureAttachmentRow,
+} from "./claude-rows"
 
 /** The provider every model of Claude Code's is named under, so a frame carries the same
  *  `provider/id` reference an Oh My Pi session's does (`anthropic/claude-sonnet-5`). */
@@ -336,6 +341,13 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     // The step that produced the answer already carried it, and the publisher would key this row
     // into a slot of its own: publishing both shows the viewer the same answer twice.
     if (door === "response") return
+    // Claude Code's own note of where it put a picture's bytes, which it writes beside the
+    // message that carried the picture (`./claude-rows`, `isPictureAttachmentRow`). Nobody wrote
+    // it, and published it draws a second user row for the one message the person sent: measured
+    // on 2.1.310 in a Legion pane, where a picture sent from the Agents page drew the person's
+    // row and this one beside it (INFRA-1026). Checked for every door, since the row is a
+    // companion of the prompt that carried the picture and no door of its own.
+    if (isPictureAttachmentRow(message.content)) return
     if (door === "prompt") {
       // A prompt this plugin submitted without `asUser` is not a person's message: Claude Code
       // frames it as "The claude-envoy plugin sent a message:" and the only one the server sends

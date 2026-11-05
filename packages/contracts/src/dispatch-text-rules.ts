@@ -1,11 +1,11 @@
 /**
- * Five rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
+ * Six rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
  * session id an agent's conversation is addressed by, how many UTF-8 bytes a string holds, the
- * most bytes a reference's target id may hold, the caption a picture line carries, and which
- * uploads are pictures. The Go server holds the same session-id rule (`text.IsSessionID`) and
- * target bound (`text.MaxTargetBytes`), both pinned against the TypeScript readers by
- * `DISPATCH_TEXT_REFERENCES`, and classifies an upload as a picture by the same four types, read
- * from its bytes.
+ * most bytes a reference's target id may hold, the caption a picture line carries, the syntax
+ * that line is written in, and which uploads are pictures. The Go server holds the same
+ * session-id rule (`text.IsSessionID`) and target bound (`text.MaxTargetBytes`), both pinned
+ * against the TypeScript readers by `DISPATCH_TEXT_REFERENCES`, and classifies an upload as a
+ * picture by the same four types, read from its bytes.
  */
 
 /**
@@ -69,6 +69,21 @@ export function referenceTargetFits(target: string): boolean {
  */
 export function pictureCaption(name: string): string {
   return name.replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
+}
+
+/**
+ * The syntax a picture line is written in, as a regular expression of its own:
+ * `![<caption>](<address>)` for a Dispatch address that names a version, escaped characters
+ * inside the caption, and an optional quoted title after the address. The address is the first
+ * capture group, which is how `pictureAddresses` reads the pictures a text shows; a reader that
+ * takes the markdown back out replaces every match with nothing.
+ *
+ * Each call answers a fresh regular expression, because the `g` flag `matchAll` requires and
+ * `replace` needs to reach every match carries `lastIndex` from one call to the next: one shared
+ * object would have each reader start where another left off.
+ */
+export function pictureSyntax(): RegExp {
+  return /!\[(?:\\.|[^\\\]])*\]\((dispatch:\/\/[^\s()]+@v[1-9][0-9]*)(?:\s+"(?:\\.|[^\\"])*")?\)/g;
 }
 
 /** The picture types a model is shown and the server stores as `kind: image`: what their bytes

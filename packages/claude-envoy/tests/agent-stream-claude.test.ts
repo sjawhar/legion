@@ -398,6 +398,48 @@ test("a person's message with a picture keeps the person's text as a part of its
   ])
 })
 
+// Claude Code writes a picture's bytes under the session's own images directory and records a row
+// of its own naming where they went (`../src/claude-rows`, `isPictureAttachmentRow`). Measured on
+// 2.1.310 in a Legion pane, where a picture sent from the Agents page wrote
+// `type: "user"`, `isMeta: true`, `turnCompanion: true` and that one text block beside the
+// person's row
+// (`/legion/scratch/tmp/i3-k5-pane/config/projects/-legion-scratch-tmp-i3-k5-pane-cwd/f376a3a9-6e75-461b-806b-22dea4e83ddf.jsonl:123`).
+// Recorded as it stands, it draws a second user row for the one message the person sent
+// (INFRA-1026).
+test("Claude Code's note of where it put a picture's bytes records nothing", () => {
+  const live = harness(1_000, () => "m1")
+  const source =
+    "[Image: source: /legion/scratch/tmp/i3-k5-pane/tmp/claude-1000/-legion-scratch-tmp-i3-k5-pane-cwd/f376a3a9-6e75-461b-806b-22dea4e83ddf/images/1.png]"
+  live.feed(
+    appendRow(
+      "prompt",
+      [
+        { text: "What colour is this picture?", type: "text" },
+        { source: { data: "…", type: "base64" }, type: "image" },
+      ],
+      { origin: { asUser: true, kind: "plugin" }, uuid: "row-picture" },
+    ),
+    appendRow("prompt", [{ text: source, type: "text" }], {
+      message: {
+        content: [{ text: source, type: "text" }],
+        isMeta: true,
+        role: "user",
+        type: "user",
+      },
+      origin: { kind: "user" },
+      uuid: "row-source",
+    }),
+  )
+
+  // The person's message, and nothing of where the bytes went.
+  expect(messages(live.replay()).map((message) => message.parts)).toEqual([
+    [
+      { text: "What colour is this picture?", type: "text" },
+      { text: "[image]", type: "text" },
+    ],
+  ])
+})
+
 test("a row with nothing to show records nothing, and the rows around it still publish", () => {
   const live = harness()
   live.feed(

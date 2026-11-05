@@ -19,6 +19,7 @@
 // card. The record is not skipped when the accept answers 404: that route answers 404 for a
 // transient database error too, and forgetting the attempt would let a later forged frame spend
 // it.
+import { pictureSyntax } from "@legion/contracts"
 import type { DispatchDelivery, RenderInboundResult } from "@legion/envoy-client/delivery"
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http"
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures"
@@ -158,7 +159,8 @@ export interface UserTurnRouter {
   observe(event: ModEvent): void
 }
 
-/** The text a row's content holds, so a row can be recognised by the message it carries. */
+/** The text a row's content holds, so a row can be recognised by the message it carries: its text
+ *  blocks alone, since a picture crosses as an image block that carries no text of its own. */
 function rowText(content: readonly ModContentBlock[]): string {
   const pieces: string[] = []
   for (const block of content) {
@@ -166,6 +168,29 @@ function rowText(content: readonly ModContentBlock[]): string {
     if (block.type === "text" && typeof text === "string") pieces.push(text)
   }
   return pieces.join("\n")
+}
+
+/**
+ * A row's text and a person's body as they are compared, so a row is recognised as the message it
+ * carries: the pictures the body embeds taken out, each line trimmed and the empty lines dropped.
+ *
+ * A message carrying a picture reaches the session as its text and one image block per picture
+ * (`claudeContentBlocks`), and the row it becomes holds the text alone - either as the person
+ * wrote it, markdown and all (measured on 2.1.310:
+ * `/legion/scratch/tmp/i3-k5-pane/config/projects/-legion-scratch-tmp-i3-k5-pane-cwd/f376a3a9-6e75-461b-806b-22dea4e83ddf.jsonl:121`),
+ * or with the markdown gone, as the live view measured it, since the picture is a block of its
+ * own and no longer a word of the text. Taking the markdown off both sides recognises the row
+ * either way, so the message is tagged with its Dispatch id and the page shows it once
+ * (`turnSaysBody`, `packages/dispatch/web/src/features/agent-view/conversation.ts`, reads the
+ * same rule).
+ */
+function comparableText(text: string): string {
+  return text
+    .replace(pictureSyntax(), "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .join("\n")
 }
 
 /** A delivery's content as Claude Code's own blocks: the text, and one image block per picture,
@@ -457,8 +482,8 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
       if (event.kind !== "append" || awaited.length === 0) return
       const { message } = event
       if (message.type !== "user" && message.role !== "user") return
-      const text = rowText(message.content).trim()
-      const index = awaited.findIndex((row) => row.body.trim() === text)
+      const text = comparableText(rowText(message.content))
+      const index = awaited.findIndex((row) => comparableText(row.body) === text)
       const row = awaited[index]
       if (row === undefined) return
       awaited.splice(index, 1)

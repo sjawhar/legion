@@ -2139,7 +2139,10 @@ export async function runEnvoyChannelServer(): Promise<void> {
           connection: bus,
           // Only a Claude-minted id follows `/clear`; the override names a fixed identity.
           followsSessionId: configuredValue(overrideSessionId) === undefined,
-          isPane: pane !== undefined,
+          // A pane is the session whose person messages go to the bridge's inbox, which is the
+          // same signal the router reads (`inPane`): a pane holds a daemon claim only where a
+          // daemon started it, and the row the bridge seeds is there either way.
+          isPane: inbox !== undefined,
           link,
           sessionId: identity.id,
           // The link's events have one consumer, and two things behind it need them: the
