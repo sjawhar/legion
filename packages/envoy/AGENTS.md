@@ -57,6 +57,7 @@ Each item below names a task and where its code is, then notes on it.
   This list and the Legion daemon's `repository_renames` in `legion.yaml` (`packages/daemon/internal/ghrepo/renames.go`) are two lists an operator keeps in step:
   they are separate Go modules, and the listener's pod mounts no `legion.yaml`.
   The daemon's list is read-side only and two-way, while this one is publish-side and one-way.
+  Dispatch keeps a third list of its own, `repo_projects.renamed_to`, the name a mapping's repository is called today, which an operator sets through `PUT /api/v1/settings/repo-projects/{owner}/{repo}` and every comparison Dispatch makes of a repository canonicalises through (`packages/envoy/cmd/dispatch/README.md`, migration `20261105075455_repo_projects_renamed_to`).
   A pair can be removed once no live session names the former repository in a topic, which Envoy's session list answers in one read (`GET /v1/sessions`).
 
 - **Listener behavior**: `cmd/listener/main.go`
