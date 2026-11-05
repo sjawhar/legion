@@ -393,6 +393,14 @@ type Observation struct {
 	// charging nothing, rather than count a death. It is a field rather than a shape of Detail,
 	// which is prose for an operator and nothing else.
 	Displaced bool
+	// OutOfMemory is a Gone whose pod's one container — the container every role of the issue runs
+	// in — the kubelet ended for running out of memory. The end was the pod's, not the role's work:
+	// the turn it cut off was stopped by the pod running out of memory, whatever that turn was
+	// doing, and the work that filled the pod may have been another role's. The supervisor sends
+	// the role's task again behind a note saying so. Only the Sandbox runtime reports it, since a
+	// pod is the only thing the kubelet ends this way. It is a field rather than a shape of Detail
+	// for the reason Displaced is: Detail is prose for an operator and nothing else.
+	OutOfMemory bool
 }
 
 // GitIdentity is the author a worker's commits carry.
