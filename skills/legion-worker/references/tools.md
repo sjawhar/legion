@@ -13,7 +13,10 @@ limit, and one command that fills it ends every role's turn, not only yours.
 In the pod you compile and test the packages your change touches, build the program a check of
 your issue drives (`go build ./cmd/legion`), vet the module you changed (`go vet -tags e2e ./...`,
 which compiles and runs no test), and, in a package whose tests need Postgres, run only the tests
-your change touches by name (`go test -run`).
+your change touches by name (`go test -run`). To run Go's race detector, prefix the command with
+`CGO_ENABLED=1`: `CGO_ENABLED=1 go test -race -count=1 ./internal/<package>/`. The worker image
+sets `CGO_ENABLED=0` and carries gcc (`packages/daemon/docker/worker.Dockerfile:975-976`), and Go
+refuses `-race` without cgo.
 
 A whole module's or whole package's test run goes to CI on the pull request, where a job of that
 pull request runs it: `go test ./...`, a whole Postgres-backed package such as
@@ -35,6 +38,10 @@ heavy run goes where your deployment's instructions say.
   `LEGION_E2E_PG_DSN`, which a daemon's `postgres_dsn` becomes and migrates Legion's schema into.
   Make one and point the variable at it:
   `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`.
+  The DSN's own database is owned by your login and writable, so what keeps two roles out of it is
+  this rule rather than the server. `packages/daemon/internal/daemon`'s own tests are this
+  repository's case: they hand `LEGION_TEST_PG_DSN` to a daemon that migrates whatever database it
+  is given, so two roles must not run that package at the same time.
 - The server is empty in every new pod and dies with it. Every database made from `template1`
   has pgvector.
 - `LEGION_TEST_PG_DSN` set and the connection refused: that is not yours to repair. Starting the
@@ -47,8 +54,9 @@ heavy run goes where your deployment's instructions say.
   is starting one and nothing will appear while you wait. With `legion-testpg` on `PATH`, start
   one yourself on the issue's volume: the directory it defaults to is a 1 MiB filesystem your
   role's own mounts cover, so `export LEGION_TESTPG_DIR=$XDG_DATA_HOME/testpg` first, then
-  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`
-  and `legion-testpg ensure`, which makes the cluster, the role and `vector` in `template1`. That
+  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/legion_test?sslmode=disable`
+  and `legion-testpg ensure`, which makes the cluster, the role, `vector` in `template1` and the
+  database the DSN names, owned by that role. That
   server lives in your generation: it dies when your generation ends, which takes a sibling
   role's connections and databases with it mid-test, and the next `ensure` of either role finds
   the same cluster on disk and serves it again. With no

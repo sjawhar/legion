@@ -16,7 +16,9 @@ import (
 // every role of such a pod is told, and TestPGDSN its value: a loopback server with no password,
 // whose user is a `createdb createrole nosuperuser` role of the cluster rather than its superuser,
 // so a test that reaches it can make the roles its own suite needs and still cannot run programs
-// as the server's process. TestPGDirName is the directory
+// as the server's process. The database the DSN names is that login's own, which `legion-testpg
+// ensure` creates with the login as its owner, so a test may create a schema or an extension in
+// it. TestPGDirName is the directory
 // the server's data and admin socket live in, under the roles directory, which every role's
 // namespace covers (role-init), so no role can edit the cluster's configuration and have the
 // launcher load it at the next start.
@@ -27,7 +29,7 @@ import (
 // database with it.
 const (
 	TestPGVariable = "LEGION_TEST_PG_DSN"
-	TestPGDSN      = "postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable"
+	TestPGDSN      = "postgres://legion_test@127.0.0.1:5433/legion_test?sslmode=disable"
 	TestPGDirName  = "testpg"
 	// testPGDirVariable is how the worker image's script is told where the cluster lives.
 	testPGDirVariable = "LEGION_TESTPG_DIR"

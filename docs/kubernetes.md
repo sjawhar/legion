@@ -260,7 +260,7 @@ The worker image ships that skill, so a role reads it where it works, and a tool
 
 A role whose change owes a Postgres test has one in its own pod.
 The image carries the PostgreSQL 18 server with `pgvector` beside the `psql` above
-— 18 is CI's version and Cloud SQL's — and `/usr/local/bin/legion-testpg`, whose `ensure` runs `initdb` if the data directory is empty, starts the server on loopback port 5433, and creates the DSN's login role.
+— 18 is CI's version and Cloud SQL's — and `/usr/local/bin/legion-testpg`, whose `ensure` runs `initdb` if the data directory is empty, starts the server on loopback port 5433, and creates the DSN's login role and the database the DSN names, owned by that role.
 
 A deployment turns it on with `runtime.kubernetes.test_postgres: true`, a key of its own beside `pod` rather than inside it.
 Then:

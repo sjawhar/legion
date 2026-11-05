@@ -963,8 +963,9 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # killed instead would leave its shutdown checkpoint running and the `rm -rf` below would race it.
 # An issue pod's launcher runs the same command, so a build whose server package, extension or
 # script no longer works fails here rather than at every role's start in every pod. The DSN is the
-# one the runtime sets for every role: a loopback host, no password, and legion_test, the
-# non-superuser role `ensure` creates, not the cluster's own superuser.
+# one the runtime sets for every role: a loopback host, no password, and legion_test for both the
+# login and the database — the non-superuser role `ensure` creates, not the cluster's own
+# superuser, and the database `ensure` creates with that role as its owner.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
@@ -987,7 +988,7 @@ RUN set -eu; \
     flock --version; \
     psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; \
     legion-testpg check; \
-    probe_dsn='postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable'; \
+    probe_dsn='postgres://legion_test@127.0.0.1:5433/legion_test?sslmode=disable'; \
     LEGION_TESTPG_DIR="$scratch/testpg" LEGION_TEST_PG_DSN="$probe_dsn" legion-testpg ensure; \
     psql -X -q "$probe_dsn" -c 'create database probe'; \
     psql -X -tAq 'postgres://legion_test@127.0.0.1:5433/probe?sslmode=disable' -c "select extname from pg_extension where extname = 'vector'" | grep -qx vector; \
