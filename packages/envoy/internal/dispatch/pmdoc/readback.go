@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"slices"
 	"sort"
-	"strings"
 )
 
 // skip names what a comparison leaves aside: the attributes it names, or all of them, and with
@@ -126,30 +125,28 @@ func newMisread(before, after *Node, spanCells int) (string, error) {
 
 // documentMisread names how doc, a whole document a write makes, reads back otherwise, or is ""
 // when it does not: every block that reads back otherwise is the write's, the first named as far
-// down as its markdown still pairs (misreads), and a doc whose markdown the parser refuses is named
-// by that refusal. Only a refusal (ErrSchema) is a verdict; any other error is the error. It
-// answers the read-back it judged as well, which is the zero value where it made none, so a write
-// that stores that rendering shares the one parse of it (WrittenReadBack).
-func documentMisread(doc *Node) (WrittenReadBack, string, error) {
-	read, err := readBackWritten(doc, maxSpanCells)
+// down as its markdown still pairs (misreads). A doc whose markdown no reader of this package
+// reads at all is that parser's own refusal instead, answered as refused, which refuseMisread
+// turns into ErrRenderingRefused. Only a refusal (ErrSchema) is a verdict; any other error is the
+// error. It answers the read-back it judged as well, which is the zero value where it made none,
+// so a write that stores that rendering shares the one parse of it (WrittenReadBack).
+func documentMisread(doc *Node) (read WrittenReadBack, misread string, refused error, err error) {
+	read, err = readBackWritten(doc, maxSpanCells)
 	if err != nil {
 		if errors.Is(err, ErrSchema) {
-			// The rendering cannot be read at all, so the refusal that names the shape is what
-			// the caller is told, rather than the sentence about reading back otherwise: the
-			// shape is what its author can act on (ErrRenderingRefused).
-			return WrittenReadBack{}, "", fmt.Errorf("%w: %s", ErrRenderingRefused, strings.TrimPrefix(err.Error(), ErrSchema.Error()+": "))
+			return WrittenReadBack{}, "", err, nil
 		}
-		return WrittenReadBack{}, "", err
+		return WrittenReadBack{}, "", nil, err
 	}
 	written := asWritten(doc)
 	difference := readDifference(written, read.Tree, skip{})
 	if difference == "" {
-		return read, "", nil
+		return read, "", nil, nil
 	}
 	if found := misreads(written, read.Tree, skip{}); len(found) > 0 {
-		return read, found[0].reason, nil
+		return read, found[0].reason, nil, nil
 	}
-	return read, difference, nil
+	return read, difference, nil, nil
 }
 
 // RefuseMisreadDocument refuses (ErrSchema) a whole document a write makes, a spec, an upload or a
@@ -157,11 +154,11 @@ func documentMisread(doc *Node) (WrittenReadBack, string, error) {
 // document, an insert, whose result reads back otherwise where before did not (NewMisread). What
 // is stored is the rendering, which the next read would give back as another document or refuse.
 // The rules that read a shape refuse what they know first, so a refusal here names a shape none of
-// them reads, and is logged. Any other error reading it back, a panic (ErrPanic) among them, is
-// the error.
+// them reads, and every one of them is logged. Any other error reading it back, a panic (ErrPanic)
+// among them, is the error.
 func RefuseMisreadDocument(doc *Node) error {
-	_, misread, err := documentMisread(doc)
-	return refuseMisread(misread, err)
+	_, misread, refused, err := documentMisread(doc)
+	return refuseMisread(misread, refused, err)
 }
 
 // RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument. It reads both
@@ -175,25 +172,31 @@ func RefuseMisreadDocument(doc *Node) error {
 // the tables hold, and its parse pads the rows a span leaves short on the read-back's own budget
 // (ParseRendering).
 func RefuseMisreadWrite(before, after *Node) error {
-	return refuseMisread(newMisread(before, after, 0))
+	misread, err := newMisread(before, after, 0)
+	return refuseMisread(misread, nil, err)
 }
 
 // ErrRenderingRefused is the refusal of a document whose own rendering no reader of this package
-// reads at all: the markdown a write would store is outside the schema, and the refusal it wraps
-// names the shape. A caller that answers such a write with a reason of its own tests for this as
-// it tests for ErrMisreadRendering.
-var ErrRenderingRefused = fmt.Errorf("%w: the markdown the document would be stored as cannot be read back", ErrSchema)
+// reads at all. It wraps that reader's own refusal, which names the shape and carries ErrSchema,
+// so a caller tests for either with errors.Is.
+var ErrRenderingRefused = errors.New("the markdown the document would be stored as cannot be read back")
 
-// ErrMisreadRendering is the refusal of a document whose own rendering reads back otherwise. A
-// caller that answers such a write with a reason of its own (docs' ask rules) tests for this
-// rather than for the sentence below.
+// ErrMisreadRendering is the refusal of a document whose own rendering reads back as another
+// document. A caller that answers such a write with a reason of its own (docs' ask rules) tests
+// for this and for ErrRenderingRefused rather than for either sentence.
 var ErrMisreadRendering = fmt.Errorf("%w: the markdown the document would be stored as reads back otherwise", ErrSchema)
 
-func refuseMisread(misread string, err error) error {
-	if err != nil {
+// refuseMisread is the one place either refusal is built: refused is the rendering's own refusal
+// where no reader read it, misread how it reads back otherwise where one did, and err anything
+// else, which is the error. Each refusal is logged.
+func refuseMisread(misread string, refused, err error) error {
+	switch {
+	case err != nil:
 		return err
-	}
-	if misread == "" {
+	case refused != nil:
+		slog.Warn("pmdoc: refused a write whose markdown cannot be read back", "refusal", refused)
+		return fmt.Errorf("%w: %w", ErrRenderingRefused, refused)
+	case misread == "":
 		return nil
 	}
 	slog.Warn("pmdoc: refused a write whose markdown reads back otherwise", "misread", misread)

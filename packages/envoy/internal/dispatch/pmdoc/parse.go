@@ -162,8 +162,8 @@ func ParseWritten(markdown string, live *Node) (*Node, WrittenReadBack, error) {
 	if err != nil {
 		return nil, WrittenReadBack{}, err
 	}
-	read, misread, err := documentMisread(doc)
-	if err := refuseMisread(misread, err); err != nil {
+	read, misread, refused, err := documentMisread(doc)
+	if err := refuseMisread(misread, refused, err); err != nil {
 		return nil, WrittenReadBack{}, err
 	}
 	return doc, read, nil

@@ -44,7 +44,9 @@ for path in "${corpora[@]}"; do
 done
 echo "corpus: $(wc -l < "$corpus") documents in $out" >&2
 
-# One test binary per revision, each built with the head's copy of the harness.
+# One test binary per revision. The base is built with the head's copy of the reading
+# (differential_test.go) and its own of everything else, the judgment (differential_gate_test.go)
+# included, which runs in the head's binary alone and names what the head holds.
 build() { # <name> <rev or empty for the working tree>
   local tree=$pmdoc
   if [ -n "$2" ]; then
@@ -97,7 +99,7 @@ for side in base head; do
   pids+=($!)
 done
 waitAll "${pids[@]}"
-PMDOC_DIFF_ENGINE=$out/engine.jsonl PMDOC_DIFF_BASE=$out/base.jsonl PMDOC_DIFF_HEAD=$out/head.jsonl \
+PMDOC_DIFF_CORPUS=$corpus PMDOC_DIFF_ENGINE=$out/engine.jsonl PMDOC_DIFF_BASE=$out/base.jsonl PMDOC_DIFF_HEAD=$out/head.jsonl \
   PMDOC_DIFF_BASE_ENGINE=$out/base-engine.jsonl PMDOC_DIFF_HEAD_ENGINE=$out/head-engine.jsonl \
   PMDOC_DIFF_REPORT=$out/report.jsonl \
   "$out/head.test" -test.run '^TestDifferentialCompare$' -test.count=1 -test.timeout=0

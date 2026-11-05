@@ -93,13 +93,16 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 		})
 	}
 	// A block shape of bare exits: a quoted typed block whose last line holds the quote's marker
-	// alone, ended by a paragraph outside the quote, repeated. Each such block ends where its
-	// content did, which puts its exits into the stream before the events of the lines already
-	// read; writing them in one by one moved the stream and walked every line's marks per block,
-	// which is quadratic in the blocks (7.7 s for 4,000 of them in a mebibyte, against main's
-	// 0.15 s), and the inserts are collected and written once now (insertEvents, writeInserts).
+	// alone, then the blank lines that make the cost show. Each such block ends where its content
+	// did, which puts its exits into the stream before the events of the lines already read;
+	// writing them in one by one moved the stream and walked every line's marks per block, so the
+	// cost was the blocks times the lines, and the inserts are collected and written once now
+	// (insertEvents, writeInserts). The unit is one block and 200 blank lines, so the blocks and
+	// the lines grow together and a mebibyte of them stays under MaxDocumentElements: the write is
+	// accepted at every size here, and any refusal - of the elements above all, which would stop
+	// the read before the cost - fails the case rather than passing it.
 	{
-		repeat := "> :::callout{#c%d kind=\"note\" title=\"T\"}\n>\nb\n"
+		repeat := "> :::callout{#c%d kind=\"note\" title=\"T\"}\n>\nb\n" + strings.Repeat("\n", 200)
 		unit := len(fmt.Sprintf(repeat, 1000))
 		full := parseFullTarget / unit
 		small := full / growthStep
@@ -112,7 +115,7 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 				}
 				body := text.String()
 				return cpuTimeOf(again(func() {
-					if _, err := ParseForWrite(body, nil); err != nil && !refusedForItsMarks(err) && !errors.Is(err, ErrSchema) {
+					if _, err := ParseForWrite(body, nil); err != nil {
 						t.Fatalf("%s at %d bytes: %v", name, size, err)
 					}
 				}))

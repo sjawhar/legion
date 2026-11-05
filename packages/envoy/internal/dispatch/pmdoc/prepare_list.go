@@ -4,7 +4,6 @@ import (
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
 	"slices"
-	"sort"
 )
 
 // This file ports the two upstream functions that decide a list's and a list item's spread in the
@@ -364,18 +363,17 @@ func (m *lineMachine) run() []spreadEvent {
 		lazyEnd = continued != len(m.stack)
 	}
 	last := len(m.lines.starts) - 1
-	switch {
-	case m.exitsATypedBlock(0) && lazyEnd && m.typedIsLazy(0, continued) && last >= 0 && m.bare[last]:
+	// A typed block whose last line held nothing of its own but the containers' markers read that
+	// line as no line of the block, so its content ends before the line, with the containers
+	// inside it (directive-container.ts, exitsOfAnUnclosedDirectiveContainer with `bare`, and
+	// contentEnd). That is the same placement whether the source ends with a line ending, where
+	// the block's own continuation did not reach the end (typedIsLazy), or with none, where the
+	// flow takes the end of the document, no continuation runs and nothing is lazy.
+	bareEnd := last >= 0 && m.bare[last] && m.exitsATypedBlock(0) &&
+		(!m.endsInLineEnding || lazyEnd && m.typedIsLazy(0, continued))
+	if bareEnd {
 		m.exitBare(0, last)
-	case !m.endsInLineEnding && last >= 0 && m.bare[last] && m.exitsATypedBlock(0):
-		// A source that ends with no line ending ends in the flow, which reads the end of the
-		// document rather than another line, so no continuation runs there and nothing is lazy.
-		// Where its last line held nothing of the block but the containers' own prefixes, the
-		// block read that line as no line of its own just as it does mid-document, so its
-		// content ends before the line (directive-container.ts,
-		// exitsOfAnUnclosedDirectiveContainer with `bare`, and contentEnd).
-		m.exitBare(0, last)
-	default:
+	} else {
 		m.exit(0, lazyEnd, continued)
 	}
 	m.writeInserts()
@@ -580,7 +578,9 @@ func (m *lineMachine) insertEvents(index int, added []spreadEvent) {
 }
 
 // writeInserts rebuilds the stream with every recorded insert in place, each before the event it
-// names and, where several name one event, in the order they were recorded.
+// names and, where several name one event, the one recorded last first: the stream had them that
+// way, since the second insert named the event the first now stands before, and exitBare's own
+// order (its block's exit, then the containers inside it) depends on it.
 func (m *lineMachine) writeInserts() {
 	if len(m.inserts) == 0 {
 		return
@@ -589,10 +589,8 @@ func (m *lineMachine) writeInserts() {
 	for _, insert := range m.inserts {
 		added += len(insert.events)
 	}
-	// Two inserts before one event stand in the order the stream had them: the second insert
-	// named the event the first now stands before, so it goes ahead of it.
 	slices.Reverse(m.inserts)
-	sort.SliceStable(m.inserts, func(left, right int) bool { return m.inserts[left].at < m.inserts[right].at })
+	slices.SortStableFunc(m.inserts, func(left, right eventInsert) int { return left.at - right.at })
 	out := make([]spreadEvent, 0, len(m.events)+added)
 	next := 0
 	for index := range m.events {

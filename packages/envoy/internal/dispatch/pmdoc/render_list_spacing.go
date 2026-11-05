@@ -38,7 +38,8 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 
 // blanksAfterDefinitionItem is how many blank lines follow item, in a list in a quote, where it
 // ends in a footnote definition, before next, the next item or the block after the list: those
-// lines are the definition's (blanksEndingQuotedList), so an item spread by none of its own
+// lines are the definition's, as the reader's port reads them (the footnote definition's
+// continuation in lineMachine.continueContainer, read by readSpreads), so an item spread by none of its own
 // lines takes what spreads it (definitionSpreadBlanks), and none spreads the list. Otherwise it
 // takes none before a quote, a list or a definition and before the next item, and one before
 // anything else, which would continue the definition's paragraph - except after a definition
@@ -61,7 +62,8 @@ func (r *renderer) definitionEndsItem(item *Node) bool {
 
 // definitionSpreadBlanks is how many blank lines after a footnote definition in a quote spread the
 // list item holding it, before next, as the browser editor's parser counts them there, where they
-// are the definition's (blanksEndingQuotedList, blanksEndingQuotedList): one before a quote, a
+// are the definition's (lineMachine.continueContainer's definition continuation, read by
+// readSpreads): one before a quote, a
 // list or a definition, and two before anything else, the next item and the quote's end included.
 func definitionSpreadBlanks(next *Node) int {
 	if next != nil && quoteListOrDefinition(next) {
@@ -178,7 +180,7 @@ func spacedAfter(list *Node, quoted bool) *Node {
 		return spacedAfter(inner, quoted)
 	case quoted && inner.Type == "footnote_definition":
 		// The blank lines after an item ending in a footnote definition are the definition's,
-		// and spread the item (blanksEndingQuotedList).
+		// and spread the item (readSpreads, prepare_list.go).
 		return last
 	case quoted:
 		return list

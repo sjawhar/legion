@@ -421,8 +421,8 @@ It returns before any read-back, so a table-row insert is not read back, and it 
 a row inserted under an aligned column is stored without alignment and reads back with the column's, and a row whose cells the upload path refuses for reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
 Every other insert is spliced and read back on the document it leaves against the one it started from, as an accept is (`400 INVALID_OP` on `markdown`), but with the tables' colspans and rowspans unwritten:
 it runs once for each insert of a batch, and an insert, written between document-level blocks, changes no table, so each span reads back the same on both.
-The reading rules refuse every shape they know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a
-write whose markdown reads back otherwise`).
+The reading rules refuse every shape they know first, so this refusal names one none of them reads, and each is logged:
+`pmdoc: refused a write whose markdown reads back otherwise` where the rendering reads back as another document (`pmdoc.ErrMisreadRendering`), and `pmdoc: refused a write whose markdown cannot be read back` where no reader reads the rendering at all, which answers that reader's own refusal and the shape it names (`pmdoc.ErrRenderingRefused`).
 Wherever a check reads a write back - here, and in an accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchema`) is a verdict;
 any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and answers `500`.
 A tree a browser edit makes is not checked, so its rendering can still fail to read back when it is uploaded again.
