@@ -3047,14 +3047,15 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_go_race_docs == 'true'
     runs-on: ubuntu-24.04
-    # The step's -timeout 23m must fire before the runner cancels the job, so a hung test prints
-    # the dump that names it. Both numbers come from this job's own first green run, 126963048179
-    # at e3afd07c: 794 s in the package, and 87 s of checkout, setup and compile before it. The
-    # step's deadline is the smallest whole minute at which that package time is at most 60 % of
-    # it, and this limit is six minutes above that, which leaves the setup its 1.5 minutes and
-    # four more. Measure again before changing either: a package that has grown past 60 % of its
-    # deadline is a deadline to raise, not a flake to re-run.
-    timeout-minutes: 29
+    # The step's -timeout 26m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it. Both numbers come from this job's own green runs at this head, the
+    # slower of them 127053239518: 927 s in the package, against 798 s in 127015089405, and 55 s
+    # of checkout, setup and compile before either. The step's deadline is the smallest whole
+    # minute at which the slower package time is at most 60 % of it, and this limit is six
+    # minutes above that. Measure again before changing either, and from the slowest run rather
+    # than the newest: a package that has grown past 60 % of its deadline is a deadline to
+    # raise, not a flake to re-run.
+    timeout-minutes: 32
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3100,7 +3101,7 @@ jobs:
       # and the count of services the tests left alive is the half of this job that no detector
       # of Go's reports.
       - name: Test the document service under the cleanup detector
-        run: GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 23m ./internal/dispatch/docs/
+        run: GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 26m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
