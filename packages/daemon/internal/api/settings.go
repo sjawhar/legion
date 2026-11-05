@@ -53,12 +53,16 @@ type Settings struct {
 	ProbeIntervalSeconds          int `json:"probe_interval_seconds"`
 	ControllerWakeIntervalSeconds int `json:"controller_wake_interval_seconds"`
 	// The counts.
-	WorkerBootRegistrationDeadlineIntervals int      `json:"worker_boot_registration_deadline_intervals"`
-	LaunchFailureLimit                      int      `json:"launch_failure_limit"`
-	PromptFailureLimit                      int      `json:"prompt_failure_limit"`
-	PromptRetireLimit                       int      `json:"prompt_retire_limit"`
-	EnvoyURL                                string   `json:"envoy_url"`
-	NatsURLs                                []string `json:"nats_urls"`
+	WorkerBootRegistrationDeadlineIntervals int `json:"worker_boot_registration_deadline_intervals"`
+	LaunchFailureLimit                      int `json:"launch_failure_limit"`
+	PromptFailureLimit                      int `json:"prompt_failure_limit"`
+	PromptRetireLimit                       int `json:"prompt_retire_limit"`
+	// The wake pacing: at most WorkerWakesPerMinute wakes a minute in bursts of WorkerWakeBurst,
+	// a rate of 0 being the pacing off.
+	WorkerWakesPerMinute int      `json:"worker_wakes_per_minute"`
+	WorkerWakeBurst      int      `json:"worker_wake_burst"`
+	EnvoyURL             string   `json:"envoy_url"`
+	NatsURLs             []string `json:"nats_urls"`
 	// DispatchURL is absent while the file sets none.
 	DispatchURL string `json:"dispatch_url,omitempty"`
 	// Projects is `{}` while the file declares none.
@@ -280,6 +284,8 @@ func SettingsOf(cfg config.Config) Settings {
 		LaunchFailureLimit:                      cfg.LaunchFailureLimit,
 		PromptFailureLimit:                      cfg.PromptFailureLimit,
 		PromptRetireLimit:                       cfg.PromptRetireLimit,
+		WorkerWakesPerMinute:                    cfg.WorkerWakesPerMinute,
+		WorkerWakeBurst:                         cfg.WorkerWakeBurst,
 		EnvoyURL:                                endpointOf(cfg.EnvoyURL),
 		NatsURLs:                                make([]string, len(cfg.NatsURLs)),
 		DispatchURL:                             endpointOf(cfg.DispatchURL),

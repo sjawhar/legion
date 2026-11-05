@@ -61,6 +61,8 @@ controller_wake_interval_seconds: 1800
 launch_failure_limit: 4
 prompt_failure_limit: 5
 prompt_retire_limit: 3
+worker_wakes_per_minute: 12
+worker_wake_burst: 2
 operator_token_file: /var/run/legion/OPERATOR_TOKEN
 envoy_url: http://legion:fixture-envoy-password@envoy-listener.internal.example:9020
 nats_urls: [nats://legion:fixture-nats-password@nats.internal.example:4222, nats://nats-2.internal.example:4222]

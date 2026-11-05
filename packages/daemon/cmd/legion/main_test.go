@@ -773,6 +773,11 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 	for _, variant := range []struct{ extra, drop, says string }{
 		{extra: "worker_cap: 3\n", says: "worker_cap"},
 		{extra: "admission_cap: 0\n", says: "admission_cap"},
+		{extra: "worker_wakes_per_minute: -1\n", says: "worker_wakes_per_minute"},
+		{extra: "worker_wakes_per_minute: 2.5\n", says: "worker_wakes_per_minute"},
+		{extra: "worker_wake_burst: 0\n", says: "worker_wake_burst"},
+		{extra: "worker_wake_burst: -1\n", says: "worker_wake_burst"},
+		{extra: "worker_wake_burst: 2.5\n", says: "worker_wake_burst"},
 		{extra: "gates: { design: sometimes }\n", says: "gates.design"},
 		{extra: "envoy_url: not a url\n", says: "envoy_url"},
 		{drop: "dispatch_token_file: ./dispatch-token\n", says: "dispatch_token_file is required when dispatch_url is configured"},

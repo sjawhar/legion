@@ -115,6 +115,8 @@ func defaultsFor(port int) Config {
 		LaunchFailureLimit:                      3,
 		PromptFailureLimit:                      3,
 		PromptRetireLimit:                       2,
+		WorkerWakesPerMinute:                    8,
+		WorkerWakeBurst:                         1,
 		EnvoyURL:                                "http://127.0.0.1:9020",
 		NatsURLs:                                []string{"nats://127.0.0.1:4222"},
 		DispatchURL:                             "http://127.0.0.1:8080",
@@ -178,6 +180,8 @@ controller_wake_interval_seconds: 900
 launch_failure_limit: 5
 prompt_failure_limit: 6
 prompt_retire_limit: 7
+worker_wakes_per_minute: 12
+worker_wake_burst: 3
 operator_token_file: tokens/OPERATOR_TOKEN
 envoy_url: http://127.0.0.1:19020
 nats_urls: [nats://127.0.0.1:4222, nats://127.0.0.1:4223, nats://127.0.0.1:4222]
@@ -213,6 +217,8 @@ nats_nkey_seed_file: secrets/legion-pane.nk
 	want.LaunchFailureLimit = 5
 	want.PromptFailureLimit = 6
 	want.PromptRetireLimit = 7
+	want.WorkerWakesPerMinute = 12
+	want.WorkerWakeBurst = 3
 	want.OperatorTokenFile = filepath.Join(dir, "tokens/OPERATOR_TOKEN")
 	want.EnvoyURL = "http://127.0.0.1:19020"
 	// A set, as the shipped `readStringArray` makes it (config.ts): the repeat is dropped, first
@@ -1289,6 +1295,41 @@ func TestLoadReadsAdmissionCapFromTheEnvironment(t *testing.T) {
 	}
 }
 
+// A rate of 0 turns the pacing off, so it is the one wake pacing value the loader takes at zero:
+// the burst is how many wakes may leave at once, and a burst of none would release nothing.
+func TestLoadAcceptsAWakeRateOfZero(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, minimalFile+"worker_wakes_per_minute: 0\n"), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkerWakesPerMinute != 0 {
+		t.Errorf("WorkerWakesPerMinute = %d, want 0: the file turns the pacing off", cfg.WorkerWakesPerMinute)
+	}
+}
+
+// Every refused wake pacing value names its own key, which is what an operator reading
+// `legion start --check-config` needs: which of the two the daemon would not take. The assertion
+// is on the key's name rather than the sentence, so rewording a refusal is no test change.
+func TestLoadRefusesAWakePacingValueNamingItsKey(t *testing.T) {
+	for _, tc := range []struct{ name, line, key string }{
+		{"a rate below zero", "worker_wakes_per_minute: -1", "worker_wakes_per_minute"},
+		{"a rate that is not a whole number", "worker_wakes_per_minute: 2.5", "worker_wakes_per_minute"},
+		{"a burst of zero", "worker_wake_burst: 0", "worker_wake_burst"},
+		{"a burst below zero", "worker_wake_burst: -1", "worker_wake_burst"},
+		{"a burst that is not a whole number", "worker_wake_burst: 2.5", "worker_wake_burst"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, minimalFile+tc.line+"\n"), noEnv)
+			if err == nil {
+				t.Fatalf("Load succeeded, want a refusal naming %s", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("Load error = %q, want it to name %s", err.Error(), tc.key)
+			}
+		})
+	}
+}
+
 func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1311,8 +1352,8 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 }
 
 // Every top-level key of the earlier schema (38 keys, nats_daemon_nkey_seed_file among them since
-// #1494) plus the new postgres_dsn, and the class it is in. No shipped key may fall through to the
-// typo refusal, and none is accepted without being modelled.
+// #1494) plus the new postgres_dsn and the wake pacing's two keys, and the class it is in. No
+// shipped key may fall through to the typo refusal, and none is accepted without being modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
 		modelled  = "modelled"
@@ -1356,6 +1397,8 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "nats_daemon_nkey_seed_file", line: "nats_daemon_nkey_seed_file: /var/run/legion/NATS_DAEMON_NKEY_SEED", class: modelled},
 		{key: "nats_urls", line: "nats_urls: [nats://127.0.0.1:4222]", class: modelled},
 		{key: "operator_token_file", line: "operator_token_file: /var/run/legion/OPERATOR_TOKEN", class: modelled},
+		{key: "worker_wakes_per_minute", line: "worker_wakes_per_minute: 8", class: modelled},
+		{key: "worker_wake_burst", line: "worker_wake_burst: 1", class: modelled},
 
 		{key: "dispatch_url", line: "dispatch_url: https://dispatch.example", class: modelled},
 		{key: "dispatch_token_file", line: "dispatch_token_file: /var/run/legion/DISPATCH_TOKEN", class: modelled},

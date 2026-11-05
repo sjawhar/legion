@@ -508,6 +508,8 @@
     "launch_failure_limit": 4,
     "prompt_failure_limit": 5,
     "prompt_retire_limit": 3,
+    "worker_wakes_per_minute": 12,
+    "worker_wake_burst": 2,
     "envoy_url": "http://xxxxx@envoy-listener.internal.example:9020",
     "nats_urls": [
       "nats://xxxxx@nats.internal.example:4222",
