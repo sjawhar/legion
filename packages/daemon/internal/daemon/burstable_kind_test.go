@@ -140,6 +140,10 @@ func burstableLiveRuntime(ctx context.Context, cfg config.Config, rc *rest.Confi
 		rendered := ghconfig.Render("ghs_placeholder", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
 		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
+	// The stand-in bundle holds the launch's own owner and no other, so the proof's project
+	// serves none of its own: every pod it makes projects what it was launched with, and no pod
+	// has drifted from an owner the daemon serves (sandbox's movedGhOwners).
+	opts.GitHubOwners = func() []string { return nil }
 	opts.Mapped = func() []ghrepo.Repository { return []ghrepo.Repository{burstableLiveRepository} }
 	opts.Agent = burstableLiveStub
 	rt, err := sandbox.New(ctx, rc, opts)
@@ -199,7 +203,7 @@ func TestTheBurstableKindProofBuildsItsRuntimesFromItsConfigurations(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := writeBurstableLiveConfig(t, filepath.Join(dir, tc.name), tc.project, "192.0.2.10",
-				"ghcr.io/sjawhar/legion-worker@sha256:"+strings.Repeat("a", 64), kubeconfig, "test", tc.resources)
+				"ghcr.io/cybermonklabs/legion-worker@sha256:"+strings.Repeat("a", 64), kubeconfig, "test", tc.resources)
 			cfg, err := config.LoadForValidation(path, nil)
 			if err != nil {
 				t.Fatalf("load %s: %v", path, err)

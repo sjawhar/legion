@@ -36,7 +36,7 @@ related_issues:
 `skills/legion-controller/SKILL.md`'s pull-request row (`gh pr view <url> …`) and its take step
 (`dispatch issue-update … --label <each current label>`) were written at LEGION-668's first head,
 the round in which the controller's session first held the review App's full token. Reviewer
-round 1 (thread https://github.com/sjawhar/legion/pull/1878#discussion_r4236735170) and round 2
-(https://github.com/sjawhar/legion/pull/1878#discussion_r4236923447), fixed in 1b7ab7b123bc and
+round 1 (thread https://github.com/cybermonklabs/legion/pull/1878#discussion_r4236735170) and round 2
+(https://github.com/cybermonklabs/legion/pull/1878#discussion_r4236923447), fixed in 1b7ab7b123bc and
 0b6fa13ed103; the negative controls (unquoting either turns the guard red) are in the tester's
 `E2E` line at 4adda6ba.

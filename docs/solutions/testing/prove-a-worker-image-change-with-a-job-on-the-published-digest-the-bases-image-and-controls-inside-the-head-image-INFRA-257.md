@@ -30,7 +30,7 @@ and PATH, and it can carry a sidecar, such as Postgres for a suite.
   `automountServiceAccountToken: false`. Read the namespace's build admission before the first
   run; `kubectl create --dry-run=server` reports a refusal without running anything. Put scratch
   on an `emptyDir` and point `TMPDIR`, `GOCACHE` and `GOMODCACHE` at it.
-- **Pin by digest, then check it:** name the image as `ghcr.io/sjawhar/legion-worker@sha256:…`,
+- **Pin by digest, then check it:** name the image as `ghcr.io/cybermonklabs/legion-worker@sha256:…`,
   taken from the `Worker Image` run's `Record digest` step. Require the pod's
   `status.containerStatuses[0].imageID` to name that digest.
 - **One script for every image:** each check prints `CHECK <name>: got [x] want [y]`, and the

@@ -21,8 +21,31 @@ export interface ActorOrigin {
   readonly session_title?: string;
 }
 
+/** The OAuth scopes a Dispatch credential can hold, mirroring Go's `model.ScopePerson` and
+ *  `model.ScopeApprove` and the `agent_tokens.scopes` check that stores them: `person` acts as
+ *  the credential's own person on every route a person reaches through the dashboard, and
+ *  `approve` settles what a person settles — a document review, the answer of an approval ask, a
+ *  machine-login decision or revoke, and minting, changing or revoking a personal token. A
+ *  credential holding `approve` holds `person` too. */
+export const DISPATCH_SCOPES = ["person", "approve"] as const;
+export type DispatchScope = (typeof DISPATCH_SCOPES)[number];
+
+/** The agent that made an act for the person it acts for: the session a broker-issued token
+ *  proved, and the personal token presented, by id and name. It is absent wherever the person
+ *  acted themselves, which is every act made at a browser.
+ *
+ *  `scopes` is the set that credential held at the act, recorded with it and never read back
+ *  from the token: a person who narrows a token afterwards narrows what it may do next, and
+ *  does not un-approve what it approved while it held `approve`. */
+export interface ActorAct {
+  readonly session?: string;
+  readonly token_id?: string;
+  readonly token_name?: string;
+  readonly scopes?: DispatchScope[];
+}
+
 export type Actor =
-  | { readonly kind: "user"; readonly id: string }
+  | { readonly kind: "user"; readonly id: string; readonly act?: ActorAct }
   | {
       readonly kind: "session";
       readonly id: string;
@@ -70,6 +93,9 @@ export interface AgentToken {
   readonly id: string;
   readonly name: string;
   readonly prefix: string;
+  /** The OAuth scopes the token holds (`DISPATCH_SCOPES`). A token holding `approve` holds
+   *  `person` too; `[]` is a token that acts as nobody. */
+  readonly scopes: DispatchScope[];
   readonly created_at: string;
   readonly last_used_at: string | null;
   readonly revoked_at: string | null;
@@ -77,6 +103,59 @@ export interface AgentToken {
 
 export interface CreatedAgentToken extends AgentToken {
   readonly token: string;
+}
+
+/** `POST /api/v1/me/agent-tokens`: the new token's name, and the scopes it is to hold. Omitting
+ *  `scopes` gives it the set the minting credential holds itself; `[]` gives it none. A scope the
+ *  minter does not hold is 403 OAUTH_SCOPE_REQUIRED, and `approve` without `person` is 400
+ *  TOKEN_SCOPES_INPUT. The answer is the one time the token's plaintext is shown. */
+export interface CreateAgentTokenInput {
+  readonly name: string;
+  readonly scopes?: DispatchScope[];
+}
+
+/** `PATCH /api/v1/me/agent-tokens/{id}`: the whole set the token is to hold, with the mint's
+ *  refusals. It is required, since it replaces the set rather than adding to it. */
+export interface UpdateAgentTokenScopesInput {
+  readonly scopes: DispatchScope[];
+}
+
+/** What a credential request's kind is, as the secrets broker names it: a secret an agent asked
+ *  its person for, or a machine login a launcher asked to enrol. */
+export type CredentialRequestKind = "agent_secret" | "launcher_credential";
+
+/** A credential request's two possibly-differing session ids, read independently by the broker:
+ *  `request` is the id the request itself stated (an unsigned override in its body at create
+ *  time), `enrollment` is the id its requesting enrollment stated when it enrolled. Either is
+ *  null when that id was never set; a machine login (`launcher_credential`, which has no request
+ *  row and no requesting enrollment) always answers both null. Optional so an older broker's
+ *  response, with no `session` field at all, resolves the same as a request that names neither
+ *  id. */
+export interface CredentialSession {
+  readonly request: string | null;
+  readonly enrollment: string | null;
+}
+
+/** One row of `GET /api/v1/credential-requests?approver=me`: a request the caller may decide,
+ *  as the dashboard's Inbox and `dispatch inbox` both read it. */
+export interface CredentialPendingRow {
+  readonly record_id: string;
+  readonly kind: CredentialRequestKind;
+  /** Secret rule keys, or `[hostname]` for a `launcher_credential`. */
+  readonly identifiers: string[];
+  /** RFC3339. */
+  readonly requested_at: string;
+  readonly session?: CredentialSession;
+  /** An `agent_secret` row's page on the secrets broker, where a person signed in to the broker
+   *  decides it (`<BROKER_PUBLIC_URL>/approve/<record>`). Absent on a machine login's row, and on
+   *  every row from a broker older than that page. */
+  readonly approve_url?: string;
+}
+
+/** `GET /api/v1/credential-requests?approver=me`, which answers null where the deployment has no
+ *  secrets broker. */
+export interface CredentialPendingResponse {
+  readonly pending: CredentialPendingRow[];
 }
 
 export interface Anchor {
@@ -1261,6 +1340,9 @@ export interface AskAnswer {
   readonly selected: string[];
   readonly text: string | null;
   readonly at: string;
+  /** The agent that answered for the person `user` names, absent where the person answered
+   *  themselves. Whether the answer can carry an approval is read from its `scopes`. */
+  readonly act?: ActorAct;
 }
 
 export interface AskResolution {
@@ -3203,15 +3285,22 @@ export interface ListUsersResponse {
  *  session the credential itself proved, which only an access token the secrets broker issued
  *  does, and `project` the one project key that credential lets the caller write, null where it
  *  names none. Both are absent from a Dispatch older than broker-issued tokens, which a client
- *  reads as an older build rather than as null. */
+ *  reads as an older build rather than as null.
+ *
+ *  `scopes` is the OAuth scopes the caller's own credential holds, which decide the routes it may
+ *  call: both of them for a person at a browser, the set its row names for a personal token, and
+ *  `[]` for the shared token and a verified service token, which act as nobody. The kind stays
+ *  `agent` for a personal token holding `person`, because the kind names the credential and not
+ *  the act; the person it acts for is `owner`. */
 export type WhoamiResponse =
-  | { readonly kind: "user"; readonly login: string }
+  | { readonly kind: "user"; readonly login: string; readonly scopes: DispatchScope[] }
   | {
       readonly kind: "agent";
       readonly owner: string | null;
       readonly service: string | null;
       readonly session?: string | null;
       readonly project?: string | null;
+      readonly scopes: DispatchScope[];
     };
 
 export interface CreateAskInput {

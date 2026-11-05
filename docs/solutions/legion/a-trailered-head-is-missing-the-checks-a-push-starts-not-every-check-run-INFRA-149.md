@@ -47,9 +47,9 @@ docs/solutions/legion/a-base-with-no-required-check-makes-the-ci-verdict-a-hand-
 ## Evidence
 
 sjawhar/legion#2121 sat `MERGEABLE`/`BLOCKED` at head `917c49e9`. Read on 2026-10-24:
-`gh api repos/sjawhar/legion/commits/917c49e9 --jq '[.files[].filename]'` returns exactly
+`gh api repos/cybermonklabs/legion/commits/917c49e9 --jq '[.files[].filename]'` returns exactly
 `[".legion/INFRA-83/review.json"]`, its commit message ends with `skip-checks: true`, and
-`gh api repos/sjawhar/legion/commits/917c49e9/check-runs` returns two completed, successful
+`gh api repos/cybermonklabs/legion/commits/917c49e9/check-runs` returns two completed, successful
 `pr-title` runs and nothing else. `lint`, `typecheck` and `test` — the other three main requires —
 are absent. Counting runs says "two checks, both green"; counting the required set says "three of
 four never ran", which is the fact.

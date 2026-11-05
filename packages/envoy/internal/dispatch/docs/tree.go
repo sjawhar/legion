@@ -226,25 +226,25 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 // it stands, read inside that transaction, which holds the document's lock, and reports whether it
 // changed the tree; only a changed tree is written. A repair computed on a tree read before the
 // transaction and written back would revert whatever another writer wrote after that read
-// (LEGION-479). It returns the tree as the transaction left it and whether edit changed it.
-func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, bool, error) {
+// (LEGION-479). It returns the tree as the transaction left it; whether the transaction changed the
+// document is the update ygo emits for it, or its absence.
+func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, error) {
 	fragment := doc.GetXmlFragment(fragmentName)
 	var live *pmdoc.Node
-	changed := false
 	err := doc.TransactE(func(transaction *crdt.Transaction) error {
 		var readErr error
 		if live, readErr = treeOfTransaction(transaction, fragment); readErr != nil {
 			return readErr
 		}
-		if changed = edit(live); !changed {
+		if !edit(live) {
 			return nil
 		}
 		return pmdoc.Update(transaction, fragment, live)
 	}, origin)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return live, changed, nil
+	return live, nil
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {
@@ -371,11 +371,10 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return newCappedDocumentCopy(maxUpdateItems, options...)
 }
 
-// newCappedDocumentCopy builds every copy that replays a document's stored or room updates, and
-// is the one place a copy is built: at the pending queue of the instance the decode runs for -
-// PgVersioned.maxPendingItems or Service.maxPendingItems, both maxUpdateItems in production and
-// lowered only by a test (shrinkPendingItems) - so a copy decodes what that instance decodes and
-// no more, and refuses what it would refuse. See maxUpdateItems for what those caps hold.
+// newCappedDocumentCopy builds a fresh document for replay at the instance's pending-queue cap:
+// a copy of its room decodes what that instance decodes and refuses what it would refuse. The
+// cap follows the instance (newRoomServer, loadTree, replica); other callers use newDocumentCopy.
+// See maxUpdateItems for the production and protocol caps.
 //
 // Every copy replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each
 // remote apply that changes formatted text with a commit of its own: every update a copy applies
@@ -387,6 +386,11 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))...)
 }
+
+// emptyUpdateV1 is the V1 encoding of no structs and no delete ranges. ygo logs it beside Parked
+// for a commit that kept only parked bytes, and calls no OnUpdate for that commit
+// (crdt.LoggedUpdate).
+var emptyUpdateV1 = crdt.EncodeStateAsUpdateV1(crdt.New(), nil)
 
 // forkTreeCounts counts the trees read off a write transaction's fork, and the reads that taking
 // the write's rendering in place of one avoided, so a test can assert that a write reads its fork
