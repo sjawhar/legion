@@ -117,11 +117,14 @@ func newHarness(t *testing.T) *harness {
 	return &harness{t: t, webhook: webhook, client: client, state: state, database: database, limits: limits, logs: &lockedBuffer{}, clock: c}
 }
 
-// openState opens the sweep's state bucket on a NATS server of the test's own, since the package's
-// TestMain is storetest.Main and not testnats.Main (main_test.go).
+// openState opens the sweep's state bucket on the package's shared NATS server, in a JetStream
+// account no other test holds (testnats.URL): the bucket's name is the production one for every
+// test, and an account of its own is what keeps one test's bucket out of another's reach. The
+// package's TestMain runs both harnesses so this server is shut down after the tests
+// (main_test.go).
 func openState(tb testing.TB) bus.KeyValue {
 	tb.Helper()
-	_, natsURL := testnats.Start(tb)
+	natsURL := testnats.URL(tb)
 	nc, err := natsgo.Connect(natsURL)
 	if err != nil {
 		tb.Fatalf("connect NATS: %v", err)

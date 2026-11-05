@@ -34,6 +34,9 @@ func capBody(t *testing.T) string {
 // the server's maximum payload would be recorded as delivered and reach no agent session at all,
 // silently. The cap is counted in UTF-16 units and the payload in bytes, so this holds the widest
 // body the cap allows (capBody) against the server's 1 MiB default.
+//
+// Serial: it swaps process-wide state, the nkey seed grantedNATS puts in the environment
+// (docs/testing.md).
 func TestRunDeliversACommentBodyAtTheCapThroughNATS(t *testing.T) {
 	database := storetest.Open(t)
 	client, subscriber, _ := grantedNATS(t, "notifications.dispatch.>", "_INBOX.>", "$JS.API.>")

@@ -206,6 +206,7 @@ func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", tc.route)
@@ -389,6 +390,7 @@ func TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions(t *
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", tc.route)
@@ -483,6 +485,7 @@ func TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTo
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", tc.route)
@@ -625,6 +628,7 @@ func TestALaterEventReachesNoSessionTheFailedRecipientReadOfAnEarlierOneMissedBe
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", nil)
@@ -888,6 +892,7 @@ func TestAnEventBehindAnotherThatIsNotDueIsHeldOnlyOnTheKeysTheOtherCouldStillOw
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", tc.route)
@@ -994,6 +999,7 @@ func TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed(t *testing.T) 
 	}
 
 	t.Run("the stop cancels the recipient queries", func(t *testing.T) {
+		t.Parallel()
 		database := storetest.Open(t)
 		broker := events.NewBroker()
 		seedIssue(t, database, "T-1", nil)
@@ -1023,6 +1029,7 @@ func TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed(t *testing.T) 
 	// batch has no send of it to lose: the read the stop cancelled is what releases it
 	// (batchEvent.resolveLost), rather than backing it off.
 	t.Run("the stop cancels the recipient query of an event with nothing else to send", func(t *testing.T) {
+		t.Parallel()
 		database := storetest.Open(t)
 		broker := events.NewBroker()
 		seedIssue(t, database, "T-1", nil)
@@ -1050,6 +1057,7 @@ func TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed(t *testing.T) 
 	})
 
 	t.Run("the query fails in the store and the stop comes before the answers", func(t *testing.T) {
+		t.Parallel()
 		database := storetest.Open(t)
 		broker := events.NewBroker()
 		seedIssue(t, database, "T-1", nil)

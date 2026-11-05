@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // answered is a channel already holding err, the outcome of a test publisher that answers each
@@ -425,6 +426,7 @@ func TestRunRoutesAskEventsToEveryFollowerRegardlessOfNotify(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", nil)
@@ -490,6 +492,7 @@ func TestAddAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) 
 	t.Parallel()
 	for _, eventType := range []string{"ask.follower_added", "ask.follower_removed"} {
 		t.Run(eventType, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
 			event := model.Event{
@@ -550,6 +553,7 @@ func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
 			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
@@ -1179,6 +1183,7 @@ func TestRunRoutesAskResolutionToTheAskerAndHumanResolutionToTheRoute(t *testing
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			route := "role:legion-controller-x"
@@ -1222,6 +1227,7 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 		{"session", "session:5a660655-04ad-4ce0-8a9b-93dd03c412b7", "notifications.agent.5a660655-04ad-4ce0-8a9b-93dd03c412b7"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", &tc.route)
@@ -1431,6 +1437,7 @@ func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
 	// a targeted message is quiet either way - the session it names already had it through the
 	// synchronous listener send, so the issue's followers are not shown it a second time.
 	t.Run("a targeted message the outbox scanned out of Postgres", func(t *testing.T) {
+		t.Parallel()
 		database := storetest.Open(t)
 		broker := events.NewBroker()
 		seedIssue(t, database, "T-1", nil)
@@ -1879,7 +1886,11 @@ func publishedAt(t *testing.T, database *store.Store, eventID int64) *time.Time 
 	return value
 }
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// TestMain gives the package both harnesses: storetest.Main runs the tests and drops the databases
+// it clones, and testnats.MainWith shuts down the one NATS server the tests that need no server of
+// their own share (newRoleRig and its kin). A test that stops, freezes or reconfigures its server
+// still starts one of its own (testnats.Start).
+func TestMain(m *testing.M) { os.Exit(testnats.MainWith(m, storetest.Main)) }
 
 func waitFor(t *testing.T, timeout time.Duration, what string, condition func() bool) {
 	t.Helper()

@@ -218,6 +218,7 @@ func keptRoleEvent(t *testing.T, key, role string) (*store.Store, *events.Broker
 // agent subject. The copy is the envelope as its sender sent it, on its own role topic and under
 // its own dedupe key, which is what the drain's forward to the next holder reads.
 func TestARoleRouteToAnUnheldRoleIsKeptForTheRolesNextHolder(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role = "kept-unclaimed"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
@@ -251,6 +252,7 @@ func TestARoleRouteToAnUnheldRoleIsKeptForTheRolesNextHolder(t *testing.T) {
 // same Nats-Msg-Id (bus.KeptMsgID, the dedupe key and the role), so the stream holds one copy of
 // it however often the outbox retries: the role's next holder is handed the message once.
 func TestAKeptRoleRouteRetriedAfterALostAcknowledgementIsKeptOnce(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role = "kept-retried"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
@@ -289,6 +291,7 @@ func TestAKeptRoleRouteRetriedAfterALostAcknowledgementIsKeptOnce(t *testing.T) 
 // role route unrecorded, and the outbox's own retry keeps it: nothing of the message is lost to a
 // keep NATS did not take.
 func TestAKeptRoleRouteWhoseKeepFailedStaysPendingAndIsKeptOnTheRetry(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role = "kept-failed"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
@@ -326,6 +329,7 @@ func TestAKeptRoleRouteWhoseKeepFailedStaysPendingAndIsKeptOnTheRetry(t *testing
 // its claim and writes no new one, so a copy kept for it would wait for a claim that never comes.
 // The event stays pending with the error it had before the kept lane, and nothing is kept.
 func TestARoleRouteWhoseClaimTheGraceRetainedErrsWithNothingKept(t *testing.T) {
+	t.Parallel()
 	const role = "kept-retained"
 	database, broker, event := keptRoleEvent(t, "T-1", role)
 	publisher := &keepRecorder{}
@@ -352,6 +356,7 @@ func TestARoleRouteWhoseClaimTheGraceRetainedErrsWithNothingKept(t *testing.T) {
 // begins with the hyphen model.ParseRoute allows and roles.Valid refuses - so the two patterns
 // are not one, and this is the token a route can carry to a role nobody may ever hold.
 func TestARoleTokenNoClaimCanNameIsSkippedWithNothingKept(t *testing.T) {
+	t.Parallel()
 	const role = "-reviewer"
 	database, broker, event := keptRoleEvent(t, "T-1", role)
 	publisher := &keepRecorder{}
@@ -391,6 +396,7 @@ func TestARoleTokenNoClaimCanNameIsSkippedWithNothingKept(t *testing.T) {
 // publishes (cmd/listener/role_keep.go, keepRoleMessage). The two writers' copies of one message
 // therefore carry one id, and the stream stores it once.
 func TestAKeptRoleRouteIsPublishedOnTheRolesKeptLaneUnderTheKeptMsgID(t *testing.T) {
+	t.Parallel()
 	const role = "kept-named"
 	database, broker, event := keptRoleEvent(t, "T-1", role)
 	publisher := &keepRecorder{}
@@ -456,6 +462,7 @@ func handedNow(t *testing.T, recv *receiver, what string) contracts.Envelope {
 // the copy can reach the holder, and the holder takes exactly one copy of it: the forward goes
 // under the id the drain's own forward would carry, which is what collapses the two.
 func TestACopyKeptForARoleClaimedUnderTheKeepReachesThatHolderBeforeTheIssuesNextEvent(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "kept-claimed-under-the-keep", "ses_claimed_under_the_keep"
 	const key = "T-1"
@@ -545,6 +552,7 @@ func TestACopyKeptForARoleClaimedUnderTheKeepReachesThatHolderBeforeTheIssuesNex
 // read on the lane itself: both copies in the order a drain hands them over, the earlier first,
 // and nothing taken by the holder or stored on its agent subject.
 func TestACopyKeptForARoleClaimedUnderTheKeepWaitsBehindTheCopiesOnItsLane(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "kept-behind-older-copies", "ses_claimed_behind_older_copies"
 	const key = "T-1"
@@ -610,6 +618,7 @@ func TestACopyKeptForARoleClaimedUnderTheKeepWaitsBehindTheCopiesOnItsLane(t *te
 // Nothing sweeps and nothing drains here - no listener runs in this test - so the two handovers
 // are the only way either copy can reach the holder.
 func TestTwoCopiesKeptForOneRoleClaimedUnderTheFirstKeepReachTheHolderInOrder(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "kept-twice-under-one-claim", "ses_claimed_under_the_first_keep"
 	const key = "T-1"
@@ -684,6 +693,7 @@ func TestTwoCopiesKeptForOneRoleClaimedUnderTheFirstKeepReachTheHolderInOrder(t 
 // left is read on the lane itself: both copies in the order a drain hands them over, and nothing
 // taken by the holder that claimed the role second.
 func TestASecondCopyKeptForARoleIsNotHandedToAHolderTheFirstDidNotReach(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role = "kept-twice-across-two-claims"
 	const firstHolder, secondHolder = "ses_claimed_under_the_first_keep", "ses_claimed_under_the_second_keep"

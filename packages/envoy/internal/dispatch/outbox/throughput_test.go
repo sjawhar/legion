@@ -347,8 +347,7 @@ type throughputRig struct {
 
 func newThroughputRig(t *testing.T, rtt time.Duration) *throughputRig {
 	t.Helper()
-	server, url := testnats.Start(t)
-	_ = server
+	url := testnats.URL(t)
 	proxied := testnats.StartProxy(t, url, testnats.ProxyLatency(rtt)).URL()
 	client, err := bus.ConnectOwningStream([]string{proxied})
 	if err != nil {
@@ -427,6 +426,10 @@ func (r *throughputRig) roleArrivals() []int64 {
 // the batches queue on is the same whatever the load seeds; and the burst's second latency read
 // the same single-issue serialization at another round trip. The backlog is well under
 // 2*batchSize, so a scan still reads more than one batch of some owners while it drains.
+//
+// Serial: it measures the process. It holds the outbox to a rate and to an arrival order under a
+// fixed round trip, and every parallel test's CPU and Postgres work counts against both
+// (docs/testing.md).
 func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	const (
 		backlogIssues = 20
@@ -598,13 +601,21 @@ func runOutbox(t *testing.T, database *store.Store, client *bus.Client, broker *
 // production resolves them on the publisher's own.
 func runOutboxThrough(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker) func() {
 	t.Helper()
-	_, stop := runningOutbox(t, database, client, publisher, broker)
+	_, stop := runningOutbox(t, database, client, publisher, broker, Timings{})
+	return stop
+}
+
+// runOutboxTimed is runOutbox with timings in place of production's waits, for a test that would
+// otherwise sit one of them out. Every zero field of timings is still production's (Timings).
+func runOutboxTimed(t *testing.T, database *store.Store, client *bus.Client, broker *events.Broker, timings Timings) func() {
+	t.Helper()
+	_, stop := runningOutbox(t, database, client, client, broker, timings)
 	return stop
 }
 
 // runningOutbox is runOutboxThrough with the Outbox itself, for a test that reads its state - an
 // outbox that gave the publisher hold up is one that stopped publishing (Publishing).
-func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker) (*Outbox, func()) {
+func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker, timings Timings) (*Outbox, func()) {
 	t.Helper()
 	pool, err := database.Pool.Outbox()
 	if err != nil {
@@ -612,7 +623,7 @@ func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publ
 	}
 	holders := roles.NewBuckets(client)
 	outbox := New(Deps{Store: &store.Store{Pool: pool}, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener,
-		RoleClaims: holders, Sessions: holders})
+		RoleClaims: holders, Sessions: holders, Timings: timings})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { outbox.Run(ctx); close(done) }()

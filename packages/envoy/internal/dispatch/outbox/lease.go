@@ -48,6 +48,72 @@ const (
 // process that is killed is replaced by a standby within 6 s of its last renewal.
 var publisherHoldOptions = duty.HoldOptions{TTL: 6 * time.Second, Renew: 2 * time.Second, Margin: 2 * time.Second}
 
+// Timings are the waits the outbox's own code makes: the publisher hold's parameters, the grace a
+// holder gives a NATS connection that is down, the bounds of a probe, a record and a role
+// holder's receipt, and the back-off schedule a failed event waits out. Every zero field takes
+// the production default the constants above spell, which is what cmd/dispatch leaves them all.
+//
+// They are fields of Deps rather than constants read from the code because a test that proves
+// what the outbox does after one of these waits would otherwise wait production's seconds out.
+// Each test shortens them on the Deps of an outbox of its own, so no test changes a duration
+// another test reads (docs/testing.md, "A test that calls t.Parallel()"); the test that pins
+// these defaults to the values above is TestTheOutboxTakesProductionsTimings.
+type Timings struct {
+	// Hold is the publisher hold's TTL, renewal period and loss margin (publisherHoldOptions).
+	Hold duty.HoldOptions
+	// NATSLossGrace, ProbeTimeout and HoldRetry are the constants of those names.
+	NATSLossGrace time.Duration
+	ProbeTimeout  time.Duration
+	HoldRetry     time.Duration
+	// RecordTimeout bounds a batch's record and the hold's release (recordTimeout).
+	RecordTimeout time.Duration
+	// MentionPendingDelay is how long an event whose copy waits on a mention's delivery is held
+	// back for (mentionPendingDelay).
+	MentionPendingDelay time.Duration
+	// RoleReceiptTimeout bounds the wait for a role holder's answer to a forward
+	// (roleReceiptTimeout).
+	RoleReceiptTimeout time.Duration
+	// Backoff is how long an event whose attempts now count attempts waits before it is read
+	// again, and how long a failed scan waits before the next one (retry.Delay). A test that
+	// proves the schedule itself reads retry.Delay and leaves this nil.
+	Backoff func(attempts int) time.Duration
+}
+
+// defaults is t with every zero field set to production's value.
+func (t Timings) defaults() Timings {
+	if t.Hold.TTL == 0 {
+		t.Hold.TTL = publisherHoldOptions.TTL
+	}
+	if t.Hold.Renew == 0 {
+		t.Hold.Renew = publisherHoldOptions.Renew
+	}
+	if t.Hold.Margin == 0 {
+		t.Hold.Margin = publisherHoldOptions.Margin
+	}
+	if t.NATSLossGrace == 0 {
+		t.NATSLossGrace = natsLossGrace
+	}
+	if t.ProbeTimeout == 0 {
+		t.ProbeTimeout = probeTimeout
+	}
+	if t.HoldRetry == 0 {
+		t.HoldRetry = holdRetry
+	}
+	if t.RecordTimeout == 0 {
+		t.RecordTimeout = recordTimeout
+	}
+	if t.MentionPendingDelay == 0 {
+		t.MentionPendingDelay = mentionPendingDelay
+	}
+	if t.RoleReceiptTimeout == 0 {
+		t.RoleReceiptTimeout = roleReceiptTimeout
+	}
+	if t.Backoff == nil {
+		t.Backoff = retry.Delay
+	}
+	return t
+}
+
 // holdEnd is why a holder stopped publishing.
 type holdEnd string
 
@@ -248,7 +314,7 @@ func (o *Outbox) standby(ctx context.Context) *duty.Hold {
 		var lapse *time.Timer
 		var lapsed <-chan time.Time
 		if o.deps.Publisher.Connected() {
-			wait := holdRetry
+			wait := o.deps.timings().HoldRetry
 			if o.answering() {
 				var hold *duty.Hold
 				hold, wait = o.tryHold(ctx)
@@ -282,7 +348,7 @@ func (o *Outbox) answering() bool {
 	if !o.probeBeforeHold {
 		return true
 	}
-	if err := o.deps.Publisher.WindowUntil(nil).Probe(probeTimeout); err != nil {
+	if err := o.deps.Publisher.WindowUntil(nil).Probe(o.deps.timings().ProbeTimeout); err != nil {
 		return false
 	}
 	o.probeBeforeHold = false
@@ -294,7 +360,7 @@ func (o *Outbox) answering() bool {
 // statements), and holdRetry when the database did not answer.
 func (o *Outbox) tryHold(ctx context.Context) (*duty.Hold, time.Duration) {
 	pool := o.deps.Store.Pool
-	options := publisherHoldOptions
+	options := o.deps.timings().Hold
 	options.Token = o.token
 	hold, err := duty.TryHold(ctx, pool, publisherHold, o.instance, options)
 	if err == nil && hold != nil {
@@ -309,7 +375,7 @@ func (o *Outbox) tryHold(ctx context.Context) (*duty.Hold, time.Duration) {
 		if ctx.Err() == nil {
 			slog.Error("dispatch outbox: try the publisher hold", "instance", o.instance, "error", err)
 		}
-		return nil, holdRetry
+		return nil, o.deps.timings().HoldRetry
 	}
 	if !held {
 		return nil, 0
@@ -327,7 +393,7 @@ func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) holdEnd {
 	slog.Info("dispatch outbox: took the publisher hold", "instance", o.instance)
 	end := o.serve(ctx, hold)
 	o.hold.Store(nil)
-	release, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	release, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.deps.timings().RecordTimeout)
 	defer cancel()
 	if err := hold.Release(release); err != nil {
 		// The renewal has stopped, and the row lapses on its own, TTL after the last renewal.
@@ -355,7 +421,7 @@ func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 	for {
 		if !o.deps.Publisher.Connected() {
 			if disconnected == nil {
-				disconnected = time.NewTimer(natsLossGrace)
+				disconnected = time.NewTimer(o.deps.timings().NATSLossGrace)
 				disconnectedFor = disconnected.C
 			}
 		} else {
@@ -632,7 +698,7 @@ func (l *lanes) statement(fn func() error) error {
 // that does, is retried retry.BaseDelay later.
 func (o *Outbox) nextRetry(ctx context.Context, failed bool) (time.Duration, bool) {
 	if failed {
-		return retry.BaseDelay, true
+		return o.deps.timings().Backoff(1), true
 	}
 	var micros *int64
 	if err := o.deps.Store.Pool.QueryRow(ctx, `
@@ -645,7 +711,7 @@ func (o *Outbox) nextRetry(ctx context.Context, failed bool) (time.Duration, boo
 		if ctx.Err() == nil {
 			slog.Error("dispatch outbox: read the next retry", "instance", o.instance, "error", err)
 		}
-		return retry.BaseDelay, true
+		return o.deps.timings().Backoff(1), true
 	}
 	if micros == nil {
 		return 0, false

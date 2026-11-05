@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -254,7 +255,7 @@ func assertKeptLaneInOrder(t *testing.T, url, role string, seeded []model.Event,
 func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	t.Parallel()
 	const issues, count = 2, 20
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	proxy := testnats.StartProxy(t, url)
 	client, err := bus.ConnectOwningStream([]string{proxy.URL()})
 	if err != nil {
@@ -315,7 +316,7 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 func TestOneIssuesEventsReachItsSubjectInSeqOrderWhileAnotherIssueCommitsAcrossThem(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
@@ -451,7 +452,7 @@ func issueSubjectOrder(t *testing.T, url string) (map[string][]int, []int64) {
 func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 	t.Parallel()
 	const issues, count = 4, 2 * batchSize
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	proxy := testnats.StartProxy(t, url, testnats.ProxyLatency(150*time.Millisecond))
 	client, err := bus.ConnectOwningStream([]string{proxy.URL()})
 	if err != nil {
@@ -510,10 +511,23 @@ func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 // lapses, so the process that takes the hold over publishes it again: at least once, never at most
 // once. The repeat adds nothing to the stream, which drops it inside its duplicate window by each
 // destination's MsgId.
+//
+// The publisher hold is this test's own, three seconds rather than production's six: the dead
+// holder's row lapses that long after it was written and the next holder waits it out, which is
+// time and not behaviour (publisherHoldOptions, held to production's values by
+// TestTheOutboxTakesProductionsTimings). The row below is written with the same TTL the next
+// holder reads, so the bound and the floor under it still hold: published no earlier than its
+// lapse, and inside it plus the backlog's own time.
 func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 	const issues, count = 2, 10
-	_, url := testnats.Start(t)
+	// The whole hold scales, not the TTL alone: a hold lasts TTL and reports itself lost Margin
+	// before it lapses, so a TTL cut to the margin would leave the next holder's own hold lost
+	// the moment it took it, and it would publish nothing (which is how this test failed with a
+	// 2 s TTL beside production's 2 s renewal and margin). Renewed every 500 ms and lost 1 s
+	// before it lapses, the holder has 2 s of slack for each renewal, as production's has.
+	lapsing := Timings{Hold: duty.HoldOptions{TTL: 3 * time.Second, Renew: 500 * time.Millisecond, Margin: time.Second}}
+	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
@@ -559,7 +573,7 @@ func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *tes
 	dead := uuid.New()
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into duty_holds (name, holder, expires_at) values ($1, $2, now() + make_interval(secs => $3))
-	`, publisherHold, dead, publisherHoldOptions.TTL.Seconds()); err != nil {
+	`, publisherHold, dead, lapsing.Hold.TTL.Seconds()); err != nil {
 		t.Fatalf("leave the dead holder's row: %v", err)
 	}
 	died := time.Now()
@@ -567,12 +581,17 @@ func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *tes
 	if _, err := database.Pool.Exec(context.Background(), `drop trigger refuse_mark on events`); err != nil {
 		t.Fatalf("let the mark succeed: %v", err)
 	}
-	stop = runOutbox(t, database, client, broker)
+	stop = runOutboxTimed(t, database, client, broker, lapsing)
 	defer stop()
-	waitFor(t, publisherHoldOptions.TTL+10*time.Second, "the backlog marked published by the next holder", func() bool {
+	// The lapse, and then the backlog's republish: that second part is the stream's work and has
+	// nothing to do with the TTL, so it keeps an allowance of its own. Twelve seconds in all - the
+	// TTL plus ten - was not enough beside eleven other tests on this pod's two cores, where the
+	// republish alone took past it (dispatch://INFRA-1075). The floor below is what proves the
+	// lapse was waited out; this bound only has to outlast the work.
+	waitFor(t, lapsing.Hold.TTL+30*time.Second, "the backlog marked published by the next holder", func() bool {
 		return unpublishedCount(t, database) == 0
 	})
-	if took := time.Since(died); took < publisherHoldOptions.TTL-time.Second {
+	if took := time.Since(died); took < lapsing.Hold.TTL-time.Second {
 		t.Fatalf("the next holder published %s after the death, before the dead holder's hold lapsed", took.Round(time.Millisecond))
 	}
 	assertStreamInOrderPerDestination(t, url, wantOnDestinations)

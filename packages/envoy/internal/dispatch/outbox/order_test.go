@@ -150,7 +150,7 @@ func TestABackedOffEventHoldsBackOnlyItsDestination(t *testing.T) {
 }
 
 func holdsBackASessionRouteTheStreamRefuses(t *testing.T) {
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
@@ -386,8 +386,9 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 	}
 
 	t.Run("no responders", func(t *testing.T) {
-		_, url := testnats.Start(t)
-		// A client that owns no stream, on a server that has none: no stream captures the subject.
+		t.Parallel()
+		url := testnats.URL(t)
+		// A client that owns no stream, in an account that has none: no stream captures the subject.
 		client, err := bus.Connect([]string{url})
 		if err != nil {
 			t.Fatalf("connect: %v", err)
@@ -421,6 +422,7 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 	})
 
 	t.Run("a stream that never answers", func(t *testing.T) {
+		t.Parallel()
 		server, url := testnats.Start(t)
 		client, err := bus.ConnectOwningStream([]string{url})
 		if err != nil {
@@ -440,7 +442,8 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 	})
 
 	t.Run("a lost connection", func(t *testing.T) {
-		_, url := testnats.Start(t)
+		t.Parallel()
+		url := testnats.URL(t)
 		proxy := testnats.StartProxy(t, url)
 		client, err := bus.ConnectOwningStream([]string{proxy.URL()})
 		if err != nil {
@@ -681,6 +684,7 @@ func TestAPublishedEventIsWrittenOnce(t *testing.T) {
 		}},
 	} {
 		t.Run(fmt.Sprintf("%d destinations", tc.destinations), func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			database := storetest.Open(t)
 			broker := events.NewBroker()

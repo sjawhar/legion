@@ -5,9 +5,11 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// TestMain drops the databases the harness clones (storetest.Main). Each harness starts a NATS
-// server of its own (testnats.Start), since testnats.Main, which the shared server needs, and
-// storetest.Main each run the package's tests themselves.
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// TestMain gives the package both harnesses: storetest.Main runs the tests and drops the databases
+// it clones, and testnats.MainWith shuts the one NATS server the package's tests share down after
+// it (openState). A server per test was what this package paid before, 47 of them in a run, for
+// state each test can have in an account of its own instead.
+func TestMain(m *testing.M) { os.Exit(testnats.MainWith(m, storetest.Main)) }

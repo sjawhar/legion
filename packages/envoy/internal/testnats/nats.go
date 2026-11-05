@@ -84,8 +84,20 @@ func init() {
 // started it, and returns the exit code. A package whose tests use URL calls it from TestMain:
 // os.Exit(testnats.Main(m)).
 func Main(m *testing.M) int {
+	return MainWith(m, func(m *testing.M) int { return m.Run() })
+}
+
+// MainWith is Main for a package whose tests need another harness's Main as well: it runs the
+// package's tests through run - storetest.Main, which hands out the Postgres databases and drops
+// them after - and shuts the shared NATS server down once run returns. A package whose tests use
+// URL and a Dispatch database calls it from TestMain:
+// os.Exit(testnats.MainWith(m, storetest.Main)).
+//
+// Only one harness can own m.Run, and both harnesses' cleanups must run after it; this is how a
+// package gets both, in place of a server of its own per test (internal/dispatch/redeliver).
+func MainWith(m *testing.M, run func(*testing.M) int) int {
 	mainRuns = true
-	code := m.Run()
+	code := run(m)
 	if sharedCleanup != nil {
 		sharedCleanup.run()
 		if sharedCleanup.failed && code == 0 {

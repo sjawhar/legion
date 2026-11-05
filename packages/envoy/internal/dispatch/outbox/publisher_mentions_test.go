@@ -278,6 +278,7 @@ func TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent(t *testing.T) {
 		{settled: "sent", want: []string{issueTopic}},
 	} {
 		t.Run(tc.settled, func(t *testing.T) {
+			t.Parallel()
 			ctx := store.WithTransactionTracking(context.Background())
 			database := storetest.Open(t)
 			broker := events.NewBroker()
@@ -368,6 +369,7 @@ func TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := store.WithTransactionTracking(context.Background())
 			database := storetest.Open(t)
 			broker := events.NewBroker()
@@ -442,6 +444,7 @@ func TestARetryReachesTheClaimantTheScanReads(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := store.WithTransactionTracking(context.Background())
 			database := storetest.Open(t)
 			broker := events.NewBroker()

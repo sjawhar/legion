@@ -204,6 +204,7 @@ func requireFleetCommit(t *testing.T, a *Announcer, want string) {
 // the fleet rolls back to C1. Each envelope is the one its row builds, its started_at the
 // database's announced_at.
 func TestTheFleetsBuildIsAnnouncedOnceEachTimeItChanges(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	publisher := &recordingPublisher{}
 	announcer := New(Deps{Pool: database.Pool, Publisher: publisher})
@@ -236,6 +237,7 @@ func TestTheFleetsBuildIsAnnouncedOnceEachTimeItChanges(t *testing.T) {
 // A build nothing stamped names nothing, so a fleet any of whose live processes carries no commit
 // is never announced: not alone, and not beside a stamped one.
 func TestAnUnstampedBuildIsNeverAnnounced(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	publisher := &recordingPublisher{}
 	announcer := New(Deps{Pool: database.Pool, Publisher: publisher})
@@ -259,6 +261,7 @@ func TestAnUnstampedBuildIsNeverAnnounced(t *testing.T) {
 // meanwhile, and that pass finds the lock held, reads the announcement and leaves the publish to
 // the lock's holder. Each then names the build as the fleet's.
 func TestTwoAnnouncersAtOnceAnnounceAndPublishOnce(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	register(t, database, c1)
 	publisher := &recordingPublisher{held: make(chan struct{})}
@@ -310,6 +313,7 @@ func TestTwoAnnouncersAtOnceAnnounceAndPublishOnce(t *testing.T) {
 // unpublished, and is published once by the first pass whose publish succeeds, this process's
 // or another's.
 func TestAnAnnouncementIsPublishedOnceAPublishSucceeds(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	register(t, database, c1)
 	ctx := context.Background()
@@ -339,13 +343,13 @@ func TestAnAnnouncementIsPublishedOnceAPublishSucceeds(t *testing.T) {
 	}
 }
 
-// A publish that does not answer within publishTimeout is abandoned with its context, so nothing
-// of it runs on once its pass has given up and moved on: the announcement stays unpublished, and
-// a later pass whose publish answers publishes it.
+// A publish that does not answer within the Announcer's publishTimeout is abandoned with its
+// context, so nothing of it runs on once its pass has given up and moved on: the announcement
+// stays unpublished, and a later pass whose publish answers publishes it. The bound is this
+// Announcer's own field rather than the package's default, so the test waits 200 ms for it and
+// swaps nothing another test reads.
 func TestAPublishThatOutlivesItsBoundIsAbandoned(t *testing.T) {
-	before := publishTimeout
-	publishTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { publishTimeout = before })
+	t.Parallel()
 	database := storetest.Open(t)
 	register(t, database, c1)
 	ctx := context.Background()
@@ -353,6 +357,7 @@ func TestAPublishThatOutlivesItsBoundIsAbandoned(t *testing.T) {
 	publisher := &recordingPublisher{}
 	publisher.hang(true)
 	announcer := New(Deps{Pool: database.Pool, Publisher: publisher})
+	announcer.publishTimeout = 200 * time.Millisecond
 	announcer.pass(ctx)
 	if running := publisher.inFlight(); running != 0 {
 		t.Fatalf("%d publishes still running after the pass that gave up on them", running)
@@ -376,6 +381,7 @@ const fixturePath = "../../../../daemon/internal/intake/testdata/dispatch/server
 // The envelope of announcement 7 of commit 0f1e2d3… at a fixed time is, field for field, the
 // shared fixture.
 func TestTheBuiltEnvelopeIsTheSharedFixture(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile(fixturePath)
 	if err != nil {
 		t.Fatal(err)
@@ -390,5 +396,15 @@ func TestTheBuiltEnvelopeIsTheSharedFixture(t *testing.T) {
 	}
 	if !reflect.DeepEqual(built, fixture) {
 		t.Fatalf("built envelope = %+v\nwant the fixture %+v", built, fixture)
+	}
+}
+
+// Every Announcer a process builds bounds its publishes by production's ten seconds: the field
+// the test above shortens is defaulted here, so shortening it there changes this process's
+// announcer and nothing of production's.
+func TestANewAnnouncerTakesProductionsPublishTimeout(t *testing.T) {
+	t.Parallel()
+	if got := New(Deps{}).publishTimeout; got != 10*time.Second {
+		t.Fatalf("a new Announcer's publishTimeout = %v, want 10s", got)
 	}
 }

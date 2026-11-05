@@ -81,6 +81,9 @@ func (b *lockedBuffer) String() string {
 // A destination NATS refuses is refused the same way however often the outbox retries it, so it
 // is done: the refusal is logged once, naming the event, the event's other destinations are
 // published, and the event is marked published instead of backing off forever.
+//
+// Serial: it swaps process-wide state, the default logger it counts its refusal line in
+// (docs/testing.md).
 func TestRunTreatsADestinationNATSRefusesAsDone(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))

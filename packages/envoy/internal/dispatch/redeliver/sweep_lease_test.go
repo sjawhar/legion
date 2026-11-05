@@ -74,6 +74,10 @@ func (g *countingGitHub) Redeliver(context.Context, int64) error {
 // sweep - holds the webhook-redelivery lease. The lease is not what makes a redelivery safe (the
 // KV compare-and-set on each delivery's record is); it is what keeps N processes from spending N
 // times the listing calls on one installation's rate limit for one result.
+//
+// Serial: it swaps process-wide state. captureDefaultLogs replaces the default logger, which is
+// where the lease itself logs, so a parallel test running beside it would have its own lines
+// counted here and its own logger taken away (docs/testing.md).
 func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 	leases := redeliverTestLeases(t)
 	logs := captureDefaultLogs(t)
@@ -271,6 +275,9 @@ func (s *drawSequence) calls() []time.Duration {
 // a wait of 1.099999999s). The bubble's lease is this test's own; that the wait of at least one
 // interval always reaches the next period, which is what keeps a sweep from being skipped as
 // served, is the row below against the real one.
+//
+// Serial: it swaps process-wide state. redeliver.FixJitter assigns the package's jitter function,
+// which every sweep loop in the process draws from (docs/testing.md).
 func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(t *testing.T) {
 	const (
 		interval = time.Minute
@@ -359,6 +366,9 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 // and so the tightest case for the next period's boundary. It counts what came of each sweep and
 // reads the order everything came in: each sweep listed and then ended, the loop asked for one wait
 // after each sweep and before the next one listed, and the first sweep listed before any wait.
+//
+// Serial: it swaps process-wide state, both kinds this file holds - redeliver.FixJitter's draw
+// and the default logger captureDefaultLogs takes (docs/testing.md).
 func TestNoSweepOfALoneProcessIsSkippedAsAPeriodAlreadyServed(t *testing.T) {
 	const (
 		interval = 100 * time.Millisecond

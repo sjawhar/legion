@@ -71,9 +71,13 @@ type roleRig struct {
 	broker   *events.Broker
 }
 
+// newRoleRig is a roleRig on the package's shared NATS server, in a JetStream account of this
+// test's own (testnats.URL): the stream, the role bucket and the session bucket this rig owns are
+// that account's, so they are this test's alone though every one of them carries production's
+// name. A test that stops or freezes its server starts one of its own instead.
 func newRoleRig(t *testing.T) *roleRig {
 	t.Helper()
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
@@ -107,6 +111,22 @@ func (r *roleRig) deps() Deps {
 	holders := roles.NewBuckets(r.client)
 	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders,
 		KeptLanes: r.client}
+}
+
+// silentReceipt is the receipt timeout a test gives an outbox whose role holder never answers:
+// production's roleReceiptTimeout is five seconds of waiting such a test sits through, and what
+// those tests prove is what the outbox does once the wait is over, not how long it is. It is far
+// above the round trip a forward to an in-process holder takes - the holder must receive the
+// forward before the request gives up on it - and the test that holds roleReceiptTimeout itself
+// to five seconds is TestTheOutboxTakesProductionsTimings.
+const silentReceipt = 2 * time.Second
+
+// silentHolderDeps is deps with silentReceipt in place of production's receipt timeout, for a
+// test whose holder withholds its receipt.
+func (r *roleRig) silentHolderDeps() Deps {
+	deps := r.deps()
+	deps.Timings.RoleReceiptTimeout = silentReceipt
+	return deps
 }
 
 // claim makes holder role's holder, registered with entry, as a session plugin's registration
@@ -289,7 +309,7 @@ func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t 
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	recv := rig.receiver(t, holder, false)
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
-	outbox := holding(t, rig.deps())
+	outbox := holding(t, rig.silentHolderDeps())
 
 	t.Run("published only after the receipt", func(t *testing.T) {
 		// The holder takes the first forward and does not answer it.
@@ -511,6 +531,9 @@ func TestARoleRouteWhoseHolderIsTheActorIsPublishedWithoutAForward(t *testing.T)
 // One holder's forward that Dispatch's grant denies fails only its own event: in a batch of 50
 // role-routed events on distinct issues, each with a live self-subscribed holder that answers, the
 // 49 others are published with no attempt counted, and the denied one is backed off.
+//
+// Serial: it swaps process-wide state, the nkey seed its granted client reads from the
+// environment (t.Setenv, docs/testing.md).
 func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 	const events, denied = 50, 17
 	holderOf := func(index int) string { return fmt.Sprintf("ses_holder_%02d", index) }
@@ -610,6 +633,7 @@ func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
 	deps, registry := rig.countingDeps(t)
+	deps.Timings.RoleReceiptTimeout = silentReceipt
 
 	holding(t, deps).scan(context.Background(), unfenced{})
 

@@ -427,6 +427,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", tc.route)
 			if tc.claim != nil {
