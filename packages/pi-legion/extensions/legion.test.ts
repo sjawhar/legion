@@ -693,7 +693,14 @@ async function claimPane(options: {
   readonly ready?: (attempt: number) => Response | Promise<Response>;
   readonly readyPosted?: () => void;
   readonly roleHolder?: () => string | undefined;
-  readonly extraRoutes?: (url: URL, body: unknown) => Response | undefined;
+  /** A route the stub answers ahead of the daemon's own. `init` is the request as the caller
+   * made it, so a test can read what never reaches `requests`: the `AbortSignal` a bounded call
+   * carries. */
+  readonly extraRoutes?: (
+    url: URL,
+    body: unknown,
+    init: RequestInit | undefined
+  ) => Response | undefined;
   readonly ensureOnDisk?: () => Promise<void>;
   readonly branch?: readonly unknown[];
   readonly title?: { readonly name: string; readonly source: "auto" | "user" };
@@ -742,7 +749,7 @@ async function claimPane(options: {
     const url = new URL(input.toString());
     const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
     requests.push({ path: url.pathname, body });
-    const extra = options.extraRoutes?.(url, body);
+    const extra = options.extraRoutes?.(url, body, init);
     if (extra !== undefined) return extra;
     if (url.pathname === "/legion/v1/claims/register") {
       return (await options.register?.()) ?? Response.json(registration);
@@ -2919,6 +2926,9 @@ describe("Legion OMP extension", () => {
       readonly calls: string[];
       /** Every report the session sent, in order, however the daemon answered it. */
       readonly reports: LegionCapabilityReportBody[];
+      /** The `AbortSignal` each report-carrying `claims/ready` was made with, in the order of
+       * `reports`: `undefined` where the request carried none. */
+      readonly readySignals: (AbortSignal | undefined)[];
       /** Resolves once the session has sent its `nth` report (1 is the first). */
       readonly reported: (nth: number) => Promise<void>;
     }
@@ -2935,6 +2945,12 @@ describe("Legion OMP extension", () => {
      * its active tools before `session_start` snapshots them, `pi.agents` exposed, and a
      * recording capability host. Its `claims/activity` answers 204 — the pane's stub 404s that
      * route, and the warning its report then logs is not this machine's. Nothing has ticked yet.
+     *
+     * `agentsExposed` and `promptAgents` are the pane's, so a test can measure a session whose
+     * host exposes no `pi.agents`, or whose registration names agents the task tool does not
+     * resolve. `capabilityHost` replaces the recording host the pane measures through, called
+     * once per measurement and handed the session's own `calls`: a host that throws on its first
+     * call is how a measurement that fails outright is made.
      */
     const capabilitySession = async (
       options: {
@@ -2943,19 +2959,25 @@ describe("Legion OMP extension", () => {
         readonly idle?: () => boolean;
         readonly host?: Partial<CapabilityHost>;
         readonly ready?: (attempt: number) => Response | Promise<Response>;
+        readonly promptAgents?: readonly string[];
+        readonly agentsExposed?: boolean;
+        readonly capabilityHost?: (calls: string[]) => CapabilityHost;
       } = {}
     ): Promise<CapabilitySession> => {
       const calls: string[] = [];
       const reports: LegionCapabilityReportBody[] = [];
+      const readySignals: (AbortSignal | undefined)[] = [];
       const gates = new Map<number, ReportGate>();
       const pane = await claimPane({
         role: options.role ?? "implementer",
         sessionId: options.sessionId ?? `ses_capability_${options.role ?? "implementer"}`,
-        agentsExposed: true,
-        capabilityHost: () => recordingCapabilityHost(calls, options.host),
+        agentsExposed: options.agentsExposed ?? true,
+        promptAgents: options.promptAgents,
+        capabilityHost: () =>
+          options.capabilityHost?.(calls) ?? recordingCapabilityHost(calls, options.host),
         idle: options.idle,
         ready: options.ready,
-        extraRoutes: (url, body) => {
+        extraRoutes: (url, body, init) => {
           if (url.pathname === "/legion/v1/claims/activity") {
             return new Response(null, { status: 204 });
           }
@@ -2963,6 +2985,7 @@ describe("Legion OMP extension", () => {
             const report = capabilityReport(body);
             if (report !== undefined) {
               reports.push(report);
+              readySignals.push(init?.signal ?? undefined);
               gates.get(reports.length)?.resolve();
             }
           }
@@ -2975,6 +2998,7 @@ describe("Legion OMP extension", () => {
         pane,
         calls,
         reports,
+        readySignals,
         reported: (nth) => {
           const gate = gates.get(nth) ?? Promise.withResolvers<void>();
           gates.set(nth, gate);
@@ -3280,7 +3304,93 @@ describe("Legion OMP extension", () => {
       expect(warnings.filter((warning) => warning.message.includes("activity report"))).toEqual([]);
     });
 
-    test("a send the daemon takes and never answers is bounded: the tick ends, the failure costs one log line, and the session measures again at its next due tick", async () => {
+    test("the measurement reads the registration's promptAgents against the task tool's agents", async () => {
+      // The claim's prompts dispatch two agents: the task tool resolves neither `plan-reviewer`,
+      // nor `oracle` while `task.disabledAgents` turns it off.
+      const session = await capabilitySession({
+        sessionId: "ses_capability_prompt_agents",
+        promptAgents: ["oracle", "plan-reviewer"],
+        host: { disabledAgents: async () => ["oracle"] },
+      });
+
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+      await session.reported(1);
+      await drain();
+
+      expect(session.reports[0]?.rows[0]).toEqual({
+        name: "subagents",
+        ok: false,
+        detail:
+          "agents the prompts dispatch that the task tool does not resolve: plan-reviewer; disabled by task.disabledAgents: oracle",
+      });
+      expect(session.pane.exits).toEqual([]);
+    });
+
+    test("a session whose host exposes no pi.agents measures a subagents row that says so", async () => {
+      const session = await capabilitySession({
+        sessionId: "ses_capability_no_agents",
+        agentsExposed: false,
+      });
+
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+      await session.reported(1);
+      await drain();
+
+      expect(session.reports[0]?.rows[0]).toEqual({
+        name: "subagents",
+        ok: false,
+        detail: "pi.agents is not exposed",
+      });
+      expect(session.pane.exits).toEqual([]);
+    });
+
+    test("a measurement that fails outright costs the report alone: one log line, no report, and the next due tick measures again", async () => {
+      let hosts = 0;
+      const session = await capabilitySession({
+        sessionId: "ses_capability_no_host",
+        // The host is built once per measurement: the first measurement has none at all, as a
+        // pane whose Oh My Pi modules are missing is, and the second measures as every other.
+        capabilityHost: (calls) => {
+          hosts += 1;
+          if (hosts === 1) throw new Error("no capability host in this pane");
+          return recordingCapabilityHost(calls);
+        },
+      });
+
+      const { warnings } = await loggedWarnings(async () => {
+        await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+        await drain();
+        // The measurement rejected: nothing was measured and no report reached the daemon.
+        expect(measurements(session.calls)).toBe(0);
+        expect(session.reports).toEqual([]);
+
+        // The attempt was spent, so the next attempt is due `CAPABILITY_RETRY_TICKS` later.
+        await ticks(session.pane, CAPABILITY_RETRY_TICKS - 1);
+        await drain();
+        expect(measurements(session.calls)).toBe(0);
+
+        await ticks(session.pane, 1);
+        await session.reported(1);
+        await drain();
+      });
+
+      const failures = warnings.filter(
+        (warning) => warning.message === "legion: this session's capability measurement failed"
+      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.context?.claim).toBe(session.pane.claimToken);
+      expect(failures[0]?.context?.issue).toBe("REPO-43");
+      expect(String(failures[0]?.context?.error)).toContain("no capability host in this pane");
+      // The failure cost the one attempt and nothing else: the session kept running, and the
+      // next due tick measured afresh and sent its report.
+      expect(hosts).toBe(2);
+      expect(measurements(session.calls)).toBe(1);
+      expect(session.reports).toHaveLength(1);
+      expect(session.reports[0]?.rows.every((row) => row.ok)).toBe(true);
+      expect(session.pane.exits).toEqual([]);
+    });
+
+    test("a send the daemon takes and never answers is bounded: the request is aborted, the tick ends, the failure costs one log line, and the session measures again at its next due tick", async () => {
       // The real bound is 10 s, past Bun's limit for one test; the machine is the same at 50 ms.
       setLegionCapabilitySendTimeoutForTests(50);
       const session = await capabilitySession({
@@ -3329,6 +3439,15 @@ describe("Legion OMP extension", () => {
       expect(failures).toHaveLength(1);
       expect(failures[0]?.context?.issue).toBe("REPO-43");
       expect(String(failures[0]?.context?.error)).toContain("claims/ready did not answer within");
+      // The bound aborted the request the daemon took, rather than only ending the race the
+      // schedule runs it under: a daemon that never answers is left no open connection.
+      const hung = session.readySignals[0];
+      expect(hung?.aborted).toBe(true);
+      expect(String((hung?.reason as Error | undefined)?.message)).toContain(
+        "claims/ready did not answer within 50 ms"
+      );
+      // The send the daemon took ends its own bound: its request is never aborted.
+      expect(session.readySignals[1]?.aborted).toBe(false);
     });
   });
 });
