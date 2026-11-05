@@ -16,7 +16,7 @@ import (
 
 	"github.com/sjawhar/envoy/going"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -105,7 +105,7 @@ func (s *server) createGoingRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	// Counted as search counts its own query, after trimming, so a question this route accepts
 	// is one the answerer can send whole.
-	if length := len16(words); length > contracts.GoingWordsMax {
+	if length := itemblocks.Units16(words); length > contracts.GoingWordsMax {
 		capExceeded(w, "words", length, contracts.GoingWordsMax)
 		return
 	}
@@ -206,13 +206,9 @@ func goingHitTitle(result model.SearchResult) string {
 }
 
 // goingBodies is each hit's own stored text, the text search ranked, cut to
-// contracts.GoingHitRuneMax runes a hit and keyed as going.Hit.Key keys it.
+// contracts.GoingHitRuneMax runes a hit and keyed as going.Hit.Key keys it (goingItemText).
 func (s *server) goingBodies(ctx context.Context, hits []going.Hit) (map[string]string, error) {
-	items := make([]embedqueue.Item, 0, len(hits))
-	for _, hit := range hits {
-		items = append(items, embedqueue.Item{Kind: hit.Kind, ID: hit.ID})
-	}
-	return embedqueue.ItemText(ctx, s.deps.Store.Pool, items, contracts.GoingHitRuneMax)
+	return goingItemText(ctx, s.deps.Store.Pool, hits, contracts.GoingHitRuneMax)
 }
 
 // streamGoingAnswer writes one run's answer as server-sent events: GET

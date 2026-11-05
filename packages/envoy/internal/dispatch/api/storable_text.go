@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -38,10 +39,10 @@ func unstorableText(field, value string) *apiError {
 		switch {
 		case char == 0:
 			return errorf(http.StatusBadRequest, "NUL_CHARACTER",
-				"%s holds a NUL character (U+0000) at character %d, which Dispatch cannot store", field, len16(value[:at])+1)
+				"%s holds a NUL character (U+0000) at character %d, which Dispatch cannot store", field, itemblocks.Units16(value[:at])+1)
 		case char == utf8.RuneError && width == 1:
 			return errorf(http.StatusBadRequest, "INVALID_UTF8",
-				"%s holds a byte that is not UTF-8 (0x%02X) at character %d, which Dispatch cannot store", field, value[at], len16(value[:at])+1)
+				"%s holds a byte that is not UTF-8 (0x%02X) at character %d, which Dispatch cannot store", field, value[at], itemblocks.Units16(value[:at])+1)
 		}
 		at += width
 	}

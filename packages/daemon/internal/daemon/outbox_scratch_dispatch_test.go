@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -74,60 +74,202 @@ func TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch(t *testing.T)
 	}
 }
 
-// The runner posts a message as its body, then its outbox marker, and Dispatch counts the whole of
-// it against its cap. record.MessagePostLimit leaves room for the marker at its longest, a row id of
-// math.MaxInt64: a body at the limit posts from that row, and a body one unit longer is refused by
-// Dispatch and stays queued, so the limit is exactly what Dispatch takes. The body counts UTF-16
-// units, as Dispatch does, so it opens with a character outside the Basic Multilingual Plane.
-func TestOutboxPostsABodyAtThePostLimitWithTheLongestMarkerAgainstScratchDispatch(t *testing.T) {
+// A long READY packet posts whole and reads back byte for byte. Dispatch bounds a message body
+// block by block, so a 40,000-unit packet of ordinary paragraphs is taken; its message.created
+// event carries only the first part of it and says so (body_truncated), which leaves the outbox's
+// marker off the end of the event's body. The runner reads such a body from the message itself,
+// so the row run again after a crash before its finish finds its own marker and posts nothing,
+// and the issue holds exactly one message.
+func TestOutboxPostsALongPacketWholeAndOnceAgainstScratchDispatch(t *testing.T) {
 	baseURL, token := startScratchDispatch(t)
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	issue := createScratchDispatchIssue(t, baseURL)
 	now := time.Now().UTC()
+	// Six paragraphs of 6,665 characters, 40,000 units in all: every block is far under
+	// Dispatch's own block bound and the body is far over the units one event carries.
+	packet := record.MessagePost{Body: strings.TrimSuffix(strings.Repeat(strings.Repeat("x", 6665)+"\n\n", 6), "\n\n")}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue, packet, now))
+	var id int64
+	if err := pool.QueryRow(context.Background(), "select id from outbox").Scan(&id); err != nil {
+		t.Fatalf("read the queued row: %v", err)
+	}
+
+	first := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: crashAfterPostStore{Store: records}, dispatch: dispatch.New(baseURL, token),
+		now: func() time.Time { return now },
+	}
+	if err := first.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first delivery = %v; a failed finish leaves the row leased and is not the tick's error", err)
+	}
+	restarted := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: dispatch.New(baseURL, token),
+		now: func() time.Time { return now.Add(outboxLease + time.Second) },
+	}
+	if err := restarted.RunOnce(context.Background()); err != nil {
+		t.Fatalf("restart recovery: %v", err)
+	}
+	if remaining := outboxRows(t, pool); remaining != 0 {
+		t.Fatalf("outbox rows after recovery = %d, want the row posted and finished", remaining)
+	}
+
+	bodies, err := dispatch.New(baseURL, token).MessageBodiesSince(context.Background(), issue, now.Add(-time.Second))
+	if err != nil {
+		t.Fatalf("read real Dispatch messages: %v", err)
+	}
+	if want := packet.Posted(id); len(bodies) != 1 || bodies[0] != want {
+		t.Fatalf("Dispatch messages = %d of %d characters, want the 40,000-character packet posted once, whole, under row %d's marker",
+			len(bodies), len(strings.Join(bodies, "")), id)
+	}
+	cut, truncated := messageCreatedEvent(t, baseURL, token, issue)
+	if !truncated || strings.Contains(cut, record.MessageMarker(id)) {
+		t.Fatalf("the message.created event carries %d characters (truncated=%v), want a cut body with no marker in it", len(cut), truncated)
+	}
+}
+
+// A post Dispatch refuses the same way on every attempt — one block of the body over Dispatch's
+// own block bound — is no retry's to repair. The row finishes and its issue's architect is told
+// Dispatch's own refusal, rather than the row climbing its backoff for ever and telling nobody.
+func TestOutboxFinishesAPostDispatchRefusesAndTellsTheArchitectAgainstScratchDispatch(t *testing.T) {
+	baseURL, token := startScratchDispatch(t)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := createScratchDispatchIssue(t, baseURL)
+	now := time.Now().UTC()
+	over := record.MessagePost{Body: "READY #42 at head for " + issue + "\n\n" + strings.Repeat("x", 32001)}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue, over, now))
 	runner := &outbox{
 		dispatchProject: "LEGION", log: quietLogger(),
 		pool: pool, records: records, dispatch: dispatch.New(baseURL, token),
 		now: func() time.Time { return now },
 	}
-	const emoji = "\U0001F600"
-	// deliver enqueues body as the row math.MaxInt64 and runs it once.
-	deliver := func(body string) {
-		t.Helper()
-		if _, err := pool.Exec(context.Background(), "select setval('outbox_id_seq', $1)", int64(math.MaxInt64-1)); err != nil {
-			t.Fatalf("set the outbox row id: %v", err)
-		}
-		enqueueOutbox(t, pool, records, mustOutboxRow(t, issue, record.MessagePost{Body: body}, now))
-		if err := runner.RunOnce(context.Background()); err != nil {
-			t.Fatalf("run the outbox: %v", err)
-		}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox: %v", err)
 	}
 
-	deliver(emoji + strings.Repeat("x", record.MessagePostLimit-1))
-	var id int64
-	var lastError string
-	if err := pool.QueryRow(context.Background(), "select id, last_error from outbox").Scan(&id, &lastError); err != nil {
-		t.Fatalf("read the queued row: %v", err)
-	}
-	if id != math.MaxInt64 || !strings.Contains(lastError, "CAP_EXCEEDED") {
-		t.Fatalf("row one unit over the limit = %d, %q; want row %d queued with Dispatch's CAP_EXCEEDED", id, lastError, int64(math.MaxInt64))
-	}
-	if _, err := pool.Exec(context.Background(), "delete from outbox"); err != nil {
-		t.Fatalf("drop the refused row: %v", err)
-	}
-
-	atLimit := record.MessagePost{Body: emoji + strings.Repeat("x", record.MessagePostLimit-2)}
-	deliver(atLimit.Body)
-	if remaining := outboxRows(t, pool); remaining != 0 {
-		t.Fatalf("outbox rows after posting the body at the limit = %d, want it posted and finished", remaining)
-	}
 	bodies, err := dispatch.New(baseURL, token).MessageBodiesSince(context.Background(), issue, now.Add(-time.Second))
 	if err != nil {
 		t.Fatalf("read real Dispatch messages: %v", err)
 	}
-	if want := atLimit.Posted(math.MaxInt64); len(bodies) != 1 || bodies[0] != want || dispatch.MessageBodyLength(want) != dispatch.MessageBodyLimit {
-		t.Fatalf("Dispatch messages = %d, want the body at the limit posted once with row %d's marker, %d units", len(bodies), int64(math.MaxInt64), dispatch.MessageBodyLimit)
+	if len(bodies) != 0 {
+		t.Fatalf("Dispatch messages = %#v, want the refused post on no issue", bodies)
 	}
+	var kind string
+	var payload []byte
+	if err := pool.QueryRow(context.Background(), "select kind, payload from outbox").Scan(&kind, &payload); err != nil {
+		t.Fatalf("read the row left behind: %v", err)
+	}
+	if kind != string(record.OutboxKindNotice) {
+		t.Fatalf("the one row left is a %s row, want the refused post finished and its architect's notice in its place", kind)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode the notice: %v", err)
+	}
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, issue) || !strings.Contains(notice.Reason, "CAP_EXCEEDED") ||
+		!strings.Contains(notice.Reason, "READY #42 at head for "+issue) {
+		t.Fatalf("the notice = %+v, want message-refused to the architect naming %s, the message's first line and Dispatch's refusal", notice, issue)
+	}
+}
+
+// A done write posts its reason on the issue before it writes the status, and the reason here is
+// one block over Dispatch's own block bound, which Dispatch refuses on every attempt. Against the
+// real server: no message is on the issue, the status is set all the same, and the issue's
+// architect is told what was refused and that the status stands. Without that, the daemon's
+// record would read done while the Dispatch issue kept the status it had, and nobody would know.
+func TestOutboxSetsTheStatusOfAWriteWhoseReasonDispatchRefusesAgainstScratchDispatch(t *testing.T) {
+	baseURL, token := startScratchDispatch(t)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := createScratchDispatchIssue(t, baseURL)
+	client := dispatch.New(baseURL, token)
+	before, err := client.GetIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("read the scratch issue: %v", err)
+	}
+	now := time.Now().UTC()
+	reason := "Closed by its architect before its first phase: " + strings.Repeat("x", 32001)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue,
+		record.StatusWrite{ObservedStatus: before.Status, Status: "done", Reason: reason}, now))
+	runner := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: dispatch.New(baseURL, token),
+		now: func() time.Time { return now },
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox: %v", err)
+	}
+
+	bodies, err := client.MessageBodiesSince(context.Background(), issue, now.Add(-time.Second))
+	if err != nil {
+		t.Fatalf("read real Dispatch messages: %v", err)
+	}
+	if len(bodies) != 0 {
+		t.Fatalf("Dispatch messages = %#v, want the refused reason on no issue", bodies)
+	}
+	after, err := client.GetIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("read the scratch issue after the run: %v", err)
+	}
+	if after.Status != "done" {
+		t.Fatalf("the issue stands at %q, want done written though its reason was refused", after.Status)
+	}
+	var kind string
+	var payload []byte
+	if err := pool.QueryRow(context.Background(), "select kind, payload from outbox").Scan(&kind, &payload); err != nil {
+		t.Fatalf("read the row left behind: %v", err)
+	}
+	if kind != string(record.OutboxKindNotice) {
+		t.Fatalf("the one row left is a %s row, want the status row finished and its architect's notice in its place", kind)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode the notice: %v", err)
+	}
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, issue) || !strings.Contains(notice.Reason, "CAP_EXCEEDED") ||
+		!strings.Contains(notice.Reason, "The status done was set on the issue all the same") {
+		t.Fatalf("the notice = %+v, want message-refused to the architect naming %s, Dispatch's refusal and the status it set", notice, issue)
+	}
+}
+
+// messageCreatedEvent is the issue's message.created event as Dispatch serves it: the body the
+// event carries, and whether Dispatch says that body is only the first part of the message's.
+func messageCreatedEvent(t *testing.T, baseURL, token, issue string) (string, bool) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/issues/"+url.PathEscape(issue)+"/events?limit=200", nil)
+	if err != nil {
+		t.Fatalf("create the events request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatalf("GET the issue's events: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET the issue's events = %s", response.Status)
+	}
+	var events []struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Body          string `json:"body"`
+			BodyTruncated bool   `json:"body_truncated"`
+		} `json:"payload"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&events); err != nil {
+		t.Fatalf("decode the issue's events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == "message.created" {
+			return event.Payload.Body, event.Payload.BodyTruncated
+		}
+	}
+	t.Fatal("the issue has no message.created event")
+	return "", false
 }
 
 type crashAfterPostStore struct{ record.Store }

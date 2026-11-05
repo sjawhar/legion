@@ -13,7 +13,6 @@ import (
 	"github.com/sjawhar/envoy/going"
 	"github.com/sjawhar/envoy/going/goingtest"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 )
 
 // goingModelBearer is the bearer the chat client presents to the fake model. The client under
@@ -164,7 +163,7 @@ func goingFrameNames(frames []liveGoingFrame) []string {
 // The whole answer, end to end, with the answerer a deployment runs: Dispatch's own search and
 // stored text reach the model, and what the model writes reaches a reader as the stream's frames.
 // The item the answer links is named as an item frame, the link survives whole in the text, and
-// the text the model was given is the item's own stored text - embedqueue.ItemText's, the text
+// the text the model was given is the item's own stored text - goingItemText's, the text
 // search ranked.
 //
 // The reader here is a real connection, because what it proves is a matter of time and not of
@@ -236,7 +235,7 @@ func TestGoingAnswersFromWhatDispatchHoldsWhileTheModelIsStillWriting(t *testing
 	}
 
 	// What the model was given: one call, carrying the question and the issue's own stored text,
-	// which is what embedqueue.ItemText reads for the hit and what goingBodies hands the answerer.
+	// which is what goingItemText reads for the hit and what goingBodies hands the answerer.
 	requests := model.Requests()
 	if len(requests) != 1 {
 		t.Fatalf("the model served %d calls, want the one this answer needed", len(requests))
@@ -250,8 +249,8 @@ func TestGoingAnswersFromWhatDispatchHoldsWhileTheModelIsStillWriting(t *testing
 	if !strings.Contains(asked, words) || !strings.Contains(asked, "href: "+href) {
 		t.Fatalf("the model was asked %q, want the question and the hit's href", asked)
 	}
-	stored, err := embedqueue.ItemText(context.Background(),
-		rig.database.Pool, []embedqueue.Item{{Kind: "issue", ID: issueKey}}, contracts.GoingHitRuneMax)
+	stored, err := goingItemText(context.Background(),
+		rig.database.Pool, []going.Hit{{Kind: "issue", ID: issueKey}}, contracts.GoingHitRuneMax)
 	if err != nil {
 		t.Fatalf("read the issue's stored text: %v", err)
 	}
