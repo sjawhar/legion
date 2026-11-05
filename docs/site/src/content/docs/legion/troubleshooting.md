@@ -468,6 +468,26 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 ## A tree does not move after a restart
 
+A restart's wakes go out at the pace the operator set (`worker_wakes_per_minute`, 8 a minute by
+default, with `worker_wake_burst` 1), so a tree whose process has not come back yet may simply be
+waiting its turn. One wake has its session read its whole context again, which the provider charges
+as uncached input — a mean of 576,083 tokens, a median of 493,636 and a ninetieth percentile of
+1,327,888 — and the pacing is what spreads that over the minutes after a restart. A wave sustains
+about two thirds of the rate, about 5 a minute at the default, so a hundred claims take about
+twenty minutes. Read what the pacing still holds before you act on anything below:
+
+```sh
+legion state --config legion.yaml --json | jq '.wakesWaiting'
+```
+
+`legion state` prints the same as a `wakes waiting:` line, and prints no such line when nothing
+waits. Each entry names the `claim`, its `issue` and `role`, the `kind` of wake (`launch`, a role
+process about to start; `plugin-task`, the update task a stale-plugin round queues to a session
+that already runs; `catch-up`, the notice a start writes to an architect that is already running)
+and `dueAt`, the moment the pacing gave it, which is when it runs. An empty array says the wave has
+gone out; the last `dueAt` in it says when the last of the wave goes. A claim on that list needs
+nothing from you: its wake is reserved and nothing drops it.
+
 A restart re-adopts every process still running, but a claim with no process runs again only when
 something starts it. A worker is started by the workflow when its phase begins, and a tree's
 architect by its admission; a notice to an architect with no process waits for it rather than
