@@ -7,9 +7,10 @@ building READY. Every path it cites is in cybermonklabs/legion.
 The order, in full: the tester's evidence green → the reviewer's approval of the head → the
 architect's acceptance, in `accepting` → retro → the merger's READY → the merge, which closes the
 issue → the implementer's production check, after the close. Every handoff is a record on the
-Dispatch issue, never a commit, so the head that merges carries none. Retro commits nothing
-(*Retro*, below), so the approved head is the head that merges. READY still lets a commit that
-changes only `docs/solutions/` stand, and a file under `.legion/` that GitHub's compare lists as
+Dispatch issue, never a commit, so the head that merges carries none. Retro's one commit closes
+the pull request's open review threads (*Retro: retro's commits do not void the reviewer's
+approval*, below), so the head that merges is the head that commit made. READY still lets a commit
+that changes only `docs/solutions/` stand, and a file under `.legion/` that GitHub's compare lists as
 removed, the commit `legion handoffs import` makes to remove the directory where handoffs lived
 before they moved to Dispatch. A conflict-forced merge goes back to the reviewer for a
 confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
@@ -94,8 +95,8 @@ other change to the head voids it.
   nothing restarts. Different, or either run printed no fingerprint: a new round — thermo again,
   one review. A return whose task's `Reason:` names a READY refusal is never a confirmation, even
   after a forward merge, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
-  after it reviews the refused change in full from the last `APPROVE` (*Retro's commits do not
-  void the reviewer's approval* below). That round's approval needs the tester's results current
+  after it reviews the refused change in full from the last `APPROVE` (*Retro: retro's commits do
+  not void the reviewer's approval* below). That round's approval needs the tester's results current
   at the head it approves, or at an ancestor with only files under `.legion/` removed since.
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
@@ -153,12 +154,15 @@ reviewing until you finish.
   head the review App pushed is the exception: the daemon marks it a planned red and acts on it
   nowhere, and GitHub holds the merge under the base branch's own rules.
 
-## Retro
+## Retro: retro's commits do not void the reviewer's approval
 
-- **Retro commits nothing.** It reads the evidence, writes what the work taught as a
-  `dispatch comment` on the issue for the skill librarian, brings the PR body up to date and
-  completes (`skill://legion-retro` gives the steps), so the approved head is the head READY
-  names. Anything above the approved
+- **Retro commits the text fixes that close the pull request's open review threads, and nothing
+  else.** It reads the evidence, writes what the work taught as a `dispatch comment` on the issue
+  for the skill librarian, lists the pull request's unresolved threads itself with the
+  `reviewThreads` query of `skill://legion-worker/references/review-threads.md`, replies on each,
+  resolves each one it answered, brings the PR body up to date, pushes that one commit, and waits
+  for its head's required checks before it completes (`skill://legion-retro` gives the
+  steps), so the head READY names is the head that commit made. Anything else above the approved
   head voids the approval, except the handoff import's removal of `.legion/` files and a commit
   that changes only `docs/solutions/`, which READY still lets through: READY is refused
   `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send

@@ -6,16 +6,17 @@ at.
 ## Retro's result
 
 Retro output is one `dispatch comment` on the issue with what the work taught, the PR body content
-the repository's instructions derive from the pull request's changed paths at that head, and one
-`dispatch message` on the issue. Retro commits nothing and pushes nothing, since every handoff is
-a record on the Dispatch issue and `docs/solutions/` is history no role writes to now. Retro
-writes no handoff and never rewrites the reviewer-approved head.
+the repository's instructions derive from the pull request's changed paths at that head, the
+closing of every review thread the approval left open, and one `dispatch message` on the issue.
+Its one commit is the text fixes that close those threads, pushed to the issue branch, since every
+handoff is a record on the Dispatch issue and `docs/solutions/` is history no role writes to now.
+Retro writes no handoff and never rewrites the reviewer-approved head.
 
 When the implementer reports that it cannot compute that body content or do the work a line of it
 affirms, that its read of the body failed or came back empty, or that GitHub refused the body, it
-has pushed nothing and is still in its phase. Answer it with `envoy_publish` to its role topic,
-saying how from the deployment instructions; when they do not say, open a `dispatch ask` naming the
-missing instruction.
+has pushed no fix of its own and is still in its phase. Answer it with `envoy_publish` to its role
+topic, saying how from the deployment instructions; when they do not say, open a `dispatch ask`
+naming the missing instruction.
 
 ## Accepting
 
@@ -30,6 +31,10 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 ```
 
 - The issue's Dispatch status stays `needs_review` in `accepting`; `sign_off` moves it to `retro`.
+- An approval may stand with text threads open: the reviewer leaves each text finding as the
+  inline review thread it already wrote, and retro closes those threads before READY. Where you
+  doubt the reviewer's call between a text and a behavioural finding, read the threads yourself
+  and send the issue back with `request_backward_move` rather than accepting.
 - A `catch-up` whose `reason` names an issue as waiting for your acceptance is the wake for it: it
   is in `accepting`, and the `phase-finished` notice that moved it there may never have reached you
   (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its
@@ -93,9 +98,10 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 1. The tester's last result is green and the reviewer approves the head.
 2. The reviewer's approval of the head by SHA moves the issue to `accepting`; your `sign_off` moves
    it to `retro`.
-3. Retro records what the work taught as a `dispatch comment` on the issue and brings the PR body
-   up to date. It commits nothing, so the approved head is the head READY names. No merge carries
-   a handoff onto the default branch, since no commit carries one.
+3. Retro records what the work taught as a `dispatch comment` on the issue, closes the review
+   threads the approval left open and brings the PR body up to date. Its one commit of those text
+   fixes makes the head READY names. No merge carries a handoff onto the default branch, since no
+   commit carries one.
 4. The merger quotes what sits above the approved head
    (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in READY and sends the READY packet
    with its completion. The daemon refuses a head carrying anything above the approved head but a
