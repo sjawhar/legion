@@ -125,6 +125,13 @@ Each item below names a variable, then its purpose.
   Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below).
   A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries.
 
+- `DISPATCH_ANSWERER`, `DISPATCH_AZURE_CHAT_*`, `DISPATCH_CHAT_*`, and the same `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID` and `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`
+
+  Where the server generates text: `azure` is a chat deployment of an Azure AI Foundry resource, reached with the shared Azure sign-in; `endpoint` is any OpenAI-shaped chat completions service, reached with the bearer token `DISPATCH_CHAT_TOKEN_FILE` names, which is read on every call.
+  Unset, no model is configured, and the server starts and says so.
+  The sign-in is the embedder's too, read by whichever of the two is `azure`, so a deployment may embed on Bedrock and answer on Azure; it is refused only where neither is.
+  `DISPATCH_AZURE_CHAT_SCOPE` is configuration because one Azure AI Foundry resource serves two inference families: the models inference endpoint (`/models`, an `api-version`, scope `https://cognitiveservices.azure.com/.default`) and the Azure OpenAI endpoint (`/openai/v1`, no `api-version`, scope `https://ai.azure.com/.default`), and which of the two a deployment serves is named by that deployment.
+
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot with comma-separated `owner/repo=KEY` entries.
 Existing dashboard mappings take precedence over this seed:
 it adds only a repository with no mapping, and announces each one it adds with `settings.repo_project.updated`, as a dashboard write does.

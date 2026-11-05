@@ -16,8 +16,9 @@ import (
 const (
 	// defaultAzureDeployment is DISPATCH_AZURE_EMBED_DEPLOYMENT when it is unset.
 	defaultAzureDeployment = "embed-v-4-0"
-	// azureSettingPrefix begins the name of every setting only DISPATCH_EMBEDDER=azure reads.
-	azureSettingPrefix = "DISPATCH_AZURE_"
+	// azureEmbedSettingPrefix begins the name of every setting only DISPATCH_EMBEDDER=azure
+	// reads; the shared Azure sign-in is three rows of its own, which the answerer reads too.
+	azureEmbedSettingPrefix = "DISPATCH_AZURE_EMBED_"
 	// azureKeyNames is the key form of Azure credential, as a refusal names it.
 	azureKeyNames = "DISPATCH_AZURE_EMBED_KEY_FILE or DISPATCH_AZURE_EMBED_KEY"
 	// azureKeylessNames is the keyless form of Azure credential, as a refusal names it.
@@ -39,22 +40,24 @@ type embedderConfig struct {
 	AzureTokenFile       string
 }
 
-// resolveEmbedder reads DISPATCH_EMBEDDER and the DISPATCH_AZURE_* settings, and refuses, naming
-// the setting, every shape newEmbedder could not build or would silently ignore: a place other
-// than bedrock or azure; any DISPATCH_AZURE_* setting under Bedrock, DISPATCH_EMBEDDER's default;
-// and under Azure, an endpoint that is missing or not an absolute https URL with a host and no
-// query or fragment, a quota that is missing or not a positive integer, a key file that is
-// unreadable or blank, both credential forms, neither, or part of the keyless one. It calls
-// nothing, so a model service or a sign-in that is down never refuses boot.
+// resolveEmbedder reads DISPATCH_EMBEDDER, the DISPATCH_AZURE_EMBED_* settings and the shared
+// Azure sign-in, and refuses, naming the setting, every shape newEmbedder could not build or
+// would silently ignore: a place other than bedrock or azure; any DISPATCH_AZURE_EMBED_* setting
+// under Bedrock, DISPATCH_EMBEDDER's default; and under Azure, an endpoint that is missing or not
+// an absolute https URL with a host and no query or fragment, a quota that is missing or not a
+// positive integer, a key file that is unreadable or blank, both credential forms, neither, or
+// part of the keyless one. The shared sign-in under Bedrock is resolveAnswerer's refusal, since
+// an answerer on Azure reads it while the embedder is on Bedrock. It calls nothing, so a model
+// service or a sign-in that is down never refuses boot.
 func resolveEmbedder(env settingValues) (embedderConfig, error) {
 	switch place := strings.TrimSpace(env.get("DISPATCH_EMBEDDER")); place {
 	case "", embed.PlaceBedrock:
-		if set := azureSettingsSet(env); len(set) > 0 {
+		if set := settingsSet(env, azureEmbedSettingPrefix); len(set) > 0 {
 			chosen := "DISPATCH_EMBEDDER is bedrock"
 			if place == "" {
 				chosen = "DISPATCH_EMBEDDER is unset, which is bedrock"
 			}
-			return embedderConfig{}, fmt.Errorf("%s set, but %s: the DISPATCH_AZURE_* settings are read only with DISPATCH_EMBEDDER=azure", strings.Join(set, ", "), chosen)
+			return embedderConfig{}, fmt.Errorf("%s set, but %s: the DISPATCH_AZURE_EMBED_* settings are read only with DISPATCH_EMBEDDER=azure", strings.Join(set, ", "), chosen)
 		}
 		return embedderConfig{Place: embed.PlaceBedrock}, nil
 	case embed.PlaceAzure:
@@ -64,12 +67,13 @@ func resolveEmbedder(env settingValues) (embedderConfig, error) {
 	}
 }
 
-// azureSettingsSet names each DISPATCH_AZURE_* variable env sets, a row's _FILE form included,
-// in table order.
-func azureSettingsSet(env settingValues) []string {
+// settingsSet names each variable of one group env sets, in table order: every row whose name
+// begins with prefix, a row's _FILE form included. A refusal lists them, so an operator sees
+// every setting the place it chose would have ignored.
+func settingsSet(env settingValues, prefix string) []string {
 	var set []string
 	for _, row := range settings {
-		if !strings.HasPrefix(row.Name, azureSettingPrefix) {
+		if !strings.HasPrefix(row.Name, prefix) {
 			continue
 		}
 		variables := []string{row.Name}
@@ -165,6 +169,7 @@ func newEmbedder(ctx context.Context, cfg embedderConfig) (embed.Embedder, error
 			TenantID:  cfg.AzureTenantID,
 			ClientID:  cfg.AzureClientID,
 			TokenFile: cfg.AzureTokenFile,
+			Scope:     embed.DefaultEntraScope,
 		})
 		if err != nil {
 			return nil, err

@@ -173,6 +173,10 @@ type bootConfig struct {
 	// Embedder is where meaning search embeds text (DISPATCH_EMBEDDER and DISPATCH_AZURE_*),
 	// checked whole; newEmbedder builds its client.
 	Embedder embedderConfig
+	// Answerer is where the server generates text (DISPATCH_ANSWERER, and the DISPATCH_AZURE_CHAT_*
+	// or DISPATCH_CHAT_* settings of the place it names), checked whole; an empty Place is no
+	// model configured, which the server says at boot rather than refusing to start.
+	Answerer answererConfig
 }
 
 func main() {
@@ -1037,6 +1041,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		}
 	}
 	boot.Embedder, err = resolveEmbedder(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.Answerer, err = resolveAnswerer(env, boot.Embedder.Place)
 	if err != nil {
 		return bootConfig{}, err
 	}
