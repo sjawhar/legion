@@ -238,6 +238,7 @@ jobs:
             # The envoy packages the daemon module compiles (`go list -deps -test` of
             # packages/daemon's ./..., with and without -tags e2e).
             daemon_envoy_deps: &daemon_envoy_deps
+              - 'packages/envoy/brokerclient/*'
               - 'packages/envoy/brokertest/*'
               - 'packages/envoy/daemonpermissions/*'
               - 'packages/envoy/internal/broker/api/*'
@@ -257,9 +258,13 @@ jobs:
               - 'packages/envoy/internal/broker/requests/*'
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/broker/store/**'
+              # The token client whose public re-export the daemon imports, and the wire corpus
+              # its own tests replay.
+              - 'packages/envoy/internal/brokerclient/**'
               - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -323,6 +328,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/metrics/*'
@@ -401,6 +407,9 @@ jobs:
               - 'packages/daemon/internal/wait/*'
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
+              - 'packages/envoy/brokerclient/*'
+              - 'packages/envoy/internal/brokerclient/*'
+              - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/listenfd/*'
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
               # migrations are held to, in the envoy module so both sets keep one rule.
@@ -408,17 +417,21 @@ jobs:
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
+              - 'packages/envoy/internal/broker/oauthwire/*'
+              - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/cistore/*'
               - 'packages/envoy/internal/config/*'
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/dedupe/*'
               - 'packages/envoy/internal/ghrename/*'
+              - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/logging/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
@@ -442,6 +455,7 @@ jobs:
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/logtest/*'
@@ -1024,8 +1038,12 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - *listener_command
-              - 'packages/envoy/internal/broker/oauthwire/*'
-              - 'packages/envoy/internal/brokertoken/*'
+              - 'packages/envoy/internal/broker/helper/*'
+              - 'packages/envoy/internal/broker/proof/*'
+              - 'packages/envoy/internal/broker/record/*'
+              # The token client the helper trades through, with the wire corpus its tests replay.
+              - 'packages/envoy/internal/brokerclient/**'
+              - 'packages/envoy/internal/brokertoken/brokertokentest/*'
               - 'packages/envoy/internal/bus/bustest/*'
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/testdata/**'
@@ -1070,6 +1088,7 @@ jobs:
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
+              - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               - 'packages/envoy/internal/webhook/testdata/**'
@@ -1105,10 +1124,13 @@ jobs:
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/broker/store/**'
               - 'packages/envoy/internal/broker/wake/*'
+              # agent-secrets trades through the client, whose own tests replay the wire corpus.
+              - 'packages/envoy/internal/brokerclient/**'
               - 'packages/envoy/internal/buildversion/*'
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/dispatch/githubapp/githubapptest/*'
               - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -1136,6 +1158,7 @@ jobs:
               - 'bun.lock'
               - 'patches/**'
               - 'packages/envoy-client/package.json'
+              - 'packages/broker-client/package.json'
               - 'packages/pi-envoy/package.json'
               - 'packages/pi-legion/package.json'
               - 'packages/pi-shared/package.json'
@@ -1243,11 +1266,13 @@ jobs:
               - 'packages/pi-legion/**'
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/**'
+              - 'packages/broker-client/**'
               - 'packages/contracts/**'
               - 'skills/**'
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/*'
+              - 'packages/envoy/brokerclient/**'
               - 'packages/envoy/brokertest/**'
               - 'packages/envoy/cmd/**'
               - 'packages/envoy/daemonpermissions/**'
@@ -2784,6 +2809,9 @@ jobs:
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
+        working-directory: packages/envoy
+      - name: Isolation test for dev-stack.sh (fakes go/psql/curl/python3; no real Postgres or network)
+        run: bash scripts/dev-stack.test.sh
         working-directory: packages/envoy
       - name: Reuse test for dev-postgres.sh (a fake docker; refuses a dispatch-pg off the pinned image)
         run: bash scripts/dev-postgres.test.sh

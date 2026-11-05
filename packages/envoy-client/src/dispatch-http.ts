@@ -77,6 +77,7 @@ import {
 } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
+import type { RequestCredential } from "./bearer";
 
 export type {
   CredentialPendingResponse,
@@ -758,11 +759,17 @@ function excerpt(text: string, token: string): string {
  * JSON HTTP client for Dispatch's native-tool API. Every request goes through `#send`, where each
  * write (POST or PATCH) carries an `Idempotency-Key` of its own and asks again under it as
  * `writeRetry` paces it.
+ *
+ * `credential` is what every request presents: a bearer (`bearerCredential`, src/bearer.ts), or
+ * what this machine trades its own identity for at the secrets broker, presented under the
+ * `DPoP` scheme with a fresh proof of this process's key on every request. A resolved Dispatch
+ * holds exactly one of them (`ActiveDispatchConfig.credential`), so no caller chooses.
  */
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
+  readonly #credential: RequestCredential;
   /**
    * When this client was made, on the write clock (`#now`): its 60 s deadline counts from here, so
    * no write asks again later than `writeRetry.inFlightWithinMs` after it, however late in the
@@ -772,14 +779,21 @@ export class DispatchClient {
 
   constructor(
     baseUrl: string,
-    readonly token: string,
+    credential: RequestCredential,
     readonly fetchImpl: typeof fetch = fetch,
     signal?: AbortSignal,
     readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY
   ) {
+    this.#credential = credential;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
     this.#madeAt = this.#now();
+  }
+
+  /** The secret this client presents, which an excerpt of someone else's answer redacts; "" while
+   *  a broker credential has yet to trade for one. */
+  get token(): string {
+    return this.#credential.secret();
   }
 
   /**
@@ -1665,15 +1679,18 @@ export class DispatchClient {
     signal?: AbortSignal,
     callerKey?: string
   ): Promise<Response> {
-    const headers: Record<string, string> = {
-      Accept: accept,
-      Authorization: `Bearer ${this.token}`,
-    };
+    // The credential is presented once here, and again for each attempt the write loop makes
+    // below: a key-bound scheme signs one proof per request, so one presentation is one proof
+    // sent, never a second minted and discarded. It is asked before the loop so a credential
+    // that cannot answer throws here, out of the loop's reach, rather than being taken for a
+    // failed attempt.
+    const headers: Record<string, string> = { Accept: accept };
+    let presented = await this.#credential.headers(method, url);
     if (body !== undefined) headers["Content-Type"] = body.type;
     if (method !== "POST" && method !== "PATCH") {
       return this.fetchImpl(url, {
         method,
-        headers,
+        headers: { ...headers, ...presented },
         signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...(body === undefined ? {} : { body: body.content }),
       });
@@ -1708,7 +1725,11 @@ export class DispatchClient {
       let answer: WriteAnswer | undefined;
       let thrown: unknown;
       try {
-        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        // Each attempt after the first presents the credential afresh: a resource server that
+        // keeps a replay store refuses a proof it has already seen.
+        if (attempt > 1) presented = await this.#credential.headers(method, url);
+        const sent = { ...headers, ...presented };
+        answer = await writeAnswer(await this.#attempt(url, method, sent, body, silenceMs), key);
         if (answer.echoed) KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
         if (!answer.again) return answer.response;
         reached ||= answer.reached;
@@ -1876,9 +1897,10 @@ export class DispatchClient {
    */
   async #probeKeyedLayer(): Promise<boolean> {
     try {
-      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+      const probe = `${this.#baseUrl}/healthz`;
+      const response = await this.fetchImpl(probe, {
         method: "GET",
-        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        headers: { Accept: "application/json", ...(await this.#credential.headers("GET", probe)) },
         signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)]),
       });
       if (!isJson(response)) return false;
