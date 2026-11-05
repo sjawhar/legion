@@ -2662,6 +2662,336 @@ func deleteRangesFrame(client uint64, n int) []byte {
 	})
 }
 
+// gcRunFrame is one client's update of a single GC run of length clocks starting at clock, with an
+// empty delete set: gcFrame's struct at a clock of the caller's choosing, so the run can be
+// appended past the clocks a room holds of that client rather than skipped as clocks it holds
+// already (sjawhar/ygo v1.55.1-sami.1, integrateGroup steps over a struct ending at or before the
+// client's clock, crdt/update.go:899-917, and appends one past them without integrating it,
+// :938-949).
+func gcRunFrame(client, clock, length uint64) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(client)
+		encoder.WriteVarUint(clock)
+		encoder.WriteUint8(0)
+		encoder.WriteVarUint(length)
+		encoder.WriteVarUint(0)
+	})
+}
+
+// oneDeleteRangeFrame is an update of no structs whose delete set holds one range of client's, the
+// clocks [clock, clock+length), where deleteRangesFrame holds many ranges of one clock each.
+func oneDeleteRangeFrame(client, clock, length uint64) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(0)
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(client)
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(clock)
+		encoder.WriteVarUint(length)
+	})
+}
+
+// gcRunsOverHeldClocksFrame is one GC run of length clocks for every client in held, each starting
+// at the clock held says that client has reached, so every one of them is appended past the clocks
+// the room holds. It names the room's own client whichever of them that is: a document the server
+// stored holds the client its own writes were made under, and a room that has taken a browser's
+// edit holds that browser's too.
+func gcRunsOverHeldClocksFrame(held crdt.StateVector, length uint64) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(uint64(len(held)))
+		for _, client := range slices.Sorted(maps.Keys(held)) {
+			encoder.WriteVarUint(1)
+			encoder.WriteVarUint(uint64(client))
+			encoder.WriteVarUint(held[client])
+			encoder.WriteUint8(0)
+			encoder.WriteVarUint(length)
+		}
+		encoder.WriteVarUint(0)
+	})
+}
+
+const (
+	// hugeSpanAnsweredWithin is the bound the drive below holds each frame's answer to. A clock
+	// length in a V1 update is a varuint, so twenty-five bytes can claim 2^33 clocks and a
+	// fifteen-byte frame 2^40: a second is three orders of magnitude past the milliseconds a
+	// frame of one struct costs, and three orders under what any work in the clocks a frame
+	// claims would take - 2^33 clocks at a nanosecond each is 8.6 s, 2^40 is 18 minutes, and the
+	// 2^45 the rounds below claim is ten hours.
+	hugeSpanAnsweredWithin = time.Second
+	// hugeSpanEditWithin is the bound it holds the keystroke after each frame, the reconnect after
+	// that and the load of the stored document to: ten seconds, which each of them is three
+	// orders of magnitude under on this pod and which no path linear in a claimed span could meet.
+	hugeSpanEditWithin = 10 * time.Second
+	// hugeSpanRounds is how many GC runs of 2^40 clocks each, at rising clocks so each is appended
+	// rather than skipped, one browser sends into one room, and hugeSpanRoundsMargin how much more
+	// the server may hold after the last than after the first: the room's claimed span passes 2^45
+	// clocks while the room gains thirty-two structs. The margin is reconnectRoundsMargin's 16
+	// MiB, for the same reason: above the garbage the rounds' sockets and syncs leave until the
+	// collector runs, and far under what one round would add if anything on the path held memory
+	// in the clocks the round claimed.
+	hugeSpanRounds       = 32
+	hugeSpanRoundsMargin = 16 << 20
+	// hugeSpanNewClient is the client of the frames below that name a client the room has never
+	// seen, above every client a stored document holds and above the 32 bits a browser's own id is
+	// drawn from (crdt.New).
+	hugeSpanNewClient = 1<<40 + 211
+)
+
+// theDeletedRunsCrasher is the twenty-five-byte frame the deleted-runs fuzz target reached
+// (internal/dispatch/docs, FuzzAnAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet): two client
+// groups, the first a GC run, and then a delete set whose count of clients is the six-byte varuint
+// 80 80 80 80 80 20, 2^40 clients, in twenty-five bytes.
+var theDeletedRunsCrasher = []byte("\x02\x01?\x80\x80 \x00\x00\x00\x80\x80\x80 \x01\x80\x80\x80\x80\x80 \x00\x00\x00\x01\x00")
+
+// typedThrough sends one browser's keystroke into the room over a socket of its own, appending
+// typed to the document's first paragraph of plain words, and returns how long the room took to
+// answer it applied.
+func typedThrough(t *testing.T, server *memoryServer, room, typed string) time.Duration {
+	t.Helper()
+	typist := server.openBrowser(t, room)
+	defer typist.leave()
+	keystroke := browserEdit(t, typist.state(t), func(tree *pmdoc.Node) {
+		paddingTexts(t, tree)[0].Text += typed
+	})
+	start := time.Now()
+	applied, closed, err := typist.send(typist.updateFrame(keystroke))
+	took := time.Since(start)
+	if err != nil || !applied || closed != nil {
+		t.Fatalf("the keystroke into %s was answered applied %v, closed %v, %v; want it applied and the socket open", room, applied, closed, err)
+	}
+	return took
+}
+
+// resyncedThrough opens a browser of its own on the room and asks it for the whole document, as a
+// browser reconnecting does, and returns how long the two took with the state it was given.
+func resyncedThrough(t *testing.T, server *memoryServer, room string) (time.Duration, []byte) {
+	t.Helper()
+	start := time.Now()
+	browser := server.openBrowser(t, room)
+	defer browser.leave()
+	state := browser.state(t)
+	return time.Since(start), state
+}
+
+// A frame costs the server what its bytes carry, never what its clocks claim, over real document
+// sockets of a real server. A clock length in a V1 update is a varuint: a GC run, a skip and a
+// delete range each name a span of clocks in a few bytes, so a frame of fifteen bytes can claim
+// 2^40 clocks of a client, and the twenty-five-byte frame the deleted-runs fuzz target reached
+// (theDeletedRunsCrasher) claims 2^40 delete-set clients besides. Nothing the server runs for such
+// a frame walks those clocks: the walk reads a struct and a delete range at a time (walkUpdate),
+// the hook's weighing is arithmetic over each of them (peerWeighing), the room's list of deleted
+// runs holds a range as two integers (deletedRuns), and ygo integrates a GC struct by appending it
+// and applies a delete range over the items it covers, never over its clocks
+// (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:938-949, crdt/delete_set.go:243-320).
+//
+// Each row below is a frame of that shape on a document of its own: the fuzz target's own
+// twenty-five bytes, which the walk refuses at byte 20 for a delete set of more clients than ygo
+// decodes; a GC run of 2^33 clocks for every client the room holds, each at the clock the room
+// holds of it, which the room's own client is one of; a delete range of 2^40 clocks over the
+// clocks a browser wrote, which the room holds; and a GC run of 2^40 clocks of a client the room
+// has never seen. Each is answered - admitted or refused, as the row says - within
+// hugeSpanAnsweredWithin, an ordinary keystroke applies after it, a browser reconnecting is given
+// the whole document, and once the room has settled and the server has been restarted the stored
+// history loads and takes a keystroke, each within hugeSpanEditWithin and beside a control
+// document that took no frame at all. Then one room takes hugeSpanRounds GC runs of 2^40 clocks
+// each at rising clocks, claiming more than 2^45 clocks in 32 structs, and the server holds no
+// more after the last round than after the first.
+func TestAFrameClaimingHugeClockSpansCostsOnlyItsBytes(t *testing.T) {
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	markdown := "# Spans\n\n" + strings.Repeat("word ", 400) + "\n"
+	document := func(t *testing.T, what string) string {
+		t.Helper()
+		stored := server.upload(t, "json", memory.issue, markdown)
+		if stored.status != http.StatusCreated {
+			t.Fatalf("upload the document for %s: status %d body %.300s, want 201", what, stored.status, stored.body)
+		}
+		memory.waitForSettlement(t, stored)
+		return stored.artifactID
+	}
+	// The control: a document of the same markdown that takes no frame of the kind, whose load
+	// after the restart is what the others' loads are read against.
+	control := document(t, "the control document")
+	rooms := map[string]string{"the control document": control}
+	type hugeSpanRow struct {
+		name     string
+		claimed  string
+		admitted bool
+		// frame is the bytes the row sends, built against the room it is sent to, which the row
+		// reads through a browser of its own.
+		frame func(t *testing.T, room string) []byte
+	}
+	before := heldNow(t, server, "before any frame claiming a span of clocks")
+	for _, row := range []hugeSpanRow{
+		{
+			name:     "the deleted-runs fuzz target's 25-byte frame",
+			claimed:  "a delete set of 2^40 clients",
+			admitted: false,
+			frame:    func(*testing.T, string) []byte { return theDeletedRunsCrasher },
+		},
+		{
+			name:     "a GC run of 2^33 clocks for every client the room holds, each at its clock",
+			claimed:  "2^33 clocks a client",
+			admitted: true,
+			frame: func(t *testing.T, room string) []byte {
+				reader := server.openBrowser(t, room)
+				defer reader.leave()
+				held := newBrowserDocument(t, reader.state(t)).doc.StateVector()
+				if len(held) == 0 {
+					t.Fatal("the room holds no client, so no frame can name the clocks it holds")
+				}
+				return gcRunsOverHeldClocksFrame(held, 1<<33)
+			},
+		},
+		{
+			name:     "a delete range of 2^40 clocks over clocks the room holds",
+			claimed:  "2^40 clocks",
+			admitted: true,
+			frame: func(t *testing.T, room string) []byte {
+				// The clocks the range covers are a browser's own, which the room holds once its
+				// keystroke has applied: a range over the client the stored document was written
+				// under would delete the document itself, and what this row is for is the span,
+				// not the deletion.
+				typist := server.openBrowser(t, room)
+				defer typist.leave()
+				writing := newBrowserDocument(t, typist.state(t))
+				keystroke := writing.edit(t, func(tree *pmdoc.Node) {
+					paddingTexts(t, tree)[0].Text += " typed-before-the-delete"
+				})
+				requireApplied(t, typist, keystroke, "the keystroke whose clocks the delete range covers")
+				client := uint64(writing.doc.ClientID())
+				held := newBrowserDocument(t, typist.state(t)).doc.StateVector()
+				if held.Clock(crdt.ClientID(client)) == 0 {
+					t.Fatalf("the room holds no clock of the typing browser's client %d, want the keystroke's: %v", client, held)
+				}
+				return oneDeleteRangeFrame(client, 0, 1<<40)
+			},
+		},
+		{
+			name:     "a GC run of 2^40 clocks for a client the room has never seen",
+			claimed:  "2^40 clocks",
+			admitted: true,
+			frame: func(*testing.T, string) []byte {
+				return gcRunFrame(hugeSpanNewClient, 0, 1<<40)
+			},
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			room := document(t, row.name)
+			rooms[row.name] = room
+			frame := row.frame(t, room)
+			// A browser that only reads the room, which a refusal must leave alone.
+			reader := server.openBrowser(t, room)
+			defer reader.leave()
+			sending := server.openBrowser(t, room)
+			defer sending.leave()
+			start := time.Now()
+			applied, closed, err := sending.send(sending.updateFrame(frame))
+			answered := time.Since(start)
+			t.Logf("%s, %d bytes claiming %s: applied %v, closed %v, %v, answered in %s",
+				row.name, len(frame), row.claimed, applied, closed, err, answered.Round(time.Microsecond))
+			if err != nil {
+				t.Fatalf("the frame was answered %v, want the room to answer it", err)
+			}
+			if applied != row.admitted {
+				t.Fatalf("the frame was answered applied %v (closed %v), want applied %v", applied, closed, row.admitted)
+			}
+			if !row.admitted {
+				requireRefused(t, applied, closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentUpdateRefusedCloseReason)
+			} else if closed != nil {
+				t.Fatalf("the admitted frame's socket was closed with %v, want it left open", closed)
+			}
+			if answered > hugeSpanAnsweredWithin {
+				t.Fatalf("the room took %s to answer a %d-byte frame claiming %s, past the %s a frame costing only its bytes takes",
+					answered, len(frame), row.claimed, hugeSpanAnsweredWithin)
+			}
+			if err := reader.ping(); err != nil {
+				t.Fatalf("the room stopped answering the browser that only reads it: %v", err)
+			}
+			typed := typedThrough(t, server, room, " typed-after-the-frame")
+			resynced, state := resyncedThrough(t, server, room)
+			t.Logf("%s: the keystroke after it applied in %s, a reconnect read the room's %d-byte state in %s",
+				row.name, typed.Round(time.Microsecond), len(state), resynced.Round(time.Microsecond))
+			if typed > hugeSpanEditWithin || resynced > hugeSpanEditWithin {
+				t.Fatalf("after the frame the keystroke took %s and the reconnect %s, past the %s each takes in a room no frame has made slow",
+					typed, resynced, hugeSpanEditWithin)
+			}
+			if text := server.text(t, room); !strings.Contains(text, "typed-after-the-frame") {
+				t.Fatalf("the document's text is %d bytes and carries none of the keystroke after the frame", len(text))
+			}
+		})
+	}
+
+	// The rounds: one room, one browser's socket a round, each round a GC run of 2^40 clocks at
+	// the clock the round before it reached, so every one of them is appended and the room's
+	// claimed span passes 2^45 clocks in thirty-two structs.
+	flooded := document(t, "the room the rounds flood")
+	rooms["the room the rounds flood"] = flooded
+	var afterFirst int64
+	for round := range hugeSpanRounds {
+		frame := gcRunFrame(hugeSpanNewClient+1, uint64(round)<<40, 1<<40)
+		sending := server.openBrowser(t, flooded)
+		start := time.Now()
+		applied, closed, err := sending.send(sending.updateFrame(frame))
+		answered := time.Since(start)
+		sending.leave()
+		if err != nil || !applied || closed != nil {
+			t.Fatalf("round %d of the GC runs of 2^40 clocks was answered applied %v, closed %v, %v; want it applied and the socket open",
+				round, applied, closed, err)
+		}
+		if answered > hugeSpanAnsweredWithin {
+			t.Fatalf("round %d of the GC runs of 2^40 clocks was answered in %s, past %s", round, answered, hugeSpanAnsweredWithin)
+		}
+		if round == 0 {
+			afterFirst = heldNow(t, server, "after the first GC run of 2^40 clocks")
+		}
+	}
+	afterRounds := heldNow(t, server, fmt.Sprintf("after all %d GC runs of 2^40 clocks", hugeSpanRounds))
+	t.Logf("%d GC runs of 2^40 clocks, %d clocks claimed in all: the runtime holds %d bytes after the last, against %d after the first (%+d), within the %d-byte margin",
+		hugeSpanRounds, uint64(hugeSpanRounds)<<40, afterRounds, afterFirst, afterRounds-afterFirst, int64(hugeSpanRoundsMargin))
+	if afterRounds > afterFirst+hugeSpanRoundsMargin {
+		t.Fatalf("the %d rounds left the runtime holding %d bytes, past the %d it held after the first by more than the %d-byte margin",
+			hugeSpanRounds, afterRounds, afterFirst, int64(hugeSpanRoundsMargin))
+	}
+	after := heldNow(t, server, "after every frame claiming a span of clocks")
+	t.Logf("the runtime holds %d bytes after every frame, against %d before the first (%+d)", after, before, after-before)
+	if after > before+hugeSpanRoundsMargin {
+		t.Fatalf("the frames left the runtime holding %d bytes, past the %d it held before the first by more than the %d-byte margin",
+			after, before, int64(hugeSpanRoundsMargin))
+	}
+
+	// The stored histories: each room settles what it took, the server is restarted so no room is
+	// resident, and every document is loaded again from its stored state. A load that walked the
+	// clocks a stored GC run claims could not answer at all.
+	for _, room := range rooms {
+		memory.waitForSettled(t, room)
+	}
+	server.stop(t)
+	restarted := memory.start(t)
+	loads := map[string]time.Duration{}
+	for _, what := range slices.Sorted(maps.Keys(rooms)) {
+		room := rooms[what]
+		requireRoomAbsent(t, restarted, room, what)
+		load, state := resyncedThrough(t, restarted, room)
+		typed := typedThrough(t, restarted, room, " typed-after-the-reload")
+		loads[what] = load
+		t.Logf("after the restart %s loaded its %d-byte stored history in %s and took a keystroke in %s",
+			what, len(state), load.Round(time.Microsecond), typed.Round(time.Microsecond))
+		if load > hugeSpanEditWithin || typed > hugeSpanEditWithin {
+			t.Fatalf("after the restart %s loaded in %s and took a keystroke in %s, past the %s each takes for a stored history no frame has made slow",
+				what, load, typed, hugeSpanEditWithin)
+		}
+	}
+	for what, load := range loads {
+		if load > loads["the control document"]+hugeSpanEditWithin {
+			t.Fatalf("%s loaded in %s, past the control document's %s by more than %s",
+				what, load, loads["the control document"], hugeSpanEditWithin)
+		}
+	}
+}
+
 const (
 	// maxUpdateItemsForTest mirrors docs' maxUpdateItems, the
 	// decode cap: the most structs a stored document's state may hold. The struct-dense drives
