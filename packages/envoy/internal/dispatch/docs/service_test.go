@@ -6158,7 +6158,10 @@ func waitForDocumentVersion(t *testing.T, database *store.Store, artifactID stri
 	t.Helper()
 	// A ceiling, not a duration: a settlement that needs a room reload first (a test that evicted
 	// the room) takes longer than one that only writes, and a loaded CI runner stretches both.
-	deadline := time.Now().Add(3 * time.Second)
+	// Thirty seconds rather than three, because on four cores with every package of the module
+	// beside it three was not enough (run 42061247130); on an idle server this returns in
+	// milliseconds, so a healthy run pays nothing for the ceiling (dispatch://INFRA-1075).
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		version, ok, err := loadDocumentVersion(context.Background(), database, artifactID, number)
 		if err != nil {

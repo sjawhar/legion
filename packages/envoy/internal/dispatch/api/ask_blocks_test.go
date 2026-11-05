@@ -72,7 +72,10 @@ func TestSearchAskBlockOptionDescription(t *testing.T) {
 	if edited.Code != http.StatusOK {
 		t.Fatalf("write ask block: status=%d body=%s", edited.Code, edited.Body.String())
 	}
-	deadline := time.Now().Add(time.Second)
+	// Thirty seconds rather than one: this waits for the settlement to reach the inbox, an
+	// event, and under the race detector with every package of the module beside it a second was
+	// not enough (run 42061247130). It returns in milliseconds on an idle server.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
 		if inbox.Code != http.StatusOK {
