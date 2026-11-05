@@ -47,7 +47,7 @@ own fault.
 ## What replaced the re-run
 
 - Every image a CI job fetches is a copy in one package this repository publishes,
-  `ghcr.io/sjawhar/legion/ci`. Each consumer names its copy by digest, so a push can add bytes to
+  `ghcr.io/cybermonklabs/legion/ci`. Each consumer names its copy by digest, so a push can add bytes to
   the package but can never change the bytes a job pulls.
 - `.github/ci-images.yaml` holds one row per image (`upstream`, `tag`, `digest`).
   `.github/scripts/mirror-ci-images.sh` copies the rows the package does not hold yet, with
@@ -77,7 +77,7 @@ own fault.
 
 ## What to do when an image pull fails now
 
-1. Read the failing step and the reference it names. It names `ghcr.io/sjawhar/legion/ci` and a
+1. Read the failing step and the reference it names. It names `ghcr.io/cybermonklabs/legion/ci` and a
    digest.
 2. Read the failure against this run's own `ci-images` job before you re-run anything, and add
    no retry. One case is fixed by a re-run: a consumer that pulled before the copy landed. The
@@ -118,7 +118,7 @@ own fault.
   way with `BLOB_UNKNOWN` from `mirror.gcr.io`, so each row's `upstream` is now the
   image's own Docker Hub reference. The 12 digests are the same at both hosts, read at both. At
   17:1xZ, from a pod holding no credential, an anonymous token request
-  (`GET https://ghcr.io/token?scope=repository:sjawhar/legion/ci:pull&service=ghcr.io`) and one
+  (`GET https://ghcr.io/token?scope=repository:cybermonklabs/legion/ci:pull&service=ghcr.io`) and one
   manifest `HEAD` per row with that token answered `200` for all 12 rows. A `HEAD` with no token
   answers `401`, which is the registry asking for a token rather than refusing the package. GitHub
   published the package with the repository's own visibility, so no person had to act, no

@@ -20,7 +20,7 @@ var Roles = []Role{RoleArchitect, RolePlanner, RoleImplementer, RoleTester, Role
 
 // ProjectToken is the project as every token, and the private tmux server, spell it: the
 // operator's `project` lowercased with every character outside [a-z0-9] dropped — the shipped
-// daemon's rule (`legionProjectToken`, packages/contracts/src/legion-roles.ts), so `sjawhar/legion`
+// daemon's rule (`legionProjectToken`, packages/contracts/src/legion-roles.ts), so `cybermonklabs/legion`
 // names the same role topics under either daemon.
 func ProjectToken(project string) (string, error) {
 	token := notAlphanumeric.ReplaceAllString(strings.ToLower(project), "")

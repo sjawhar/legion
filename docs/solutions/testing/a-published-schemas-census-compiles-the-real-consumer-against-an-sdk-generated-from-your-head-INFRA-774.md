@@ -50,7 +50,7 @@ plugin. Census it like this.
 ## Evidence
 
 sjawhar/legion#2528 made thirteen inputs of `envoy-infra:gcp:Dispatch` optional in the served
-schema. In sjawhar/legion the three searches found no caller outside
+schema. In cybermonklabs/legion the three searches found no caller outside
 `packages/envoy/infra` itself: seven hits, every one a comment or a changelog fragment.
 
 The consumer is theorem-labs/agent-infra, read read-only with

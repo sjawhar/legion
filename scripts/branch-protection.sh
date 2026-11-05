@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly repository="sjawhar/legion"
+readonly repository="cybermonklabs/legion"
 readonly branch="main"
 readonly endpoint="repos/${repository}/branches/${branch}/protection"
 readonly ci_app_id="${CI_APP_ID:-15368}"

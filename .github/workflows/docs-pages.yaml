@@ -2,7 +2,7 @@ name: Docs (main)
 
 # Builds the documentation site (docs/site) on a push to main whose change could change it, and
 # publishes it to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the
-# repository this runs in (https://sjawhar.github.io/legion/ today). The build is docs-site.yaml's,
+# repository this runs in (https://cybermonklabs.github.io/legion/ today). The build is docs-site.yaml's,
 # which holds those steps once. Pull requests and merge groups call the same workflow from
 # ci.yaml's docs job; this workflow is main's half.
 #

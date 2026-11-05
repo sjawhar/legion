@@ -232,11 +232,11 @@ jobs:
           # $GITHUB_EVENT_PATH's full JSON into any provenance predicate a build below computes,
           # attached to the pushed image or not. false here keeps every build this builder runs —
           # smoke and publish alike — free of that, regardless of each build's own provenance
-          # setting. image= is the driver's own default BuildKit image: ghcr.io/sjawhar/legion/ci,
+          # setting. image= is the driver's own default BuildKit image: ghcr.io/cybermonklabs/legion/ci,
           # the copy of moby/buildkit:buildx-stable-1 (.github/ci-images.yaml).
           driver-opts: |
             provenance-add-gha=false
-            image=ghcr.io/sjawhar/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+            image=ghcr.io/cybermonklabs/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -419,8 +419,8 @@ jobs:
   # branch pushes one too. The attestation's Sigstore certificate carries this workflow file's
   # identity, ref and commit from the run's OIDC token, which no workflow edit can change, so a
   # consumer accepts a digest only when a run of this file on main built it:
-  #   gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
-  #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  #   gh attestation verify oci://ghcr.io/cybermonklabs/legion/envoy@sha256:… --repo cybermonklabs/legion \
+  #     --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
   #     --source-ref refs/heads/main --deny-self-hosted-runners
   # and adds `--source-digest <the commit its tag names>` to pin the commit as well. The certificate
   # names the workflow whose job signed, so this job stays in this file: moved into a called
@@ -887,8 +887,8 @@ jobs:
       # release below uploads exactly. `--repo` alone accepts an archive any workflow of this
       # repository attested, so the check pins the signer as docs/kubernetes.md ("Pin by digest,
       # never by tag") does:
-      #   gh attestation verify agent-secrets-<asset>.tar.gz --repo sjawhar/legion \
-      #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+      #   gh attestation verify agent-secrets-<asset>.tar.gz --repo cybermonklabs/legion \
+      #     --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
       #     --source-ref refs/heads/main --deny-self-hosted-runners
       # and adds `--source-digest <the legion-envoy-v<version> tag's commit>` to pin the commit as well.
       # It runs after "Tag release", so a run whose tag step refuses (the tag already names another

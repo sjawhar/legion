@@ -12,7 +12,7 @@ Secrets Manager or Google Cloud Secret Manager, and it starts nothing else.
 
 ## What to run
 
-The broker ships as `envoy-broker` in the Envoy image, `ghcr.io/sjawhar/legion/envoy:<commit>`,
+The broker ships as `envoy-broker` in the Envoy image, `ghcr.io/cybermonklabs/legion/envoy:<commit>`,
 which `.github/workflows/release-envoy-listener.yaml` publishes on a push to `main` that touches
 the image's sources (the image's default
 entrypoint is the Envoy listener, so run it with `--entrypoint envoy-broker`). Of the builds

@@ -50,7 +50,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
 - **jj (Jujutsu)** for version control, native **Dispatch** for issue tracking
 
-- **Container images** a CI job fetches are copies in one package this repository publishes, `ghcr.io/sjawhar/legion/ci`.
+- **Container images** a CI job fetches are copies in one package this repository publishes, `ghcr.io/cybermonklabs/legion/ci`.
   Every workflow, Dockerfile and test names its copy by digest.
   `.github/ci-images.yaml` holds one row per image (`upstream`, `tag`, `digest`), and `.github/scripts/mirror-ci-images.sh` copies the rows the package does not hold yet with `crane copy`, which keeps the digest.
   That copy names the row's upstream at the row's digest, and crane drops a tag written before that digest, so a floating upstream tag decides no byte of a copy.
@@ -558,7 +558,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Repository-dependent paths come from one script**
   — the image a workflow pushes, the release URL it stamps into a binary, the `repository.url` npm matches against the publishing repository and the docs site's own address are derived from `$GITHUB_REPOSITORY` by `.github/scripts/repo-paths.sh`, never written as a literal in a workflow or in the docs config.
-  It prints one key (`repo-paths.sh docs_base`) or every `key=value`, answers today's `sjawhar/legion` off a runner, and `.github/scripts/repo-paths.test.sh` tests it in `ci.yaml`'s test job.
+  It prints one key (`repo-paths.sh docs_base`) or every `key=value`, answers today's `cybermonklabs/legion` off a runner, and `.github/scripts/repo-paths.test.sh` tests it in `ci.yaml`'s test job.
   A job holding a credential runs no script of this repository, so it reads the value from the output of an upstream job that does (`release-envoy-listener.yaml`'s `targets`, `worker-image.yaml`'s `build`), or from a `workflow_call` input when that job was skipped (`worker-image.yaml`'s `image`, which `release.yaml` passes).
   `docs/site/repo-paths.ts` is the docs build's adapter over the same script
 
@@ -586,7 +586,7 @@ Each item below names a task and where its code is, then notes on it.
   a release made by a release workflow running on `refs/heads/main` (the `legion` binary from `release.yaml`, the worker image from `worker-image.yaml`, the Envoy image and its listener release from `release-envoy-listener.yaml`, the `envoy-infra` Pulumi plugin from `release-envoy-infra.yaml`, the npm plugins from `release.yaml`'s `*_build` jobs and its one `publish` job, which run only on main), and `packages/claude-envoy`, whose built files main carries, committed by the rebuild workflow (`claude-envoy-rebuild.yaml`), so a deployment uses a checkout of `main`.
   Keep no long-lived integration or deployment branch:
   a fix a deployment needs merges to `main` through a pull request and ships in the next release, never from the branch it was written on, and a change meant for one deployment is a pull request against `main` like any other.
-  A branch build (a pull request's, or a `workflow_dispatch` from another ref, publishes `ghcr.io/sjawhar/legion-worker:sha-<first 12 hex of the commit>` or `ghcr.io/sjawhar/legion/envoy:<full commit>`) proves a change before it merges and is never what a deployment pins.
+  A branch build (a pull request's, or a `workflow_dispatch` from another ref, publishes `ghcr.io/cybermonklabs/legion-worker:sha-<first 12 hex of the commit>` or `ghcr.io/cybermonklabs/legion/envoy:<full commit>`) proves a change before it merges and is never what a deployment pins.
   A deployment pins an image by digest and accepts it only when its `org.opencontainers.image.revision` names a commit `main` contains and, for an attested image, when that image's own acceptance command passes with `--source-digest <that commit>`:
   the worker image's in `docs/kubernetes.md` ("Pin by digest, never by tag"), the Envoy image's in `packages/envoy/AGENTS.md` (the paragraph on `release-envoy-listener.yaml`'s attestation), each naming its own workflow in `--cert-identity`;
   it pins the plugin by a released version, never `0.0.0-dev` or a commit.
@@ -671,7 +671,7 @@ The implementer — the agent that developed the change
 `pass` once it drove the changed path in production and recorded the result of the issue's `after_merge` check with `dispatch result` (at the merge commit, naming what woke the look), whose printed line goes in the pull request body;
 `pending` when production does not carry the merge yet (the daemon suspends the implementer's claim with its session, the issue's pod goes and takes the disk it owns, and the daemon wakes the check on Dispatch's `issue.deployed` for the pull request;
 when the project's `projects.<KEY>.deploys` names the repository's deploy workflow and step, at each completed run of that workflow on the default branch whose step succeeded after the merge, once per such job, read from GitHub as the implement App on the run's `workflow_run` webhook through Envoy, the task naming `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <time>`, and never for a pull-request run, a skipped or failed step, or a step that finished before the merge;
-or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge or Dispatch's announcement that every server process serves a build containing the merge;
+or, for `cybermonklabs/legion`, on a Legion daemon's boot on a build containing the merge or Dispatch's announcement that every server process serves a build containing the merge;
 a wake while a look is open is kept for the next look);
 `fail` for a defect, recorded as a failing result, never an issue the implementer files:
 a defect with a clear fix goes to the controller, which gives it to the running tree whose code it is and files a Legion root only when none does, and one that needs a decision is a `dispatch ask` on the controller's report issue whose reference goes to the controller;

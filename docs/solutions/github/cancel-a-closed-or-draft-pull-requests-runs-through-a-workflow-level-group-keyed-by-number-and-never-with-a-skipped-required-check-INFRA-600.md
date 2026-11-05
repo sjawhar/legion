@@ -60,7 +60,7 @@ related_issues:
 
 ## Evidence
 
-- sjawhar/legion#2356 (INFRA-600), code head 32dd5458. Before it, 72 h of sjawhar/legion runs held
+- sjawhar/legion#2356 (INFRA-600), code head 32dd5458. Before it, 72 h of cybermonklabs/legion runs held
   3,952 draft job minutes, 4,703 runner minutes after a pull request's close and 2,167 minutes of
   superseded Worker Image builds (dispatch://INFRA-600/artifact/ci-queue-waste-before-2026-10-27-md).
 - Scratch #2380 at 20fa840c: `Tests (closed pull request)` run 40465747080, its job `skipped` with
