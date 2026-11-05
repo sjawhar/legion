@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -256,6 +257,9 @@ type router struct {
 	// eventHead is what GET /auth/whoami answers as event_head: the context's own (AppContext's
 	// eventHead) when it names one, else the registered API server's (api.Background's EventHead).
 	eventHead func(context.Context) (int64, error)
+	// firstScreen draws the opening blocks of the document a browser address names, for the page
+	// handler (api.Background's FirstScreen, servePageForDocument).
+	firstScreen func(context.Context, *http.Request, api.FirstScreenAddress) api.FirstScreen
 }
 
 // New returns an http.Handler that serves all dispatch routes, and the API server's background
@@ -283,6 +287,7 @@ func New(ctx *AppContext) (http.Handler, api.Background) {
 	if r.eventHead == nil {
 		r.eventHead = background.EventHead
 	}
+	r.firstScreen = background.FirstScreen
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
 		return r.enforceCookieOrigin(mux), background
@@ -608,7 +613,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
+	r.servePageForDocument(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"), normalized)
 }
 
 // isMissingFile reports whether os.Stat's err means no file is there: the path does not exist,
@@ -804,6 +809,140 @@ func servePage(w http.ResponseWriter, req *http.Request, path string) {
 	w.Header().Set("Cache-Control", pageCacheControl)
 	w.Header().Set("ETag", `"`+pageTag(page)+`"`)
 	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
+}
+
+// firstScreenMarker is where index.html keeps the server's place for a document's opening
+// blocks: inside the page's own `#first-screen` element, which sits after `#root` because
+// `createRoot` clears everything inside the element it mounts into. A page that carries no
+// document leaves the marker where it is, so a reader with no session, or at any other address,
+// gets the build's own bytes.
+const firstScreenMarker = "<!--first-screen-->"
+
+// firstScreenElement opens the element the blocks are drawn in: the document, named for what it
+// is, exactly as the page's own read-only preview names it
+// (`web/src/features/doc/DocumentPreview.tsx`), so what reads either surface reads both and the
+// page's preview can take these blocks as its own. It carries the address it was drawn for, so a
+// page the reader has already navigated away from never hands its blocks to another document
+// (`web/src/features/doc/first-screen.ts`).
+func firstScreenElement(address string) string {
+	return `<div role="document" aria-label="Document text" data-first-screen-address="` +
+		html.EscapeString(address) + `">`
+}
+
+// firstScreenBudget is the longest the page may wait for a document before it sends the shell.
+// The page is what the reader is waiting for; a document the server cannot draw in this long is
+// one the page's own read will draw for them a moment later, and holding the page for it would
+// cost every reader of that document the wait. A variable so a test can shorten it and prove
+// the fallback without waiting it out.
+var firstScreenBudget = 300 * time.Millisecond
+
+// documentPageCacheControl is what a page carrying a document may be kept as: nothing, by
+// anything. The bytes are one reader's document, so no shared cache may hold them, and a browser
+// that kept them would show one person's document to the next person to sign in on that machine.
+const documentPageCacheControl = "private, no-store"
+
+// servePageForDocument serves the dashboard page, with the opening blocks of the document the
+// address names in it where there is one to draw (dispatch://INFRA-341 R11). A page carrying a
+// document is nobody's to keep and carries no validator at all: no ETag, and so no revalidation
+// for an If-None-Match to answer, since a 304 would leave a browser showing the document it held
+// before - another reader's, or one this reader may no longer read.
+func (r *router) servePageForDocument(w http.ResponseWriter, req *http.Request, path, normalized string) {
+	address, ok := documentAddress(req, normalized)
+	if !ok || r.firstScreen == nil {
+		servePage(w, req, path)
+		return
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), firstScreenBudget)
+	defer cancel()
+	screen := r.firstScreen(ctx, req, address)
+	if !screen.Drawn {
+		servePage(w, req, path)
+		return
+	}
+	page, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "dashboard build not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read failed")
+		return
+	}
+	marker := bytes.Index(page, []byte(firstScreenMarker))
+	if marker < 0 {
+		slog.Warn("dispatch: the dashboard page holds no first-screen marker", "path", path)
+		servePage(w, req, path)
+		return
+	}
+	w.Header().Set("Content-Type", contentType(path))
+	w.Header().Set("Cache-Control", documentPageCacheControl)
+	w.WriteHeader(http.StatusOK)
+	if req.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(page[:marker])
+	_, _ = io.WriteString(w, firstScreenElement(normalized))
+	_, _ = io.WriteString(w, screen.HTML)
+	_, _ = io.WriteString(w, "</div>")
+	_, _ = w.Write(page[marker+len(firstScreenMarker):])
+}
+
+// documentAddress is the document a browser address opens, for the page handler. Four addresses
+// open one: the issue's own spec at `/issues/{key}` and at `/issues/{key}/spec`, which a link to
+// a block of the spec names, and the issue document at `/issues/{key}/artifacts/{slug}` and at
+// `/issues/{key}/artifact/{slug}` - both spellings are written, and both are the same document.
+// Nothing else carries a document into its page: a pinned version (`?v=`) is a different
+// document than the one this draws, an agent's conversation document is read by another route,
+// and every other address opens no document at all.
+func documentAddress(req *http.Request, normalized string) (api.FirstScreenAddress, bool) {
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return api.FirstScreenAddress{}, false
+	}
+	if req.URL.Query().Has("v") {
+		return api.FirstScreenAddress{}, false
+	}
+	rest, found := strings.CutPrefix(normalized, "/issues/")
+	if !found {
+		return api.FirstScreenAddress{}, false
+	}
+	key, tail, hasTail := strings.Cut(rest, "/")
+	if !isIssueKey(key) {
+		return api.FirstScreenAddress{}, false
+	}
+	if !hasTail || tail == "spec" {
+		return api.FirstScreenAddress{IssueKey: key}, true
+	}
+	slug, found := strings.CutPrefix(tail, "artifacts/")
+	if !found {
+		slug, found = strings.CutPrefix(tail, "artifact/")
+	}
+	if !found || slug == "" || strings.Contains(slug, "/") {
+		return api.FirstScreenAddress{}, false
+	}
+	return api.FirstScreenAddress{IssueKey: key, Slug: slug}, true
+}
+
+// isIssueKey reports whether text spells an issue key, `PROJECT-123`, as Dispatch mints one.
+func isIssueKey(text string) bool {
+	project, number, found := strings.Cut(text, "-")
+	if !found || len(project) < 2 || len(project) > 10 || number == "" || number[0] == '0' {
+		return false
+	}
+	if project[0] < 'A' || project[0] > 'Z' {
+		return false
+	}
+	for index := range len(project) {
+		letter := project[index]
+		if (letter < 'A' || letter > 'Z') && (letter < '0' || letter > '9') {
+			return false
+		}
+	}
+	for index := range len(number) {
+		if number[index] < '0' || number[index] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // pageTag names a page by its bytes: lowercase hex of the first 16 bytes of their SHA-256. It is

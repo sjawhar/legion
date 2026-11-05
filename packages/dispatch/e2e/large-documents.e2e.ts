@@ -904,3 +904,42 @@ test(`a comment body of ${commentDiagrams} diagrams draws only the diagrams near
     await alice.close();
   }
 });
+
+/** The build's own budget of recovery reloads, spent before the page loads, so the row below
+ *  reads one page rather than the three the shell's inline script would reload through when it
+ *  sees every script of the build fail (`web/index.html`, `CHUNK_RELOADS_STORAGE_KEY` in
+ *  `web/src/features/shell/DeploymentResilience.tsx`). */
+const CHUNK_RELOADS_SPENT = "dispatch.chunk-reloads";
+
+// The reader meets their document in the page's own bytes. The Go server draws the document's
+// opening blocks into the page it sends a reader whose session may read it
+// (`internal/dispatch/pmdoc/first_screen.go`, dispatch://INFRA-341 R11, acceptance A11), so the
+// first block is on the screen with none of the app downloaded, parsed or run: this row blocks
+// every script the build serves and finds it there. What it proves is the one thing no
+// measurement can - that the first block owes nothing at all to the page's own code.
+test("draws the document's first block with the app's code blocked @phone", async ({ browser }) => {
+  test.setTimeout(300_000);
+  const { path } = await seedDocument("specs-blocked.md", smallDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.addInitScript(
+      ([key, now]) => {
+        window.sessionStorage.setItem(key as string, JSON.stringify([now, now, now]));
+      },
+      [CHUNK_RELOADS_SPENT, Date.now()]
+    );
+    await page.route("**/*.js", (route) => route.abort());
+    await page.goto(path);
+
+    const first = page.locator('[aria-label="Document text"] [data-block-id]').first();
+    await expect(first).toBeVisible();
+    await expect(first).toHaveText(documentTitle(documentDiagrams.small));
+    // The app never ran: its own root is empty, and the editor it would build is nowhere.
+    await expect(page.locator("#root")).toBeEmpty();
+    await expect(page.getByRole("textbox", { name: "Document editor" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});

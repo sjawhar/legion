@@ -174,6 +174,30 @@
   </head>
   <body>
     <div id="root"></div>
+    <!--
+      Where the server puts the opening blocks of the document this address names.
+
+      A reader who opens /issues/<KEY> or /issues/<KEY>/artifacts/<slug> with a session that may
+      read that document is sent its first blocks as HTML, drawn by the Go server from the tree
+      it already holds (internal/dispatch/pmdoc/first_screen.go). So the document is on the
+      screen as soon as the page is parsed, rather than after 813 kB of entry chunk has
+      downloaded, evaluated, read the document's text and parsed it - on a phone at 4x CPU
+      throttling, seconds (dispatch://INFRA-341, R11).
+
+      It sits after #root, not inside it, because createRoot clears the element it mounts into.
+      The page's own preview takes these blocks as its first draw rather than drawing them again
+      (src/features/doc/first-screen.ts, DocumentPreview), and the element goes with them.
+
+      Its classes are the preview's own (markdownClassName in src/features/refs/markdown-engine.ts,
+      which first-screen.test.ts holds this attribute to), so the blocks read the same before the
+      page runs as after it. The server replaces the comment inside it and nothing else; a page
+      carrying no document is the build's own bytes, and this element is empty, unlabelled and
+      silent.
+    -->
+    <div
+      id="first-screen"
+      class="dispatch-markdown prose prose-sm prose-slate break-words dark:prose-invert max-w-none"
+    ><!--first-screen--></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -1,10 +1,11 @@
-import { type ReactNode, useMemo, useRef, useState } from "react";
+import { type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { markdownClassName } from "../refs/markdown-engine";
 import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
 import { paintBlock, paintBlockInSlices } from "../refs/paint-block";
 import { useRenderedMarkdown } from "../refs/useRenderedMarkdown";
 import { leadingBlocks } from "./document-blocks";
+import { takeFirstScreen } from "./first-screen";
 
 /** The class the preview's own element carries, which `styles.css` skips the off-screen blocks
  *  of exactly as it skips the editor's (`content-visibility`). */
@@ -69,8 +70,13 @@ export function documentPreview(within: HTMLElement | null): HTMLElement | null 
  * on the reader's thread for a paint thrown away in the next line, and hold it in the answer
  * cache afterwards.
  *
- * Until the first pass lands the element holds nothing (`whilePending: "nothing"`): 2,000
- * characters of Markdown syntax is no document to read, and the pass that replaces it is a
+ * Until the first pass lands the element holds whatever it holds (`whilePending: "hold"`):
+ * nothing, or - where the server drew the document's opening blocks into the page it sent - those
+ * blocks, which this element adopts in the commit that mounts it rather than parsing and drawing
+ * the same screenful again (`first-screen.ts`). A reader whose page carried a draw has read the
+ * document since the page was parsed, which on a phone is seconds before this element exists, so
+ * the first pass is skipped for them altogether and the only pass left is the whole document.
+ * 2,000 characters of Markdown syntax is no document to read, and the pass that replaces it is a
  * frame away.
  *
  * It stops where the editor's build begins (`building`). The build fills the editor a batch of
@@ -87,32 +93,58 @@ export function documentPreview(within: HTMLElement | null): HTMLElement | null 
  * `reportLoadFailure`): there is nothing to replace the draw, so it paints the whole document.
  */
 export function DocumentPreview({
+  address,
   building,
   markdown,
 }: {
+  /** The address this document is open at, which the server's own draw names: blocks drawn for
+   *  one document are never taken by another. */
+  address: string;
   /** Whether the editor's build has begun, which is where this draw stops painting. */
   building: boolean;
   markdown: string;
 }): ReactNode {
   const root = useRef<HTMLDivElement>(null);
+  /** The blocks the server drew into the page, taken out of it in this element's first render so
+   *  the commit that mounts this element is the one that puts them back on the screen. Read
+   *  once: a second render must not look again, since the first took them. */
+  const serverDrew = useRef<DocumentFragment | undefined | null>(null);
+  if (serverDrew.current === null) {
+    serverDrew.current = takeFirstScreen(address);
+  }
+  useLayoutEffect(() => {
+    const drawn = serverDrew.current;
+    if (drawn !== undefined && drawn !== null && root.current !== null) {
+      root.current.append(drawn);
+    }
+  }, []);
   const firstScreenful = useMemo(
     () => leadingBlocks(markdown, markdownWorkerThreshold),
     [markdown]
   );
-  /** Whether the first draw is behind this element, which is what puts the whole document in
-   *  front of it. A document whose every block fits in the first draw is its own first draw
-   *  (`leadingBlocks` answers the source itself), so nothing is parsed twice for it. */
-  const [drawnOnce, setDrawnOnce] = useState(false);
+  /** Whether a draw is behind this element, which is what puts the whole document in front of
+   *  it: its own first pass, or the blocks the server drew, which are a first pass already made.
+   *  A document whose every block fits in the first draw is its own first draw (`leadingBlocks`
+   *  answers the source itself), so nothing is parsed twice for it. */
+  const [drawnOnce, setDrawnOnce] = useState(serverDrew.current !== undefined);
   /** The last source a pass of this element finished drawing, which is what it holds once the
    *  build has begun. Read only in the render the build's start causes, so it is never behind;
-   *  before the first pass lands there is nothing drawn to hold, and the first pass is what
-   *  the build then finds here. */
-  const drawn = useRef(firstScreenful);
+   *  `undefined` while nothing of this element's own has been drawn - before the first pass
+   *  lands, and for a reader whose page carried the server's draw until the whole document
+   *  replaces it - and the element then holds what it has rather than drawing anything. */
+  const drawn = useRef<string | undefined>(
+    serverDrew.current === undefined ? firstScreenful : undefined
+  );
   const source = !drawnOnce ? firstScreenful : building ? drawn.current : markdown;
+  /** Whether this element draws nothing for now and keeps what is in front of the reader: the
+   *  server's blocks, until the document's text has arrived and been parsed, and whatever it
+   *  holds from the task the editor's build begins in. */
+  const holding = source === undefined || source === "";
   // The document's own parse policies, which are this hook's defaults: a single newline inside a
   // paragraph is a space (hard-wrapped Markdown is one paragraph), and a line of raw HTML leaves
   // the source to the literal-text fallback rather than drawing as text.
-  const { isFallback, isPending, portals } = useRenderedMarkdown(root, source, paintBlock, {
+  const { isFallback, isPending, portals } = useRenderedMarkdown(root, source ?? "", paintBlock, {
+    holding,
     keepAPostedParse: false,
     onRendered: () => {
       drawn.current = source;
@@ -120,7 +152,7 @@ export function DocumentPreview({
     },
     paintInSlices: paintBlockInSlices,
     theWorkerOrNothing: true,
-    whilePending: "nothing",
+    whilePending: "hold",
   });
 
   return (

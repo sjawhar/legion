@@ -8,6 +8,7 @@ import { parseAheadOfTheRender, warmMarkdownRenderer } from "../refs/markdown-en
 import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
 import { parseIssuePath } from "../refs/routes";
 import { leadingBlocks } from "./document-blocks";
+import { currentAddress, dropFirstScreen } from "./first-screen";
 import { liveTextQueryOptions } from "./live-text";
 
 /**
@@ -45,6 +46,10 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
     return;
   }
   openedAddress = address;
+  // The blocks the server drew into this page belong to the address it drew them for
+  // (`first-screen.ts`). A navigation away from that address leaves them with nothing to adopt
+  // them, so they go here, before anything of the new address is started.
+  dropFirstScreen(currentAddress(pathname));
   // Whatever the address before this one left unread is this navigation's to drop, before
   // anything of this one is started: a read belongs to the opening it was made for.
   earlyTextRead = undefined;

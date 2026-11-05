@@ -14,6 +14,11 @@ import {
   restoreParseWorker,
 } from "../refs/parse-worker-fixture";
 import { DocumentPreview } from "./DocumentPreview";
+
+/** The address these rows read the page at; no row puts a server draw in the page, so none of
+ *  them adopts one. */
+const ADDRESS = "/issues/CORE-1/artifacts/spec-md";
+
 import { leadingBlocks } from "./document-blocks";
 
 /** A document of one-word paragraphs, longer than the threshold several times over, under a
@@ -81,7 +86,7 @@ describe("the document preview's parse", () => {
     const screenfulParagraphs = firstScreenful.split("\n\n").length;
 
     setParseDeadline(50);
-    const view = render(<DocumentPreview building={false} markdown={markdown} />);
+    const view = render(<DocumentPreview address={ADDRESS} building={false} markdown={markdown} />);
     try {
       // The first pass: the blocks the document opens with, parsed on the page in one short
       // task, which is what puts the whole document in front of the reader next.
@@ -114,7 +119,7 @@ describe("the document preview's parse", () => {
   // one of the four places in the answer cache.
   test("builds nothing on the reader's thread for an answer that arrives after it has gone", async () => {
     const markdown = wholeDocument("A document whose editor landed first");
-    const view = render(<DocumentPreview building={false} markdown={markdown} />);
+    const view = render(<DocumentPreview address={ADDRESS} building={false} markdown={markdown} />);
     try {
       await worker.waitForRequests(1);
       expect(worker.requests[0].markdown).toBe(markdown);
@@ -141,14 +146,14 @@ describe("the document preview's parse", () => {
     const firstScreenful = leadingBlocks(markdown, markdownWorkerThreshold);
     const screenfulParagraphs = firstScreenful.split("\n\n").length;
 
-    const view = render(<DocumentPreview building={false} markdown={markdown} />);
+    const view = render(<DocumentPreview address={ADDRESS} building={false} markdown={markdown} />);
     try {
       await waitFor(() => expect(paragraphs(view.container)).toBe(screenfulParagraphs));
       await worker.waitForRequests(1);
       expect(worker.requests[0].markdown).toBe(markdown);
 
       // The build begins while the worker still holds the whole document.
-      view.rerender(<DocumentPreview building markdown={markdown} />);
+      view.rerender(<DocumentPreview address={ADDRESS} building markdown={markdown} />);
       await act(() => worker.answer(0));
 
       // The reader keeps the pass they were reading, and nothing was built out of that answer:
@@ -170,7 +175,7 @@ describe("the document preview's parse", () => {
     const firstScreenful = leadingBlocks(markdown, markdownWorkerThreshold);
     const screenfulParagraphs = firstScreenful.split("\n\n").length;
 
-    const view = render(<DocumentPreview building markdown={markdown} />);
+    const view = render(<DocumentPreview address={ADDRESS} building markdown={markdown} />);
     try {
       await waitFor(() => expect(paragraphs(view.container)).toBe(screenfulParagraphs));
       expect(worker.requests).toEqual([]);

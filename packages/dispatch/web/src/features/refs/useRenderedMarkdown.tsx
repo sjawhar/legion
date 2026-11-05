@@ -212,11 +212,17 @@ export interface RenderedMarkdownOptions {
   paintInSlices?: PaintMarkdownInSlices;
   /** What the element holds while the parse worker still owes this source its formatting:
    *  `"source"`, the default, the body's own literal text, which the reader reads meanwhile;
-   *  `"nothing"` for a surface whose source is no text a reader would read - a whole document,
-   *  whose markdown is as long as the page it draws, where the reader would meet 400,000
-   *  characters of syntax in one text node and the page would lay every line of it out twice
-   *  (`features/doc/DocumentPreview.tsx`). */
-  whilePending?: "source" | "nothing";
+   *  `"hold"` for a surface whose source is no text a reader would read, which keeps whatever
+   *  the element holds instead - a whole document, whose markdown is as long as the page it
+   *  draws, where the reader would meet 400,000 characters of syntax in one text node and the
+   *  page would lay every line of it out twice, and whose element may already hold the blocks
+   *  its own server drew (`features/doc/DocumentPreview.tsx`). */
+  whilePending?: "source" | "hold";
+  /** Whether this element draws nothing at all for now and keeps what it holds. A surface passes
+   *  it while what is on the screen is not this hook's to replace: the document preview holds the
+   *  blocks the server drew until the whole document has been parsed, and holds whatever it has
+   *  drawn from the task the editor's build begins in (`features/doc/DocumentPreview.tsx`). */
+  holding?: boolean;
   /** Whether an answer to a source this element has moved on from is still worth painting, by
    *  keeping the element's place on a parse the worker had already been posted when the render
    *  was cancelled (`markdown-engine.ts`, `keepAPostedParse`). `true` by default, because the
@@ -373,7 +379,8 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * A body longer than `markdownWorkerThreshold` is parsed off the page's own thread
  * (`markdown-engine.ts`), so it lands a frame or more after the commit that rendered it. Until
  * it does, `isPending` is set and the element holds the body's own literal text - selectable,
- * under nothing - or nothing at all where the surface asked for that (`whilePending`), unless
+ * under nothing - or whatever it already holds where the surface asked for that
+ * (`whilePending: "hold"`: nothing, or the blocks its own server drew), unless
  * it already holds a paint of an earlier source, which it keeps instead,
  * so a streaming turn never flips back to its source between frames. Every paint, the pending
  * one included, recomputes the ask hosts, the reference anchors and the picture anchors in the
@@ -433,6 +440,7 @@ export function useRenderedMarkdown(
     paintInSlices,
     rawHtml = "refuse",
     softBreaks = "space",
+    holding = false,
     theWorkerOrNothing = false,
     whilePending = "source",
   }: RenderedMarkdownOptions = {}
@@ -483,6 +491,11 @@ export function useRenderedMarkdown(
     if (element === null) {
       throw new Error("The Markdown element is unavailable.");
     }
+    // A held element draws nothing: what is in front of the reader is the surface's own, and
+    // this hook neither replaces it nor asks for a parse it would replace it with.
+    if (holding) {
+      return;
+    }
     setIsFallback(false);
     renders.current += 1;
     const render = renders.current;
@@ -510,11 +523,13 @@ export function useRenderedMarkdown(
             // that paint goes on attaching (sjawhar/legion#2519).
             return;
           }
-          // A surface that reads as nothing until it is formatted holds nothing meanwhile
-          // (`whilePending`); every other one holds the body's own text.
-          element.replaceChildren(
-            ...(whilePending === "source" ? [document.createTextNode(markdown)] : [])
-          );
+          // A surface whose source reads as nothing until it is formatted keeps whatever its
+          // element holds meanwhile (`whilePending`) - nothing, or the blocks its own server
+          // drew; every other one holds the body's own text.
+          if (whilePending === "hold") {
+            return;
+          }
+          element.replaceChildren(document.createTextNode(markdown));
           setAskHosts(NO_ASK_HOSTS);
           const { pictures: placeholders, references } = portalAnchors(element, decorate);
           setReferenceAnchors(references);
@@ -650,6 +665,7 @@ export function useRenderedMarkdown(
   }, [
     Card,
     decorate,
+    holding,
     keepAPostedParse,
     markdown,
     paint,

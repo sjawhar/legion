@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import {
   api,
@@ -60,6 +60,7 @@ import { colorForLogin } from "./connection";
 import { DocumentPreview, documentPreview } from "./DocumentPreview";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
+import { currentAddress, firstScreenAwaits } from "./first-screen";
 import type { Highlight } from "./highlight";
 import { liveTextQueryOptions } from "./live-text";
 import {
@@ -357,6 +358,9 @@ export function ProofDocument({
    *  toolbar), takes edits, and offers the repair and rebuild prompts. `surface` is fixed for
    *  the life of a mount, so every effect below lists this and none is rebuilt for it. */
   const page = surface === "page";
+  /** The address the reader has this document open at, as the server spells it, which is what
+   *  names the blocks the server drew into this page (`first-screen.ts`). */
+  const address = currentAddress(useLocation().pathname);
   useEffect(() => {
     if (page || admission === undefined) {
       return;
@@ -442,12 +446,19 @@ export function ProofDocument({
     write: (_variables, bounds) => api.rebuildArtifact(artifact.id, undefined, bounds),
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
+  /** Whether this page was sent the document's opening blocks, read once, since the draw this
+   *  asks about is taken out of the page by the element that adopts it (`first-screen.ts`). */
+  const serverDrew = useRef<boolean | undefined>(undefined);
+  serverDrew.current ??= page && version === undefined && firstScreenAwaits(address);
   /** Whether the reader reads the document's own markdown rather than the editor's draw of it:
-   *  from the moment `/text` lands until this effect's editor has its DOM in the page
+   *  from the moment `/text` lands - or, where the server drew the document's opening blocks
+   *  into the page it sent, from this page's first commit, so those blocks are adopted rather
+   *  than left standing under the app - until this effect's editor has its DOM in the page
    *  (`DocumentPreview`). A version is its own view, and a pane is not it either: a reading
    *  column places itself at the block its reader chose, and only the editor's blocks carry the
    *  ids the server minted for them (`scroll-block.ts`). */
-  const showsOwnText = page && !editorDrawn && version === undefined && liveMarkdown !== "";
+  const showsOwnText =
+    page && !editorDrawn && version === undefined && (liveMarkdown !== "" || serverDrew.current);
   const versionMarkdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
@@ -1149,7 +1160,7 @@ export function ProofDocument({
         }}
       >
         {showsOwnText ? (
-          <DocumentPreview building={editorBuilding} markdown={liveMarkdown} />
+          <DocumentPreview address={address} building={editorBuilding} markdown={liveMarkdown} />
         ) : null}
         <div ref={root} />
         {askBlockHosts.map((host) => {
