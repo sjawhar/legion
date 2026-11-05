@@ -275,6 +275,9 @@ export function unresolvedAgentDispatches(
 /** The worker skill, the one file the release rule below is written over. */
 export const WORKER_SKILL = path.join(REPO_ROOT, "skills/legion-worker/SKILL.md");
 
+/** The worker skill's tool reference, the one file the two rules below are written over. */
+export const WORKER_TOOLS = path.join(REPO_ROOT, "skills/legion-worker/references/tools.md");
+
 /**
  * The claim the idle release retired (INFRA-945): that a role, or the pane it runs in, stays live
  * for as long as its issue is in the workflow. Under `runtime: kubernetes` the daemon now releases
@@ -313,6 +316,49 @@ export function retiredWorkerLifecycleClaims(markdown: string): string[] {
   if (!text.includes(RELEASE_IS_NO_STOP)) {
     faults.push(
       `skills/legion-worker/SKILL.md does not say "${RELEASE_IS_NO_STOP}": a worker told nothing about release reads its pod's deletion as a crash`
+    );
+  }
+  return faults;
+}
+
+/**
+ * The claim INFRA-1315 retired: that a login, or the URL that carries one, can create and drop
+ * databases on the shared server. This deployment is splitting the session login in two, so a
+ * role's login owns nothing there, and a role that reads the old claim believes a power it does
+ * not have. The claim is matched rather than its one wording, and the subject is named rather
+ * than left open, so the file's own "Each makes and drops a database of its own per test", said
+ * of the pod's server, stays outside it; the rule the file does carry, that nothing which creates
+ * or drops a database gets the session URL, names no login that can and so passes too.
+ */
+const LOGIN_OWNS_DATABASES =
+  /\b(?:login|account|credentials?|URL|DSN)\b[^.]{0,40}?\b(?:can|could|may|is able to|is allowed to|has (?:the )?(?:rights?|permissions?|privileges?) to)\s+(?:create|make|drop|delete)\b[^.]{0,40}?\bdatabases?\b/i;
+
+/**
+ * The sentence of `## Reading a shared database` a role must not lose, pinned whole and literally:
+ * a role that reads nothing about it reads the shared store through the write-capable session URL,
+ * which on 2026-11-05 left a session-level read-only setting on a pooled backend and failed 1,432
+ * session writes.
+ */
+const NO_READ_THROUGH_SESSION_URL =
+  "Never read it through the session URL the file `OMP_SESSION_SQL_DSN_FILE` names.";
+
+/**
+ * What `markdown` — skills/legion-worker/references/tools.md — gets wrong about a shared database,
+ * each as one sentence naming the file. Both halves are read over whitespace-normalized text,
+ * because the file is hard-wrapped and a sentence of it crosses lines.
+ */
+export function brokenSharedDatabaseRules(markdown: string): string[] {
+  const text = markdown.replace(/\s+/g, " ");
+  const faults: string[] = [];
+  const owns = text.match(LOGIN_OWNS_DATABASES);
+  if (owns !== null) {
+    faults.push(
+      `skills/legion-worker/references/tools.md says "${owns[0]}": the session login is being split in two, so no role's login creates or drops a database on the shared server`
+    );
+  }
+  if (!text.includes(NO_READ_THROUGH_SESSION_URL)) {
+    faults.push(
+      `skills/legion-worker/references/tools.md does not say "${NO_READ_THROUGH_SESSION_URL}": a role told nothing about reads reaches the shared store through the write-capable session URL`
     );
   }
   return faults;
