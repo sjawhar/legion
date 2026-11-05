@@ -23,12 +23,11 @@ so what a test binary grows to in its last seconds is never seen: the next walk 
 
 The first walk whose peak passes the limit ends the run there and then: the log names that walk's
 tests and the second it was taken, the command's process group is sent SIGTERM and then SIGKILL,
-and the step goes red while the runner still has room rather than after an hour of running on. The
-status is the command's own wherever that is non-zero, so a command that catches the stop's
-SIGTERM and exits 2 returns 2; a run a walk stopped whose command exited 0, or that someone else
-signalled meanwhile, returns 1; a command no walk stopped that a signal killed returns 128 plus
-that signal. A SIGINT, SIGTERM or SIGHUP to this script stops the command's group the same way
-and exits 128 plus that signal, so a Ctrl-C or a cancelled step leaves nothing of it running.
+and the step goes red while the runner still has room rather than after an hour of running on.
+watch() gives the rule this script's own exit status follows. A SIGINT or SIGTERM to this script,
+and a SIGHUP the caller has not already ignored, stops the command's group the same way, writes
+the peak, and then kills this script with that same signal, so a Ctrl-C leaves nothing of the run
+behind and a shell looping over packages ends on the first one.
 
 Usage: race_memory.py <command> [args...], for example
 
@@ -72,8 +71,10 @@ TERM_GRACE_SECONDS = SAMPLE_SECONDS
 DONE_ACTIONS = frozenset({"pass", "fail", "skip"})
 
 # The signals that end this script. The command has a session of its own, so these reach the
-# script alone; each one is answered by stopping the command's group and then exiting 128 plus
-# the signal's number, as a shell reports a signalled command.
+# script alone; each one is answered by stopping the command's group, writing the peak, and then
+# dying of that same signal, which is how a shell reads a run as interrupted rather than as one
+# that handled the interruption itself. An inherited ignore is replaced for SIGINT and left as it
+# is for SIGHUP; main() says why.
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
@@ -304,16 +305,56 @@ class Signalled(Exception):
         self.signum = signum
 
 
-def raise_signalled(signum: int, _frame: object) -> None:
-    """The handler STOP_SIGNALS are installed with: it raises, and does nothing else.
+class Run:
+    """What the signal path needs of a run the sampling loop is in the middle of: the two peaks
+    folded in so far, so that the closing peak line is written however the run ends, and a signal
+    that arrived before there was a command to stop.
 
-    A handler runs on the main thread, between two of its bytecodes - the thread that samples,
-    that may be holding the log's lock, and that sits in `Popen.wait`. Raising there leaves the
-    stopping to ordinary unwinding, which releases those locks on its way out, so there is no
-    handler-against-thread deadlock to reason about. It is what Python's own SIGINT handler does
-    with KeyboardInterrupt.
+    No lock guards any of it. `handle` runs on the main thread, between two of that thread's
+    bytecodes, and the main thread is also the one that samples and the one the signal path
+    unwinds on; the thread reading the command's stdout touches none of these fields.
     """
-    raise Signalled(signum)
+
+    def __init__(self) -> None:
+        self.peak_hwm_kb = 0
+        self.peak_rss_kb = 0
+        self.stoppable = False
+        self.held: int | None = None
+
+    def handle(self, signum: int, _frame: object) -> None:
+        """The handler STOP_SIGNALS are installed with: it raises, and does nothing else.
+
+        A handler runs on the main thread - the thread that samples, that may be holding the
+        log's lock, and that sits in `Popen.wait`. Raising there leaves the stopping to ordinary
+        unwinding, which releases those locks on its way out, so there is no deadlock between this
+        handler and that thread to reason about. It is what Python's own SIGINT handler does with
+        KeyboardInterrupt.
+
+        Until `started` says there is a command to stop, there is nothing for that unwinding to
+        do, so the signal is held and `started` raises it instead. A handler that returns leaves
+        the syscall it interrupted to be restarted (PEP 475), so holding one costs the start of
+        the command nothing.
+        """
+        if not self.stoppable:
+            self.held = signum
+            return
+        raise Signalled(signum)
+
+    def started(self) -> None:
+        """Called once the command is started and can be stopped, from inside the `try` that
+        answers Signalled: a signal `handle` held while the command was starting is raised here,
+        where stopping the command is what answers it."""
+        self.stoppable = True
+        if self.held is not None:
+            raise Signalled(self.held)
+
+
+def log_peak(log: Log, run: Run, limit_kb: int) -> None:
+    """The closing line, the number this script exists to report: the peak of the whole run,
+    which of the two numbers that is, and the limit it was measured against. Every path that ends
+    a run writes it, the signal path included."""
+    peak_kb, field = choose_peak(run.peak_hwm_kb, run.peak_rss_kb)
+    log.line(f"race memory: the peak was {peak_kb} kB ({field}), the limit {limit_kb} kB")
 
 
 def watch(
@@ -322,31 +363,32 @@ def watch(
     tests: RunningTests,
     log: Log,
     limit_kb: int,
+    run: Run,
 ) -> int:
     """Sample the command's tree until the command ends or a walk's peak passes the limit, and
     give the status this script is to exit with.
 
-    Both peaks are folded in walk by walk rather than kept as every text sampled: a forty-minute
-    package at one walk every five seconds is hundreds of walks of a tree that is itself hundreds
-    of processes while the race binary compiles, and this script runs inside the memory it
-    measures.
+    Both peaks are folded in walk by walk, and on `run` rather than in locals of this function, so
+    that the signal path writes the same closing line out of them. Keeping every text sampled is
+    not affordable either way: a forty-minute package at one walk every five seconds is hundreds
+    of walks of a tree that is itself hundreds of processes while the race binary compiles, and
+    this script runs inside the memory it measures.
 
-    The status is the command's own wherever that is non-zero, which covers a command that caught
-    the SIGTERM of an over-limit stop and exited 2 of its own accord: 2 is then what this gives.
-    Otherwise a run a walk stopped is 1, whether the command exited 0 under that SIGTERM or
-    something else signalled it meanwhile; a command no walk stopped that a signal killed is 128
-    plus that signal, as a shell reports one; and everything else is 0.
+    The rule the status follows, which is the whole of it: a non-zero exit status is the command's
+    own and passes through, which covers a command that caught the SIGTERM of an over-limit stop
+    and exited 2 of its own accord; otherwise a run a walk stopped is 1, however it ended - that
+    stop's own SIGTERM or SIGKILL killed the command and left a negative status, or the command
+    exited 0 under the SIGTERM, or something else signalled it meanwhile; otherwise a command a
+    signal killed is 128 plus that signal, as a shell reports one; otherwise 0.
     """
-    peak_hwm_kb = 0
-    peak_rss_kb = 0
     stopped = False
     started = time.monotonic()
     while True:
         walked = tree_statuses(process.pid)
         sample = summarize(walked, time.monotonic() - started, tests.names())
         if sample is not None:
-            peak_hwm_kb = max(peak_hwm_kb, sample.hwm_kb or 0)
-            peak_rss_kb = max(peak_rss_kb, sample.rss_kb)
+            run.peak_hwm_kb = max(run.peak_hwm_kb, sample.hwm_kb or 0)
+            run.peak_rss_kb = max(run.peak_rss_kb, sample.rss_kb)
             log.line(sample.line())
             walk_kb, walk_field = choose_peak(sample.hwm_kb, sample.rss_kb)
             if walk_kb > limit_kb:
@@ -370,8 +412,7 @@ def watch(
         process.stdout.close()
     status = process.wait()
 
-    peak_kb, field = choose_peak(peak_hwm_kb, peak_rss_kb)
-    log.line(f"race memory: the peak was {peak_kb} kB ({field}), the limit {limit_kb} kB")
+    log_peak(log, run, limit_kb)
 
     if status > 0:
         return status
@@ -398,6 +439,27 @@ def main(argv: list[str]) -> int:
         return 2
 
     log = Log()
+    run = Run()
+
+    # The command gets a session of its own below, so the terminal's Ctrl-C, which goes to the
+    # foreground process group, and a `kill` to this script both reach this script alone. Without
+    # these handlers the script would end and leave the command - a race-built `go test` holding
+    # memory and the test databases - running with nothing watching it. They go in before the
+    # command is started, because `Popen` starts it and a signal between that start and an
+    # installation after it would take its default action and leave the command running; the
+    # command inherits none of them, because an exec resets a handler that is a Python function
+    # to the default.
+    #
+    # SIGINT's handler goes in over an inherited SIG_IGN: a background job of a shell with no job
+    # control inherits SIGINT ignored, and a run that sampled on through a Ctrl-C with no one left
+    # watching it is the thing being fixed. An inherited SIG_IGN for SIGHUP is left as it is,
+    # because that ignore is the whole of what `nohup` does: replacing it would end a 40-minute
+    # race run the moment the ssh session it was started from dropped.
+    for signum in STOP_SIGNALS:
+        if signum == signal.SIGHUP and signal.getsignal(signum) == signal.SIG_IGN:
+            continue
+        signal.signal(signum, run.handle)
+
     log.line(f"race memory: the limit is {limit_kb} kB ({source})")
 
     try:
@@ -418,18 +480,9 @@ def main(argv: list[str]) -> int:
     reader = threading.Thread(target=pump, args=(process.stdout, tests, log), daemon=True)
     reader.start()
 
-    # The command runs in a session of its own from here, so the terminal's Ctrl-C, which goes to
-    # the foreground process group, and a `kill` to this script both reach this script alone.
-    # Without these handlers the script would end and leave the command - a race-built `go test`
-    # holding memory and the test databases - running with nothing watching it. They go in over
-    # whatever the caller left: a background job of a shell with no job control inherits SIGINT
-    # ignored, and a run that sampled on through a Ctrl-C with no one left watching it is the
-    # thing being fixed.
-    for signum in STOP_SIGNALS:
-        signal.signal(signum, raise_signalled)
-
     try:
-        return watch(process, reader, tests, log, limit_kb)
+        run.started()
+        return watch(process, reader, tests, log, limit_kb, run)
     except Signalled as arrival:
         # Stopping the group is the last thing this script owes anyone, so a second signal must
         # not cut that stop short between its SIGTERM and its SIGKILL.
@@ -438,6 +491,22 @@ def main(argv: list[str]) -> int:
         name = signal.Signals(arrival.signum).name
         log.line(f"race memory: {name} arrived, so the command's process group is being stopped")
         stop_command(process, log)
+        # What the end of watch() does, for the same reasons: the thread reading the command's
+        # stdout is given what is left in the pipe to write - a command that caught the stop's
+        # SIGTERM has just written what it held, which is what the grace is for - and then the
+        # peak is reported. The join is bounded because a process outside the command's group can
+        # hold that pipe open, and this script owes its caller an end.
+        reader.join(timeout=TERM_GRACE_SECONDS)
+        if process.stdout is not None:
+            process.stdout.close()
+        log_peak(log, run, limit_kb)
+        # Die of the signal rather than exit with its number: bash ends its own script when the
+        # foreground child was killed by SIGINT, and an ordinary exit of 130 tells it the child
+        # handled the Ctrl-C itself, so a loop over packages would need one Ctrl-C per package.
+        # The default action is what ends this script; the 128 plus the number below is the answer
+        # for a caller that had the signal blocked, where the kill does not land.
+        signal.signal(arrival.signum, signal.SIG_DFL)
+        os.kill(os.getpid(), arrival.signum)
         return 128 + arrival.signum
 
 
