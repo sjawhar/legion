@@ -38,6 +38,7 @@ import {
   createIssue,
   createMessage,
   createProject,
+  editComment,
   getArtifactText,
 } from "./api";
 import { blockId, documentEditor, markSpan, openSpec, placeCaret } from "./editor";
@@ -402,6 +403,75 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
     // quotes the dangling line too, so the source is read from its code block.
     await expect(card.locator("pre code").filter({ hasText: "A -->" })).toBeVisible();
     await expect(diagramIn(card)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// SLOW(>=2s): three edits reach the page over the event feed, each waited out at the page's own
+// once-a-second refresh, and two real worker draws - the diagram the reader opens and the one
+// an edit puts in its place. The clock cannot spend any of it, for the reason below.
+// A body is painted whole, so an edit landing under a reader builds its source disclosure anew.
+// What that disclosure shows is the reader's own: a source they opened is open again on every
+// later paint of it, with no second click, and a source they never opened - the one an edit
+// draws in its place - comes back closed. A refusal draws open whatever came before it. Against
+// a build of the commit before the change, the first repaint below draws the opened source
+// closed again and the row fails there. No clock runs here: a fast-forward before a diagram has
+// drawn would spend the 5 s render limit and refuse the source, which is how this file's
+// time-limit rows work on purpose. Every comment the row edits is a person's: an agent session's
+// credential is refused on an edit.
+test("a mermaid source a reader opened is open again when the comment is edited, and an edited diagram draws closed @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reopened source" });
+  const drawn = await createComment(issue.key, {
+    body: flowchart("Reading this:", "Opened", "Kept"),
+  });
+  const brokenFence = "```mermaid\ngraph TD\n  A -->\n```\n";
+  const refused = await createComment(issue.key, { body: `Broken:\n\n${brokenFence}` });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, drawn.id, "Reading this:");
+    // Both halves of the control, ending in the reader's one click: the source is open.
+    await expectDrawnDiagram(card, ["Opened", "Kept"]);
+    const source = card.getByText("graph TD");
+
+    // The edit reaches the page over the event feed, whose refetch the page holds to one a
+    // second (`MIN_REFETCH_INTERVAL_MS`, `web/src/api/query-refresh.ts`), so the new lead in the
+    // card is the repaint. The diagram's source is byte for byte the one the reader opened, and
+    // it is theirs again without another click.
+    await editComment(drawn.id, { body: flowchart("Reading this, reworded:", "Opened", "Kept") });
+    await expect(card).toContainText("Reading this, reworded:");
+    await expect(diagramIn(card)).toBeVisible();
+    await expect(source).toBeVisible();
+
+    // An edit of the source itself draws a diagram the reader never opened, so it draws closed.
+    await editComment(drawn.id, { body: flowchart("Rewired:", "Replaced", "Drawn") });
+    await expect(card).toContainText("Rewired:");
+    await expect(diagramIn(card)).toContainText("Replaced");
+    await expect(source).toHaveCount(1);
+    await expect(source).toBeHidden();
+
+    // On a phone the open thread is a dialog over the Conversation, so the reader goes back to
+    // it before opening the refused comment's thread.
+    const phoneThread = page.getByRole("dialog", { name: "Thread" });
+    if ((await phoneThread.count()) > 0) {
+      await phoneThread.getByRole("button", { exact: true, name: "Back" }).click();
+      await expect(phoneThread).toHaveCount(0);
+    }
+
+    // A source the renderer refuses is readable at once on every paint of it, edit or no edit.
+    const broken = await openCommentThread(page, testInfo, refused.id, "Broken:");
+    const brokenSource = broken.locator("pre code").filter({ hasText: "A -->" });
+    await expect(brokenSource).toBeVisible();
+    await editComment(refused.id, { body: `Broken, still:\n\n${brokenFence}` });
+    await expect(broken).toContainText("Broken, still:");
+    await expect(brokenSource).toBeVisible();
+    await expect(diagramIn(broken)).toHaveCount(0);
   } finally {
     await alice.close();
   }
