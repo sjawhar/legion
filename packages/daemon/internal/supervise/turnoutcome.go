@@ -53,14 +53,18 @@ func (o TurnOutcome) newerThan(held *TurnOutcome) bool {
 // of order — two turns whose HTTP calls overlap, in either order — leaves the newer one standing,
 // which is why the pair the plugin counted travels with the class.
 //
-// Nothing reads the report yet. The provider-error retry (dispatch://INFRA-956 R2) is the
-// decision that will: a turn a content filter refused is sent to the same session again on a
-// weaker model, and a turn any other provider failure ended is not. It is memory only, as the
-// held suspension and `askFirst` are (`Machine`'s fields in machine.go): that decision reads the
-// report within two minutes of the turn it is about, and a daemon restart in that window leaves
-// no report at all, which the decision takes as the safe answer. A report is worth no store
-// write and no migration for a fact with that life.
-func turnOutcome(m *Machine, _ context.Context, ev Event) error {
+// The provider-error retry reads it (dispatch://INFRA-956 R2, providererror.go): a turn a content
+// filter refused can clear, because the plugin has already moved the session down its model
+// chain, and a turn the provider failed in a way it marked final cannot. A report that lands
+// while that decision is waiting for one decides it here, in the same step, rather than at the
+// end of the wait.
+//
+// It is memory only, as the held suspension and `askFirst` are (`Machine`'s fields in
+// machine.go): the decision reads the report within two minutes of the turn it is about, and a
+// daemon restart in that window leaves no report at all, which leaves the task sitting
+// unconfirmed on its claim to be sent again — the same answer the wait reaches. A report is
+// worth no store write and no migration for a fact with that life.
+func turnOutcome(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestTurnOutcome)
 	report := TurnOutcome{Generation: r.Generation, Sequence: r.Sequence, Outcome: r.Outcome, Category: r.Category}
 	kept := report.newerThan(m.lastTurnOutcome)
@@ -69,5 +73,11 @@ func turnOutcome(m *Machine, _ context.Context, ev Event) error {
 	}
 	m.log.Info("supervise: the agent's plugin reported how a turn ended", "generation", r.Generation,
 		"sequence", r.Sequence, "outcome", r.Outcome, "category", r.Category, "kept", kept)
-	return nil
+	if !kept {
+		return nil
+	}
+	if _, waiting := m.timers[TimerTurnOutcome]; !waiting {
+		return nil
+	}
+	return m.decideProviderError(ctx)
 }

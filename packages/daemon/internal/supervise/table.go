@@ -125,6 +125,12 @@ const (
 	// lifecycle check failed with no cleanup reserved, or a launch whose write failed. The claim waits
 	// launching with no process until it fires.
 	TimerRelaunch TimerKind = "relaunch"
+	// TimerPromptRetry is the wait before a task a provider error took back is sent to the same
+	// session again (promptRetryDelay), armed on that task's own delivery id.
+	TimerPromptRetry TimerKind = "prompt_retry"
+	// TimerTurnOutcome is the wait for the turn-outcome report of a turn that ended in a provider
+	// error neither the error's own fields nor a report already settled (providerErrorWait).
+	TimerTurnOutcome TimerKind = "turn_outcome"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -460,6 +466,10 @@ const (
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
 	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
 	onRelaunchTimer eventKind = timerPrefix + eventKind(TimerRelaunch)
+	// The two waits a turn that ended in a provider error arms (promptResulted).
+	onPromptRetryTimer eventKind = timerPrefix + eventKind(TimerPromptRetry)
+	onTurnOutcomeTimer eventKind = timerPrefix + eventKind(TimerTurnOutcome)
+
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
 	onReady         eventKind = "request_ready"
@@ -628,11 +638,12 @@ func RunsNothingStates() []ClaimState {
 }
 
 const (
-	noProcess     = "no process of this claim is running"
-	noSend        = "no prompt is sent in this state"
-	failedClaim   = "the claim failed; what happens to it next is not the supervisor's decision"
-	retiredClaim  = "the claim is retired"
-	notRegistered = "the agent has not registered"
+	noProcess       = "no process of this claim is running"
+	noSend          = "no prompt is sent in this state"
+	failedClaim     = "the claim failed; what happens to it next is not the supervisor's decision"
+	retiredClaim    = "the claim is retired"
+	notRegistered   = "the agent has not registered"
+	noProviderError = "no turn of this claim ended in a provider error this wait is for"
 )
 
 // table is the transition table: a row or a named ignore for every event kind in every state.
@@ -713,6 +724,19 @@ func fillTable(t *builder) {
 	t.ignore(onTurnTimer, "the turn started", StateWorking)
 	t.ignore(onTurnTimer, noSend, unready...)
 	t.ignore(onTurnTimer, noSend, gone...)
+
+	// The two waits a turn that ended in a provider error arms. Each is armed only where such a
+	// turn can end — a claim working its task, or one whose turn already ended — and is dropped
+	// with the task it is for (retirePending) and with the process it was armed under (letGo).
+	t.row(onPromptRetryTimer, "the wait after a provider error is over: the task goes to the same session again", promptRetryDue,
+		[]ClaimState{StateWorking}, StateReady, StateIdle, StateWorking)
+	t.ignore(onPromptRetryTimer, noSend, unready...)
+	t.ignore(onPromptRetryTimer, noSend, gone...)
+
+	t.row(onTurnOutcomeTimer, "no turn-outcome report came: the provider error is taken as one that can clear", turnOutcomeWaitOver,
+		nil, StateReady, StateIdle, StateWorking)
+	t.ignore(onTurnOutcomeTimer, noProviderError, unready...)
+	t.ignore(onTurnOutcomeTimer, noProviderError, gone...)
 
 	t.row(onProbeTimer, "probe the uncertain process again", reprobe, []ClaimState{StateLaunching, StateFailed}, live...)
 	t.ignore(onProbeTimer, noProcess, processless...)
@@ -862,9 +886,11 @@ func fillTable(t *builder) {
 	// How a turn of this claim's agent ended, as the agent's own plugin classified it. Only a
 	// registered claim has a report: the route authenticates the registration's secret, and a
 	// claim holds the hash that secret is checked against in exactly these four states
-	// (HoldsCapability, read in internal/api's staleClaim).
+	// (HoldsCapability, read in internal/api's staleClaim). A report that settles a provider
+	// error the machine is waiting on decides it in this same step (decideProviderError), which
+	// is how such a claim reaches failed here.
 	t.row(onTurnOutcome, "keep the newest turn outcome the claim's plugin has reported", turnOutcome,
-		nil, StateRegistered, StateReady, StateWorking, StateIdle)
+		[]ClaimState{StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onTurnOutcome, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 	t.ignore(onTurnOutcome, "the claim is suspended and the agent that reported is stopped", StateSuspended)
 	t.ignore(onTurnOutcome, failedClaim, StateFailed)
@@ -1410,6 +1436,11 @@ func (m *Machine) answerByTurnEnd() {
 // A result for a delivery the claim no longer holds — retired, or taken back under a new id — is
 // fenced out before this runs (fence).
 //
+// A turn that ended in a provider error does not retire its task (providerErrored): the work is
+// still owed, and the daemon owes the worker another prompt of it rather than an idle claim
+// (dispatch://INFRA-956 R2). A turn that ended with no error is the one that clears the claim's
+// run of provider-error turns.
+//
 // A turn already ended is over for its delivery here, so this is where what was held for that
 // turn runs when the end found the result still outstanding (afterTurn): settle first, so the
 // round's end and the stale-plugin relaunch read a worker whose hands are empty. A result that
@@ -1423,6 +1454,17 @@ func promptResulted(m *Machine, ctx context.Context, ev Event) error {
 			why += ": " + r.Error
 		}
 		return m.promptFailed(ctx, why, taskRead)
+	}
+	if r.Error != "" {
+		return m.providerErrored(ctx, r)
+	}
+	if m.claim.ProviderErrorRun != 0 {
+		m.log.Info("supervise: a turn of this task ended with no provider error; the run of provider errors is over",
+			"delivery", r.DeliveryID, "providerErrorRun", m.claim.ProviderErrorRun)
+		m.claim.ProviderErrorRun = 0
+		if err := m.persist(ctx); err != nil {
+			return err
+		}
 	}
 	if p := m.claim.Pending; p.ConfirmedAt.IsZero() {
 		// No turn was ever matched to this prompt — each one the claim saw was taken for another's

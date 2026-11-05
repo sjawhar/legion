@@ -390,8 +390,14 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // names the status the root stood at. An update-stalled notice names an issue whose pod the
 // daemon opened an update round over and cannot replace: a worker has not answered within
 // `pod_update_notice_hours`, a turn that will not end holds the replacement, or the replacement
-// itself keeps failing (the daemon's reconcilePodUpdates). When admission sends each is its
-// rule (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
+// itself keeps failing (the daemon's reconcilePodUpdates). A provider-errors notice names an
+// issue whose role has ended six turns in a row in a provider error: its Role is that role, and
+// its Reason the model and the error's category or status, in words built from structured
+// fields alone (supervise's tellControllerOfProviderErrors). It is told once, and not again
+// until a turn with no error puts that run back to zero; nothing is held and nothing is
+// bounded, because a chain's bottom refusing deterministically costs one request every ten
+// minutes. When admission sends each is its rule (admit.Admission.wakeController and its
+// callers, admit's releaseUnslotted, admit.Admission.TellController).
 //
 // A parked-decision notice names a person's decision on a tree Legion is not running, which
 // nobody inside the tree will hear: a spec decision the notice executor could not deliver to the
@@ -410,6 +416,7 @@ const (
 	AwaitingPersonNotice NoticeKind = "awaiting-person"
 	ParkedDecisionNotice NoticeKind = "parked-decision"
 	UpdateStalledNotice  NoticeKind = "update-stalled"
+	ProviderErrorsNotice NoticeKind = "provider-errors"
 )
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
@@ -978,7 +985,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, ParkedDecisionNotice, UpdateStalledNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, ParkedDecisionNotice, UpdateStalledNotice, ProviderErrorsNotice:
 		return true
 	default:
 		return false

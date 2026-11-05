@@ -1306,6 +1306,27 @@ func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
 	}()
 }
 
+// providerErrorRunReached tells the project's controller that a role's turns keep ending in a
+// provider error (supervise's Deps.ProviderErrorRunReached): the machine counts the run and
+// decides when to tell, and this names the notice kind, since supervise records nothing of
+// internal/record. Admission's own check stops a second notice while one still waits in the
+// outbox (TellController). The machine calls it inside its own decision, so the notice is
+// queued on a goroutine of its own, bounded as a terminal fact is; a failure is logged and is
+// not the daemon's end, since the run goes on and the task is sent again either way.
+func (w *workflowRuntime) providerErrorRunReached(c supervise.Claim, reason string) {
+	if c.Issue == "" || w.admission == nil {
+		return
+	}
+	notice := record.ControllerNotice{Kind: record.ProviderErrorsNotice, Role: c.Role, Reason: reason}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
+		defer cancel()
+		if err := w.admission.TellController(ctx, w.pool, notice, c.Issue); err != nil {
+			w.log.Warn("tell the controller of a run of provider errors", "claim", c.Token, "error", err)
+		}
+	}()
+}
+
 // releaseReadied releases, until ctx ends, the waiting notices of the architects claimReady
 // recorded: each wake takes every architect recorded since the last one, in one release.
 func (w *workflowRuntime) releaseReadied(ctx context.Context) {

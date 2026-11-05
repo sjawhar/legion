@@ -83,6 +83,19 @@ type Delivery struct {
 	// owes them. It is rewritten, with the task text, by the send-time narrowing of what the task
 	// still names of this claim's tree (Deps.RootTask). Empty for a task that names none.
 	Kept []byte
+	// ProviderErrorRetries is how many times this task has been sent again after a turn of it
+	// ended in a provider error, from 0 (promptResulted's providerErrored). It is what the wait
+	// before the next send is a function of (promptRetryDelay), so a daemon restarted in the
+	// middle of a ladder goes on climbing it rather than starting again at the first step. It is
+	// the task's own count, not the claim's: a new task starts at 0.
+	ProviderErrorRetries int
+	// ProviderErrorNote is the sentence such a task is sent behind, as Interrupted sends one
+	// behind interruptedTask: what ended the previous turn, and that the daemon is sending the
+	// task again. It is built from structured fields alone — a refusal's category, else the HTTP
+	// status, else nothing more than "a provider error" — because a refusal's own explanation is
+	// itself refused when it is sent back (dispatch://INFRA-956/artifact/cause-evidence-md), so
+	// no provider text reaches a prompt. Empty for a task no provider error has taken back.
+	ProviderErrorNote string
 }
 
 // StillWorked says whether a claim in state will still work this task as the task of generation's
@@ -94,12 +107,18 @@ func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState
 }
 
 // message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
-// died in a turn of it.
+// died in a turn of it, and behind its own sentence once a provider error took it back
+// (ProviderErrorNote). A task both took keeps both sentences, in that order: the death came
+// first, and each says something the other does not.
 func (d Delivery) message() string {
+	prefix := ""
 	if d.Interrupted {
-		return interruptedTask + d.Task
+		prefix = interruptedTask
 	}
-	return d.Task
+	if d.ProviderErrorNote != "" {
+		prefix += d.ProviderErrorNote + "\n\n"
+	}
+	return prefix + d.Task
 }
 
 // HashBootToken is the one hash a boot token is stored and looked up by. A launch mints the token
@@ -222,6 +241,12 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		return nil
 	}
 	if _, awaiting := m.timers[TimerTurn]; awaiting {
+		return nil
+	}
+	// The two waits a provider error arms are the delivery's own, so each is fenced on the id the
+	// arming recorded (waitsForProviderError): a newer task queued meanwhile is a task no wait is
+	// armed for, and it goes at once.
+	if m.waitsForProviderError(p.ID) {
 		return nil
 	}
 	conn, ok := m.deps.Conns.Conn(m.claim.Token)
@@ -472,6 +497,8 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // completion the worker's next turn reports.
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
+	// Both provider-error waits are this task's, so they end with it (providerErrorOver).
+	m.providerErrorOver()
 	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() {
 		retired.ServingGeneration = serving(p, deliveredRun, retired.ServingGeneration)

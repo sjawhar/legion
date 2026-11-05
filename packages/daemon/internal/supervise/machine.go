@@ -207,6 +207,12 @@ type Claim struct {
 	// Whether that claim had answered when it left is UpdateSignalledAt, which a claim that has
 	// left never changes (takeBackSignal). Only the round's end clears it (clearUpdate).
 	UpdateLeftRound string
+	// ProviderErrorRun is how many turns of this claim ended in a provider error in a row, and 0
+	// for a claim whose last turn ended with none (promptResulted). At providerErrorRunTold the
+	// project's controller is told once, and not again until a turn with no error puts it back to
+	// zero. It bounds nothing: R2 of dispatch://INFRA-956 forbids an attempt limit here, since a
+	// limit would fail every claim of a project at once in a provider outage.
+	ProviderErrorRun int
 }
 
 // The two kinds of round Claim.UpdateRound spells, each with what identifies it: a pod's, which
@@ -477,6 +483,12 @@ type Deps struct {
 	// re-task clock runs from each send (Claim.UpdateTaskedAt), so asking again never postpones
 	// the round's own clock. Zero takes defaultPodUpdateRetask.
 	PodUpdateRetask time.Duration
+	// ProviderErrorRunReached is told of a claim whose turns have ended in a provider error
+	// providerErrorRunTold times in a row, once per run, with the reason the project's controller
+	// is given: the model and the error's category or status, in words built from structured
+	// fields alone. The claim carries the issue and the role. nil tells nobody, as it does for
+	// TaskConfirmed above. It is called inside the machine's decision, so it returns at once.
+	ProviderErrorRunReached func(c Claim, reason string)
 }
 
 func (d Deps) check() error {
@@ -668,6 +680,9 @@ type Machine struct {
 	// lastTurnOutcome is the newest turn outcome the claim's plugin has reported, nil until one
 	// arrives (turnoutcome.go, which says why it is never written to the store).
 	lastTurnOutcome *TurnOutcome
+	// providerError is the turn that ended in a provider error whose decision is not yet made,
+	// nil for none (providererror.go, which says why it is never written to the store).
+	providerError *providerError
 }
 
 type sending struct {
@@ -1083,7 +1098,7 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	case Timer:
 		a, ok := m.timers[ev.Kind]
 		if !ok || a.seq != ev.Seq || ev.Generation != m.claim.Generation || a.deliveryID != ev.DeliveryID ||
-			(ev.Kind == TimerTurn && pendingID(pending) != ev.DeliveryID) {
+			(timesADelivery(ev.Kind) && pendingID(pending) != ev.DeliveryID) {
 			m.dropStale("Timer", "timer", fmt.Sprintf("%s#%d", ev.Kind, ev.Seq), fmt.Sprintf("%s#%d", ev.Kind, a.seq))
 			return false, nil
 		}
@@ -1109,6 +1124,20 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		return m.fenceRequest("ready_for_update", ev.Generation, ev.Session)
 	}
 	return true, nil
+}
+
+// timesADelivery is whether a timer of kind waits on one delivery rather than on the claim or
+// its process: the wait for an acknowledged prompt's turn, and the two a provider error arms
+// (providererror.go). Each is fenced on the claim's pending delivery as well as on the id the
+// arming recorded, so one that fires after the task it was armed for was replaced decides
+// nothing about the task that replaced it.
+func timesADelivery(kind TimerKind) bool {
+	switch kind {
+	case TimerTurn, TimerPromptRetry, TimerTurnOutcome:
+		return true
+	default:
+		return false
+	}
 }
 
 // fenceOutcome is the fence on a prompt's outcome. The send it belongs to is over either way; an
@@ -1433,6 +1462,7 @@ func (m *Machine) retire(ctx context.Context) error {
 // letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
 // on one (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
 // relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
+// no decision waits on the report of a turn it failed (providerErrorOver) —
 // and the process the claim records, when it records one, moves into previous — the claim no
 // longer runs it (it was stopped, found dead, or left behind), and the next launch of the same
 // session waits it out.
@@ -1443,6 +1473,7 @@ func (m *Machine) letGo() {
 	m.held = nil
 	m.staleRelaunch = nil
 	m.unseenTurn = false
+	m.providerError = nil
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
 	}

@@ -185,6 +185,44 @@ func TestARePutDeliveryKeepsThePhaseItWasQueuedFor(t *testing.T) {
 	}
 }
 
+// The ladder a provider error puts a task on outlives the daemon that armed it: the count says
+// which step the next send waits, and the sentence is what that send puts in front of the task
+// (dispatch://INFRA-956 R2). The claim's own run of such turns is beside them, because that is
+// what the controller's notice is counted from, and neither a restart nor a re-put of the
+// delivery under a new id may lose either.
+func TestAProviderErrorsLadderAndItsRunRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-212-implementer")
+	c.ProviderErrorRun = 4
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	note := "Your previous turn on this task stopped because of a provider error (HTTP 529)."
+	queued := supervise.Delivery{ID: "delivery-1", Task: "implement the plan", Phase: phase.Implementing, QueuedAt: at(1),
+		ProviderErrorRetries: 3, ProviderErrorNote: note}
+	if err := store.PutDelivery(ctx, c.Token, queued); err != nil {
+		t.Fatalf("put delivery: %v", err)
+	}
+
+	read := onlyClaim(t, store)
+	if read.ProviderErrorRun != 4 {
+		t.Errorf("the claim's run of provider errors read back as %d, want 4", read.ProviderErrorRun)
+	}
+	if p := read.Pending; p == nil || p.ProviderErrorRetries != 3 || p.ProviderErrorNote != note {
+		t.Fatalf("delivery read back = %+v, want three sends counted and the sentence %q", p, note)
+	}
+
+	// A task no provider error has taken back carries neither.
+	fresh := supervise.Delivery{ID: "delivery-2", Task: "test the change", Phase: phase.Testing, QueuedAt: at(2)}
+	if err := store.PutDelivery(ctx, c.Token, fresh); err != nil {
+		t.Fatalf("put the newer delivery: %v", err)
+	}
+	if p := onlyClaim(t, store).Pending; p == nil || p.ProviderErrorRetries != 0 || p.ProviderErrorNote != "" {
+		t.Fatalf("delivery read back = %+v, want a task no provider error has taken back", p)
+	}
+}
+
 func TestAClaimWithNothingOptionalRoundTripsAsNothing(t *testing.T) {
 	ctx := context.Background()
 	store := migratedStore(t)
