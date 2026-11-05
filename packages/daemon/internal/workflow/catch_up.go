@@ -72,12 +72,14 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 // telling's to settle, so this one names only what nobody claims. The notice goes through the
 // outbox like any other, so it is routed, held and re-held as they are.
 //
-// paced is the moment the daemon's wake pacing reserved for this catch-up, and the notice row's
-// next_at: the zero value, which every caller but the paced ready passes (CatchUpTheTreesOwed for
-// HandOverKept, and the ready of a launch), is now, so a catch-up no pacing holds is due as it
-// always was. A reserved moment also marks the row (record.Notice.Paced), which is what keeps a
-// ready from pulling it forward (the daemon's releaseWaiting) and what tells the outbox to write
-// the line a wake writes when it runs it.
+// paced is the moment the daemon's wake pacing reserved for this catch-up, which is both the
+// notice row's next_at and the moment the notice itself carries (record.Notice.PacedAt): the zero
+// value, which every caller but the paced ready passes (CatchUpTheTreesOwed for HandOverKept, and
+// the ready of a launch), is now, so a catch-up no pacing holds is due as it always was. The row
+// keeps the moment of its own because a failed attempt rewrites next_at to its backoff: the
+// moment is what keeps a ready from pulling the row forward before its turn (the daemon's
+// releaseWaiting) and what the outbox reads for the wait in the line that wake writes when it
+// runs (the daemon's wakeRan).
 func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now, paced time.Time) error {
 	catchUp, awaiting, err := treeCatchUp(ctx, tx, store, gate, root)
 	if err != nil {
@@ -107,7 +109,7 @@ func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 		at = paced
 	}
 	return EnqueueNaming(ctx, tx, store, root.Key, root.Key,
-		record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp, Paced: !paced.IsZero()},
+		record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp, PacedAt: paced},
 		kept, at)
 }
 

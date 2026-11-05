@@ -63,7 +63,18 @@ func New(rate, burst int, jitter func(interval time.Duration) time.Duration) *Li
 //
 // The wake is charged on the reserve, not on the release, so a caller that reserves a wake and
 // then drops it has still spent a wake's worth of the rate.
+//
+// now is stripped of its monotonic reading (Round(0)) before anything reads it, so that the one
+// limiter is fed one kind of clock whoever reserves: the workflow engine's now is Clock().UTC()
+// (workflow.Engine.now), which has none, while a machine's is time.Now() (supervise's
+// reserveWake), which has one, and a theoretical arrival time set from one and compared against
+// the other would mix the two. Stripping here rather than giving the engine a monotonic now is
+// what keeps every caller free to pass its own clock, which is this package's whole shape: a
+// moment this limiter returns is a wall-clock moment, the kind a caller writes into next_at or
+// hands to a timer, and a wall-clock step moves the waits of every lane together rather than one
+// lane's alone.
 func (l *Limiter) Reserve(now time.Time) time.Time {
+	now = now.Round(0)
 	if l.interval == 0 {
 		return now
 	}
@@ -74,7 +85,7 @@ func (l *Limiter) Reserve(now time.Time) time.Time {
 	// The bucket is full as far back as burst-1 intervals before the theoretical arrival time, so
 	// a queue idle for that long — a fresh limiter among them, whose tat is the zero time — wakes
 	// at once and pays no jitter.
-	release := now
+	release, arrival := now, now
 	if base := l.tat.Add(-time.Duration(l.burst-1) * l.interval); base.After(now) {
 		release = base
 		if l.jitter != nil {
@@ -85,9 +96,18 @@ func (l *Limiter) Reserve(now time.Time) time.Time {
 		if release.Before(now) {
 			release = now
 		}
+		// A paced release is burst-1 intervals before the arrival time it charges, so its own
+		// jitter pushes that time out with it: without this the next base would be exactly one
+		// interval after this base, whatever jitter this release drew, and at a burst of 2 or more
+		// the gaps would collapse — measured here at rate 8 over 200 reservations, a burst of 2
+		// held a minimum gap of 0.77s and sustained 7.97 wakes a minute where the operator's docs
+		// promise a gap of one to two intervals and about two thirds of the rate. At a burst of 1
+		// the arrival is the release and nothing moves (TestBurstLetsItsFirstWakesGoAtOnce,
+		// TestJitterAtABurstOfTwoKeepsEveryGapBetweenOneIntervalAndTwo).
+		arrival = release.Add(time.Duration(l.burst-1) * l.interval)
 	}
-	if l.tat.Before(release) {
-		l.tat = release
+	if l.tat.Before(arrival) {
+		l.tat = arrival
 	}
 	l.tat = l.tat.Add(l.interval)
 	return release

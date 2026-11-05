@@ -106,16 +106,18 @@ func (k *controllerKeeper) keep() error {
 	var request supervise.Event
 	switch state := m.Claim().State; state {
 	case supervise.StateQueued:
-		// Every request this keeper makes is exempt from the wake pacing (supervise's
-		// reserveWake): the controller is the one session the operator's own read of a running
-		// wave relies on, so it comes up ahead of the queue it is reading, and holding it behind
-		// a wave of workers would leave nobody able to say what the wave is doing. The machine
-		// exempts the controller's claim by itself as well, for the launches no request raises.
+		// The spawn of a claim that has never run says so with its own field: the controller is
+		// the one session the operator's own read of a running wave relies on, so it comes up
+		// ahead of the queue it is reading, and holding it behind a wave of workers would leave
+		// nobody able to say what the wave is doing. Every other request this keeper makes needs
+		// no field at all — the machine exempts the controller's claim by identity, which is what
+		// covers the launches no request raises as well (supervise's reserveWake,
+		// claim.IsController).
 		request = supervise.RequestSpawn{Claim: token, Exempt: true}
 	case supervise.StateSuspended:
 		// The daemon keeps its controller running by rule, which holds an operator's suspension:
 		// only the operator's resume runs a controller the operator suspended.
-		request = supervise.RequestRuleResume{Claim: token, Reason: "the daemon keeps its controller running", Exempt: true}
+		request = supervise.RequestRuleResume{Claim: token, Reason: "the daemon keeps its controller running"}
 	case supervise.StateFailed, supervise.StateRetired:
 		now := k.now()
 		if k.retryAt.IsZero() {
@@ -131,7 +133,7 @@ func (k *controllerKeeper) keep() error {
 		k.backoff = min(2*k.backoff, controllerRetryMax)
 		k.retryAt = now.Add(k.backoff)
 		k.log.Warn("controller: retrying the daemon's controller", "claim", token, "state", state, "nextRetryAt", k.retryAt)
-		request = supervise.RequestRetry{Claim: token, Exempt: true}
+		request = supervise.RequestRetry{Claim: token}
 	case supervise.StateReady, supervise.StateWorking, supervise.StateIdle:
 		k.retryAt, k.backoff = time.Time{}, 0
 		return nil

@@ -200,17 +200,24 @@ type Notice struct {
 	// Resends counts the times the notice was queued again after the listener could not forward
 	// it to its architect's session (the daemon's rehold), which stops at a cap.
 	Resends int `json:"resends,omitempty"`
-	// Paced marks a catch-up whose row's next_at is the moment the daemon's wake pacing reserved
-	// for it: the catch-up the outbox writes in place of a launch when a start row finds the tree's
-	// root architect already running (the outbox's start, workflow.Config.Reserve). Reading that
-	// catch-up is a wake of the architect, and what the organization's per-minute cap counts is the
-	// context it reads, so the row waits its turn like a launch does. The mark is what keeps that
-	// turn: a ready that releases the architect's waiting notices leaves a marked row whose moment
-	// is still ahead where it stands (the daemon's releaseWaiting), and the outbox writes the one
-	// line a wake writes when it runs such a row. It is the daemon's own bookkeeping, so the
-	// publish drops it (Published) as it drops ResendOf, and a re-held copy carries none: that
-	// copy's next_at is the re-send delay, not a reservation.
-	Paced bool `json:"paced,omitempty"`
+	// PacedAt is the moment the daemon's wake pacing reserved for a catch-up it holds to its turn,
+	// and the zero value on every other notice: the catch-up the outbox writes in place of a
+	// launch when a start row finds the tree's root architect already running (the outbox's start,
+	// workflow.Config.Reserve). Reading that catch-up is a wake of the architect, and what the
+	// organization's per-minute cap counts is the context it reads, so the row waits its turn like
+	// a launch does.
+	//
+	// The moment is kept here rather than read back from the row's next_at because the two part
+	// company: a failed attempt rewrites next_at to its backoff (RetryOutbox), while the turn the
+	// pacing gave this wake never moves. The outbox writes that wake's one line from it — how long
+	// the wake waited is PacedAt less CreatedAt, whichever attempt publishes (the daemon's
+	// wakeRan) — and a ready that releases the architect's waiting notices leaves the row where it
+	// stands only while the moment is still ahead (the daemon's releaseWaiting), so a catch-up
+	// whose turn has come is released like any other notice rather than waiting out a backoff the
+	// pacing never asked for. It is the daemon's own bookkeeping, so the publish drops it
+	// (Published) as it drops ResendOf, and a re-held copy carries none: that copy's next_at is
+	// the re-send delay, not a reservation.
+	PacedAt time.Time `json:"paced_at,omitzero"`
 	// ResendOf is the outbox row a re-held copy copies. The copy is published under that row's
 	// dedupe key (OutboxKey), so the listener's report of a failed forward names the original row,
 	// whichever copy failed (exceptionNotice), and the listener's role lane drops a copy that
@@ -375,11 +382,11 @@ type CatchUpIssue struct {
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
 // Published is the notice the runner publishes for outbox row id, and the dedupe key it goes under:
-// a re-held copy goes under the key of the row it copies, and without ResendOf. The pacing mark
-// goes out with neither: both are the daemon's own bookkeeping of the row, and Paced says nothing
-// to the architect that reads the notice (the daemon's wakeRan writes what the pacing did).
+// a re-held copy goes under the key of the row it copies, and without ResendOf. The reserved
+// moment goes out with neither: both are the daemon's own bookkeeping of the row, and PacedAt says
+// nothing to the architect that reads the notice (the daemon's wakeRan writes what the pacing did).
 func (n Notice) Published(id int64) (Notice, string) {
-	n.Paced = false
+	n.PacedAt = time.Time{}
 	if n.ResendOf == 0 {
 		return n, OutboxKey(id)
 	}

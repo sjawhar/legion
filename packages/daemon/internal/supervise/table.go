@@ -334,10 +334,6 @@ type RequestResume struct{ Claim claim.Token }
 type RequestRuleResume struct {
 	Claim  claim.Token
 	Reason string
-	// Exempt is the caller saying this resume is not one the wake pacing may hold (reserveWake):
-	// the daemon's operator API and the controller keeper. The zero value is paced, so a caller
-	// that has not thought about it is paced, as it is on RequestSpawn.
-	Exempt bool
 }
 
 // RequestStop ends one claim. The tree's root claim is not one it can end: a root ends only with
@@ -371,13 +367,7 @@ type RequestOperatorClose struct{ Claim claim.Token }
 // RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
 // decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
 // re-admitted after its linger stopped every claim.
-type RequestRetry struct {
-	Claim claim.Token
-	// Exempt is the caller saying this retry is not one the wake pacing may hold (reserveWake):
-	// the daemon's operator API and the controller keeper. The zero value is paced, so a caller
-	// that has not thought about it is paced, as it is on RequestSpawn.
-	Exempt bool
-}
+type RequestRetry struct{ Claim claim.Token }
 
 // RequestOperatorRetry is the operator relaunching a failed architect through the API: the retry
 // RequestRetry makes, fresh budgets and the same session, from failed alone, for the root and
@@ -1867,8 +1857,16 @@ func deliverNow(m *Machine, ctx context.Context, ev Event) error {
 // task (an outbox delivery, which carries a durable id) resumes a claim unless an operator
 // suspended it: an operator's suspension answers ErrHeldByOperator, queuing
 // nothing, and its start waits for the operator's resume. The operator's own delivery resumes the
-// claim whoever suspended it. Either way the resume is paced like every other wake the daemon
-// causes (reserveWake): the task waits on the claim until the launch it waits for runs.
+// claim whoever suspended it.
+//
+// Which of the two it is decides the pacing too, and the id is what says which (RequestDeliver.ID,
+// which the API's deliver route leaves empty). The workflow's own task is a wake of the daemon's
+// own and waits its turn like every other (reserveWake): the task waits on the claim until the
+// launch it waits for runs. The operator's task never waits — a person is waiting on it, as they
+// are on the resume and the retry the same route sends (exemptWake) — so it launches where it
+// arrives and takes nothing from the rate. A wake the pacing already holds over the claim is
+// dropped before this row is reached, so the claim this decides is the claim the gate found
+// (dropsWaitingWake, dropWakeFor).
 func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	d := ev.(RequestDeliver)
 	if d.ID != "" && !m.claim.RuleMayResume() {
@@ -1877,7 +1875,7 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.queue(ctx, d); err != nil {
 		return err
 	}
-	return m.revive(ctx, false)
+	return m.revive(ctx, d.ID == "")
 }
 
 // exit is the agent reporting its own end. A worker's or sub-architect's claim ends with it and is

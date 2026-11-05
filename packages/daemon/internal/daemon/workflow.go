@@ -35,7 +35,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/wakepace"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -71,12 +70,6 @@ type workflowRuntime struct {
 	// through them, so the wake forwards to whatever attach has stored, and to nothing before
 	// then — the outbox's boot sweep finds every row written before it ran.
 	outboxWake atomic.Pointer[outbox]
-	// wakes is the daemon's one wake limiter as the engine reaches it (reserveWake): supervision
-	// owns it (openSupervision), and the engine is built before supervision exists, so the
-	// Reserve the engine is given at open forwards to whatever attach has stored here. Nothing
-	// applies a fact before attach — the durable consumers open after it, and the boot's terminal
-	// replay runs after it — so no wake of the engine's goes unpaced for want of it.
-	wakes atomic.Pointer[wakepace.Limiter]
 	// bootID disambiguates this boot's synthetic Dispatch consumer position facts from another
 	// boot's, or another project's daemon: processed_events is keyed only on (source, event_id),
 	// shared by every project's daemon in the database, and a stream recreated by a later boot
@@ -295,7 +288,13 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 // from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
 // written before the record carried its repository. build is the daemon's own build (Build), which
 // the engine and the boot fact compare against the open production checks.
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (opened *workflowRuntime, _ error) {
+//
+// reserve is the daemon's one wake limiter as the engine reaches it (run builds it, before this
+// and before supervision, which reserves its launches from the same one): the moment the one
+// wake the engine causes may run, the catch-up a start writes in place of a launch (workflow's
+// claimReady), and nil while the operator paces nothing, which is the engine's reading of the
+// pacing off — the catch-up is then due at once, as it always was.
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build, reserve func(time.Time) time.Time) (opened *workflowRuntime, _ error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
@@ -361,12 +360,10 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	}
 	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
 	// The one wake the engine causes is the catch-up a start writes in place of a launch
-	// (workflow's claimReady), and it is paced with the launches it stands among. A deployment
-	// that paces nothing gives the engine no Reserve at all, which is the pacing off: the engine
-	// then writes that catch-up due at once, as it always did.
-	if cfg.WorkerWakesPerMinute > 0 {
-		engineCfg.Reserve = w.reserveWake
-	}
+	// (workflow's claimReady), and it is paced with the launches it stands among, from the one
+	// limiter run built for both lanes. A deployment that paces nothing passes no reserve at all,
+	// which is the pacing off: the engine then writes that catch-up due at once, as it always did.
+	engineCfg.Reserve = reserve
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	// The project's `memory` block decides what each tree admission opens is drawn: a project the
@@ -393,17 +390,6 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 	if r := w.outboxWake.Load(); r != nil {
 		r.wake(issue, kind)
 	}
-}
-
-// reserveWake is the engine's Reserve (workflow.Config.Reserve): the moment the daemon's one wake
-// limiter gives the catch-up a start writes in place of a launch, from the limiter attach stored
-// (wakes). Before attach there is none, and the wake is due at once; nothing applies a fact that
-// early.
-func (w *workflowRuntime) reserveWake(now time.Time) time.Time {
-	if l := w.wakes.Load(); l != nil {
-		return l.Reserve(now)
-	}
-	return now
 }
 
 // engineConfig is the workflow engine's configuration from the daemon's, the review App's bot
@@ -836,16 +822,15 @@ func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, paylo
 }
 
 // attach gives the workflow what only supervision has: the outbox, built on its supervisor and
-// its runtime, and the daemon's one wake limiter, which the engine reserves the catch-up it
-// writes in place of a launch from (reserveWake) and whose pace — the rate and the burst the
-// machines themselves are held to (supervise.WakePace) — the outbox names in the line that
-// catch-up writes when it runs (wakeRan).
+// its runtime. The pace a paced catch-up's wake line names is the supervisor's own
+// (supervise.WakePace, the rate and the burst the machines are held to), which the outbox reads
+// through that supervisor where it writes the line (wakeRan); the limiter both lanes reserve
+// from was built before either of them (run).
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
-	w.wakes.Store(supervision.wakes)
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
 		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design,
-		supervision.supervisor.deps.WakePace, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
+		w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnDurableState(w.claimDurableState)

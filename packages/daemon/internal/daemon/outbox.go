@@ -92,15 +92,7 @@ type outbox struct {
 	// writes states and whose kept approval pair a start task names (workflow.QueueCatchUp). A
 	// test that builds the runner by hand leaves it zero, which reads as the shipped policy.
 	designGate config.DesignGate
-	// wakePace is the pace the operator set (`worker_wakes_per_minute`, `worker_wake_burst`,
-	// config.Config), carried for the one line a paced catch-up writes when this runner runs it
-	// (wakeRan) and read for nothing else — its Rate and its Burst alone, never its Reserve: the
-	// reservation that decides when such a row is due is the workflow engine's
-	// (workflow.Config.Reserve), taken from the one limiter the daemon paces every wake from. A
-	// test that builds the runner by hand leaves it zero, which is the pacing off and the line's
-	// own reading of it.
-	wakePace supervise.WakePace
-	log      *slog.Logger
+	log        *slog.Logger
 	// backstop is how long after a release its one open phase's worker is woken whatever else
 	// happens (config.IdleReleaseConfig.Backstop, `backstop_minutes`); zero where the deployment
 	// releases no pod, and then a release arms none.
@@ -177,13 +169,13 @@ type outboxTrees interface {
 	ArmPodBackstop(ctx context.Context, backstop store.PodWakeBackstop) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, wakePace supervise.WakePace, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, designGate: designGate, wakePace: wakePace,
+		handlers: handlers, designGate: designGate,
 		project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
@@ -722,13 +714,10 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // architect's next ready to name. However the row ends, a catch-up that told its decisions in any
 // run forgets them here rather than let its ending release what the architect has already heard.
 //
-// A row the wake pacing held to its turn (record.Notice.Paced) writes the line a wake writes as
-// it runs, before anything else, because running it is the wake: the architect reads its whole
-// context from the catch-up (wakeRan).
+// A row the wake pacing held to its turn (record.Notice.PacedAt) writes the line a wake writes,
+// once, on the attempt that publishes it (deliverNotice's wakeRan): running the row is the wake
+// only if the architect is given the catch-up to read.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
-	if payload.Paced {
-		r.wakeRan(row)
-	}
 	if err := r.deliverNotice(ctx, row, payload); err != nil {
 		return err
 	}
@@ -736,34 +725,42 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 }
 
 // wakeRan is the one line a wake the outbox runs writes, where it runs: the catch-up a start row
-// wrote in place of a launch, which the pacing held until row.NextAt (workflow's claimReady). It
-// is the shape internal/supervise composes for every wake of the daemon, prepended with the claim
-// this one wakes (supervise.WakeRanMessage, WakeRanFields): the shape is what matters to its
-// reader, since one grep over the daemon's log finds every wake of a restart or a plugin wave,
-// whichever lane caused it, and counts the wakes of a minute against the rate and burst each line
-// names. The claim is the architect the catch-up goes to, the root architect of the row's issue
-// (QueueCatchUp writes the row for the root), spelled as a machine's own lines spell a claim,
-// since this logger is the runner's and carries no claim of its own — where a machine's logger
-// carries one already, which is why the field is this caller's to add.
+// wrote in place of a launch, which the pacing held until the moment it reserved (workflow's
+// claimReady). It is the shape internal/supervise composes for every wake of the daemon,
+// prepended with the claim this one wakes (supervise.WakeRanMessage, WakeRanFields): the shape is
+// what matters to its reader, since one grep over the daemon's log finds every wake of a restart
+// or a plugin wave, whichever lane caused it, and counts the wakes of a minute against the rate
+// and burst each line names. The claim is the architect the catch-up goes to, the root architect
+// of the row's issue (QueueCatchUp writes the row for the root), spelled as a machine's own lines
+// spell a claim, since this logger is the runner's and carries no claim of its own — where a
+// machine's logger carries one already, which is why the field is this caller's to add.
 //
-// How long the wake waited is the row's own record, not a clock: the engine composed the row at
-// the moment it reserved and wrote it due at the moment the pacing gave it, so next_at less
-// created_at is what the pacing held this wake for. A row the burst let straight out — the first
-// wake of a wave — waited nothing and says so, as supervise's line does; reading the wait from
-// the runner's clock instead would call every such row held, by however long the lane took to
-// pick it up.
-func (r *outbox) wakeRan(row record.OutboxRow) {
+// The line is written on the attempt that publishes, and so once for the row: a row that waits
+// behind an earlier notice of the same architect (errNoticeWaits, wait.Until), finds its role
+// topic unheld, or meets a transient publish failure runs again on its backoff, and a line per
+// attempt would count one wake many times in the minute it lands in (scripts/wake-windows.py
+// counts every paced line and builds a window for each).
+//
+// How long the wake waited is the row's own record, not a clock and not its next_at: the engine
+// composed the row at the moment it reserved and carried that moment on the notice, so PacedAt
+// less created_at is what the pacing held this wake for, whatever a retry since has written into
+// next_at (record.Notice.PacedAt, the store's RetryOutbox). A row the burst let straight out —
+// the first wake of a wave — waited nothing and says so, as supervise's line does; reading the
+// wait from the runner's clock instead would call every such row held, by however long the lane
+// took to pick it up.
+//
+// The pace the line names is the one the daemon holds its machines to (supervise.WakePace, set in
+// openSupervision): the rate and the burst alone, never its Reserve — the reservation that
+// decided when this row was due is the workflow engine's (workflow.Config.Reserve), taken from
+// the same limiter. A test that builds the runner by hand over a supervisor with no pace reads
+// the pacing off, which is that line's own reading of it.
+func (r *outbox) wakeRan(row record.OutboxRow, pacedAt time.Time) {
 	architect, _ := claim.NewToken(r.project, row.Issue, claim.RoleArchitect)
-	waitedFor := row.NextAt.Sub(row.CreatedAt)
+	pace := r.supervisor.deps.WakePace
 	fields := append([]any{"claim", string(architect)},
-		supervise.WakeRanFields(wakeCatchUp, true, waitedFor, r.wakePace.Rate, r.wakePace.Burst)...)
+		supervise.WakeRanFields(supervise.WakeCatchUp, true, pacedAt.Sub(row.CreatedAt), pace.Rate, pace.Burst)...)
 	r.log.Info(supervise.WakeRanMessage, fields...)
 }
-
-// wakeCatchUp is the kind of wake a paced catch-up is, as the line it writes names it (wakeRan).
-// The lanes beside it are internal/supervise's: a role process a launch starts ("launch") and the
-// stale-plugin lane's update task ("plugin-task"). All three reserve from the one limiter.
-const wakeCatchUp = "catch-up"
 
 // deliverNotice is the notice executor's own work: routing the notice, publishing it, and settling
 // what a catch-up that will never publish named. Its endings are notice's to read.
@@ -844,9 +841,15 @@ func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payloa
 	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
-		// The architect has the catch-up, so the decisions it named and this row claims are told:
-		// the telling is recorded under the key it went out on, before anything forgets them, and
-		// the settle after this run forgets them (toldKept, settleTold).
+		// The architect has the catch-up and reads its whole context from it, so this attempt is
+		// the wake the pacing held the row for, and the line it writes is written here: once for
+		// the row, whatever the attempts before it met (wakeRan).
+		if !payload.PacedAt.IsZero() {
+			r.wakeRan(row, payload.PacedAt)
+		}
+		// The decisions the catch-up named and this row claims are told: the telling is recorded
+		// under the key it went out on, before anything forgets them, and the settle after this
+		// run forgets them (toldKept, settleTold).
 		if payload.CatchUp != nil && payload.CatchUp.Kept != nil {
 			return r.toldKept(ctx, tree.root.Key, key)
 		}

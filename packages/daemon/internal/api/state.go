@@ -713,8 +713,8 @@ func StrandedByMove(stranded []StrandedClaim, suspended Suspenders) map[Stranded
 // WakeWaiting is one wake the daemon's pacing holds until its turn, as the state names it
 // (State.WakesWaiting): the claim it will wake, that claim's issue and role, what kind of wake it
 // is, and the moment the pacing gave it, which is when it runs. The kinds are the three lanes the
-// daemon paces, each named as the line that wake writes names it (supervise's wakeRan, the
-// outbox's):
+// daemon paces, declared once where the machines reserve them (supervise.WakeKind) and each named
+// on the wire as the line that wake writes names it (supervise's wakeRan, the outbox's):
 //
 //   - `launch`, a role process the daemon is about to start, held by the claim's machine;
 //   - `plugin-task`, the update task a stale-plugin round queues to a session already running,
@@ -726,11 +726,11 @@ func StrandedByMove(stranded []StrandedClaim, suspended Suspenders) map[Stranded
 // appears. A wake over a claim whose process still runs appears like any other: it is a wake the
 // queue holds, whatever the claim does meanwhile.
 type WakeWaiting struct {
-	Claim claim.Token `json:"claim"`
-	Issue string      `json:"issue"`
-	Role  claim.Role  `json:"role"`
-	Kind  string      `json:"kind"`
-	DueAt time.Time   `json:"dueAt"`
+	Claim claim.Token        `json:"claim"`
+	Issue string             `json:"issue"`
+	Role  claim.Role         `json:"role"`
+	Kind  supervise.WakeKind `json:"kind"`
+	DueAt time.Time          `json:"dueAt"`
 }
 
 // WakesWaitingOf is every wake still waiting, from both of the places one can wait, in claim order:

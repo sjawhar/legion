@@ -320,12 +320,19 @@ func waitingWakes(t *testing.T, d *daemon) []api.WakeWaiting {
 
 // awaitWave waits until the whole wave has reserved its turn: one wake out at once, which the
 // burst lets through, and the rest waiting in the state. It returns the queue, earliest first.
+//
+// The queue must be read twice alike before it is believed. A wave's sites fan out over one
+// goroutine per claim (the boot's launchUnfinished, the sweep's posts, the outbox's lanes), so
+// the count can reach the wave's size while a straggler is still between its reserve and the
+// write the state reads it from, and a queue read in that moment names one claim the turns do
+// not. Two equal reads in a row say the fan-out is over, and every caller then advances the
+// clock to the moments this returned.
 func awaitWave(t *testing.T, d *daemon, count int) []api.WakeWaiting {
 	t.Helper()
-	var waiting []api.WakeWaiting
+	var waiting, settled []api.WakeWaiting
 	testwait.Eventually(t, fmt.Sprintf("the pacing to hold %d of the wave's %d wakes", count-1, count), func() bool {
-		waiting = waitingWakes(t, d)
-		return len(waiting) == count-1
+		waiting, settled = waitingWakes(t, d), waiting
+		return len(waiting) == count-1 && slices.Equal(waiting, settled)
 	})
 	return waiting
 }
@@ -382,11 +389,12 @@ func assertSpread(t *testing.T, what string, moments []time.Time, origin time.Ti
 	}
 }
 
-// wakeLines is every line a wake wrote as it ran (supervise's wakeRan), in order.
-func wakeLines(t *testing.T, logged *syncBuffer) []map[string]any {
+// wakeLines is every line a wake wrote as it ran (supervise's wakeRan), in order: of a machine's
+// own gate, and of the outbox where a paced catch-up publishes (the outbox's wakeRan).
+func wakeLines(t *testing.T, logged string) []map[string]any {
 	t.Helper()
 	var lines []map[string]any
-	for line := range strings.Lines(logged.String()) {
+	for line := range strings.Lines(logged) {
 		entry := map[string]any{}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			t.Fatalf("decode log line %q: %v", line, err)
@@ -401,7 +409,7 @@ func wakeLines(t *testing.T, logged *syncBuffer) []map[string]any {
 // wakeLineOf is the line the named claim's wake wrote, and whether it wrote one at all.
 func wakeLineOf(t *testing.T, logged *syncBuffer, token claim.Token) (map[string]any, bool) {
 	t.Helper()
-	for _, line := range wakeLines(t, logged) {
+	for _, line := range wakeLines(t, logged.String()) {
 		if line["claim"] == string(token) {
 			return line, true
 		}
@@ -415,7 +423,7 @@ func wakeLineOf(t *testing.T, logged *syncBuffer, token claim.Token) (map[string
 // how long it was held.
 func assertWakeLines(t *testing.T, logged *syncBuffer, kind string, moments []time.Time) {
 	t.Helper()
-	lines := wakeLines(t, logged)
+	lines := wakeLines(t, logged.String())
 	if len(lines) != len(moments) {
 		t.Fatalf("wake lines = %d, want one for each of the wave's %d wakes", len(lines), len(moments))
 	}
@@ -580,7 +588,7 @@ func TestAWaveOfCatchUpsIsWrittenOnTheLimitersScheduleInTheOrderItBecameReady(t 
 	var paced []noticeRow
 	var single []noticeRow
 	for _, row := range rows {
-		if row.paced {
+		if row.paced() {
 			paced = append(paced, row)
 			continue
 		}
@@ -627,8 +635,8 @@ func TestWithNoPacingTheCatchUpWaveIsWrittenDueAtOnce(t *testing.T) {
 		t.Fatalf("notice rows = %d, want one catch-up each", len(rows))
 	}
 	for _, row := range rows {
-		if row.paced || !row.nextAt.Equal(wakeOrigin) {
-			t.Fatalf("row %d is paced %v and due at %s, want unpaced and due at once at %s", row.id, row.paced, row.nextAt, wakeOrigin)
+		if row.paced() || !row.nextAt.Equal(wakeOrigin) {
+			t.Fatalf("row %d reserved %s and is due at %s, want no reservation and due at once at %s", row.id, row.pacedAt, row.nextAt, wakeOrigin)
 		}
 	}
 }
@@ -793,7 +801,7 @@ func TestWithNoPacingTheBootWaveGoesOutInOneTick(t *testing.T) {
 	if waiting := waitingWakes(t, d); len(waiting) != 0 {
 		t.Fatalf("wakesWaiting with the pacing off = %+v, want none", waiting)
 	}
-	for _, line := range wakeLines(t, logged) {
+	for _, line := range wakeLines(t, logged.String()) {
 		if line["paced"] != false || line["waited"] != false {
 			t.Fatalf("a wake line of an unpaced daemon says paced %v waited %v, want both false: %v",
 				line["paced"], line["waited"], line)
@@ -1431,7 +1439,6 @@ func pacedLaneTree(t *testing.T, log *slog.Logger) (*laneTree, *wakepace.Limiter
 	limiter := pacedWakes()
 	tree.runner.supervisor.deps.Clock = tree.clock
 	tree.runner.supervisor.deps.WakePace = supervise.WakePace{Reserve: limiter.Reserve, Rate: testWakeRate, Burst: testWakeBurst}
-	tree.runner.wakePace = tree.runner.supervisor.deps.WakePace
 	for range waveSize {
 		limiter.Reserve(tree.clock.Now())
 	}
@@ -1582,13 +1589,18 @@ func TestASecondStartOfAWaitingClaimTakesNoTokenAndStartsNoSecondLaunch(t *testi
 func noticeRowOf(t *testing.T, pool *pgxpool.Pool, issue string) (noticeRow, bool) {
 	t.Helper()
 	var row noticeRow
-	err := pool.QueryRow(context.Background(), `select id, coalesce((payload->>'paced')::boolean, false), created_at, next_at
-		from outbox where kind = $1 and issue = $2 order by id`, string(record.OutboxKindNotice), issue).Scan(&row.id, &row.paced, &row.createdAt, &row.nextAt)
+	// A notice the pacing reserved no moment for carries no paced_at at all (omitzero).
+	var pacedAt *time.Time
+	err := pool.QueryRow(context.Background(), `select id, (payload->>'paced_at')::timestamptz, created_at, next_at
+		from outbox where kind = $1 and issue = $2 order by id`, string(record.OutboxKindNotice), issue).Scan(&row.id, &pacedAt, &row.createdAt, &row.nextAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return noticeRow{}, false
 	}
 	if err != nil {
 		t.Fatalf("read the notice row of %s: %v", issue, err)
+	}
+	if pacedAt != nil {
+		row.pacedAt = pacedAt.UTC()
 	}
 	row.createdAt, row.nextAt = row.createdAt.UTC(), row.nextAt.UTC()
 	return row, true
@@ -1628,7 +1640,7 @@ func TestAReadyAndALaterNoticeLeaveThePacedCatchUpWhereTheQueueHoldsIt(t *testin
 	// An architect from the middle of the queue, whose turn is minutes out.
 	const woken = "LEGION-20"
 	catchUp, ok := noticeRowOf(t, pool, woken)
-	if !ok || !catchUp.paced || !catchUp.nextAt.After(now.Add(time.Minute)) {
+	if !ok || !catchUp.paced() || !catchUp.nextAt.After(now.Add(time.Minute)) {
 		t.Fatalf("the catch-up of %s is %+v, want one the pacing holds more than a minute out", woken, catchUp)
 	}
 	architect := mustClaimToken(t, woken, claim.RoleArchitect)

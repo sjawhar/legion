@@ -369,12 +369,14 @@ func (r *outbox) exceptionNotice(exception roleLaneException) (reportedNotice, b
 // tree read once; the fence is not read, since a release only makes a notice due and its send
 // still passes the fence.
 //
-// A catch-up the wake pacing holds to its turn is left where it stands (record.Notice.Paced; the
-// query answers with the rows whose moment is still ahead of now, `next_at > $2`). Its wait is not
-// the architect being away — the architect is running, which is why a start wrote a catch-up
-// instead of launching one — but the turn the operator's rate gave this wake, and a ready that
-// pulled it forward would let a whole restart's worth of catch-ups out in the minute the first
-// architect reported ready, which is the wave the pacing exists to spread.
+// A catch-up the wake pacing still holds to its turn is left where it stands: its wait is not the
+// architect being away — the architect is running, which is why a start wrote a catch-up instead
+// of launching one — but the turn the operator's rate gave this wake, and a ready that pulled it
+// forward would let a whole restart's worth of catch-ups out in the minute the first architect
+// reported ready, which is the wave the pacing exists to spread. What is held back is the row
+// whose reserved moment is still ahead of now (record.Notice.PacedAt), not every row the pacing
+// ever marked: a catch-up whose turn came and whose attempt then failed waits on a backoff of its
+// own, and that wait is one a ready releases like any other, since the pacing has had its say.
 func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) error {
 	now := r.now()
 	released := []record.OutboxRow{}
@@ -390,7 +392,7 @@ func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) 
 				return fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
 			}
 			notice, ok := payload.(record.Notice)
-			if !ok || notice.Paced {
+			if !ok || notice.PacedAt.After(now) {
 				continue
 			}
 			issue, route, err := r.readNoticeRoute(ctx, tx, row.Issue, routes)

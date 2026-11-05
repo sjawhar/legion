@@ -210,11 +210,19 @@ func (c Claim) openRoundHoldsTask() bool {
 // delivery's — except for a root architect's task of a run, which no turn of the agent's own is
 // ever taken for, since it may be a task nobody has sent at all (asksRoot).
 //
-// Two states hand the claim nothing and hold the task instead of dropping it: a claim holding a
-// suspension (holdSuspension), and a claim that has answered its open update round
-// (answeredOpenRound, opened by openPodUpdate). Starting the worker of an answered round on a
-// task it is about to lose would waste both the turn and the work. PodUpdateEnded releases that
-// task once the round is over (endPodUpdate).
+// Three states hand the claim nothing and hold the task instead of dropping it: a claim holding a
+// suspension (holdSuspension), a claim that has answered its open update round
+// (answeredOpenRound, opened by openPodUpdate), and a claim whose launch waits its turn in the
+// wake pacing over the process this send would reach (launchWaits). Starting the worker of an
+// answered round on a task it is about to lose would waste both the turn and the work, and so
+// would starting the worker of a process the next turn replaces: that launch lets the process go
+// (launchNow), and the task it had just begun would be retired as served at the turn it never
+// finished (settle, retirePending). Such a claim is decided as a claim whose launch is in flight,
+// which is what it is — the gate left its state alone only so that a restart would not find a
+// live process recorded launching — so its deliveries wait here exactly as a launching claim's
+// are queued (deliverLater), and go at the ready of the process the launch starts.
+// PodUpdateEnded releases the round's held task once the round is over (endPodUpdate), and the
+// wake's turn is where the launch takes the other back.
 //
 // An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
 // sent (Claim.LeftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
@@ -223,8 +231,9 @@ func (c Claim) openRoundHoldsTask() bool {
 // below, and both leave through the answer every drop of a delivery gives the mark armed for it
 // (answerAskFirstAfterDrop, which dropUpdateTask makes of its own).
 func (m *Machine) sendPending(ctx context.Context) error {
-	// A claim holding a suspension is handed nothing (holdSuspension).
-	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
+	// A claim holding a suspension is handed nothing (holdSuspension), and neither is one whose
+	// paced launch is about to replace the process a send would reach (launchWaits).
+	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil || m.launchWaits() {
 		return nil
 	}
 	// A claim that answered its open update round is handed nothing until the round ends.

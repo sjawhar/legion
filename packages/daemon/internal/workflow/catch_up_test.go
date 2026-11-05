@@ -308,9 +308,11 @@ func catchUpRows(t *testing.T, pool *pgxpool.Pool) []int64 {
 
 // The catch-up a start writes in place of a launch waits its turn in the daemon's wake pacing:
 // the ready carries the mark only that start sets (intake.ClaimReady.Paced), the engine takes one
-// turn from the limiter it was given, and the row is due at the moment that turn comes. A launch's
-// own ready takes no turn, whatever the pacing: the launch already took one at the machine's gate.
-// An engine with no limiter at all — the deployment that paces nothing — writes both at once.
+// turn from the limiter it was given, and the row is due at the moment that turn comes and
+// carries it (record.Notice.PacedAt), which is what the outbox reads for the wait in the line
+// that wake writes and what a ready compares its now against. A launch's own ready takes no turn,
+// whatever the pacing: the launch already took one at the machine's gate. An engine with no
+// limiter at all — the deployment that paces nothing — writes both at once, with no moment.
 func TestAPacedReadysCatchUpIsDueAtTheMomentTheWakePacingGivesIt(t *testing.T) {
 	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
 	turn := now.Add(90 * time.Second)
@@ -319,10 +321,10 @@ func TestAPacedReadysCatchUpIsDueAtTheMomentTheWakePacingGivesIt(t *testing.T) {
 		paced   bool
 		pacing  bool
 		due     time.Time
-		marked  bool
+		marked  time.Time
 		reserve int
 	}{
-		{name: "a start's ready while the pacing is on", paced: true, pacing: true, due: turn, marked: true, reserve: 1},
+		{name: "a start's ready while the pacing is on", paced: true, pacing: true, due: turn, marked: turn, reserve: 1},
 		{name: "a launch's ready while the pacing is on", pacing: true, due: now},
 		{name: "a start's ready while the pacing is off", paced: true, due: now},
 	} {
@@ -346,14 +348,19 @@ func TestAPacedReadysCatchUpIsDueAtTheMomentTheWakePacingGivesIt(t *testing.T) {
 			}
 
 			var due time.Time
-			var marked bool
-			if err := pool.QueryRow(t.Context(), `select next_at, coalesce((payload->>'paced')::boolean, false) from outbox
+			// A catch-up the pacing reserved no moment for carries none at all (omitzero).
+			var marked *time.Time
+			if err := pool.QueryRow(t.Context(), `select next_at, (payload->>'paced_at')::timestamptz from outbox
 				where kind = 'notice' and payload->>'kind' = 'catch-up'`).Scan(&due, &marked); err != nil {
 				t.Fatalf("read the catch-up: %v", err)
 			}
-			if !due.UTC().Equal(tc.due) || marked != tc.marked || reserved != tc.reserve {
-				t.Fatalf("the catch-up is due at %s, marked paced %v, after %d reservations; want %s, %v, %d",
-					due.UTC(), marked, reserved, tc.due, tc.marked, tc.reserve)
+			var reservedAt time.Time
+			if marked != nil {
+				reservedAt = marked.UTC()
+			}
+			if !due.UTC().Equal(tc.due) || !reservedAt.Equal(tc.marked) || reserved != tc.reserve {
+				t.Fatalf("the catch-up is due at %s, reserved for %s, after %d reservations; want %s, %s, %d",
+					due.UTC(), reservedAt, reserved, tc.due, tc.marked, tc.reserve)
 			}
 		})
 	}

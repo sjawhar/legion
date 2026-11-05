@@ -58,13 +58,6 @@ func CannotAnswerUpdate(c Claim) bool {
 	return HoldsCapability(c.State) && c.PluginContract < PodUpdateContract
 }
 
-// wakePluginTask is the kind of wake the stale-plugin lane reserves: the update task a plugin
-// round queues to a live session in place of a launch (refreshPlugin, openPluginUpdate). It is
-// paced from the same limiter as the role processes a launch starts (wakeLaunch) and named apart
-// only in the line each wake writes (wakeRan), because what the organization's per-minute cap
-// counts is the context a woken session reads, not whether the daemon started a process for it.
-const wakePluginTask = "plugin-task"
-
 // refreshPlugin is the claim's process found to speak a plugin contract this daemon does not: at
 // boot, re-adopting a claim whose recorded contract is an earlier daemon's, or none at all (the
 // first boot on this release); or, uncharged, a registration that still differs from the daemon's
@@ -135,7 +128,7 @@ const wakePluginTask = "plugin-task"
 // The round's own task is a wake of the daemon's own — it wakes a live session in place of a
 // launch, and the context that session reads in the minute after is what an organization's
 // per-minute uncached-input cap counts — so it waits its turn in the pacing like every launch
-// (reserveWake, wakePluginTask). The claim records a process in this branch, so the gate leaves
+// (reserveWake, WakePluginTask). The claim records a process in this branch, so the gate leaves
 // it exactly as it stands: nothing is written, the round opens at the wake's turn (wakeNow,
 // openPluginUpdateIfStale), and a sweep meanwhile reads a live claim rather than one parked
 // launching.
@@ -161,7 +154,10 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	}
 	controller := claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree)
 	if !CannotAnswerUpdate(m.claim) && !controller {
-		return m.reserveWake(ctx, wakePluginTask, false, m.openPluginUpdateIfStale)
+		// The round's task starts no process, so its turn makes no lifecycle check and has no
+		// launch to raise again (reserveWake's again); a suspension held meanwhile keeps the turn
+		// it protects and this wake opens nothing (wakeNow).
+		return m.reserveWake(ctx, WakePluginTask, false, m.openPluginUpdateIfStale, nil)
 	}
 	if m.claim.State == StateWorking && !controller {
 		m.holdStaleRelaunch(trigger)

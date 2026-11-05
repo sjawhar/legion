@@ -153,6 +153,62 @@ func TestBurstLetsItsFirstWakesGoAtOnce(t *testing.T) {
 	}
 }
 
+// A jittered burst of two keeps the spacing promise the operator's documentation makes (the
+// deployment docs and legion.yaml.example): once the burst is spent, every gap is at least one
+// interval and less than two, so a wave sustains about two thirds of the rate rather than all of
+// it. A paced release is burst-1 intervals before the arrival time it charges, so the limiter
+// pushes that time out by the jitter the release drew (Reserve); without the push the next base
+// was exactly one interval after the previous base whatever the jitter, and the gaps collapsed.
+// Measured with this package at rate 8 over 200 reservations with the daemon's own rand.N jitter,
+// counting the gaps once the burst is spent: before the push a burst of 2 held a minimum gap of
+// 0.77s and sustained 7.97 wakes a minute, where a burst of 1 held 7.51s and 5.23; after it a
+// burst of 2 holds 7.52s and 5.30, beside the same burst of 1 at 7.52s and 5.32.
+func TestJitterAtABurstOfTwoKeepsEveryGapBetweenOneIntervalAndTwo(t *testing.T) {
+	const burst = 2
+	parts := []time.Duration{0, interval / 4, interval / 2, 3 * interval / 4, interval - time.Nanosecond}
+	releases := reserveAll(New(rate, burst, jitterCycle(parts...)), origin, 40)
+
+	// The burst goes out at once and draws no jitter; every release after it is one interval
+	// after the one before it plus the part that release drew, which is the schedule a burst of
+	// one keeps too.
+	want, drawn := origin, 0
+	for i, release := range releases {
+		if i >= burst {
+			want, drawn = want.Add(interval+parts[drawn%len(parts)]), drawn+1
+		}
+		if !release.Equal(want) {
+			t.Fatalf("release %d of a jittered burst of %d = %s, want %s", i, burst, release, want)
+		}
+	}
+	for i, release := range releases[burst:] {
+		gap := release.Sub(releases[burst-1+i])
+		if gap < interval || gap >= 2*interval {
+			t.Fatalf("the gap before release %d of a jittered burst of %d was %s, want at least %s and less than %s",
+				burst+i, burst, gap, interval, 2*interval)
+		}
+	}
+	if most := mostInAnyMinute(releases); most > rate+burst {
+		t.Errorf("a minute of the run held %d releases, want no more than %d", most, rate+burst)
+	}
+}
+
+// Whatever clock a caller reserves from, the moment it is given carries no monotonic reading: the
+// engine's now is wall-only (Clock().UTC()) and a machine's is time.Now(), which has one, and a
+// limiter fed both would set its arrival time from one clock and compare it against the other.
+// Reserve strips the reading from the now it is handed, so every lane's wait is read from the
+// wall clock the moments were written on.
+func TestReserveReturnsNoMonotonicReading(t *testing.T) {
+	for _, rate := range []int{rate, 0} {
+		l := New(rate, 1, nil)
+		for i := range 3 {
+			release := l.Reserve(time.Now())
+			if release != release.Round(0) {
+				t.Fatalf("release %d at rate %d = %s, want it stripped of its monotonic reading", i, rate, release)
+			}
+		}
+	}
+}
+
 // A burst below one is a burst of one, not a panic and not a pace that runs backwards: the
 // configuration layer refuses such a burst by name, and the limiter still has to hold the rate if
 // one reaches it.
