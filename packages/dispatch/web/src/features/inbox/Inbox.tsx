@@ -767,11 +767,15 @@ export function Inbox({
    *  window or tab blur moves no focus at all: nothing is focused anew, so no `focusin` fires,
    *  and the `onBlur` that does names no target while the scroller still holds the focus - the
    *  reader is still in the column, and back on the tab Escape owes them the row they came
-   *  from. An unmount inside the column - the head's `Assign to me` going once its write lands,
-   *  one body component swapped for another - while the column still shows the question the
-   *  record was made on leaves the reader on that question, so the record is still theirs:
-   *  React fires no blur for a focused node it removes, and the `document.body` the focus falls
-   *  to is focused by nothing, so neither drop of (b) reads it. Their next focus does. */
+   *  from. A focused node React removes from inside the column - one body component swapped
+   *  for another - while the column still shows the question the record was made on leaves
+   *  the reader on that question, so the record is still theirs: React fires no blur for a
+   *  node it removes, and the `document.body` the focus falls to is focused by nothing, so
+   *  neither drop of (b) reads it. Their next focus does. A control that disables itself is
+   *  not that case: Chromium blurs it as it is disabled, before React removes it - the head's
+   *  `Assign to me` while its write is in flight - so the wrapper's `onBlur` reads the focus
+   *  leaving for the body and drops the record, and Escape then goes to the row of the
+   *  question the column shows. */
   const paneReturn = useRef<string | null>(null);
   /** The question the column was showing when this component last looked, which is how the
    *  layout effect below tells a commit that changed it from one that did not. Nothing else

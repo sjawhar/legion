@@ -3165,8 +3165,9 @@ test("a focus that leaves the column for the body alone drops the record", async
 //
 // What they prove is the rule for a focused node React removes, which is what the keep rests on.
 // They do not prove a browser's own ordering through this control: it disables itself while its
-// write is out, and a browser blurs a control it disables where happy-dom does not, so there the
-// wrapper's `onBlur` may reach the record first and drop it before the unmount.
+// write is out, and Chromium blurs a control it disables where happy-dom does not, so on a real
+// page the wrapper's `onBlur` reaches the record first and drops it before the unmount, and
+// Escape then goes to the row of the question the column shows (measured in the test phase).
 test("an unmount inside the column keeps the record: the focus falls to the body and comes back in", async () => {
   const narrow = widenToReadingPane();
   const rows = [
