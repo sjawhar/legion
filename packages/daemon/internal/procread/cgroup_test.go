@@ -23,11 +23,9 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// sameTotals reports the two as equal, the seconds within a float's own slack: the value comes
-// out of a division the test cannot write as a literal and get back bit for bit.
-func sameTotals(got, want Totals) bool {
-	return got.MemoryBytes == want.MemoryBytes && math.Abs(got.CPUSeconds-want.CPUSeconds) < 1e-9
-}
+// sameSeconds reports the two as equal within a float's own slack: the value comes out of a
+// division the test cannot write as a literal and get back bit for bit.
+func sameSeconds(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
 
 // sameGroup reports the two as equal, the seconds within the same slack.
 func sameGroup(got, want Group) bool {
@@ -75,28 +73,36 @@ func TestLayoutStringNamesTheHierarchy(t *testing.T) {
 	}
 }
 
-// The pod's own totals come from the files its hierarchy keeps them in, each out of the unit that
-// file counts in: v1's cpuacct.usage is nanoseconds, v2's cpu.stat usage_usec is microseconds. A
-// root with no cgroup filesystem is a zero Totals and no error, since there is nothing there to
-// read and nothing wrong with that.
-func TestPodTotalsReadTheHierarchysOwnFiles(t *testing.T) {
+// The pod's own totals come from the files its hierarchy keeps them in, each read apart from the
+// other and each out of the unit that file counts in: v1's cpuacct.usage is nanoseconds, v2's
+// cpu.stat usage_usec is microseconds. A root with no cgroup filesystem is zero and no error,
+// since there is nothing there to read and nothing wrong with that.
+func TestThePodsTotalsAreReadFromTheHierarchysOwnFiles(t *testing.T) {
 	for _, test := range []struct {
-		root   string
-		layout Layout
-		want   Totals
+		root    string
+		layout  Layout
+		memory  int64
+		seconds float64
 	}{
-		{profile(gvisor), LayoutV1, Totals{MemoryBytes: 798289920, CPUSeconds: 123.456789012}},
-		{profile(microvm), LayoutV2, Totals{MemoryBytes: 1610612736, CPUSeconds: 91.234567}},
-		{profile(runcnode), LayoutV2, Totals{MemoryBytes: 8589934592, CPUSeconds: 987.654321}},
-		{profile(gvisor), LayoutNone, Totals{}},
-		{t.TempDir(), LayoutV2, Totals{}},
+		{profile(gvisor), LayoutV1, 798289920, 123.456789012},
+		{profile(microvm), LayoutV2, 1610612736, 91.234567},
+		{profile(runcnode), LayoutV2, 8589934592, 987.654321},
+		{profile(gvisor), LayoutNone, 0, 0},
+		{t.TempDir(), LayoutV2, 0, 0},
 	} {
-		totals, err := PodTotals(test.root, test.layout)
+		seconds, err := PodCPUSeconds(test.root, test.layout)
 		if err != nil {
-			t.Fatalf("PodTotals(%s, %s) = %v", test.root, test.layout, err)
+			t.Fatalf("PodCPUSeconds(%s, %s) = %v", test.root, test.layout, err)
 		}
-		if !sameTotals(totals, test.want) {
-			t.Errorf("PodTotals(%s, %s) = %+v, want %+v", test.root, test.layout, totals, test.want)
+		if !sameSeconds(seconds, test.seconds) {
+			t.Errorf("PodCPUSeconds(%s, %s) = %g, want %g", test.root, test.layout, seconds, test.seconds)
+		}
+		memory, err := PodMemoryBytes(test.root, test.layout)
+		if err != nil {
+			t.Fatalf("PodMemoryBytes(%s, %s) = %v", test.root, test.layout, err)
+		}
+		if memory != test.memory {
+			t.Errorf("PodMemoryBytes(%s, %s) = %d, want %d", test.root, test.layout, memory, test.memory)
 		}
 	}
 }
@@ -104,16 +110,25 @@ func TestPodTotalsReadTheHierarchysOwnFiles(t *testing.T) {
 // A file that is there and holds something that is no number is this package reading a kernel
 // wrongly, not a kernel counting less: the refusal names the file, so whoever reads the log knows
 // which one to look at.
-func TestPodTotalsRefusesAFileItCannotParse(t *testing.T) {
+func TestThePodsTotalsRefuseAFileTheyCannotParse(t *testing.T) {
 	root := t.TempDir()
 	usage := filepath.Join(root, "sys", "fs", "cgroup", "memory", "memory.usage_in_bytes")
 	writeFile(t, usage, "lots\n")
-	totals, err := PodTotals(root, LayoutV1)
+	memory, err := PodMemoryBytes(root, LayoutV1)
 	if err == nil {
-		t.Fatalf("PodTotals(a root whose memory.usage_in_bytes is \"lots\") = %+v, want an error", totals)
+		t.Fatalf("PodMemoryBytes(a root whose memory.usage_in_bytes is \"lots\") = %d, want an error", memory)
 	}
 	if !strings.Contains(err.Error(), usage) {
-		t.Errorf("PodTotals() error = %v, want it to name %s", err, usage)
+		t.Errorf("PodMemoryBytes() error = %v, want it to name %s", err, usage)
+	}
+	cpuacct := filepath.Join(root, "sys", "fs", "cgroup", "cpuacct", "cpuacct.usage")
+	writeFile(t, cpuacct, "plenty\n")
+	seconds, err := PodCPUSeconds(root, LayoutV1)
+	if err == nil {
+		t.Fatalf("PodCPUSeconds(a root whose cpuacct.usage is \"plenty\") = %g, want an error", seconds)
+	}
+	if !strings.Contains(err.Error(), cpuacct) {
+		t.Errorf("PodCPUSeconds() error = %v, want it to name %s", err, cpuacct)
 	}
 }
 

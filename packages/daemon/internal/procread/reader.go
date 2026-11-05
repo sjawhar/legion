@@ -68,9 +68,9 @@ type Reader struct {
 	root   string
 	layout Layout
 
-	// meminfo, memory and cpu are the files read every second: /proc/meminfo, and the two
-	// the layout keeps a pod's totals in. Under LayoutNone the two cgroup files have no path
-	// and are never opened.
+	// meminfo, memory and cpu are the files a sampler reads again and again: /proc/meminfo,
+	// and the two the layout keeps a pod's totals in, each read on its own rate. Under
+	// LayoutNone the two cgroup files have no path and are never opened.
 	meminfo, memory, cpu kept
 
 	// processes are the per-process descriptors, at most keptProcesses of them.
@@ -156,33 +156,36 @@ func (r *Reader) MemInfo() (MemInfo, error) {
 	return info, nil
 }
 
-// PodTotals is the pod's totals at the cgroup mount root, as PodTotals answers them for this
-// reader's layout, read through the descriptors it keeps on the two files that hold them.
-func (r *Reader) PodTotals() (Totals, error) {
-	var totals Totals
+// PodCPUSeconds is the CPU the pod has spent at the cgroup mount root, as PodCPUSeconds answers
+// it for this reader's layout, read through the descriptor it keeps on the file that holds it.
+func (r *Reader) PodCPUSeconds() (float64, error) {
 	switch r.layout {
 	case LayoutV1:
-		memory, err := r.number(&r.memory)
-		if err != nil {
-			return Totals{}, err
-		}
 		nanoseconds, err := r.number(&r.cpu)
 		if err != nil {
-			return Totals{}, err
+			return 0, err
 		}
-		totals = Totals{MemoryBytes: memory, CPUSeconds: float64(nanoseconds) / 1e9}
+		return float64(nanoseconds) / 1e9, nil
 	case LayoutV2:
-		memory, err := r.number(&r.memory)
-		if err != nil {
-			return Totals{}, err
-		}
 		microseconds, err := r.key(&r.cpu, "usage_usec")
 		if err != nil {
-			return Totals{}, err
+			return 0, err
 		}
-		totals = Totals{MemoryBytes: memory, CPUSeconds: float64(microseconds) / 1e6}
+		return float64(microseconds) / 1e6, nil
 	}
-	return totals, nil
+	return 0, nil
+}
+
+// PodMemoryBytes is the memory the pod holds at the cgroup mount root, as PodMemoryBytes answers
+// it for this reader's layout, read through the descriptor it keeps on that file. It is read
+// apart from the CPU beside it because it costs a gVisor pod some twenty times as much
+// (PodCPUSeconds).
+func (r *Reader) PodMemoryBytes() (int64, error) {
+	switch r.layout {
+	case LayoutV1, LayoutV2:
+		return r.number(&r.memory)
+	}
+	return 0, nil
 }
 
 // Stat is <root>/proc/<pid>/stat parsed, as ReadStat answers it, read through the descriptor this

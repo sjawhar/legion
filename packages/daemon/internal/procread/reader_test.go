@@ -93,12 +93,19 @@ func TestTheReaderAnswersWhatThePureFunctionsAnswer(t *testing.T) {
 				if err == nil && info != want {
 					t.Errorf("round %d: Reader.MemInfo() = %+v, want %+v", round, info, want)
 				}
-				totals, err := reader.PodTotals()
+				seconds, err := reader.PodCPUSeconds()
 				if err != nil {
-					t.Fatalf("round %d: Reader.PodTotals() = %v", round, err)
+					t.Fatalf("round %d: Reader.PodCPUSeconds() = %v", round, err)
 				}
-				if wantTotals, err := PodTotals(root, layout); err != nil || totals != wantTotals {
-					t.Errorf("round %d: Reader.PodTotals() = %+v, want %+v (%v)", round, totals, wantTotals, err)
+				if want, err := PodCPUSeconds(root, layout); err != nil || !sameSeconds(seconds, want) {
+					t.Errorf("round %d: Reader.PodCPUSeconds() = %g, want %g (%v)", round, seconds, want, err)
+				}
+				memory, err := reader.PodMemoryBytes()
+				if err != nil {
+					t.Fatalf("round %d: Reader.PodMemoryBytes() = %v", round, err)
+				}
+				if want, err := PodMemoryBytes(root, layout); err != nil || memory != want {
+					t.Errorf("round %d: Reader.PodMemoryBytes() = %d, want %d (%v)", round, memory, want, err)
 				}
 				pids, err := PIDs(root)
 				if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -363,8 +370,11 @@ func TestCloseReleasesEveryDescriptorTheReaderHeld(t *testing.T) {
 	if _, err := reader.MemInfo(); err != nil {
 		t.Fatalf("Reader.MemInfo() = %v", err)
 	}
-	if _, err := reader.PodTotals(); err != nil {
-		t.Fatalf("Reader.PodTotals() = %v", err)
+	if _, err := reader.PodCPUSeconds(); err != nil {
+		t.Fatalf("Reader.PodCPUSeconds() = %v", err)
+	}
+	if _, err := reader.PodMemoryBytes(); err != nil {
+		t.Fatalf("Reader.PodMemoryBytes() = %v", err)
 	}
 	for _, pid := range []int{1, 42} {
 		if _, err := reader.Stat(pid); err != nil {

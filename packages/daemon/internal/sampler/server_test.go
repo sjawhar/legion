@@ -345,9 +345,10 @@ func TestTheSamplerRefusesOptionsItCouldNotRunWith(t *testing.T) {
 	}
 }
 
-// What the sampler costs the pod it reads: dispatch://INFRA-1141/spec#b-r-cost caps it at 2% of
-// one CPU and 64 MiB of anonymous memory, and this measures both over the pod that check names —
-// 200 processes, read for the passes thirty seconds of a running sampler stands for.
+// What the sampler costs the pod it reads: dispatch://INFRA-1141/spec#b-r-cost caps it at 3% of
+// one CPU over any minute and 64 MiB of anonymous memory, and this measures both over the pod
+// that check names — 200 processes, read for the passes thirty seconds of a running sampler
+// stands for.
 //
 // Neither side of the comparison is a wall clock, which is what makes it decidable on a shared
 // CI runner. The passes are driven by hand, so costPasses ticks of podInterval stand for exactly
@@ -364,12 +365,11 @@ func TestTheSamplerRefusesOptionsItCouldNotRunWith(t *testing.T) {
 // machine the test ran on rather than for the sampler. What this cannot measure is the kernel's
 // own cost of a real smaps read, 2.45 ms a process, since the fixture's files are the test's;
 // that belongs to the live check.
-func TestTheSamplerCostsUnderTwoPercentOfOneCPUOver200Processes(t *testing.T) {
+func TestTheSamplerCostsUnderThreePercentOfOneCPUOver200Processes(t *testing.T) {
 	useMemoryFixture(t)
 	const (
 		costProcesses = 200
 		costPasses    = 30
-		costShare     = 0.02
 	)
 	f := newPodFixture(t)
 	tree := costTree(costProcesses)
@@ -402,9 +402,9 @@ func TestTheSamplerCostsUnderTwoPercentOfOneCPUOver200Processes(t *testing.T) {
 	share := spent / stood
 	t.Logf("%d passes over %d processes spent %.3f s of CPU for the %.0f s they stand for: %.2f%% of one CPU",
 		costPasses, costProcesses, spent, stood, 100*share)
-	if share > costShare {
+	if share > samplerCap {
 		t.Errorf("the sampler spent %.2f%% of one CPU over %d processes; the cap is %.0f%%",
-			100*share, costProcesses, 100*costShare)
+			100*share, costProcesses, 100*samplerCap)
 	}
 
 	grew := selfAnonymous(t) - held

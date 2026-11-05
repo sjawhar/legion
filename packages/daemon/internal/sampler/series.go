@@ -270,7 +270,7 @@ var metrics = [metricCount]metric{
 	},
 	totalsDeferred: {
 		name: "legion_sampler_totals_deferred", typ: gaugeType, modes: bothModes,
-		help: "Per-second totals reads the sampler's own cap has deferred",
+		help: "Memory-total reads the sampler's own cap has deferred",
 	},
 	walkDeferred: {
 		name: "legion_sampler_walk_deferred", typ: gaugeType, modes: bothModes,
@@ -390,8 +390,8 @@ type Registry struct {
 	errors   map[ReadSource]*counter
 	restarts counter
 	// deferred is the processes the last smaps window carried, deferredWalks the walk passes
-	// the collector's own cap has deferred since it started, and deferredTotals the totals
-	// reads it has deferred, each a count that only rises.
+	// the collector's own cap has deferred since it started, and deferredTotals the readings
+	// of the pod's memory totals it has deferred, each a count that only rises.
 	deferred       float64
 	deferredWalks  float64
 	deferredTotals float64
@@ -651,8 +651,8 @@ func (r *Registry) SetSmapsDeferred(count int) {
 	r.deferred = float64(count)
 }
 
-// SetTotalsDeferred is how many of the per-second totals reads the sampler's own cap has
-// deferred, a count that only rises, as the walk's below.
+// SetTotalsDeferred is how many readings of the pod's memory totals the sampler's own cap has
+// deferred from their two-second rate, a count that only rises, as the walk's below.
 func (r *Registry) SetTotalsDeferred(count uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

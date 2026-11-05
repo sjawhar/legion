@@ -76,31 +76,48 @@ Both modes serve these, and they carry no `project` or `issue`.
 | `legion_sampler_restarts_total` | counter | — | times the launcher has started the sampler again, a count the launcher keeps and hands over |
 | `legion_sampler_series_dropped` | gauge | — | series the 200-series cap removed at the last scrape |
 | `legion_sampler_smaps_deferred` | gauge | — | processes the `smaps` budget carried into the next window |
-| `legion_sampler_totals_deferred` | gauge | — | per-second totals readings the sampler's own cap has deferred, a count that only rises |
+| `legion_sampler_totals_deferred` | gauge | — | readings of the pod's memory totals the sampler's own cap has deferred, a count that only rises |
 | `legion_sampler_walk_deferred` | gauge | — | walk passes the sampler's own cap has deferred, a count that only rises |
 
 All four sources of `legion_sampler_read_errors_total` are served from the first scrape, at zero, so a rate over one of them answers on a sampler that has never failed a read.
 
-The cap on what the sampler costs the pod it reads is 2% of one CPU over any minute in which the pod's CPUs are not saturated and 3% over any minute in which builds saturate them,
+The cap on what the sampler costs the pod it reads is 3% of one CPU over any minute, whether or not the pod's CPUs are saturated,
 over the whole of its own work and not over one pass of it.
 It is held from `/proc/self/stat`, as every other reading here is read from the kernel's own counts.
-Each ten-second window has 200 ms of that allowance, and what the window has spent already decides what the rest of it may read.
+Each ten-second window has 250 ms of that allowance, five sixths of the cap, and what the window has spent already decides what the rest of it may read.
+The window budgets against five sixths and not against the whole of it because the floors below force readings a spent allowance cannot pay for, and the sixth left over is what those cost.
+
+The rates are split by what a reading costs rather than by what it is of:
+
+- the pod's own CPU — the cgroup's `cpuacct.usage` under cgroup v1, its `cpu.stat` under v2 — is read every second, and the cap never slows it;
+
+- the pod's memory totals — the cgroup's `memory.usage_in_bytes` (`memory.current` under v2) and `/proc/meminfo`, which feed `legion_sampler_pod_memory_bytes`, `legion_sampler_pod_process_memory_bytes` and `legion_sampler_pod_shared_memory_bytes` — are read every two seconds;
+
+- every process's `stat` and every volume are read every two seconds;
+
+- the `smaps` pass runs once every ten seconds.
+
+The memory totals are the dear readings, and on a gVisor pod they are nearly all of what the sampler costs at all:
+the kernel there accounts for the pod's memory on each read of it,
+so the cgroup's `memory.usage_in_bytes` answers in 17 ms to 20 ms and `/proc/meminfo` in 12 ms to 20 ms,
+against 0.50 ms for the cgroup's `cpuacct.usage`, 0.50 ms for the sampler's own `smaps` and 0.00 ms for its own `stat`.
+That is why the two halves of the pod's totals are read apart:
+the cheap half holds the second a dashboard reads a pod's CPU at, and the dear half is read at the two seconds the cap pays for.
 
 What gives way where the allowance runs out is the reading rate and never the cap, in this order:
 
-- the per-second totals, the pod's cgroup and its `/proc/meminfo`, fall to one reading every two seconds, and each reading that waits is counted as `legion_sampler_totals_deferred`;
-  they fall there whether the window's allowance has run out or they have spent the 50 ms of it that is theirs, since they are the first reading of every tick and the dearest one the sampler makes;
+- the pod's memory totals fall from one reading every two seconds to one every four, and each reading that waits is counted as `legion_sampler_totals_deferred`;
 
 - a walk pass, which reads every process's `stat` and every volume, waits for a later pass whenever the window has less left than the last walk cost, as often as the window needs, and each pass that waits is counted as `legion_sampler_walk_deferred`;
 
-- the `smaps` pass spends what those two leave of the window's 200 ms and never more than 100 ms, and a window whose other work has already spent the allowance reads no `smaps` at all.
+- the `smaps` pass spends what those two leave of the window's 250 ms and never more than 100 ms, and a window whose other work has already spent the allowance reads no `smaps` at all.
 
 Under all three stands one floor: nothing waits longer than a window.
-A window whose allowance is spent still runs one walk, one volume read and one totals read before it ends,
+A window whose allowance is spent still runs one walk and one volume read before it ends, and the memory totals never wait longer than four seconds,
 so every process's `stat` is read at least once each ten seconds and no series the sampler serves goes staler than that.
 `legion_sampler_smaps_deferred` is how many processes a window carried into the next one, so a window that reached none of them says so there, and the next window takes the carried processes up first.
 
-The floor is a reading rate that never gives way, and one walk of a pod running hundreds of build processes can cost more than the 200 ms itself.
+The floor is a reading rate that never gives way, and one walk of a pod running hundreds of build processes can cost more than the 250 ms itself.
 A window that goes over its allowance that way takes what it overspent out of the next window, up to one whole allowance,
 since the cap is over a minute and not over one window of it:
 the window that pays reads nothing it is not held to, and the sampler is back at its rate as soon as the debt is paid.
@@ -110,13 +127,11 @@ a build makes thousands of short-lived processes, each one a `stat` to open, and
 So the two deferral counts are where an operator reads that a pod is busy enough to cost the sampler its cap,
 and the answer to why that pod's readings arrived more slowly over the minutes the sampler was deferring.
 
-The totals are what an idle pod costs the sampler most, and on a gVisor pod they are nearly all of what it costs at all:
-the kernel there accounts for the pod's memory on each read of it,
-so the cgroup's `memory.usage_in_bytes` answers in 17 ms to 20 ms and `/proc/meminfo` in 12 ms to 20 ms,
-against 0.50 ms for the cgroup's `cpuacct.usage`, 0.50 ms for the sampler's own `smaps` and 0.00 ms for its own `stat`.
-Over an idle minute scraped every two seconds, the same sampler held 0.25% of one CPU reading no totals at all,
-1.9% to 2.1% reading them at their floor of one reading every two seconds,
-and 2.1% to 2.3% reading them as often as the window's allowance paid for, which was 41 to 49 readings a minute.
+The memory totals are what an idle pod costs the sampler most.
+At the rates above, scraped every two seconds, this pod's sampler held 0.95% to 1.37% of one CPU over every rolling minute of three idle minutes and deferred nothing,
+and 2.00% to 2.53% over every rolling minute of a `go build -a -o /dev/null ./...` that saturated both its CPUs for four minutes, where it deferred ten walk passes and one reading of the pod's memory.
+Reading no totals at all it held 0.25%.
+Scraped four times a second over an idle minute, `legion_sampler_pod_memory_bytes` moved 31 times, never more than 2.01 s apart.
 A scrape of the port costs the sampler 1.3 ms, of which writing the exposition is 0.04 ms, so a collector reading every two seconds costs it 0.07% of one CPU.
 Those are this pod's numbers, measured 2026-11-05 under dispatch://INFRA-1208.
 
@@ -213,7 +228,7 @@ Two scrapes of one unchanged state are the same bytes.
 
 The DaemonSet asks for 50m of CPU and 64Mi of memory and is limited to 200m and 128Mi.
 Those are the numbers dispatch://INFRA-1209's B3 deploys, and they hold the sampler's own cost rule:
-2% of one CPU, and an exit of its own when its anonymous memory passes 64 MiB.
+3% of one CPU over any minute, and an exit of its own when its anonymous memory passes 64 MiB.
 
 ## What a per-command cgroup must keep
 

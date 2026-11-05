@@ -68,50 +68,49 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// Totals is the whole pod's own accounting, read at the cgroup mount root: the memory it holds
-// and the CPU time it has spent since it started, both converted out of the unit the file reports
-// them in.
-type Totals struct {
-	MemoryBytes int64
-	CPUSeconds  float64
-}
-
-// PodTotals is the pod's totals at the mount root of root, read the way layout's hierarchy keeps
-// them: under v1, memory/memory.usage_in_bytes and cpuacct/cpuacct.usage, which counts
-// nanoseconds; under v2, memory.current and cpu.stat's usage_usec, which counts microseconds.
-// LayoutNone is a zero Totals and no error, since a root with no cgroup filesystem has nothing to
-// disagree with and nothing to report.
+// PodCPUSeconds is the CPU the whole pod has spent, read at the cgroup mount root of root the way
+// layout's hierarchy keeps it: under v1, cpuacct/cpuacct.usage, which counts nanoseconds; under
+// v2, cpu.stat's usage_usec, which counts microseconds. LayoutNone is zero and no error, since a
+// root with no cgroup filesystem has nothing to disagree with and nothing to report.
 //
-// A file the mount does not hold leaves its own field zero rather than failing the pass: a kernel
-// may mount the memory controller and not cpuacct, and half a reading beats none. A file that is
-// there and holds something that is no number is a refusal naming it, because that is a kernel
-// this package has read wrongly, not a kernel that counts less.
-func PodTotals(root string, layout Layout) (Totals, error) {
+// A file the mount does not hold answers zero rather than failing the pass: a kernel may mount
+// the memory controller and not cpuacct, and half a reading beats none. A file that is there and
+// holds something that is no number is a refusal naming it, because that is a kernel this package
+// has read wrongly, not a kernel that counts less.
+//
+// The pod's CPU and the pod's memory are read apart because they cost a sampler quite different
+// things: this one is 0.00 ms to 0.50 ms in a gVisor pod, where a read of the pod's memory is
+// 17 ms to 20 ms, since that kernel answers it by accounting for the pod's memory there and then
+// (INFRA-1208, measured 2026-11-05). So a sampler reads this every second and the memory at half
+// that rate (internal/sampler/pod.go's rates).
+func PodCPUSeconds(root string, layout Layout) (float64, error) {
 	mount := filepath.Join(root, "sys", "fs", "cgroup")
-	var totals Totals
 	switch layout {
 	case LayoutV1:
-		memory, err := readInt(filepath.Join(mount, "memory", "memory.usage_in_bytes"))
-		if err != nil {
-			return Totals{}, err
-		}
 		nanoseconds, err := readInt(filepath.Join(mount, "cpuacct", "cpuacct.usage"))
 		if err != nil {
-			return Totals{}, err
+			return 0, err
 		}
-		totals = Totals{MemoryBytes: memory, CPUSeconds: float64(nanoseconds) / 1e9}
+		return float64(nanoseconds) / 1e9, nil
 	case LayoutV2:
-		memory, err := readInt(filepath.Join(mount, "memory.current"))
-		if err != nil {
-			return Totals{}, err
-		}
-		cpu, err := readKeys(filepath.Join(mount, "cpu.stat"), "usage_usec")
-		if err != nil {
-			return Totals{}, err
-		}
-		totals = Totals{MemoryBytes: memory, CPUSeconds: float64(cpu["usage_usec"]) / 1e6}
+		return GroupCPUSeconds(mount)
 	}
-	return totals, nil
+	return 0, nil
+}
+
+// PodMemoryBytes is the memory the whole pod holds now, read at the cgroup mount root of root:
+// under v1, memory/memory.usage_in_bytes; under v2, memory.current. It answers for a root with no
+// cgroup filesystem, for a file the mount does not hold and for a file that holds no number as
+// PodCPUSeconds does, and it is the dear half of a pod's totals.
+func PodMemoryBytes(root string, layout Layout) (int64, error) {
+	mount := filepath.Join(root, "sys", "fs", "cgroup")
+	switch layout {
+	case LayoutV1:
+		return readInt(filepath.Join(mount, "memory", "memory.usage_in_bytes"))
+	case LayoutV2:
+		return GroupMemoryBytes(mount)
+	}
+	return 0, nil
 }
 
 // Group is one cgroup v2 directory's own accounting: the CPU time its processes have spent,
@@ -133,12 +132,11 @@ type Group struct {
 // has. A file that exists and cannot be parsed is an error naming the file.
 func ReadGroup(dir string) (Group, error) {
 	var group Group
-	cpu, err := readKeys(filepath.Join(dir, "cpu.stat"), "usage_usec")
-	if err != nil {
+	var err error
+	if group.CPUSeconds, err = GroupCPUSeconds(dir); err != nil {
 		return Group{}, err
 	}
-	group.CPUSeconds = float64(cpu["usage_usec"]) / 1e6
-	if group.MemoryBytes, err = readInt(filepath.Join(dir, "memory.current")); err != nil {
+	if group.MemoryBytes, err = GroupMemoryBytes(dir); err != nil {
 		return Group{}, err
 	}
 	if group.MemoryPeakBytes, err = readInt(filepath.Join(dir, "memory.peak")); err != nil {
@@ -155,6 +153,23 @@ func ReadGroup(dir string) (Group, error) {
 	}
 	group.OOMKills = events["oom_kill"]
 	return group, nil
+}
+
+// GroupCPUSeconds is one cgroup v2 directory's CPU alone: cpu.stat's usage_usec, which counts
+// microseconds. It is the reading a sampler takes every second, apart from the memory beside it
+// in the same directory, for the reason PodCPUSeconds gives.
+func GroupCPUSeconds(dir string) (float64, error) {
+	cpu, err := readKeys(filepath.Join(dir, "cpu.stat"), "usage_usec")
+	if err != nil {
+		return 0, err
+	}
+	return float64(cpu["usage_usec"]) / 1e6, nil
+}
+
+// GroupMemoryBytes is one cgroup v2 directory's memory alone: memory.current, the memory it holds
+// now.
+func GroupMemoryBytes(dir string) (int64, error) {
+	return readInt(filepath.Join(dir, "memory.current"))
 }
 
 // ChildGroups are the names — not the paths — of dir's child groups, which is every entry of dir
