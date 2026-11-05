@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/brokertoken"
 )
 
@@ -118,7 +118,7 @@ func NewCaller(t testing.TB) *Caller {
 		t.Fatalf("thumbprint the caller's key: %v", err)
 	}
 	captured := &capturedRequest{}
-	return &Caller{client: &http.Client{Transport: helper.NewDPoPTransport(key, captured)}, captured: captured, jkt: jkt}
+	return &Caller{client: &http.Client{Transport: brokerclient.NewDPoPTransport(key, captured)}, captured: captured, jkt: jkt}
 }
 
 // JKT is the thumbprint of the caller's key: what the broker binds a token to, and what a proof

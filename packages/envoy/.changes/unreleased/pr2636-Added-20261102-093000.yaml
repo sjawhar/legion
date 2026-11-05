@@ -1,0 +1,49 @@
+kind: Added
+body: |
+  One Go client of the secrets broker's RFC 8693 token exchange, `internal/brokerclient`, which
+  `agent-secrets`, `agent-secrets-helper` and `legion controller start` all trade through: the
+  identity a machine already holds is traded for one of the broker's DPoP-bound access tokens and
+  traded again before that token expires, the grant issuing no refresh token at all, and a client
+  that cannot renew stops with a plain error rather than acting with no identity. Each process
+  makes its own key and sends only its public half. `AGENT_SECRETS_MACHINE_IDENTITY` says which
+  identity this machine proves — `kubernetes` (`AGENT_SECRETS_MACHINE_TOKEN_FILE`, a pod's
+  projected service-account token), `metadata` (`AGENT_SECRETS_MACHINE_AUDIENCE`, a Compute Engine
+  machine's own token, asked for with `format=full` through no proxy) or `pool`
+  (`AGENT_SECRETS_POOL_AUDIENCE` and `AGENT_SECRETS_POOL_ACCOUNT`, a token minted through a
+  workload identity pool with `generateIdToken` and `includeEmail`) — and `AGENT_SECRETS_SESSION`
+  the session name a trade writes under. With it unset every program works exactly as before.
+  A refusal the broker answers carries what it said: it reads as the OAuth refusal it is, so the
+  redaction that keeps a configured URL's credential out of every message prints the broker's
+  own reason — an entry that fixes no session while the request names none, an identity no entry
+  lists — instead of `the request failed`, and prints the status alone where that URL carries a
+  credential.
+  The wire contract both this client and the TypeScript one are held to is the corpus at
+  `packages/envoy/internal/brokerclient/testdata/wire.json`, which each suite replays: a field one
+  client sends or reads without an entry there fails that client's own test.
+
+  `agent-secrets login` signs a person in on a machine: it makes a box key, runs Google's device
+  authorization grant for `openid` and `email` alone, trades the person's identity token with the
+  machine's as the actor token, and keeps the key and Google's refresh token together in that
+  person's own record under the key directory, mode 0600 in a 0700 directory. One record per
+  person, so a second person signs in beside the first; `AGENT_SECRETS_PERSON` says which of them
+  a session acts for, and with more than one sign-in and no such variable every form that needs a
+  session identity refuses and names them. `AGENT_SECRETS_SIGNIN_CLIENT_ID`,
+  `AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE` and `AGENT_SECRETS_SIGNIN_ISSUER` (default
+  `https://accounts.google.com`) name the device-flow client. A machine that proves an identity of
+  its own and holds no launcher and no helper registers a session key of its own under the
+  credential its trade mints, so a pod needs nobody to enrol it, and `agent-secrets-helper` gets
+  its launcher credential the same way with no person approving the machine at all.
+
+  `legion controller start` gives the controller's session that same route where the controller's
+  own file asks for it: `dispatch_token_broker: true`, the alternative to `dispatch_token_file`
+  and never set beside it, has the session trade this machine's identity for a Dispatch
+  credential of its own and renew it, so nobody copies a person's Dispatch token onto a machine.
+  It hands Oh My Pi no
+  `DISPATCH_TOKEN_FILE` and no `DISPATCH_TOKEN`, and drops an inherited one, since such a token
+  is bound to the key its holder proves and Dispatch refuses it presented as a bearer; it
+  trades once itself before the daemon mints the controller's capability, so a broker that
+  refuses this machine refuses the start, in the broker's own words, rather than leaving a
+  controller to find at its first write that it can write nothing.
+time: 2026-11-02T09:30:00.000000000Z
+custom:
+  Issue: pr2636

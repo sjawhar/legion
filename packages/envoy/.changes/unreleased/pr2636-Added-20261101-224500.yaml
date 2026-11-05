@@ -1,0 +1,22 @@
+kind: Added
+body: |
+  A person signs in once on a machine and that machine's sessions then act for them. The
+  secrets broker's RFC 8693 token exchange takes the person's own Google identity token as a
+  fifth subject token (`urn:envoy:params:oauth:token-type:person-google-identity`) with the
+  machine's as the actor token (`urn:envoy:params:oauth:token-type:machine-google-identity`),
+  proved by the box key the client made at sign-in. The new `BROKER_SIGNIN_DEVICE_AUDIENCE`
+  (optional, no default; needs `BROKER_GOOGLE_OIDC_AUDIENCE`) is the audience of the device-flow
+  client `agent-secrets login` runs Google's device grant as, and the person is held to the
+  Workspace domain `BROKER_SIGNIN_DOMAIN` names through the `hd` claim. The minted access token
+  names the person and, as the new `machine` claim and introspection field, the machine's
+  account. Migration 0025 adds `person_signins`, one row per person and box key, with the
+  machine's account and the times it was made, last used and revoked. Dispatch relays two new
+  routes: `GET /v1/person-signins` lists a person's sign-ins by machine and
+  `POST /v1/person-signins/{id}/revoke` ends one, ending every access token minted under it in
+  the revoke's own transaction. Each refusal has its own message: an account of another domain,
+  an `email_verified` that is not true, either token minted for the other's audience, an actor
+  token for an account no entry lists, and a box key the person has revoked, which names
+  `agent-secrets login`.
+time: 2026-11-01T22:45:00.000000000Z
+custom:
+  Issue: pr2636

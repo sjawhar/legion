@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
@@ -41,13 +42,36 @@ type Signer interface {
 
 // fileSigner signs with the key and enrollment id an agent box or pod keeps under
 // AGENT_SECRETS_KEY_DIR.
+//
+// register is how this session is made again when the broker says the enrollment is not live,
+// and it answers the fresh enrollment id. It is set for the two sessions this command registers
+// itself — a person's sign-in on this box, and a machine that proves an identity of its own —
+// and nil for every other, a box or pod its launcher enrolled above all: that enrollment is the
+// launcher's to make again, and registering one here would leave the launcher's own key dir
+// naming a session the launcher never made.
 type fileSigner struct {
 	key          *ecdsa.PrivateKey
 	enrollmentID string
+	register     func(ctx context.Context) (string, error)
 }
 
 func (f *fileSigner) Sign(method, url string) (string, error) {
 	return proof.Sign(f.key, f.enrollmentID, method, url, time.Now())
+}
+
+// Reenroll registers this session again and signs with the enrollment it gets from here on
+// (client.reenroller). A signer with no register answers an error, so the broker's own refusal
+// is what the caller reports.
+func (f *fileSigner) Reenroll(ctx context.Context) error {
+	if f.register == nil {
+		return errors.New("nothing here can register this session again: its enrollment is its launcher's to make")
+	}
+	id, err := f.register(ctx)
+	if err != nil {
+		return err
+	}
+	f.enrollmentID = id
+	return nil
 }
 
 func (f *fileSigner) SignRequestObject(audience string, names []string, reason string, lifetimeSeconds *int) (string, error) {

@@ -20,13 +20,13 @@
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
-//	agent-secrets enroll --vm --service <name> [--audience <aud>] [--out <dir>]
 //	agent-secrets unenroll --helper --enrollment <id>
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
+//	agent-secrets login
 //	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
-//	agent-secrets renew [--pod-token-file FILE | --vm [--audience <aud>]]
+//	agent-secrets renew [--pod-token-file FILE]
 //	agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]
 //	agent-secrets status <request_id> [--json]
 //	agent-secrets cancel <request_id>
@@ -54,10 +54,7 @@
 // enrollment path for either; on a devbox only a session key a launcher holds (a box's) enrolls
 // through it, and only via --helper (the shared broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
-// that hold a launcher's proof-signing key). A Google Cloud VM is the one runtime that enrolls
-// itself (`enroll --vm`, vm.go): it holds no credential a person installed, and the identity
-// token its own metadata server signs is what the broker trusts instead, so it needs no helper,
-// no launcher and no approval. The secret forms read AWS_PROFILE (or --profile) for
+// that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
 // the person's AWS sign-in against an AWS broker, or their Google sign-in (their Application
 // Default Credentials, or their gcloud login) against a GCP one, and need no session identity at
 // all. The machine and grant forms act under this machine's login: the helper signs each call
@@ -88,6 +85,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
@@ -117,8 +115,8 @@ type command struct {
 var commands = []command{
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
-	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>] | --vm --service <name> [--audience <aud>] [--out <dir>]",
-		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nor, with --vm, enroll this Google Cloud VM with the identity token its own metadata server\nsigns, for the broker-side service --service names. Either writes the enrollment id to\nAGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on stdout. --vm also writes key.pem\nthere, reusing the one already in --out: a re-run keeps that key's enrollment and renews its\nlease, so a VM that re-runs enroll needs no renewer, and runs on one directory take turns."},
+	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
+		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper.\nIt writes the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on\nstdout."},
 	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
 		"End an enrollment `enroll --helper` made, through this machine's agent-secrets-helper."},
 	{"machine login", "agent-secrets machine login",
@@ -133,14 +131,16 @@ var commands = []command{
 		"List the live grants of your sessions and those you approved, under this machine's login:\neach one's id, secrets, how it was granted, who approved it, its session and operator, and\nwhen it expires. Dispatch's Live grants page lists the same."},
 	{"grant revoke", "agent-secrets grant revoke <grant_id>",
 		"End a grant as its operator or approver, under this machine's login, as Dispatch's Live\ngrants page does. Ending an automatic grant also makes its session ask before it gets those\nsecrets again."},
+	{"login", "agent-secrets login",
+		"Sign in on this machine as yourself: print the code to type in at Google, then record the\nsign-in at the secrets broker, which binds it to a box key this machine makes. Every session\nof yours on this machine then acts as you. A second person signs in beside you, and\nAGENT_SECRETS_PERSON then says which of you a session acts for."},
 	{"register", "agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]",
 		"Register this process with agent-secrets-helper as a machine session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session."},
 	{"identity", "agent-secrets identity",
 		"Exit 0 when this process has a broker identity and 1 when it does not, asking the broker\nnothing."},
 	{"--version", "agent-secrets --version",
 		"Print the release this binary was built as."},
-	{"renew", "agent-secrets renew [--pod-token-file FILE | --vm [--audience <aud>]]",
-		"Keep an agent box's, pod's or VM's enrollment lease alive, renewing it until interrupted. A\npod names its projected service-account token's file and a VM reads a fresh token from its\nmetadata server before each renewal: each renewal sends the token of that moment, which the\nbroker checks names the pod or VM the enrollment was made for. POD_TOKEN_REQUIRED,\nVM_TOKEN_REQUIRED, VM_NOT_LISTED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID\nsaying \"not live\" exits 76, naming the enrollment, HTTP status and broker code; every other\nrefusal retries."},
+	{"renew", "agent-secrets renew [--pod-token-file FILE]",
+		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file, read again before each renewal, so each\nrenewal sends the token of that moment, which the broker checks names the pod the enrollment\nwas made for. POD_TOKEN_REQUIRED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID\nsaying \"not live\" exits 76, naming the enrollment, HTTP status and broker code; every other\nrefusal retries."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]",
 		"Request secrets and print the request's id, state and source, and who approves it and\nwhere while it waits; exit 75 while it waits for approval and 77 when it is denied. The\ngrant lasts --ttl, or 12 hours (until this session ends when every secret is\ntagged default-grant=session)."},
 	{"status", "agent-secrets status <request_id> [--json]",
@@ -170,13 +170,39 @@ environment:
                              (default 20s)
   AGENT_SECRETS_APPROVE_URL  Dispatch's address; machine login names the page under it where the
                              operator types the code
-  AGENT_SECRETS_AUDIENCE     the audience the broker verifies a Google VM's identity tokens for;
-                             enroll --vm and renew --vm need it when --audience names none
-  GCE_METADATA_HOST          the metadata server's host (and port) enroll --vm and renew --vm ask
-                             for that token (default metadata.google.internal)
   OMP_SESSION_ID             the agent session the broker names and notifies if a pending request
                              expires; falls back to ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID,
                              so a harness that sets one of those instead still names its session
+  AGENT_SECRETS_PERSON       which person a session acts for, where more than one has signed in
+                             on this machine with agent-secrets login; with one sign-in it is
+                             that person, and with more and this unset every form that needs a
+                             session identity refuses and names them
+  AGENT_SECRETS_SIGNIN_DIR   where agent-secrets login keeps this machine's sign-ins
+                             (default $XDG_STATE_HOME/agent-secrets/signins, which a reboot
+                             keeps; the key dir above is runtime state and does not)
+  AGENT_SECRETS_SIGNIN_CLIENT_ID
+                             the device-flow client agent-secrets login signs a person in as
+  AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE
+                             a file holding that client's secret
+  AGENT_SECRETS_SIGNIN_ISSUER
+                             where a person signs in (default https://accounts.google.com); a dev
+                             stack names its own issuer
+  AGENT_SECRETS_MACHINE_IDENTITY
+                             the identity this machine proves at the broker's token exchange,
+                             which a person's sign-in presents as the actor token: kubernetes
+                             (AGENT_SECRETS_MACHINE_TOKEN_FILE), metadata
+                             (AGENT_SECRETS_MACHINE_AUDIENCE) or pool (both, with
+                             AGENT_SECRETS_POOL_AUDIENCE and AGENT_SECRETS_POOL_ACCOUNT)
+  AGENT_SECRETS_MACHINE_TOKEN_FILE
+                             this machine's projected Kubernetes service-account token
+  AGENT_SECRETS_MACHINE_AUDIENCE
+                             the audience of this machine's Google identity token
+  AGENT_SECRETS_POOL_AUDIENCE
+                             the workload identity pool provider an external credential is
+                             traded at, the full //iam.googleapis.com/projects/... resource name
+  AGENT_SECRETS_POOL_ACCOUNT the managed identity generateIdToken is called on
+  AGENT_SECRETS_SESSION      the session name a trade writes under, where the deployment's entry
+                             fixes none
   AWS_PROFILE                the AWS profile the secret forms sign in with when --profile names
                              none (else the AWS SDK's default credential chain); every secret
                              form needs a sign-in in the broker's account, and a write your own
@@ -212,6 +238,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdUnenroll(args[1:], stdout, stderr)
 	case "machine", "grant":
 		return cmdGroup(args[0], args[1:], stdout, stderr)
+	case "login":
+		return cmdLogin(args[1:], stdout, stderr)
 	case "register":
 		return cmdRegister(args[1:], stdout, stderr)
 	case "renew":
@@ -426,8 +454,8 @@ func splitArgs(args []string, takesValue map[string]bool) (flagArgs, positional 
 }
 
 // encodeKeyPEM is a session key as its key.pem bytes: the PKCS8 PEM keygen writes and loadKey
-// reads back, in the one place that marshals it, so a key `enroll --vm` writes is byte-for-byte
-// a key keygen wrote.
+// reads back, in the one place that marshals it, so every key this binary writes is
+// byte-for-byte a key keygen wrote.
 func encodeKeyPEM(key *ecdsa.PrivateKey) ([]byte, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
@@ -441,29 +469,38 @@ func loadKey(path string) (*ecdsa.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	return parseKeyPEM(data, path)
+}
+
+// parseKeyPEM is a session key as its PKCS#8 PEM bytes hold it, named for the refusal: a key dir's
+// key.pem, or the box key inside a person's sign-in record (brokerclient.SignInRecord).
+func parseKeyPEM(data []byte, name string) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, fmt.Errorf("%s: not a PEM file", path)
+		return nil, fmt.Errorf("%s: not a PEM file", name)
 	}
 	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	key, ok := parsed.(*ecdsa.PrivateKey)
 	if !ok {
-		return nil, fmt.Errorf("%s: not an ECDSA private key", path)
+		return nil, fmt.Errorf("%s: not an ECDSA private key", name)
 	}
 	return key, nil
 }
 
 // buildSigner selects and builds this process's Signer: an agent box or pod signs with the key
-// and enrollment id it keeps in its key dir (file mode); a machine session has no key of its own and
+// and enrollment id it keeps in its key dir (file mode); a person who ran `agent-secrets login`
+// on this machine signs with the box key and enrollment in their own sign-in record (sign-in
+// mode, brokerclient.SignIns); a machine session has no key of its own and
 // asks agent-secrets-helper over its socket, which signs only for processes descending from a
 // session `agent-secrets register` registered (helper mode). The key dir and socket are
 // AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, or their defaults where those are unset
 // (identity.go). While a box's launcher is still enrolling it (a fresh enrollment.pending in the
 // key dir), this first waits for key.pem and enrollment, for AGENT_SECRETS_ENROLL_WAIT at most.
-// The enrollment id it returns is file mode's own; helper mode returns "" because nothing needs
+// The enrollment id it returns is file mode's and sign-in mode's own; helper mode returns ""
+// because nothing needs
 // it as a literal except RenewEnrollment's URL path, and a machine session's lease is renewed by
 // the helper itself — cmdRenew refuses outright once it sees an empty id from a successful build.
 func buildSigner() (enrollmentID string, signer Signer, err error) {
@@ -496,13 +533,163 @@ func selectSigner(dir string) (string, Signer, error) {
 		if id == "" {
 			return "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, enrollmentFile))
 		}
-		return id, &fileSigner{key: key, enrollmentID: id}, nil
+		return id, &fileSigner{key: key, enrollmentID: id, register: machineReregister(dir, key)}, nil
+	}
+	if record, err := signInSigner(); err != nil {
+		return "", nil, err
+	} else if record != nil {
+		return record.enrollmentID, record, nil
 	}
 	sock, named := helperSocket()
 	if named || exists(sock) {
 		return "", &helperSigner{sock: sock}, nil
 	}
-	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher) and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, sock)
+	if signer, err := machineSigner(dir); err != nil {
+		return "", nil, err
+	} else if signer != nil {
+		return signer.enrollmentID, signer, nil
+	}
+	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher), nobody has run `agent-secrets login` here, this machine proves no identity of its own (%s), and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, brokerclient.IdentityVar, sock)
+}
+
+// machineSigner is the signer of a machine that proves an identity of its own and holds no
+// launcher and no helper — a pod, which nobody enrols. It trades that identity for a launcher
+// credential, registers a key it makes here under it, and writes the key, the enrollment and
+// the marker that says whose session this is into the key dir, so the next call of this
+// machine's takes the file branch above and trades nothing. It answers nil where this machine
+// proves no identity, which is every deployment that has not turned the exchange on.
+func machineSigner(dir string) (*fileSigner, error) {
+	identity, err := brokerclient.MachineIdentity(os.Getenv)
+	if err != nil || identity == nil {
+		return nil, err
+	}
+	key, err := proof.NewKey()
+	if err != nil {
+		return nil, err
+	}
+	enrollmentID, err := registerMachineSession(context.Background(), dir, key)
+	if err != nil {
+		return nil, err
+	}
+	return &fileSigner{key: key, enrollmentID: enrollmentID, register: machineReregister(dir, key)}, nil
+}
+
+// machineReregister is how a machine session in the key dir is made again when the broker says
+// its enrollment is not live: it trades this machine's identity afresh and registers key under
+// the credential that trade mints. It is nil unless this key dir's session is one this command
+// registered for a machine that proves an identity of its own (machineSessionMarker) — a box or
+// pod its launcher enrolled writes no marker, and its lapsed enrollment is the launcher's.
+func machineReregister(dir string, key *ecdsa.PrivateKey) func(context.Context) (string, error) {
+	if !exists(filepath.Join(dir, machineSessionMarker)) {
+		return nil
+	}
+	return func(ctx context.Context) (string, error) { return registerMachineSession(ctx, dir, key) }
+}
+
+// registerMachineSession trades this machine's identity for a launcher credential, registers key
+// under it as a session, and writes the key, the enrollment and the marker into the key dir.
+func registerMachineSession(ctx context.Context, dir string, key *ecdsa.PrivateKey) (string, error) {
+	identity, err := brokerclient.MachineIdentity(os.Getenv)
+	if err != nil {
+		return "", err
+	}
+	if identity == nil {
+		return "", fmt.Errorf("this machine proves no identity of its own, so no session can be registered for it: set %s", brokerclient.IdentityVar)
+	}
+	base := brokerBaseURL()
+	if base == "" {
+		return "", fmt.Errorf("%s names the identity this machine proves, so %s must name the secrets broker it proves it to", brokerclient.IdentityVar, brokerURLVar)
+	}
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		return "", err
+	}
+	client, err := brokerclient.New(brokerclient.Config{
+		BrokerURL: base, Key: key, Subject: identity,
+		Session: brokerclient.TradeSession(os.Getenv, ""), HTTP: brokerclient.HTTPClient(),
+	})
+	if err != nil {
+		return "", err
+	}
+	token, err := client.Token(ctx)
+	if err != nil {
+		return "", err
+	}
+	if token.CredentialID == "" {
+		return "", errors.New("the broker took this machine's identity but named no launcher credential, so no session can be registered under it")
+	}
+	enrollmentID, err := enrollUnderCredential(ctx, base, key, thumbprint, token.CredentialID, "this machine")
+	if err != nil {
+		return "", err
+	}
+	if err := writeMachineSession(dir, key, enrollmentID); err != nil {
+		return "", err
+	}
+	return enrollmentID, nil
+}
+
+// writeMachineSession keeps the key, the enrollment and the marker of a machine that registered
+// a session for itself, in the key dir and in the modes a launcher writes them with (a 0700
+// directory, a 0600 key). The marker is what later calls read to know this key dir's session is
+// one this command may register again when its lease lapses (machineReregister); a launcher's
+// key dir has none.
+func writeMachineSession(dir string, key *ecdsa.PrivateKey, enrollmentID string) error {
+	pemBytes, err := encodeKeyPEM(key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("make the key dir %s: %w", dir, err)
+	}
+	if err := writeFileAtomic(filepath.Join(dir, keyFile), pemBytes, 0o600); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(dir, machineSessionMarker), nil, 0o600); err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(dir, enrollmentFile), []byte(enrollmentID+"\n"), 0o600)
+}
+
+// signInSigner is the signer of the person this session acts for, or nil where nobody has
+// signed in on this machine (in which case the caller goes on to the helper). A box with
+// sign-ins but no way to say which one this session is refuses here, naming them: a command
+// must never read one colleague's secrets under another's name. A sign-in whose enrollment has
+// not been made yet is registered now, under a fresh trade of that person's identity, and the
+// record is rewritten with it, so a record that outlived its enrollment heals itself.
+//
+// So does one whose enrollment the broker no longer holds: nothing renews a sign-in's lease, so
+// every enrollment it makes ends after BROKER_LEASE_SECONDS, and without this the box would
+// answer nothing but a dead id until somebody ran `agent-secrets login` again — which would
+// make a second box key and a second sign-in on that person's list (client.reenroller).
+func signInSigner() (*fileSigner, error) {
+	store := brokerclient.SignIns(os.Getenv)
+	records, err := store.List()
+	if err != nil || len(records) == 0 {
+		return nil, err
+	}
+	record, err := store.Choose(os.Getenv(brokerclient.PersonVar))
+	if err != nil {
+		return nil, err
+	}
+	key, err := record.Key()
+	if err != nil {
+		return nil, err
+	}
+	register := func(ctx context.Context) (string, error) {
+		record.EnrollmentID = ""
+		fresh, err := registerSignInSession(ctx, record, key)
+		if err != nil {
+			return "", err
+		}
+		record = fresh
+		return fresh.EnrollmentID, nil
+	}
+	if record.EnrollmentID == "" {
+		if _, err := register(context.Background()); err != nil {
+			return nil, err
+		}
+	}
+	return &fileSigner{key: key, enrollmentID: record.EnrollmentID, register: register}, nil
 }
 
 // sessionContext resolves the broker URL and this process's Signer every session-authenticated
@@ -595,35 +782,22 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 // cmdRenew renews this session's enrollment until interrupted. With --pod-token-file (a pod; the
 // Legion worker shim passes the projected token file the runtime mounts) every renewal reads the
 // file again and sends its contents as pod_token, since the kubelet rotates the token in place;
-// the broker verifies it against the enrollment's pod UID and service account. With --vm (a
-// Google Cloud VM, enrolled by `enroll --vm`) every renewal asks the metadata server for a fresh
-// identity token and sends it as vm_token, which the broker checks names the VM the enrollment
-// was made for; a VM enrollment's renewal must carry one. Without either flag a renewal has no
-// body, a box's renewal. A broker that predates the token reads no renew body, so a renewal
-// carrying one still renews there. A refusal in terminalRenewal (POD_TOKEN_REQUIRED,
-// VM_TOKEN_REQUIRED, VM_NOT_LISTED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID saying "not live")
-// exits exitRenewRefused (76), so the worker shim stops rather than restarting a renewer that
-// cannot succeed; every other refusal, POD_IDENTITY_MISMATCH, POD_TOKEN_EXPIRED,
-// VM_IDENTITY_MISMATCH and VM_TOKEN_EXPIRED among them, retries.
+// the broker verifies it against the enrollment's pod UID and service account. Without the flag
+// a renewal has no body, a box's renewal. A broker that predates the token reads no renew body,
+// so a renewal carrying one still renews there. A refusal in terminalRenewal
+// (POD_TOKEN_REQUIRED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID saying "not
+// live") exits exitRenewRefused (76), so the worker shim stops rather than restarting a renewer
+// that cannot succeed; every other refusal, POD_IDENTITY_MISMATCH and POD_TOKEN_EXPIRED among
+// them, retries.
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true, "audience": true})
+	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true})
 	flags := newFlagSet("renew", stderr)
 	podTokenFile := flags.String("pod-token-file", "", "a pod's projected service-account token file, read again before every renewal")
-	vmFlag := flags.Bool("vm", false, "a Google Cloud VM: ask the metadata server for a fresh identity token before every renewal")
-	audience := flags.String("audience", os.Getenv(vmAudienceVar), "--vm: the audience the broker verifies Google identity tokens for (default "+vmAudienceVar+")")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	if len(positional) > 0 {
 		fmt.Fprintln(stderr, "agent-secrets renew: no arguments are accepted")
-		return exitUsageError
-	}
-	if *vmFlag && *podTokenFile != "" {
-		fmt.Fprintln(stderr, "agent-secrets renew: --vm and --pod-token-file are mutually exclusive: a VM's token comes from its metadata server, a pod's from its projected file")
-		return exitUsageError
-	}
-	if *vmFlag && *audience == "" {
-		fmt.Fprintln(stderr, "agent-secrets renew: --vm needs --audience (or "+vmAudienceVar+"): it is the audience the broker verifies Google identity tokens for")
 		return exitUsageError
 	}
 	base, enrollmentID, signer, err := sessionContext()
@@ -632,60 +806,45 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if enrollmentID == "" {
-		fmt.Fprintln(stderr, "agent-secrets renew: a machine session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes, pods and VMs")
+		fmt.Fprintln(stderr, "agent-secrets renew: a machine session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes and pods")
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	token := boxRenewal
-	switch {
-	case *podTokenFile != "":
-		token = renewToken{field: "pod_token", what: "pod token", until: "the file becomes readable", read: func() (string, error) { return readPodToken(*podTokenFile) }}
+	if *podTokenFile != "" {
 		// A pod given a token file that cannot be read now never starts: a bodyless renewal of
 		// such an enrollment is refused anyway, and would hide the fault.
-		if _, err := token.read(); err != nil {
-			fmt.Fprintf(stderr, "agent-secrets renew: %s\n", tokenUnreadable(enrollmentID, token, err))
+		if _, err := readPodToken(*podTokenFile); err != nil {
+			fmt.Fprintf(stderr, "agent-secrets renew: %s\n", tokenUnreadable(enrollmentID, err))
 			return exitUsageError
 		}
-	case *vmFlag:
-		token = vmRenewToken(ctx, *audience)
 	}
-	return renewLoop(ctx, newClient(base), signer, enrollmentID, token, stderr, time.After)
+	return renewLoop(ctx, newClient(base), signer, enrollmentID, *podTokenFile, stderr, time.After)
 }
 
-// renewToken is the token each renewal carries: the body field the broker reads it as, what an
-// ERROR line calls it when it cannot be read and what has to change before it can be, and how to
-// read it afresh — a pod re-reads its projected file, a VM asks its metadata server again.
-// boxRenewal reads nothing and sends no body at all.
-type renewToken struct {
-	field, what, until string
-	read               func() (string, error)
+// tokenUnreadable is the ERROR a pod's renewer prints when it cannot read its token: it sends
+// nothing (a bodyless renewal of a pod enrollment is refused, and would hide the fault), so the
+// broker never hears of it, and this line, which the worker shim relays into its log, is the
+// only record naming the enrollment whose lease is lapsing.
+func tokenUnreadable(enrollmentID string, err error) string {
+	return fmt.Sprintf("ERROR: enrollment %s cannot read its pod token (%v); nothing was sent, so its lease lapses unless the file becomes readable", enrollmentID, err)
 }
 
-// boxRenewal is an agent box's renewal: no token, no body.
-var boxRenewal = renewToken{}
-
-// tokenUnreadable is the ERROR a pod's or a VM's renewer prints when it cannot read its token: it
-// sends nothing (a bodyless renewal of an enrollment whose kind must carry a token is refused, and
-// would hide the fault), so the broker never hears of it, and this line, which the worker shim or
-// the VM's unit relays into its log, is the only record naming the enrollment whose lease is
-// lapsing.
-func tokenUnreadable(enrollmentID string, carry renewToken, err error) string {
-	return fmt.Sprintf("ERROR: enrollment %s cannot read its %s (%v); nothing was sent, so its lease lapses unless %s", enrollmentID, carry.what, err, carry.until)
-}
-
-func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, carry renewToken, stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
+// renewLoop renews enrollmentID until ctx ends or the broker refuses it for good. podTokenFile
+// is a pod's projected token file, read again before every renewal because the kubelet rotates
+// it in place, and "" is every other session's renewal, which carries no body.
+func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID, podTokenFile string, stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
 	backoff := leasetime.RenewBackoffInitial
 	for {
 		var token string
 		var tokenErr error
-		if carry.read != nil {
-			token, tokenErr = carry.read()
+		if podTokenFile != "" {
+			token, tokenErr = readPodToken(podTokenFile)
 		}
 		var expires time.Time
 		err := tokenErr
 		if err == nil {
-			expires, err = c.RenewEnrollment(ctx, signer, enrollmentID, carry.field, token)
+			expires, err = c.RenewEnrollment(ctx, signer, enrollmentID, token)
 		}
 		if err != nil {
 			if ctx.Err() != nil {
@@ -701,7 +860,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				return exitRenewRefused
 			}
 			if tokenErr != nil {
-				fmt.Fprintf(stderr, "agent-secrets renew: %s; retrying in %s\n", tokenUnreadable(enrollmentID, carry, tokenErr), backoff)
+				fmt.Fprintf(stderr, "agent-secrets renew: %s; retrying in %s\n", tokenUnreadable(enrollmentID, tokenErr), backoff)
 			} else {
 				fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
 			}

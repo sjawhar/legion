@@ -1,0 +1,37 @@
+kind: Added
+body: |
+  `agent-secrets-helper` now enrols each session under the person signed in on the box, where
+  there is one. Before every enrolment it reads this user's own sign-ins
+  (`<key dir>/signins`, which `AGENT_SECRETS_KEY_DIR` names and `agent-secrets login` writes
+  0600 in a 0700 directory): with one it trades that sign-in for the person's launcher
+  credential and enrols the session under it, so a host session and an agent box registered
+  after the sign-in act for that person; with none, and with one the broker has refused, it
+  enrols under this machine's own credential, so a session registered after the person revokes
+  the sign-in is the fleet's again. It follows the box rather than the moment it started, so
+  neither signing in nor revoking needs the helper restarted, and a person's credential the
+  broker rejects is traded again inside the same enrolment rather than failing it. A second
+  user on the machine runs a helper of their own and reads their own directory; nothing here
+  takes a directory or a person from a session.
+  An enrolment now states only the operator the credential it is signed with carries: the
+  person for a sign-in's credential, the `AGENT_SECRETS_OPERATOR_FILE` login for a machine
+  login's, and none at all for the credential a machine's own identity traded for, which names
+  its fleet's service and no person. A machine in that mode reads no operator file, so a
+  missing or empty one no longer stops it enrolling — the broker refuses an enrolment stating
+  an operator its credential has not got (`OPERATOR_MISMATCH`), which is what stopped such a
+  machine enrolling any session at all. A revoke is signed with the credential the enrolment
+  was made under, falling back to this machine's own when the broker answers that the
+  enrolment is not that credential's.
+  The helper also answers the calls that need no peer identity — `login`, `login-status`,
+  `enroll-session-key`, `unenroll-session-key`, `sessions`, `drain` and `undrain` — on a kernel
+  that cannot pin the caller's pidfd (`SO_PEERPIDFD`, Linux 6.5), which it refused before: the
+  peer is pinned for the five ops judged on who the caller is and for nothing else.
+  `agent-secrets-helper install` writes `AGENT_SECRETS_KEY_DIR` into the unit beside the three
+  paths it already wrote.
+  In the token client, the broker's `429` is no longer read as a refusal no retry can cure: the
+  token endpoint spends a bucket per source address, and a renewal loop that stopped on one
+  would enrol nothing from the moment its credential lapsed, with only a restart to cure it. A
+  token that lives less than the five minutes before expiry a renewal aims at is now renewed at
+  half of what is left, rather than being traded again the instant it lands.
+time: 2026-11-02T17:45:00.000000000Z
+custom:
+  Issue: pr2636

@@ -1,0 +1,30 @@
+kind: Fixed
+body: |
+  A person's sign-in holds to one row per person and box key, live or revoked, so a revoke that
+  commits while a trade waits on it refuses that trade instead of leaving a second live sign-in
+  behind; the refusal is the insert's own conflict rather than a read taken before the revoke
+  landed. A sign-in's box key presented from another machine is refused `invalid_grant` naming
+  `agent-secrets login`, where the row used to follow the key and every trade after it collided
+  on `launcher_credentials_live_key`. `agent-secrets login` trades under the person's own session
+  name rather than `AGENT_SECRETS_SESSION`, which is unset on most boxes (the trade was refused
+  for want of a session name) and on the rest names the session this machine trades its own
+  identity under (which the person's trade took, after which the helper's own trade was refused
+  for good). A sign-in's or a machine's own session registers itself again, once, when the broker
+  says its enrollment is not live, so a box goes on working past `BROKER_LEASE_SECONDS` without
+  a second `agent-secrets login` and a second sign-in on that person's list. A refresh token
+  Google no longer honours falls the box back to its own authority instead of failing every
+  enrolment, and a refusal a retry can cure — the broker's 429 — no longer marks a person's
+  sign-in refused for the life of the helper. A clock-skewed DPoP proof (`invalid_dpop_proof`)
+  and a `use_dpop_nonce` that survives the transport's retry no longer stop the renewal loop, so
+  a helper started before NTP corrects the host's clock trades again rather than holding no
+  launcher credential until somebody restarts it. A `LAUNCHER_INVALID` on a machine that proves
+  an identity of its own wakes that machine's trade loop, so register and sign stop answering
+  `NO_CREDENTIAL` at once rather than at the token's own renewal. `agent-secrets-helper install`
+  writes this machine's identity and sign-in settings into the unit it installs
+  (`AGENT_SECRETS_MACHINE_IDENTITY`, `_MACHINE_TOKEN_FILE`, `_MACHINE_AUDIENCE`, `_POOL_AUDIENCE`,
+  `_POOL_ACCOUNT`, `_SIGNIN_ISSUER`, `_SIGNIN_CLIENT_ID`, `_SIGNIN_CLIENT_SECRET_FILE`,
+  `_PERSON` and `_SESSION`), without which the installed helper fell back to the device-grant
+  machine login and ignored every `agent-secrets login` on the box.
+time: 2026-11-03T03:15:00.000000000Z
+custom:
+  Issue: pr2636

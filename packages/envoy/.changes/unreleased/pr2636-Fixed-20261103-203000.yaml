@@ -1,0 +1,15 @@
+kind: Fixed
+body: |
+  `scripts/dev-stack.sh` now drops the two databases it created when it is stopped by a signal,
+  not only on Ctrl-C and on a clean exit. Its cleanup put INT and TERM back on their default
+  disposition before stopping anything, so a SIGTERM sent to the whole process group — what a
+  supervisor's stop sends, and what reaches this shell again whenever the signal is repeated or
+  a process of the stack takes it first — killed the run between the kills and the drops, and
+  `dev_stack_broker_<suffix>` and `dev_stack_dispatch_<suffix>` stayed on the server for every
+  stop. The cleanup now ignores both signals for the rest of the run instead, which also puts
+  the psql that runs each drop out of reach of a signal sent to the group, and it returns at
+  once when it is already running. A run ended by SIGKILL still leaves both databases behind:
+  no process can trap that signal. `scripts/dev-stack.test.sh` has the case.
+time: 2026-11-03T20:30:00.000000000Z
+custom:
+  Issue: pr2636
