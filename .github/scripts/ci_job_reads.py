@@ -605,16 +605,20 @@ GATES = [
                    f"starts in {at('dispatch', 'Browser-test dispatch dashboard')} for e2e/broker-approval.e2e.ts (a one-process run on the "
                    "fake broker, e2e/harness-real-broker.ts)", ENVOY, BROKER_PKGS, mode="build"),
     ], reads=reads(
-        ("packages/dispatch/**", f"{at('dispatch', 'Browser-test dispatch dashboard')}: `bun run e2e` builds the SPA and runs Playwright in packages/dispatch"),
-        ("packages/proof-editor/**", "packages/dispatch/web/vite.config.ts:104-123 (the build:web of `bun run e2e`)"),
+        ("packages/dispatch/**", f"{at('dispatch', 'Build the dashboard the lanes serve')} (build:web) and "
+                                 f"{at('dispatch', 'Browser-test dispatch dashboard')} (the harness and Playwright) in packages/dispatch"),
+        ("packages/proof-editor/**", f"packages/dispatch/web/vite.config.ts:104-123, read by the build:web of {at('dispatch', 'Build the dashboard the lanes serve')}"),
         (CONTRACTS_SRC, f"{at('dispatch', 'Build contracts for dispatch e2e')}; packages/dispatch/web/vite.config.ts:94-103 aliases"),
         ("packages/envoy-client/bin/dispatch.ts", "packages/dispatch/e2e/cli-body-cap.e2e.ts:17 runs it through e2e/dispatch-cli.ts:8"),
         (ENVOY_CLIENT_SRC, "imported by packages/envoy-client/bin/dispatch.ts, which cli-body-cap.e2e.ts:17 runs"),
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/e2e/engine-reading.ts:10"),
         (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch', 'Pull the file store image')} names it to the action, and "
-         f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image"),
+         f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image; "
+         f"{at('dispatch', 'Wait for the S3-compatible server')} waits for the container it started"),
         (".github/actions/pull-test-images/**", at("dispatch", "Pull the file store image")),
-        ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:80 holds the server's port through it"),
+        ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:80 holds each lane's server port through it"),
+        ("bun.lock", f"{at('dispatch', 'playwright-cache')} keys the browser cache on hashFiles('bun.lock'), "
+         f"which pins the Playwright version whose browsers {at('dispatch', 'Install Playwright Chromium, WebKit and Firefox')} downloads"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + setup_go("dispatch", f"{ENVOY}/go.mod") + bun_job("dispatch") + CI_SELF),
 

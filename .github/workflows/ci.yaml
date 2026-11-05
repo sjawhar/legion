@@ -34,10 +34,10 @@ name: CI
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change and envoy-go-checks, which build the
-# listener, and dispatch-browser-multiprocess and envoy-go-race-docs), go-envoy-test (envoy-go
-# alone: it builds the test binary of every package of the envoy module, a set no other job
-# builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Every family but
-# go-docs is filled by .github/workflows/ci-caches.yaml, which builds those sets on a push to
+# listener, and dispatch, dispatch-browser-multiprocess and envoy-go-race-docs), go-envoy-test
+# (envoy-go alone: it builds the test binary of every package of the envoy module, a set no other
+# job builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Every family
+# but go-docs is filled by .github/workflows/ci-caches.yaml, which builds those sets on a push to
 # main and saves them; go-docs stays with docs-pages.yaml, which saves it on that same push. Each
 # family keeps one entry, keyed on the Go version its job's setup-go installed, so it is
 # refreshed only when Go is bumped. A go.sum change downloads only the changed modules, and Go's
@@ -45,8 +45,10 @@ name: CI
 # go.sum files left a whole entry, up to a gigabyte, per change for seven days. The fallback by
 # prefix, when the exact key misses, now applies on every run, a dispatched one on main
 # included: it was held off main so that the entry a run saved after a Go bump held nothing the
-# older Go built, and no run here saves any more. setup-bun reads and writes its cache only on
-# main (.github/actions/setup-bun), which of this workflow's events is the dispatched run alone.
+# older Go built, and no run here saves any more. Beside the Go families, dispatch restores the
+# Playwright browsers of the version bun.lock pins, which ci-caches.yaml's browsers job fills on
+# that same push. setup-bun reads and writes its cache only on main (.github/actions/setup-bun),
+# which of this workflow's events is the dispatched run alone.
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -464,6 +466,7 @@ jobs:
               - 'packages/daemon/internal/omplaunch/*'
               - 'packages/daemon/internal/ompsessions/*'
               - 'packages/daemon/internal/phase/*'
+              - 'packages/daemon/internal/pods/**'
               - 'packages/daemon/internal/podsafety/**'
               - 'packages/daemon/internal/procgroup/*'
               - 'packages/daemon/internal/projection/*'
@@ -501,6 +504,7 @@ jobs:
               - 'packages/envoy/internal/config/*'
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/dedupe/*'
+              - 'packages/envoy/internal/ghrename/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/logging/*'
@@ -2221,7 +2225,7 @@ jobs:
       # The release's pack (release.yaml's pi_envoy_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
-      # license cannot be determined) and stages this plugin's five skills. The listing shows the
+      # license cannot be determined) and stages this plugin's eight skills. The listing shows the
       # tarball ships those and nothing of the Legion plugin's: no legion.js, no agents/, none of
       # its skills.
       - name: Pack pi-envoy
@@ -2375,6 +2379,16 @@ jobs:
       - name: Typecheck dispatch dashboard
         run: bun run typecheck
         working-directory: packages/dispatch
+      # The lane cases of e2e/__tests__/psql-session.test.ts and harness-lanes.test.ts skip
+      # themselves where no database is named, so in this job they do not run: it has no
+      # `postgres:` service, as this job's head says. A container of the pinned image for this
+      # step alone was tried and taken out again, in the dispatch job below where these tests ran
+      # before: it cost an image pull and a readiness wait, about 90 s, and the wait timed out on
+      # one runner in three. What those cases prove - that a lane's psql reads its own lane's
+      # database and not the plain name - is proven on any machine with DATABASE_URL set, which
+      # is how a developer and an issue pod run them (`bun run test` in packages/dispatch), and
+      # the lane contract they guard is also covered end to end by every multi-lane run of the
+      # browser suite itself.
       - name: Test dispatch dashboard
         run: bun run test
         working-directory: packages/dispatch
@@ -2406,29 +2420,41 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
-    timeout-minutes: 155
-    services:
-      postgres:
-        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-        env:
-          POSTGRES_PASSWORD: ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    # The browser suite runs one lane per Playwright worker, each with a Postgres, a harness and
+    # a file-store bucket of its own (packages/dispatch/e2e/run.ts), so this job has no
+    # `postgres:` service and no job-level DATABASE_URL: a run of more than one lane refuses a
+    # caller-set DATABASE_URL, since one database cannot serve lanes that truncate it per row.
+    # The lanes' image and worker count are set on the browser step's own command line, not in an
+    # `env:`: a name outside ci_filter_coverage.py's ENV_ALLOWED in this job's or any of its
+    # steps' `env:` drops run-server.sh's `go build` out of check-ci-filters.sh's reduction, which
+    # then counts it as reading every Go file of the repository.
+    # 40, against the 28 the issue's own acceptance sets. Six executions of this job at four lanes
+    # have measured 19:26, 20:46, 21:31, 28:17, 29:29 and 26:46, on one tree whose browser step
+    # alone read 1,050 s on one runner and 1,464 s on another, so the spread is the fleet's rather
+    # than the suite's. A job the timeout kills reports as cancelled and writes no Playwright
+    # report, so a timeout tight against the measurement costs the run that would say why it was
+    # slow - which is the one run anyone investigating a slow execution needs.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # go-envoy, restored only: each lane's run-server.sh builds the Dispatch server, not the
+      # listener and natsd the family's saving jobs build, so it saves none. Without it that build
+      # is a cold `go build` in every lane.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ format('go-envoy-{0}-', runner.os) }}
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Build contracts for dispatch e2e
@@ -2438,14 +2464,11 @@ jobs:
         # TS source directly through the workspace's "bun" export condition).
         run: bun run build
         working-directory: packages/contracts
-      - name: Install Playwright Chromium, WebKit and Firefox
-        # The runner image preconfigures Google's chrome-stable apt source, whose
-        # index intermittently fails `apt-get update` with a hash-sum mismatch and
-        # takes `--with-deps` down with it. Chrome is already installed there; the
-        # source only serves upgrades, so drop it before installing our deps.
-        run: |
-          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium webkit firefox
+      # The SPA every lane's server serves: run-server.sh serves web/dist (:103) and builds
+      # nothing itself, and the dashboard's own build step, with the notices listing it asserts
+      # on, is dispatch-ui's now. One build for all the lanes, which read the same dist.
+      - name: Build the dashboard the lanes serve
+        run: bun run build:web
         working-directory: packages/dispatch
       # The file store the step below starts, pulled first for the reason the action gives. The
       # image comes from ghcr.io/cybermonklabs/legion/ci, a registry this repository publishes, so a
@@ -2459,11 +2482,38 @@ jobs:
         # reads DISPATCH_E2E_FILE_STORE_ENDPOINT), so every upload and download the dashboard makes
         # goes through the file store, as production's does. Same image as the Go tests
         # (internal/tests3), read from its declaration again to name it for the docker run below.
-        # An anonymous PUT makes the bucket.
+        # Started before the Playwright install, and waited for after it, so the container's own
+        # start overlaps that install instead of following it.
         run: |
           image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' ../envoy/internal/tests3/seaweedfs.go)
           [ -n "$image" ] || { echo "::error::no const Image in packages/envoy/internal/tests3/seaweedfs.go"; exit 1; }
           docker run -d --name dispatch-e2e-files -p 127.0.0.1:18333:8333 "$image" server -s3 -dir=/data -ip=0.0.0.0 -s3.port=8333
+        working-directory: packages/dispatch
+      # The browsers the install step below downloads, under the Playwright version bun.lock
+      # pins, which is what decides their revisions. No job of this workflow saves an Actions
+      # cache entry: the entry this reads is the one ci-caches.yaml's browsers job fills on a
+      # push to main, and a miss costs this job the download alone.
+      - id: playwright-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ format('playwright-{0}-', runner.os) }}
+      - name: Install Playwright Chromium, WebKit and Firefox
+        # The runner image preconfigures Google's chrome-stable apt source, whose
+        # index intermittently fails `apt-get update` with a hash-sum mismatch and
+        # takes `--with-deps` down with it. Chrome is already installed there; the
+        # source only serves upgrades, so drop it before installing our deps.
+        run: |
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          bunx playwright install --with-deps chromium webkit firefox
+        working-directory: packages/dispatch
+      - name: Wait for the S3-compatible server
+        # The readiness wait of the step that started the container, after the install the
+        # container came up during. An anonymous PUT makes the bucket; each lane makes its own
+        # (dispatch-e2e-files-lane-N) with the same request (e2e/run.ts), so this one proves the
+        # store answers a PUT and serves the one-lane run its own bucket.
+        run: |
           for attempt in $(seq 1 60); do
             curl -sf -o /dev/null http://127.0.0.1:18333/ && break
             [ "$attempt" -lt 60 ] || { docker logs dispatch-e2e-files; exit 1; }
@@ -2472,12 +2522,91 @@ jobs:
           curl -sf -X PUT -o /dev/null http://127.0.0.1:18333/dispatch-e2e-files
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
-        # `bun run e2e` builds the SPA and then runs the harness, the one Vite build this job
-        # makes now that the dashboard's own build step is dispatch-ui's. The build cannot be
-        # skipped here: the server serves the dashboard from web/dist (e2e/run-server.sh:103).
-        # The wrapper it runs, e2e/run.ts, starts the harness on ports the OS chooses and runs
-        # Playwright with them; the config starts no server.
-        run: bun run e2e
+        # `bun run e2e` builds the SPA itself, which would build it a second time in this job.
+        # Calling the wrapper directly reuses the "Build the dashboard the lanes serve" step's
+        # dist above, holds this job to one Vite build, and keeps that build's own CPU out of the
+        # reading this step takes below. Safe because that build and this one are now the same
+        # binary: `packages/dispatch` no longer has an E2E-only build flag (removed with its sole,
+        # unconsumed consumer, the `window.__dispatchDocument` inspection probe). e2e/run.ts starts
+        # the harness on ports the OS chooses and runs Playwright with them; the config starts no
+        # server.
+        #
+        # DISPATCH_E2E_WORKERS is how many lanes e2e/run.ts starts, one per Playwright worker,
+        # each a harness, a bucket and a Postgres of its own, that last one a `docker run` of
+        # DISPATCH_E2E_PG_IMAGE (e2e/harness-postgres.ts). They are set on the command line, not
+        # in this step's `env:`, for the reason the job's head gives.
+        #
+        # MemAvailable every 5 s for the length of this step, kept for the upload below and its
+        # lowest value printed at the end: the lanes' Postgres containers run outside this job's
+        # cgroup, so /proc/meminfo is the one reading that counts them. The JSON report goes
+        # beside the list reporter's output, so a green run reports what it ran too. Both sample
+        # files and that report are written under $RUNNER_TEMP, beside the lanes' own run
+        # directory: a file this step wrote into the checkout would leave it dirty afterwards.
+        #
+        # Beside it, the same 5 s tick records where the CPU goes, which is the bound a run of
+        # four lanes on four vCPU hits (INFRA-317): one line per process of a named group, with
+        # the CPU that process has used, read from /proc/<pid>/stat. `pidstat` is not on this
+        # image and `ps -o pcpu` is a process's average over its whole life, not what it spent
+        # since the last tick, so neither answers this; /proc costs one `ps` and one `awk` per
+        # tick. A group's total is the sum of its processes' ticks apart, and the whole reading
+        # of a process this tick first saw, which is what catches a renderer that was started
+        # after the last tick. Nothing is ever counted twice, so the named groups are a floor:
+        # what is lost is a process that lived and died inside one tick, and the last seconds of
+        # one that died between ticks. `everything else` is the machine's own busy time
+        # (/proc/stat) less the named groups, so a reader sees the whole step without
+        # downloading the samples: it holds that loss, the runner's own work, the file-store
+        # container and the sampler itself.
+        run: |
+          # $RUNNER_TEMP holds everything this step writes, the run directory of e2e/run.ts
+          # (mkdtempSync in os.tmpdir(), :183) among it, which is what the upload steps below
+          # read. TMPDIR is exported on the command line, not in this step's `env:`, for the
+          # reason the job's head gives.
+          export TMPDIR="$RUNNER_TEMP"
+          : > "$RUNNER_TEMP/memory-samples.txt"
+          : > "$RUNNER_TEMP/cpu-samples.txt"
+          while :; do
+            awk '/^MemAvailable:/ { print $2 }' /proc/meminfo >> "$RUNNER_TEMP/memory-samples.txt"
+            ps -eo pid=,args= | awk '
+              function group(args) {
+                if (args ~ /ms-playwright/)     return "browser"
+                if (args ~ /(^|\/)bun( |$)/)    return "bun"
+                if (args ~ /playwright/)        return "runner"
+                if (args ~ /dispatch-e2e( |$)/) return "dispatch"
+                if (args ~ /postgres|psql/)     return "postgres"
+                return ""
+              }
+              BEGIN { while ((getline l < "/proc/stat") > 0) if (l ~ /^cpu /) { split(l, c); print "machine", c[2]+c[3]+c[4]+c[7]+c[8]+c[9]; break } }
+              { g = group($0); if (g == "") next
+                if ((getline l < ("/proc/" $1 "/stat")) <= 0) next
+                close("/proc/" $1 "/stat"); sub(/^[^ ]+ \(.*\) /, "", l); split(l, s)
+                print $1, s[12] + s[13], g }' >> "$RUNNER_TEMP/cpu-samples.txt"
+            sleep 5
+          done &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          # pgvector, the copy in ghcr.io/cybermonklabs/legion/ci (.github/ci-images.yaml) this
+          # job's service used before the lanes.
+          export DISPATCH_E2E_PG_IMAGE=ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+          export DISPATCH_E2E_WORKERS=4
+          export PLAYWRIGHT_JSON_OUTPUT_NAME="$RUNNER_TEMP/report.json"
+          status=0
+          bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --reporter=list,json || status=$?
+          kill "$sampler" 2>/dev/null || true
+          awk '$1 ~ /^[0-9]+$/ { if (++n == 1 || $1 + 0 < low) low = $1 + 0 } END { if (n) printf "::notice title=dispatch MemAvailable::the lowest MemAvailable during the browser step was %d kB, over %d samples\n", low, n; else print "::warning::the browser step took no MemAvailable sample" }' "$RUNNER_TEMP/memory-samples.txt"
+          awk '
+            $1 == "machine" { if (samples++) busy += $2 - was; was = $2; next }
+            ($1, $3) in seen { if ($2 >= seen[$1, $3]) group[$3] += $2 - seen[$1, $3]; seen[$1, $3] = $2; next }
+            { if (samples > 1) group[$3] += $2; seen[$1, $3] = $2 }
+            END {
+              if (!samples) { print "::warning::the browser step took no CPU sample"; exit }
+              split("browser runner dispatch postgres bun", names, " ")
+              for (i = 1; i <= 5; i++) {
+                named += group[names[i]]
+                split_up = split_up sprintf("%s %.0f (%.0f%%), ", names[i], group[names[i]] / 100, busy ? 100 * group[names[i]] / busy : 0)
+              }
+              printf "::notice title=dispatch CPU::the browser step used %.0f CPU-seconds over %d samples: %severything else %.0f (%.0f%%)\n", busy / 100, samples, split_up, (busy - named) / 100, busy ? 100 * (busy - named) / busy : 0
+            }' "$RUNNER_TEMP/cpu-samples.txt"
+          exit "$status"
         working-directory: packages/dispatch
         # The file store the step above started. Set here, not written to $GITHUB_ENV, which every
         # later step would inherit, and which check-ci-filters.sh treats as reaching the job's go
@@ -2485,11 +2614,28 @@ jobs:
         env:
           DISPATCH_E2E_FILE_STORE_ENDPOINT: http://127.0.0.1:18333
           DISPATCH_E2E_FILE_STORE_BUCKET: dispatch-e2e-files
+      # Always, not on failure alone: the memory and CPU readings are of the run that passed as
+      # much as of the one that did not, and the report says what a green run ran.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: dispatch-e2e-report-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/report.json
+            ${{ runner.temp }}/memory-samples.txt
+            ${{ runner.temp }}/cpu-samples.txt
+      # A failed row's trace says what the browser saw; these say what its lane's own servers did,
+      # which is where a lane-only failure (a port, a migration, a server that never came up) is
+      # legible. The glob is the run directory e2e/run.ts made under $TMPDIR, which the step
+      # above pointed at $RUNNER_TEMP; mkdtempSync gives the directory a random suffix, so the
+      # glob matches it however many lanes ran.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
-          path: packages/dispatch/e2e/test-results
+          path: |
+            packages/dispatch/e2e/test-results
+            ${{ runner.temp }}/dispatch-e2e-run-*/lane-*/log/*.log
 
       - name: Report ci-ok when this is the run's last job
         if: always()

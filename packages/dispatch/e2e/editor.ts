@@ -8,6 +8,7 @@ import {
   type WebSocketRoute,
 } from "@playwright/test";
 import { createDecoder, readVarUint } from "lib0/decoding";
+import type { Ask } from "../web/src/api/types";
 
 import { readField } from "../web/src/features/doc/sync-frame";
 import { createIssue, createProject, getArtifactBlocks, getArtifactText, getIssue } from "./api";
@@ -539,16 +540,22 @@ export async function blockId(artifactId: string, text: string): Promise<string>
   return block.id;
 }
 
-/** Waits until the issue's spec block has been indexed into an open ask and returns it. */
-export async function indexedBlockAsk(issueKey: string, block: string) {
+/** Waits until the issue's spec block has been indexed into an open ask and returns it. The
+ *  index lands inside the first step of Playwright's own 100/250/500 ladder, which would then
+ *  not look again until a quarter-second after it was there, so this reads it on a closer one. */
+export async function indexedBlockAsk(issueKey: string, block: string): Promise<Ask> {
+  let blockAsk: Ask | undefined;
   await expect
-    .poll(async () =>
-      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === block)
+    .poll(
+      async () => {
+        blockAsk = (await getIssue(issueKey)).open_asks.find(
+          (candidate) => candidate.block_id === block
+        );
+        return blockAsk !== undefined;
+      },
+      { intervals: [50, 50, 100, 200, 500] }
     )
     .toBe(true);
-  const blockAsk = (await getIssue(issueKey)).open_asks.find(
-    (candidate) => candidate.block_id === block
-  );
   if (blockAsk === undefined) {
     throw new Error(`the ${block} decision was not indexed`);
   }

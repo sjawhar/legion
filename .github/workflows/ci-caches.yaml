@@ -1,6 +1,6 @@
 name: CI caches
 
-# Fills the Go Actions caches ci.yaml's jobs restore, so a pull request or a merge group finds
+# Fills the Actions caches ci.yaml's jobs restore, so a pull request or a merge group finds
 # them warm. ci.yaml runs on a pull request, a merge group and a dispatch, and no longer on a push
 # to main: the queue tests every change on the tree it lands as, so a run on main would only test
 # that tree again (ci.yaml's header says it). No job of that workflow saves a cache entry any
@@ -12,28 +12,35 @@ name: CI caches
 # request lands in that run's own scope, which the next pull request's run cannot read, so it
 # would reach nobody.
 #
-# Five families, each one a restore step of ci.yaml names, keyed on the Go version the family's
-# own module installs: go-notices (lint's notices step), go-daemon (typecheck, test and
-# pi-legion), go-envoy (dispatch-browser-multiprocess, envoy-go-checks, envoy-go-race-docs,
-# listener-server-change, envoy-e2e-local and envoy-session-stall), go-envoy-test (envoy-go) and
-# go-envoy-infra (envoy-infra-go). One job per Go setup, since the key carries the version that
-# module's go.mod names: the daemon's go.mod for go-daemon and for go-notices, which lint
-# installs the daemon's Go for; the envoy module's for go-envoy and go-envoy-test; the infra
-# module's for go-envoy-infra. Each family is first looked up (`lookup-only`, and no
-# `restore-keys`: the question is whether that exact key exists, and the answer downloads
-# nothing), and only a miss runs the build the ci.yaml job runs and saves what it left in the
-# module cache and the build cache. A family whose key is already there builds nothing, so a run
-# that finds every key costs a checkout and a setup-go. Where a job fills two families it fills
-# the smaller one first, so the entry that carries the other's objects too is the one that was
-# large already.
+# Five Go families, each one a restore step of ci.yaml names, keyed on the Go version the
+# family's own module installs: go-notices (lint's notices step), go-daemon (typecheck, test and
+# pi-legion), go-envoy (dispatch, dispatch-browser-multiprocess, envoy-go-checks,
+# envoy-go-race-docs, listener-server-change, envoy-e2e-local and envoy-session-stall),
+# go-envoy-test (envoy-go) and go-envoy-infra (envoy-infra-go). One job per Go setup, since the
+# key carries the version that module's go.mod names: the daemon's go.mod for go-daemon and for
+# go-notices, which lint installs the daemon's Go for; the envoy module's for go-envoy and
+# go-envoy-test; the infra module's for go-envoy-infra. Each family is first looked up
+# (`lookup-only`, and no `restore-keys`: the question is whether that exact key exists, and the
+# answer downloads nothing), and only a miss runs the build the ci.yaml job runs and saves what
+# it left in the module cache and the build cache. A family whose key is already there builds
+# nothing, so a run that finds every key costs a checkout and a setup-go. Where a job fills two
+# families it fills the smaller one first, so the entry that carries the other's objects too is
+# the one that was large already.
+#
+# The sixth entry is no Go family: the Playwright browsers ci.yaml's dispatch job restores, which
+# the browsers job below fills. Its key is bun.lock's hash, since the lockfile pins the Playwright
+# version that decides the browsers' revisions, so that entry is refreshed when the pin moves
+# rather than when Go is bumped; it is looked up, filled on a miss and saved as the Go families
+# are.
 #
 # go-docs is not here: docs-pages.yaml saves it on this same push, from the build job it shares
 # with ci.yaml's docs job. The Bun cache is not here either: .github/actions/setup-bun reads and
 # writes it on main, and five workflows that run there call it.
 
 # A push to main is what writes the default branch's cache scope; workflow_dispatch fills a family
-# by hand, after a Go bump or an eviction. No `paths:`: a key holds a Go version, not a file list,
-# so what the push touched decides nothing, and a run whose keys are all there is seconds.
+# by hand, after a Go bump, a Playwright bump or an eviction. No `paths:`: a key holds a Go
+# version or bun.lock's hash, not a file list, so what the push touched decides nothing, and a
+# run whose keys are all there is seconds.
 on:
   push:
     branches: [main]
@@ -261,3 +268,44 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-envoy-infra-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+
+  # The Playwright browsers ci.yaml's dispatch job restores, the one entry here that is no Go
+  # family: no setup-go, and the key is bun.lock's hash rather than a Go version, since that
+  # lockfile pins the Playwright version whose browsers the install downloads.
+  browsers:
+    runs-on: ubuntu-24.04
+    # Three browser downloads on a miss; a run that finds the key costs the checkout alone.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: playwright
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          lookup-only: true
+
+      # The install reads the Playwright the lockfile pins out of node_modules, as the dispatch
+      # job's does: `bunx playwright` without it would fetch the newest release instead, whose
+      # browser revisions are other than the ones that job will look for.
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        uses: ./.github/actions/setup-bun
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        run: bun install --frozen-lockfile
+
+      # The three browsers the dispatch job's suite runs. No `--with-deps`: the apt packages it
+      # installs land outside ~/.cache/ms-playwright, so no entry could carry them, and that job
+      # installs them itself on every run.
+      - name: Download the browsers the dispatch job's suite runs
+        if: steps.playwright.outputs.cache-hit != 'true'
+        run: bunx playwright install chromium webkit firefox
+        working-directory: packages/dispatch
+
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
