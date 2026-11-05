@@ -46,6 +46,10 @@ type fakeLimiter struct {
 	mu           sync.Mutex
 	// next is the next free slot, in modeled time since epoch.
 	next time.Duration
+	// held is how long, in wall-clock time, the limiter held the last Wait it did not refuse: the
+	// timer it set that caller, which is what a test asserting a request outlasted its queue reads
+	// rather than the span of the call itself.
+	held time.Duration
 }
 
 func newFakeLimiter(qps, speedup float64) *fakeLimiter {
@@ -64,6 +68,13 @@ func (l *fakeLimiter) backlog() time.Duration {
 	return max(l.next-l.now(), 0)
 }
 
+// heldLast is the wall-clock hold the limiter imposed on the last Wait it did not refuse.
+func (l *fakeLimiter) heldLast() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.held
+}
+
 func (l *fakeLimiter) Wait(ctx context.Context) error {
 	l.mu.Lock()
 	now := l.now()
@@ -74,8 +85,10 @@ func (l *fakeLimiter) Wait(ctx context.Context) error {
 		return errors.New("rate: Wait(n=1) would exceed context deadline")
 	}
 	l.next = slot + time.Duration(float64(time.Second)/l.qps)
+	hold := time.Duration(float64(wait) / l.speedup)
+	l.held = hold
 	l.mu.Unlock()
-	timer := time.NewTimer(time.Duration(float64(wait) / l.speedup))
+	timer := time.NewTimer(hold)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -593,7 +606,12 @@ func TestTheInformersWatchOnTheirClientsAndALaunchsRequestsGoThroughTheRequests(
 
 // A request's own timeout starts once the client's limiter lets it go (client-go's
 // Request.request), which is what lets a launch wait out a queue longer than apiTimeout: here the
-// limiter holds a request of the requests' client four times its timeout, and it succeeds.
+// limiter holds a request of the requests' client twice its timeout, and it succeeds. A timeout
+// that covered the queue would end the request where it stands, so the queue is what the row
+// reads — the hold the limiter itself imposed (heldLast), which must outlast the timeout for the
+// request's success to say anything — and not the span of the call, which also carries a loopback
+// round trip a loaded machine makes slow. The timeout is a second for the same reason: the round
+// trip is to end well inside it whatever the machine is doing, so only the queue can spend it.
 func TestARequestsTimeoutStartsOnceTheClientsLimiterLetsItGo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -601,21 +619,22 @@ func TestARequestsTimeoutStartsOnceTheClientsLimiterLetsItGo(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	requests := requestConfig(&rest.Config{Host: server.URL})
-	limit := newFakeLimiter(5, 1)
+	// One slot every two seconds: the Wait below takes the free one, and the request waits out the
+	// next.
+	limit := newFakeLimiter(0.5, 1)
 	if err := limit.Wait(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	requests.RateLimiter, requests.Timeout = limit, 50*time.Millisecond
+	requests.RateLimiter, requests.Timeout = limit, time.Second
 	kube, err := kubernetes.NewForConfig(requests)
 	if err != nil {
 		t.Fatal(err)
 	}
-	started := time.Now()
 	if _, err := kube.CoreV1().Secrets("legion").Get(context.Background(), "held", metav1.GetOptions{}); err != nil {
 		t.Fatalf("a request the limiter held past its client's timeout failed: %v", err)
 	}
-	if waited := time.Since(started); waited < 150*time.Millisecond {
-		t.Fatalf("the request went after %s, want it held about 200ms by the limiter", waited)
+	if held := limit.heldLast(); held <= requests.Timeout {
+		t.Fatalf("the limiter held the request %s, want longer than the %s timeout it is to outlast", held, requests.Timeout)
 	}
 }
 
