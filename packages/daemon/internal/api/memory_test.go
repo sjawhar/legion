@@ -63,10 +63,10 @@ func TestTheStateShowsEveryIssueItsTreesMemoryDraw(t *testing.T) {
 	}
 }
 
-// contract46Issue is every key the issue record of contract 46's strict reader knows
-// (packages/contracts/src/legion-api.ts's legionIssue at the last release declaring 46): one key
-// more and it refuses the whole state, which is every `read_record` of every worker in a pod one
-// release behind.
+// contract46Issue is every key the issue record of the last strict reader before memoryContract
+// knows (packages/contracts/src/legion-api.ts's legionIssue, unchanged from 46 through 48): one
+// key more and it refuses the whole state, which is every `read_record` of every worker in a pod
+// one release behind.
 var contract46Issue = []string{
 	"key", "generation", "phase", "status", "repo", "defaultBranch", "holdReason", "architect",
 	"workers", "pullRequest", "designGate", "slot", "waitingOn", "check",
@@ -74,10 +74,10 @@ var contract46Issue = []string{
 
 // The route authenticates nobody, so it knows a plugin by the pod the request came from: a pod
 // whose claims record a contract below memoryContract is served issues with only the keys
-// contract 46 knows, and the rest of the body as it is. The two downgrades compose: a pod at 46 is
-// served the update rounds it reads and no memory, a pod below 46 neither, and a pod at this
-// contract, a pod whose claims record none and a caller in no pod — the operator's `legion state`,
-// whose memory line reads the draws — are served both.
+// the last strict reader before it knows, and the rest of the body as it is. The two downgrades
+// compose: a pod at 46 to 48 is served the update rounds it reads and no memory, a pod below 46
+// neither, and a pod at this contract, a pod whose claims record none and a caller in no pod —
+// the operator's `legion state`, whose memory line reads the draws — are served both.
 func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(memoryContract-1))
 	if !strings.Contains(string(full), `"memoryGroup"`) || !strings.Contains(string(full), `"updateRound"`) {
@@ -92,7 +92,7 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		rounds bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod two contracts behind, below both", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "a pod below PodUpdateContract, below both", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(memoryContract - 1), rounds: true},
 		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, rounds: true},
 		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, rounds: true},
@@ -114,7 +114,7 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 				}
 				for field := range view {
 					if !slices.Contains(contract46Issue, field) {
-						t.Errorf("issue view %v carries %q, which contract 46's strict reader refuses", view, field)
+						t.Errorf("issue view %v carries %q, which the strict reader before memoryContract refuses", view, field)
 					}
 				}
 			}

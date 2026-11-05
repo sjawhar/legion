@@ -560,7 +560,7 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // (withoutUpdateRounds), which is the body that contract's schema describes; and a caller below
 // memoryContract, the contract that added the issues' memory group, is served it without those
 // three fields (withoutMemory). The two compose: each is applied when the state carries something
-// of its own, so a caller below both — a pod one release behind during a roll — is served a body
+// of its own, so a caller below both — a pod below supervise.PodUpdateContract — is served a body
 // without either. Every later reader takes all five as optional, so the body this serves when the
 // claims cannot be read is the one every reader from 45 on takes. Any other caller — a pod at this
 // contract, the operator's `legion state`, a tmux pane — is served the state as this contract
