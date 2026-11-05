@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   type Artifact,
-  ASK_QUESTION_MAX,
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
@@ -15,7 +14,11 @@ import {
   type TablePosition,
   zodSchemaApi,
 } from "@legion/contracts";
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import {
+  DISPATCH_BLOCK_UNITS,
+  DISPATCH_EVENT_BODY_MAX,
+  DISPATCH_ITEM_BLOCKS,
+} from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
 import { bearerCredential } from "../bearer";
 import { cliRefusals } from "../dispatch-cli";
@@ -497,25 +500,25 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual([expect.objectContaining({ question })]);
   });
 
-  test("rejects an ask ref that would exceed Dispatch's question limit, naming the number to trim", async () => {
-    const fetchImpl = (() => {
-      throw new Error("network must not be called");
-    }) as unknown as typeof fetch;
+  // The bound on a question and its ref is the server's: the pair is sent whole, and the
+  // refusal the caller is thrown is the one Dispatch wrote.
+  test("sends a question with its ref whole and throws Dispatch's own refusal of the pair", async () => {
+    const ref = "dispatch://DSP-41/ask/ab";
+    const question = "x".repeat(DISPATCH_EVENT_BODY_MAX - 10);
+    const sent = `${question}\n\nRef: ${ref}`;
+    const refusal =
+      `question and options is 21 characters over the ${DISPATCH_EVENT_BODY_MAX}-character ` +
+      `limit (${DISPATCH_EVENT_BODY_MAX + 21}/${DISPATCH_EVENT_BODY_MAX})`;
+    const questions: unknown[] = [];
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      questions.push(JSON.parse(String(init?.body)).question);
+      return response({ code: "CAP_EXCEEDED", error: refusal }, 400);
+    };
 
-    // The question at the cap less 10, plus "\n\nRef: " (7) and the 24-unit ref, is 21 over.
     await expect(
-      executeAsk(
-        {
-          issue: "DSP-41",
-          question: "x".repeat(ASK_QUESTION_MAX - 10),
-          ref: "dispatch://DSP-41/ask/ab",
-        },
-        fetchImpl
-      )
-    ).rejects.toThrow(
-      `question plus ref is 21 characters over the ${ASK_QUESTION_MAX}-character limit ` +
-        `(${ASK_QUESTION_MAX + 21}/${ASK_QUESTION_MAX}); shorten the question or drop the ref`
-    );
+      executeAsk({ issue: "DSP-41", question, ref }, fetchImpl as typeof fetch)
+    ).rejects.toThrow(refusal);
+    expect(questions).toEqual([sent]);
   });
 
   test("rejects an ask ref outside the dispatch scheme", async () => {
@@ -670,6 +673,8 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  // A body longer than a block bound is no problem for the call to report: Dispatch holds the
+  // body to its bounds, so only the schema's problems and the hand checks are listed.
   test("reports the comment hand checks alongside the schema problems", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -682,7 +687,8 @@ describe("executeDispatchTool", () => {
         quote: "some text",
         reply_to: "c1",
         reply_to_ask: "a1",
-        body: "x".repeat(DISPATCH_BODY_MAX + 1),
+        body: "x".repeat(DISPATCH_BLOCK_UNITS + 1),
+        custom: "x",
       },
       cwd: "/workspace",
       host: "omp",
@@ -696,7 +702,7 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      `--body ${overCapMessage(DISPATCH_BODY_MAX + 1, DISPATCH_BODY_MAX)}`,
+      "unknown flag --custom",
       "artifact is required when quote is supplied",
       "reply_to and reply_to_ask cannot both be set",
     ]);
@@ -3877,6 +3883,50 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  test("limits prints the server's bounds", async () => {
+    const requests: string[] = [];
+    const bounds = {
+      block_units: DISPATCH_BLOCK_UNITS,
+      item_blocks: DISPATCH_ITEM_BLOCKS,
+      ask_options: 8,
+      ask_units: DISPATCH_EVENT_BODY_MAX,
+      event_body_units: DISPATCH_EVENT_BODY_MAX,
+      request_bytes: 1_048_576,
+      document_bytes: 1_048_576,
+      handoff_bytes: 32_768,
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      requests.push(new URL(String(url)).pathname);
+      return response(bounds);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_limits",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/limits"]);
+    expect(result.details).toEqual(bounds);
+    expect(result.text.split("\n")).toEqual([
+      "One block of a body - a paragraph, list, quote, table or code block: 32,000 characters (UTF-16 units).",
+      "Blocks in one body: 32,768.",
+      "An ask's question and its options together: 32,000 characters (UTF-16 units).",
+      "Options on one ask: 8.",
+      "The body an event carries whole: 32,000 characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.",
+      "One request: 1,048,576 bytes.",
+      "One markdown document: 1,048,576 bytes.",
+      "One handoff body: 32,768 bytes.",
+      "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one.",
+    ]);
+  });
+
   test("dispatch_whoami returns the session and the personal token's owner", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -5214,7 +5264,11 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_ask",
-        args: { issue: "DSP-41", question: "x".repeat(ASK_QUESTION_MAX + 1) },
+        args: {
+          issue: "DSP-41",
+          question: "Which way?",
+          options: Array.from({ length: 9 }, (_, index) => ({ label: `Way ${index}` })),
+        },
         cwd: "/workspace",
         host: "omp",
         config,
