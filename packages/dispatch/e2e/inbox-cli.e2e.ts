@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
@@ -15,6 +15,7 @@ import {
   createProjectDocument,
   getAsk,
   listMyReplies,
+  mintAgentToken,
   replyToMessageDelivery,
   requestApproval,
   snoozeAsk,
@@ -35,6 +36,10 @@ import { asUser } from "./users";
  * the token makes - an answer, a review, a message - is recorded as the person with the agent
  * beside them, which every reader renders. Last, the Settings checkbox that narrows a token to
  * the person scope alone stops it approving, and ticking it back lets it approve again.
+ *
+ * The second row reads the `Unread threads` band on the command's own surface (INFRA-450): the
+ * two threads of this seed the reader has not caught up with, each named by its owner, the agent
+ * that wrote the newest reply and how long ago, and the count the call leaves in its details.
  *
  * Two run details. The viewport is pinned to the reading column's width, because the Inbox draws
  * a row one way above it and another below (`e2e/inbox-pane.ts`). And the deferred ask's snooze
@@ -107,12 +112,57 @@ function printedAsks(printed: CommandSection): string[] {
   return printed.rows.map((row) => (row.split(" · ").at(-1) ?? "").split("/").at(-1) ?? "").sort();
 }
 
-/** The asks the page has in one band, sorted the same way. */
+/** Whether a row the Inbox list holds is one of the reader's own threads rather than an ask.
+ *  The list holds both (`features/inbox/list-row.ts`), and that file is where the spelling of a
+ *  row's id lives: a thread row's is `reply:<thread id>` or `agent:<thread id>`, an ask row's
+ *  the bare ask id. */
+function isThreadRow(rowId: string): boolean {
+  return rowId.startsWith("reply:") || rowId.startsWith("agent:");
+}
+
+/** Every row of the Inbox list, by id: the reader's asks and their own threads together. */
+function listedRows(page: Page): Promise<string[]> {
+  return page
+    .locator("[data-inbox-row]")
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-inbox-row") ?? ""));
+}
+
+/** The asks the page has in one band, sorted the same way; the threads the band also holds are
+ *  the command's `Unread threads` and not its ask bands. */
 async function bandAsks(page: Page, band: "human" | "agent" | "later"): Promise<string[]> {
   const ids = await page
     .locator(`[data-inbox-row][data-inbox-section="${band}"]`)
     .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-inbox-row") ?? ""));
-  return ids.sort();
+  return ids.filter((id) => !isThreadRow(id)).sort();
+}
+
+/** The `ref` of each thread a printed `Unread threads` band lists, sorted: each row ends in the
+ *  thread's own `ref`, the address its row on the page opens, which the server's row carries
+ *  too. Sorted, because what is compared is which threads are listed and not the order one read
+ *  of the two happened to answer them in. */
+function printedThreads(printed: CommandSection): string[] {
+  return printed.rows.map((row) => row.split(" · ").at(-1) ?? "").sort();
+}
+
+/** The fields of the one line the band printed for the thread `ref` names, or a failure naming
+ *  what was printed instead: a thread the band left out is the command's answer being wrong. */
+function threadFields(printed: CommandSection, ref: string): string[] {
+  const row = printed.rows.find((line) => line.endsWith(` · ${ref}`));
+  expect(row, `no unread thread ends in ${ref}: ${printed.rows.join(" | ")}`).toBeDefined();
+  return (row ?? "").split(" · ");
+}
+
+/** A short relative age, which is what a thread's line carries in place of a timestamp. */
+const relativeAge = /^(<1m|\d+[mhd])$/;
+
+/** The details the last `dispatch` call recorded: the command prints its counts nowhere and
+ *  leaves them in the ledger line it writes for its host, under the state directory the run was
+ *  given, which is its home (`e2e/dispatch-cli.ts`). */
+function callDetails(home: string): Record<string, unknown> {
+  const ledger = readFileSync(join(home, "sessions", cliSession, "results.jsonl"), "utf-8");
+  const lines = ledger.trimEnd().split("\n");
+  const entry = JSON.parse(lines.at(-1) ?? "{}") as { details?: Record<string, unknown> };
+  return entry.details ?? {};
 }
 
 /** A sidebar entry's number: the badge after its name, 0 when it carries none, and undefined when
@@ -234,10 +284,12 @@ async function seedInbox(): Promise<SeededInbox> {
     { body: "How far is the backfill?", delivery: "aside" },
     { login: "alice" }
   );
+  // The session stamps its title on what it writes, as a live one does, so every reader names
+  // the thread by the session's name rather than by its id (`delivery.ResolveSessionTitles`).
   await replyToMessageDelivery(
     message.id,
     { attempt: 1, body: "Half-way; the flag name is next." },
-    { id: worker.session_id, kind: "session" }
+    { id: worker.session_id, kind: "session", origin: { session_title: worker.title } }
   );
 
   return {
@@ -302,11 +354,17 @@ test("dispatch inbox under the person's own token lists the Inbox page's own row
     );
     expect(section(sections, "Later").count).toBe((await bandAsks(page, "later")).length);
     // Neither list holds a question that is not the person's own: bob's issue's and the
-    // document's are on the server's list and in neither of these.
-    expect(await page.locator("[data-inbox-row]").count()).toBe(
+    // document's are on the server's list and in neither of these. The Inbox list holds the
+    // reader's own threads beside the asks, and those are the command's `Unread threads`, so
+    // each kind of row is counted against the bands that list it.
+    const listed = await listedRows(page);
+    expect(listed.filter((id) => !isThreadRow(id))).toHaveLength(
       section(sections, "Needs you").rows.length +
         section(sections, "Waiting on agents").rows.length +
         section(sections, "Later").rows.length
+    );
+    expect(listed.filter(isThreadRow)).toHaveLength(
+      section(sections, "Unread threads").rows.length
     );
 
     // The credential requests, line for line: the page lists one row per request the command
@@ -323,28 +381,21 @@ test("dispatch inbox under the person's own token lists the Inbox page's own row
 
     // 2. The counts, read off the sidebar rather than summed here.
     //
-    // Today the rail carries `Needs you n` on the Inbox entry and the unread threads on a
-    // `Replies` entry of their own, and `needsYouCount` has no thread term at all
-    // (`features/sidebar/Sidebar.tsx`, `features/inbox/BlockedOnYou.tsx`): the Inbox entry's
-    // number is the command's `Needs you` alone. This base's command prints no `Unread threads`
-    // heading - that waits on `GET /api/v1/me/replies` taking a `kind`, which dispatch://INFRA-450
-    // adds - so the term is 0 here. Written as a branch so it still holds once that change folds
-    // the Replies entry into the Inbox count: with no Replies entry the two terms together are
-    // the Inbox entry's number, and with one the command's thread term is that entry's own.
+    // The rail carries one number for the Inbox and no `Replies` entry at all
+    // (`features/sidebar/Sidebar.tsx`, `features/inbox/useInboxCount.ts`): the work waiting on
+    // the reader plus the threads they have not caught up with, which is the command's
+    // `Needs you` and `Unread threads` together. The seed leaves two threads unread, so the
+    // thread term is load-bearing rather than a zero that would pass either way.
     const needsYou = section(sections, "Needs you").count;
-    const unreadThreads = sections.get("Unread threads")?.count;
+    const unreadThreads = section(sections, "Unread threads").count;
     const inboxEntry = await railCount(page, /^Inbox/);
-    const repliesEntry = await railCount(page, /^Replies/);
+    expect(await railCount(page, /^Replies/)).toBeUndefined();
     expect(needsYou).toBe(section(sections, "Needs you").rows.length + printedRequests.count);
-    if (repliesEntry === undefined) {
-      expect(needsYou + (unreadThreads ?? 0)).toBe(inboxEntry);
-    } else {
-      expect(needsYou).toBe(inboxEntry);
-      // The seed leaves a thread unread, which is the case the spec's single sum got wrong.
-      expect(repliesEntry).toBe((await listMyReplies({}, { login: "alice" })).total);
-      expect(repliesEntry).toBeGreaterThan(0);
-      if (unreadThreads !== undefined) expect(unreadThreads).toBe(repliesEntry);
-    }
+    expect(unreadThreads).toBeGreaterThan(0);
+    expect(unreadThreads).toBe(
+      (await listMyReplies({ kind: ["reply", "agent"] }, { login: "alice" })).total
+    );
+    expect(needsYou + unreadThreads).toBe(inboxEntry);
 
     // 3. An answer the agent makes with the token is the person's answer, with the agent beside
     // it. The reading column keeps a question the reader had begun answering when it is answered
@@ -448,6 +499,82 @@ test("dispatch inbox under the person's own token lists the Inbox page's own row
     expect(approvedNow.status, await approvedNow.text()).toBe(200);
     await page.goto(`/issues/${seeded.gateIssue}`);
     await expect(page.getByRole("button", { name: "Approved v1" })).toBeVisible();
+  } finally {
+    await alice.close();
+    rmSync(home, { force: true, recursive: true });
+  }
+});
+
+test("dispatch inbox lists the reader's unread threads, the page's own thread rows: the thread an agent wrote in and the message a session answered, each with its owner, its replier and its age", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the command runs outside the browser");
+  // A cold `bun` start for the command, a seeded workspace and a page of its own.
+  test.setTimeout(240_000);
+  await seedInbox();
+  const home = mkdtempSync(join(tmpdir(), "dispatch-inbox-cli-threads-"));
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    // The reading column's width, for the reason the row above pins it.
+    await page.setViewportSize({ height: 900, width: READING_PANE_WIDTH });
+
+    // The reader's own token, as the agent acting for her presents it; the row above mints one
+    // on the Settings page, which is where a person makes theirs.
+    const token = await mintAgentToken("Thread reader", "alice");
+    const inbox = await runDispatch(["inbox"], home, token);
+    expect(inbox.code, `${inbox.stdout}${inbox.stderr}`).toBe(0);
+    const printed = section(printedSections(inbox.stdout), "Unread threads");
+    // The heading's number is the lines under it, as every other band's is.
+    expect(printed.count).toBe(printed.rows.length);
+
+    // The threads the server answers this reader, and no others: the comment thread of hers an
+    // agent has written in, and the message she sent a session that it answered.
+    const listed = await listMyReplies({ kind: ["reply", "agent"] }, { login: "alice" });
+    expect(listed.total).toBe(2);
+    expect(printedThreads(printed)).toEqual(listed.rows.map((row) => row.ref).sort());
+
+    // And the same two on the page, which lists a thread row beside the asks under the id the
+    // server's row is named by. Polled, because the page reads its threads of its own accord.
+    const threadRows = listed.rows
+      .map((row) => `${row.kind === "agent" ? "agent" : "reply"}:${row.thread_id}`)
+      .sort();
+    await page.goto("/");
+    await expect
+      .poll(async () => (await listedRows(page)).filter(isThreadRow).sort())
+      .toEqual(threadRows);
+    expect(printed.rows).toHaveLength(threadRows.length);
+
+    const replyRow = listed.rows.find((row) => row.kind !== "agent");
+    if (replyRow === undefined) throw new Error("the server answered this reader no Reply row");
+    const agentRow = listed.rows.find((row) => row.kind === "agent");
+    if (agentRow === undefined) throw new Error("the server answered this reader no Agent row");
+
+    // The Reply row is named by the issue its thread sits on and carries the head of the line
+    // she opened it with; its author is the agent that wrote the newest reply, not her.
+    expect(threadFields(printed, replyRow.ref)).toEqual([
+      replyRow.issue?.key,
+      "comment",
+      replyRow.subject,
+      `session ${asker.actor.id}`,
+      expect.stringMatching(relativeAge),
+      replyRow.ref,
+    ]);
+
+    // The Agent row sits on no issue and in no document, so it is named by the session, under
+    // the name the page knows it by.
+    expect(threadFields(printed, agentRow.ref)).toEqual([
+      worker.title,
+      "agent",
+      agentRow.subject,
+      `session ${worker.session_id}`,
+      expect.stringMatching(relativeAge),
+      agentRow.ref,
+    ]);
+
+    // What the call tells its host it listed.
+    expect(callDetails(home)).toMatchObject({ unread_threads: printed.count });
   } finally {
     await alice.close();
     rmSync(home, { force: true, recursive: true });
