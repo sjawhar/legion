@@ -1,0 +1,1257 @@
+//go:build e2e
+
+// The live proof of what a provider error does to a worker's task (dispatch://INFRA-956 R2) and
+// of the operator's hand on the claims it leaves (R3), driven against real Oh My Pi panes under
+// the real daemon. scripts/e2e/provider-error-retry.sh builds this driver with `-tags e2e` and
+// owns the nats-server and the PostgreSQL it runs against.
+//
+// The daemon is the whole daemon: run, the function `legion start` calls, through this package's
+// own whole-daemon harness (startDaemonWithin) over the live-proof fixture (live_proof_test.go),
+// so the proof exercises the real configuration, the real store and its migrations, the real HTTP
+// API, the real claim supervision and its worker stream, and the real workflow. Each worker is a
+// real `omp --mode rpc` under the real `legion worker-shim`, started by localruntime_live_test.go
+// — this pod carries no tmux, so the pane is a child process group instead of a window — with this
+// checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` installed into an Oh My Pi profile of the
+// run's own. The agents register, report ready, take their tasks and report their turn outcomes
+// over the daemon's own routes and stream, as they do in production.
+//
+// What stands in is the model endpoint and nothing else. Three HTTP stand-ins of the test's own
+// answer the panes' provider requests:
+//
+//   - overloaded: every request 529, with `retry-after: 3600`. The header is over the Oh My Pi
+//     client's `maxRetryDelayMs` cap (60 s), which declines the retry and surfaces the original
+//     status untouched (@oh-my-pi/pi-ai src/providers/anthropic-client.ts), so one send is one
+//     request. Without it, the pane retries the same request eleven times over about fifty
+//     seconds whatever `retry.enabled` and `retry.maxRetries` say, which would hide the ladder's
+//     own gaps inside the host's.
+//   - filtered: an OpenAI chat completion that streams text and then ends `finish_reason:
+//     content_filter`, which Oh My Pi reports as the turn error `Provider finish_reason:
+//     content_filter` with no HTTP status and `retryable: false`. The role's chain names one
+//     model, so no fallback is left and the plugin reports the turn `refused`.
+//   - malformed: every request 400 with an `invalid_request_error` body, which Oh My Pi reports
+//     `retryable: false` with status 400 — neither retryable nor 429 or 5xx — and the plugin
+//     reports `provider-error`.
+//
+// Each pane's Oh My Pi overlay sets `retry.enabled: false` (PI_CONFIG_FILES, the key an operator's
+// `runtime.tmux.pi_config_files` carries), so the host walks no fallback chain of its own and
+// every failed turn reaches the daemon.
+//
+// How long it takes. The ladder's first three gaps are waited out where they are real: 30 s, 60 s
+// and 120 s of wall clock, measured between the daemon's sends. The fourth and fifth steps, 240 s
+// and 480 s, are driven on the daemon's own clock (ladderClock, which shortens exactly those two
+// durations and no others), because waiting them out would add twelve minutes and measure the same
+// ladder twice. With the pod's Oh My Pi the whole driver runs in about eight minutes, inside the
+// twenty-minute bound scripts/e2e/lib/live-daemon-proof.sh gives it.
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/stream"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testbin"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+)
+
+// liveOmpPathEnv names the Oh My Pi every pane of this proof runs. It is the pod's own build,
+// which is the fleet's pin rather than this branch's fetch, so the proof prints which build it
+// ran. Unset, the driver skips rather than guess one, as the script refuses to start without it.
+const liveOmpPathEnv = "LEGION_OMP_PATH"
+
+// The three model stand-ins, by the provider name each is given in the run's models.yml.
+const (
+	overloadedProvider = "overloaded"
+	filteredProvider   = "filtered"
+	malformedProvider  = "malformed"
+)
+
+// ladderSends is how many times the daemon sends the ladder's task: the first send and five
+// re-sends, so the sixth turn's error is the one that reaches providerErrorRunTold and tells the
+// controller.
+const ladderSends = 6
+
+// ladderDelays are the waits the ladder arms before each re-send, in order (supervise's
+// promptRetryDelay from attempt 1).
+var ladderDelays = []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute}
+
+// ladderDriven are the two ladder waits the proof drives on the daemon's clock rather than waits
+// out, each shortened to the same short span.
+var ladderDriven = map[time.Duration]time.Duration{4 * time.Minute: 2 * time.Second, 8 * time.Minute: 2 * time.Second}
+
+// ladderTolerance is how much longer than its armed wait a send-to-send gap may be: the turn whose
+// error armed the wait runs inside the gap, and so does the agent's own start of the next one.
+const ladderTolerance = 45 * time.Second
+
+// providerErroredMessage is the daemon's own line for a turn that ended in a provider error
+// (supervise's providerErrored), the record a step reads the reported fields off.
+const providerErroredMessage = "supervise: the turn this task's prompt ran ended in a provider error; the task is kept and sent again"
+
+// paneReady is how long a real pane is given to start Oh My Pi, load the two plugins, register and
+// report ready.
+const paneReady = 3 * time.Minute
+
+// providerErrorLive is one run of the proof: the booted daemon, the local runtime that started
+// each pane, the daemon's own log as this driver reads it back, and the three issues it drives.
+type providerErrorLive struct {
+	liveProof
+	rt     *localRuntime
+	built  *built
+	clock  *ladderClock
+	daemon *recordingLog
+	legion string
+	omp    string
+	// ladder, refused and failing are the three issues, each in the phase its one worker works.
+	ladder, refused, failing string
+	// stands is each stand-in by its provider name.
+	stands map[string]*modelStandin
+	// ladderTask is the task step 1 gave the planner, which the ladder keeps on the claim and the
+	// operator's retry in step 5 sends to the fresh session.
+	ladderTask string
+}
+
+// TestAProviderErrorKeepsTheTaskAndTheOperatorRetriesWhatItLeavesLive drives the five steps in the
+// order each one's state follows from the last: the ladder a 529 walks, the controller's notice at
+// the sixth turn, a refusal the plugin reports, an error that cannot clear, and the operator's
+// commands over the claims the first and the fourth leave.
+func TestAProviderErrorKeepsTheTaskAndTheOperatorRetriesWhatItLeavesLive(t *testing.T) {
+	fixtureenv.Live(t)
+	r := newProviderErrorLive(t)
+	r.step("step1-a-529-keeps-the-task-and-walks-the-30-60-120-ladder", r.ladderWalks)
+	r.step("step2-the-sixth-turn-in-a-row-tells-the-controller", r.controllerIsTold)
+	r.step("step3-a-content-filter-is-reported-refused-and-the-task-goes-again", r.refusalGoesAgain)
+	r.step("step4-an-error-that-cannot-clear-fails-the-claim-and-holds-the-issue", r.cannotClearFails)
+	r.step("step5-the-operator-stops-retries-and-reads-the-claims", r.operatorDrivesTheClaims)
+}
+
+// newProviderErrorLive readies everything a pane needs before the daemon boots: the `legion`
+// binary and the two plugins built from this checkout, an Oh My Pi profile of the run's own routed
+// to the three stand-ins, the three issues seeded with their phase worker mid-launch, and the
+// daemon booted over the local runtime.
+func newProviderErrorLive(t *testing.T) *providerErrorLive {
+	t.Helper()
+	omp := os.Getenv(liveOmpPathEnv)
+	if omp == "" {
+		t.Skipf("%s is unset, so there is no Oh My Pi for a pane to run; scripts/e2e/provider-error-retry.sh requires it", liveOmpPathEnv)
+	}
+	takeOwnDatabase(t)
+	proof := newLiveProof(t, "scripts/e2e/provider-error-retry.sh")
+	r := &providerErrorLive{
+		liveProof: proof, built: &built{}, clock: newLadderClock(ladderDriven), omp: omp,
+		ladder: proof.cfg.Project + "-1", refused: proof.cfg.Project + "-2", failing: proof.cfg.Project + "-3",
+		stands: map[string]*modelStandin{},
+	}
+	version, err := exec.Command(omp, "--version").Output()
+	if err != nil {
+		t.Fatalf("read the Oh My Pi version of %s: %v", omp, err)
+	}
+	r.note("Oh My Pi %s at %s (the pod's build, which is the fleet's pin and not this branch's fetch)",
+		strings.TrimSpace(string(version)), omp)
+
+	root := proofCheckoutRoot(t)
+	work := t.TempDir()
+	r.legion = buildProofLegion(t, root, work)
+	home := filepath.Join(work, "omp-home")
+	profile := "legion-provider-error-" + strings.ToLower(r.cfg.Project)
+	installProofPlugins(t, root, work, home, profile, omp)
+	for _, name := range []string{overloadedProvider, filteredProvider, malformedProvider} {
+		r.stands[name] = newModelStandin(t, name)
+	}
+	r.writeOmpProfile(home, profile)
+	overlays := r.writeOverlays(work)
+
+	r.rt = newLocalRuntime(t, r.cfg.StateDir, r.legion, omp, home, profile)
+	r.rt.daemonURL, r.rt.envoyURL, r.rt.natsURLs = r.cfg.DaemonURL, newPaneListener(t), r.cfg.NatsURLs
+	r.rt.overlays = func(token claim.Token) []string { return overlays[token] }
+
+	r.seed()
+	r.daemon = newRecordingLog(r.log())
+	r.d = startDaemonWithin(t, r.cfg, r.overrides(), slog.New(r.daemon), 60*time.Second)
+	r.registerController()
+	return r
+}
+
+// registerController registers a controller session for the project. The daemon tells a
+// controller nothing while none is registered (admit's wakeController), and the notice a run of
+// provider errors earns is the one thing step 2 reads, so a session is registered here as `legion
+// controller start` registers the operator's own (ControllerLaunchOperator). No controller process
+// runs: the proof reads what the daemon published to the listener for it, never what an agent did
+// with it.
+func (r *providerErrorLive) registerController() {
+	t := r.t
+	t.Helper()
+	status, body := r.d.request(http.MethodPost, "/legion/v1/controller/secret",
+		api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion}, true)
+	if status != http.StatusOK {
+		t.Fatalf("the controller's boot secret = %d %s, want 200", status, body)
+	}
+	var capability api.ControllerSecretResponse
+	if err := json.Unmarshal(body, &capability); err != nil {
+		t.Fatalf("decode the controller's boot secret %s: %v", body, err)
+	}
+	session := "ses_controller_" + randomSuffix(t)
+	if status, body := r.d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: capability.Secret, SessionID: session, OmpSessionFile: "/sessions/" + session + ".jsonl",
+		AgentID: session, PluginContract: api.DaemonAPIVersion,
+	}, false); status != http.StatusOK {
+		t.Fatalf("register the controller = %d %s, want 200", status, body)
+	}
+	r.note("the project's controller is registered as %s, so a notice for it is published rather than dropped", session)
+}
+
+// overrides is the daemon this proof boots: the local runtime over the real worker stream, the
+// ladder's clock, the API listener the fixture holds, and the workflow's App tokens stood in for.
+func (r *providerErrorLive) overrides() overrides {
+	return overrides{
+		runtime: func(_ context.Context, listener *stream.Listener, address string, _ appauth.Tokens,
+			_ func(context.Context, string) (ghrepo.Repository, string, error), _ *store.Store, _ func() []ghrepo.Repository) (runtime.Runtime, error) {
+			r.built.mu.Lock()
+			defer r.built.mu.Unlock()
+			r.built.conns, r.built.address = listener, address
+			r.rt.conns, r.rt.stream = listener, address
+			return r.rt, nil
+		},
+		clock:          r.clock,
+		listen:         heldListen,
+		workflowTokens: &workflowTokenRecorder{},
+	}
+}
+
+// seed records the three issues as the daemon would hold them at the moment each one's worker
+// began: a root handed to Legion, in the phase its worker works, holding its tree's admission slot
+// with its lifecycle open, and that worker's claim mid-launch, which this boot relaunches. That
+// last one is how the proof reaches three live panes without an operator's spawn.
+func (r *providerErrorLive) seed() {
+	t := r.t
+	t.Helper()
+	ctx := context.Background()
+	for _, seeded := range r.issues() {
+		r.board.show(seeded.key, "in_progress")
+	}
+	if err := r.st.Tx(ctx, func(tx pgx.Tx) error {
+		for _, seeded := range r.issues() {
+			if err := r.records.PutIssue(ctx, tx, record.Issue{
+				Key: seeded.key, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: seeded.key,
+				Project: r.cfg.Project, Title: seeded.title, Phase: seeded.phase, Generation: 1, Status: "in_progress",
+				DispatchStatus: "in_progress", Rank: "U", LastDispatchSeq: 1, HandedOver: true,
+			}); err != nil {
+				return err
+			}
+		}
+		return r.admit(ctx, tx, r.ladder, r.refused, r.failing)
+	}); err != nil {
+		t.Fatalf("seed the issues: %v", err)
+	}
+	for _, seeded := range r.issues() {
+		if _, err := r.st.OpenTreeLifecycle(ctx, r.project, seeded.key, treelifecycle.AuthorityWorkflow); err != nil {
+			t.Fatalf("open the lifecycle of %s: %v", seeded.key, err)
+		}
+		token := r.token(seeded.key, seeded.role)
+		if _, err := r.st.AdmitClaim(ctx, supervise.Claim{
+			Token: token, Project: r.project, Tree: seeded.key, Issue: seeded.key, Role: seeded.role,
+			Generation: 1, State: supervise.StateLaunching,
+			BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)), ServingGeneration: 1,
+		}); err != nil {
+			t.Fatalf("record the unfinished launch of %s: %v", token, err)
+		}
+		writePrompt(t, r.cfg, token)
+	}
+	r.note("seeded %s (%s, %s), %s (%s, %s) and %s (%s, %s), each with its worker mid-launch",
+		r.ladder, phase.Planning, overloadedProvider, r.refused, phase.Implementing, filteredProvider,
+		r.failing, phase.Testing, malformedProvider)
+}
+
+// seededIssue is one of the proof's three issues: its key, the phase it stands in, the role that
+// works that phase, and the stand-in that role's pane talks to.
+type seededIssue struct {
+	key      string
+	title    string
+	phase    phase.Phase
+	role     claim.Role
+	provider string
+}
+
+func (r *providerErrorLive) issues() []seededIssue {
+	return []seededIssue{
+		{r.ladder, "the issue whose provider is overloaded", phase.Planning, claim.RolePlanner, overloadedProvider},
+		{r.refused, "the issue whose turn a content filter refuses", phase.Implementing, claim.RoleImplementer, filteredProvider},
+		{r.failing, "the issue whose provider request is malformed", phase.Testing, claim.RoleTester, malformedProvider},
+	}
+}
+
+// token is the claim token of role on key, as the daemon spells it.
+func (r *providerErrorLive) token(key string, role claim.Role) claim.Token {
+	r.t.Helper()
+	token, err := claim.NewToken(r.project, key, role)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return token
+}
+
+// ---- the steps ---------------------------------------------------------------------------------
+
+// ladderWalks drives the first half of R2: the task a 529 takes back stays on the claim, goes to
+// the same session again after 30 s, 60 s and 120 s, and the claim neither fails nor loses it.
+func (r *providerErrorLive) ladderWalks() {
+	t := r.t
+	token := r.token(r.ladder, claim.RolePlanner)
+	r.awaitReady(token)
+	marker := "LADDER-" + randomSuffix(t)
+	task := "Say the word " + marker + " and nothing else."
+	r.ladderTask = task
+	status, body := r.d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/deliver",
+		api.DeliverRequest{Task: task}, true)
+	if status != http.StatusOK {
+		t.Fatalf("deliver the ladder's task = %d %s, want 200", status, body)
+	}
+	sent := []time.Time{time.Now()}
+	r.note("the daemon was given the task %q for %s", task, token)
+
+	for attempt := 1; attempt < ladderSends; attempt++ {
+		delay := ladderDelays[attempt-1]
+		within := delay + ladderTolerance
+		if driven, ok := ladderDriven[delay]; ok {
+			within = driven + ladderTolerance
+		}
+		r.awaitLog("the ladder's send "+strconv.Itoa(attempt+1), within+time.Minute, func(record loggedRecord) bool {
+			return record.Message == "supervise: the wait after a provider error is over; the task goes again" &&
+				record.at.After(sent[attempt-1])
+		})
+		armed := r.lastLog(func(record loggedRecord) bool {
+			return record.Message == "supervise: this provider error can clear; the task goes to the same session again after a wait" &&
+				record.Attrs["attempt"] == float64(attempt)
+		})
+		if armed == nil {
+			t.Fatalf("the daemon armed no wait for send %d of the ladder", attempt+1)
+		}
+		if wait, want := armed.Attrs["wait"], delay.String(); wait != want {
+			t.Fatalf("the ladder armed %v before send %d, want %s", wait, attempt+1, want)
+		}
+		now := time.Now()
+		gap := now.Sub(sent[attempt-1])
+		sent = append(sent, now)
+		if driven, ok := ladderDriven[delay]; ok {
+			r.note("send %d came %s after send %d; its %s wait was driven on the daemon's clock to %s",
+				attempt+1, gap.Round(time.Second), attempt, delay, driven)
+			continue
+		}
+		if gap < delay || gap > delay+ladderTolerance {
+			t.Fatalf("send %d of the ladder came %s after send %d, want between %s and %s",
+				attempt+1, gap.Round(time.Second), attempt, delay, delay+ladderTolerance)
+		}
+		r.note("send %d came %s after send %d, and the daemon had armed %s (cause %q)",
+			attempt+1, gap.Round(time.Second), attempt, delay, armed.Attrs["cause"])
+	}
+
+	errors := r.logs(func(record loggedRecord) bool {
+		return record.Message == providerErroredMessage &&
+			record.Attrs["httpStatus"] == float64(529)
+	})
+	if len(errors) < ladderSends-1 {
+		t.Fatalf("the daemon read %d turns ending in a 529, want at least %d", len(errors), ladderSends-1)
+	}
+	r.note("every turn ended in a 529 the pane reported retryable=%v on model %v",
+		errors[0].Attrs["retryable"], errors[0].Attrs["model"])
+
+	held := r.claim(token)
+	if held.Pending == nil || held.Pending.Task != task {
+		t.Fatalf("%s holds pending %+v, want the task it was given", token, held.Pending)
+	}
+	if held.State == string(supervise.StateFailed) {
+		t.Fatalf("%s failed while the ladder ran: %+v", token, held)
+	}
+	if issue := r.issue(r.ladder); issue.Phase == phase.Held {
+		t.Fatalf("%s was held while the ladder ran: %+v", r.ladder, issue)
+	}
+	r.note("%s is %s, still holding its task (%d re-sends counted on the delivery), and %s is %s",
+		token, held.State, ladderSends-1, r.ladder, r.issue(r.ladder).Phase)
+	if got := r.stands[overloadedProvider].requestsHolding(marker); got < ladderSends {
+		t.Fatalf("the overloaded stand-in was asked %d times for a request carrying the task, want %d", got, ladderSends)
+	}
+	r.note("the overloaded stand-in answered 529 to %d requests, %d of them carrying the task itself",
+		r.stands[overloadedProvider].count(), r.stands[overloadedProvider].requestsHolding(marker))
+}
+
+// controllerIsTold reads the one notice the run of provider errors earns: at the sixth turn in a
+// row, the project's controller is told, once, and nothing is held.
+func (r *providerErrorLive) controllerIsTold() {
+	t := r.t
+	topic := notify.ControllerTopic(r.project)
+	var told []listenerPublish
+	r.await("the controller's notice of a run of provider errors", 3*time.Minute, func() bool {
+		told = nil
+		for _, published := range r.notices.acceptedOn(topic) {
+			var payload struct {
+				Kind   string `json:"kind"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal([]byte(published.Payload), &payload); err != nil {
+				t.Fatalf("decode the controller notice %q: %v", published.Payload, err)
+			}
+			if payload.Kind == string(record.ProviderErrorsNotice) {
+				published.Payload = payload.Reason
+				told = append(told, published)
+			}
+		}
+		return len(told) == 1
+	})
+	r.note("the controller was told once on %s: %q", topic, told[0].Payload)
+	if !strings.Contains(told[0].Payload, strconv.Itoa(ladderSends)+" turns in a row") {
+		t.Fatalf("the controller's notice does not name the run of %d turns: %q", ladderSends, told[0].Payload)
+	}
+	if issue := r.issue(r.ladder); issue.Phase == phase.Held {
+		t.Fatalf("%s was held by the run of provider errors: %+v", r.ladder, issue)
+	}
+	r.note("%s is still %s: the notice is the one exit from a run, and no attempt limit holds the issue",
+		r.ladder, r.issue(r.ladder).Phase)
+}
+
+// refusalGoesAgain drives the second half of R2: a content filter the plugin reports `refused`
+// clears, so the task goes to the same session again after 30 s and nobody is told to hold the
+// issue.
+func (r *providerErrorLive) refusalGoesAgain() {
+	t := r.t
+	token := r.token(r.refused, claim.RoleImplementer)
+	r.awaitReady(token)
+	marker := "FILTERED-" + randomSuffix(t)
+	task := "Say the word " + marker + " and nothing else."
+	// The log is marked before the task is given: the daemon errors and decides inside a few
+	// milliseconds of each other, so a mark taken after the first record would miss the decision
+	// that belongs to it and read the ladder's next step instead.
+	from := r.daemon.count()
+	status, body := r.d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/deliver",
+		api.DeliverRequest{Task: task}, true)
+	if status != http.StatusOK {
+		t.Fatalf("deliver the refused task = %d %s, want 200", status, body)
+	}
+	sent := time.Now()
+	errored := r.awaitLogFrom("the turn a content filter ended", from, 4*time.Minute, func(record loggedRecord) bool {
+		return record.Message == providerErroredMessage &&
+			record.Attrs["claim"] == string(token)
+	})
+	// A refusal carries no HTTP status at all, which the daemon reads off the pane's report as
+	// zero; nothing of 429 or 5xx is there to settle it, so only the plugin's `refused` can.
+	if errored.Attrs["retryable"] != false || errored.Attrs["httpStatus"] != float64(0) {
+		t.Fatalf("the refused turn was reported retryable=%v httpStatus=%v, want a plain refusal",
+			errored.Attrs["retryable"], errored.Attrs["httpStatus"])
+	}
+	armed := r.awaitLogFrom("the refusal's wait", from, time.Minute, func(record loggedRecord) bool {
+		return record.Message == "supervise: this provider error can clear; the task goes to the same session again after a wait" &&
+			record.Attrs["claim"] == string(token)
+	})
+	if armed.Attrs["wait"] != ladderDelays[0].String() {
+		t.Fatalf("the refusal armed %v, want %s", armed.Attrs["wait"], ladderDelays[0])
+	}
+	// The cause names no filter category: an OpenAI `finish_reason: content_filter` carries none,
+	// and the daemon builds the cause from structured fields alone, never from a provider's text.
+	cause, _ := armed.Attrs["cause"].(string)
+	if cause != "a provider error" {
+		t.Fatalf("the refusal's cause is %q, want the words a refusal with no category and no status gives", cause)
+	}
+	r.note("the plugin reported the turn refused (retryable=false, no HTTP status) and the daemon armed %v: %q",
+		armed.Attrs["wait"], cause)
+
+	r.awaitLogFrom("the refused task sent again", from, ladderDelays[0]+ladderTolerance+time.Minute, func(record loggedRecord) bool {
+		return record.Message == "supervise: the wait after a provider error is over; the task goes again" &&
+			record.Attrs["claim"] == string(token)
+	})
+	gap := time.Since(sent)
+	if gap < ladderDelays[0] {
+		t.Fatalf("the refused task went again %s after it was first sent, want at least %s", gap.Round(time.Second), ladderDelays[0])
+	}
+	outcome := r.turnOutcome(token)
+	if outcome != claim.TurnRefused {
+		t.Fatalf("the newest turn-outcome report of %s says %q, want %q", token, outcome, claim.TurnRefused)
+	}
+	held := r.claim(token)
+	if held.Pending == nil || held.Pending.Task != task {
+		t.Fatalf("%s holds pending %+v, want the task it was given", token, held.Pending)
+	}
+	issue := r.issue(r.refused)
+	if issue.Phase != phase.Implementing {
+		t.Fatalf("%s is %s, want it still implementing and held for nobody", r.refused, issue.Phase)
+	}
+	if notices := r.architectNotices(r.refused, "held"); len(notices) != 0 {
+		t.Fatalf("%s's architect was told %d held notices, want none", r.refused, len(notices))
+	}
+	r.note("the task went again %s after the first send, %s still holds it, %s is %s and its architect was told nothing",
+		gap.Round(time.Second), token, r.refused, issue.Phase)
+}
+
+// cannotClearFails drives the last of R2: an error the plugin reports `provider-error` that
+// carries neither a retryable mark nor a 429 or 5xx fails the claim, and the workflow holds the
+// issue for its architect.
+func (r *providerErrorLive) cannotClearFails() {
+	t := r.t
+	token := r.token(r.failing, claim.RoleTester)
+	r.awaitReady(token)
+	marker := "MALFORMED-" + randomSuffix(t)
+	task := "Say the word " + marker + " and nothing else."
+	from := r.daemon.count()
+	status, body := r.d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/deliver",
+		api.DeliverRequest{Task: task}, true)
+	if status != http.StatusOK {
+		t.Fatalf("deliver the malformed task = %d %s, want 200", status, body)
+	}
+	errored := r.awaitLogFrom("the turn a malformed request ended", from, 4*time.Minute, func(record loggedRecord) bool {
+		return record.Message == providerErroredMessage &&
+			record.Attrs["claim"] == string(token)
+	})
+	if errored.Attrs["retryable"] != false || errored.Attrs["httpStatus"] != float64(400) {
+		t.Fatalf("the malformed turn was reported retryable=%v httpStatus=%v, want retryable=false and 400",
+			errored.Attrs["retryable"], errored.Attrs["httpStatus"])
+	}
+	var failed api.OperatorClaim
+	r.await("the claim to fail", 4*time.Minute, func() bool {
+		failed = r.claim(token)
+		return failed.State == string(supervise.StateFailed)
+	})
+	if outcome := r.turnOutcome(token); outcome != claim.TurnProviderError {
+		t.Fatalf("the newest turn-outcome report of %s says %q, want %q", token, outcome, claim.TurnProviderError)
+	}
+	r.note("the plugin reported provider-error with HTTP 400 and retryable=false, and %s is %s", token, failed.State)
+	var issue api.Issue
+	r.await(r.failing+" to be held for its architect", 2*time.Minute, func() bool {
+		issue = r.issue(r.failing)
+		return issue.Phase == phase.Held
+	})
+	notices := r.waitArchitectNotices(r.failing, "held", 1)
+	r.note("%s is %s and its architect was told once: %q", r.failing, issue.Phase, notices[0].Message)
+}
+
+// operatorDrivesTheClaims drives R3 with the `legion` binary this checkout built: the stop of a
+// phase worker that is still working, its retry in a fresh session, and the same retry of the
+// claim the malformed provider failed.
+func (r *providerErrorLive) operatorDrivesTheClaims() {
+	t := r.t
+	planner := r.token(r.ladder, claim.RolePlanner)
+	before := r.claim(planner)
+	r.note("`legion claims stop` on %s, which is %s in session %s", planner, before.State, before.Session)
+	r.note("%s", r.legionClaims("stop", "--claim", string(planner)))
+	r.await(string(planner)+" to retire", 2*time.Minute, func() bool {
+		return r.claim(planner).State == string(supervise.StateRetired)
+	})
+	r.note("`legion claims list` now reads:\n%s", indentOutput(r.legionClaims("list")))
+
+	r.note("%s", r.legionClaims("retry", "--claim", string(planner), "--fresh-session"))
+	// The stopped planner still holds the task its ladder kept, so the fresh session is sent that
+	// task, and the restart's own phase task waits in the outbox behind it ("a delivery is already
+	// pending") until the kept one is retired. That is R2 and R3 together: a provider error takes
+	// the task away from nobody, and neither does a stop and a retry.
+	sent := r.awaitFreshSession(planner, before.Session)
+	if sent != r.ladderTask {
+		t.Fatalf("the planner's fresh session was sent %q, want the task its ladder kept, %q", sent, r.ladderTask)
+	}
+
+	failing := r.token(r.failing, claim.RoleTester)
+	stale := r.claim(failing)
+	r.note("`legion claims retry --fresh-session` on %s, which is %s in session %s", failing, stale.State, stale.Session)
+	r.note("%s", r.legionClaims("retry", "--claim", string(failing), "--fresh-session"))
+	r.awaitFreshSession(failing, stale.Session)
+	if issue := r.issue(r.failing); issue.Phase != phase.Testing {
+		t.Fatalf("%s is %s after its worker's retry, want it back in testing", r.failing, issue.Phase)
+	}
+	r.note("%s left its hold and is %s again", r.failing, r.issue(r.failing).Phase)
+	r.note("`legion claims list` at the end reads:\n%s", indentOutput(r.legionClaims("list")))
+}
+
+// awaitFreshSession waits until token runs in a session other than old, having been relaunched
+// with no recorded session to resume, and answers the task that new session was sent.
+func (r *providerErrorLive) awaitFreshSession(token claim.Token, old string) string {
+	t := r.t
+	t.Helper()
+	var now api.OperatorClaim
+	r.await(string(token)+" to run in a session of its own", paneReady, func() bool {
+		now = r.claim(token)
+		return now.Session != "" && now.Session != old &&
+			(now.State == string(supervise.StateReady) || now.State == string(supervise.StateIdle) ||
+				now.State == string(supervise.StateWorking))
+	})
+	launches := r.rt.LaunchesOf(token)
+	last := launches[len(launches)-1]
+	if last.ResumeSessionFile != "" {
+		t.Fatalf("the retry of %s resumed %s, and --fresh-session asked for a new session", token, last.ResumeSessionFile)
+	}
+	var sent string
+	r.await("the task "+string(token)+"'s new session was sent", 2*time.Minute, func() bool {
+		held := r.claim(token)
+		if held.Pending == nil {
+			return false
+		}
+		sent = held.Pending.Task
+		return sent != ""
+	})
+	r.note("%s was relaunched with no session to resume, registered %s (was %s), and that session was sent: %q",
+		token, now.Session, old, sent)
+	return sent
+}
+
+// ---- reads the steps make ------------------------------------------------------------------------
+
+// claim is token as the operator's claim listing shows it now.
+func (r *providerErrorLive) claim(token claim.Token) api.OperatorClaim {
+	r.t.Helper()
+	status, body := r.d.request(http.MethodGet, "/legion/v1/operator/claims", nil, true)
+	if status != http.StatusOK {
+		r.t.Fatalf("the operator's claim listing = %d %s", status, body)
+	}
+	var list api.OperatorClaims
+	if err := json.Unmarshal(body, &list); err != nil {
+		r.t.Fatalf("decode the claim listing %s: %v", body, err)
+	}
+	for _, held := range list.Claims {
+		if held.Token == token {
+			return held
+		}
+	}
+	r.t.Fatalf("the daemon holds no claim %s; it holds %d", token, len(list.Claims))
+	return api.OperatorClaim{}
+}
+
+// turnOutcome is the class of the newest turn-outcome report the claim's plugin sent. A report is
+// the machine's memory and no store row (supervise/turnoutcome.go says why), so the daemon's own
+// log line for the report it kept is where a step reads it.
+func (r *providerErrorLive) turnOutcome(token claim.Token) string {
+	r.t.Helper()
+	kept := r.lastLog(func(record loggedRecord) bool {
+		return record.Message == "supervise: the agent's plugin reported how a turn ended" &&
+			record.Attrs["claim"] == string(token) && record.Attrs["kept"] == true
+	})
+	if kept == nil {
+		r.t.Fatalf("the plugin of %s reported no turn outcome the daemon kept", token)
+	}
+	outcome, _ := kept.Attrs["outcome"].(string)
+	return outcome
+}
+
+// awaitReady waits for the claim's real pane to start Oh My Pi, register and report ready. A claim
+// that fails meanwhile ends the wait at once, naming the log the worker's own output is in: a pane
+// that cannot start is read from there and nowhere else.
+func (r *providerErrorLive) awaitReady(token claim.Token) {
+	r.t.Helper()
+	var held api.OperatorClaim
+	r.await(string(token)+"'s pane to register and report ready", paneReady, func() bool {
+		held = r.claim(token)
+		if held.State == string(supervise.StateFailed) {
+			r.t.Fatalf("%s failed before its pane reported ready; its workers' output is under %s",
+				token, r.rt.paneLogs)
+		}
+		return held.State == string(supervise.StateReady) || held.State == string(supervise.StateIdle)
+	})
+	r.note("%s is %s in session %s, plugin contract %d, process %s",
+		token, held.State, held.Session, held.PluginContract, held.Locator.Label())
+}
+
+// await polls until want holds, failing with what it waited for. testwait.Eventually bounds its
+// own wait at a minute, which is shorter than the ladder's own gaps.
+func (r *providerErrorLive) await(what string, within time.Duration, want func() bool) {
+	r.t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if want() {
+			return
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatalf("timed out after %s waiting for %s", within, what)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// awaitLog waits for the daemon to write a log record matching want, and answers the first one it
+// wrote after the wait began.
+func (r *providerErrorLive) awaitLog(what string, within time.Duration, want func(loggedRecord) bool) *loggedRecord {
+	r.t.Helper()
+	return r.awaitLogFrom(what, r.daemon.count(), within, want)
+}
+
+// awaitLogFrom is awaitLog from a mark the step took itself, before whatever it drove: the daemon
+// errors and decides inside milliseconds of each other, so a step that must read both takes one
+// mark ahead of the act rather than a mark per read.
+func (r *providerErrorLive) awaitLogFrom(what string, from int, within time.Duration, want func(loggedRecord) bool) *loggedRecord {
+	r.t.Helper()
+	var found *loggedRecord
+	r.await(what, within, func() bool {
+		found = r.daemon.firstAfter(from, want)
+		return found != nil
+	})
+	return found
+}
+
+// logs is every record the daemon has written that matches want, oldest first.
+func (r *providerErrorLive) logs(want func(loggedRecord) bool) []loggedRecord {
+	return r.daemon.matching(want)
+}
+
+// lastLog is the newest record matching want, and nil when there is none.
+func (r *providerErrorLive) lastLog(want func(loggedRecord) bool) *loggedRecord {
+	matched := r.daemon.matching(want)
+	if len(matched) == 0 {
+		return nil
+	}
+	return &matched[len(matched)-1]
+}
+
+// legionClaims runs `legion claims <args>` — the binary this checkout built — against the booted
+// daemon, and answers its output. A non-zero exit fails the step with both streams.
+func (r *providerErrorLive) legionClaims(args ...string) string {
+	r.t.Helper()
+	full := append([]string{"claims", args[0], "--port", strconv.Itoa(r.cfg.Port),
+		"--operator-token-file", r.cfg.OperatorTokenFile}, args[1:]...)
+	cmd := exec.Command(r.legion, full...)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + r.t.TempDir()}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		r.t.Fatalf("legion %s: %v\n%s", strings.Join(full, " "), err, out)
+	}
+	return strings.TrimRight(string(out), "\n")
+}
+
+// indent puts each line of a command's output under a step's own note.
+func indentOutput(text string) string {
+	return "   " + strings.ReplaceAll(text, "\n", "\n   ")
+}
+
+// ---- what the run builds before the daemon boots -------------------------------------------------
+
+// takeOwnDatabase points LEGION_TEST_PG_DSN at a database this run makes for itself on the server
+// that variable names, so the fixture migrates into a database of its own rather than into the one
+// the DSN names. The daemon's live proofs share the named database on a CI service, whose role
+// owns it; in a Legion worker pod the server's `legion_test` role may create databases and may not
+// write the `public` schema of `postgres`, which a migration answers `permission denied for schema
+// public` (SQLSTATE 42501). The database is dropped at the end of the run; that role also cannot
+// terminate another backend, so a drop a connection outlives is reported and not a failure, and the
+// database goes with the pod.
+func takeOwnDatabase(t *testing.T) {
+	t.Helper()
+	named := os.Getenv("LEGION_TEST_PG_DSN")
+	if named == "" {
+		return // newLiveProof's own testDSN skips the test, naming the variable.
+	}
+	ctx := context.Background()
+	server, err := pgx.Connect(ctx, named)
+	if err != nil {
+		t.Fatalf("connect the PostgreSQL LEGION_TEST_PG_DSN names: %v", err)
+	}
+	database := "legion_provider_error_" + strings.ToLower(randomSuffix(t))
+	if _, err := server.Exec(ctx, "create database "+database); err != nil {
+		server.Close(ctx)
+		t.Fatalf("make this run's own database %s: %v", database, err)
+	}
+	if err := server.Close(ctx); err != nil {
+		t.Fatalf("close the connection the database was made on: %v", err)
+	}
+	own, err := url.Parse(named)
+	if err != nil {
+		t.Fatalf("read LEGION_TEST_PG_DSN as a URL: %v", err)
+	}
+	own.Path = "/" + database
+	t.Setenv("LEGION_TEST_PG_DSN", own.String())
+	fmt.Printf("   this run migrates into its own database %s on the server LEGION_TEST_PG_DSN names\n", database)
+	t.Cleanup(func() {
+		drop, err := pgx.Connect(context.Background(), named)
+		if err != nil {
+			t.Logf("the run's own database %s was left behind: %v", database, err)
+			return
+		}
+		defer drop.Close(context.Background())
+		if _, err := drop.Exec(context.Background(), "drop database "+database); err != nil {
+			t.Logf("the run's own database %s was left behind: %v", database, err)
+		}
+	})
+}
+
+// proofCheckoutRoot is the repository this driver was built from, found from this file's own
+// compiled path: the driver runs from a temporary directory, so nothing about its working
+// directory names the checkout.
+func proofCheckoutRoot(t *testing.T) string {
+	t.Helper()
+	_, source, _, ok := goruntime.Caller(0)
+	if !ok {
+		t.Fatal("locate this driver's source")
+	}
+	root, err := filepath.Abs(filepath.Join(filepath.Dir(source), "..", "..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "go.work")); err != nil {
+		t.Fatalf("%s is not the checkout root: %v", root, err)
+	}
+	return root
+}
+
+// buildLegion builds the `legion` every pane's shim and every operator command in this proof is,
+// from this checkout.
+func buildProofLegion(t *testing.T, root, work string) string {
+	t.Helper()
+	binary := filepath.Join(work, "legion")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/legion")
+	build.Dir = filepath.Join(root, "packages", "daemon")
+	build.Env = append(os.Environ(), "GOFLAGS=")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build legion from %s: %v\n%s", build.Dir, err, out)
+	}
+	return binary
+}
+
+// installPlugins packs this checkout's two Oh My Pi plugins as the release packs them
+// (scripts/e2e/lib/pack-plugin.sh) and installs each into the run's own profile under its own
+// HOME, as scripts/e2e/lib/install-plugin-profile.sh does for a stage proof — through the Oh My Pi
+// this proof's panes run rather than a mise pin, since a pod has no mise. The profile's natives are
+// linked from the shared cache, so no pane downloads a native module.
+func installProofPlugins(t *testing.T, root, work, home, profile, omp string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".omp"), 0o700); err != nil {
+		t.Fatalf("make the run's Oh My Pi home %s: %v", home, err)
+	}
+	testbin.OMPHome(t, omp, home)
+	for _, pkg := range []string{"pi-envoy", "pi-legion"} {
+		packed := filepath.Join(work, "pack-"+pkg)
+		pack := exec.Command("bash", filepath.Join(root, "scripts", "e2e", "lib", "pack-plugin.sh"), pkg, packed)
+		pack.Dir = root
+		tarball, err := pack.Output()
+		if err != nil {
+			t.Fatalf("pack %s: %v", pkg, err)
+		}
+		dest := filepath.Join(work, pkg)
+		if err := os.MkdirAll(dest, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		unpack := exec.Command("tar", "xzf", strings.TrimSpace(string(tarball)), "-C", dest, "--strip-components=1")
+		if out, err := unpack.CombinedOutput(); err != nil {
+			t.Fatalf("unpack %s: %v\n%s", pkg, err, out)
+		}
+		install := exec.Command(omp, "plugin", "install", dest)
+		install.Dir = dest
+		install.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "OMP_PROFILE=" + profile}
+		if out, err := install.CombinedOutput(); err != nil {
+			t.Fatalf("install %s into the profile %s: %v\n%s", pkg, profile, err, out)
+		}
+	}
+	list := exec.Command(omp, "plugin", "list", "--json")
+	list.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "OMP_PROFILE=" + profile}
+	out, err := list.Output()
+	if err != nil {
+		t.Fatalf("read the profile's plugins: %v", err)
+	}
+	var listing struct {
+		NPM []struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+			Enabled bool   `json:"enabled"`
+		} `json:"npm"`
+	}
+	if err := json.Unmarshal(out, &listing); err != nil {
+		t.Fatalf("decode the plugin listing %s: %v", out, err)
+	}
+	var installed []string
+	for _, plugin := range listing.NPM {
+		if plugin.Enabled {
+			installed = append(installed, plugin.Name+"@"+plugin.Version)
+		}
+	}
+	if len(installed) != 2 {
+		t.Fatalf("the profile %s has %v enabled, want this checkout's pi-envoy and pi-legion", profile, installed)
+	}
+	fmt.Printf("   plugins %s in Oh My Pi profile %s under %s\n", strings.Join(installed, " and "), profile, home)
+}
+
+// writeOmpProfile writes the profile every pane shares: the three stand-in providers, the models
+// they serve, and the settings a pane needs to run unattended. The model each role uses is its own
+// overlay's (writeOverlays).
+func (r *providerErrorLive) writeOmpProfile(home, profile string) {
+	t := r.t
+	t.Helper()
+	agent := filepath.Join(home, ".omp", "profiles", profile, "agent")
+	if err := os.MkdirAll(agent, 0o700); err != nil {
+		t.Fatalf("make the profile's agent directory %s: %v", agent, err)
+	}
+	var models, enabled strings.Builder
+	models.WriteString("# Written by packages/daemon/internal/daemon/provider_error_retry_live_test.go.\nproviders:\n")
+	for _, name := range []string{overloadedProvider, filteredProvider, malformedProvider} {
+		api := "anthropic-messages"
+		base := r.stands[name].url
+		if name == filteredProvider {
+			api, base = "openai-completions", base+"/v1"
+		}
+		fmt.Fprintf(&models, "  %s:\n    baseUrl: %s\n    api: %s\n    apiKey: a-literal-key-no-endpoint-checks\n"+
+			"    models:\n      - id: %s\n        name: %s\n", name, base, api, name+"-model", name)
+		fmt.Fprintf(&enabled, "  - %s\n", standinModel(name))
+	}
+	writeProofFile(t, filepath.Join(agent, "models.yml"), models.String())
+	writeProofFile(t, filepath.Join(agent, "config.yml"),
+		"# Written by packages/daemon/internal/daemon/provider_error_retry_live_test.go.\n"+
+			"enabledModels:\n"+enabled.String()+
+			// A fresh profile opens Oh My Pi's setup wizard, and a pane waiting on it never starts.
+			"startup:\n  setupWizard: false\n")
+}
+
+// writeOverlays writes the Oh My Pi overlays each pane is told through PI_CONFIG_FILES: the
+// operator's own, shared by every pane, which turns `retry.enabled` off so the host walks no
+// fallback chain and every failed turn reaches the daemon; and one per claim naming the single
+// model that claim's stand-in serves, so each claim's chain has no fallback below it.
+func (r *providerErrorLive) writeOverlays(work string) map[claim.Token][]string {
+	t := r.t
+	t.Helper()
+	dir := filepath.Join(work, "overlays")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	operator := filepath.Join(dir, "operator.yml")
+	writeProofFile(t, operator, "# The operator's pane overlay (runtime.tmux.pi_config_files).\nretry:\n  enabled: false\n")
+	overlays := map[claim.Token][]string{}
+	for _, seeded := range r.issues() {
+		model := standinModel(seeded.provider)
+		var body strings.Builder
+		body.WriteString("# The role's own pane overlay (role_config_files): one model, so its chain has no fallback.\nmodelRoles:\n")
+		for _, role := range []string{"default", "smol", "slow", "vision", "plan", "commit", "tiny", "task", "advisor", "review", "oracle", "deep"} {
+			fmt.Fprintf(&body, "  %s: %s\n", role, model)
+		}
+		path := filepath.Join(dir, string(seeded.role)+".yml")
+		writeProofFile(t, path, body.String())
+		overlays[r.token(seeded.key, seeded.role)] = []string{operator, path}
+	}
+	return overlays
+}
+
+// standinModel is the one model a stand-in serves, as a selector.
+func standinModel(provider string) string { return provider + "/" + provider + "-model" }
+
+func writeProofFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// newPaneListener is the Envoy listener a pane is told through ENVOY_URL, and answers the URL of
+// it. A pane's plugin registers its session with the listener and claims its role topic
+// (pi-shared's legion-claim-core, between claims/register and claims/ready), and a claim boot
+// whose role claim is refused stops the agent, so the pane needs a listener that answers those
+// calls — the fixture's noticeListener, which the daemon itself publishes its notices to, serves
+// the publish route alone and 404s the rest. It answers as the plugins' own pane harness does
+// (packages/pi-shared/test/omp-harness.ts, runLegionPane's stand-in): the session, a machine and
+// no topics, for every path.
+//
+// Nothing the proof reads comes from here. What an architect or the controller is told is read
+// from the daemon's own listener, which is the fixture's and another server.
+func newPaneListener(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var sent struct {
+			SessionID string `json:"session_id"`
+			Dir       string `json:"dir"`
+		}
+		if body, err := io.ReadAll(req.Body); err == nil {
+			_ = json.Unmarshal(body, &sent)
+		}
+		// The plugin reads an answer whose dir is no string as a refusal, so every answer carries
+		// one: the directory the caller named, and the root for a call that named none.
+		dir := sent.Dir
+		if dir == "" {
+			dir = "/"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"session_id": sent.SessionID,
+			"machine_id": "provider-error-retry",
+			"dir":        dir,
+			"topics":     []string{},
+		})
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+// ---- the model stand-ins -------------------------------------------------------------------------
+
+// modelStandin is one provider endpoint of the test's own: it answers every model request the way
+// its name says, and records each one so a step can count the requests a task reached it in.
+type modelStandin struct {
+	t    *testing.T
+	name string
+	url  string
+
+	mu       sync.Mutex
+	requests []string
+}
+
+func newModelStandin(t *testing.T, name string) *modelStandin {
+	t.Helper()
+	s := &modelStandin{t: t, name: name}
+	server := httptest.NewServer(s)
+	t.Cleanup(server.Close)
+	s.url = server.URL
+	return s
+}
+
+func (s *modelStandin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[]}`)
+		return
+	}
+	body, _ := io.ReadAll(req.Body)
+	s.mu.Lock()
+	s.requests = append(s.requests, string(body))
+	s.mu.Unlock()
+	switch s.name {
+	case overloadedProvider:
+		// `retry-after` over the client's own 60 s cap declines the retry and surfaces the 529
+		// untouched, so one of the daemon's sends is one request here.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(529)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+	case malformedProvider:
+		// No word of this body is one Oh My Pi reads as transient, so the turn error is reported
+		// `retryable: false` with status 400.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"type":"invalid_request_error","message":"messages: unexpected role"}`)
+	case filteredProvider:
+		s.streamContentFilter(w)
+	}
+}
+
+// streamContentFilter answers one OpenAI chat completion: two chunks of text, then a chunk whose
+// `finish_reason` is `content_filter`, which is what a provider's own filter leaves behind.
+func (s *modelStandin) streamContentFilter(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	chunk := func(delta, finish string) {
+		reason := "null"
+		if finish != "" {
+			reason = `"` + finish + `"`
+		}
+		fmt.Fprintf(w, "data: {\"id\":\"filtered\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,"+
+			"\"choices\":[{\"index\":0,\"delta\":{%s},\"finish_reason\":%s}]}\n\n",
+			filteredProvider+"-model", delta, reason)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	chunk(`"role":"assistant","content":"I can "`, "")
+	chunk(`"content":"start on that"`, "")
+	chunk("", "content_filter")
+	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
+// count is how many model requests the stand-in has answered.
+func (s *modelStandin) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.requests)
+}
+
+// requestsHolding is how many of them carried marker, which is how many of them are a turn of the
+// task rather than one of Oh My Pi's own side requests.
+func (s *modelStandin) requestsHolding(marker string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	held := 0
+	for _, body := range s.requests {
+		if strings.Contains(body, marker) {
+			held++
+		}
+	}
+	return held
+}
+
+// ---- the daemon's clock and its log ----------------------------------------------------------------
+
+// ladderClock is the wall clock with named waits shortened. The ladder's fourth and fifth steps
+// are twelve minutes of waiting that prove the same doubling the first three do, so each is armed
+// for a short span instead; every other duration the daemon arms — its probe interval, its
+// registration deadline, its two-minute wait for a turn-outcome report, the ladder's own 30 s,
+// 60 s and 120 s — passes through untouched, so what the proof measures is measured where it is
+// real.
+type ladderClock struct {
+	supervise.RealClock
+	shorten map[time.Duration]time.Duration
+
+	mu     sync.Mutex
+	driven map[time.Duration]int
+}
+
+func newLadderClock(shorten map[time.Duration]time.Duration) *ladderClock {
+	return &ladderClock{shorten: shorten, driven: map[time.Duration]int{}}
+}
+
+func (c *ladderClock) AfterFunc(d time.Duration, f func()) supervise.Cancel {
+	if to, ok := c.shorten[d]; ok {
+		c.mu.Lock()
+		c.driven[d]++
+		c.mu.Unlock()
+		d = to
+	}
+	return c.RealClock.AfterFunc(d, f)
+}
+
+// loggedRecord is one record the daemon wrote, as a step reads it back: the message, its
+// attributes decoded from JSON, and the moment it was written.
+type loggedRecord struct {
+	Message string
+	Attrs   map[string]any
+	at      time.Time
+}
+
+// recordingLog is the daemon's own log handler with every record also kept in memory, so a step
+// can read what the daemon decided and when. The records still go wherever liveProof.log() sends
+// them, which is the script's evidence file.
+type recordingLog struct {
+	inner slog.Handler
+
+	mu      sync.Mutex
+	records []loggedRecord
+}
+
+func newRecordingLog(logger *slog.Logger) *recordingLog {
+	return &recordingLog{inner: logger.Handler()}
+}
+
+func (l *recordingLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *recordingLog) Handle(ctx context.Context, record slog.Record) error {
+	kept := loggedRecord{Message: record.Message, Attrs: map[string]any{}, at: time.Now()}
+	record.Attrs(func(attr slog.Attr) bool {
+		kept.Attrs[attr.Key] = decodeAttr(attr.Value)
+		return true
+	})
+	l.mu.Lock()
+	l.records = append(l.records, kept)
+	l.mu.Unlock()
+	if l.inner.Enabled(ctx, record.Level) {
+		return l.inner.Handle(ctx, record)
+	}
+	return nil
+}
+
+// decodeAttr is one attribute as a step compares it: a number as float64, whatever its Go type, so
+// a step's own literal need not match the daemon's; a duration and every other value as the text
+// the log shows.
+func decodeAttr(value slog.Value) any {
+	switch value.Kind() {
+	case slog.KindInt64:
+		return float64(value.Int64())
+	case slog.KindUint64:
+		return float64(value.Uint64())
+	case slog.KindFloat64:
+		return value.Float64()
+	case slog.KindBool:
+		return value.Bool()
+	case slog.KindString:
+		return value.String()
+	default:
+		return value.String()
+	}
+}
+
+func (l *recordingLog) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &recordingLogChild{parent: l, inner: l.inner.WithAttrs(attrs), attrs: attrs}
+}
+
+func (l *recordingLog) WithGroup(name string) slog.Handler {
+	return &recordingLogChild{parent: l, inner: l.inner.WithGroup(name)}
+}
+
+func (l *recordingLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.records)
+}
+
+func (l *recordingLog) matching(want func(loggedRecord) bool) []loggedRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var matched []loggedRecord
+	for _, kept := range l.records {
+		if want(kept) {
+			matched = append(matched, kept)
+		}
+	}
+	return matched
+}
+
+// firstAfter is the first record written after the first from, matching want.
+func (l *recordingLog) firstAfter(from int, want func(loggedRecord) bool) *loggedRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := from; i < len(l.records); i++ {
+		if want(l.records[i]) {
+			kept := l.records[i]
+			return &kept
+		}
+	}
+	return nil
+}
+
+// recordingLogChild is a handler the daemon derived with WithAttrs or WithGroup: it writes through
+// to its own inner handler and keeps the record on the root, with the attributes the derivation
+// carries, so a step reads a claim's `claim` attribute whether the daemon set it per record or on
+// the logger.
+type recordingLogChild struct {
+	parent *recordingLog
+	inner  slog.Handler
+	attrs  []slog.Attr
+}
+
+func (l *recordingLogChild) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *recordingLogChild) Handle(ctx context.Context, record slog.Record) error {
+	kept := loggedRecord{Message: record.Message, Attrs: map[string]any{}, at: time.Now()}
+	for _, attr := range l.attrs {
+		kept.Attrs[attr.Key] = decodeAttr(attr.Value)
+	}
+	record.Attrs(func(attr slog.Attr) bool {
+		kept.Attrs[attr.Key] = decodeAttr(attr.Value)
+		return true
+	})
+	l.parent.mu.Lock()
+	l.parent.records = append(l.parent.records, kept)
+	l.parent.mu.Unlock()
+	if l.inner.Enabled(ctx, record.Level) {
+		return l.inner.Handle(ctx, record)
+	}
+	return nil
+}
+
+func (l *recordingLogChild) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &recordingLogChild{parent: l.parent, inner: l.inner.WithAttrs(attrs), attrs: append(append([]slog.Attr{}, l.attrs...), attrs...)}
+}
+
+func (l *recordingLogChild) WithGroup(name string) slog.Handler {
+	return &recordingLogChild{parent: l.parent, inner: l.inner.WithGroup(name), attrs: l.attrs}
+}
