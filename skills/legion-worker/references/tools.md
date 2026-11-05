@@ -627,6 +627,22 @@ something to count.
   testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
   `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
   `internal/testpg` (unless `DISPATCH_TEST_DATABASE_URL` names a Postgres).
+
+  The daemon's NATS-backed tests have a way round it: `packages/daemon/internal/testnats` serves
+  the server `LEGION_TEST_NATS_URL` and `LEGION_TEST_NATS_MONITOR_URL` name, and starts no
+  container when both are set, so run one yourself and point them at it:
+
+  ```sh
+  go run github.com/nats-io/nats-server/v2@v2.15.1 -js -p 14222 -m 18222 -sd "$TMPDIR/nats" &
+  export LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:18222
+  ```
+
+  Both or neither: one set without the other fails the test rather than falling back. The
+  monitor port is read, not decoration — the per-test reset waits there for every client
+  connection to end. Pick ports no sibling role holds, and keep the store directory off your
+  home. Measured here: `go run …@v2.15.1 --version` prints `nats-server: v2.15.1`, and with the
+  two variables set `go test -count=1 -timeout 40m ./internal/workflow/` runs whole in the pod,
+  with no docker panic.
 - **The rest, by package**, for a named run the pod does make. The pod's Postgres has only the
   `C`, `C.utf8` and `POSIX` locales, so its default collation is byte order, and
   `internal/dispatch/api`'s
