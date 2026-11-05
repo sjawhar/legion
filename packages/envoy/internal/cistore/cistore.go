@@ -407,10 +407,9 @@ func OpenWriter(nc *nats.Conn, logger *logging.Logger) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		combiners:   map[string]*keyCombiner{},
-		rewatched:   make(chan struct{}),
-		changedWake: make(chan struct{}, 1),
-		logger:      logger,
+		combiners: map[string]*keyCombiner{},
+		rewatched: make(chan struct{}),
+		logger:    logger,
 	}
 	// One handle for the store's life: nothing moves it, since a writer has no watcher to
 	// rewatch. The cache maps stay nil, since nothing a writer calls reads or writes them.

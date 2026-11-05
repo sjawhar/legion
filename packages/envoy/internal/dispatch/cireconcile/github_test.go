@@ -1,13 +1,9 @@
 package cireconcile
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +16,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 )
 
@@ -257,11 +254,7 @@ func queryNumber(values url.Values, name string, fallback int) int {
 // recording the shared rate limits as every Dispatch process's client does.
 func (f *fakeGitHub) client(limits *ratelimit.Store) *githubapp.Client {
 	f.t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		f.t.Fatalf("generate a fixture key: %v", err)
-	}
-	text := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	_, text := githubapptest.Key(f.t)
 	server := httptest.NewServer(http.HandlerFunc(f.serve))
 	f.t.Cleanup(server.Close)
 	client, err := githubapp.New(&auth.AppConfig{ClientID: "Iv1.cireconcile", PEM: text}, server.URL, githubapp.WithLimits(limits))

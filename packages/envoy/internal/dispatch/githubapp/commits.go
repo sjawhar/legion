@@ -103,7 +103,7 @@ func (c *Client) CommitOnBranch(ctx context.Context, token, owner, repo, branch,
 	}
 	// The three dots are the comparison's own syntax and travel unescaped; each side is escaped
 	// on its own so a `/` in a branch name travels as %2F.
-	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
+	path := repoPath(owner, repo) +
 		"/compare/" + url.PathEscape(branch) + "..." + url.PathEscape(sha) + "?per_page=1"
 	body, _, err := c.readRepositoryJSON(ctx, token, path, owner+"/"+repo)
 	if err != nil {
@@ -125,7 +125,7 @@ func (c *Client) DefaultBranch(ctx context.Context, token, owner, repo string) (
 	if c == nil {
 		return "", ErrNoAppKey
 	}
-	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+	path := repoPath(owner, repo)
 	body, _, err := c.readRepositoryJSON(ctx, token, path, owner+"/"+repo)
 	if err != nil {
 		return "", err
@@ -204,16 +204,21 @@ func (c *Client) readObjectPage(ctx context.Context, token, path, repoFull, fiel
 	}
 	// The objects alone are decoded into maps, as the webhook's own bodies reach
 	// contracts.GithubCIObservation: total_count is GitHub's count of the whole list, which the
-	// page size and Full already say what a caller needs of.
-	var answer map[string]json.RawMessage
+	// page size and Full already say what a caller needs of. Both listings are decoded by one
+	// struct, the page the caller named picked out of it, so the objects are decoded once.
+	var answer struct {
+		CheckRuns   []map[string]any `json:"check_runs"`
+		CheckSuites []map[string]any `json:"check_suites"`
+	}
 	if err := json.Unmarshal(body, &answer); err != nil {
 		return ObjectPage{}, fmt.Errorf("decode the %s of %s: %w", field, repoFull, err)
 	}
 	var objects []map[string]any
-	if raw, ok := answer[field]; ok {
-		if err := json.Unmarshal(raw, &objects); err != nil {
-			return ObjectPage{}, fmt.Errorf("decode the %s of %s: %w", field, repoFull, err)
-		}
+	switch field {
+	case "check_runs":
+		objects = answer.CheckRuns
+	case "check_suites":
+		objects = answer.CheckSuites
 	}
 	return ObjectPage{Objects: objects, ETag: answerETag, Full: len(objects) == objectsPerPage}, nil
 }

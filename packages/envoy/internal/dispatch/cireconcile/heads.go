@@ -1,6 +1,7 @@
 package cireconcile
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,12 @@ type pullHead struct {
 // four parts cistore keys its record by.
 func (h pullHead) key() string {
 	return h.owner + "/" + h.repo + "#" + h.number + "@" + h.sha
+}
+
+// repository is the `owner/name` GitHub itself spells this head's repository, which every line
+// the pass writes about the head names it by.
+func (h pullHead) repository() string {
+	return h.owner + "/" + h.repo
 }
 
 // pageOf is one page of a conditional listing as a pass keeps it: the ETag GitHub answered with,
@@ -74,7 +81,9 @@ func readPages[T any](ctx context.Context, r *Reconciler, c *counts, tally *int,
 		}
 		page := pageOf[T]{etag: answer.etag, items: answer.items, full: answer.full, modified: true}
 		if answer.notModified {
-			page = pageOf[T]{etag: etagOr(answer.etag, before.etag), items: before.items, full: before.full}
+			// A 304 should repeat the ETag it matched, and a kept ETag is better than no ETag if
+			// it does not.
+			page = pageOf[T]{etag: cmp.Or(answer.etag, before.etag), items: before.items, full: before.full}
 		}
 		pages = append(pages, page)
 		if !page.full {
@@ -95,15 +104,15 @@ func (r *Reconciler) readHead(ctx context.Context, writer Writer, head pullHead,
 		answer, err := r.GitHub.CommitCheckRuns(ctx, head.token, head.owner, head.repo, head.sha, page, etag)
 		return objectPage(answer), err
 	})
-	if at, failed := r.headFailed(err, head, c); failed {
-		return at
+	if err != nil {
+		return r.headFailed(err, head, c)
 	}
 	suites, err := readPages(ctx, r, c, &c.headRequests, kept.suites, func(ctx context.Context, page int, etag string) (conditionalPage[object], error) {
 		answer, err := r.GitHub.CommitCheckSuites(ctx, head.token, head.owner, head.repo, head.sha, page, etag)
 		return objectPage(answer), err
 	})
-	if at, failed := r.headFailed(err, head, c); failed {
-		return at
+	if err != nil {
+		return r.headFailed(err, head, c)
 	}
 	wanted, ok := r.record(ctx, writer, head, runs, suites, c)
 	if !ok {
@@ -112,14 +121,14 @@ func (r *Reconciler) readHead(ctx context.Context, writer Writer, head pullHead,
 		delete(r.heads, head.key())
 		return nil
 	}
-	remember(&r.heads, head.key(), &headState{
-		runs:   runs,
-		suites: suites,
+	remember(&r.heads, head.key(), headState{
+		runs:   withoutItems(runs),
+		suites: withoutItems(suites),
 		// Once a head's answer has held something to record, it holds it in every later answer
 		// too, so the record it was written to is worth asking after at every pass.
 		observed: kept.observed || wanted > 0,
 	})
-	if everyPageKept(runs) && everyPageKept(suites) {
+	if everyPageNotModified(runs) && everyPageNotModified(suites) {
 		c.notModified++
 	}
 	return nil
@@ -135,30 +144,27 @@ func (r *Reconciler) kept(writer Writer, head pullHead) headState {
 	}
 	if !state.observed {
 		// Nothing was recorded from this head's last answer, so there is no record to have lost.
-		return *state
+		return state
 	}
 	has, err := writer.HasRecord(head.owner, head.repo, head.number, head.sha)
 	if err != nil {
 		r.Logger.Warn("ci reconcile did not read whether a head still has its CI record",
-			"repository", head.owner+"/"+head.repo, "pr", head.number, "sha", head.sha, "error", err)
+			"repository", head.repository(), "pr", head.number, "sha", head.sha, "error", err)
 		return headState{}
 	}
 	if !has {
 		return headState{}
 	}
-	return *state
+	return state
 }
 
 // headFailed reports one head's failed read. A rate limit ends the pass (the stop it answers);
 // every other failure drops what the pass kept of the head, so the next pass reads it in full,
 // and leaves the pass to the next head.
-func (r *Reconciler) headFailed(err error, head pullHead, c *counts) (*stop, bool) {
-	if err == nil {
-		return nil, false
-	}
+func (r *Reconciler) headFailed(err error, head pullHead, c *counts) *stop {
 	delete(r.heads, head.key())
 	if at := stopAt(err, head.scope); at != nil {
-		return at, true
+		return at
 	}
 	var tooLarge *githubapp.ResponseTooLargeError
 	if errors.As(err, &tooLarge) {
@@ -166,12 +172,12 @@ func (r *Reconciler) headFailed(err error, head pullHead, c *counts) (*stop, boo
 		// counted and named, and the pass goes on rather than failing every head behind it.
 		c.tooLarge++
 		r.Logger.Warn("ci reconcile skipped a head whose answer from GitHub was too large",
-			"repository", head.owner+"/"+head.repo, "pr", head.number, "sha", head.sha, "error", err)
-		return nil, true
+			"repository", head.repository(), "pr", head.number, "sha", head.sha, "error", err)
+		return nil
 	}
 	r.Logger.Warn("ci reconcile did not read a head",
-		"repository", head.owner+"/"+head.repo, "pr", head.number, "sha", head.sha, "error", err)
-	return nil, true
+		"repository", head.repository(), "pr", head.number, "sha", head.sha, "error", err)
+	return nil
 }
 
 // record writes every observation the rules say to record from the pages GitHub answered 200
@@ -180,7 +186,7 @@ func (r *Reconciler) headFailed(err error, head pullHead, c *counts) (*stop, boo
 // when a write failed, which is what makes the pass drop this head's ETags.
 func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, runs, suites []pageOf[object], c *counts) (wanted int, ok bool) {
 	ok = true
-	repository := head.owner + "/" + head.repo
+	repository := head.repository()
 	for _, page := range runs {
 		if !page.modified {
 			continue
@@ -258,13 +264,37 @@ func objectPage(answer githubapp.ObjectPage) conditionalPage[object] {
 	}
 }
 
-// everyPageKept reports whether every page of a listing answered 304, which is GitHub saying the
-// pass has already read all of it.
-func everyPageKept[T any](pages []pageOf[T]) bool {
+// pullRequestPage is githubapp's answer to the open pull request listing as readPages takes it.
+func pullRequestPage(answer githubapp.PullRequestPage) conditionalPage[githubapp.PullRequestHead] {
+	return conditionalPage[githubapp.PullRequestHead]{
+		items:       answer.PullRequests,
+		etag:        answer.ETag,
+		notModified: answer.NotModified,
+		full:        answer.Full,
+	}
+}
+
+// everyPageNotModified reports whether every page of a listing answered 304, which is GitHub
+// saying the pass has already read all of it.
+func everyPageNotModified[T any](pages []pageOf[T]) bool {
 	for _, page := range pages {
 		if page.modified {
 			return false
 		}
 	}
 	return len(pages) > 0
+}
+
+// withoutItems is these pages as the pass remembers them between passes: each page's ETag and
+// whether it was full, and none of its items. A page the pass kept is a page the next read
+// either sends that ETag for and is answered 304 on -- which record skips, since such a page is
+// not modified -- or reads in full and answers with items of its own, so the items held here
+// are never read again. A head's check runs carry each run's output.text, which GitHub caps at
+// 65,535 characters, so keeping them would hold megabytes a head for as long as the head is open.
+func withoutItems[T any](pages []pageOf[T]) []pageOf[T] {
+	kept := make([]pageOf[T], len(pages))
+	for i, page := range pages {
+		kept[i] = pageOf[T]{etag: page.etag, full: page.full}
+	}
+	return kept
 }

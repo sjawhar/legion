@@ -26,10 +26,12 @@
 package cireconcile
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -111,7 +113,7 @@ type Reconciler struct {
 	// id GitHub gave the repository, so two rows naming one repository share one listing.
 	pulls map[int64][]pageOf[githubapp.PullRequestHead]
 	// heads is what the last pass kept of each head it read (headKey).
-	heads map[string]*headState
+	heads map[string]headState
 }
 
 // rowState is what a pass learned of one repo_projects row from GitHub.
@@ -125,7 +127,7 @@ type rowState struct {
 }
 
 // headState is what a pass kept of one head: the pages of its two listings, each with the ETag
-// the next pass reads it conditionally on.
+// the next pass reads it conditionally on and no items of its own (withoutItems).
 type headState struct {
 	runs   []pageOf[object]
 	suites []pageOf[object]
@@ -162,10 +164,10 @@ type counts struct {
 	// records counts the observations written to the CI store. The store writes nothing for an
 	// observation its record already holds, which is what a pass over an unchanged head does.
 	records int
-	// mappings counts the repo_projects rows the pass skipped, and tooLarge the heads whose answer
-	// was past what githubapp reads.
-	mappings int
-	tooLarge int
+	// mappingsSkipped counts the repo_projects rows the pass skipped, and tooLarge the heads
+	// whose answer was past what githubapp reads.
+	mappingsSkipped int
+	tooLarge        int
 }
 
 // Pass runs one reconcile pass within ctx and logs exactly one INFO line for it: the pass line
@@ -222,9 +224,9 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 		if at := r.limited(ctx, githubapp.AppScope); at != nil {
 			return at
 		}
-		owner, name, found := strings.Cut(row, "/")
-		if !found || owner == "" || name == "" {
-			c.mappings++
+		owner, name, ok := splitRepo(row)
+		if !ok {
+			c.mappingsSkipped++
 			r.Logger.Warn("ci reconcile skipped a repository mapping that is not owner/name", "repository", row)
 			continue
 		}
@@ -236,7 +238,7 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 		if err != nil {
 			// The App is not installed on it, or its token is refused the repository: neither
 			// mends itself within a pass, so the repository is named once and the pass goes on.
-			c.mappings++
+			c.mappingsSkipped++
 			r.Logger.Warn("ci reconcile skipped a repository it holds no token for", "repository", row, "error", err)
 			continue
 		}
@@ -248,7 +250,7 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 			return at
 		}
 		if err != nil {
-			c.mappings++
+			c.mappingsSkipped++
 			r.Logger.Warn("ci reconcile skipped a repository GitHub did not answer for", "repository", row, "error", err)
 			delete(r.rows, row)
 			continue
@@ -264,9 +266,9 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 		// repo_projects.repo is stored lower-cased, while the webhook's key comes from GitHub's own
 		// casing and cistore.Key does not lower-case, so a pass keyed from the row would write a
 		// second record of the same head and settle it on a second subject.
-		ownerOf, nameOf, found := strings.Cut(state.fullName, "/")
-		if !found || ownerOf == "" || nameOf == "" {
-			c.mappings++
+		ownerOf, nameOf, ok := splitRepo(state.fullName)
+		if !ok {
+			c.mappingsSkipped++
 			r.Logger.Warn("ci reconcile skipped a repository GitHub named oddly", "repository", row, "full_name", state.fullName)
 			continue
 		}
@@ -275,13 +277,19 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 			return at
 		}
 		if err != nil {
-			c.mappings++
+			c.mappingsSkipped++
 			r.Logger.Warn("ci reconcile read no open pull requests of a repository", "repository", state.fullName, "error", err)
 			continue
 		}
+		// Every head of this repository is held by the same two shared limits, read before each
+		// of them below.
+		headScopes := scopes(scope)
 		for _, pull := range pulls {
-			if at := r.limited(ctx, scopes(scope)...); at != nil {
+			if at := r.limited(ctx, headScopes...); at != nil {
 				return at
+			}
+			if pull.HeadSHA == "" {
+				continue
 			}
 			head := pullHead{
 				token:  token,
@@ -290,9 +298,6 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 				repo:   nameOf,
 				number: strconv.FormatInt(pull.Number, 10),
 				sha:    pull.HeadSHA,
-			}
-			if head.sha == "" {
-				continue
 			}
 			seenHeads[head.key()] = struct{}{}
 			if at := r.readHead(ctx, writer, head, c); at != nil {
@@ -351,7 +356,7 @@ func (r *Reconciler) identify(ctx context.Context, row, owner, name, token strin
 			// this cannot happen; reading the row in full next pass is the honest answer to it.
 			return rowState{}, nil, errors.New("GitHub answered 304 for a repository this pass remembers nothing of")
 		}
-		kept.etag = etagOr(answer.ETag, kept.etag)
+		kept.etag = cmp.Or(answer.ETag, kept.etag)
 		return kept, nil, nil
 	}
 	if answer.FullName == "" || answer.ID == 0 {
@@ -365,12 +370,7 @@ func (r *Reconciler) identify(ctx context.Context, row, owner, name, token strin
 func (r *Reconciler) openPullRequests(ctx context.Context, id int64, owner, name, token string, c *counts) ([]githubapp.PullRequestHead, *stop, error) {
 	pages, err := readPages(ctx, r, c, &c.listPages, r.pulls[id], func(ctx context.Context, page int, etag string) (conditionalPage[githubapp.PullRequestHead], error) {
 		answer, err := r.GitHub.OpenPullRequests(ctx, token, owner, name, page, etag)
-		return conditionalPage[githubapp.PullRequestHead]{
-			items:       answer.PullRequests,
-			etag:        answer.ETag,
-			notModified: answer.NotModified,
-			full:        answer.Full,
-		}, err
+		return pullRequestPage(answer), err
 	})
 	if at := stopAt(err, githubapp.AppScope); at != nil {
 		return nil, at, nil
@@ -388,17 +388,17 @@ func (r *Reconciler) openPullRequests(ctx context.Context, id int64, owner, name
 	return pulls, nil, nil
 }
 
-// limited reads the shared GitHub rate limits and reports the limit in force on scopes, nil when
-// none is. A read that fails leaves the pass to GitHub's own answers, as githubapp.Client's own
-// read before every request does: the limits are the database's, and GitHub still answers each
-// process's requests with the limit.
-func (r *Reconciler) limited(ctx context.Context, scopes ...string) *stop {
-	if r.Limits == nil || len(scopes) == 0 {
+// limited reads the shared GitHub rate limits and reports the limit in force on the scopes it is
+// given, nil when none is. A read that fails leaves the pass to GitHub's own answers, as
+// githubapp.Client's own read before every request does: the limits are the database's, and
+// GitHub still answers each process's requests with the limit.
+func (r *Reconciler) limited(ctx context.Context, under ...string) *stop {
+	if r.Limits == nil {
 		return nil
 	}
-	limit, found, err := r.Limits.InForce(ctx, scopes...)
+	limit, found, err := r.Limits.InForce(ctx, under...)
 	if err != nil {
-		r.Logger.Warn("ci reconcile did not read the shared GitHub rate limits", "scopes", scopes, "error", err)
+		r.Logger.Warn("ci reconcile did not read the shared GitHub rate limits", "scopes", under, "error", err)
 		return nil
 	}
 	if !found {
@@ -433,6 +433,16 @@ func scopes(tokenScope string) []string {
 	return []string{githubapp.AppScope, tokenScope}
 }
 
+// splitRepo is the owner and the name of an `owner/name`, and false for anything that is not
+// one: no slash, or a side of it empty.
+func splitRepo(full string) (owner, name string, ok bool) {
+	owner, name, found := strings.Cut(full, "/")
+	if !found || owner == "" || name == "" {
+		return "", "", false
+	}
+	return owner, name, true
+}
+
 // pace leaves the pause between requests GitHub asks a poller for. It waits before each request
 // but the pass's first, so a pass of one request takes no longer than that request.
 func (r *Reconciler) pace(ctx context.Context, c *counts) {
@@ -459,20 +469,10 @@ func remember[K comparable, V any](held *map[K]V, key K, value V) {
 // forget drops every entry of held the pass did not see, so what the pass keeps follows the open
 // pull requests there are rather than every one the process has ever read.
 func forget[K comparable, V any](held map[K]V, seen map[K]struct{}) {
-	for key := range held {
-		if _, ok := seen[key]; !ok {
-			delete(held, key)
-		}
-	}
-}
-
-// etagOr is answered, or kept when GitHub's answer carried none: a 304 should repeat the ETag it
-// matched, and a kept ETag is better than no ETag if it does not.
-func etagOr(answered, kept string) string {
-	if answered != "" {
-		return answered
-	}
-	return kept
+	maps.DeleteFunc(held, func(key K, _ V) bool {
+		_, ok := seen[key]
+		return !ok
+	})
 }
 
 // report writes the one INFO line a pass logs. Its field names are fixed: an alarm counts a
@@ -484,7 +484,7 @@ func (r *Reconciler) report(c *counts, at *stop, took time.Duration) {
 		"head_requests", c.headRequests,
 		"heads_not_modified", c.notModified,
 		"records", c.records,
-		"mappings_skipped", c.mappings,
+		"mappings_skipped", c.mappingsSkipped,
 		"heads_too_large", c.tooLarge,
 		"rate_limited", at != nil,
 	}
