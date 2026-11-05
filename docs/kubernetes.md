@@ -287,6 +287,9 @@ Then:
   So that the role it makes can log in, `pg_hba.conf` trusts every role on loopback, and the line before that rejects the cluster's superuser over TCP:
   a test that creates a role and connects as it works in the pod as it does in CI, and no login over the DSN's port
   — the superuser's own name included — reaches the superuser, so the trust the created roles need cannot be turned into `COPY … TO PROGRAM`.
+  The role is also granted `pg_signal_backend`, which `drop database … with (force)` needs to end the backends still attached to the database it drops
+  — an autovacuum worker among them — and which reaches nothing else: it signals a backend and gives no read, no command and no database the role is not already in.
+  Without it `packages/daemon/internal/workflow`'s tests fail in the pod alone, at a different three each run, with `permission denied to terminate process` (SQLSTATE 42501), and pass in CI, whose login is a superuser.
 
 - `ensure` is idempotent and cheap when the server is up:
   it returns after one connection through the DSN itself (`psql … select 1`, with a connect timeout), and otherwise initialises and starts under `flock -o`.

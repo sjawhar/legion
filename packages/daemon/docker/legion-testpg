@@ -27,6 +27,8 @@
 # packages/envoy/internal/dispatch/store/census_test.go), and a test that passes in CI and fails in
 # the pod is what sends an agent to the deployment's sessions database; measured on 18, a CREATEROLE
 # non-superuser can neither make a superuser, nor grant itself one, nor grant pg_execute_server_program.
+# The role is also granted pg_signal_backend, which a `drop database … with (force)` of its own
+# throwaway database needs and which reaches nothing but a backend's signal (start).
 set -eu
 
 name=legion-testpg
@@ -247,6 +249,16 @@ start() {
 		grep -q 1 ||
 		super -d postgres -c "create role $user login createdb createrole nosuperuser" >> "$log" 2>&1 ||
 		die "create role $user failed; $log holds its output"
+	# pg_signal_backend lets the DSN's role end another role's backend, which is what
+	# `drop database … with (force)` does to whatever is still attached — autovacuum among them.
+	# Without it a suite that drops its own throwaway database that way fails in the pod alone,
+	# with `permission denied to terminate process` (SQLSTATE 42501), and passes in CI, whose
+	# login is a superuser. It signals a backend and nothing else: it cannot read a file, run a
+	# command or reach a database the role is not already in. The grant runs on every start, so a
+	# cluster an earlier version of this script made gets it at the next one, and repeating it
+	# changes nothing.
+	super -d postgres -c "grant pg_signal_backend to $user" >> "$log" 2>&1 ||
+		die "grant pg_signal_backend to $user failed; $log holds its output"
 	if [ "$database" != postgres ]; then
 		super -tA -d postgres -c "select 1 from pg_database where datname = '$database'" 2>> "$log" |
 			grep -q 1 ||
