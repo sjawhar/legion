@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -518,5 +520,91 @@ func TestASecondServeOnTheSameMachineFileNeverSpendsItsRefreshToken(t *testing.T
 	}
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("the second serve made %d broker calls; want none", n)
+	}
+}
+
+// identityHelperConfig is the configuration of a machine that proves a Kubernetes identity of
+// its own, with a HOME of its own so the key it keeps is this test's.
+func identityHelperConfig(t *testing.T, home string) config {
+	t.Helper()
+	tokenFile := filepath.Join(t.TempDir(), "projected-token")
+	if err := os.WriteFile(tokenFile, []byte("projected.service.account.token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(env(map[string]string{
+		"HOME": home, "XDG_RUNTIME_DIR": t.TempDir(),
+		"AGENT_SECRETS_URL":                "https://secrets.internal.example",
+		"AGENT_SECRETS_MACHINE_IDENTITY":   "kubernetes",
+		"AGENT_SECRETS_MACHINE_TOKEN_FILE": tokenFile,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// TestAnIdentityHelperKeepsItsKeyAcrossARestart: the broker names a machine's one launcher
+// credential by the thumbprint of the key the trade's proof presented
+// (exchange.MachineSubject), so a helper that made a new key at every start would ask for a new
+// subject at every restart and leave behind the credential its sessions are enrolled under:
+// those sessions could not revoke their old enrollments under the new credential, and a box
+// enrolled through `enroll-session-key` would be refused ENROLLMENT_NOT_LIVE once the old
+// credential lapsed, with nothing to enrol it again. So the key is kept, 0600 beside the
+// machine login, and a restart trades the same subject.
+func TestAnIdentityHelperKeepsItsKeyAcrossARestart(t *testing.T) {
+	home := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := identityHelperConfig(t, home)
+	want := filepath.Join(home, ".config", "agent-secrets", "identity-key.pem")
+	if cfg.IdentityKeyFile != want {
+		t.Fatalf("identity key file %q, want %q", cfg.IdentityKeyFile, want)
+	}
+
+	first, err := identityClient(cfg, log)
+	if err != nil || first == nil {
+		t.Fatalf("the first helper's token client: %+v %v", first, err)
+	}
+	info, err := os.Stat(cfg.IdentityKeyFile)
+	if err != nil {
+		t.Fatalf("the key the first helper kept: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("identity key mode %04o; want 600, since whoever holds this key holds this machine's credential", mode)
+	}
+
+	// The restart: a second process, with nothing of the first's memory, reading the same HOME.
+	second, err := identityClient(identityHelperConfig(t, home), log)
+	if err != nil || second == nil {
+		t.Fatalf("the restarted helper's token client: %+v %v", second, err)
+	}
+	before, err := proof.Thumbprint(&first.Key().PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := proof.Thumbprint(&second.Key().PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("the restarted helper trades with the key %s, the first with %s; one machine holds one key, and the subject carries its thumbprint", after, before)
+	}
+}
+
+// TestAnIdentityHelperRefusesAKeyOthersCanRead: the key this machine's launcher credential is
+// bound to is the whole of its authority over its sessions, so a file others may read stops the
+// start naming the file and the fix, as the machine login's own file does.
+func TestAnIdentityHelperRefusesAKeyOthersCanRead(t *testing.T) {
+	home := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := identityHelperConfig(t, home)
+	if _, err := identityClient(cfg, log); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.IdentityKeyFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := identityClient(cfg, log)
+	if err == nil || !strings.Contains(err.Error(), cfg.IdentityKeyFile) || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("a world-readable identity key: %v; want a refusal naming %s and the fix", err, cfg.IdentityKeyFile)
 	}
 }

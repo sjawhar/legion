@@ -54,9 +54,9 @@ export interface ExecuteDispatchToolInput {
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
-  /** The resolved Dispatch (`activeDispatchSettings`): the server, the bearer it takes, and the
-   *  public dashboard its printed links point at when there is one. */
-  readonly config: Pick<ActiveDispatchConfig, "url" | "token" | "publicUrl">;
+  /** The resolved Dispatch (`activeDispatchSettings`): the server, the credential every request
+   *  presents, and the public dashboard its printed links point at when there is one. */
+  readonly config: Pick<ActiveDispatchConfig, "url" | "credential" | "publicUrl">;
   /** Host cancellation for the currently executing tool call. */
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
@@ -277,7 +277,7 @@ export function sessionContext(
   input: ExecuteDispatchToolInput,
   checked: CheckedCall
 ): SessionContext {
-  const { url: configUrl, token: configToken } = input.config;
+  const { url: configUrl, credential } = input.config;
   const baseFetch = input.fetchImpl ?? fetch;
   const fetchImpl = Object.assign(
     async (...args: Parameters<typeof fetch>): Promise<Response> => {
@@ -303,6 +303,6 @@ export function sessionContext(
     linkBase: input.config.publicUrl ?? configUrl,
     hostSession: input.sessionId?.trim(),
     newClient: () =>
-      new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry),
+      new DispatchClient(configUrl, credential, fetchImpl, input.signal, input.writeRetry),
   };
 }

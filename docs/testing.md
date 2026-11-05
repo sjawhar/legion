@@ -37,6 +37,8 @@ cd packages/envoy
 go test -timeout 20m ./internal/dispatch/api
 ```
 
+A Legion issue pod does not run that whole package: `skills/legion-worker/references/tools.md` says what the pod runs and where the rest goes.
+
 CI's `envoy-go` job runs it that way, alone and before the module's other packages
 (`.github/workflows/ci.yaml`), and `envoy-go-race-api`, the race job that runs that package by
 itself, gives it 30 minutes; `docs` runs under `-race` in `envoy-go-race-docs`, which gives it 60.
@@ -60,6 +62,8 @@ command that runs the whole package, alone or in a pattern that includes it, pas
 cd packages/daemon
 go test -race -timeout 30m ./internal/daemon/
 ```
+
+A Legion issue pod does not run that whole package either: `skills/legion-worker/references/tools.md` says what the pod runs and where the rest goes.
 
 ## A database a Go test creates
 

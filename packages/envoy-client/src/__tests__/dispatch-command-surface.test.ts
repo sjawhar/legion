@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { ASK_QUESTION_MAX, dispatchToolSpecs } from "@legion/contracts";
+import { bearerCredential } from "../bearer";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool } from "../dispatch-execute";
 import { DISPATCH_WRITE_RETRY, type DispatchWriteRetry } from "../dispatch-http";
@@ -66,7 +67,7 @@ const AT = "2026-01-02T03:04:05Z";
 const COMMIT = "1111111111111111111111111111111111111111";
 const CHECK_SHA256 = "2222222222222222222222222222222222222222222222222222222222222222";
 
-const config = { url: "http://dispatch.test", token: "secret" };
+const config = { url: "http://dispatch.test", credential: bearerCredential("secret") };
 
 const exec: ExecFn = async (file, args) => {
   if (file === "jj" && args.join(" ") === "git remote list") {

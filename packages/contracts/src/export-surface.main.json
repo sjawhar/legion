@@ -176,6 +176,7 @@
     "DISPATCH_LOGIN_HEADER": "constant",
     "DISPATCH_SCOPES": "constant",
     "DISPATCH_SERVER_STARTED_SUBJECT": "constant",
+    "DISPATCH_SIGN_IN_REQUIRED": "constant",
     "DISPATCH_TEXT_REFERENCES": "constant",
     "DISPATCH_TOPIC_PREFIX": "constant",
     "DISPATCH_TYPED_BLOCK_ID_SPELLINGS": "constant",

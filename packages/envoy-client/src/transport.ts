@@ -5,7 +5,9 @@ import {
   MINTED_DEDUPE_KEY_PATTERN,
 } from "@legion/contracts";
 import { z } from "zod";
+import type { RequestCredential } from "./bearer";
 import { normalizeEnvoyUrl } from "./envoy-settings";
+import { messageFor } from "./errors";
 import { machineID } from "./machine";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -156,9 +158,13 @@ export type EnvoyClientConfig = {
   /** Whether a request a network error or a 5xx failed is sent once more, after 250 ms. Default
    * true; false for a best-effort read that must not hold its caller past one timeout. */
   readonly retry?: boolean;
-  /** The listener's bearer (`envoySettings`), sent on every call; none sends no `Authorization`
-   * header, for a loopback listener that asks for none. */
-  readonly token?: string | undefined;
+  /**
+   * What every call presents (`EnabledEnvoySettings.credential`): the listener's bearer, as it
+   * always was; or this machine's identity traded at the secrets broker, presented under the
+   * `DPoP` scheme with a proof of this process's key on each request; or none at all, which
+   * sends no `Authorization` header, for a loopback listener that asks for none.
+   */
+  readonly credential?: RequestCredential | undefined;
 };
 
 export type Interest = z.infer<typeof InterestWireSchema>;
@@ -537,6 +543,18 @@ type RequestOptions = {
   readonly retry?: boolean;
   /** Called for each attempt that got no answer or a 5xx: one the listener may have acted on. */
   readonly onUnanswered?: () => void;
+  /**
+   * The session this call acts for, where its body names one the listener binds to the
+   * credential: a subscribe, an unsubscribe, a deregistration, a role claim, a replay, and a
+   * send's or a publish's `source_session`. The listener answers 403 to a body naming a session
+   * its broker token does not (`sessionNotBound`, packages/envoy/cmd/listener/brokerauth.go), so
+   * the credential is asked for that session's own headers rather than the caller's current
+   * ones; a call this process makes for the session it has just left — the hand-back of a role
+   * that session still holds — is the one that needs it. A read of another session's record
+   * names none: those are not narrowed, and asking for a credential of a session this process
+   * never acted as would trade for a name the broker refuses.
+   */
+  readonly actingSession?: string;
 };
 
 /** One attempt's outcome: the listener's status and body, or no answer and why. */
@@ -547,18 +565,36 @@ type AttemptOutcome =
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const apiToken = config.token;
   const attempts = config.retry === false ? 1 : 2;
+
+  const credential = config.credential;
 
   const attemptOnce = async (
     url: string,
     init: RequestInit,
-    deadlineMs: number
+    deadlineMs: number,
+    actingSession: string | undefined
   ): Promise<AttemptOutcome> => {
-    const headers = new Headers(init.headers);
-    if (apiToken) headers.set("Authorization", `Bearer ${apiToken}`);
     let response: Response;
+    // What a credential that could not mint said, where one could not. A listener that asks for
+    // no credential answers the same with or without one, so a broker that is down or refused
+    // this machine's trade must not take those calls down: the request goes without the headers
+    // and stands or falls on the listener's own answer. A listener that did want one answers 401
+    // or 403, and that is reported as the failed trade it really is, below.
+    let unminted: unknown;
     try {
+      const headers = new Headers(init.headers);
+      // Awaited only when the credential answers with a promise. A bearer answers at once, and
+      // an awaited microtask here would let whatever the caller does next — the plugin's NATS
+      // drain at shutdown — start before this request leaves.
+      let presented: Readonly<Record<string, string>> | undefined;
+      try {
+        const ready = credential?.headers(init.method ?? "GET", url, actingSession);
+        presented = ready instanceof Promise ? await ready : ready;
+      } catch (error) {
+        unminted = error;
+      }
+      for (const [name, value] of Object.entries(presented ?? {})) headers.set(name, value);
       response = await config.fetch(url, {
         ...init,
         headers,
@@ -566,6 +602,17 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       });
     } catch (error) {
       return { unanswered: error };
+    }
+    if (unminted !== undefined && (response.status === 401 || response.status === 403)) {
+      // The listener wanted the credential this machine could not mint. That is no answer about
+      // the call itself, so it retries like any other unanswered attempt — the broker may have
+      // come back — and the error names both halves.
+      return {
+        unanswered: new Error(
+          `${init.method ?? "GET"} ${url} answered ${response.status}, and this machine's Envoy credential could not be minted: ${messageFor(unminted)}`,
+          { cause: unminted }
+        ),
+      };
     }
     // The body is read under the same deadline. A refusal whose body does not arrive is still the
     // listener's refusal; any other answer whose body does not arrive is no answer.
@@ -587,7 +634,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     const url = `${baseUrl}${path}`;
     const tries = options.retry === false ? 1 : attempts;
     for (let attempt = 0; attempt < tries; attempt += 1) {
-      const outcome = await attemptOnce(url, init, options.timeoutMs ?? timeoutMs);
+      const outcome = await attemptOnce(
+        url,
+        init,
+        options.timeoutMs ?? timeoutMs,
+        options.actingSession
+      );
       if ("unanswered" in outcome) {
         options.onUnanswered?.();
         if (attempt + 1 < tries) {
@@ -632,42 +684,52 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     subscribe: async (input) =>
       parseSubscribeAnswer(
         JSON.parse(
-          await post("/v1/interests/subscribe", {
-            session_id: input.sessionID,
-            dir: input.directory,
-            topics: expandSubscriptionTopics(input.topics),
-            port: input.port,
-            title: input.title,
-            ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
-            driving: input.driving,
-            ...(input.selfSubscribed === undefined
-              ? {}
-              : { self_subscribed: input.selfSubscribed }),
-            ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
-            // The client instance driving this session (`clientInstanceID`), omitted when the
-            // caller has none so an older listener sees an unchanged body. The listener stores it
-            // on the registry entry, where a soft role claim and a deregistration compare it.
-            ...(input.clientInstanceID === undefined
-              ? {}
-              : { client_instance_id: input.clientInstanceID }),
-            // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
-            // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
-            // re-subscribes on each tick). The listener stores it separately from the registering
-            // listener's own machine_id and reads it for no delivery: it is what a human-facing
-            // list shows as the session's machine. The owner is the listener the session's stored
-            // subscription names, else the one it registered through; only the owner relays the
-            // session's consumer, and any other listener leaves inbox messages to it silently.
-            host: machineID(),
-            plugin: input.plugin.name,
-            plugin_version: input.plugin.version,
-          })
+          await post(
+            "/v1/interests/subscribe",
+            {
+              session_id: input.sessionID,
+              dir: input.directory,
+              topics: expandSubscriptionTopics(input.topics),
+              port: input.port,
+              title: input.title,
+              ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
+              driving: input.driving,
+              ...(input.selfSubscribed === undefined
+                ? {}
+                : { self_subscribed: input.selfSubscribed }),
+              ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
+              // The client instance driving this session (`clientInstanceID`), omitted when the
+              // caller has none so an older listener sees an unchanged body. The listener stores it
+              // on the registry entry, where a soft role claim and a deregistration compare it.
+              ...(input.clientInstanceID === undefined
+                ? {}
+                : { client_instance_id: input.clientInstanceID }),
+              // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
+              // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
+              // re-subscribes on each tick). The listener stores it separately from the registering
+              // listener's own machine_id and reads it for no delivery: it is what a human-facing
+              // list shows as the session's machine. The owner is the listener the session's stored
+              // subscription names, else the one it registered through; only the owner relays the
+              // session's consumer, and any other listener leaves inbox messages to it silently.
+              host: machineID(),
+              plugin: input.plugin.name,
+              plugin_version: input.plugin.version,
+            },
+            // Every call below whose body names the session it acts for presents that session's
+            // own credential, since the listener binds a broker token's session to it.
+            { actingSession: input.sessionID }
+          )
         )
       ),
     unsubscribe: async (input) => {
-      await post("/v1/interests/unsubscribe", {
-        session_id: input.sessionID,
-        topics: expandSubscriptionTopics(input.topics),
-      });
+      await post(
+        "/v1/interests/unsubscribe",
+        {
+          session_id: input.sessionID,
+          topics: expandSubscriptionTopics(input.topics),
+        },
+        { actingSession: input.sessionID }
+      );
     },
     getInterest: async (sessionID) =>
       InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
@@ -693,6 +755,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             onUnanswered: () => {
               unanswered = true;
             },
+            ...(input.sourceSessionID === undefined || input.sourceSessionID === ""
+              ? {}
+              : { actingSession: input.sourceSessionID }),
           }
         );
         // A 2xx whose body does not parse is the listener's word that cannot be read.
@@ -714,17 +779,23 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
       const response = PublishResponseSchema.parse(
         JSON.parse(
-          await post("/v1/messages/publish", {
-            source: input.source ?? "agent",
-            ...sourceSession(input.sourceSessionID),
-            topic: input.topic,
-            message: input.message,
-            ...(input.payload === undefined ? {} : { payload: input.payload }),
-            idempotency_key: idempotencyKey,
-            ...messageMetadata(input),
-            // Omitted unless the caller set it, so an older listener sees an unchanged request.
-            ...(input.keep === undefined ? {} : { keep: input.keep }),
-          })
+          await post(
+            "/v1/messages/publish",
+            {
+              source: input.source ?? "agent",
+              ...sourceSession(input.sourceSessionID),
+              topic: input.topic,
+              message: input.message,
+              ...(input.payload === undefined ? {} : { payload: input.payload }),
+              idempotency_key: idempotencyKey,
+              ...messageMetadata(input),
+              // Omitted unless the caller set it, so an older listener sees an unchanged request.
+              ...(input.keep === undefined ? {} : { keep: input.keep }),
+            },
+            input.sourceSessionID === undefined || input.sourceSessionID === ""
+              ? {}
+              : { actingSession: input.sourceSessionID }
+          )
         )
       );
       return {
@@ -741,9 +812,11 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         input.clientInstanceID === undefined
           ? ""
           : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
-      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
-        method: "DELETE",
-      });
+      await request(
+        `/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`,
+        { method: "DELETE" },
+        { actingSession: input.sessionID }
+      );
     },
     setRole: async (input) => {
       // `soft` and `previous_session_id` are omitted from the wire unless set,
@@ -761,7 +834,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         };
       let raw: string;
       try {
-        raw = await post("/v1/roles/set", body);
+        raw = await post("/v1/roles/set", body, { actingSession: input.sessionID });
       } catch (error) {
         // A soft claim refused by a live holder is an outcome, not a failure:
         // the listener answers 409 with the holder's id.
@@ -805,7 +878,11 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
               ),
               ...(input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }),
             },
-            { timeoutMs: input.timeoutMs ?? REPLAY_TIMEOUT_MS, retry: false }
+            {
+              timeoutMs: input.timeoutMs ?? REPLAY_TIMEOUT_MS,
+              retry: false,
+              actingSession: input.sessionID,
+            }
           )
         )
       ),

@@ -137,7 +137,7 @@ export function readingMode(group: Group): "latest" | "version" {
   return group === "document-version" ? "version" : "latest";
 }
 
-type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token">;
+type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "credential">;
 
 /** One stored text, as the corpus holds it. */
 export interface StoredText {
@@ -374,9 +374,10 @@ async function get<T>(config: DispatchConfig, path: string, rate: Rate, spend: S
     await rate.take();
     spend.requests += 1;
     try {
-      const response = await fetch(`${config.url}${path}`, {
-        headers: { Authorization: `Bearer ${config.token}` },
-      });
+      const url = `${config.url}${path}`;
+      // Presented afresh for each attempt, as DispatchClient does: a broker credential proves this
+      // process's key per request, and a stale proof is what a retry would otherwise re-send.
+      const response = await fetch(url, { headers: await config.credential.headers("GET", url) });
       if (response.ok) return (await response.json()) as T;
       const body = (await response.text()).slice(0, 200);
       if (response.status < 500) throw new HttpError(response.status, `${response.status} ${body}`);
