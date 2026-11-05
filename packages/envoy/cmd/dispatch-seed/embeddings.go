@@ -33,10 +33,25 @@ const (
 // text, so a larger batch would make one statement several hundred megabytes.
 const embeddingBatch = 200
 
+// hnswBuildSettings keep the index build in the server's own memory rather than the host's. A
+// parallel maintenance operation asks for a dynamic shared memory segment sized by
+// maintenance_work_mem, which lives in /dev/shm, and a container holds that to 64 MB: CI's
+// Postgres service refused one at 63,999,456 bytes ("could not resize shared memory segment …
+// No space left on device") on two runs of this seed, whose embeddings heap of 13 MB at scale
+// 0.01 is past min_parallel_table_scan_size and so earns the build its workers. With no
+// maintenance workers the leader builds alone, under a bound of its own, and the run depends on
+// the host's shared memory not at all. It costs nothing at the sizes this tool seeds: 69 ms
+// against 203 ms, measured on a seeded database at scale 0.01.
+var hnswBuildSettings = []string{
+	`set local max_parallel_maintenance_workers = 0`,
+	`set local maintenance_work_mem = '64MB'`,
+}
+
 // writeEmbeddings fills half the embedding rows the triggers queued. It drops the HNSW index
 // first and builds it again after: about 285,000 per-row insertions into an HNSW index at scale 1
 // would dominate the run, where one build at the cluster's maintenance memory is a fraction of
 // it (the plan's Decision "The seed drops and rebuilds the HNSW index around its vector writes").
+// That build is serial and bounded, for the reason hnswBuildSettings gives.
 func (r *seedRun) writeEmbeddings(ctx context.Context) error {
 	if _, err := r.database.Pool.Exec(ctx, `drop index if exists embeddings_cosine`); err != nil {
 		return fmt.Errorf("drop the HNSW index: %w", err)
@@ -70,9 +85,17 @@ func (r *seedRun) writeEmbeddings(ctx context.Context) error {
 		}); err != nil {
 		return err
 	}
-	if _, err := r.database.Pool.Exec(ctx, `
-		create index embeddings_cosine on embeddings using hnsw (embedding vector_cosine_ops) where (embedding is not null)
-	`); err != nil {
+	if err := pgx.BeginFunc(ctx, r.database.Pool, func(tx pgx.Tx) error {
+		for _, setting := range hnswBuildSettings {
+			if _, err := tx.Exec(ctx, setting); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(ctx, `
+			create index embeddings_cosine on embeddings using hnsw (embedding vector_cosine_ops) where (embedding is not null)
+		`)
+		return err
+	}); err != nil {
 		return fmt.Errorf("build the HNSW index: %w", err)
 	}
 	r.subject.Model = embeddingModel
