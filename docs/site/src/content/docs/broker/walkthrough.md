@@ -95,5 +95,5 @@ keeps the value it was given.
 ![Live grants in Settings: the example-host-build session holding DEMO_API_KEY, approved by alice@example.com, expiring when the session ends, with a Revoke button](/legion/media/broker/live-grants.png)
 
 The rig that records the screenshots and the narrated recording, and the scripts that record them
-again, are in [`docs/site/media/broker/`](https://github.com/sjawhar/legion/tree/main/docs/site/media/broker).
+again, are in [`docs/site/media/broker/`](https://github.com/cybermonklabs/legion/tree/main/docs/site/media/broker).
 [The Secrets Broker's introduction](/legion/broker/) says what the broker is for.

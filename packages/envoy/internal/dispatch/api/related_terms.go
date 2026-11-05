@@ -709,7 +709,11 @@ func (s *server) pickRelatedTerms(
 	picked := relatedTerms{StatsPresent: items != nil}
 	if items != nil {
 		picked.Items = *items
-	} else {
+	} else if probe {
+		// Only the related-item check starts the refresh. It needs the statistics, since it
+		// drops a word it cannot price; the near-copy gate prices one instead and reads whatever
+		// is there. Starting it from the gate as well would run a second refresh of the same
+		// project per create, each holding a pool connection for as long as the read takes.
 		s.ensureSearchTermStats(project)
 	}
 
@@ -744,9 +748,35 @@ func (s *server) pickRelatedTerms(
 	}
 
 	commonAbove := max(float64(relatedCommonFloor), float64(picked.Items)/10)
-	candidates = slices.DeleteFunc(candidates, func(candidate relatedCandidate) bool {
-		return !candidate.known || candidate.DF == 0 || float64(candidate.DF) > commonAbove
-	})
+	kept := candidates[:0]
+	var common []relatedCandidate
+	for _, candidate := range candidates {
+		switch {
+		case !candidate.known || candidate.DF == 0:
+		case float64(candidate.DF) > commonAbove:
+			common = append(common, candidate)
+		default:
+			kept = append(kept, candidate)
+		}
+	}
+	candidates = kept
+	// A title every word of which the project has made common leaves the gate nothing to judge,
+	// and an exact copy of it is created: that is INFRA-432 against INFRA-431, two open issues
+	// with one title and no spec at all, which k4 requires the gate to refuse. So where the cap
+	// leaves the gate under duplicateMinTerms, the rarest of the words it dropped go back in
+	// until there are that many. The related-item check keeps the cap whole: a common word there
+	// buys a reader nothing, while here it is all there is to compare.
+	if !probe && len(candidates) < duplicateMinTerms {
+		slices.SortFunc(common, func(a, b relatedCandidate) int {
+			return cmp.Or(cmp.Compare(a.DF, b.DF), strings.Compare(a.Lexeme, b.Lexeme))
+		})
+		for _, candidate := range common {
+			if len(candidates) == duplicateMinTerms {
+				break
+			}
+			candidates = append(candidates, candidate)
+		}
+	}
 	for index := range candidates {
 		candidate := &candidates[index]
 		// N is floored at df: in probe mode N is 0, and an idf below zero would rank the words the

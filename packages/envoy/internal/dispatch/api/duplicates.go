@@ -32,16 +32,16 @@ const duplicateCandidateLimit = 5
 const (
 	// duplicateRefuseScore is the score at or above which a create is refused 409
 	// POSSIBLE_DUPLICATE. At most 5% of the creates the replay judges not duplicates may reach it
-	// (dispatch://INFRA-1160/spec#b-r2). Measured on 2026-11-05 over 1,159 INFRA creates: 64
-	// refused, 49 of them not duplicates, 4.28% of the 1,144 creates not marked. It is the
-	// lowest bar under that ceiling, so it stops the most near copies the ceiling allows: the
-	// next bar down, 0.70, refuses 75 that are not duplicates, 6.55%.
-	duplicateRefuseScore = 0.75
+	// (dispatch://INFRA-1160/spec#b-r2). Measured on 2026-11-05 over 1,159 INFRA creates, with
+	// the project's term statistics refreshed every ten minutes of replayed time as a live server
+	// refreshes them: 61 refused, 49 of them not duplicates, 4.28% of the 1,144 creates not
+	// marked. It is the lowest bar under that ceiling, so it stops the most near copies the
+	// ceiling allows: the next bar down, 0.75, refuses 63 that are not duplicates, 5.51%.
+	duplicateRefuseScore = 0.80
 	// duplicateNudgeScore is the score at or above which the closest open issue is named to the
 	// filer as a likely duplicate, without refusing the create. At most 15% of the replay's
-	// creates may reach it (dispatch://INFRA-1160/spec#b-r4). Measured on the same replay: 114
-	// creates nudged, 9.8%. The next bar down, 0.55, nudges 163, 14.1%, which is under the
-	// ceiling by less than one create in a hundred and so is not where a bar belongs.
+	// creates may reach it (dispatch://INFRA-1160/spec#b-r4). Measured on the same replay: 133
+	// creates nudged, 11.5%. The next bar down, 0.55, nudges 182, 15.7%, over that ceiling.
 	duplicateNudgeScore = 0.60
 	// duplicateMinTerms is how many terms the new text must carry before the gate judges it at
 	// all. The score is a share of the picked terms, and pickRelatedTerms keeps only a term some
@@ -50,13 +50,20 @@ const (
 	// two-word title would be refused as a near copy of an issue it shares one word with. Three
 	// is what the title rule this replaces asked for as well (`shared >= 3`), and it is as high
 	// as it can go: one near-copy pair the replay must refuse, INFRA-432 against INFRA-431, is
-	// two issues with one title and no spec at all, and it carries three terms.
+	// two issues with one title and no spec at all, and it carries three terms. It is also the
+	// number the picker fills back up to from the words it dropped as common, so a title every
+	// word of which the project has made common is still judged (pickRelatedTerms).
 	duplicateMinTerms = 3
 )
 
 // duplicateIssueKeyLexeme matches a lexeme shaped like a Dispatch issue key, lower-cased as a
 // vector holds it.
 var duplicateIssueKeyLexeme = regexp.MustCompile(`^[a-z][a-z0-9_]*-[0-9]+$`)
+
+// duplicateGateRollback bounds the gate's own rollback, which runs after the read whatever
+// happened to it. It is not the read's bound: it ends a rollback the database will not take,
+// so the handler is never held by one.
+const duplicateGateRollback = 2 * time.Second
 
 // duplicateKeyLexemesQuery is what the issues trigger makes of a key of project $1
 // (0057_issues_search_trigger): the compound lexeme, the project's own word and the number.
@@ -248,7 +255,16 @@ func (s *server) readDuplicateCandidates(
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	// The rollback runs on a context of its own, not the gate's: the gate's is expired exactly
+	// when the rollback matters, and pgx answers a rollback on an expired context by destroying
+	// the connection instead of returning it to the pool, which leaves a backend on the database
+	// for as long as the server lives. A read held past the bound is the ordinary case here, not
+	// the rare one, since the bound is what ends a slow one.
+	defer func() {
+		rollback, cancel := context.WithTimeout(context.WithoutCancel(ctx), duplicateGateRollback)
+		defer cancel()
+		_ = tx.Rollback(rollback)
+	}()
 	if _, err := tx.Exec(ctx, fmt.Sprintf("set local statement_timeout = '%dms'", bound.Milliseconds())); err != nil {
 		return nil, err
 	}

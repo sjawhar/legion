@@ -53,10 +53,11 @@ EOF
   repository — so one pull request lands it in order, and a deletion of what this tree replaced
   rides in the pull request of the last change it waits on the same way.
   Post the verdict, with the folds you made, as one `dispatch comment` on your own issue (the
-  root, in a root session). Its first line is exactly `Red-team verdict for <root key>:`, so a
-  reader can find it among the issue's comments; the controller's weekly audit matches that
-  prefix. The architect who wrote the list reads every child on it as needed, and the comment
-  stops a later session filing the same children again.
+  root, in a root session). Its first line is exactly `Red-team verdict for <root key>:`, with
+  the root's own key in place of the placeholder, so a reader can find it among the issue's
+  comments; the controller's weekly audit matches that line, and counts no child filed before
+  the release that first asked for it. The architect who wrote the list reads every child on it
+  as needed, and the comment stops a later session filing the same children again.
 - A child that duplicates another issue and is not yet released is never released: fold it by the
   duplicate rule of `skill://dispatch-first`. The daemon records a child at its release and
   re-asserts a status only on an issue it has recorded, so that close stands. A released duplicate

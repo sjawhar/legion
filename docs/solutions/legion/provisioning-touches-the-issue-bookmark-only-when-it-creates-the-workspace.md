@@ -208,7 +208,7 @@ From the spec's Rejected list (v8):
 
 ## Checking it in production
 
-The daemon's clone is `$LEGION_STATE_DIR/repos/github.com/sjawhar/legion`. A
+The daemon's clone is `$LEGION_STATE_DIR/repos/github.com/cybermonklabs/legion`. A
 `point bookmark legion/<KEY> to commit …` operation belongs in exactly two places: directly above
 `create initial working-copy commit in workspace <key>` (an issue's first spawn, or a forgotten
 registration re-created with no bookmark), or as a worker's own `jj bookmark set` shortly before

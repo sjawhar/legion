@@ -2654,8 +2654,16 @@ export default function envoyExtension(pi: PiApi): void {
     send: (input: RegistrationInput) => Promise<SubscribeResult>
   ): Promise<SubscribeResult> => {
     const registeringFor = sessionID;
+    // While a sweep still owes the session's own inbox from the stream's oldest message (its start
+    // could not be read when it registered with NATS down, `ReplayEngine.startPending`), the
+    // registration asks for no relay: a consumer seeded from the cursors would start past what that
+    // sweep owes. The registration after that sweep asks again.
     const asking =
-      relay?.sessionID === registeringFor && relay.subscription !== undefined ? relay : undefined;
+      relay?.sessionID === registeringFor &&
+      relay.subscription !== undefined &&
+      replay?.startPending() !== true
+        ? relay
+        : undefined;
     const input = registrationInput(asking);
     return send(input).then((result) => {
       takeDeliveryAnswer(registeringFor, input.topics, asking, result);
@@ -3008,6 +3016,14 @@ export default function envoyExtension(pi: PiApi): void {
     // A step this pass was refused ends it here: what it was refused is no NATS outage to
     // report, and the pass the move queued opens the subject.
     handle.check();
+    // The agent subject did not open (NATS down), so the registration below has the listener store
+    // what is sent to the session and push none of it: the session takes its messages over NATS.
+    // First, every followed subject with no cursor (a new session's agent subject) starts its
+    // replay cursor at the stream's end, so the first sweep once the subject opens shows what is
+    // stored meanwhile. A cursor already set stays. If the position cannot be read either, the
+    // session's own agent subject is marked to be read from the stream's oldest message, and the
+    // session registers all the same (`ReplayEngine.startCursors`).
+    if (inboundFailure !== undefined && replay !== undefined) await replay.startCursors();
     // Every session subscribes to its own agent subject, so every session is registered;
     // envoy_send treats an unregistered id as dead. The listener rejects a claim from a session it
     // does not currently know, so this comes before the role.

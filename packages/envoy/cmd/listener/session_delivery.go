@@ -197,10 +197,12 @@ func (m *sessionDelivery) drain(ctx context.Context) {
 
 // register gives a registration the delivery it asks for, once its topics are stored in registry.
 // A registration that carried delivery with consumer set gets the session's consumer, created
-// when the stream holds none (at the sequence after its resume point when that names the stream's
-// current identity, else at the stream's end) and otherwise updated to the current filter, before
-// the registration answers. The filter is the session's stored interest topics as they stand under
-// the session's lock, not as this registration stored them: another call storing topics for the
+// when the stream holds none and otherwise updated to the current filter, before the registration
+// answers. The consumer is created at the sequence after its resume point's seq when that point
+// carries a seq, 0 included (which gives sequence 1), and names the stream's current identity. A
+// registration with no resume point, or one with no seq or naming another identity, creates it at
+// the stream's end. The filter is the session's stored interest topics as they stand under the
+// session's lock, not as this registration stored them: another call storing topics for the
 // session meanwhile (a registration, a follow) writes its own filter under that lock first, and
 // this one must not put the older set back over it. A registration that asks for nothing stays on
 // the core path: it takes its messages off its own NATS subscription.
@@ -228,8 +230,8 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, regi
 	}
 	var startSeq uint64
 	epoch := body.Delivery.Epoch
-	if resume := body.Delivery.Resume; resume != nil && resume.Seq > 0 && resume.StreamID == streamID {
-		startSeq = resume.Seq + 1
+	if resume := body.Delivery.Resume; resume != nil && resume.Seq != nil && resume.StreamID == streamID {
+		startSeq = *resume.Seq + 1
 	}
 	unlock := m.locks.lock(body.SessionID)
 	topics, err := storedInterestTopics(ctx, registry, body.SessionID)

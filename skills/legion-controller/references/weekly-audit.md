@@ -1,7 +1,8 @@
 # The weekly audit
 
-Read this on your first turn of each UTC week, whatever woke you, and run the three passes below
-before you post the day's report. They are the week's own numbers, beside the daily ones.
+Read this on your first turn of each UTC week, whatever woke you, and run all four passes below
+before you post the day's report. They are the week's own numbers, beside the daily ones. The
+fourth pass, the duplicate audit, serves R8 of dispatch://INFRA-1160 and is not optional.
 
 ## The week
 
@@ -23,10 +24,13 @@ apart, since nobody forced past anything there.
 
 ```bash
 dispatch issues --project <PROJECT> --all
-dispatch read --issue <KEY>            # its Events: line for issue.created carries forced
+dispatch read --issue <KEY> --all-events   # the issue.created line ends `forced past <keys>`
 ```
 
-Keep the issues created inside the window, read each one's `issue.created` event, and count by
+`--all-events` is not optional: a bare `dispatch read` prints the last ten events alone, and on
+any issue with more than ten the `issue.created` line is not printed at all.
+
+Keep the issues created inside the window, read each one's `issue.created` line, and count by
 filer: the event actor's `origin.session_title` cut at its last middle dot (`·`), so
 `Legion implementer · INFRA-1160` counts as `Legion implementer`, with every person counted
 together as one filer. Report, per filer, how many creates forced past a refusal and which issues
@@ -59,8 +63,15 @@ Ask the architect of each tree the counts name to fold what can ride in an open 
 - a tree with more than 8 descendants in all, or more than 2 levels below its root;
 - a tree that filed a child no red-team verdict names. The verdict is a comment on the root whose
   first line reads `Red-team verdict for <root key>:`
-  (`skill://legion-architect/references/decomposition.md`). Read the root's comments and the
-  replies under each verdict comment; a child named in none of them was filed without the check.
+  (`skill://legion-architect/references/decomposition.md`). Read the root's comments with
+  `dispatch read --issue <ROOT> --all-events` and the replies under each verdict comment; a child
+  named in none of them was filed without the check.
+
+  Count no child created before that first line existed. The architects write it from the Legion
+  release that carries this file, so every child filed before then has no verdict comment to
+  find and is not evidence of a skipped check: read the release's own publication time from its
+  tag and leave out every child created at or before it. Without that, the first run of this
+  pass nudges nearly every tree that has children.
 
 Each nudge is one `dispatch comment` on the tree's root, naming what you counted and asking the
 architect to fold what can ride in an open pull request of the tree. End the comment with

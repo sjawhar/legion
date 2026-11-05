@@ -32,11 +32,12 @@ import (
 //	the comma-separated keys of the replayed creates the implementer marked real duplicates,
 //	which the 5% ceiling leaves out. The pairs the corpus names are always marked.
 //
-// DISPATCH_NEARCOPY_REFRESH_EVERY
-//
-//	how many creates run between two refreshes of the project's term statistics (default 1).
-//	A live server refreshes every ten minutes, so a larger number is the more faithful replay
-//	and the faster one; the report names what was used.
+// The project's term statistics are refreshed on the corpus's own clock, every
+// SearchTermStatsInterval of replayed time, which is the cadence a live server keeps
+// (RunSearchTermStatsRefresh). Refreshing by a count of creates instead lets the statistics lag
+// a create meets in production: INFRA's window holds about one create every twenty minutes,
+// so a create there meets current statistics, and a replay that lags refuses a pair the
+// current statistics do not (dispatch://INFRA-1160 test handoff version 1, k4).
 
 // nearCopyRecord is one line of the corpus: an issue, a query (a create to replay) or a pair.
 type nearCopyRecord struct {
@@ -239,14 +240,6 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 		t.Skip("DISPATCH_NEARCOPY_CORPUS must name a file scripts/near-copy-replay.sh wrote")
 	}
 	corpus := readNearCopyCorpus(t, path)
-	refreshEvery := 1
-	if every := os.Getenv("DISPATCH_NEARCOPY_REFRESH_EVERY"); every != "" {
-		parsed, err := strconv.Atoi(every)
-		if err != nil || parsed < 1 {
-			t.Fatalf("DISPATCH_NEARCOPY_REFRESH_EVERY = %q", every)
-		}
-		refreshEvery = parsed
-	}
 	marked := map[string]bool{}
 	for _, pair := range corpus.pairs {
 		marked[pair.Query] = true
@@ -278,7 +271,17 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 	present := map[string]bool{}
 	created := 0
 	started := time.Now()
+	var refreshedAt time.Time
+	refreshes := 0
 	for _, event := range nearCopyTimeline(corpus) {
+		// The statistics as a live server keeps them: rebuilt every SearchTermStatsInterval of
+		// the corpus's own time, before the create that first passes the interval, so each
+		// replayed create meets statistics no older than production's.
+		if refreshedAt.IsZero() || event.at.Sub(refreshedAt) >= SearchTermStatsInterval {
+			refreshNearCopyStats(t, ctx, database, corpus.project)
+			refreshedAt = event.at
+			refreshes++
+		}
 		switch event.kind {
 		case "create":
 			if queries[event.key] {
@@ -287,9 +290,6 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 			insertNearCopyIssue(t, ctx, database, handler, corpus, event, present)
 			present[event.key] = true
 			created++
-			if created%refreshEvery == 0 {
-				refreshNearCopyStats(t, ctx, database, corpus.project)
-			}
 		case "title":
 			execNearCopy(t, ctx, database, `update issues set title = $2, updated_at = $3 where key = $1`,
 				event.key, event.title, event.at)
@@ -311,11 +311,11 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 		}
 	}
 	refreshNearCopyStats(t, ctx, database, corpus.project)
-	t.Logf("replayed %d creates over %d issues in %v (term statistics refreshed every %d creates)",
-		len(scores), len(corpus.issues), time.Since(started).Round(time.Second), refreshEvery)
+	t.Logf("replayed %d creates over %d issues in %v (term statistics refreshed %d times, every %v of replayed time)",
+		len(scores), len(corpus.issues), time.Since(started).Round(time.Second), refreshes, SearchTermStatsInterval)
 
 	measureNearCopyGate(t, ctx, srv, database, corpus)
-	reportNearCopyReplay(t, corpus, scores, marked, refreshEvery)
+	reportNearCopyReplay(t, corpus, scores, marked, refreshes)
 }
 
 // measureNearCopyGate times the gate on the loaded project, which holds the whole history the
@@ -535,7 +535,7 @@ func nearCopyNumber(t *testing.T, key string) int {
 // reportNearCopyReplay prints the report the pull request and the artifact carry, then holds the
 // two bars in code to what it measured.
 func reportNearCopyReplay(
-	t *testing.T, corpus nearCopyCorpus, scores []nearCopyScore, marked map[string]bool, refreshEvery int,
+	t *testing.T, corpus nearCopyCorpus, scores []nearCopyScore, marked map[string]bool, refreshes int,
 ) {
 	t.Helper()
 	byKey := map[string]nearCopyScore{}
@@ -628,13 +628,13 @@ func reportNearCopyReplay(
 		t.Logf("nudge bar %.2f (refuse %.2f): %d nudged (%.2f%% of %d creates)",
 			bar, duplicateRefuseScore, nudged, 100*float64(nudged)/float64(total), total)
 	}
-	t.Logf("corpus: %s; creates replayed: %d; marked duplicates: %d; refresh every %d creates",
-		os.Getenv("DISPATCH_NEARCOPY_CORPUS"), total, len(marked), refreshEvery)
+	t.Logf("corpus: %s; creates replayed: %d; marked duplicates: %d; term statistics refreshed %d times, every %v of replayed time",
+		os.Getenv("DISPATCH_NEARCOPY_CORPUS"), total, len(marked), refreshes, SearchTermStatsInterval)
 	t.Logf("distortions a later reader must know: a project with no term statistics scores in probe mode; "+
 		"document frequency is counted per project while the index scan is not; every lexeme an issue key "+
 		"contributes is dropped; the picker keeps at most %d terms, spends at most %d document frequency, "+
-		"and drops a term in more than a tenth of the project or under %d items; the gate judges nothing "+
-		"under %d terms. A change to any of those invalidates this calibration.",
+		"and drops a term in more than a tenth of the project or under %d items, though the gate fills "+
+		"back up to %d terms with the rarest it dropped; the gate judges nothing under that many. A change to any of those invalidates this calibration.",
 		relatedTermLimit, relatedMatchBudget, relatedCommonFloor, duplicateMinTerms)
 
 	for _, pair := range corpus.pairs {

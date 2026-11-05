@@ -42,7 +42,7 @@ drift check decides file coverage and `ci-ok` decides success.
 
 ## Evidence
 
-In sjawhar/legion, `packages/envoy/internal/dispatch/docs` has
+In cybermonklabs/legion, `packages/envoy/internal/dispatch/docs` has
 `func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }`
 (`internal/dispatch/docs/persistence_test.go:19`), and `storetest.Open` calls
 `t.Skip(DatabaseURLEnv + " must be set to run Postgres-backed Dispatch tests")` when the

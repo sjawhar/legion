@@ -126,7 +126,7 @@ func TestTheControllerSweepKindProofBuildsItsRuntimeFromItsConfiguration(t *test
 	t.Cleanup(func() { cancel(); server.Close() })
 	dir := t.TempDir()
 	path := writeControllerSweepKindConfig(t, dir, testDSN(t), "192.0.2.10",
-		"ghcr.io/sjawhar/legion-worker@sha256:"+strings.Repeat("a", 64), writeKubeconfig(t, server.URL, ""), "test")
+		"ghcr.io/cybermonklabs/legion-worker@sha256:"+strings.Repeat("a", 64), writeKubeconfig(t, server.URL, ""), "test")
 	cfg, err := config.LoadForValidation(path, nil)
 	if err != nil {
 		t.Fatalf("load %s: %v", path, err)

@@ -7,6 +7,10 @@ import { asUser } from "./users";
 
 // Runs in Firefox as well as Chromium (playwright.config.ts): Firefox's own editing mishandles
 // text typed over whatever follows a block's last line break.
+// The typed text reaches the server inside the live write, so the markdown below is true within a
+// round trip of the keystroke; the default ladder would not look again until 350 ms.
+const PROBE = { intervals: [50, 50, 100, 200, 500] };
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -28,7 +32,10 @@ test("typing over the whole last line of a code block replaces that line", async
     await selectEditorText(page, "let y = 2;");
     await page.keyboard.type("hello");
     await expect
-      .poll(() => getArtifactText(issue.primary_artifact_id).then(({ markdown }) => markdown))
+      .poll(
+        () => getArtifactText(issue.primary_artifact_id).then(({ markdown }) => markdown),
+        PROBE
+      )
       .toContain("```ts\nconst x = 1;\nhello\n```");
   } finally {
     await alice.close();
@@ -52,7 +59,10 @@ test("typing over the text after a paragraph's hard break keeps the break", asyn
     await selectEditorText(page, "second line");
     await page.keyboard.type("X");
     await expect
-      .poll(() => getArtifactText(issue.primary_artifact_id).then(({ markdown }) => markdown))
+      .poll(
+        () => getArtifactText(issue.primary_artifact_id).then(({ markdown }) => markdown),
+        PROBE
+      )
       .toContain("first line\\\nX\n");
   } finally {
     await alice.close();

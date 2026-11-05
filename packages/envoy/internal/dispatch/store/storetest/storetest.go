@@ -31,8 +31,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -125,13 +127,38 @@ func Main(m *testing.M) int {
 
 // dropDatabase drops name without waiting for it; Main waits for every drop. Drops in flight
 // together share one checkpoint.
+//
+// `with (force)` terminates whatever is still connected, which needs pg_signal_backend: a login
+// that is only the database's owner is refused `permission denied to terminate process`. The
+// test's own pool is closed before this runs (Open's cleanups are LIFO), but Postgres tears a
+// backend down after the client has closed its socket, so a drop that lands inside that window
+// finds a connection and, without that right, cannot clear it. So the drop is tried plainly
+// and tried again while Postgres says the database is still in use, up to dropWindow; `force`
+// is the last attempt, for a connection that really is somebody else's.
+const (
+	dropWindow = 15 * time.Second
+	dropPause  = 200 * time.Millisecond
+)
+
 func dropDatabase(name string) {
 	shared.drops.Go(func() {
-		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			shared.dropMu.Lock()
-			shared.dropFails = append(shared.dropFails, fmt.Sprintf("drop isolated database %s: %v", name, err))
-			shared.dropMu.Unlock()
+		deadline := time.Now().Add(dropWindow)
+		var err error
+		for {
+			if _, err = shared.admin.Exec(context.Background(), "drop database "+name); err == nil {
+				return
+			}
+			if !strings.Contains(err.Error(), "is being accessed by other users") || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(dropPause)
 		}
+		if _, forced := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); forced == nil {
+			return
+		}
+		shared.dropMu.Lock()
+		shared.dropFails = append(shared.dropFails, fmt.Sprintf("drop isolated database %s: %v", name, err))
+		shared.dropMu.Unlock()
 	})
 }
 
