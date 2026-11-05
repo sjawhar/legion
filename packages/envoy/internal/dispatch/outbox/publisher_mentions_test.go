@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -260,7 +261,7 @@ func nextAttempt(t *testing.T, database *store.Store, eventID int64) (attempts i
 // TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent drives the scan itself: a new comment
 // mentioning the claimant is published to its issue topic at once, and its claimant copy waits
 // for the mention's send to settle - without counting a failed attempt - and then follows it: a
-// failed send leaves the copy to the outbox, a sent one delivered it already.
+// transport failure leaves the copy to the outbox; a sent or uncertain receipt does not.
 func TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent(t *testing.T) {
 	const (
 		issueTopic    = "notifications.dispatch.issue.T-1.comment.created"
@@ -268,12 +269,14 @@ func TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent(t *testing.T) {
 	)
 	for _, tc := range []struct {
 		settled string
+		failure string
 		want    []string
 	}{
-		{settled: "failed", want: []string{issueTopic, claimantTopic}},
+		{settled: "failed", failure: "envoy listener: connection refused", want: []string{issueTopic, claimantTopic}},
+		{settled: "failed", failure: contracts.ReceiptTimeoutCause, want: []string{issueTopic}},
 		{settled: "sent", want: []string{issueTopic}},
 	} {
-		t.Run(tc.settled, func(t *testing.T) {
+		t.Run(tc.settled+"/"+tc.failure, func(t *testing.T) {
 			ctx := store.WithTransactionTracking(context.Background())
 			database := storetest.Open(t)
 			broker := events.NewBroker()
@@ -311,8 +314,8 @@ func TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent(t *testing.T) {
 			}
 
 			if _, err := database.Pool.Exec(ctx, `
-				update comment_deliveries set state = $2 where comment_id = $1
-			`, commentID, tc.settled); err != nil {
+				update comment_deliveries set state = $2, error=nullif($3,'') where comment_id = $1
+			`, commentID, tc.settled, tc.failure); err != nil {
 				t.Fatalf("settle the mention: %v", err)
 			}
 			if _, err := database.Pool.Exec(ctx, `update events set next_attempt_at = null where id = $1`, event.ID); err != nil {

@@ -288,7 +288,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			wantErr:    errMentionPending,
 		},
 		{
-			name:  "a person's new comment whose mention of the claimant was abandoned reaches the claimant",
+			name:  "a person's new comment whose mention claim lapsed leaves the copy to the sweeper",
 			claim: &claimant,
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				return commentEvent("comment.created", alice, model.Comment{
@@ -296,7 +296,8 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 				}), ""
 			},
 			deliveries: map[string]string{claimant.ID: "abandoned"},
-			want:       []string{issueTopic + "comment.created", claimantTopic},
+			want:       []string{issueTopic + "comment.created"},
+			wantErr:    errMentionPending,
 		},
 		{
 			name:  "a person's new comment whose mention of the claimant recorded no attempt reaches the claimant",

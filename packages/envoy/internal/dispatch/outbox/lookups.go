@@ -39,6 +39,8 @@ type mentionDeliveries struct {
 	sent map[string]struct{}
 	// pending includes every unsettled attempt, regardless of the sender's claim age.
 	pending map[string]struct{}
+	// An unresolved role can still pin any session; no fallback can safely race it.
+	unpinnedPending bool
 }
 
 // wanted is the lookup a batch's first pass over its events runs: it answers nothing and records
@@ -473,11 +475,11 @@ const mentionDeliveryQuery = `
 		       state, coalesce(error, resolve_error, '') as failure
 		from comment_deliveries where comment_id = any($1::text[]::uuid[])
 	)
-	select comment_id::text, session_id,
+	select comment_id::text, coalesce(session_id, ''),
 	       bool_or(state = 'sent' or (state = 'failed' and not (
 	         starts_with(failure, 'envoy listener: ') or starts_with(failure, 'no live session ')
 	       ))), bool_or(state = 'pending')
-	from attempts where session_id is not null group by comment_id, session_id
+	from attempts group by comment_id, session_id
 `
 
 // loadMentionDeliveries reads explicit outcomes only. Body recipients come from the
@@ -496,14 +498,18 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 		deliveries, ok := found.mentions[commentID]
 		if !ok {
 			deliveries = mentionDeliveries{sent: map[string]struct{}{}, pending: map[string]struct{}{}}
-			found.mentions[commentID] = deliveries
 		}
-		switch {
-		case sent:
+		if sent && sessionID != "" {
 			deliveries.sent[sessionID] = struct{}{}
-		case pending:
-			deliveries.pending[sessionID] = struct{}{}
 		}
+		if pending {
+			if sessionID == "" {
+				deliveries.unpinnedPending = true
+			} else {
+				deliveries.pending[sessionID] = struct{}{}
+			}
+		}
+		found.mentions[commentID] = deliveries
 		return nil
 	})
 	if err != nil {

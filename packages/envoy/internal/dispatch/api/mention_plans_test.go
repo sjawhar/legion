@@ -16,12 +16,12 @@ func TestMentionPlansAndCensusOnRealisticRecordedVolume(t *testing.T) {
 	ctx := context.Background()
 	_, err := database.Pool.Exec(ctx, `insert into projects(key,name) values ('VOL','Volume');
  insert into issues(key,project_key,number,title,created_by,rank) values ('VOL-1','VOL',1,'Mentions','{"kind":"user","id":"alice"}','U');
- insert into comments(id,issue_key,author,body) select md5(n::text)::uuid,'VOL-1','{"kind":"user","id":"bob"}','Volume mention' from generate_series(1,20000) n;
+ insert into comments(id,issue_key,author,body) select md5(n::text)::uuid,'VOL-1','{"kind":"user","id":"bob"}',case when n>10000 then 'Volume dispatch://people/alice' else 'Volume explicit mention' end from generate_series(1,20000) n;
  insert into comments(issue_key,author,body) values ('VOL-1','{"kind":"session","id":"reader","owner":"alice"}','Verified session');
  insert into comment_mentions(comment_id,target,delivery,resolved_session_id) select md5(n::text)::uuid,'session:reader','steer','reader' from generate_series(1,10000) n;
- insert into refs(from_kind,from_id,to_kind,to_id) select 'comment',md5(n::text)::uuid::text,'person_mention','alice' from generate_series(10001,20000) n;
+ insert into identity_mentions(owner_kind,owner_id,from_kind,from_id,to_kind,to_id) select 'comment',md5(n::text)::uuid::text,'comment',md5(n::text)::uuid::text,'person','alice' from generate_series(10001,20000) n;
  insert into events(issue_key,seq,type,actor,notify,payload) select 'VOL-1',n,'issue.updated','{"kind":"session","id":"volume"}',false,'{}' from generate_series(1,100000) n;
- analyze comments;analyze comment_mentions;analyze refs;analyze events;`)
+ analyze comments;analyze comment_mentions;analyze identity_mentions;analyze events;`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,14 @@ func (q mentionExplainQuery) Query(ctx context.Context, sql string, args ...any)
 	}
 	q.t.Logf("bounded unified mention expansion: planning %.3f ms execution %.3f ms", plan[0].PlanningTime, plan[0].ExecutionTime)
 	logMentionScans(q.t, plan[0].Plan)
+	if plan[0].ExecutionTime > 2000 {
+		q.t.Fatalf("mention expansion took %.3f ms, budget 2000 ms", plan[0].ExecutionTime)
+	}
+	hits, _ := plan[0].Plan["Shared Hit Blocks"].(float64)
+	reads, _ := plan[0].Plan["Shared Read Blocks"].(float64)
+	if hits+reads > 200000 {
+		q.t.Fatalf("mention expansion touched %.0f buffers, budget 200000", hits+reads)
+	}
 	return q.queryer.Query(ctx, sql, args...)
 }
 
@@ -93,5 +101,36 @@ func logMentionScans(t *testing.T, node map[string]any) {
 	children, _ := node["Plans"].([]any)
 	for _, child := range children {
 		logMentionScans(t, child.(map[string]any))
+	}
+}
+
+func TestSparseMentionPlansStayWithinBudget(t *testing.T) {
+	_, database, _ := newTestServer(t, testServerOptions{})
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `insert into projects(key,name) values ('SPARSE','Sparse');
+	 insert into issues(key,project_key,number,title,created_by,rank) values ('SPARSE-1','SPARSE',1,'Sparse mentions','{"kind":"user","id":"bob"}','U');
+	 insert into comments(id,issue_key,author,body) select md5(n::text)::uuid,'SPARSE-1','{"kind":"user","id":"bob"}',case when n=1 then 'dispatch://people/alice' else 'No mention here' end from generate_series(1,20000)n;
+	 insert into identity_mentions(owner_kind,owner_id,from_kind,from_id,to_kind,to_id) select 'comment',id::text,'comment',id::text,'person','alice' from comments where id=md5('1')::uuid;
+	 insert into events(issue_key,seq,type,actor,notify,payload) select 'SPARSE-1',n,'issue.updated','{"kind":"session","id":"volume"}',false,'{}' from generate_series(1,100000)n;
+	 analyze comments;analyze identity_mentions;analyze events;`); err != nil {
+		t.Fatal(err)
+	}
+	items, err := readInboxMentions(ctx, mentionExplainQuery{queryer: database.Pool, t: t}, "alice", 50, 0)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("sparse mentions = %d, %v; want one of 20000 comments", len(items), err)
+	}
+	var raw []byte
+	if err := database.Pool.QueryRow(ctx, `explain(analyze,buffers,format json) `+personNodesQuery, "alice", 50, 0).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var plans []struct {
+		ExecutionTime float64 `json:"Execution Time"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("sparse person page: 1 mention / 20000 comments / 100000 events, execution %.3f ms, budget 2000 ms", plans[0].ExecutionTime)
+	if plans[0].ExecutionTime > 2000 {
+		t.Fatalf("sparse person page exceeded 2000 ms budget: %.3f ms", plans[0].ExecutionTime)
 	}
 }

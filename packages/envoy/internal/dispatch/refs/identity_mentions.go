@@ -133,12 +133,3 @@ func replaceDocumentIdentityMentions(
 // own rows.
 func blockOwnerKind(sourceKind string) string { return sourceKind + "_blocks" }
 
-// IdentityMentionsOf lists the identities one source's body names, as identity_mentions holds
-// them, newest first. It is the read the mention census compares a re-parse of the source against.
-func IdentityMentionsOf(ctx context.Context, q Queryer, fromKind, fromID string) ([]Target, error) {
-	return scanTargets(q.Query(ctx, `
-		select to_kind, to_id from identity_mentions
-		where from_kind = $1 and from_id = $2
-		order by to_kind, to_id
-	`, fromKind, fromID))
-}

@@ -15,8 +15,8 @@ func TestInboxMentionPaginationFiltersPrivateNodesBeforePaging(t *testing.T) {
  ('00000000-0000-0000-0000-000000000001','CORE-1','{"kind":"session","id":"agent"}','Public mention',now()-interval '1 hour');
  insert into messages(id,author,body,target)
  select md5('private-'||n)::uuid,'{"kind":"user","id":"bob"}','Private mention','session:other' from generate_series(1,51)n;
- insert into refs(from_kind,from_id,kind,to_kind,to_id,created_at)
-select 'message',id::text,'mentions','person_mention','alice',created_at from messages;
+ insert into identity_mentions(owner_kind,owner_id,from_kind,from_id,to_kind,to_id,created_at)
+select 'message',id::text,'message',id::text,'person','alice',created_at from messages;
  `); err != nil {
 		t.Fatal(err)
 	}

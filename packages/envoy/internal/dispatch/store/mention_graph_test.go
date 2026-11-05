@@ -19,6 +19,8 @@ func TestMentionGraphUsesRecordedTargetsAndResolvedSessions(t *testing.T) {
 		insert into comments (id,issue_key,author,body) values
 		('00000000-0000-0000-0000-000000000001','CORE-1','{"kind":"user","id":"bob"}','No body reparse'),
 		('00000000-0000-0000-0000-000000000002','CORE-1','{"kind":"session","id":"reader","owner":" Alice "}','Verified ownership');
+		insert into refs(from_kind,from_id,to_kind,to_id) values
+		('comment','00000000-0000-0000-0000-000000000001','issue','CORE-1');
 		insert into comment_mentions (comment_id,target,delivery,resolved_session_id) values
 		('00000000-0000-0000-0000-000000000001','role:reviewer','steer','reader'),
 		('00000000-0000-0000-0000-000000000001','session:missing','aside',null);
@@ -54,5 +56,12 @@ func TestMentionGraphUsesRecordedTargetsAndResolvedSessions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("mentions = %v; want %v", got, want)
+	}
+	var legacy string
+	if err := database.Pool.QueryRow(ctx, `select string_agg(to_kind||':'||to_id,',' order by to_kind,to_id) from graph_edges where from_kind='comment' and from_id='00000000-0000-0000-0000-000000000001' and kind='mentions'`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy != "issue:CORE-1" {
+		t.Fatalf("ordinary graph_edges reference changed: %s", legacy)
 	}
 }
