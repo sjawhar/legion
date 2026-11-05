@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  `dispatch_issue_update`'s close rule and description give the reason for posting the reason
+  first as what it is, so the close carries its note, and drop the claim that a closed issue
+  takes no messages or comments: Dispatch now accepts both on a closed issue (asks and artifacts
+  are still refused). The description says a close of an issue already closed is refused
+  `ISSUE_CLOSED` before anything is posted.

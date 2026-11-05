@@ -1,13 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Changed
-
-- The bundled `dispatch` command refuses `dispatch issue-update --status done --reason` on an issue
-  already closed, `ISSUE_CLOSED`, before it posts the reason, since Dispatch now takes messages on
-  a closed issue and the reason would otherwise land there as a stray message (INFRA-448).
-
 ## [16.6.0] - 2026-11-05
 
 ### Added

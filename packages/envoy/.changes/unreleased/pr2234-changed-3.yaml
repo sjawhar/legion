@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+  A closed Dispatch issue takes comments and messages, where each was
+  `409 ISSUE_CLOSED` before: a new comment (issue-level, a thread reply, a reply on an ask, one
+  anchored to a quote of one of its documents, and that thread's replies) and a new message post
+  from people and agents, and so do their deliveries, retries and the mentioned or targeted agent's
+  reply; a reply still reopens a resolved root there, as it does on an open issue. Every other
+  closed-issue rule stays: a new ask, an ask's edit, answer or resolve, a suggestion, a document
+  edit, a named version, an upload, a review, an approval request, a claim, a PATCH outside the
+  closed allow-list, and the comment actions resolve, reopen, edit, accept and reject on an
+  existing comment are still `409 ISSUE_CLOSED` until the issue reopens.

@@ -1,0 +1,5 @@
+kind: Changed
+body: |-
+  The bundled `dispatch` command refuses `dispatch issue-update --status done --reason` on an issue
+  already closed, `ISSUE_CLOSED`, before it posts the reason, since Dispatch now takes messages on
+  a closed issue and the reason would otherwise land there as a stray message.

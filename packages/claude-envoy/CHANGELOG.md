@@ -1,14 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Changed
-
-- The `dispatch` command (`dist/dispatch.js`) refuses `dispatch issue-update --status done
-  --reason` on an issue already closed, `ISSUE_CLOSED`, before it posts the reason, since Dispatch
-  now takes messages on a closed issue; the bundled `dispatch_issue_update` description no longer
-  says a closed issue takes no messages or comments (INFRA-448).
-
 ## [main@f06073fb9ef4] - 2026-11-05
 
 ### Changed

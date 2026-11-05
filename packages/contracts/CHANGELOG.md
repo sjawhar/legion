@@ -1,21 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Added
-
-- `IssueCollaborators` and its members (`IssueCollaboratorPerson`, `IssueCollaboratorAgent`,
-  `IssueCollaboratorLegion`, `CollaboratorReason`), the answer of Dispatch's
-  `GET /api/v1/issues/{key}/collaborators`: everyone who worked an issue, running or not, with each
-  Legion agent's role and the session that replaced it (INFRA-448).
-
-### Changed
-
-- `dispatch_issue_update`'s close rule and description give the reason for posting the reason
-  first as what it is, so the close carries its note, and drop the claim that a closed issue
-  takes no messages or comments: Dispatch now accepts both on a closed issue (asks and artifacts
-  are still refused). The description says a close of an issue already closed is refused
-  `ISSUE_CLOSED` before anything is posted (INFRA-448).
 ## [main@c82087d74996] - 2026-11-05
 
 ### Added
