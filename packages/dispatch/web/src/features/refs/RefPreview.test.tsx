@@ -14,7 +14,8 @@ import type {
   IssueDetails,
   IssueReferenceSummary,
 } from "../../api/types";
-import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
+import { RefPreviewHost } from "./RefPreview";
+import { closeRefPreview, referenceTriggerProps } from "./ref-preview-state";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import { shortForm } from "./routes";
 

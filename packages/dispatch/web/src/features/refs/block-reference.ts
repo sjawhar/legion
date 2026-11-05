@@ -1,4 +1,4 @@
-import { encodeBlockId, parseBlockFragment } from "@legion/contracts";
+import { encodeBlockId, parseBlockFragment } from "@legion/contracts/dispatch-block-ref";
 
 import type { DispatchReferenceRoute } from "./routes";
 

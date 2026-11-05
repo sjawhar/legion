@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import type { InboxRow, OpenAskOwner } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
-import { referenceTriggerProps } from "../refs/RefPreview";
+import { referenceTriggerProps } from "../refs/ref-preview-state";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { askIssueKey } from "./ask-name";
 

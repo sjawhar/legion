@@ -1,5 +1,5 @@
 import { expect, jest, type Mock, spyOn, test } from "bun:test";
-import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
+import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts/dispatch-constants";
 import {
   focusManager,
   onlineManager,

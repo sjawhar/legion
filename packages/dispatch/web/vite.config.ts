@@ -114,14 +114,47 @@ export default defineConfig({
     dedupe: ["prosemirror-model"],
     alias: {
       "decode-named-character-reference": characterReferenceDecoder,
-      "@legion/contracts/repo": fileURLToPath(
-        new URL("../../contracts/src/repo.ts", import.meta.url)
+      // One alias per subpath of `@legion/contracts` the web imports, longest first, because
+      // Vite matches a string alias by prefix and `@legion/contracts` alone would otherwise
+      // swallow every one of them. Each names a module of its own rather than the package's
+      // index, so the page's bundle holds only what it imports: the values and the plain
+      // helpers, never `dispatch-api.ts`, whose every zod schema is built as it loads
+      // (`packages/contracts/src/dispatch-constants.ts`; `check:no-zod`).
+      "@legion/contracts/actor-label": fileURLToPath(
+        new URL("../../contracts/src/actor-label.ts", import.meta.url)
+      ),
+      "@legion/contracts/agent-stream": fileURLToPath(
+        new URL("../../contracts/src/agent-stream.ts", import.meta.url)
+      ),
+      "@legion/contracts/claim-holds": fileURLToPath(
+        new URL("../../contracts/src/claim-holds.ts", import.meta.url)
+      ),
+      "@legion/contracts/dispatch-block-ref": fileURLToPath(
+        new URL("../../contracts/src/dispatch-block-ref.ts", import.meta.url)
+      ),
+      "@legion/contracts/dispatch-constants": fileURLToPath(
+        new URL("../../contracts/src/dispatch-constants.ts", import.meta.url)
+      ),
+      "@legion/contracts/dispatch-href": fileURLToPath(
+        new URL("../../contracts/src/dispatch-href.ts", import.meta.url)
       ),
       "@legion/contracts/dispatch-snippet": fileURLToPath(
         new URL("../../contracts/src/dispatch-snippet.ts", import.meta.url)
       ),
+      "@legion/contracts/dispatch-text-references": fileURLToPath(
+        new URL("../../contracts/src/dispatch-text-references.ts", import.meta.url)
+      ),
+      "@legion/contracts/dispatch-text-rules": fileURLToPath(
+        new URL("../../contracts/src/dispatch-text-rules.ts", import.meta.url)
+      ),
       "@legion/contracts/dispatch-tools": fileURLToPath(
         new URL("../../contracts/src/dispatch-tools.ts", import.meta.url)
+      ),
+      "@legion/contracts/related-forms": fileURLToPath(
+        new URL("../../contracts/src/related-forms.ts", import.meta.url)
+      ),
+      "@legion/contracts/repo": fileURLToPath(
+        new URL("../../contracts/src/repo.ts", import.meta.url)
       ),
       "@legion/contracts": fileURLToPath(new URL("../../contracts/src/index.ts", import.meta.url)),
       "@legion/proof-editor/headless": fileURLToPath(

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
+import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-constants";
 import {
   ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,

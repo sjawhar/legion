@@ -98,6 +98,16 @@
                       "shortSessionId"
                     ],
                     "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
+                  },
+                  "@legion/contracts/actor-label": {
+                    "importNames": [
+                      "actorAttribution",
+                      "actorLabel",
+                      "actorName",
+                      "sessionLabel",
+                      "shortSessionId"
+                    ],
+                    "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
                   }
                 },
                 "patterns": [
@@ -123,6 +133,16 @@
               "options": {
                 "paths": {
                   "@legion/contracts": {
+                    "importNames": [
+                      "actorAttribution",
+                      "actorLabel",
+                      "actorName",
+                      "sessionLabel",
+                      "shortSessionId"
+                    ],
+                    "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
+                  },
+                  "@legion/contracts/actor-label": {
                     "importNames": [
                       "actorAttribution",
                       "actorLabel",

@@ -5,7 +5,7 @@ import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
 import { paintBlock, paintBlockInSlices } from "../refs/paint-block";
 import { useRenderedMarkdown } from "../refs/useRenderedMarkdown";
 import { leadingBlocks } from "./document-blocks";
-import { takeFirstScreen } from "./first-screen";
+import { firstScreenAwaits, takeFirstScreen } from "./first-screen";
 
 /** The class the preview's own element carries, which `styles.css` skips the off-screen blocks
  *  of exactly as it skips the editor's (`content-visibility`). */
@@ -105,19 +105,22 @@ export function DocumentPreview({
   markdown: string;
 }): ReactNode {
   const root = useRef<HTMLDivElement>(null);
-  /** The blocks the server drew into the page, taken out of it in this element's first render so
-   *  the commit that mounts this element is the one that puts them back on the screen. Read
-   *  once: a second render must not look again, since the first took them. */
-  const serverDrew = useRef<DocumentFragment | undefined | null>(null);
-  if (serverDrew.current === null) {
-    serverDrew.current = takeFirstScreen(address);
-  }
+  /** Whether the page carries the blocks the server drew for this address.
+   *
+   *  Read here, taken in the commit that mounts this element. The reading leaves them on the
+   *  screen: a render React yields in the middle of - the issue page's first render is a
+   *  transition (`app.tsx`'s `IssuePageInATransition`) - would otherwise take the reader's
+   *  document off the page frames before the element that puts it back is in it, and the
+   *  reader would watch their first screen go and come back. The take and the append are one
+   *  layout effect, so the blocks leave `#first-screen` and land here inside one commit,
+   *  before the browser paints either. */
+  const [serverDrewTheFirstScreen] = useState(() => firstScreenAwaits(address));
   useLayoutEffect(() => {
-    const drawn = serverDrew.current;
-    if (drawn !== undefined && drawn !== null && root.current !== null) {
+    const drawn = takeFirstScreen(address);
+    if (drawn !== undefined && root.current !== null) {
       root.current.append(drawn);
     }
-  }, []);
+  }, [address]);
   const firstScreenful = useMemo(
     () => leadingBlocks(markdown, markdownWorkerThreshold),
     [markdown]
@@ -126,15 +129,13 @@ export function DocumentPreview({
    *  it: its own first pass, or the blocks the server drew, which are a first pass already made.
    *  A document whose every block fits in the first draw is its own first draw (`leadingBlocks`
    *  answers the source itself), so nothing is parsed twice for it. */
-  const [drawnOnce, setDrawnOnce] = useState(serverDrew.current !== undefined);
+  const [drawnOnce, setDrawnOnce] = useState(serverDrewTheFirstScreen);
   /** The last source a pass of this element finished drawing, which is what it holds once the
    *  build has begun. Read only in the render the build's start causes, so it is never behind;
    *  `undefined` while nothing of this element's own has been drawn - before the first pass
    *  lands, and for a reader whose page carried the server's draw until the whole document
    *  replaces it - and the element then holds what it has rather than drawing anything. */
-  const drawn = useRef<string | undefined>(
-    serverDrew.current === undefined ? firstScreenful : undefined
-  );
+  const drawn = useRef<string | undefined>(serverDrewTheFirstScreen ? undefined : firstScreenful);
   const source = !drawnOnce ? firstScreenful : building ? drawn.current : markdown;
   /** Whether this element draws nothing for now and keeps what is in front of the reader: the
    *  server's blocks, until the document's text has arrived and been parsed, and whatever it

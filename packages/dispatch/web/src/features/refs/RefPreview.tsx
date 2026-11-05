@@ -19,7 +19,17 @@ import { statusText } from "../project/board-model";
 import { AgentName } from "./AgentName";
 import { type BlockItemKind, itemOfBlock } from "./block-reference";
 import { MarkdownPreview } from "./MarkdownPreview";
-import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
+import {
+  CARD_ID,
+  cardContains,
+  closeRefPreview,
+  inHoverZone,
+  type PreviewTarget,
+  previewState,
+  refPreview,
+  subscribeToPreview,
+  triggerOf,
+} from "./ref-preview-state";
 import {
   artifactTextQuery,
   blockText,
@@ -29,143 +39,12 @@ import {
   useReferencePath,
 } from "./reference-target";
 import {
-  buildDispatchReference,
   type DispatchReferenceRoute,
   isProjectRoute,
   parseNodeReference,
   shortForm,
 } from "./routes";
 import { referenceTargetKind } from "./target-id";
-
-const CARD_ID = "ref-preview";
-/** Every hover-card trigger: a Markdown anchor `collectReferenceAnchors` tagged, a Proof link
- * mark (`data-dispatch-href`, the sanitized mark's real target), or a React link that set
- * `data-dispatch-ref` — see `referenceTriggerProps`. */
-const TRIGGER_SELECTOR = "[data-dispatch-ref],[data-dispatch-href]";
-
-interface PreviewTarget {
-  readonly anchor: HTMLElement;
-  readonly route: DispatchReferenceRoute;
-}
-
-interface PreviewState {
-  readonly phase: "pending" | "open";
-  readonly target: PreviewTarget;
-}
-
-let state: PreviewState | undefined;
-let openTimer = 0;
-let closeTimer = 0;
-const subscribers = new Set<() => void>();
-
-/** A new target, or none, cancels both timers, so a timer's callback always acts on the target
- * that armed it and no transition has to clear them for a target change. The comparison is by
- * object identity, and `hoverStart` and `focus` mint a fresh `PreviewTarget` on every call, so
- * keyboard focus landing on the very anchor the pointer just left still cancels that anchor's
- * close. A transition that re-arms a timer on the target already shown clears it itself, which
- * is `leave` alone. */
-function setState(next: PreviewState | undefined): void {
-  if (next?.target !== state?.target) {
-    window.clearTimeout(openTimer);
-    window.clearTimeout(closeTimer);
-  }
-  state = next;
-  for (const notify of subscribers) {
-    notify();
-  }
-}
-
-/** The one hover card's controller. Module-level on purpose: "one card at a time" is a single
- * piece of state, and `RefPreviewHost` drives it from document-level listeners. Each transition
- * has a precondition its one caller checks - `hoverStart`, `leave` and `reenter` the hover zone
- * (`attachTriggers` alone judges that), `focus` `:focus-visible`, `blur` that focus is not moving
- * into the card, and the scroll handler's `reposition` that the card's anchor holds focus - so
- * all of them are private and `closeRefPreview` below is the whole outside surface. */
-const refPreview = {
-  /** Hover began on an anchor outside the hover zone: open its card after the delay unless the
-   * pointer leaves first. */
-  hoverStart(anchor: HTMLElement, route: DispatchReferenceRoute): void {
-    const target: PreviewTarget = { anchor, route };
-    setState({ phase: "pending", target });
-    openTimer = window.setTimeout(
-      () => setState({ phase: "open", target }),
-      REF_PREVIEW_OPEN_DELAY_MS
-    );
-  },
-  /** The pointer left the hover zone: a card that has not opened yet is abandoned, and an open
-   * one closes after the bridge delay unless the pointer comes back. */
-  leave(): void {
-    if (state === undefined) {
-      return;
-    }
-    if (state.phase === "pending") {
-      setState(undefined);
-      return;
-    }
-    // Re-arming on the target already shown, which `setState` does not clear for: two pointers
-    // leaving the zone within the delay must leave one close timer, not two, or the first one
-    // closes the card under the pointer that came back.
-    window.clearTimeout(closeTimer);
-    closeTimer = window.setTimeout(() => setState(undefined), REF_PREVIEW_CLOSE_DELAY_MS);
-  },
-  /** The pointer came back into the hover zone before the bridge delay ran out. */
-  reenter(): void {
-    window.clearTimeout(closeTimer);
-  },
-  /** Keyboard focus opens the card at once. */
-  focus(anchor: HTMLElement, route: DispatchReferenceRoute): void {
-    setState({ phase: "open", target: { anchor, route } });
-  },
-  blur(anchor: HTMLElement): void {
-    if (state?.target.anchor === anchor) {
-      setState(undefined);
-    }
-  },
-  /** The anchor moved (the page scrolled under a keyboard-opened card): measure it again. */
-  reposition(): void {
-    if (state !== undefined) {
-      setState({ ...state });
-    }
-  },
-};
-
-/** Close the hover card. The one operation with no precondition, so it is the one this module
- * exports: a surface that takes the pointer over (the board's drag lift) closes the card rather
- * than driving the hover transitions itself. */
-export function closeRefPreview(): void {
-  setState(undefined);
-}
-
-function subscribe(notify: () => void): () => void {
-  subscribers.add(notify);
-  return () => {
-    subscribers.delete(notify);
-  };
-}
-
-/** The attribute a React-rendered link spreads to become a hover-card trigger; the Markdown and
- * Proof surfaces carry the same attributes on the anchors they render themselves. */
-export function referenceTriggerProps(route: DispatchReferenceRoute): {
-  "data-dispatch-ref": string;
-} {
-  return { "data-dispatch-ref": buildDispatchReference(route) };
-}
-
-function triggerOf(node: EventTarget | null): HTMLElement | null {
-  return node instanceof Element ? node.closest<HTMLElement>(TRIGGER_SELECTOR) : null;
-}
-
-function cardContains(node: EventTarget | null): boolean {
-  return node instanceof Element && node.closest(`#${CARD_ID}`) !== null;
-}
-
-/** The one region the pointer may roam without closing the card: the current target's anchor -
- * the open card's, or the one a pending hover is waiting on - and the card itself. Every pointer
- * transition is judged against this predicate, in the document listeners alone, so no close
- * depends on the order in which two event systems see one `pointerout`. */
-function inHoverZone(node: EventTarget | null): boolean {
-  return state !== undefined && (triggerOf(node) === state.target.anchor || cardContains(node));
-}
 
 /** The route a trigger names, read as a node's reference whatever the length of its target id: a
  *  `data-dispatch-ref`, which the dashboard writes for a route it already holds, or a Proof link
@@ -272,7 +151,8 @@ function attachTriggers(): () => void {
     // now, until the reader themselves moves away. The reader leaving is the reader doing
     // something, and that is what tells the two apart. A hover that has not opened yet is
     // abandoned as before: there is nothing on screen to protect.
-    const anchor = state?.phase === "open" ? state.target.anchor : undefined;
+    const open = previewState();
+    const anchor = open?.phase === "open" ? open.target.anchor : undefined;
     if (
       anchor !== undefined &&
       anchorWas?.anchor === anchor &&
@@ -604,7 +484,7 @@ function PreviewCard({ target }: { target: PreviewTarget }): ReactNode {
  * the anchor holds keyboard focus (focusing it may itself scroll it into view), in which case
  * the card follows the anchor instead. */
 export function RefPreviewHost(): ReactNode {
-  const current = useSyncExternalStore(subscribe, () => state);
+  const current = useSyncExternalStore(subscribeToPreview, previewState);
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -613,7 +493,7 @@ export function RefPreviewHost(): ReactNode {
     // layer, so Escape dismisses it alone and leaves the dialog beneath (the search palette)
     // open. With no open card the key passes through untouched.
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && state?.phase === "open") {
+      if (event.key === "Escape" && previewState()?.phase === "open") {
         event.stopPropagation();
         closeRefPreview();
       }
@@ -622,7 +502,8 @@ export function RefPreviewHost(): ReactNode {
     // comes to rest on a link while the page is still settling (smooth scrolling, a
     // scrollIntoView), and the card is measured fresh when it opens anyway.
     const onScroll = (event: Event) => {
-      if (state?.phase !== "open") {
+      const open = previewState();
+      if (open?.phase !== "open") {
         return;
       }
       // The card follows its anchor rather than closing where the reader did nothing to move the
@@ -636,7 +517,7 @@ export function RefPreviewHost(): ReactNode {
       // leaving the zone closes the card itself. An anchor that holds keyboard focus keeps its
       // card either way: focusing it may itself scroll it into view.
       if (
-        document.activeElement === state.target.anchor ||
+        document.activeElement === open.target.anchor ||
         event.timeStamp - lastInputAt > READER_INPUT_GRACE_MS
       ) {
         refPreview.reposition();

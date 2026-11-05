@@ -1,4 +1,4 @@
-import { DISPATCH_LOGIN_CHANGED } from "@legion/contracts";
+import { DISPATCH_LOGIN_CHANGED } from "@legion/contracts/dispatch-constants";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useRef, useSyncExternalStore } from "react";
 

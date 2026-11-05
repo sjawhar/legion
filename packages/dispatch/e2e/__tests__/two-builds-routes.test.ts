@@ -8,7 +8,7 @@ import {
   ANSWERS_PATH,
   REPLIES_PATH,
 } from "../../web/src/features/refs/routes";
-import { walkRoutes } from "../two-builds-routes";
+import { type WalkRoute, walkRoutes } from "../two-builds-routes";
 
 // The two-builds walk (e2e/two-builds.multiprocess.e2e.ts) asks the other build's process for
 // exactly the chunks the routes it visits load, so a page app.tsx adds without a row in
@@ -44,7 +44,9 @@ describe("the two-builds walk's route list", () => {
   });
 
   test("covers every page app.tsx loads with lazy()", () => {
-    const walkedPages = new Set<string>(walkRoutes.map((route) => route.page));
+    const walkedPages = new Set<string>(
+      walkRoutes.map((route: WalkRoute) => route.loads ?? route.page)
+    );
     expect(lazyPages.filter((page) => page !== undefined && !walkedPages.has(page))).toEqual([]);
   });
 

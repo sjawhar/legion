@@ -1,4 +1,5 @@
-import { MAX_BLOCK_ID_BYTES, referenceTargetFits, utf8Bytes } from "@legion/contracts";
+import { MAX_BLOCK_ID_BYTES } from "@legion/contracts/dispatch-block-ref";
+import { referenceTargetFits, utf8Bytes } from "@legion/contracts/dispatch-text-rules";
 
 import { itemOfBlock } from "./block-reference";
 import type { DispatchReferenceRoute } from "./routes";

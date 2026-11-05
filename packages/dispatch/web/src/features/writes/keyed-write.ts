@@ -1,4 +1,4 @@
-import { IDEMPOTENCY_KEY_TTL_MS, retriesUnderKey } from "@legion/contracts";
+import { IDEMPOTENCY_KEY_TTL_MS, retriesUnderKey } from "@legion/contracts/dispatch-constants";
 
 import {
   AnswerNotKeptError,

@@ -1,4 +1,4 @@
-import type { MessageDeliveryMode } from "@legion/contracts";
+import type { MessageDeliveryMode } from "@legion/contracts/dispatch-constants";
 import type { MutationKey } from "@tanstack/react-query";
 
 import { newSendKey } from "../../lib/send-key";

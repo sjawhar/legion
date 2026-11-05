@@ -13,7 +13,7 @@ import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 installInboxApiMocks();
 
 /** A harness matching how `app.tsx` mounts the drawer: a trigger the reader's focus starts on,
- *  the drawer itself as a sibling, state living above both. */
+ *  the drawer itself as a sibling while it is open, state living above both. */
 function Harness() {
   const [open, setOpen] = useState(false);
   return (
@@ -21,7 +21,7 @@ function Harness() {
       <button onClick={() => setOpen(true)} type="button">
         Open inbox
       </button>
-      <InboxDrawer onClose={() => setOpen(false)} open={open} />
+      {open ? <InboxDrawer onClose={() => setOpen(false)} /> : null}
     </>
   );
 }

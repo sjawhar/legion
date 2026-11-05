@@ -9,7 +9,7 @@ import {
   type AgentStreamSettingsReported,
   type AgentStreamToolResult,
   isTypableCommandName,
-} from "@legion/contracts";
+} from "@legion/contracts/agent-stream";
 import { dispatchMetadata, type KeyedMessage } from "./dispatch-marks";
 
 /**

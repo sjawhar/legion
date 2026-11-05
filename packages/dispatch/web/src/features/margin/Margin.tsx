@@ -13,9 +13,9 @@ import { routeHasMargin } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { MarginSheet } from "./MarginSheet";
 import { useMargin } from "./margin-context";
+import { DEFAULT_MARGIN_WIDTH } from "./margin-width";
 import { useMarginSheet } from "./useMarginSheet";
 
-export const DEFAULT_MARGIN_WIDTH = 384;
 const MIN_MARGIN_WIDTH = 280;
 const MARGIN_WIDTH_STEP = 24;
 

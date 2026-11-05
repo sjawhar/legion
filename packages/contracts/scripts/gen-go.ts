@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
+import { SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE } from "../src/dispatch-api";
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
@@ -30,8 +31,7 @@ import {
   MAX_ISSUE_PAGE_LIMIT,
   PROJECT_NAME_MAX,
   RECEIPT_TIMEOUT_CAUSE,
-  SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
-} from "../src/dispatch-api";
+} from "../src/dispatch-constants";
 import {
   ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,

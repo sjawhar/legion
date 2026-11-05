@@ -1,4 +1,4 @@
-import { relatedCheckFormOf, relatedCheckSearchWords } from "@legion/contracts";
+import { relatedCheckFormOf, relatedCheckSearchWords } from "@legion/contracts/related-forms";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useState } from "react";
 

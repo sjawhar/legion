@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AgentStreamFrame } from "@legion/contracts";
+import type { AgentStreamFrame } from "@legion/contracts/agent-stream";
 
 import { applyFrames, EMPTY_CONVERSATION, toThreadMessages } from "./conversation";
 

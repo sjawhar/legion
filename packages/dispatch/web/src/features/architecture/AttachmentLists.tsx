@@ -25,7 +25,7 @@ import {
 } from "../../theme/classes";
 import { type IssueComponentsWrite, useIssueComponents } from "../issue/useIssueComponents";
 import { statusText } from "../project/board-model";
-import { referenceTriggerProps } from "../refs/RefPreview";
+import { referenceTriggerProps } from "../refs/ref-preview-state";
 import { buildIssuePath } from "../refs/routes";
 import { ComponentPicker } from "./ComponentPicker";
 

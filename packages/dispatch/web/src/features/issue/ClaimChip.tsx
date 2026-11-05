@@ -1,4 +1,4 @@
-import { claimHolds } from "@legion/contracts";
+import { claimHolds } from "@legion/contracts/claim-holds";
 import type { ReactNode } from "react";
 
 import type { IssueClaim } from "../../api/types";

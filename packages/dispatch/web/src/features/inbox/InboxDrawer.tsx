@@ -15,9 +15,11 @@ import { InboxList } from "./InboxList";
 
 /**
  * The Inbox as a peek over whatever page is open (LEGION-547): the same list, cards and actions
- * as the Inbox page, mounted once in the app shell as a sibling of `<main>` so a route change
+ * as the Inbox page, mounted by the app shell as a sibling of `<main>` so a route change
  * underneath never unmounts the page beneath it - the drawer itself closes instead
- * (`useCloseOnNavigation`), which is also what "open the item" from inside it does.
+ * (`useCloseOnNavigation`), which is also what "open the item" from inside it does. The shell
+ * mounts it while it is open and takes it down when it closes, so its chunk is asked for the
+ * first time a reader opens it (`features/shell/deferred-shell.ts`).
  *
  * Its assignee filter is its own `useState`, never the URL: `Inbox`'s `filter`/`onAssigneesChange`
  * exist exactly so a peek embedded on, say, the Agents page does not navigate it to `/` the
@@ -27,17 +29,13 @@ import { InboxList } from "./InboxList";
  * is the third: a peek is a strip beside the page it covers, not a two-column reader, so it keeps
  * the card in the row at every width - the Inbox the page itself shows below 1280 px.
  */
-export function InboxDrawer({ onClose, open }: { onClose: () => void; open: boolean }): ReactNode {
+export function InboxDrawer({ onClose }: { onClose: () => void }): ReactNode {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   // `undefined` is the reader alone, the same default the page reads from an address without
   // `?assignee=`.
   const [assignees, setAssignees] = useState<readonly string[] | undefined>(undefined);
-  const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open });
-  useCloseOnNavigation(open, onClose);
-
-  if (!open) {
-    return null;
-  }
+  const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open: true });
+  useCloseOnNavigation(true, onClose);
 
   const filter: InboxRoute = { assignees };
 

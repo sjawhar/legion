@@ -149,10 +149,16 @@ afterEach(() => {
 test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop landmarks", async () => {
   renderShellAt(800);
 
-  await waitFor(() =>
-    expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull()
+  // The margin is a chunk of its own, so both its controls arrive a module load after the
+  // shell's own first commit (`features/shell/deferred-shell.ts`) - longer than `waitFor`'s
+  // default second under a loaded machine.
+  await waitFor(
+    () => {
+      expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull();
+      expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull();
+    },
+    { timeout: 5_000 }
   );
-  expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull();
   expect(screen.queryByRole("navigation", { name: "Issues" })).toBeNull();
   expect(screen.queryByRole("complementary", { name: "Review margin" })).toBeNull();
 });
@@ -160,10 +166,13 @@ test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop
 test("desktop exposes the persistent sidebar navigation and review margin", async () => {
   renderShellAt(1280);
 
-  await waitFor(() =>
-    expect(screen.queryByRole("navigation", { name: "Navigation" })).not.toBeNull()
+  await waitFor(
+    () => {
+      expect(screen.queryByRole("navigation", { name: "Navigation" })).not.toBeNull();
+      expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull();
+    },
+    { timeout: 5_000 }
   );
-  expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull();
   expect(screen.queryByRole("button", { name: "Open navigation" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Open review panel/ })).toBeNull();
 });

@@ -1,4 +1,4 @@
-import { DELIVERY_CAPABILITIES } from "@legion/contracts";
+import { DELIVERY_CAPABILITIES } from "@legion/contracts/dispatch-constants";
 import type { QueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api/client";

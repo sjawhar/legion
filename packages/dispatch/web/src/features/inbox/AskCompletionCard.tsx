@@ -1,4 +1,4 @@
-import { answerSelected } from "@legion/contracts";
+import { answerSelected } from "@legion/contracts/dispatch-constants";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 

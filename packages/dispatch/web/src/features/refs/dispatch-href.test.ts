@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DISPATCH_HREF_REFERENCES } from "@legion/contracts";
+import { DISPATCH_HREF_REFERENCES } from "@legion/contracts/dispatch-href";
 
 import { parseDispatchReference, referenceRouteFromHref } from "./routes";
 

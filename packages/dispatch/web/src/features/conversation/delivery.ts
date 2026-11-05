@@ -3,7 +3,7 @@ import {
   DELIVERY_DUPLICATE_WINDOW_MS,
   type MessageDeliveryMode,
   RECEIPT_TIMEOUT_CAUSE,
-} from "@legion/contracts";
+} from "@legion/contracts/dispatch-constants";
 
 /**
  * Each delivery mode as a person reads it, the one mapping every surface names a mode with: the

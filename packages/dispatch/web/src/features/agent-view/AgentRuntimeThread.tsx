@@ -3,7 +3,8 @@ import {
   type ThreadMessageLike,
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
-import type { AgentStreamCommand, MessageDeliveryMode } from "@legion/contracts";
+import type { AgentStreamCommand } from "@legion/contracts/agent-stream";
+import type { MessageDeliveryMode } from "@legion/contracts/dispatch-constants";
 import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
 
 import type { Message, MessageRead } from "../../api/types";

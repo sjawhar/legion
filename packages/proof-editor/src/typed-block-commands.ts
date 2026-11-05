@@ -1,4 +1,4 @@
-import { blockPointersProblem } from '@legion/contracts';
+import { blockPointersProblem } from '@legion/contracts/dispatch-block-ref';
 import type { Node as ProseMirrorNode, NodeType } from '@milkdown/kit/prose/model';
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 

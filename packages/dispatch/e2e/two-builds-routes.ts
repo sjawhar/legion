@@ -10,6 +10,9 @@
 export interface WalkRoute {
   readonly path: string;
   readonly page: string;
+  /** The `lazy()` page that component loads, where it is not the component itself: the issue
+   *  route renders its page inside a React transition, through a gate of its own. */
+  readonly loads?: string;
 }
 
 export const walkRoutes = [
@@ -21,7 +24,7 @@ export const walkRoutes = [
   { page: "BroadcastPage", path: "/agents/broadcasts/:id" },
   { page: "AgentConversationPage", path: "/agents/:sessionId/live" },
   { page: "AgentArtifactPage", path: "/agents/:sessionId/artifacts/:slug" },
-  { page: "IssuePage", path: "/issues/:key/*" },
+  { loads: "IssuePage", page: "IssuePageInATransition", path: "/issues/:key/*" },
   { page: "ProjectPage", path: "/projects/:key" },
   { page: "ProjectPage", path: "/projects/:key/architecture" },
   { page: "ProjectPage", path: "/projects/:key/issues" },

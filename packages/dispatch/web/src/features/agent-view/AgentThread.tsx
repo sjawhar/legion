@@ -12,11 +12,11 @@ import {
   useAui,
   useAuiState,
 } from "@assistant-ui/react";
+import type { AgentStreamCommand } from "@legion/contracts/agent-stream";
 import {
-  type AgentStreamCommand,
   DELIVERY_CAPABILITIES,
   type MessageDeliveryMode,
-} from "@legion/contracts";
+} from "@legion/contracts/dispatch-constants";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { ChevronIcon } from "../../components/DisclosureToggle";

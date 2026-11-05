@@ -28,6 +28,51 @@
       "types": "./src/legion-api.ts",
       "bun": "./src/legion-api.ts",
       "default": "./dist/legion-api.js"
+    },
+    "./actor-label": {
+      "types": "./src/actor-label.ts",
+      "bun": "./src/actor-label.ts",
+      "default": "./dist/actor-label.js"
+    },
+    "./agent-stream": {
+      "types": "./src/agent-stream.ts",
+      "bun": "./src/agent-stream.ts",
+      "default": "./dist/agent-stream.js"
+    },
+    "./claim-holds": {
+      "types": "./src/claim-holds.ts",
+      "bun": "./src/claim-holds.ts",
+      "default": "./dist/claim-holds.js"
+    },
+    "./dispatch-block-ref": {
+      "types": "./src/dispatch-block-ref.ts",
+      "bun": "./src/dispatch-block-ref.ts",
+      "default": "./dist/dispatch-block-ref.js"
+    },
+    "./dispatch-constants": {
+      "types": "./src/dispatch-constants.ts",
+      "bun": "./src/dispatch-constants.ts",
+      "default": "./dist/dispatch-constants.js"
+    },
+    "./dispatch-href": {
+      "types": "./src/dispatch-href.ts",
+      "bun": "./src/dispatch-href.ts",
+      "default": "./dist/dispatch-href.js"
+    },
+    "./dispatch-text-references": {
+      "types": "./src/dispatch-text-references.ts",
+      "bun": "./src/dispatch-text-references.ts",
+      "default": "./dist/dispatch-text-references.js"
+    },
+    "./dispatch-text-rules": {
+      "types": "./src/dispatch-text-rules.ts",
+      "bun": "./src/dispatch-text-rules.ts",
+      "default": "./dist/dispatch-text-rules.js"
+    },
+    "./related-forms": {
+      "types": "./src/related-forms.ts",
+      "bun": "./src/related-forms.ts",
+      "default": "./dist/related-forms.js"
     }
   },
   "main": "dist/index.js",
@@ -35,7 +80,7 @@
   "scripts": {
     "gen:go": "bun run scripts/gen-go.ts",
     "check:go": "bun run scripts/gen-go.ts --check",
-    "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-api.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-api.ts src/actor-label.ts src/agent-stream.ts src/claim-holds.ts src/dispatch-block-ref.ts src/dispatch-constants.ts src/dispatch-href.ts src/dispatch-text-references.ts src/dispatch-text-rules.ts src/related-forms.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ schemas/"

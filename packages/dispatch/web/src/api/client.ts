@@ -8,7 +8,7 @@ import {
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_REPLAYED_HEADER,
   type IdempotencyLandedCode,
-} from "@legion/contracts";
+} from "@legion/contracts/dispatch-constants";
 import { takeEarlyDocumentRead } from "./early-document-read";
 import { reachable, routeOf, unreachable } from "./reachability";
 

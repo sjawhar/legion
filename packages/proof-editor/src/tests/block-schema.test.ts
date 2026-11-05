@@ -1,5 +1,5 @@
 import { test } from './harness.js';
-import { DISPATCH_BLOCK_POINTER_VALUES } from '@legion/contracts';
+import { DISPATCH_BLOCK_POINTER_VALUES } from '@legion/contracts/dispatch-block-ref';
 import { Schema } from '@milkdown/kit/prose/model';
 import { EditorState } from '@milkdown/kit/prose/state';
 

@@ -1,4 +1,4 @@
-import { answerSelected } from "@legion/contracts";
+import { answerSelected } from "@legion/contracts/dispatch-constants";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 

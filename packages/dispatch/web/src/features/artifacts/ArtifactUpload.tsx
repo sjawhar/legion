@@ -1,4 +1,4 @@
-import { isPictureType, pictureCaption } from "@legion/contracts";
+import { isPictureType, pictureCaption } from "@legion/contracts/dispatch-text-rules";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import {
   type ChangeEvent,

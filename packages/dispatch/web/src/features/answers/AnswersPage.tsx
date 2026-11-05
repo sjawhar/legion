@@ -1,4 +1,4 @@
-import { answerSelected } from "@legion/contracts";
+import { answerSelected } from "@legion/contracts/dispatch-constants";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";

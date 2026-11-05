@@ -1,4 +1,7 @@
-import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
+import {
+  DELIVERY_CAPABILITIES,
+  type MessageDeliveryMode,
+} from "@legion/contracts/dispatch-constants";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";

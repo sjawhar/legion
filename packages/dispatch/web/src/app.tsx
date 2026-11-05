@@ -1,5 +1,14 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
-import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  type ReactNode,
+  type RefObject,
+  Suspense,
+  startTransition,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isNoIdentity, isUnauthorized } from "./api/client";
@@ -11,14 +20,10 @@ import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { openDocumentEarly } from "./features/doc/open-document-early";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
-import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { InboxList, importInbox } from "./features/inbox/InboxList";
-import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
-import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
-import { AgentRegistryPoller } from "./features/refs/agent-registry";
+import { DEFAULT_MARGIN_WIDTH } from "./features/margin/margin-width";
 import { TextAskCard } from "./features/refs/markdown-cards";
-import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
   AGENT_ARTIFACT_PATH,
   AGENT_LIVE_PATH,
@@ -35,6 +40,13 @@ import {
 import { useRepliesCount } from "./features/replies/useRepliesCount";
 import { SearchButton } from "./features/search/SearchButton";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
+import {
+  AgentRegistryPoller,
+  CreateIssueDialog,
+  InboxDrawer,
+  Margin,
+  RefPreviewHost,
+} from "./features/shell/deferred-shell";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
 import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
@@ -222,6 +234,29 @@ function IssuePageFallback(): ReactNode {
       </div>
     </div>
   );
+}
+
+/**
+ * The issue page, rendered at transition priority.
+ *
+ * An issue page is the largest first render the app does, and a document's is the largest of
+ * those: the header, the tab strip, the margin's reads and the document surface are one commit,
+ * measured at about 0.7 s on a phone at 4x CPU throttling, and nothing a reader does reaches
+ * the main thread while it runs (dispatch://INFRA-341, R11). React renders a transition in
+ * short pieces, yielding to the browser between them, so the page's own paint and the reader's
+ * scroll are not held behind the whole of it.
+ *
+ * The shell paints its own skeleton first - the same `IssuePageFallback` the `Suspense`
+ * boundary above shows while the page's chunk arrives - and the effect then starts the
+ * transition. So the page appears exactly as it does today: the skeleton, then the page, with
+ * nothing in between that a reader did not see before.
+ */
+function IssuePageInATransition(): ReactNode {
+  const [renderThePage, setRenderThePage] = useState(false);
+  useEffect(() => {
+    startTransition(() => setRenderThePage(true));
+  }, []);
+  return renderThePage ? <IssuePage /> : <IssuePageFallback />;
 }
 
 function ShellMessagePage({ children, title }: { children?: ReactNode; title: string }): ReactNode {
@@ -834,7 +869,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
                 <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
                 <Route element={<AgentArtifactPage />} path={AGENT_ARTIFACT_PATH} />
-                <Route element={<IssuePage />} path="/issues/:key/*" />
+                <Route element={<IssuePageInATransition />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />
                 <Route element={<ProjectPage />} path="/projects/:key/issues" />
@@ -851,18 +886,30 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </ErrorBoundary>
         </main>
         <ErrorBoundary region="the margin" resetKey={location.pathname}>
-          <Margin
-            collapsed={marginHidden}
-            onCollapsedChange={setMarginHidden}
-            onWidthChange={setMarginWidth}
-            width={marginWidth}
-          />
+          <Suspense fallback={null}>
+            <Margin
+              collapsed={marginHidden}
+              onCollapsedChange={setMarginHidden}
+              onWidthChange={setMarginWidth}
+              width={marginWidth}
+            />
+          </Suspense>
         </ErrorBoundary>
         <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
-        <InboxDrawer onClose={() => setInboxDrawerOpen(false)} open={inboxDrawerOpen} />
+        {inboxDrawerOpen ? (
+          <Suspense fallback={null}>
+            <InboxDrawer onClose={() => setInboxDrawerOpen(false)} />
+          </Suspense>
+        ) : null}
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
-        {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
-        <RefPreviewHost />
+        {createOpen ? (
+          <Suspense fallback={null}>
+            <CreateIssueDialog onClose={() => setCreateOpen(false)} />
+          </Suspense>
+        ) : null}
+        <Suspense fallback={null}>
+          <RefPreviewHost />
+        </Suspense>
       </div>
     </MarginProvider>
   );
@@ -897,7 +944,9 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   // dialogs - draws a decision block in its text as the read-only card (`TextAskCard`).
   return (
     <KeymapProvider>
-      <AgentRegistryPoller />
+      <Suspense fallback={null}>
+        <AgentRegistryPoller />
+      </Suspense>
       <OpenDocumentEarly />
       <TextAskCard.Provider value={TextAskBlockCard}>
         <AppShell user={user} />
