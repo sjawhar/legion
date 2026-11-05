@@ -492,6 +492,7 @@
           "-c",
           "echo fixture-setup"
         ],
+        "skills_repository": "acme/agent-skills",
         "test_postgres": false,
         "repository_cache": {
           "volume": "40Gi",
