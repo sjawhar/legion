@@ -14,8 +14,8 @@ import (
 // rather than losing it at its next reminder turn and being asked for it again.
 //
 // The store's harness migrates to any version a test names (migrateThrough), so these rows are
-// written as the released daemon left them, at the migration before this one, and read after it
-// ran.
+// written as the released daemon left them, at a migration before this one after which no
+// migration but this one changes the claims table, and read after this one ran.
 func TestTheUpdateAnswerBackfillKeepsTheTurnsEndAnswerOfAClaimBelow46(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
