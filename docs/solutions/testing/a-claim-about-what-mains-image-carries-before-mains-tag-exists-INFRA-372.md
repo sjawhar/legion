@@ -18,7 +18,7 @@ related_issues:
 
 A change that documents what an earlier pull request put into the worker image is often written
 while `main`'s image of that merge is still unpublished (`crane digest
-ghcr.io/sjawhar/legion-worker:sha-<12 hex>` answers `MANIFEST_UNKNOWN`). Do not wait for it:
+ghcr.io/cybermonklabs/legion-worker:sha-<12 hex>` answers `MANIFEST_UNKNOWN`). Do not wait for it:
 
 - **Prove the contents on the earlier pull request's head image, and tie that image to `main` by
   the Dockerfile.** List the files with `crane export <ref@digest> - | tar -tvf - <paths>`, read

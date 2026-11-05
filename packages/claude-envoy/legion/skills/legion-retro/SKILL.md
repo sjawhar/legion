@@ -47,7 +47,7 @@ for a finished retro only.
    that line quotes). Every `before_merge` check of the issue carries a passing result that is
    current at the approved head, the implementer's and the tester's alike, and the pull request
    body's `Checks` block carries each of those lines. In
-   sjawhar/legion a surface may also be the daemon's real-process tests, a live proof under
+   cybermonklabs/legion a surface may also be the daemon's real-process tests, a live proof under
    `scripts/e2e/`, or a live check at the operator's next daemon restart recorded on the pull
    request. When a check has no current passing result, or its only evidence is a unit suite,
    call the `legion` tool's `request_backward_move` with `to: implementing` for the implementer's

@@ -2,7 +2,7 @@
 
 Part of `skill://legion-worker`. Read it when you reply on or resolve a review thread, list a pull
 request's threads, or adjudicate a bot's finding: the implementer after every push that answers a
-review, and the reviewer on every re-review. Every path it cites is in sjawhar/legion.
+review, and the reviewer on every re-review. Every path it cites is in cybermonklabs/legion.
 
 Three facts govern every thread, whoever opened it.
 
