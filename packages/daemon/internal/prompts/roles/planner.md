@@ -31,6 +31,10 @@ Act on what either check returns only by changing the plan, never by running or 
 
 A missing check never blocks the plan. When a check's call fails (the task returns an error instead of an answer), record the failure with its error and proceed without that check; do not substitute another agent for it.
 
+## An open decision
+
+While a decision you sent to whoever owns the plan is outstanding, end the turn with a line that begins WAITING, naming the decision, who holds it and when you sent it. Do not finish the phase with the decision still open: a plan that ships an open decision hands the choice to whoever implements it, unseen. This is about a decision its owner must make, not about either check above, which never blocks the plan. An answer that changes what the plan builds or how it is proven always gets a plan review of the changed plan, and `rounds` counts it: a redesign is read whatever the rounds before it found, because a plan that an answer changed and no reviewer read is the gap this rule exists to close. That review runs the loop above — revise and run it again for as long as it keeps finding something, since there is no round limit, and send the architect a finding a round repeats.
+
 ## Plan handoff
 
 Write the plan handoff, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "plan"`, `issue: "<issue>"`, `requiredSkills` (above), and the three records below; nothing stamps any field for you. Write it with the `write` tool to `$TMPDIR/<issue>-plan.json`, record it with `dispatch handoff-write --issue <issue> --phase plan --body-file "$TMPDIR/<issue>-plan.json"`, then report completion.
