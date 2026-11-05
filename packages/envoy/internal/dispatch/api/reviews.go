@@ -11,9 +11,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -327,6 +329,14 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	if state == "changes_requested" && reason == nil {
 		writeError(w, "REASON_REQUIRED", http.StatusBadRequest, "requesting changes requires a reason")
 		return
+	}
+	// Before the open approval request is looked for: a reason answers that request, so it
+	// rides the ask.answered event, and the review it writes carries it too.
+	if reason != nil {
+		if length := itemblocks.Units16(*reason); length > contracts.DispatchEventBodyMax {
+			capExceeded(w, "reason", length, contracts.DispatchEventBodyMax)
+			return
+		}
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -814,22 +824,25 @@ const maxApprovalVersion = 9_999_999_999
 
 // approvalQuestion is an approval ask's question: every document and version it names, then the
 // requester's summary of what the human is approving, when one was given. A summary that would
-// take the question past the ask cap is refused naming the characters left for it.
+// take the ask past the bound its wording shares is refused naming the characters left for it.
 func approvalQuestion(documents []model.AskApprovalDocument, summary string) (string, error) {
 	question := docs.ApprovalQuestion(documents, summary)
 	if summary == "" {
 		return question, nil
 	}
-	// A version move rebuilds the question at the documents' new versions without asking again
-	// (docs.MoveApprovalAsk), so the summary is budgeted against the longest version each document
-	// can reach, and no move takes a question accepted here past the cap. It follows that prefix
-	// after one space.
+	// The room left is the ask bound less everything the ask carries besides the summary: the
+	// longest question the request can reach, since a version move rebuilds the question at the
+	// documents' new versions without asking again (docs.MoveApprovalAsk); the one space the
+	// summary follows that question after; and the fixed options, which validateAskWording
+	// counts beside the question. So no summary accepted here can make that ask fail the bound,
+	// through a move or otherwise.
 	longest := slices.Clone(documents)
 	for index := range longest {
 		longest[index].Version = maxApprovalVersion
 	}
-	left := max(0, maxAskQuestion16-len16(docs.ApprovalQuestion(longest, ""))-1)
-	if length := len16(summary); length > left {
+	fixed := docs.AskWordingUnits(docs.ApprovalQuestion(longest, ""), approvalAskOptions)
+	left := max(0, contracts.DispatchEventBodyMax-fixed-1)
+	if length := itemblocks.Units16(summary); length > left {
 		return "", capExceededError("summary", length, left)
 	}
 	return question, nil

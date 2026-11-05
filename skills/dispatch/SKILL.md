@@ -17,13 +17,14 @@ Dispatch is a record for the people who decide, never a log of your work.
 
 ```md
 :::ask{urgency="med"}
-Which machines, files or people, the numbers, then "A happens to X, or B to Y?" Recommendation and its reason.
+The question and the recommendation, as `skill://dispatch-writing-specs` writes them.
 
 - Option one: what it costs.
 - Option two: what it costs.
 :::
 ```
 
+- An ask is short and asks one thing; its reasoning goes in the document.
 - An open ask is the request; never repeat it per message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
 - Reply on an open ask with `dispatch comment --reply-to-ask`; `--turn agent` (a progress note) needs it. An approval request a newer version moved needs `request-approval` again.
