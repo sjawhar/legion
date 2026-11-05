@@ -53,7 +53,8 @@ Three facts govern every thread, whoever opened it.
 - **A reviewer who disagrees with a resolution replies and unresolves it.** Resolution is a
   judgment, not a ledger entry: a thread the implementer resolved whose finding still stands gets
   the reviewer's reply saying what stands and is unresolved, and a finding the reviewer cannot
-  accept becomes its own, with a `REQUEST_CHANGES` naming it.
+  accept becomes its own, named in the review: a `REQUEST_CHANGES` when that finding is
+  behavioural, and otherwise a thread the approval leaves open.
 
 ## The PR body's `Threads` section
 
@@ -67,10 +68,15 @@ section: it is the implementer's record, and GitHub is the fact.
 
 When you re-review after a corrective push, answer every thread you opened, and every thread a bot
 opened that is none of Legion's role Apps, with one reply in your own words. A bot's finding you
-cannot accept becomes your own: say what stands and request changes. Approve once each of those
-threads carries your answer and no finding stands, read in `gh api graphql` — quote those answers
-in the approval. Your approval never waits on a resolution: resolution is the pull request author's
-App's. A review bot that is red while a thread it opened still stands is CI like any other, and
+cannot accept becomes your own: say what stands. A reviewer submits `REQUEST_CHANGES` only when a
+behavioural finding stands — one whose closing changes code that runs — and otherwise approves the
+head it read, named by SHA, leaving every text finding as the inline review thread it already
+writes. Approve once each of those threads carries your answer, read in `gh api graphql` — quote
+those answers in the approval, and say there that the open threads are the work the merge waits
+for. Your approval never waits on a resolution: resolution is the pull request author's App's. The
+thread is the record of the finding, and the implementer closes it in retro, where it replies,
+resolves each one and commits the text fixes (`skill://legion-retro`). A review bot that is red
+while a thread it opened still stands is CI like any other, and
 you re-run nothing: when the base branch requires its check, that red sends the work back to the
 implementer, who answers or fixes each of the bot's threads, resolves them with its own `gh` (the
 ones you named to it, above, and its own), and pushes, and the bot runs again on that push. The
