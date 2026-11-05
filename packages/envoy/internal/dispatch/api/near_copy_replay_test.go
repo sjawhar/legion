@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -213,10 +215,11 @@ type nearCopyScore struct {
 	took           time.Duration
 }
 
-// nearCopyGateBound is the bound the replay runs the gate under. Production's is one second
+// nearCopyGateBound is the bound the replay runs the gate under. Production's is 500 ms
 // (duplicateGateTimeout), which this replay must not be held to: it measures the score, and a
 // cold project with no term statistics probes every lexeme live, so an early create can take far
-// longer than a warm server ever does. What the gate costs is reported rather than enforced.
+// longer than a warm server ever does. What the gate costs is reported rather than enforced, and
+// the report says how many of the replay's reads production's own bound would have cut.
 const nearCopyGateBound = time.Minute
 
 // nearCopyMarkedDuplicates are the replayed creates the implementer read and marked real
@@ -447,7 +450,14 @@ func replayNearCopyGate(t *testing.T, srv *server, corpus nearCopyCorpus, key st
 		corpus.firstTitle(key), corpus.firstSpec(key), issue.Ancestors, nearCopyGateBound, 0)
 	score := nearCopyScore{key: key, answered: err == nil, took: time.Since(started)}
 	if err != nil {
-		t.Fatalf("the gate did not answer for %s: %v", key, err)
+		// A read that runs past the bound is cut by statement_timeout, and the create goes in
+		// with no check made: that is the gate's own behaviour, not a fault, and its share is
+		// what the bound is judged on, so the replay counts it and goes on. Any other error is
+		// the change's and fails the run.
+		if !nearCopyBoundHit(err) {
+			t.Fatalf("the gate did not answer for %s: %v", key, err)
+		}
+		return score
 	}
 	if len(candidates) > 0 {
 		closest := candidates[0]
@@ -455,6 +465,17 @@ func replayNearCopyGate(t *testing.T, srv *server, corpus nearCopyCorpus, key st
 		score.candidateTitle = closest.Title
 	}
 	return score
+}
+
+// nearCopyBoundHit says whether the gate's read ended at its bound. The bound is on the context
+// and on statement_timeout inside the read transaction, so Postgres cancels the statement
+// (SQLSTATE 57014) or the context expires first; either way no check was made.
+func nearCopyBoundHit(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var pgError *pgconn.PgError
+	return errors.As(err, &pgError) && pgError.Code == "57014" // query_canceled
 }
 
 func execNearCopy(t *testing.T, ctx context.Context, database *store.Store, statement string, arguments ...any) {
@@ -538,6 +559,23 @@ func reportNearCopyReplay(
 	t *testing.T, corpus nearCopyCorpus, scores []nearCopyScore, marked map[string]bool, refreshes int,
 ) {
 	t.Helper()
+	// A create whose gate ran past its bound got no check at all, so it is no evidence of a bar:
+	// it is counted and reported on its own, and the rates below are of the creates the gate
+	// answered. Its share is what says whether the bound is set where the creates meet it.
+	answered := make([]nearCopyScore, 0, len(scores))
+	boundHits := 0
+	for _, score := range scores {
+		if score.answered {
+			answered = append(answered, score)
+			continue
+		}
+		boundHits++
+		t.Logf("the bound: %s got no check; the gate's read took %v",
+			score.key, score.took.Round(time.Millisecond))
+	}
+	t.Logf("the bound (%v): %d of %d replayed creates got no check (%.2f%%)",
+		nearCopyGateBound, boundHits, len(scores), 100*float64(boundHits)/float64(max(len(scores), 1)))
+	scores = answered
 	byKey := map[string]nearCopyScore{}
 	took := make([]time.Duration, 0, len(scores))
 	for _, score := range scores {
@@ -549,9 +587,20 @@ func reportNearCopyReplay(
 		at := func(share float64) time.Duration {
 			return took[min(int(share*float64(len(took))), len(took)-1)]
 		}
-		t.Logf("the gate's own time over %d creates: p50 %v, p95 %v, max %v",
+		t.Logf("the gate's own time over %d answered creates: p50 %v, p95 %v, max %v",
 			len(took), at(0.5).Round(time.Millisecond), at(0.95).Round(time.Millisecond),
 			took[len(took)-1].Round(time.Millisecond))
+		// The replay runs under a bound of its own, so these creates all answered. What a
+		// reader needs is the share production's bound would have cut, since such a create
+		// gets no check there: the reads at or past duplicateGateTimeout.
+		overBound := 0
+		for _, one := range took {
+			if one >= duplicateGateTimeout {
+				overBound++
+			}
+		}
+		t.Logf("production's bound (%v): %d of %d answered creates read that long or longer (%.2f%%), and would have got no check",
+			duplicateGateTimeout, overBound, len(took), 100*float64(overBound)/float64(len(took)))
 	}
 	for _, pair := range corpus.pairs {
 		score := byKey[pair.Query]
@@ -633,8 +682,10 @@ func reportNearCopyReplay(
 	t.Logf("distortions a later reader must know: a project with no term statistics scores in probe mode; "+
 		"document frequency is counted per project while the index scan is not; every lexeme an issue key "+
 		"contributes is dropped; the picker keeps at most %d terms, spends at most %d document frequency, "+
-		"and drops a term in more than a tenth of the project or under %d items, though the gate fills "+
-		"back up to %d terms with the rarest it dropped; the gate judges nothing under that many. A change to any of those invalidates this calibration.",
+		"and drops a term in more than a tenth of the project or under %d items; a text left with fewer "+
+		"than %d terms, or holding no more lexemes than that, is scored by no share at all - it refuses "+
+		"only an open issue whose title and spec hold the same lexemes, which the report counts at 1.000. "+
+		"A change to any of those invalidates this calibration.",
 		relatedTermLimit, relatedMatchBudget, relatedCommonFloor, duplicateMinTerms)
 
 	for _, pair := range corpus.pairs {
