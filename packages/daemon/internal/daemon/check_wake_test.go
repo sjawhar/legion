@@ -220,8 +220,8 @@ func (rig *checkWakeRig) check(t *testing.T) record.ProductionCheck {
 // A daemon that boots on a build containing an open check's merge commit starts no look: no boot
 // reads production any more. GitHub would answer `ahead` for this build, and the check is the one
 // a compare would have woken — open, its first look ended, its implementer suspended with its
-// session kept — so a boot that still compared would start look 2 here. Nothing is compared, no
-// check_compare row is queued, the check stays as it was and the implementer is never resumed.
+// session kept — so a boot that still compared would start look 2 here. Nothing is compared, the
+// check stays as it was and the implementer is never resumed.
 func TestABootOnABuildCarryingTheMergeStartsNoLook(t *testing.T) {
 	rig := newCheckWakeRig(t)
 	rig.boot(t)
@@ -231,17 +231,9 @@ func TestABootOnABuildCarryingTheMergeStartsNoLook(t *testing.T) {
 			t.Fatalf("the boot read %s, want no compare of its build against the check's merge", path)
 		}
 	}
-	var compares int
-	if err := rig.pool.QueryRow(context.Background(), `select count(*) from outbox where kind = $1`,
-		string(record.OutboxKindCheckCompare)).Scan(&compares); err != nil {
-		t.Fatalf("count the check compares: %v", err)
-	}
-	if compares != 0 {
-		t.Fatalf("the boot queued %d check_compare rows, want none", compares)
-	}
-	if check := rig.check(t); check.Looks != 1 || check.LookOpen || check.LastWakeKind != "merge" || check.PendingCauseKind != "" {
-		t.Fatalf("check = look %d (open %v) woken by %q, pending %q; want look 1 still ended by the merge's look and nothing kept",
-			check.Looks, check.LookOpen, check.LastWakeKind, check.PendingCauseKind)
+	if check := rig.check(t); check.Looks != 1 || check.LookOpen || check.LastWakeKind != "merge" {
+		t.Fatalf("check = look %d (open %v) woken by %q; want look 1 still ended by the merge's look",
+			check.Looks, check.LookOpen, check.LastWakeKind)
 	}
 	if resumes := resumesOf(rig.rt, rig.implementer); len(resumes) != 0 {
 		t.Fatalf("the implementer was resumed %d times, want never: the boot wakes no check", len(resumes))

@@ -73,7 +73,7 @@ func (e *Engine) openCheck(ctx context.Context, tx pgx.Tx, issue record.Issue, p
 }
 
 // startLook starts the next look of issue's check, woken by cause with detail, last marking the
-// bound's look: the record counts the look open from now with that wake and no cause pending, the
+// bound's look: the record counts the look open from now with that wake, the
 // implementer is started on the check task — a start with no phase, fenced on the check and its
 // look (record.SuperviseRequest.CheckLook and CheckOpenedAt) rather than on the generation, and
 // stamped with the generation the issue holds as the delivery's run — and a check_look row due at
@@ -83,7 +83,6 @@ func (e *Engine) startLook(ctx context.Context, tx pgx.Tx, issue record.Issue, c
 	check.Looks++
 	check.LookOpen, check.LookWakeAt = true, &now
 	check.LastWakeKind, check.LastWakeDetail, check.LastWakeAt = cause, detail, &now
-	check.PendingCauseKind, check.PendingCauseDetail = "", ""
 	check.Last = last
 	if err := e.store.PutProductionCheck(ctx, tx, *check); err != nil {
 		return err
@@ -213,10 +212,11 @@ func (e *Engine) endLook(ctx context.Context, tx pgx.Tx, check *record.Productio
 
 // endLookPending is what follows a look that saw the merge nowhere in production. The last look
 // closes the check as not run. An issue back in the workflow — a root reopened inside its linger,
-// whose implementer now works the new run — starts no look and suspends nobody: the check waits
-// with whatever cause it holds, and closes with the run's next merge (openCheck) or at its bound
-// (checkBound). A cause that arrived during the look starts the next look with it at once.
-// Otherwise the implementer's claim is suspended, its session kept, and the issue's Sandbox is
+// whose implementer now works the new run — starts no look and suspends nobody: the check waits,
+// and closes with the run's next merge (openCheck) or at its bound (checkBound). Nothing here
+// starts the next look from a cause that arrived during the look: the only writer of such a cause
+// was Engine.wake, which read production from a build or a deploy event, and that is gone.
+// The implementer's claim is then suspended, its session kept, and the issue's Sandbox is
 // deleted with the pod it ran in (record.IssueSuspend): both rows follow the look's start row, so
 // the suspension's fences find no later start and wait for the suspend (store.IssueSuspension),
 // and the pod goes until the next wake, whose launch makes the Sandbox again.
@@ -232,9 +232,6 @@ func (e *Engine) endLookPending(ctx context.Context, tx pgx.Tx, check *record.Pr
 		e.logOnCommit(ctx, "workflow: production check waits while its issue runs again", "issue", issue.Key, "mergeCommit", check.MergeSHA,
 			"look", check.Looks, "phase", issue.Phase)
 		return nil
-	}
-	if check.PendingCauseKind != "" {
-		return e.startLook(ctx, tx, issue, check, check.PendingCauseKind, check.PendingCauseDetail, false)
 	}
 	if err := e.suspend(ctx, tx, issue, claim.RoleImplementer, fmt.Sprintf("%s's production check waits for its deploy", issue.Key)); err != nil {
 		return err

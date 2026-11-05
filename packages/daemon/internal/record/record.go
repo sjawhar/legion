@@ -735,13 +735,17 @@ const (
 // checks' looks apart in the events their rows and reports are recorded under. It copies the
 // repository, the pull request's number and the merge commit, and is fenced on itself (the issue,
 // the check and the look number) rather than on the tree generation, so a re-admission that
-// clears the tree's merged pull requests leaves it as it is. Looks counts the implementer's
+// clears the tree's merged pull requests leaves it as it is. Looks counts the checking role's
 // looks, each a wake of its session that ends with a report (pass, pending or fail) or at its
-// bound; LookOpen is whether the latest look is still running and LookWakeAt when it woke.
-// LastWakeKind and LastWakeDetail are what woke the latest look (the merge, a deploy event, a
-// build compare, the bound) and LastWakeAt when; PendingCauseKind and PendingCauseDetail hold a
-// wake that arrived while a look was open, which the next look starts with. Last marks the
-// bound's look, after which no look starts. A closed check has ClosedAt and its Outcome.
+// bound; LookOpen is whether the latest look is still running and LookWakeAt when it woke. Role
+// is the role that works the check, written once when the check opens (the project's
+// production_check setting) and never read from the configuration again, so a setting changed
+// mid-check leaves the open check with the role it started under. LastWakeKind and
+// LastWakeDetail are what woke the latest look (the merge, the bound, the agent's own wake) and
+// LastWakeAt when; WakeAt is when the check is next looked at — the time the checking agent
+// named on a pending report, or the retry of a look nobody reported — and is nil when neither
+// stands. Last marks the bound's look, after which no look starts. A closed check has ClosedAt
+// and its Outcome.
 type ProductionCheck struct {
 	Issue   string
 	Project string
@@ -754,18 +758,18 @@ type ProductionCheck struct {
 	OpenedAt time.Time
 	// BoundAt is when the whole check is bound: the check's last look starts then
 	// (config.Config.ProductionCheckBound after OpenedAt).
-	BoundAt            time.Time
-	Looks              int
-	LookOpen           bool
-	LookWakeAt         *time.Time
-	LastWakeKind       string
-	LastWakeDetail     string
-	LastWakeAt         *time.Time
-	PendingCauseKind   string
-	PendingCauseDetail string
-	Last               bool
-	ClosedAt           *time.Time
-	Outcome            CheckOutcome
+	BoundAt        time.Time
+	Role           claim.Role
+	Looks          int
+	LookOpen       bool
+	LookWakeAt     *time.Time
+	LastWakeKind   string
+	LastWakeDetail string
+	LastWakeAt     *time.Time
+	WakeAt         *time.Time
+	Last           bool
+	ClosedAt       *time.Time
+	Outcome        CheckOutcome
 }
 
 // Open says whether the check is still open: no look has closed it.
