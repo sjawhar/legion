@@ -1,5 +1,25 @@
 # Changelog
 
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- No Dispatch tool carries a length of its own. `DISPATCH_BODY_MAX` and `ASK_QUESTION_MAX` are
+  gone, and the server's own bounds take their place: `DISPATCH_BLOCK_UNITS` (32000), one block
+  of a body, `DISPATCH_ITEM_BLOCKS` (32768), how many blocks a body may hold, and
+  `DISPATCH_EVENT_BODY_MAX` (32000), how much of a body one event carries whole and the bound an
+  ask's question and its options share. Each is generated into Go for the server, which refuses
+  a longer write and names what passed the bound, and the Legion daemon reads the two block
+  bounds through the server's own splitter (`github.com/sjawhar/envoy/dispatchbody`), so it
+  refuses a close reason or a READY packet the server would refuse at the call that carries it
+  rather than losing the post. The new `dispatch_limits` spec reads them from the server
+  (`GET /api/v1/limits`, `DispatchLimits`).
+  Every ask instruction gives one rule and states no character count: an ask is short and asks
+  one thing, and its reasoning goes in the document. An event whose body is longer than it
+  carries says `body_truncated`; a search hit carries `block_id`, the block of it a meaning
+  match named; and a document, comment or message block carries `embedding`, where meaning
+  search stands on it.
+
 ## [main@c82087d74996] - 2026-11-05
 
 ### Added

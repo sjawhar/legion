@@ -20,7 +20,7 @@ import { messageFor } from "./errors";
 /** How far back the list reaches, at the read and again at each render. */
 export const SESSION_ANSWERS_WINDOW_MS = 72 * 3_600_000;
 
-/** The cap on the whole rendered message, in UTF-16 units as `DISPATCH_BODY_MAX` counts. */
+/** The cap on the whole rendered message, in UTF-16 units, as Dispatch counts a text. */
 export const SESSION_ANSWERS_MAX_CHARS = 8_000;
 
 /** How long one model request waits on the read before it carries the last list read. */

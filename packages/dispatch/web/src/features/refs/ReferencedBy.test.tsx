@@ -54,6 +54,33 @@ afterEach(() => {
   restore = undefined;
 });
 
+test("an answers edge is labelled Answer", async () => {
+  const { getReferences, view } = renderPanel({
+    edges: [
+      {
+        created_at: createdAt,
+        direction: "in",
+        kind: "answers",
+        node: {
+          id: "11111111-1111-4111-8111-111111111111",
+          issue_key: "OPS-1",
+          kind: "comment",
+          project: "OPS",
+          ref: "dispatch://OPS-1/comment/11111111-1111-4111-8111-111111111111",
+        },
+        source_seq: null,
+      },
+    ],
+    node: { id: "CORE-1", issue_key: "CORE-1", kind: "issue", ref: "dispatch://CORE-1" },
+  });
+  restore = () => {
+    getReferences.mockRestore();
+    view.unmount();
+  };
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  expect(await within(panel).findByRole("link", { name: "Answer · OPS-1" })).toBeDefined();
+});
+
 test("two blocks of one document version citing the node are two rows under that document, each linked to its block", async () => {
   const notes = "dispatch://OPS-1/artifact/notes-md";
   const consoleError = spyOn(console, "error");

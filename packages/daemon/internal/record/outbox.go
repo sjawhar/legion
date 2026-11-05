@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
@@ -149,12 +149,6 @@ const (
 	messageMarkerClose = " -->"
 )
 
-// MessagePostLimit is the longest body the runner can post, in UTF-16 code units: Dispatch's cap
-// less the separator and the marker at its longest, whose row id (a bigserial) has at most the 19
-// digits of math.MaxInt64. The marker is ASCII, so its length in bytes is its length in units.
-const MessagePostLimit = dispatch.MessageBodyLimit -
-	len(messageSeparator+messageMarkerOpen+messageMarkerClose) - len("9223372036854775807")
-
 // MessageMarker is the marker of outbox row id.
 func MessageMarker(id int64) string {
 	return messageMarkerOpen + strconv.FormatInt(id, 10) + messageMarkerClose
@@ -179,6 +173,19 @@ func ParseOutboxKey(key string) (int64, bool) {
 // Posted is the message the runner posts for row id: the body, then the row's marker.
 func (m MessagePost) Posted(id int64) string {
 	return m.Body + messageSeparator + MessageMarker(id)
+}
+
+// LongestPost is the longest text the runner could ever post for body: the post Posted composes,
+// for the largest row id a row can carry (outbox ids are a bigserial, so math.MaxInt64 is the
+// longest marker there is). A caller that must know, before anything is recorded, whether
+// Dispatch would take the post holds this text to Dispatch's bounds rather than the body alone
+// (api's closeRoot and the merger's READY completion): the marker is a block of its own after a
+// body that ends in a paragraph, and it is code inside a body that ends in an open fence, so a
+// body that passes a bound can be a post that does not. It is built by Posted, the function the
+// runner itself posts with, so the text checked and the text posted cannot be composed by two
+// different rules.
+func LongestPost(body string) string {
+	return MessagePost{Body: body}.Posted(math.MaxInt64)
 }
 
 // NoticeKind identifies one persisted notice delivery.
@@ -892,9 +899,6 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Reason != "" && value.Status != "done" {
 			return fmt.Errorf("a status write to %s carries a reason; only a done write does", value.Status)
 		}
-		if length := dispatch.MessageBodyLength(value.Reason); length > MessagePostLimit {
-			return fmt.Errorf("a status write's reason is %d characters, over the %d a message holds", length, MessagePostLimit)
-		}
 	case MessagePost, GateSeed, LingerClose, IssueBranch, CheckBound:
 	case IssueSuspend:
 		if value.Tree == "" || value.Generation == 0 || value.TreeGeneration == 0 {
@@ -1030,7 +1034,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "message-refused", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

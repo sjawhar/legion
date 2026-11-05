@@ -34,6 +34,7 @@ const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
 
 const STRUCTURAL_LABELS: Partial<Record<GraphEdge["kind"], string>> = {
   anchored_to: "Anchored item",
+  answers: "Answer",
   attached_to: "Attached document",
   blocked_by: "Blocked issue",
   child_of: "Child issue",
@@ -51,6 +52,7 @@ const STRUCTURAL_LABELS: Partial<Record<GraphEdge["kind"], string>> = {
 const RENDERED_EDGE_KINDS: Record<GraphEdge["kind"], true> = {
   affects: true,
   anchored_to: true,
+  answers: true,
   attached_to: true,
   blocked_by: true,
   child_of: true,
