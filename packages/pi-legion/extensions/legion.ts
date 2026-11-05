@@ -371,14 +371,14 @@ export default function legionExtension(pi: PiApi): void {
        *
        * The measurement's input is snapshotted here, since the host's accessors answer only from
        * a handler and throw at factory time, and it is read before `registerLegionTool()` below,
-       * so the rows see the tool surface the boot's measurement saw.
+       * so the rows see the tool surface `session_start` exposes.
        */
       const capabilityClaim = claimSession.capability(context.sessionManager.getSessionId());
       let capabilitySchedule: CapabilitySchedule | undefined;
       if (capabilityClaim !== undefined) {
         const capabilityInput = {
           cwd: context.cwd,
-          sessionId: context.sessionManager.getSessionId(),
+          sessionId: capabilityClaim.sessionID,
           issue: capabilityClaim.issue,
           promptAgents: capabilityClaim.promptAgents ?? [],
           activeTools: pi.getActiveTools(),

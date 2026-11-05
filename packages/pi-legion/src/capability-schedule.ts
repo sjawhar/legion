@@ -1,5 +1,6 @@
 import { LEGION_ROLES } from "@legion/contracts";
 import type { LegionCapabilityReportBody } from "@legion/contracts/legion-api";
+import { messageFor } from "@legion/envoy-client/errors";
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
 
 /**
@@ -20,8 +21,12 @@ import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
  *   table (`LIVE_CAPABILITIES`, ./capability-report): the session is settled once the daemon has
  *   taken a report whose every row read `ok`.
  *
+ * The send is a plain `send` call with no retry helper, unlike the boot's ready
+ * (`callReadyWithRetry`, @legion/pi-shared/daemon-client), so one failure costs one log line and
+ * one attempt and the next due tick is the retry.
+ *
  * Every collaborator is injected — the claim, the idle answer, the measurement, the send and the
- * log — so this module reaches nothing of its own beyond types, and a test drives the machine tick
+ * log — so this module reaches no Legion module of its own, and a test drives the machine tick
  * by tick on its own clock.
  */
 
@@ -88,16 +93,18 @@ export function createCapabilitySchedule(deps: {
       deps.log(message, {
         claim: deps.claim.claimToken,
         issue: deps.claim.issue,
-        error: error instanceof Error ? error.message : String(error),
+        error: messageFor(error),
       });
     } catch {
       // A log that fails is no reason to drop the schedule.
     }
   };
 
-  /** One `claims/ready` carrying `report`. The hold is cleared however it ends — a refused report
-   * is dropped rather than re-measured as it stands — and the next due tick is the gap in ticks
-   * after the send ended, read then, so a slow send does not shorten the wait. */
+  /** One `claims/ready` carrying `report`, which the caller has already marked running. The hold
+   * is cleared however it ends — a refused report is dropped rather than sent again as it
+   * stands — and every ending but a settled one leaves the next attempt due
+   * `CAPABILITY_RETRY_TICKS` after the send ended, read then, so a slow send does not shorten the
+   * wait. */
   const sendReport = async (report: LegionCapabilityReportBody): Promise<void> => {
     try {
       await deps.send(report);
@@ -107,47 +114,46 @@ export function createCapabilitySchedule(deps: {
         settled = true;
         return;
       }
-      dueTick = count + CAPABILITY_RETRY_TICKS;
     } catch (error) {
       note("legion: this session's capability report did not reach the daemon", error);
-      dueTick = count + CAPABILITY_RETRY_TICKS;
     } finally {
       held = undefined;
-      running = false;
     }
+    dueTick = count + CAPABILITY_RETRY_TICKS;
   };
 
   const tick = async (): Promise<void> => {
     count += 1;
-    if (settled) return;
-    if (running) return;
-    if (!isIdle()) return;
-    if (held !== undefined) {
-      running = true;
-      await sendReport(held);
-      return;
-    }
-    if (count < dueTick || attempts >= CAPABILITY_ATTEMPTS) return;
-    // The attempt is spent whatever follows, so a measurement that fails costs one of the three.
-    attempts += 1;
+    if (settled || running || !isIdle()) return;
+    // A held report is sent whatever the attempts say: its measurement is good, and only its
+    // send waited for the turn to end.
+    if (held === undefined && (count < dueTick || attempts >= CAPABILITY_ATTEMPTS)) return;
     running = true;
-    let report: LegionCapabilityReportBody;
     try {
-      report = await deps.measure();
-    } catch (error) {
-      dueTick = count + CAPABILITY_RETRY_TICKS;
+      if (held !== undefined) {
+        await sendReport(held);
+        return;
+      }
+      // The attempt is spent whatever follows, so a measurement that fails costs one of the three.
+      attempts += 1;
+      let report: LegionCapabilityReportBody;
+      try {
+        report = await deps.measure();
+      } catch (error) {
+        dueTick = count + CAPABILITY_RETRY_TICKS;
+        note("legion: this session's capability measurement failed", error);
+        return;
+      }
+      // A turn can start while a measurement runs, so the idle answer is read again: the report
+      // waits for an idle tick rather than reaching the daemon from under a working session.
+      if (!isIdle()) {
+        held = report;
+        return;
+      }
+      await sendReport(report);
+    } finally {
       running = false;
-      note("legion: this session's capability measurement failed", error);
-      return;
     }
-    // A turn can start while a measurement runs, so the idle answer is read again: the report
-    // waits for an idle tick rather than reaching the daemon from under a working session.
-    if (!isIdle()) {
-      held = report;
-      running = false;
-      return;
-    }
-    await sendReport(report);
   };
 
   return { tick };
