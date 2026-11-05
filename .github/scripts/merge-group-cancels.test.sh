@@ -198,4 +198,30 @@ check "it decides rather than failing" "$(is "$status" 0)"
 check "it says the asking run stands as the newest" \
   "$(contains "$err" "^the run list does not hold the asking run 41999999999 yet, so it stands as the newest merge-group run, created now\$")"
 
+echo "case: the stand-in must not cancel a newer group of the same pull request"
+# `gh run list` can already hold a group created after the asking run while it still does not
+# hold the asking run itself: that is the same index lag the stand-in above exists for. Dating
+# the asking run `now` then makes the newer group look older, and the act cancels the group that
+# will land.
+lagging=$(runs "$(mg_run 41874000200 2700 "$main_older" "$pr2700_new" in_progress "" 2026-11-04T19:05:10Z)")
+run_cancels started 41874000100 "$pr2700_old" "$(queue_branch 2700 "$main_older")" "$lagging" '{}'
+check "it decides rather than failing" "$(is "$status" 0)"
+check "it cancels no group it cannot prove is older than itself" "$(is "$out" "")"
+
+echo "case: every cancel job of ci.yaml can run when the job it needs did not succeed"
+# GitHub gives a job `if:` that names no status-check function an implicit `success()`
+# (docs.github.com, "Evaluate expressions", Status check functions), false once any job in
+# `needs:` failed or was cancelled. A follower whose condition reads `needs.<job>.result ==
+# 'failure' || … == 'cancelled'` with no `always()` or `!cancelled()` is therefore skipped in
+# exactly the runs it exists for, so the act below is never asked for a decision at all.
+# release.yaml's header states the same rule for this repository and names the run it cost
+# (38822866387); check-release-credentials.sh rule 5 pins it there and reads no other workflow.
+dead_followers=$(yq -r '
+  .jobs | to_entries
+  | map(select((.value."if" // "") | test("needs\.[A-Za-z0-9_-]+\.result")))
+  | map(select(((.value."if" // "") | test("always\(\)|cancelled\(\)|failure\(\)|success\(\)")) | not))
+  | map(.key) | join(" ")' "$script_dir/../workflows/ci.yaml" 2>/dev/null)
+check "no job of ci.yaml reads a need's result behind an implicit success()" \
+  "$(is "$dead_followers" "")"
+
 summary "the merge-group cancel decision"
