@@ -60,6 +60,12 @@ const COMMAND_WAITING_MS = 10_000
  *  message whose row never came from being matched against a much later one. */
 const AWAITED_ROWS_MAX = 16
 
+/** The most answered deliveries this session remembers, so a second answer to one asks Dispatch
+ *  to post it. A delivery is answered twice at most, within one command's run, and messages are
+ *  delivered one at a time; this is the bound that keeps the record from growing for the
+ *  session's life. */
+const ANSWERED_DELIVERIES_MAX = 64
+
 /** What a person is told while a command they sent has not finished. */
 export function commandStillRunning(command: string): string {
   return `${command} is still running: it waits for the turn this session is in, or for an answer at the session's own terminal. Its output follows in another reply.`
@@ -93,10 +99,16 @@ export interface UserTurnRouterOptions {
   /** The session's Dispatch for one request, with `ms` to answer; undefined when Dispatch is not
    *  configured, and a throw when its configuration cannot be read. */
   readonly dispatch: (ms: number) => DispatchClient | undefined
-  /** Answers a delivery on Dispatch: the reply the person reads, or the error that stopped it. */
+  /** Answers a delivery on Dispatch: the reply the person reads, or the error that stopped it.
+   *  `followUp` is the ask that Dispatch post this answer although the attempt is already
+   *  answered, which every answer to a delivery after the first carries (`post`). */
   readonly reply: (
     delivery: DispatchDelivery,
-    result: { readonly body?: string; readonly error?: string },
+    result: {
+      readonly body?: string
+      readonly error?: string
+      readonly followUp?: boolean
+    },
   ) => Promise<void>
   /**
    * Where a person's own message goes in a Legion pane: the bridge's inbox, which makes it a user
@@ -178,6 +190,9 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
   const shownPictures = new Set<string>()
   /** The messages whose row of the conversation has not arrived yet, oldest first. */
   const awaited: AwaitedRow[] = []
+  /** The deliveries this session has already answered, oldest first: every answer after the
+   *  first has to ask Dispatch to post it (`post`). */
+  const answered = new Set<string>()
 
   /** Expects the row a message is about to become, so the row is recorded as that message as soon
    *  as the session reports it - which it may do before the call that delivered it answers. */
@@ -270,10 +285,38 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
     for (const address of pictures.shown) shownPictures.add(address)
   }
 
+  /**
+   * Posts one answer to a delivery, and asks Dispatch to post it when this session has answered
+   * that delivery before. Dispatch settles a delivery attempt with the first reply it takes and
+   * answers a later POST to the same attempt by handing the stored reply back, posting nothing
+   * unless the request asks for a follow-up (`replyAfterAnswer`,
+   * `packages/envoy/internal/dispatch/api/message_delivery.go`) - so without the ask the output
+   * a waiting reply promised never reaches the person. The ask is decided before the post is
+   * awaited, so a waiting reply and the output racing it cannot both be the first.
+   */
+  const post = async (
+    delivery: DispatchDelivery,
+    result: { readonly body?: string; readonly error?: string },
+  ): Promise<void> => {
+    const key = handledAttemptKey(delivery.id, delivery.attempt)
+    const followUp = answered.has(key)
+    if (!followUp) {
+      // A reply Dispatch refused leaves the attempt unsettled, and a follow-up on an unsettled
+      // attempt is inserted as the first reply anyway, so the record is kept either way.
+      answered.add(key)
+      // A `Set` yields what was added first, which is the delivery answered longest ago.
+      for (const oldest of answered) {
+        if (answered.size <= ANSWERED_DELIVERIES_MAX) break
+        answered.delete(oldest)
+      }
+    }
+    await reply(delivery, { ...result, followUp })
+  }
+
   /** Posts one reply to a delivery, naming on stderr a reply that did not reach Dispatch. */
   const answer = async (delivery: DispatchDelivery, body: string | undefined): Promise<void> => {
     if (body === undefined) return
-    await reply(delivery, { body }).catch((error: unknown) => {
+    await post(delivery, { body }).catch((error: unknown) => {
       warn(`a reply to message ${delivery.id} did not reach Dispatch — ${messageFor(error)}`)
     })
   }
@@ -350,7 +393,11 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
   }
 
   /** A BTW: one question of the model with the conversation as its context, answered on Dispatch.
-   *  It adds nothing to the conversation, and the frame is answered without waiting for it. */
+   *  It adds nothing to the conversation, and the frame is answered without waiting for it. Its
+   *  answer never asks for a follow-up: a BTW is answered one time, and the rule that a frame
+   *  this session is handed twice posts no second answer is what Dispatch leans on for it
+   *  (`replyAfterAnswer`, `packages/envoy/internal/dispatch/api/message_delivery.go`), since
+   *  nothing here guards a redelivered BTW and the fork would answer it afresh. */
   const runBtw = (delivery: DispatchDelivery): void => {
     void (async () => {
       if (!session.connected()) {

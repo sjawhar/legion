@@ -440,13 +440,14 @@ class UnsupportedEnvoyToolError extends Error {
 /**
  * Answer a targeted Dispatch delivery, on the sender's behalf: the reply this session has for it,
  * or the error that stopped it, so the sender sees the attempt fail instead of waiting on a reply
- * that never comes.
+ * that never comes. `followUp` asks Dispatch to post an answer to an attempt its first reply
+ * already settled, which every answer after the first needs (`postDeliveryReply`).
  */
 export async function postDispatchReply(
   identity: SessionIdentity,
   configFile: SessionConfigFile,
   delivery: DispatchDelivery,
-  result: { readonly body?: string; readonly error?: string },
+  result: { readonly body?: string; readonly error?: string; readonly followUp?: boolean },
 ): Promise<void> {
   const config = sessionDispatchSettings(configFile, process.env, {
     cwd: identity.directory,
