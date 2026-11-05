@@ -41,6 +41,7 @@ import type {
   IssueRouteReach,
   IssueRouteStatus,
   MessageRead,
+  MyReplyRow,
   OpenAsk,
   OpenAsksResponse,
   Project,
@@ -2813,6 +2814,39 @@ function inboxAskLine(row: InboxRow): string {
   return `- ${label} · ${priority} · ${row.kind} · ${textHead(row.question, INBOX_QUESTION_HEAD)} · ${ref}`;
 }
 
+/** What an unread thread's line is named by: the issue key of a thread on an issue, the slug of
+ *  one on a project document, and the session's name for an Agent row, which sits on neither.
+ *  A Reply row with no owner at all is named by its thread id, the one name every row carries. */
+function inboxThreadLabel(row: MyReplyRow): string {
+  if (row.kind === "agent") return row.session.name;
+  return row.issue?.key ?? row.document?.slug ?? row.thread_id;
+}
+
+/** How long ago the newest reply in a thread was written, in one short field: the largest whole
+ *  unit that fits, since a list line wants an age rather than a timestamp. Anything under a
+ *  minute reads `<1m`. */
+function inboxReplyAge(at: string, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - Date.parse(at)) / 60_000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+/** One unread thread: who owns it, what kind of thread it is, the head of its subject, who wrote
+ *  the newest reply and how long ago, and where to read it. */
+function inboxThreadLine(row: MyReplyRow, now: number): string {
+  return [
+    `- ${inboxThreadLabel(row)}`,
+    row.kind,
+    textHead(row.subject, INBOX_QUESTION_HEAD),
+    actorText(row.reply.author),
+    inboxReplyAge(row.reply.created_at, now),
+    row.ref,
+  ].join(" · ");
+}
+
 /** One pending credential request: what it asks for, when, the sessions it names and the page
  *  where it is decided. A row that names no session leaves that field out rather than printing
  *  two dashes, and a machine login, which is decided with `dispatch` rather than on a broker
@@ -2830,6 +2864,14 @@ function credentialRequestLine(request: CredentialPendingRow): string {
   ].join(" · ");
 }
 
+/** Why one of the Inbox's two side reads failed, as its warning line names it: the code and
+ *  message Dispatch refused with, or whatever else went wrong. */
+function inboxReadRefusal(error: unknown): string {
+  return error instanceof DispatchServiceError
+    ? `${error.code} ${error.message}`
+    : messageFor(error);
+}
+
 /**
  * What the person's Inbox page shows, as the `dispatch inbox` command prints it: each heading
  * with its count, then the rows under it, in the order the page bands them. The rows within a
@@ -2842,9 +2884,14 @@ function credentialRequestLine(request: CredentialPendingRow): string {
  * keeps only the asks on issues assigned to the caller, as the page's default view does; counting
  * the rows it prints is therefore the page's rule, and it is the one count that cannot disagree
  * with the lines under it.
+ *
+ * `Unread threads` is the page's thread list (`GET /api/v1/me/replies?kind=reply,agent`): the
+ * threads the person is reading that somebody else has written in since, and the messages they
+ * sent an agent session that it answered, newest reply first.
  */
 function formatInboxSummary(
   rows: readonly InboxRow[],
+  threads: readonly MyReplyRow[],
   requests: readonly CredentialPendingRow[],
   now: number
 ): string {
@@ -2862,6 +2909,9 @@ function formatInboxSummary(
     "",
     `Later ${sections.later.length}`,
     ...sections.later.map(inboxAskLine),
+    "",
+    `Unread threads ${threads.length}`,
+    ...threads.map((row) => inboxThreadLine(row, now)),
     "",
     `Credential requests ${requests.length}`,
     ...requests.map(credentialRequestLine),
@@ -3763,10 +3813,15 @@ export async function executeDispatchTool(
   }
   if (input.tool === "dispatch_inbox") {
     const client = dispatchClient();
-    // All three reads at once: they depend on nothing of each other, and the credential list is
-    // the slow one, since Dispatch relays it to the secrets broker. Its rejection is caught at
-    // the start so that a refusal of the other two, which throws first, leaves no unhandled one.
+    // All four reads at once: they depend on nothing of each other, and the credential list is
+    // the slow one, since Dispatch relays it to the secrets broker. The two side reads have
+    // their rejections caught at the start so that a refusal of the other two, which throws
+    // first, leaves no unhandled one.
     const pending = client.credentialPending().then(
+      (answer) => ({ answer }),
+      (error: unknown) => ({ error })
+    );
+    const unread = client.myReplies().then(
       (answer) => ({ answer }),
       (error: unknown) => ({ error })
     );
@@ -3792,21 +3847,36 @@ export async function executeDispatchTool(
       if (dispatchAnswered(error, 403) && error.code === "OAUTH_SCOPE_REQUIRED") {
         throw refusalWithCode(error);
       }
-      const refusal =
-        error instanceof DispatchServiceError
-          ? `${error.code} ${error.message}`
-          : messageFor(error);
-      warnings.push(`dispatch: warning: credential requests could not be read: ${refusal}`);
+      warnings.push(
+        `dispatch: warning: credential requests could not be read: ${inboxReadRefusal(error)}`
+      );
     } else {
       // A Dispatch with no secrets broker answers null, which is an ordinary deployment: it has
       // no credential requests, so it lists and counts none.
       requests = settled.answer?.pending ?? [];
     }
+    const settledUnread = await unread;
+    let threads: readonly MyReplyRow[] = [];
+    if ("error" in settledUnread) {
+      const error = settledUnread.error;
+      // Same rule as the broker's list: a failed read of the threads costs the caller that band
+      // and nothing else, except a refusal for want of the `person` scope, which is the
+      // credential being wrong rather than one section being missing.
+      if (dispatchAnswered(error, 403) && error.code === "OAUTH_SCOPE_REQUIRED") {
+        throw refusalWithCode(error);
+      }
+      warnings.push(
+        `dispatch: warning: unread threads could not be read: ${inboxReadRefusal(error)}`
+      );
+    } else {
+      threads = settledUnread.answer.rows;
+    }
     return {
-      text: formatInboxSummary(rows, requests, Date.now()),
+      text: formatInboxSummary(rows, threads, requests, Date.now()),
       details: {
         viewer,
         asks: rows.length,
+        unread_threads: threads.length,
         credential_requests: requests.length,
       },
       ...(warnings.length === 0 ? {} : { warnings }),

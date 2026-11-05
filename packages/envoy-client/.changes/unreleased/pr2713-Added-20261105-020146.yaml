@@ -1,0 +1,5 @@
+kind: Added
+body: '`dispatch inbox` lists the reader''s unread Inbox threads under `Unread threads`, beside their open asks: a thread they wrote in that somebody else has written in since, and a message they sent an agent session that it answered, each with its owner, the newest reply''s author and its age. The call''s details carry `unread_threads`, and a failed read of the threads is a warning with the rest of the summary still printed, except a refusal for want of the `person` scope.'
+time: 2026-11-05T02:01:46.000000000Z
+custom:
+    Issue: pr2713
