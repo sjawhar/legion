@@ -17,7 +17,7 @@ Resolve the simplification scope in this order:
 
 If none of the above produces a non-empty scope, stop and ask the user what to simplify rather than guessing. Use the host's blocking question tool already in the current tool list (match by capability, not by a host-specific name). Presence in the current tool list is proof the tool exists; never call a user-facing question tool to discover whether it exists. If a matching tool is listed but unloaded, use the host's tool-discovery primitive to load that capability — do not search for another host's tool name. Fall back to numbered options on the host's user-visible chat surface only when no such tool is in the list or a real question call errors. Never silently skip the question.
 
-**Preflight.** If the scope has no substantive human-authored code — only documentation, generated or vendored files, dependencies or lockfiles, or mechanical churn — report that there is nothing to simplify and stop without reviewers. For mixed scopes, retain only the code. This is a kind gate, never a size gate: explicit small scopes still run, and callers own any size or cost threshold.
+**Preflight.** Every file of the scope is in the pass: documentation, workflow and configuration files as much as code, and a scope that holds no code at all still runs. A pass that drops the documentation drops the files a wrong procedure lives in, which is the failure this rule exists to stop. Read generated, vendored and lockfile content for what it shows and edit none of it. This is never a size gate: explicit small scopes still run, and callers own any size or cost threshold.
 
 When the platform's task-tracking capability is available, show the review, apply, and verification outcomes without creating one task per reviewer. Otherwise continue without simulating a task list in chat.
 
@@ -45,6 +45,8 @@ Inspect beyond the resolved scope when needed to evaluate a finding, but edit on
 
 Each fix must preserve outputs, errors, side effects, and ordering. If that cannot be established, skip it.
 
+**A defect you see is reported, never dropped.** A problem outside what this pass may change — a wrong procedure in a document, a workflow step that cannot work, a check that cannot fail — is written into the summary with its file, its line and what is wrong, and never recorded as out of scope. This pass applies only behaviour-preserving fixes, so the caller makes that fix outside the pass and proves it again. The pass that stays silent is the one that let the defect reach review.
+
 An interface or data shape that existed only in an earlier iteration of the current unshipped scope is not protected behavior once you verify it has no deployed, persisted, public, external, dependent-branch, or in-repo caller outside the resolved scope. Remove that compatibility path only when every required caller update fits the existing mutation boundary; otherwise preserve it.
 
 **Never simplify away a safety check.** Preserve trust-boundary validation, data-loss protection, security checks, and accessibility affordances. Skip any finding that would thin or remove one.
@@ -53,7 +55,7 @@ An interface or data shape that existed only in an earlier iteration of the curr
 
 ## Step 4: Verify behavior is preserved
 
-Run project-wide typecheck and lint. Run tests matched to blast radius: scoped tests for local changes, broader tests for shared or wide-reach changes, and the full suite when the runner cannot scope tests.
+Run this step only when a fix was applied. Run project-wide typecheck and lint. Run tests matched to blast radius: scoped tests for local changes, broader tests for shared or wide-reach changes, and the full suite when the runner cannot scope tests. A pass that applied nothing left the head as it was, so there is nothing to verify: record `no fix applied; head unchanged, no verification run` in the summary and go to Step 5.
 
 Report failures with the check name and relevant output. Fix simplification-caused failures or revert the responsible change; never relax assertions, weaken types, or skip tests.
 
@@ -61,4 +63,4 @@ If no test suite, lint, or typecheck is configured, state that explicitly in the
 
 ## Step 5: Summarize
 
-Summarize what was already sound and what improved. Report applied counts by reuse, quality, and efficiency; skipped count; and check outcomes. Name the agent (or model) that produced each reviewer's findings, so the reader can see which model reviewed. If nothing changed, say so. Do not use net lines removed as the success metric.
+Summarize what was already sound and what improved. Report applied counts by reuse, quality, and efficiency; skipped count; defects reported but not fixed, each with its file and line; and check outcomes. Name the agent (or model) that produced each reviewer's findings, so the reader can see which model reviewed. If nothing changed, say so. Do not use net lines removed as the success metric.

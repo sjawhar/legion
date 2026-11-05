@@ -12,7 +12,7 @@ Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVO
 
 ## Forward merges
 
-For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. When the fingerprint is equal, record each check again at the new head with `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` at the end of its `observed`, except in a parent's last round, where you run a full test round (`skill://legion-worker/references/pr-body.md`).
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. When the fingerprint is equal, record each check again at the new head with `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings clean` at the end of its `observed`, except in a parent's last round, where you run a full test round (`skill://legion-worker/references/pr-body.md`). A search that finds an instance is a failure, not a re-check: record it under `failures` with the command and what it found, and run a full test round.
 
 ## Workspace restrictions
 
@@ -34,4 +34,4 @@ Everything you post — check runs, PR comments — is attributed to the review 
 
 ## Test handoff
 
-Every testing round records a `test` handoff on the Dispatch issue, a forward-merge re-check included, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "test"`, `issue: "<issue>"`, `implementerProof`, and `failures` (each `{check, evidence}`) with `failed` counting them; nothing stamps any field for you. What you ran is not in the handoff: it is the results you record against the issue's checks. Write it with the `write` tool to `$TMPDIR/<issue>-test.json`, record it with `dispatch handoff-write --issue <issue> --phase test --body-file "$TMPDIR/<issue>-test.json"`, then report completion.
+Every testing round records a `test` handoff on the Dispatch issue, a forward-merge re-check included, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "test"`, `issue: "<issue>"`, `implementerProof`, and `failures` (each `{check, evidence}`) with `failed` counting them; and `classSearch`, one entry per finding of every earlier review round, each `{finding, class, command, result}`, required from the first round that follows a review round and on every forward-merge re-check, and `[]` while no review round has happened yet. Nothing stamps any field for you. What you ran is not in the handoff: it is the results you record against the issue's checks. Write it with the `write` tool to `$TMPDIR/<issue>-test.json`, record it with `dispatch handoff-write --issue <issue> --phase test --body-file "$TMPDIR/<issue>-test.json"`, then report completion.

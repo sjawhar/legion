@@ -1057,3 +1057,42 @@ func TestClaimsForgetSessionRequiresTheRecordedSession(t *testing.T) {
 	}
 	d.wantNothingReached()
 }
+
+// INFRA-945 R6: the one line a claim prints as says when the claim's idle pod was released, so an
+// operator reading `legion claims list` does not read it as a suspension someone must lift. Every
+// other claim prints the state it is in, suspended by an operator among them. None of the three
+// is in an update round, so each line ends in the round and head columns' `-`.
+func TestClaimLineNamesAReleasedClaimApartFromASuspendedAndAFailedOne(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim api.OperatorClaim
+		want  string
+	}{
+		{
+			name: "released",
+			claim: api.OperatorClaim{Token: "legion-legion-legion-208-implementer", Role: "implementer", Issue: "LEGION-208",
+				State: "suspended", SuspendedBy: "released", Generation: 3, PluginContract: api.DaemonAPIVersion},
+			want: "legion-legion-legion-208-implementer implementer LEGION-208 suspended:released 3 " + thisBinarysContract + " - -\n",
+		},
+		{
+			name: "suspended by the operator",
+			claim: api.OperatorClaim{Token: "legion-legion-legion-209-tester", Role: "tester", Issue: "LEGION-209",
+				State: "suspended", SuspendedBy: "operator", Generation: 1, PluginContract: api.DaemonAPIVersion},
+			want: "legion-legion-legion-209-tester tester LEGION-209 suspended 1 " + thisBinarysContract + " - -\n",
+		},
+		{
+			name: "failed",
+			claim: api.OperatorClaim{Token: "legion-legion-legion-210-reviewer", Role: "reviewer", Issue: "LEGION-210",
+				State: "failed", Generation: 2, PluginContract: api.DaemonAPIVersion},
+			want: "legion-legion-legion-210-reviewer reviewer LEGION-210 failed 2 " + thisBinarysContract + " - -\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			writeClaimLine(&out, tc.claim)
+			if out.String() != tc.want {
+				t.Fatalf("claim line = %q, want %q", out.String(), tc.want)
+			}
+		})
+	}
+}

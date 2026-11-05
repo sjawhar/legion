@@ -143,7 +143,7 @@ type treeIssue struct {
 }
 
 // treeIssuesQuery is the architecture tree's read of a project's issues with their components.
-// The text is built once, at start, for the reason issueWithProgressQuery gives.
+// The text is built once, at start, for the reason issueRowStatement gives.
 var treeIssuesQuery = `
 		with recursive subjects as (select i.key from issues i where i.project_key = $1),
 		` + issueComponentsTerms + `

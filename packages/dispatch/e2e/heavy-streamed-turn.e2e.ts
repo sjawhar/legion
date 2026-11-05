@@ -20,6 +20,11 @@ import { asUser } from "./users";
 
 declare global {
   interface Window {
+    /** How many batches the recorder has seen land in a body that already held blocks of the
+     *  same paint while the turn streamed: the window this row is about, counted as it happens,
+     *  so the row can wait for the page to be in it rather than hope its clock lands a frame
+     *  there (`aPaintOfTheTurnIsPartWayThrough`). */
+    __heavyStreamPartBuilt?: number;
     /** Every sample the streamed turn's recorder has taken, in order. */
     __heavyStreamSamples?: StreamSample[];
     /** Told by the row that the turn's last frame is about to go out, so every sample after it
@@ -152,6 +157,7 @@ async function recordTheStreamedTurn(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const samples: StreamSample[] = [];
     let streaming = true;
+    window.__heavyStreamPartBuilt = 0;
     window.__heavyStreamSamples = samples;
     window.__heavyStreamTurnEnded = () => {
       streaming = false;
@@ -194,6 +200,9 @@ async function recordTheStreamedTurn(page: Page): Promise<void> {
       }
       const blocks = body.querySelectorAll("p, li").length;
       samples.push({ at, blocks, grew, paintedFrom, raw, streaming });
+      if (grew && streaming) {
+        window.__heavyStreamPartBuilt = (window.__heavyStreamPartBuilt ?? 0) + 1;
+      }
       held = blocks;
     };
     new MutationObserver(take).observe(document, {
@@ -213,9 +222,80 @@ function sleepUntil(at: number): Promise<void> {
   return promise;
 }
 
+/** How long the row waits for the page to be part-way through painting the turn it opened on
+ *  before it streams into it anyway. A shape that cannot be caught part-way ends the wait as
+ *  soon as it has painted rather than spending this, so what this covers is the one case it is
+ *  for: the first parse and the first batches of a 4,000-paragraph turn on a loaded machine
+ *  (`aPaintOfTheTurnIsPartWayThrough`). */
+const reachThePaintMs = 15_000;
+
+/**
+ * Waits until the page is part-way through a paint of the turn it opened on, and answers what
+ * ended the wait.
+ *
+ * The window this row is about is a frame arriving while a paint of this turn is between two of
+ * its batches, and the row used to publish its frames on a clock and hope one landed there.
+ * Under four Playwright workers none does. The page cannot paint a frame before the parse
+ * worker answers one, and a stream published into a page that is behind only makes that answer
+ * later: on this pod of two cores at four lanes, Chromium's first paint of this turn landed
+ * 5.1 s into a 4.8 s stream, so all 36 samples taken while the turn streamed were of a body
+ * holding no blocks at all and the row's own guard red it - as it red the WebKit row of CI run
+ * 125366889641, with no part-built batch in 61 samples (sjawhar/legion#2612).
+ *
+ * So the stream waits for the page rather than for its own clock: no frame goes out until the
+ * turn's body is being filled a batch at a time, and from there the frames land in a page with
+ * a paint running - the opening body's own, which is 4,000 paragraphs in some sixteen batches
+ * (`ATTACH_BATCH` in `MarkdownBody.tsx`), and then the paints the frames themselves bring.
+ *
+ * Two other things end the wait, and both leave the guards below to red rather than passing a
+ * row that measured nothing. A body painted whole - every block of it in one task, which is
+ * what `DISPATCH_STREAM_PROBE_PARAGRAPHS=2` makes this turn - can never be caught part-way, and
+ * the page says so by dropping the pending marker, so the wait ends there instead of holding
+ * the row for nothing. And a page that does neither within `waitMs` is streamed into anyway,
+ * which the guards read as the window never reached.
+ */
+async function aPaintOfTheTurnIsPartWayThrough(page: Page, waitMs: number): Promise<string> {
+  const ended = await page.waitForFunction(
+    (until) => {
+      if ((window.__heavyStreamPartBuilt ?? 0) > 0) {
+        return "a paint of it was part-way through";
+      }
+      const turns = document.querySelectorAll('[data-testid="agent-message-assistant"]');
+      const body = turns[turns.length - 1]?.querySelector(".dispatch-markdown") ?? null;
+      const painted = body !== null && body.querySelector("p") !== null;
+      if (painted && !body.hasAttribute("data-markdown-pending")) {
+        return "it was painted whole, so no paint of it can be caught part-way";
+      }
+      // Nothing yet, which is the empty answer Playwright polls on until the deadline here
+      // hands it one.
+      return Date.now() < until ? "" : "neither happened";
+    },
+    Date.now() + waitMs,
+    // The page's own deadline above is what ends this wait; this one is the backstop for a page
+    // that cannot run a script at all.
+    { timeout: 2 * waitMs }
+  );
+  return await ended.jsonValue();
+}
+
+// SLOW(>=2s): the stream is the measurement. The row waits for the page to be part-way through
+// painting a 4,000-paragraph turn and then publishes sixty frames into it, 80 ms apart, which
+// is 4.8 s of real time on top of that wait; the row's own two guards red it where the window
+// was never reached, so a shorter stream or a smaller turn would leave it green while proving
+// nothing (the comments above each number say so).
 test("a reader who opens the live view while a long turn streams is never shown a frame's text in front of the body", async ({
   browser,
 }) => {
+  // What this row spends is the page's own work, three times over: the first parse and paint of
+  // a 4,000-paragraph turn before a frame goes out (1.1 to 4.9 s at four lanes on this pod), the
+  // sixty frames of the stream, and the parse and paint of the whole 4,061-paragraph turn at the
+  // end, which is another 5 to 9 s there. The row used to overlap the first of those with the
+  // stream and measure nothing for it; measuring the window costs that overlap, and 30 s - the
+  // suite's blanket default - cut a run of it off at four lanes with every guard already
+  // satisfied (sjawhar/legion#2612). The deadline is the room a node slower than this one needs;
+  // nothing the row waits for is a clock of its own.
+  test.setTimeout(60_000);
+
   const session = streamingSession.session_id;
   await setLiveSessions([streamingSession]);
   await publishAgentStreamFrame(
@@ -234,6 +314,18 @@ test("a reader who opens the live view while a long turn streams is never shown 
     // nobody. The turn is the reader's own text here, with its paint still to come.
     await expect(turns).toHaveCount(1);
     const turn = turns.last();
+
+    // The stream starts where the window is, not where a clock is: the page is painting this
+    // turn a batch at a time before its first frame goes out, so every frame of it arrives in a
+    // page with a paint running (`aPaintOfTheTurnIsPartWayThrough`). What ended this wait is on
+    // the result, since a wait ended by a body painted whole is a run whose guards below will
+    // red, and the reader of that run should see why.
+    const reachedAt = Date.now();
+    const reached = await aPaintOfTheTurnIsPartWayThrough(page, reachThePaintMs);
+    test.info().annotations.push({
+      description: `${reached}, ${Date.now() - reachedAt} ms after the turn was in the page`,
+      type: "before the first frame of the stream",
+    });
 
     /** When the server had each frame of the stream, which is a socket hop short of when the
      *  page had it: what a frame landing inside a paint is read from, below. */

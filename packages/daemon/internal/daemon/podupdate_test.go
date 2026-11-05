@@ -1604,6 +1604,41 @@ func TestPodUpdateRevivesASuspendedClaimBelowTheUpdateContract(t *testing.T) {
 	}
 }
 
+// A released pod is not a pod that went with its workers' unpushed work, and the sweep never
+// reads it as one. The idle release suspends every claim of the pod before it suspends the
+// pod's Sandbox, and a suspension lets the claim's process go (supervise's letGo), so no claim
+// of a released pod records a process in it. Both readers of PodDrift ask it only through a
+// claim that records one (groupDrift, podProcess), so the branch that answers runtime.ErrPodGone
+// for a Sandbox suspended without this round's own displaced-pod mark is never reached for a
+// released pod: the sweep opens no round over it, writes nothing on the issue about work the
+// release's bundle is holding, and leaves the wake to bring the pod back.
+func TestPodUpdateReadsAReleasedPodAsNoPodRatherThanAPodThatWent(t *testing.T) {
+	rig := newPodUpdateRig(t,
+		podUpdateRole{role: claim.RoleImplementer, state: supervise.StateSuspended, session: true,
+			contract: api.DaemonAPIVersion, suspendedBy: supervise.SuspendedByReleased},
+		podUpdateRole{role: claim.RoleTester, state: supervise.StateSuspended, session: true,
+			contract: api.DaemonAPIVersion, suspendedBy: supervise.SuspendedByReleased},
+	)
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+
+	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleTester} {
+		if c := rig.claimOf(role); c.UpdateRound != "" {
+			t.Errorf("%s records round %q, want no round over a pod that is already released", role, c.UpdateRound)
+		}
+	}
+	if calls := rig.rt.CallsOf("PodDrift"); len(calls) != 0 {
+		t.Errorf("the sweep asked the runtime about a released pod %d times, want none", len(calls))
+	}
+	if messages := rig.messages(); len(messages) != 0 {
+		t.Errorf("the issue was told a released pod went with unpushed work: %q", messages)
+	}
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Errorf("the controller was told about a released pod: %+v", notices)
+	}
+}
+
 // The stale-plugin lane and the round divide the claims of a pod between them, and the round
 // takes every claim it covers. A claim in a round is left to it whatever contract it records:
 // one whose worker can call ready_for_update answers with the op, and one whose plugin has no op

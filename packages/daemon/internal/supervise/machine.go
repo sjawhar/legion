@@ -72,7 +72,8 @@ const (
 // triggers main had — its phase's start, a workflow delivery, the controller keeper
 // (RequestRuleResume) — unless an operator suspended it: that suspension holds until the operator
 // resumes the claim. The boot's resume by rule, which main did not have, acts only on a source
-// ByRule names, so it never overrides a drain recorded before the source existed.
+// ByRule names, so it never overrides a drain recorded before the source existed, and it leaves a
+// released claim to the wake that brings its pod back.
 type SuspendSource string
 
 const (
@@ -87,12 +88,33 @@ const (
 	SuspendedByDaemon SuspendSource = "daemon"
 	// SuspendedByExit: the tree root's agent reported its own exit, which suspends a root.
 	SuspendedByExit SuspendSource = "exit"
+	// SuspendedByReleased: the daemon released the claim's idle issue pod, whose disk and Sandbox
+	// went with it and whose unpushed work was saved as a git bundle. The claim keeps its phase and
+	// its pending task, and the next wake for its role resumes the same session; a daemon restart
+	// resumes no such claim, since only that wake brings the pod back (workflow's booted). It is no
+	// source ByRule names: the rules that act on a released claim name it themselves — the wake
+	// that brings its pod back, and the stranded report once a wake has run out with no turn.
+	SuspendedByReleased SuspendSource = "released"
 )
 
-// ByRule is whether the source is one the daemon itself recorded, the daemon's own suspend or a
-// root's exit: the only sources the boot's resume by rule acts on, and the only suspended phase
-// workers the stranded report leaves out.
-func (s SuspendSource) ByRule() bool { return s == SuspendedByDaemon || s == SuspendedByExit }
+// ByRule is whether the source is one the daemon itself recorded as a stop of its own — its own
+// suspend, or a root's exit: the sources a daemon rule resumes with no operator, and the only
+// suspended phase workers the stranded report leaves out. A release is not one of them. It is a
+// stop the daemon recorded too, but no rule here acts on it: the boot's resume by rule leaves it to
+// its role's wake (workflow's booted), and the stranded report holds it to R6's one fact
+// (workflow's stranded).
+func (s SuspendSource) ByRule() bool {
+	return s == SuspendedByDaemon || s == SuspendedByExit
+}
+
+// RetiresPhaseTask is whether a suspension by this source ends the claim's phase, so a task queued
+// for that phase goes with it (settle). Every source does but two: an operator's, and a release.
+// Each of those resumes this same claim in the same phase — the operator's by hand, a released
+// claim's at its role's next wake — so the pending task waits through the suspension and is sent
+// on that resume.
+func (s SuspendSource) RetiresPhaseTask() bool {
+	return s != SuspendedByOperator && s != SuspendedByReleased
+}
 
 // Claim is one role claim as the supervisor holds and persists it.
 type Claim struct {
@@ -303,6 +325,15 @@ func (c Claim) LeftPodRound(round string) bool {
 // operator's, which holds until an operator resumes the claim.
 func (c Claim) RuleMayResume() bool {
 	return c.State == StateSuspended && c.SuspendedBy != SuspendedByOperator
+}
+
+// Released is whether the claim is the one suspension a wake brings back: the daemon released its
+// idle issue pod, so the claim keeps its session, its phase and its pending task, and the next
+// wake for its role resumes it (SuspendedByReleased). Every rule that acts on a released claim —
+// the wakes, the notice routing, the stranded report, a release the store cancelled — reads it
+// here rather than spelling the pair out again.
+func (c Claim) Released() bool {
+	return c.State == StateSuspended && c.SuspendedBy == SuspendedByReleased
 }
 
 // RuleHolds is whether an operator's suspension blocks a daemon rule: the claim is suspended by the
@@ -607,12 +638,12 @@ var ErrHeldByOperator = wait.New("the suspension holds until the operator resume
 
 // Machine is one claim's decision owner.
 type Machine struct {
-	mu         sync.Mutex
-	ctx        context.Context
-	deps       Deps
-	log        *slog.Logger
-	claim      Claim
-	onTerminal func(Claim, ClaimState)
+	mu             sync.Mutex
+	ctx            context.Context
+	deps           Deps
+	log            *slog.Logger
+	claim          Claim
+	onDurableState func(Claim, ClaimState)
 
 	timers map[TimerKind]armed
 	seq    uint64
@@ -1019,17 +1050,20 @@ func (m *Machine) unlock() {
 	m.mu.Unlock()
 }
 
-// OnTerminal installs the daemon callback for durable ready and failed transitions.
-// The callback runs after the transition's claim write has succeeded.
-func (m *Machine) OnTerminal(callback func(Claim, ClaimState)) {
+// OnDurableState installs the daemon callback for the durable transitions it acts on: ready,
+// working and failed. Two of them are terminal for the workflow and one, working, is not: the
+// daemon reads a turn starting to stamp a woken pod's first turn. The callback runs after the
+// transition's claim write has succeeded, and a machine keeps one, so a daemon that observes
+// more than one of them observes them in that one callback.
+func (m *Machine) OnDurableState(callback func(Claim, ClaimState)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.onTerminal = callback
+	m.onDurableState = callback
 }
 
-func (m *Machine) terminal(state ClaimState) {
-	if m.onTerminal != nil {
-		m.onTerminal(copyClaim(m.claim), state)
+func (m *Machine) durableState(state ClaimState) {
+	if m.onDurableState != nil {
+		m.onDurableState(copyClaim(m.claim), state)
 	}
 }
 
@@ -1405,7 +1439,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
-	m.terminal(StateFailed)
+	m.durableState(StateFailed)
 	return nil
 }
 

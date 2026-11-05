@@ -20,6 +20,38 @@ import (
 // through the daemon's normal work or shutdown.
 const strandedReportTimeout = 5 * time.Second
 
+// strandedReleaseWakes is the wakes of released pods that workflow.Stranded judges R6 on: the
+// recorded resumes of project that have not reached the woken role's first turn
+// (store.UnfinishedPodResumes, read up to now so the ten-minute bound stays workflow's alone,
+// of each pod's newest release alone, and the rows a stuck pass has already marked included,
+// since those are exactly the pods a wake never brought back). It is read only when the project
+// holds a released claim, so a deployment that releases no pod makes no query for one.
+//
+// It is the resumes table's cheap read: PodReleaseRecords, the other read of that table, carries
+// every release and hold of the project with it, so the state route — which judges this rule on
+// every request — must not read it.
+func strandedReleaseWakes(ctx context.Context, st *store.Store, projectToken string, claims []supervise.Claim, now time.Time) ([]workflow.ReleasedWake, error) {
+	released := false
+	for _, c := range claims {
+		if c.Released() {
+			released = true
+			break
+		}
+	}
+	if !released {
+		return nil, nil
+	}
+	resumes, err := st.UnfinishedPodResumes(ctx, projectToken, now)
+	if err != nil {
+		return nil, err
+	}
+	wakes := make([]workflow.ReleasedWake, 0, len(resumes))
+	for _, resume := range resumes {
+		wakes = append(wakes, workflow.ReleasedWake{Issue: resume.Issue, Role: resume.Role, At: resume.At, Stuck: resume.Stuck})
+	}
+	return wakes, nil
+}
+
 // reportStranded logs, once the boot has re-adopted every claim and replayed the failed ones to
 // the workflow, the claims nothing will wake (workflow.Stranded), read from records as the state
 // route reads them: one error line, however many there are, naming each claim as `<issue> <role>`
@@ -40,7 +72,12 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 			return err
 		}
 		claims = ofProject(claims, projectToken)
-		stranded, err = workflow.Stranded(ctx, tx, records, claims)
+		now := time.Now().UTC()
+		resumes, err := strandedReleaseWakes(ctx, st, projectToken, claims, now)
+		if err != nil {
+			return err
+		}
+		stranded, err = workflow.Stranded(ctx, tx, records, claims, resumes, now)
 		return err
 	}); err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
@@ -53,7 +90,7 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 		return
 	}
 	attrs := []any{"project", project, "count", len(stranded)}
-	grouped := api.StrandedByMove(api.StrandedClaimsOf(stranded))
+	grouped := api.StrandedByMove(api.StrandedClaimsOf(stranded), api.SuspendersOf(stranded))
 	for _, move := range api.StrandedMoves() {
 		attrs = append(attrs, string(move), grouped[move])
 	}

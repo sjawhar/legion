@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
@@ -24,6 +26,10 @@ import (
 // item's, since the item's own read lists it (readEdgeRows): a comment citing one part of an ask
 // counts once for that ask. A node with no inbound edge is absent from the result; the caller
 // decides what zero means.
+//
+// It is the sequential half of the one count: QueueBacklinkCounts queues the same statement and
+// reads it with the same scan, for a caller that counts beside its other reads (the issue read's
+// own count, and api.queueAskDetails for every list of asks), so the two paths cannot drift.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -35,30 +41,73 @@ func BacklinkCounts(
 	if len(ids) == 0 {
 		return counts, nil
 	}
-	// A kind that is no key of the arm table is refused before any SQL is built: the count has
-	// no arms to read for it, and would otherwise be silently low.
-	statement, ok := backlinkCountSQL(toKind, excludeKinds)
-	if !ok {
-		return nil, fmt.Errorf("count %s backlinks: no arms declared for that node kind", toKind)
-	}
-	args := []any{ids, nodeKinds}
-	if len(excludeKinds) > 0 {
-		args = append(args, excludeKinds)
+	statement, args, err := backlinkCountStatement(toKind, ids, excludeKinds)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := q.Query(ctx, statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
 	}
 	defer rows.Close()
+	if err := scanBacklinkCounts(rows, toKind, counts); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
+// QueueBacklinkCounts is the batched half: it queues BacklinkCounts's statement in b and reads its
+// rows into counts, for a caller that counts beside its other reads instead of spending a round
+// trip on it (the issue read's own count, api.getIssue, and api.queueAskDetails). No id queues
+// nothing and leaves counts as it is, so a caller need not ask whether it has any. A kind the arm
+// table does not declare is refused here as BacklinkCounts refuses it, before anything is queued.
+func QueueBacklinkCounts(b *pgx.Batch, toKind string, ids, excludeKinds []string, counts map[string]int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	statement, args, err := backlinkCountStatement(toKind, ids, excludeKinds)
+	if err != nil {
+		return err
+	}
+	b.Queue(statement, args...).Query(func(rows pgx.Rows) error {
+		return scanBacklinkCounts(rows, toKind, counts)
+	})
+	return nil
+}
+
+// backlinkCountStatement is the statement and arguments both halves run. A kind that is no key of
+// the arm table is refused before any SQL is built: the count has no arms to read for it, and
+// would otherwise be silently low.
+func backlinkCountStatement(toKind string, ids, excludeKinds []string) (string, []any, error) {
+	statement, ok := backlinkCountSQL(toKind, excludeKinds)
+	if !ok {
+		return "", nil, fmt.Errorf("count %s backlinks: no arms declared for that node kind", toKind)
+	}
+	args := []any{ids, nodeKinds}
+	if len(excludeKinds) > 0 {
+		args = append(args, excludeKinds)
+	}
+	return statement, args, nil
+}
+
+// scanBacklinkCounts reads the rows the count statement returns into counts, which a node with no
+// inbound edge stays absent from. A batch can hand it rows that already hold an error - one the
+// sequential Query would have returned itself - and that error is wrapped here as BacklinkCounts
+// wraps its Query's; an error that arrives while the rows are read is the last rows.Err(),
+// unwrapped on both paths.
+func scanBacklinkCounts(rows pgx.Rows, toKind string, counts map[string]int) error {
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("count %s backlinks: %w", toKind, err)
+	}
 	for rows.Next() {
 		var id string
 		var count int
 		if err := rows.Scan(&id, &count); err != nil {
-			return nil, fmt.Errorf("scan %s backlink count: %w", toKind, err)
+			return fmt.Errorf("scan %s backlink count: %w", toKind, err)
 		}
 		counts[id] = count
 	}
-	return counts, rows.Err()
+	return rows.Err()
 }
 
 // backlinkCountSQL is the statement BacklinkCounts runs: the union of the arms of graph_edges

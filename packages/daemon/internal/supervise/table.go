@@ -1195,6 +1195,11 @@ func agentBusy(reason string) bool {
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
 // an earlier daemon). Any other turn is a foreign one, and confirms nothing.
 //
+// The persisted working state is reported to the daemon (Machine.OnDurableState), because a turn is
+// the one observation that a woken pod's role came back and took work, whether or not the wake
+// carried a delivery for it to confirm: a wake for a notice or a phase-ended message carries
+// none, and its resume would otherwise never be measured (R5).
+//
 // The question a restart left (askFirst) counts as in flight for every delivery but one: a root
 // architect's task of a run (asksRoot) may be a task nobody has ever sent, held on the claim while
 // its root had no architect to hear it, so a turn of the agent's own is not that task's. Confirmed
@@ -1216,10 +1221,15 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	// process was already in. Every other start is one this daemon read (Machine.unseenTurn).
 	m.unseenTurn = own && start.DeliveryID == "" && m.send == nil && !awaiting
 	m.takeBackSignal(own && !m.unseenTurn)
+	persist := m.persist
 	if own {
-		return m.confirm(ctx)
+		persist = m.confirm
 	}
-	return m.persist(ctx)
+	if err := persist(ctx); err != nil {
+		return err
+	}
+	m.durableState(StateWorking)
+	return nil
 }
 
 // takeBackSignal takes back this claim's answer to its open round when the turn starting is not
@@ -1601,7 +1611,7 @@ func finishReady(m *Machine, ctx context.Context) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
-	m.terminal(StateReady)
+	m.durableState(StateReady)
 	return m.sendPending(ctx)
 }
 
