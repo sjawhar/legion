@@ -217,6 +217,51 @@ func TestReadAnonymousSumsEveryMappingsAnonymousLine(t *testing.T) {
 	}
 }
 
+// A process that unmaps and exits while its smaps is being read leaves the kernel's own writing
+// cut off, and gVisor was measured ending it with a bare `Anonymous:` and no size (INFRA-1208, a
+// live sampler on 2026-11-05 counted one read error for exactly that line). Both readers answer
+// such a file with what they had summed and no error, since the process was going and the kernel
+// was not wrong; a line holding something that is no number is still a refusal, so an operator
+// still hears about a kernel this package reads wrongly.
+func TestATruncatedSmapsEndsTheSumAndIsNoError(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "proc", "7")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	smaps := "7f0000000000-7f0000001000 rw-p 00000000 00:00 0\n" +
+		"Size:                  4 kB\n" +
+		"Anonymous:             4 kB\n" +
+		"7f0000002000-7f0000003000 rw-p 00000000 00:00 0\n" +
+		"Size:                  4 kB\n" +
+		"Anonymous:"
+	if err := os.WriteFile(filepath.Join(dir, "smaps"), []byte(smaps), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := ReadAnonymous(root, 7)
+	if err != nil {
+		t.Fatalf("ReadAnonymous(7) = %v, want the sum of what the file held", err)
+	}
+	if want := int64(4 * 1024); bytes != want {
+		t.Errorf("ReadAnonymous(7) = %d, want %d", bytes, want)
+	}
+	reader := NewReader(root, LayoutNone)
+	t.Cleanup(func() { _ = reader.Close() })
+	kept, err := reader.Anonymous(7)
+	if err != nil {
+		t.Fatalf("Reader.Anonymous(7) = %v, want the sum of what the file held", err)
+	}
+	if kept != bytes {
+		t.Errorf("Reader.Anonymous(7) = %d, want the %d ReadAnonymous answered", kept, bytes)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "smaps"), []byte("Anonymous:   not a number kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadAnonymous(root, 7); err == nil {
+		t.Error("ReadAnonymous read a line that is no number without refusing it")
+	}
+}
+
 // ReadProcCgroup hands the file over as it stands: under v1 it is one line per controller, and
 // under this pod's gVisor every one of them names a directory that exists nowhere under the mount,
 // which is why it is read for the record and never for a path to open.

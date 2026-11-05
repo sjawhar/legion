@@ -267,7 +267,11 @@ func (r *Reader) anonymousOf(k *kept) (int64, int64, error) {
 	}
 	var total int64
 	for line := range bytes.Lines(r.mappings[:n]) {
-		if err := addAnonymous(&total, line, k.path); err != nil {
+		switch err := addAnonymous(&total, line, k.path); {
+		case err == nil:
+		case errors.Is(err, errTruncated):
+			return total, int64(n), nil
+		default:
 			return 0, int64(n), err
 		}
 	}
@@ -292,7 +296,11 @@ func (r *Reader) anonymousOf(k *kept) (int64, int64, error) {
 	for {
 		line, err := r.lines.ReadSlice('\n')
 		read += int64(len(line))
-		if bad := addAnonymous(&total, line, k.path); bad != nil {
+		switch bad := addAnonymous(&total, line, k.path); {
+		case bad == nil:
+		case errors.Is(bad, errTruncated):
+			return total, read, nil
+		default:
 			return 0, read, bad
 		}
 		switch {
@@ -306,12 +314,20 @@ func (r *Reader) anonymousOf(k *kept) (int64, int64, error) {
 }
 
 // addAnonymous adds what one smaps line accounts to the process, and nothing for a line that is
-// no Anonymous line. A line that is one and holds no size is a refusal naming the file, as
-// ReadAnonymous answers it.
+// no Anonymous line. A line that is one and holds no size at all is the end of a read the
+// kernel truncated — a process unmaps and exits while its smaps is being written, and gVisor was
+// measured writing a bare "Anonymous:" for such a mapping (INFRA-1208, 2026-11-05) — so it ends
+// the sum with what the pass had read rather than refusing: that process's reading is a little
+// low for one pass, where a refusal would raise legion_sampler_read_errors_total for a kernel
+// that did nothing wrong. A line holding something that is no number is still a refusal naming
+// the file, as ReadAnonymous answers it.
 func addAnonymous(total *int64, line []byte, path string) error {
 	rest, found := bytes.CutPrefix(line, []byte("Anonymous:"))
 	if !found {
 		return nil
+	}
+	if len(bytes.TrimSpace(rest)) == 0 {
+		return errTruncated
 	}
 	size, err := kilobytes(rest)
 	if err != nil {
@@ -320,6 +336,10 @@ func addAnonymous(total *int64, line []byte, path string) error {
 	*total += size
 	return nil
 }
+
+// errTruncated is how addAnonymous says that the smaps it is reading ended mid-line, which its
+// callers answer with the total they have and no error.
+var errTruncated = errors.New("procread: the smaps read ended mid-line")
 
 // Forget drops what this reader holds of one process, which is what bounds it: the caller walks
 // the processes that are there and tells the reader about every one it stops holding, so the

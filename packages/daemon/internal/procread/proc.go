@@ -171,6 +171,11 @@ func ReadCmdline(root string, pid int) ([]string, error) {
 // process holds that no file backs, the number a pod is killed over, and it is summed from the
 // per-mapping file because this pod's gVisor kernel writes neither /proc/<pid>/smaps_rollup nor a
 // RssAnon line in /proc/<pid>/status (INFRA-1208, measured 2026-11-05).
+//
+// A bare `Anonymous:` line, with no size at all, is where the kernel stopped writing: a process
+// unmaps and exits while its smaps is being read, and gVisor was measured writing that line for
+// such a mapping. The sum ends there with what was read, since a process that is going is not a
+// kernel that is wrong. A line holding something that is no number is still a refusal.
 func ReadAnonymous(root string, pid int) (int64, error) {
 	path := filepath.Join(root, "proc", strconv.Itoa(pid), "smaps")
 	file, err := os.Open(path)
@@ -188,6 +193,9 @@ func ReadAnonymous(root string, pid int) (int64, error) {
 		rest, found := bytes.CutPrefix(lines.Bytes(), anonymous)
 		if !found {
 			continue
+		}
+		if len(bytes.TrimSpace(rest)) == 0 {
+			return total, nil
 		}
 		size, err := kilobytes(rest)
 		if err != nil {
