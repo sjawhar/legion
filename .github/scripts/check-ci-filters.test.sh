@@ -1001,4 +1001,54 @@ check "fails" "$(is "$status" 1)"
 check "names the entry and the manifest" \
   "$(contains "$out" "::error file=.github/scripts/ci_job_reads.py::WORKSPACES names packages/gone, which the root manifest's workspaces does not")"
 
+echo "case: every filter of a job that compiles packages/broker-client selects it"
+# Rule 14 holds the root manifest's workspaces equal to WORKSPACES, which makes every Bun job
+# declare a read of each workspace's manifest. It says nothing about a workspace's sources, so a
+# package can be compiled by a job whose filter never selects it. packages/broker-client is:
+# packages/envoy-client/src/broker-credential.ts:21-22 imports @legion/broker-client/environment
+# and /token-client, and that package's exports map every entry to ./src/*.ts, so each of the
+# five packages below holds its seven sources in its own tsc program, measured with
+# `bunx tsc --listFilesOnly`. A filter that gates such a job and does not select the package
+# leaves the change that breaks that typecheck starting no job at all, on the pull request and
+# again on the merge group that lands it. The sixth pair is a file rather than a package:
+# packages/broker-client/src/__tests__/wire.test.ts:25-26 reads
+# packages/envoy/internal/brokerclient/testdata/wire.json by relative path — the Go package's own
+# corpus, "that file itself, never a copy" — so a field added there, which is the change that
+# file exists to force, must start the one job that replays it in TypeScript.
+uncovered=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$script_dir" python3 - "$script_dir/../workflows/ci.yaml" <<'PY'
+import sys, yaml, workflow_paths as wp
+from pathlib import Path
+
+COMPILERS = (
+    ("claude-envoy", "claude_envoy"),
+    ("envoy-client", "envoy_client"),
+    ("pi-envoy", "pi_envoy"),
+    ("pi-legion", "pi_legion"),
+    ("pi-shared", "pi_shared"),
+)
+SOURCE = "packages/broker-client/src/token-client.ts"
+CORPUS = "packages/envoy/internal/brokerclient/testdata/wire.json"
+
+doc = yaml.safe_load(Path(sys.argv[1]).read_text())
+step = next(s for s in doc["jobs"]["changes"]["steps"] if s.get("id") == "filter")
+filters = yaml.safe_load(step["with"]["filters"])
+
+
+def flat(entry):
+    return [entry] if isinstance(entry, str) else [p for x in entry for p in flat(x)]
+
+
+def covers(name, path):
+    return wp.Filter(flat(filters[name])).covers(path)
+
+
+bad = [f"{job} ({name})" for job, name in COMPILERS if not covers(name, SOURCE)]
+if not covers("envoy_client", CORPUS):
+    bad.append("envoy-client (envoy_client) for the wire corpus its broker-client tests read")
+print(", ".join(bad))
+PY
+)
+check "no filter gates a job that compiles packages/broker-client without selecting it" \
+  "$(is "$uncovered" "")"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
