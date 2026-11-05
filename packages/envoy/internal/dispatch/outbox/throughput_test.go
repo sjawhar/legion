@@ -424,8 +424,12 @@ func (r *throughputRig) roleArrivals() []int64 {
 // one round trip apart, and 150 ms is the harsher of the two; the busy pool, which is the pool
 // contention the outbox must publish through, is kept once, on the messages load, since the pool
 // the batches queue on is the same whatever the load seeds; and the burst's second latency read
-// the same single-issue serialization at another round trip. The backlog is well under
-// 2*batchSize, so a scan still reads more than one batch of some owners while it drains.
+// the same single-issue serialization at another round trip. The backlog itself keeps main's
+// size, 2*batchSize, so a scan reads a full batch of rows more than once while it drains: the
+// floor below is a rate over the whole run, start-up included, so a shorter backlog reads a
+// lower rate against the same number. This pull request cut it to 60 and CI run 42119624087
+// read 24.0 events/s against the floor of 25; at main's size the same machine has the same
+// start-up cost to amortise over three times the events (dispatch://INFRA-1075).
 //
 // Serial: it measures the process. It holds the outbox to a rate and to an arrival order under a
 // fixed round trip, and every parallel test's CPU and Postgres work counts against both
@@ -433,7 +437,7 @@ func (r *throughputRig) roleArrivals() []int64 {
 func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	const (
 		backlogIssues = 20
-		backlogCount  = 60
+		backlogCount  = 2 * batchSize
 		burstCount    = 40
 		minRate       = 25.0
 		waitTime      = 3 * time.Minute
