@@ -125,8 +125,12 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
     );
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
 
-    // Decisions is the last tab, and Activity before it has its own route.
+    // Collaborators is the last tab, with Decisions and Activity before it, each with its own
+    // route.
     await page.keyboard.press("End");
+    await expect(page.getByRole("tab", { name: "Collaborators" })).toBeFocused();
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/collaborators$`));
+    await page.keyboard.press("ArrowLeft");
     await expect(page.getByRole("tab", { name: "Decisions" })).toBeFocused();
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/decisions$`));
     await page.keyboard.press("ArrowLeft");

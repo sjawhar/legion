@@ -291,7 +291,7 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
     await expect(references).toContainText("depth 1");
     await expect(references).toContainText("depth 2");
     const tabs = page.getByRole("main").getByRole("tab");
-    await expect(tabs).toHaveCount(8);
+    await expect(tabs).toHaveCount(9);
     for (const [index, name] of [
       "Spec",
       "Verification",
@@ -301,6 +301,7 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
       "Artifacts (2)",
       "Activity",
       "Decisions",
+      "Collaborators",
     ].entries()) {
       await expect(tabs.nth(index)).toHaveAccessibleName(name);
     }

@@ -152,6 +152,8 @@ const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
   // `t a` is Artifacts and `l` is the issue's label editor, so Activity takes `t v`.
   { keys: "t v", label: "Activity tab", tab: "activity" },
   { keys: "t d", label: "Decisions tab", tab: "decisions" },
+  // `s k p c h a v d` are taken, so Collaborators, the last tab, takes `t o`.
+  { keys: "t o", label: "Collaborators tab", tab: "collaborators" },
 ];
 
 /** One of the two role-document tab panels, Verification and Plan. They differ only in the tab

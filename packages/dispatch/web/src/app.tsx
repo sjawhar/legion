@@ -180,7 +180,17 @@ function IssuePageFallback(): ReactNode {
         </h1>
       </header>
       <div className={`mb-4 flex gap-2 border-b ${borderDefault}`} role="tablist">
-        {["Spec", "Conversation", "Children", "Artifacts", "Activity"].map((label) => (
+        {[
+          "Spec",
+          "Verification",
+          "Plan",
+          "Conversation",
+          "Children",
+          "Artifacts",
+          "Activity",
+          "Decisions",
+          "Collaborators",
+        ].map((label) => (
           <span
             className={`animate-pulse rounded px-3 py-2 text-sm ${textTransparent} ${skeletonBg}`}
             key={label}
