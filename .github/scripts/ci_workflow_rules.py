@@ -250,10 +250,29 @@ def check_workspace_table(workspaces: list, problems: list) -> None:
     declares of a manifest no install reads. The table is an argument because main() holds it
     already, and because nothing here imports ci_job_reads: the engine's names are all this
     module takes. A tree with no root manifest has no workspaces to hold, as one with
-    no ci-caches.yaml has no cache round trip."""
+    no ci-caches.yaml has no cache round trip.
+
+    The manifest is read as .github/scripts/check-bun-workspace-manifests.sh:103-111 reads it,
+    since the two checks are about the same list and a list one of them cannot read is not a list
+    the other may pass over: a manifest that is not valid JSON, and a `workspaces` that is not a
+    non-empty array of non-empty strings, are named rather than taken for an empty list, which
+    would hold the table to nothing. A trailing slash is stripped as that script strips it, since
+    `packages/x/` and `packages/x` are one workspace to bun and only one of the two spellings
+    could equal a table entry."""
     if not (REPO / MANIFEST).is_file():
         return
-    declared = (json.loads((REPO / MANIFEST).read_text()) or {}).get("workspaces") or []
+    try:
+        manifest = json.loads((REPO / MANIFEST).read_text())
+    except json.JSONDecodeError as error:
+        problems.append(f"::error file={MANIFEST}::the root manifest is not valid JSON ({error.msg} at line "
+                        f"{error.lineno}), so its workspaces cannot be held to {TABLE}'s WORKSPACES")
+        return
+    found = manifest.get("workspaces") if isinstance(manifest, dict) else None
+    if not isinstance(found, list) or not found or not all(isinstance(w, str) and w for w in found):
+        problems.append(f"::error file={MANIFEST}::workspaces must be a non-empty array of workspace paths for "
+                        f"{TABLE}'s WORKSPACES to be held to it; a bun workspace root has one")
+        return
+    declared = [workspace.removesuffix("/") for workspace in found]
     for workspace in declared:
         if workspace in workspaces:
             continue

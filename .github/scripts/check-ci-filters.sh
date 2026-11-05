@@ -113,7 +113,15 @@
 #      change to that package starts no job at all: that is how packages/broker-client, a
 #      workspace of the root manifest from the day it was added, came to have its typecheck and
 #      its tests run in no job. The other way round is a read every Bun job declares of a
-#      manifest no install reads.
+#      manifest no install reads. The manifest is read as
+#      .github/scripts/check-bun-workspace-manifests.sh:103-111 reads it: a package.json that is
+#      not valid JSON, and a `workspaces` that is not a non-empty array of non-empty strings, are
+#      named rather than taken for an empty list, and a trailing slash is stripped, since
+#      `packages/x/` and `packages/x` are one workspace to bun. A workspace's sources are another
+#      matter, which this rule says nothing about: a job can compile a package whose filter never
+#      selects it, which is why ci_job_reads.py's envoy_client_dep declares, in one place for
+#      every gate whose job compiles @legion/envoy-client, that it compiles
+#      @legion/broker-client with it.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,

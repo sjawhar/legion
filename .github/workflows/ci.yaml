@@ -639,6 +639,12 @@ jobs:
               # tests/daemon-api-version.test.ts:15 and its neighbours.
               - 'packages/contracts/fixtures/daemon-api/**'
               - 'packages/envoy-client/src/**'
+              # Its src/broker-credential.ts:21-22 imports @legion/broker-client, whose exports
+              # map every entry to ./src/<module>.ts, so this job compiles that package's seven
+              # sources with envoy-client's. Every filter whose job does is held to this pattern
+              # by check-ci-filters.test.sh; ci_job_reads.py's envoy_client_dep is the one place
+              # that declares the pair.
+              - 'packages/broker-client/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/pi-shared/src/**'
               # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
@@ -817,6 +823,10 @@ jobs:
               # src/__tests__/dispatch-advice.test.ts:683-690 holds every skill section a notice
               # cites to a heading of that skill's SKILL.md.
               - 'skills/**'
+              # The one corpus both clients read: packages/broker-client/src/__tests__/wire.test.ts:23-29
+              # reads the Go package's own testdata by relative path, that file itself and never a
+              # copy, so a field added there must start this job.
+              - 'packages/envoy/internal/brokerclient/testdata/wire.json'
             # The private workspace package both Oh My Pi plugins import.
             pi_shared:
               - '.github/workflows/ci.yaml'
@@ -824,6 +834,9 @@ jobs:
               - *biome
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/src/**'
+              # And @legion/broker-client with it: src/broker-credential.ts:21-22 imports it, so
+              # this job compiles its sources too (ci_job_reads.py's envoy_client_dep).
+              - 'packages/broker-client/**'
               - 'packages/contracts/src/**'
               # src/daemon-client.test.ts:15 and its neighbours read the daemon API fixtures.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -849,6 +862,8 @@ jobs:
               # src/skills-guard.test.ts:23, scripts/prepack.test.ts:6).
               - 'packages/pi-shared/test/**'
               - 'packages/envoy-client/src/**'
+              # And @legion/broker-client with it (ci_job_reads.py's envoy_client_dep).
+              - 'packages/broker-client/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/envoy-client/scripts/build-dispatch-cli.sh'
               - 'packages/contracts/src/**'
@@ -877,6 +892,8 @@ jobs:
               - 'packages/pi-shared/src/**'
               - 'packages/pi-shared/test/**'
               - 'packages/envoy-client/src/**'
+              # And @legion/broker-client with it (ci_job_reads.py's envoy_client_dep).
+              - 'packages/broker-client/**'
               - 'packages/contracts/src/**'
               # extensions/legion.test.ts:1009 and src/capability-report.test.ts:768-776.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -914,6 +931,9 @@ jobs:
               - 'packages/contracts/src/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
+              # And @legion/broker-client with it, which that CLI's own closure holds
+              # (ci_job_reads.py's envoy_client_dep).
+              - 'packages/broker-client/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
               # scripts/e2e/lib/held-port.py holds (run-server.sh:37).
@@ -1353,6 +1373,9 @@ jobs:
               - 'packages/envoy/scripts/fixtures/github/**'
               # e2e-local.sh:445-450 renders with @legion/envoy-client/delivery.
               - 'packages/envoy-client/src/**'
+              # And @legion/broker-client with it, which delivery.ts and transport.ts pull in
+              # (ci_job_reads.py's envoy_client_dep).
+              - 'packages/broker-client/**'
               - 'packages/contracts/src/**'
               # e2e-local.sh:148-149 builds ./cmd/listener and ./internal/testnats/cmd/natsd.
               - *listener_command
@@ -2164,9 +2187,12 @@ jobs:
         working-directory: packages/envoy-client
       # packages/envoy-client/src/broker-credential.ts:21-22 imports
       # @legion/broker-client/environment and @legion/broker-client/token-client, so this job
-      # already stands on that package; its own typecheck and tests run in no other job. They sit
-      # before the NATS pull because they need no image and no server: the five test files import
-      # only bun:test, jose, node: and the package's own modules.
+      # already stands on that package; its own lint, typecheck and tests run in no other job.
+      # They sit before the NATS pull because they need no image and no server: the five test
+      # files import only bun:test, jose, node: and the package's own modules.
+      - name: Lint broker client
+        run: bun run lint
+        working-directory: packages/broker-client
       - name: Typecheck broker client
         run: bun run typecheck
         working-directory: packages/broker-client
