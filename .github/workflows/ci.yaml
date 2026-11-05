@@ -2862,14 +2862,33 @@ jobs:
       # The two calls run as background jobs of this shell and the step waits on both, so the
       # step's time is the longer of them rather than their sum, and it exits non-zero when either
       # fails - the first call's status if it failed, else the second's.
+      #
+      # The step samples the server beside the run, because its own numbers said the time is a
+      # wait rather than work and did not say what the wait is: the same test takes 91.8 s here
+      # and 0.4 s on an idle two-core machine, which is 230 times and so more than the cores.
+      # pg_stat_activity's wait_event_type and wait_event name it - a lock, a connection, the
+      # checkpointer's own queue - and the sample goes into the artifact beside the test stream,
+      # whose events carry each test's start and end, so one run says which test waited on what
+      # (dispatch://INFRA-1075).
       - name: Unit test envoy Go package
         run: |
           mkdir -p "$RUNNER_TEMP/go-test-json"
+          waits="$RUNNER_TEMP/go-test-json/postgres-waits.txt"
+          while :; do
+            for port in 5432 5433; do
+              PGPASSWORD=ci psql -h localhost -p "$port" -U postgres -At -F'|' -c \
+                "select now(), $port, backend_type, state, coalesce(wait_event_type, ''), coalesce(wait_event, ''), left(coalesce(query, ''), 120) from pg_stat_activity where pid <> pg_backend_pid()" \
+                >> "$waits" 2>/dev/null || true
+            done
+            sleep 1
+          done &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
           go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
-            xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
+            xargs go test -json -count=1 -p 8 -parallel 24 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
           rest=$!
           DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \
-            go test -json -count=1 -parallel 12 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
+            go test -json -count=1 -parallel 24 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
           routes=$!
           rest_status=0
           routes_status=0
@@ -3222,8 +3241,9 @@ jobs:
       # pg_locks shows with no backend pid. The image's max_prepared_transactions is 0, and the
       # test refuses to skip in CI, so this job raises it as envoy-go does
       # (dispatch://INFRA-1075).
-      - name: Let the Postgres service prepare transactions
+      - name: Raise the Postgres service's connection and prepared-transaction limits
         run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -c "alter system set max_connections = 500"
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -c "alter system set max_prepared_transactions = 20"
           docker restart "${{ job.services.postgres.id }}"
           for _ in $(seq 60); do
@@ -3232,7 +3252,9 @@ jobs:
             sleep 1
           done
           [ "$prepared" = "20" ] || { echo "::error::the Postgres service reports max_prepared_transactions=$prepared"; exit 1; }
-          echo "max_prepared_transactions=$prepared"
+          limit=$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "show max_connections")
+          [ "$limit" = "500" ] || { echo "::error::the Postgres service reports max_connections=$limit"; exit 1; }
+          echo "max_connections=$limit max_prepared_transactions=$prepared"
       - name: Race-test the Dispatch API
         run: go test -race -timeout 30m ./internal/dispatch/api/
         working-directory: packages/envoy

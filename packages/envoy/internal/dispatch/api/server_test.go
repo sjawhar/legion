@@ -44,16 +44,17 @@ import (
 // 2.2 % of its wall time on this process's CPU and the rest waiting on Postgres round trips, so
 // four at a time is four waits at a time.
 //
-// What bounds the number is the database's connections rather than the runner's cores. CI's
-// Postgres service takes PostgreSQL's default max_connections of 100, less the three it reserves,
-// and a test holds a handful of the sixteen its store's pool allows (storetest's testPoolSize),
-// beside the harness's admin pool and its reset workers. Sixteen reached that limit - a test
-// opening a database of its own was refused "sorry, too many clients already" - and twelve did
-// not.
+// What bounds the number is the database's connections rather than the runner's cores. A test
+// holds a handful of the sixteen its store's pool allows (storetest's testPoolSize), beside the
+// harness's admin pool and its reset workers. At PostgreSQL's default max_connections of 100,
+// sixteen reached that limit - a test opening a database of its own was refused "sorry, too many
+// clients already" - and twelve did not. Every CI job that runs this package now raises the
+// server to 500 (.github/workflows/ci.yaml, envoy-go and envoy-go-race-api), so the bound is five
+// times what it was and this is twenty-four.
 //
 // A -parallel on the command line still wins: go test parses its flags inside M.Run, which
 // storetest.Main calls after this.
-const apiTestParallelism = 12
+const apiTestParallelism = 24
 
 func TestMain(m *testing.M) {
 	if err := flag.Set("test.parallel", strconv.Itoa(apiTestParallelism)); err != nil {
