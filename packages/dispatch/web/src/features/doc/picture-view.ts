@@ -4,7 +4,7 @@ import type { EditorView, NodeView, NodeViewConstructor } from "@milkdown/kit/pr
 
 import { artifactVersionPath } from "../../api/client";
 import { pictureClassName } from "../refs/DispatchPicture";
-import { isPlainClick, openPictureLightbox } from "../refs/picture-lightbox";
+import { isPlainClick, openPictureViewer, type PictureViewer } from "../refs/picture-viewer";
 import type { ReferenceMedia } from "../refs/reference-target";
 import {
   buildDispatchReference,
@@ -64,7 +64,7 @@ export type WatchPicture = (
  * `pictureReference` reads (`refs/routes.ts`, the rule it shares with `pictureSerializer`): the
  * `alt`, or the artifact's slug when that is empty. The picture is at its own size, scaled down to
  * the column (`pictureClassName`), and a plain click opens it at full size
- * (`openPictureLightbox`), a layer the view closes when it is destroyed. A version the browser
+ * (`openPictureViewer`), a view the node view closes when it is destroyed. A version the browser
  * cannot draw (a document, another file, a missing version) errors, and the picture becomes
  * `fallbackLink`; a version-less source shows that link while no latest version is known, and a
  * source that names something other than an artifact is that link at once. `placeCaretAfter` puts
@@ -91,7 +91,7 @@ export function pictureView(
   const dom = document.createElement("span");
   dom.dataset.dispatchDocPicture = buildDispatchReference(route);
   let link: HTMLAnchorElement | undefined;
-  let lightbox: HTMLDialogElement | undefined;
+  let viewer: PictureViewer | undefined;
   // The path the wrapper shows a picture of, undefined while it shows the link: a report of the
   // same path is skipped, and one after a failed load draws again.
   let shown: string | undefined;
@@ -112,10 +112,11 @@ export function pictureView(
       if (img.parentNode === dom) showLink();
     });
     // ProseMirror selects the node on mousedown and mouseup; the click after them opens it.
+    // Only the default is prevented: the editor still sees the click that follows its selection.
     img.addEventListener("click", (event) => {
       if (!isPlainClick(event)) return;
       event.preventDefault();
-      lightbox = openPictureLightbox(document, src, picture.caption) ?? lightbox;
+      viewer = openPictureViewer(img) ?? viewer;
     });
     link = undefined;
     shown = src;
@@ -153,9 +154,11 @@ export function pictureView(
       link !== undefined &&
       event.target instanceof Node &&
       link.contains(event.target),
+    // A view destroyed while the viewer's library is still being imported ends with nothing
+    // open: `close()` before the import lands calls that open off.
     destroy: () => {
       stopWatching();
-      lightbox?.close();
+      viewer?.close();
     },
   };
 }

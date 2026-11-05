@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
-import { isPlainClick, openPictureLightbox } from "./picture-lightbox";
+import { isPlainClick, openPictureViewer, type PictureViewer } from "./picture-viewer";
 import { pictureThumbnailClassName, RefLink } from "./RefLink";
 import { usePinnedMedia, useReferenceTarget } from "./reference-target";
 import { type DispatchReferenceRoute, parseNodeReference, referencedArtifact } from "./routes";
@@ -17,7 +17,7 @@ export interface PictureAnchor {
 }
 
 /** A picture at its own size, scaled down to the column it sits in and never capped in height,
- *  so a wide figure fills the column; a click opens it at full size (`openPictureLightbox`).
+ *  so a wide figure fills the column; a click opens it at full size (`openPictureViewer`).
  *  `not-prose` keeps Markdown's figure margins off it, so it sits in its line as a pasted picture
  *  is written. The document editor's picture node view (`features/doc/picture-view.ts`) draws
  *  with the same string, so a picture in a spec and one in a comment are one shape. */
@@ -49,8 +49,10 @@ export function collectPictureAnchors(root: HTMLElement): PictureAnchor[] {
 /** The block variant's `<img>`. A plain click opens it at full size; the listener is the
  *  element's own, so it runs before anything listening above the placeholder link (the browser's
  *  navigation, the body's link handling) and keeps the click from them. A modified click is the
- *  link's, which opens the artifact's page. The layer it opened closes when the picture leaves
- *  the page (a body re-rendered or gone, another page). */
+ *  link's, which opens the artifact's page. The viewer it opened closes when the picture leaves
+ *  the page (a body re-rendered or gone, another page), whether or not its library has arrived
+ *  by then. The viewer reads the picture's address, its caption and the surface's other
+ *  pictures off the element itself, so none of them is a dependency of this effect. */
 function BlockPicture({
   caption,
   onError,
@@ -64,19 +66,19 @@ function BlockPicture({
   useEffect(() => {
     const element = picture.current;
     if (element === null) return;
-    let lightbox: HTMLDialogElement | undefined;
+    let viewer: PictureViewer | undefined;
     const open = (event: MouseEvent) => {
       if (!isPlainClick(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      lightbox = openPictureLightbox(element.ownerDocument, src, caption) ?? lightbox;
+      viewer = openPictureViewer(element) ?? viewer;
     };
     element.addEventListener("click", open);
     return () => {
       element.removeEventListener("click", open);
-      lightbox?.close();
+      viewer?.close();
     };
-  }, [caption, src]);
+  }, []);
   return (
     <img
       alt={caption}
