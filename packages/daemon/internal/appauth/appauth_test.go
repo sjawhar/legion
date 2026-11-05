@@ -597,6 +597,55 @@ func TestARateLimited422DoesNotDropActions(t *testing.T) {
 	}
 }
 
+// Only the 422 GitHub answers a permission its installation does not hold says anything about
+// permissions (ungrantedPermissionsMessage). Every other 422 — a body GitHub reads as malformed,
+// a repository list it refuses — passes on as the refusal it is: no second request without
+// actions, no lease, and nothing said about a grant.
+func TestAnother422IsNotReadAsAMissingActionsGrant(t *testing.T) {
+	_, privatePEM := testAppKey(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	const refusal = `{"message":"Validation Failed","errors":[{"resource":"Installation","code":"invalid"}]}`
+	var mu sync.Mutex
+	exchanges := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/app/installations":
+			fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			mu.Lock()
+			exchanges++
+			mu.Unlock()
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprint(w, refusal)
+		default:
+			t.Errorf("unexpected GitHub path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	tokens := New(config.GitHubApps{Review: config.GitHubApp{AppID: "67890", PrivateKey: privatePEM}},
+		Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }, Stderr: &stderr})
+	defer tokens.Close()
+
+	lease, err := tokens.ReadToken(context.Background(), Review, "acme")
+	var trouble *TransientError
+	if lease.Token != "" || err == nil || errors.Is(err, errPermissionsRefused) || errors.As(err, &trouble) {
+		t.Fatalf("read token refused 422 Validation Failed = %q, %v; want no lease and that refusal, neither the permissions nor GitHub's trouble", lease.Token, err)
+	}
+	if !strings.Contains(err.Error(), "422") {
+		t.Errorf("error = %v, want it to carry GitHub's status", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if exchanges != 1 {
+		t.Errorf("%d exchanges, want the one request: a 422 that names no permissions is not asked again without actions", exchanges)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing said of a grant the answer says nothing about", stderr.String())
+	}
+}
+
 func TestTokensDeduplicatesConcurrentRequests(t *testing.T) {
 	key, privatePEM := testAppKey(t)
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)

@@ -4522,7 +4522,7 @@ none) and `Secret.GitHubOwners` the lowercased, sorted, single-spaced list as on
 `Values` takes one policy snapshot for its re-check and passes the same snapshot's name, tier and owners to the minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint` asks GitHub for no token for an installation on an account they do not list, nor for a record with no positive installation id.
 A release may narrow its GitHub App tokens (`secrets.GitHubNarrowing`, the `github_app` body of `POST /v1/grants/{id}/values`):
 the token of one listed account's installation alone, sent GitHub's `access_tokens` body naming repositories of that account, `contents: read`, `metadata: read`, `pull_requests: read` and `actions: read`, or both, and nothing else, so a caller can only narrow.
-`actions: read` is the one permission an App is not always granted (`secrets.optionalReadOnlyPermission`), so a read-only request GitHub answers 422 is sent once more without it, logged at WARN, and the release then carries the other three rather than nothing; only a 422 that stands is `NARROWING_REFUSED`.
+`actions: read` is the one permission an App is not always granted (`secrets.optionalReadOnlyPermission`), so a read-only request GitHub answers 422 with the body it refuses an ungranted permission by (`secrets.ungrantedPermissionsMessage`, read in `installationToken` and never quoted back) is sent once more without it, logged at WARN, and the release then carries the other three rather than nothing; a 422 that stands, and any other 422, is `NARROWING_REFUSED`.
 This set is the Legion daemon's own read set (`appauth.readPermissions`), so a `token_command` lease and a key-backed one read the same things.
 A body naming repositories alone names no permissions, and GitHub then gives the token every permission the App holds, its organization permissions among them: only `read_only` limits those.
 The narrowing is that release's alone: the grant records none (each release's `grant.used` audit row does) and the broker keeps no token, so its next release without one mints the owner-wide tokens, and no approval, record, request object or grant changes, since the session holding the grant can always have the owner-wide token.
@@ -4532,12 +4532,12 @@ an answer read in part leaves a minted token neither released nor revoked) and a
 The CLI runs the same function before it sends any request (exit 2), so the two cannot drift and its comparison of the answer with its request compares like with like.
 `Values` refuses, releasing nothing and running no minter, a narrowing of a grant that holds no github-app secret (`400 NARROWING_NOT_APPLICABLE`) and one to an account a github-app secret of the grant does not list in the snapshot it mints from (`403 NARROWING_OWNER_NOT_LISTED`);
 `GitHubApp.Mint` refuses that account again before it asks GitHub anything.
-GitHub's 422 to a narrowed token is `secrets.ErrMintNarrowingRefused`, answered `422 NARROWING_REFUSED` with the narrowing's likely mistake.
+GitHub's 422 to a narrowed token is `secrets.ErrMintNarrowingRefused`, answered `422 NARROWING_REFUSED` with the narrowing's likely mistake where the answer bears one out, and with the status alone where it does not.
 Both refusals are the caller's, so each is logged at WARN as `requests.NarrowingRefusedMessage`, never as `broker: mint failed`.
 `GitHubApp.Mint` releases a narrowed token only when GitHub's answer describes no more than the narrowing asked (`GitHubNarrowing.heldBy`:
 the repositories selected, the permissions held), so the narrowing the answer echoes as `github_app` is true by construction.
 A token it refuses it revokes at GitHub first (`DELETE /installation/token`, as the token), logging a WARN when GitHub does not confirm the revoke, and the refusal names the rule the answer failed, never a value from it.
-A rate-limited answer from any minter call (a 429, `X-RateLimit-Remaining: 0`, or a body naming a rate limit, GitHub's or Google's) is the upstream's class, never `refused` or the narrowing's:
+A rate-limited answer from any minter call (a 429, `X-RateLimit-Remaining: 0`, a `Retry-After`, or a body naming a rate limit, GitHub's or Google's) is the upstream's class, never `refused` or the narrowing's:
 a rate limit is not the App owner's to fix.
 The CLI's exec form (`--github-owner`, `--github-repo`, `--github-read-only`) requires that echo before it runs anything, since a broker from before narrowing ignores the body and releases the owner-wide token.
 Once its reads are done, `Values` checks every name whose frozen source is a stored one against the policy as it stands then (`recheckStoredSources`):

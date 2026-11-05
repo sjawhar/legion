@@ -295,7 +295,8 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 		return
 	case errors.Is(err, secrets.ErrMintNarrowingRefused):
 		// GitHub refused the narrowed token (a repository the installation does not reach, or a
-		// permission the App does not hold); its message names the narrowing's likely mistake. The
+		// permission the App does not hold, where GitHub's answer said so); its message names the
+		// narrowing's likely mistake, or the status alone where the answer faulted none of it. The
 		// caller's input, so a 4xx and never MINT_FAILED.
 		writeError(w, http.StatusUnprocessableEntity, "NARROWING_REFUSED", err.Error())
 		return

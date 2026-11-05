@@ -287,34 +287,43 @@ func TestGitHubAppMintRefusesANarrowingToAnUncoveredOwner(t *testing.T) {
 }
 
 // TestGitHubAppMintNamesTheNarrowingWhenGitHubRefusesIt: GitHub's 422 to a narrowed token request
-// is the caller's narrowing (class narrowing), and the error names what it likely got wrong: the
-// repositories it names, or the read access it asks for. A 422 to a request that sent no body (no
-// narrowing, or an owner alone) narrowed nothing and stays the App's (class refused). No error
-// quotes GitHub's own text.
+// is the caller's narrowing (class narrowing), and the error names what the answer bears out: the
+// repositories it names, or, where GitHub said the installation does not hold a permission the
+// body asked for, the read access. A read-only narrowing refused for anything else names no
+// cause at all, rather than send the caller to permissions GitHub did not fault. A 422 to a
+// request that sent no body (no narrowing, or an owner alone) narrowed nothing and stays the
+// App's (class refused). No error quotes GitHub's own text.
 func TestGitHubAppMintNamesTheNarrowingWhenGitHubRefusesIt(t *testing.T) {
 	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
+	const (
+		repositoryRefusal = "There is at least one repository that does not exist or is not accessible to the parent installation."
+		ungrantedRefusal  = "The permissions requested are not granted to this installation."
+	)
 	github := newNarrowingGitHub(t)
-	github.setAnswer(func(string, []byte) (int, any) {
-		return http.StatusUnprocessableEntity, map[string]string{"message": "There is at least one repository that does not exist or is not accessible to the parent installation."}
-	})
 	app := secrets.GitHubApp{Base: github.server.URL, HTTP: github.server.Client()}
 	value := githubAppValue(t, "123456", key)
 
 	for _, tc := range []struct {
 		name      string
+		message   string
 		narrowing *secrets.GitHubNarrowing
 		class     string
 		mentions  []string
+		silent    []string
 	}{
-		{"repositories", &secrets.GitHubNarrowing{Owner: "ada", Repositories: []string{"proofs", "widgets"}}, "narrowing", []string{"422", "ada", "proofs, widgets"}},
-		{"read-only", &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true}, "narrowing", []string{"422", "ada", "contents: read"}},
-		{"the owner alone", &secrets.GitHubNarrowing{Owner: "ada"}, "refused", []string{"422"}},
-		{"no narrowing", nil, "refused", []string{"422"}},
+		{"repositories", repositoryRefusal, &secrets.GitHubNarrowing{Owner: "ada", Repositories: []string{"proofs", "widgets"}}, "narrowing", []string{"422", "ada", "proofs, widgets"}, nil},
+		{"read-only, the permissions refused", ungrantedRefusal, &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true}, "narrowing", []string{"422", "ada", "contents: read"}, nil},
+		{"read-only, refused for something else", repositoryRefusal, &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true}, "narrowing", []string{"422", "ada", "nothing this narrowing names"}, []string{"contents: read"}},
+		{"the owner alone", repositoryRefusal, &secrets.GitHubNarrowing{Owner: "ada"}, "refused", []string{"422"}, nil},
+		{"no narrowing", repositoryRefusal, nil, "refused", []string{"422"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			github.setAnswer(func(string, []byte) (int, any) {
+				return http.StatusUnprocessableEntity, map[string]string{"message": tc.message}
+			})
 			_, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: tc.narrowing})
 			if secrets.MintErrorClass(err) != tc.class {
 				t.Fatalf("Mint = %v (class %s), want class %s", err, secrets.MintErrorClass(err), tc.class)
@@ -324,7 +333,12 @@ func TestGitHubAppMintNamesTheNarrowingWhenGitHubRefusesIt(t *testing.T) {
 					t.Fatalf("Mint = %v, want it to name %q", err, want)
 				}
 			}
-			if strings.Contains(err.Error(), "parent installation") {
+			for _, unwanted := range tc.silent {
+				if strings.Contains(err.Error(), unwanted) {
+					t.Fatalf("Mint = %v, want it to name no %q, which GitHub did not fault", err, unwanted)
+				}
+			}
+			if strings.Contains(err.Error(), "parent installation") || strings.Contains(err.Error(), "are not granted") {
 				t.Fatalf("Mint = %v quotes GitHub's own text", err)
 			}
 		})
@@ -501,6 +515,51 @@ func TestGitHubAppMintDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing
 	}
 	if _, tokens := github.take(); len(tokens) != 2 {
 		t.Fatalf("%d token requests for a refusal that stands, want the asked-for set and one more without actions", len(tokens))
+	}
+}
+
+// TestOnlyAnUngrantedPermissions422AsksGitHubAgain: the one 422 Mint asks again without actions
+// is the one GitHub answers a permission the installation does not hold, which its body says.
+// Any other 422 is passed on as it is — one token request, and the caller's narrowing — and so
+// is a 422 carrying a rate limit, by its Retry-After as much as by its remaining header: that is
+// the upstream's trouble, the same request may pass later, and nothing is downgraded on it.
+func TestOnlyAnUngrantedPermissions422AsksGitHubAgain(t *testing.T) {
+	var logged bytes.Buffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+	key, err := testAppKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ungranted = "The permissions requested are not granted to this installation."
+	for _, tc := range []struct {
+		name    string
+		message string
+		headers http.Header
+		class   string
+	}{
+		{"another refusal", "There is at least one repository that does not exist or is not accessible to the parent installation.", nil, "narrowing"},
+		{"a retry-after", ungranted, http.Header{"Retry-After": []string{"60"}}, "upstream"},
+		{"the remaining header", ungranted, http.Header{"X-Ratelimit-Remaining": []string{"0"}}, "upstream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newNarrowingGitHub(t)
+			github.setHeaders(tc.headers)
+			github.setAnswer(func(string, []byte) (int, any) {
+				return http.StatusUnprocessableEntity, map[string]string{"message": tc.message}
+			})
+			app := secrets.GitHubApp{Base: github.server.URL, HTTP: github.server.Client()}
+			release, err := app.Mint(t.Context(), secrets.MintRequest{Value: githubAppValue(t, "123456", key),
+				GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true}})
+			if release != "" || secrets.MintErrorClass(err) != tc.class {
+				t.Fatalf("Mint = %q, %v (class %s); want nothing released and class %s", release, err, secrets.MintErrorClass(err), tc.class)
+			}
+			if _, tokens := github.take(); len(tokens) != 1 {
+				t.Fatalf("%d token requests, want the one: only GitHub's ungranted-permissions 422 is asked again without actions", len(tokens))
+			}
+		})
+	}
+	if strings.Contains(logged.String(), "does not hold actions") {
+		t.Errorf("log = %q, want nothing said of a grant no answer said was missing", logged.String())
 	}
 }
 

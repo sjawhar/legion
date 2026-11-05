@@ -30,6 +30,11 @@ type mintStatusError struct {
 	code      int
 	// rateLimited is an answer that says it is a rate limit (rateLimited).
 	rateLimited bool
+	// ungrantedPermissions is GitHub's 422 to a token request naming a permission the
+	// installation does not hold, which GitHub's body says (GitHubApp.installationToken sets
+	// it, the one call that can get that answer). It decides whether Mint asks again without
+	// that permission; Error() says nothing of it, since the answer's text is never quoted.
+	ungrantedPermissions bool
 }
 
 func (e *mintStatusError) Error() string {
@@ -48,12 +53,15 @@ func (e *mintStatusError) Unwrap() error {
 
 // rateLimited reports whether response, whose body is body, says it is a rate limit, without
 // quoting either: a 429; GitHub's X-RateLimit-Remaining of 0, which its primary rate limit's 403
-// or 429 carries; or a body naming a rate limit, as GitHub's secondary rate limit does ("rate limit")
-// and Google's usage limits do (the reasons rateLimitExceeded and userRateLimitExceeded,
-// RATE_LIMIT_EXCEEDED). Google sends no X-RateLimit-Remaining, so only the status and the body
-// reach a Google answer.
+// or 429 carries; a Retry-After, which GitHub's secondary rate limit sends and which asks for
+// the same request later, whatever the status it comes on; or a body naming a rate limit, as
+// GitHub's secondary rate limit does ("rate limit") and Google's usage limits do (the reasons
+// rateLimitExceeded and userRateLimitExceeded, RATE_LIMIT_EXCEEDED). Google sends no
+// X-RateLimit-Remaining, so only the status, a Retry-After and the body reach a Google answer.
 func rateLimited(response *http.Response, body []byte) bool {
-	if response.StatusCode == http.StatusTooManyRequests || response.Header.Get("X-RateLimit-Remaining") == "0" {
+	if response.StatusCode == http.StatusTooManyRequests ||
+		response.Header.Get("X-RateLimit-Remaining") == "0" ||
+		response.Header.Get("Retry-After") != "" {
 		return true
 	}
 	lower := bytes.ToLower(body)

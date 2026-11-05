@@ -492,6 +492,22 @@ var errInstallationGone = errors.New("the installation is gone")
 // leaving one out.
 var errPermissionsRefused = errors.New("the installation does not hold the permissions asked for")
 
+// ungrantedPermissionsMessage is what GitHub's 422 says, in its body's message, of a token
+// request naming a permission the installation does not hold: "The permissions requested are not
+// granted to this installation." It is matched lowercased and in part, so GitHub's own
+// punctuation and capitalisation are free to change, and narrowly enough that no other 422 of
+// the exchange answers to it: the ones it does answer are a malformed body and a repository list
+// the installation does not reach, neither of which names permissions.
+const ungrantedPermissionsMessage = "permissions requested are not granted"
+
+// namesUngrantedPermissions reports whether body, GitHub's answer to a refused token request,
+// says the installation does not hold the permissions the request asked for. The body is read as
+// text: a 422 of GitHub's carries that sentence in its message, and nothing of the request is
+// read back out of it.
+func namesUngrantedPermissions(body []byte) bool {
+	return strings.Contains(strings.ToLower(string(body)), ungrantedPermissionsMessage)
+}
+
 // ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer
 // about the owner, not GitHub's trouble, which a retry would only repeat.
 var ErrNotInstalled = errors.New("github_app_not_installed")
@@ -598,10 +614,11 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 			if githubrest.RateLimitSignals(response, body) {
 				return Lease{}, &TransientError{Err: failed}
 			}
-			// Otherwise a 422 to a request that named permissions is the installation holding
-			// fewer of them than the request asked for. One to a request that named none (the
-			// write token's) says nothing about permissions and stays the refusal it is.
-			if permissions != nil {
+			// Otherwise a 422 is the installation holding fewer permissions than the request
+			// asked for only when GitHub says so (ungrantedPermissionsMessage). A 422 whose
+			// body says anything else — a malformed request, a repository a body names — is
+			// about something the second request would not change, so it passes on unchanged.
+			if permissions != nil && namesUngrantedPermissions(body) {
 				return Lease{}, fmt.Errorf("%w: %w", errPermissionsRefused, refused)
 			}
 		}

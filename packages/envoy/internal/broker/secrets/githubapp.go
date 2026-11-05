@@ -141,9 +141,16 @@ const accessTokensResponseLimit = mintResponseLimit + MaxNarrowedRepositories*gi
 // gives a narrowed token it cannot mint: that is the caller's narrowing (ErrMintNarrowingRefused),
 // named by what it likely got wrong, since GitHub's own text is never quoted. A 422 to a request
 // that sent no body narrowed nothing, and stays the App's; a 422 that is a rate limit is no verdict
-// on the narrowing, and stays the upstream's. A read-only narrowing reaches it only once the
-// token was asked for again without actions (Mint, optionalReadOnlyPermission), so the one grant
-// an App is not always given is not among the causes it names.
+// on the narrowing, and stays the upstream's.
+//
+// A cause is named only where the answer bears it out: the repositories, since a 422 to a body
+// that names them is theirs to doubt, and read access only where GitHub said the installation
+// does not hold a permission the body asked for (status.ungrantedPermissions) — a read-only
+// narrowing refused for anything else is not the App's permissions, and saying so would send
+// the caller to the one setting that is right. Where nothing is borne out, the refusal says the
+// status alone. actions is in no cause: a 422 that names it has been asked again without it
+// (Mint, optionalReadOnlyPermission), so the one grant an App is not always given is settled
+// before this.
 func (n *GitHubNarrowing) refusal(err error, appID, owner string) error {
 	var status *mintStatusError
 	if !n.narrowsToken() || !errors.As(err, &status) || status.code != http.StatusUnprocessableEntity || status.rateLimited {
@@ -153,20 +160,38 @@ func (n *GitHubNarrowing) refusal(err error, appID, owner string) error {
 	if len(n.Repositories) > 0 {
 		causes = append(causes, fmt.Sprintf("a repository it names (%s) that the installation does not reach, such as a misspelled name", strings.Join(n.Repositories, ", ")))
 	}
-	if n.ReadOnly {
+	if n.ReadOnly && status.ungrantedPermissions {
 		causes = append(causes, "contents: read, metadata: read or pull_requests: read, which the App does not hold")
+	}
+	if len(causes) == 0 {
+		return fmt.Errorf("%w: github app %s: GitHub answered HTTP 422 to the narrowed token for %s, saying nothing this narrowing names is at fault; the caller fixes the narrowing", ErrMintNarrowingRefused, appID, owner)
 	}
 	return fmt.Errorf("%w: github app %s: GitHub answered HTTP 422 to the narrowed token for %s: likely %s; the caller fixes the narrowing", ErrMintNarrowingRefused, appID, owner, strings.Join(causes, ", or "))
 }
 
-// refusedPermissions reports GitHub refusing the permissions a read-only narrowing's token
-// request named (a 422): the installation holds fewer than the body asked for, and GitHub minted
-// nothing. A 422 that is a rate limit is the upstream's trouble and no verdict on the
-// permissions, and a narrowing that is not read-only named none to be refused.
+// ungrantedPermissionsMessage is what GitHub's 422 says, in its body's message, of a token
+// request naming a permission the installation does not hold: "The permissions requested are not
+// granted to this installation." It is matched lowercased and in part, so GitHub's own
+// punctuation and capitalisation are free to change, and it is never quoted back.
+const ungrantedPermissionsMessage = "permissions requested are not granted"
+
+// namesUngrantedPermissions reports whether body, GitHub's answer to a refused token request,
+// says the installation does not hold the permissions the request asked for.
+func namesUngrantedPermissions(body []byte) bool {
+	return bytes.Contains(bytes.ToLower(body), []byte(ungrantedPermissionsMessage))
+}
+
+// refusedPermissions reports GitHub refusing a read-only narrowing's token request because the
+// installation does not hold the permissions it named, which GitHub says in the body of its 422
+// (ungrantedPermissionsMessage, read by installationToken): the only 422 asking again without
+// actions can answer. Any other 422 — a repository the installation does not reach, a body
+// GitHub reads as malformed — is passed on as it is, and so is a 422 that is a rate limit, which
+// is the upstream's trouble and no verdict on the permissions. A narrowing that is not read-only
+// named no permissions to be refused.
 func (n *GitHubNarrowing) refusedPermissions(err error) bool {
 	var status *mintStatusError
 	return n != nil && n.ReadOnly && errors.As(err, &status) &&
-		status.code == http.StatusUnprocessableEntity && !status.rateLimited
+		status.ungrantedPermissions && !status.rateLimited
 }
 
 // heldBy checks that token, as GitHub describes it, holds no more than n asked: for repositories, a
@@ -400,6 +425,13 @@ func (m GitHubApp) installationToken(ctx context.Context, jwt string, installati
 	}
 	payload, err := mintCall(m.HTTP, request, what, "GitHub", http.StatusCreated, accessTokensResponseLimit)
 	if err != nil {
+		// GitHub's own reason for a refused token request, read from the body mintCall returns
+		// with the error: the one 422 Mint asks again without actions (refusedPermissions). It
+		// is read here, the only call that can get that answer, and never quoted.
+		var status *mintStatusError
+		if errors.As(err, &status) && status.code == http.StatusUnprocessableEntity && namesUngrantedPermissions(payload) {
+			status.ungrantedPermissions = true
+		}
 		return githubInstallationToken{}, err
 	}
 	var token githubInstallationToken
