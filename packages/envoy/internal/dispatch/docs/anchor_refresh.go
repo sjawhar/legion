@@ -295,9 +295,13 @@ func loadAnchorRefreshedCommentPayloads(ctx context.Context, tx pgx.Tx, ids []st
 		if !found {
 			return nil, fmt.Errorf("load refreshed comment %q artifact: %w", id, pgx.ErrNoRows)
 		}
-		payloads[id] = model.CommentEventPayload{
+		payload := model.CommentEventPayload{
 			Comment: comments[id], ArtifactName: place.name, ProjectKey: place.projectKey, ArtifactSlug: place.slug,
 		}
+		// A body is bounded block by block, so it can be longer than one event carries: the event
+		// takes its first part and says so, and a reader gets the rest from the comment itself.
+		payload.Body, payload.BodyTruncated = model.EventBody(comments[id].Body)
+		payloads[id] = payload
 	}
 	return payloads, nil
 }

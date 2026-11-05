@@ -16,12 +16,28 @@ import (
 // rewrite reaches the broker within this window of it.
 const AccountTokenCacheTTL = 30 * time.Second
 
-// AccountToken reads Dispatch's own projected Kubernetes ServiceAccount token
-// (DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE), the credential every call Dispatch makes to the
-// secrets broker presents as its bearer: the broker resolves the calling service from it
-// (BROKER_API_ACCOUNTS). One reader serves every such call — the credential-request UI's relay
-// (internal/dispatch/agentsecrets) and this package's introspection — so a projected token is
-// cached once rather than once per caller.
+// Account is the caller's own platform identity, read fresh at call time: the bearer every call
+// this package makes to the secrets broker presents, from which the broker resolves the calling
+// service (BROKER_API_ACCOUNTS). It is an interface because the two callers hold two kinds of
+// identity and the broker takes either: Dispatch and a listener in a pod hold a projected
+// Kubernetes ServiceAccount token in a file (AccountToken), and a listener on a Compute Engine
+// VM holds no Kubernetes token at all and asks its metadata server for the machine's own Google
+// identity token instead (GoogleAccount).
+//
+// Read is called on the path of one introspection, so an implementation caches what it read: the
+// credentials behind both implementations rotate, which is why neither is read once at boot.
+type Account interface {
+	// Read is the bearer to present, or an error that never reached the broker: a deployment's
+	// own credential it could not read is never an empty bearer for the broker to refuse.
+	Read() (string, error)
+}
+
+// AccountToken is the Account of a caller holding a projected Kubernetes ServiceAccount token in
+// a file: Dispatch's own (DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE) and a listener's in a pod
+// (ENVOY_AGENT_SECRETS_ACCOUNT_TOKEN_FILE). The broker resolves the calling service from it
+// (BROKER_API_ACCOUNTS). One reader serves every call a program makes — the credential-request
+// UI's relay (internal/dispatch/agentsecrets) and this package's introspection — so a projected
+// token is cached once rather than once per caller.
 //
 // A projected token rotates, so the path is read at call time and never once at boot.
 type AccountToken struct {

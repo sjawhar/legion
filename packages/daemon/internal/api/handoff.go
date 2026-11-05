@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/dispatchbody"
+
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -81,7 +83,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "READY_ROLE_FORBIDDEN", "only a merger may report ready")
 		return
 	}
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		writeFailure(w, http.StatusInternalServerError, "FACTS_UNAVAILABLE", "fact intake is unavailable")
 		return
 	}
@@ -176,21 +178,23 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
 	// workflow committed would be recorded as processed under this completion's key, which leaves
 	// the summary out, while a refusal here records nothing, and the corrected retry at the same
-	// commit is applied. That holds for the packet's length too. The daemon posts the packet it tells
-	// (record.ReadyPacket: the merger's packet, with a by-hand READY's note above it) as one Dispatch
-	// message, the outbox's marker appended, and Dispatch refuses a longer body on every attempt, so
-	// a packet over record.MessagePostLimit would never reach the human; refused only by the
-	// workflow, the shortened packet at the same commit would be answered HANDOFF_ALREADY_RECORDED
-	// and the issue would stay in merging.
+	// commit is applied. That holds for the packet Dispatch takes too. The daemon posts the packet
+	// it tells (record.ReadyPacket: the merger's packet, with a by-hand READY's note above it) as
+	// one Dispatch message, and Dispatch refuses a body past the bounds it publishes on every
+	// attempt, so a packet it would refuse would never reach the human. Refused only by the post,
+	// the issue would already be in awaiting_merge, where no worker holds a phase and this
+	// merger's completion is over: nobody could send the shorter packet. Refused here, the issue
+	// stays in merging and the merger completes again with it. The text measured is the post the
+	// outbox makes, not the packet alone (record.LongestPost).
 	var answer readyAnswer
 	if req.Ready {
 		if answer, ok = s.readyNote(w, r, grant, issue, req.Commit); !ok {
 			return
 		}
-		if length := dispatch.MessageBodyLength(record.ReadyPacket(req.Summary, answer.mergeNote)); length > record.MessagePostLimit {
+		if over := dispatchbody.Check(record.LongestPost(record.ReadyPacket(req.Summary, answer.mergeNote))); over != nil {
 			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
-				"the READY packet%s is %d characters over the %d the daemon can post as one Dispatch message (%d/%d): link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
-				byHandShare(answer.mergeNote), length-record.MessagePostLimit, record.MessagePostLimit, length, record.MessagePostLimit))
+				"the READY packet%s is one Dispatch refuses: %s: link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
+				byHandShare(answer.mergeNote), over))
 			return
 		}
 	}
@@ -492,8 +496,8 @@ func (s *server) checkReport(w http.ResponseWriter, r *http.Request, grant crede
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{})
 }
 
-// byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet with,
-// empty when READY carries none.
+// byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet
+// with, empty when READY carries none.
 func byHandShare(mergeNote string) string {
 	if mergeNote == "" {
 		return ""
@@ -559,7 +563,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 // for it), and the head its review round approved, "" when it recorded none (record.ApprovedHead),
 // which READY holds the pull request's head to (unreviewedChange).
 func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, string, error) {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return nil, false, "", errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})

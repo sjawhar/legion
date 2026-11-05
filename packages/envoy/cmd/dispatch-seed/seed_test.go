@@ -126,6 +126,51 @@ func TestSeedBuildsTermStatisticsOnMainsSchema(t *testing.T) {
 	}
 }
 
+func TestSeedCommentsOnTheSchemaBeforeAnswers(t *testing.T) {
+	database := storetest.Open(t)
+	rollback, err := os.ReadFile("../../internal/dispatch/store/migrations/20261105014808_comments_answers.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), string(rollback)); err != nil {
+		t.Fatalf("restore the schema before comment answers: %v", err)
+	}
+	if _, err := seed(context.Background(), database, testScale, io.Discard); err != nil {
+		t.Fatalf("seed with --no-migrate on the schema before comment answers: %v", err)
+	}
+	var replies int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from comments where reply_to is not null`).Scan(&replies); err != nil {
+		t.Fatal(err)
+	}
+	if replies == 0 {
+		t.Fatal("the old schema holds no comment replies")
+	}
+}
+
+func TestSeedReplyPlansInheritTheirOwnersAndAskThreads(t *testing.T) {
+	plan := newPlan(newSizes(testScale))
+	for index, comment := range plan.comments {
+		parent := comment.ReplyTo
+		if comment.RepliesTo >= 0 {
+			parent = comment.RepliesTo
+		}
+		if parent >= 0 {
+			owner := plan.comments[parent]
+			if comment.Issue != owner.Issue || comment.Document != owner.Document || comment.Ask != owner.Ask {
+				t.Errorf("comment %d replies to %d but owner/thread (%d,%d,%d) differs from (%d,%d,%d)",
+					index, parent, comment.Issue, comment.Document, comment.Ask, owner.Issue, owner.Document, owner.Ask)
+			}
+		}
+		if comment.Ask >= 0 {
+			ask := plan.asks[comment.Ask]
+			if comment.Issue != ask.Issue || comment.Document != ask.Document {
+				t.Errorf("comment %d answers ask %d but its owner (%d,%d) differs from (%d,%d)",
+					index, comment.Ask, comment.Issue, comment.Document, ask.Issue, ask.Document)
+			}
+		}
+	}
+}
+
 // TestSeedRefusesAFilledDatabaseWithoutMigratingIt holds the seed to refusing a database that
 // already holds rows before it has written anything to it, its migrations included. A
 // --database-url that names a database in use by mistake is the case the order decides: the
@@ -340,7 +385,7 @@ var checksums = []struct {
 	{"ask_block_texts", `ask_id::text, block_id, revision, md5(text)`},
 	{"ask_block_state", `ask_id::text, revision, next_block, body_sha256, owed_at`},
 	{"ask_block_refs", `ask_id::text, block_id, from_node, to_kind, to_id, kind, created_at`},
-	{"comments", `id::text, issue_key, artifact_id::text, md5(body), anchor::text, reply_to::text, resolved,
+	{"comments", `id::text, issue_key, artifact_id::text, md5(body), anchor::text, reply_to::text, answers::text, resolved,
 		created_at, ask_id::text, replies_to_block, edited_at, written_version, md5(search::text)`},
 	{"comment_blocks", `comment_id::text, block_id, node_id, position, type, text_sha256, md5(excerpt),
 		made_at, changed_revision, changed_at, removed_at`},
@@ -492,12 +537,8 @@ func assertEveryAskHasItsOpeningEvent(t *testing.T, database *store.Store) {
 	}
 }
 
-// graphArmCount is how many arms graph_edges unions: the 23 of migration 0142, plus the three
-// 20261101183525 restated it with - an ask's current parts, the links those parts hold, and the
-// split of the comment reply arm into a reply to a comment's block and a reply to an ask's part.
-// The test reads the arms from the view's own text, so it follows a migration that restates the
-// view; this number is the guard that it still read a whole view.
-const graphArmCount = 26
+// graphArmCount guards that the census reads every arm, including the comment answers arm.
+const graphArmCount = 27
 
 var (
 	armKindLiteral   = regexp.MustCompile(`'([a-z_]+)'::text AS kind`)
@@ -518,7 +559,7 @@ func assertEveryGraphArmHoldsRows(t *testing.T, database *store.Store) {
 	}
 	arms := strings.Split(definition, "UNION ALL")
 	if len(arms) != graphArmCount {
-		t.Fatalf("graph_edges has %d arms, not the %d migration 20261101183525 restates it with; read the view and update the test",
+		t.Fatalf("graph_edges has %d arms, not the %d migration 20261105014808 restates it with; read the view and update the test",
 			len(arms), graphArmCount)
 	}
 	pairs := map[[2]string]bool{}

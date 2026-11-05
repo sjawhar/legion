@@ -23,6 +23,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 	ygws "github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -3452,6 +3453,38 @@ func TestSettlementMarksAnAskWithAParagraphAfterItsOptionsInvalid(t *testing.T) 
 		{Label: "Ship", Description: "Release it"},
 		{Label: "Hold", Description: "Wait for review"},
 	})
+}
+
+// A browser edit reaches a document through the Yjs room and settlement, where no ask route's
+// check runs, so the bound an ask's question and options share (askWordingTooLong) is
+// settlement's too: a decision one unit over is marked invalid, with a block.invalid event
+// naming the bound, and its row is left open as it was. Were that wording stored, the ask
+// would take no PATCH at all - an urgency-only edit included - because every ask route holds
+// the merged ask to the same bound. Shortening the question by one unit repairs it.
+func TestSettlementMarksADecisionOverTheWordingBoundInvalid(t *testing.T) {
+	const blockID = "ask-wording"
+	options := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	// The options the seed wrote spend their own units of the bound; the question fills the
+	// rest of it and one unit more.
+	question := strings.Repeat("a", contracts.DispatchEventBodyMax+1-AskWordingUnits("", options))
+	service, artifactID := seedIndexedShipAsk(t, blockID)
+	setQuestion := func(text string) {
+		t.Helper()
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			ask.Children[0] = parsedBlock(t, text+"\n")
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+	}
+
+	setQuestion(question)
+	reason := fmt.Sprintf("ask block %q is 1 characters over the %d-character limit on its question and options (%d/%d)",
+		blockID, contracts.DispatchEventBodyMax, contracts.DispatchEventBodyMax+1, contracts.DispatchEventBodyMax)
+	assertAskMarkedInvalidAndKept(t, service, artifactID, blockID, reason)
+
+	setQuestion(question[:len(question)-1])
+	assertAskRepaired(t, service, artifactID, blockID, question[:len(question)-1], options)
 }
 
 // seedIndexedShipAsk is a document holding one ask, "Should we ship?" with the options Ship and

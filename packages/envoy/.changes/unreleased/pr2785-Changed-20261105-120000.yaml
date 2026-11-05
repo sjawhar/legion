@@ -1,8 +1,0 @@
-kind: Changed
-body: |-
-  A read-only GitHub App narrowing (`--github-read-only`, the API's `read_only`) now also asks for `actions: read`, so a read-only token reads a repository's Actions runs, jobs and job logs, as the Legion daemon's own read-only token does.
-
-  An installation that has not been granted Actions keeps working: GitHub answers 422 to a permission its installation does not hold, so the broker asks once more without `actions` and releases contents, metadata and pull requests read, logging one WARN that names the App and the installation. Only a refusal that stands is `NARROWING_REFUSED`.
-time: 2026-11-05T12:00:00.000000000Z
-custom:
-    Issue: pr2785

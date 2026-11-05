@@ -74,6 +74,7 @@ on:
       - "packages/envoy-client/**"
       - "packages/contracts/**"
       - "packages/pi-shared/**"
+      - "packages/broker-client/**"
       - "packages/pi-legion/agents/**"
       - "skills/**"
       - "scripts/third-party-notices.ts"

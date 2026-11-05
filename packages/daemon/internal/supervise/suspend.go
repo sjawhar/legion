@@ -164,7 +164,7 @@ func suspensionRank(source SuspendSource) int {
 func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
 	if m.held != nil && m.claim.State == StateWorking {
 		m.log.Warn("supervise: the agent's turn has not ended; suspending it mid-turn", "by", m.held.By, "deadline", m.held.Deadline)
-		if err := m.interrupted(ctx, "the held suspension's deadline ended the task's turn"); err != nil {
+		if err := m.interrupted(ctx, "the held suspension's deadline ended the task's turn", ordinaryEnd); err != nil {
 			m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
 			return fmt.Errorf("take back the task of %s before its forced stop: %w", m.claim.Token, err)
 		}

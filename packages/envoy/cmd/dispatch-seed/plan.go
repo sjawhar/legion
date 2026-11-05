@@ -433,14 +433,17 @@ func (p *seedPlan) planComments() {
 		case 2:
 			comment.Document = index % len(p.documents)
 		case 3:
-			comment.Issue = index % len(p.issues)
+			parent := p.comments[index-1]
+			comment.Issue, comment.Document, comment.Ask = parent.Issue, parent.Document, parent.Ask
 			comment.ReplyTo = index - 1
 		case 4:
-			comment.Issue = index % len(p.issues)
 			comment.Ask = index % len(p.asks)
+			ask := p.asks[comment.Ask]
+			comment.Issue, comment.Document = ask.Issue, ask.Document
 			comment.AskPart = index%20 == 4
 		case 5:
-			comment.Issue = index % len(p.issues)
+			parent := p.comments[index-1]
+			comment.Issue, comment.Document, comment.Ask = parent.Issue, parent.Document, parent.Ask
 			comment.RepliesTo = index - 1
 		default:
 			comment.Issue = index % len(p.issues)

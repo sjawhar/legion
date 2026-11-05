@@ -208,16 +208,21 @@ const DefaultIssuePageLimit = 50
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = 1000
 
-// DispatchBodyMax is the longest comment, comment-edit, message and broadcast body the server
-// accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
-// refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
-const DispatchBodyMax = 32000
+// DispatchBlockUnits is the longest one block of a comment, comment edit, message, broadcast or
+// ask part may be, in UTF-16 units. Generated from DISPATCH_BLOCK_UNITS in packages/contracts;
+// the server enforces it, names it in its refusal, and publishes it through GET /api/v1/limits.
+const DispatchBlockUnits = 32000
 
-// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
-// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
-// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
-// ask composer cannot drift apart.
-const AskQuestionMax = 2000
+// DispatchItemBlocks is the most blocks one body may hold. Generated from DISPATCH_ITEM_BLOCKS in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchItemBlocks = 32768
+
+// DispatchEventBodyMax is the longest body an event carries whole, in UTF-16 units, and the bound
+// on an ask's question and its options together. Generated from DISPATCH_EVENT_BODY_MAX in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchEventBodyMax = 32000
 
 // DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
 // POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
@@ -298,6 +303,12 @@ const IdempotencyLease = 60000 * time.Millisecond
 // packages/contracts so the server's check and the page's header cannot drift apart.
 const DispatchLoginHeader = "Dispatch-Login"
 const DispatchLoginChanged = "LOGIN_CHANGED"
+
+// DispatchSignInRequired is the code of the 403 for a write by a broker-issued access token that
+// names a session and a service but no person: the machine holding it has signed nobody in.
+// Generated from DISPATCH_SIGN_IN_REQUIRED in packages/contracts so the server's refusal and
+// every client's reading of it cannot drift apart.
+const DispatchSignInRequired = "SIGN_IN_REQUIRED"
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

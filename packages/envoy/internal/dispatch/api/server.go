@@ -613,10 +613,16 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		}
 		if route.Method != http.MethodGet {
 			// Outside the keyed layer and the upload's spool, so a write to another project's
-			// object, or into another session's own rows, claims no idempotency key and costs
-			// no body (withinProjectScope, withinSessionScope).
+			// object, into another session's own rows, or by a credential that names no person
+			// claims no idempotency key and costs no body (withinProjectScope,
+			// withinSessionScope, writeNeedsASignedInPerson).
 			handler = s.withinProjectScope(route, handler)
 			handler = s.withinSessionScope(route, handler)
+			// Outermost of the three, so a caller that may make no write at all is told that
+			// rather than which session the write it tried belongs to. The project check has
+			// nothing to tell it: a token naming a service is held to no one project
+			// (broker_token.go).
+			handler = s.writeNeedsASignedInPerson(handler)
 			handler = s.refuseChangedLogin(handler)
 		}
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
@@ -1376,7 +1382,8 @@ func (s *server) requireCallerScope(w http.ResponseWriter, r *http.Request, scop
 }
 
 // capExceededError names how far a text field is over its cap so one trim lands:
-// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units (len16).
+// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units
+// (itemblocks.Units16).
 func capExceededError(field string, length, limit int) *apiError {
 	return errorf(http.StatusBadRequest, "CAP_EXCEEDED",
 		"%s is %d characters over the %d-character limit (%d/%d)", field, length-limit, limit, length, limit)
@@ -1386,6 +1393,18 @@ func capExceededError(field string, length, limit int) *apiError {
 func countExceededError(code, field string, count, limit int) *apiError {
 	return errorf(http.StatusBadRequest, code,
 		"%s is %d over the %d-item limit (%d/%d)", field, count-limit, limit, count, limit)
+}
+
+// blockBoundError is what a route answers an itemblocks.Check with: nil where the body passed
+// both bounds, else the refusal the typed error words (itemblocks.CapExceeded names the block,
+// itemblocks.CountExceeded the count), with the status and code every cap refusal carries.
+// Every route that bounds a body calls this one helper, so a route added later cannot word the
+// same refusal differently.
+func blockBoundError(err error) *apiError {
+	if err == nil {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err)
 }
 
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {
@@ -1406,17 +1425,6 @@ func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
 		return false
 	}
 	return true
-}
-
-func len16(value string) int {
-	length := 0
-	for _, rune := range value {
-		length++
-		if rune > 0xffff {
-			length++
-		}
-	}
-	return length
 }
 
 const maxJSONRequestBytes int64 = 1 << 20

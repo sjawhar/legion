@@ -63,6 +63,9 @@ export interface AskGateHost {
   readonly logger: { warn(message: string): void };
   /** The host's plain log, for a warning one session's gated calls raise while it runs. */
   readonly runtimeLogger: { warn(message: string): void };
+  /** The session this process is acting as now, read at each call: what a broker trade for the
+   * gate's own Dispatch reads writes under (`currentSessionID`, extensions/envoy.ts). */
+  readonly session: () => string;
 }
 
 // The core passes the host's objects through untyped: ctx is the ExtensionContext, whose
@@ -128,7 +131,7 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistrati
     env: process.env,
     now: Date.now,
     dispatchClient: (directory, signal) =>
-      sessionDispatchClient(host.configFile, directory, signal),
+      sessionDispatchClient(host.configFile, directory, signal, host.session),
   });
   const loading = loadAskGate(pi, host, record);
   // A rejection is handled here and by the caller's notice; never an unhandled one.
@@ -271,8 +274,8 @@ async function loadAskGate(
               cacheRetention: "none",
               // Adaptive thinking spends this budget too: a revise that rewrote a 1,450-character
               // question used 1,106 output tokens, thinking included. An answer cut off holds no
-              // verdict and the write posts unreviewed, so this leaves room for a full
-              // 2,000-character rewrite (ASK_QUESTION_MAX).
+              // verdict and the write posts unreviewed, so this leaves room for a rewrite of a
+              // couple of thousand characters.
               maxTokens: 4096,
               temperature: 0,
               signal,
@@ -323,7 +326,7 @@ async function loadAskGate(
     runtimeLogger: host.runtimeLogger,
     configFile: host.configFile.path,
     dispatchClient: (directory, signal) =>
-      sessionDispatchClient(host.configFile, directory, signal),
+      sessionDispatchClient(host.configFile, directory, signal, host.session),
     recordDecision: record,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
