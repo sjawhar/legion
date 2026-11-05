@@ -6,6 +6,7 @@ import {
   createComment,
   createIssue,
   createProject,
+  createProjectDocument,
   getArtifact,
   getArtifactText,
   getAsk,
@@ -933,5 +934,67 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
     await expect(documentEditor(page)).toHaveText("The quick red fox");
   } finally {
     await bob.close();
+  }
+});
+
+/**
+ * The issue page fills a slot in the shell's margin (dispatch://INFRA-1196 R12,
+ * `web/src/features/margin/margin-slot.tsx`), and the margin is mounted once for every route.
+ * These three rows are what says the slot changed no other page: each one draws its margin
+ * exactly as it did before, and none of them draws the issue page's panel.
+ */
+const ISSUE_PANEL = '[data-testid="issue-margin"]';
+
+test("a project document page draws its margin, and none of the issue page's panel", async ({
+  browser,
+}) => {
+  await createProject({ key: "DOC", name: "Documents" });
+  const document = await createProjectDocument("DOC", {
+    content: "# The handbook\n\nIts margin is the margin every document page has.\n",
+    name: "handbook.md",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await page.goto(`/projects/DOC/documents/${document.artifact.slug}`);
+    await expect(page.getByRole("heading", { level: 1, name: "The handbook" })).toBeVisible();
+    await expect(page.getByTestId("desktop-margin-shell")).toHaveCount(1);
+    await expect(page.getByTestId("margin-sheet")).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Comments" })).toBeVisible();
+    await expect(page.getByLabel("Resize margin")).toHaveCount(1);
+    await expect(page.locator(ISSUE_PANEL)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("the Inbox keeps its margin-less layout", async ({ browser }) => {
+  await createProject({ key: "INB", name: "Inbox" });
+  await createIssue({ project: "INB", spec: initialMarkdown, title: "An issue to list" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await page.goto("/");
+    await expect(page.getByTestId("main-content")).toBeVisible();
+    // A route with no margin spends no width on one, which is what it did before the slot.
+    await expect(page.getByTestId("desktop-margin-shell")).toHaveCount(0);
+    await expect(page.locator(ISSUE_PANEL)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an Agents page keeps its margin-less layout", async ({ browser }) => {
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await page.goto("/agents");
+    await expect(page.getByTestId("desktop-margin-shell")).toHaveCount(0);
+    await expect(page.locator(ISSUE_PANEL)).toHaveCount(0);
+  } finally {
+    await alice.close();
   }
 });

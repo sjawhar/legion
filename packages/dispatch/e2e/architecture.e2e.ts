@@ -350,7 +350,7 @@ test("a project with no architecture source answers the read, so its pages make 
 
     // Both surfaces that ask the question on every visit.
     await page.goto(`/issues/${issue.key}`);
-    await expect(page.getByTestId("issue-metadata-rail")).toBeVisible();
+    await expect(page.getByTestId("issue-header")).toBeVisible();
     await page.goto("/projects/CORE");
     await expect(page).toHaveURL("/projects/CORE/issues");
     await expect(page.getByRole("tab", { name: "Architecture" })).toHaveCount(0);

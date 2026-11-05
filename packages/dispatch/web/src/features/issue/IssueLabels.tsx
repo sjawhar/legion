@@ -139,7 +139,9 @@ export function IssueLabels({
       <div
         className={
           variant === "rail"
-            ? "relative flex shrink-0 flex-nowrap items-center gap-1"
+            ? // The identity block's row three wraps, so the labels wrap inside it: eight long
+              // labels take a second line at 390 px rather than a sideways scroll (R11, R17).
+              "relative flex min-w-0 flex-wrap items-center gap-1"
             : "relative mt-2 flex flex-wrap items-center gap-2"
         }
         data-testid="issue-labels"

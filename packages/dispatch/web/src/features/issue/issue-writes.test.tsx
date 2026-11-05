@@ -138,6 +138,15 @@ async function openRouteEditor(): Promise<HTMLInputElement> {
   return (await screen.findByLabelText("Message route")) as HTMLInputElement;
 }
 
+/** Opens the identity block's one actions control, which holds close, reopen and the control
+ *  that sets the parent (dispatch://INFRA-1196 R11), and leaves it open if it already is. */
+async function openIssueActions(): Promise<void> {
+  const control = await screen.findByRole("button", { name: "Issue actions" });
+  if (control.getAttribute("aria-expanded") !== "true") {
+    fireEvent.click(control);
+  }
+}
+
 test("IssuePage keeps an unsaved route draft when a stale refetch arrives", async () => {
   const { patchIssue, restore } = stubIssueApi();
   const { unmount } = renderIssuePage();
@@ -879,7 +888,8 @@ test("IssuePage saves a parent from the header's parent editor", async () => {
   const { unmount } = renderIssuePage();
 
   try {
-    fireEvent.click(await screen.findByRole("button", { name: "Set parent issue" }));
+    await openIssueActions();
+    fireEvent.click(screen.getByRole("button", { name: "Set parent issue" }));
     const parent = (await screen.findByLabelText("Parent")) as HTMLInputElement;
     fireEvent.change(parent, { target: { value: "CORE-9" } });
     fireEvent.click(screen.getByRole("button", { name: "Save parent" }));
@@ -901,7 +911,8 @@ test("IssuePage clears the parent with an empty editor save", async () => {
   const { unmount } = renderIssuePage();
 
   try {
-    fireEvent.click(await screen.findByRole("button", { name: "Edit parent issue" }));
+    await openIssueActions();
+    fireEvent.click(screen.getByRole("button", { name: "Edit parent issue" }));
     const parent = (await screen.findByLabelText("Parent")) as HTMLInputElement;
     expect(parent.value).toBe("CORE-9");
     fireEvent.change(parent, { target: { value: "" } });
@@ -910,6 +921,7 @@ test("IssuePage clears the parent with an empty editor save", async () => {
     await waitFor(() =>
       expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { parent: null }, keyedAttempt)
     );
+    await openIssueActions();
     await screen.findByRole("button", { name: "Set parent issue" });
     expect(screen.queryByRole("link", { name: "CORE-9" })).toBeNull();
   } finally {
@@ -931,7 +943,8 @@ test("IssuePage renders the server's reason inline when a parent save is refused
   const { unmount } = renderIssuePage();
 
   try {
-    fireEvent.click(await screen.findByRole("button", { name: "Set parent issue" }));
+    await openIssueActions();
+    fireEvent.click(screen.getByRole("button", { name: "Set parent issue" }));
     const parent = (await screen.findByLabelText("Parent")) as HTMLInputElement;
     fireEvent.change(parent, { target: { value: "CORE-9" } });
     fireEvent.click(screen.getByRole("button", { name: "Save parent" }));

@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-
+import {
+  HELP_LINES,
+  MARGIN_SECTION_NAMES,
+  MARGIN_SECTION_ORDER,
+  PROPERTY_LABELS,
+} from "./page-structure";
 import {
   BLOCK_ATTRIBUTE_LABELS,
   blockAttributeLabel,
@@ -76,6 +81,9 @@ const WORD_SOURCES: readonly unknown[] = [
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
   CONTROL_LABELS,
+  PROPERTY_LABELS,
+  MARGIN_SECTION_NAMES,
+  HELP_LINES,
   BLOCK_ATTRIBUTE_LABELS,
 ];
 
@@ -167,6 +175,30 @@ test("every empty-state line is one sentence a person reads", () => {
     expect(line).toMatch(/^[A-Z][^_]*\.$/);
   }
   expect(EMPTY_STATE_LINES.check_result).toBe("No result recorded against this check.");
+});
+
+test("every property has a plain name, and no name is an internal token", () => {
+  for (const [field, label] of Object.entries(PROPERTY_LABELS)) {
+    expect(label, `${field} is named with an internal token`).toMatch(/^[A-Z][^_]*$/);
+  }
+  // The two the model names differently from the page: a reader is told what a route does to
+  // their messages, and whose turn it is, in words rather than in the field's own name.
+  expect(PROPERTY_LABELS.route).toBe("Messages go to");
+  expect(PROPERTY_LABELS.blocked_by).toBe("Blocked by");
+});
+
+test("the panel draws three named sections, in the order it names them", () => {
+  expect(MARGIN_SECTION_ORDER.map((section) => MARGIN_SECTION_NAMES[section])).toEqual([
+    "Development",
+    "People",
+    "References",
+  ]);
+});
+
+test("every help line is whole sentences, because it replaced a tooltip", () => {
+  for (const line of Object.values(HELP_LINES)) {
+    expect(line).toMatch(/^[A-Z][^_]*\.$/);
+  }
 });
 
 test("every `when` the block schema declares reads as words", () => {

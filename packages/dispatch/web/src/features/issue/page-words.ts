@@ -21,23 +21,13 @@
  * accessible name from `GLYPH_NAMES`, drawn beside the word rather than in place of it: a state
  * and a type are told apart by a word and a shape, never by colour alone.
  *
- * This module is data and pure functions. It holds no React, touches no DOM and imports
- * nothing, so a test, a browser spec and a component all read the same list.
+ * This module is data and pure functions. It holds no React and touches no DOM, and the only
+ * thing it imports is its sibling `page-structure.ts`, whose property and section names and
+ * help lines `DECLARED_WORDS` is derived from as well; so a test, a browser spec and a
+ * component all read the same list.
  */
 
-/**
- * Freezes `value` and everything it holds. Each declaration below is `as const`, which is the
- * compiler's half of the promise; this is the runtime half, so no caller can write a word into
- * the page's vocabulary after the module loads.
- */
-function freeze<T>(value: T): T {
-  for (const held of Object.values(value as Record<string, unknown>)) {
-    if (typeof held === "object" && held !== null) {
-      freeze(held);
-    }
-  }
-  return Object.freeze(value);
-}
+import { freeze, HELP_LINES, MARGIN_SECTION_NAMES, PROPERTY_LABELS } from "./page-structure";
 
 /** The keys of `value`, as its own key type rather than as plain strings. */
 function keysOf<T extends object>(value: T): readonly (keyof T)[] {
@@ -215,22 +205,51 @@ export const CONTROL_LABELS = freeze({
   add: "Add",
   /** The other requirements a transcluded node is also drawn under (R23). */
   also_under: "Also under",
+  /** Leaves an editor with the value the issue had, in every editor the page opens. */
+  cancel: "Cancel",
   /** The collapsible section of child issues at the top of every preset (R10). */
   children: "Children",
   /** The direct children done of total, labelled on the collapsed header (R10). */
   children_done: "Children done",
+  /** Closes the issue, from the identity block's one actions control (R11). */
+  close_issue: "Close issue",
   /** Copies a check's `run` command, which renders as code beside it (R15). */
   copy_command: "Copy the command",
   /** Takes a version of an artifact down (R16). */
   download: "Download",
+  /** Gives an issue that has a parent a different one (R11, row one). */
+  edit_parent: "Edit parent issue",
   /** Closes a branch of the tree (R1). */
   fold: "Fold",
+  /** The one control row one keeps the actions behind: close, reopen and setting the parent.
+   *  It names actions, never a property (R11 bans "more"). */
+  issue_actions: "Issue actions",
   /** Moves to the next open question that waits on the reader (R6). */
   next_question: "Next open question",
+  /** What the route control says while the issue has none to show. */
+  no_route: "No route",
   /** Marks a document or an artifact in the node menu that no block cites (R16). */
   nothing_cites_it: "Cited by nothing",
   /** The node menu beside the presets, holding what no block cites and the upload (R16). */
   other_nodes: "Files and documents",
+  /** Hands a claimed issue back, so another agent can take it (R11, row four). */
+  release_claim: "Release",
+  /** Reopens a closed issue, from the actions control or the closed issue's own line (R11). */
+  reopen_issue: "Reopen issue",
+  /** What reopening does, as the control's own words rather than a tooltip (R11). */
+  reopen_into_backlog: "Reopen into Backlog",
+  /** Each editor's save, naming the field it writes. */
+  save_blocked_by: "Save blocked by",
+  save_parent: "Save parent",
+  save_route: "Save route",
+  /** What a control says while its own write is out: Dispatch has not answered, so none of
+   *  these says the thing is done. */
+  saving_close: "Closing…",
+  saving_field: "Saving…",
+  saving_release: "Releasing…",
+  saving_reopen: "Reopening…",
+  /** Gives an issue with no parent one (R11, row one). */
+  set_parent: "Set parent issue",
   /** The whole subtree done of total, labelled beside the direct count (R10). */
   subtree_done: "Whole tree done",
   /** Opens a branch of the tree (R1). */
@@ -354,12 +373,6 @@ function glyphNames(): Readonly<Record<string, string>> {
  */
 export const GLYPH_NAMES: Readonly<Record<string, string>> = freeze(glyphNames());
 
-/** The attribute every element carries whose visible text is the page's own vocabulary. */
-export const PAGE_CHROME_ATTRIBUTE = "data-page-chrome";
-
-/** The attribute every element carries whose visible text came from a person or an agent. */
-export const AUTHOR_TEXT_ATTRIBUTE = "data-author-text";
-
 /**
  * The words of `text`, as the page's vocabulary counts them: lowercase, each run of letters and
  * digits a word, an apostrophe inside a word kept, and every other character a break. A reader
@@ -393,6 +406,9 @@ const WORD_SOURCES: readonly unknown[] = [
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
   CONTROL_LABELS,
+  PROPERTY_LABELS,
+  MARGIN_SECTION_NAMES,
+  HELP_LINES,
   BLOCK_ATTRIBUTE_LABELS,
 ];
 

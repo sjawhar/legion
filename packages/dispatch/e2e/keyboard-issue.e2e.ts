@@ -406,6 +406,8 @@ test("a closed issue greys the shortcuts its header disables, and keeps the ones
     const page = await context.newPage();
     await page.setViewportSize({ width: 1280, height: 900 });
     await openIssue(page, issue.key, "Closed issue");
+    // Reopen is behind the identity block's actions control now (dispatch://INFRA-1196 R11).
+    await page.getByRole("button", { name: "Issue actions" }).click();
     await expect(page.getByRole("button", { name: "Reopen issue" })).toBeVisible();
 
     await page.keyboard.press("?");

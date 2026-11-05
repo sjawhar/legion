@@ -19,7 +19,9 @@ import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { outsideAskCard } from "../inbox/ask-card";
+import { useFillMarginSlot } from "../margin/margin-slot";
 import { PlanTab } from "../plan/PlanTab";
+import { statusText } from "../project/board-model";
 import {
   buildReferencePath,
   documentRoute,
@@ -29,19 +31,30 @@ import {
 } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
+import { type FrameAttributes, usePageFrame } from "../shell/page-frame";
+import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { VerificationTab } from "../verification/VerificationTab";
 import { ChildrenTab } from "./ChildrenTab";
 import { DecisionsPanel } from "./DecisionsPanel";
+import { type FocusedNode, FocusedNodeProvider, useFocusedNode } from "./focused-node";
 import { IssueHeader } from "./IssueHeader";
+import { IssueMarginPanel } from "./IssueMargin";
 import { IssueTabs } from "./IssueTabs";
 import { NODE_TYPE_NAMES, sentenceCase } from "./page-words";
 import { stateForIssue } from "./pins";
+import { RoleDocumentPanel } from "./RoleDocumentPanel";
 import { SpecRequirements } from "./SpecRequirements";
 import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
+import { useIssueKeymap } from "./useIssueKeymap";
 import { useIssuePriority } from "./useIssuePriority";
 import { type ItemLanding, type ItemRoute, isItemRoute, useItemLanding } from "./useItemLanding";
+
+/** The issue page's own root, which every browser check reads the page through
+ *  (`e2e/issue-page.ts`): the shell's frame around this page's column and the margin beside it,
+ *  so the identity block, the body and the panel's properties are one page. */
+const ISSUE_PAGE_FRAME: FrameAttributes = { "data-issue-page": "" };
 
 export function IssuePage(): ReactNode {
   const { pathname, search } = useLocation();
@@ -51,8 +64,14 @@ export function IssuePage(): ReactNode {
   }
   // key={route.key}: switching to a different issue remounts IssueDetail
   // fresh (discarding any unsaved local drafts); switching tabs within the
-  // same issue keeps route.key unchanged, so it only re-renders.
-  return <IssueDetail key={route.key} route={route} />;
+  // same issue keeps route.key unchanged, so it only re-renders. The focus provider is above
+  // it, so the page can read what the focus is on and hand it to the panel, which the shell's
+  // margin draws outside this tree (`focused-node.tsx`).
+  return (
+    <FocusedNodeProvider key={route.key}>
+      <IssueDetail route={route} />
+    </FocusedNodeProvider>
+  );
 }
 
 /** An item deep link the SPA could not resolve: the id names nothing on this issue, or the
@@ -85,120 +104,6 @@ function ItemLandingFailure({
         <QueryError message={`Couldn't load this ${noun}.`} onRetry={landing.retry} />
       </div>
     </section>
-  );
-}
-
-/**
- * What the `issue` scope acts on. Every target is a control the header or the tablist already
- * renders, so a key does exactly what a click on it does. Scoping the lookup to
- * `[data-issue-header]` keeps a child issue's row in the Children tab - it carries the same
- * accessible names - out of reach.
- */
-const HEADER = "[data-issue-header]";
-const LABELS_TRIGGER = 'button[aria-label="Edit labels"]';
-const PIN_TOGGLE = 'button[aria-label="Pin issue"], button[aria-label="Unpin issue"]';
-const PRIORITY_SELECT = 'select[aria-label^="Priority of "]';
-const STATUS_SELECT = 'select[aria-label="Status"]';
-const TITLE_HEADING = 'h1[tabindex="0"]';
-
-/** The header control `selector` names, or `null` when it is absent or refuses input (a closed
- *  issue, a save in flight): the one fact both the key's `run` and the `when` that offers it read,
- *  so a shortcut is listed exactly while its control would take a click. */
-function usableControl(selector: string): HTMLElement | null {
-  const node = document.querySelector(HEADER)?.querySelector<HTMLElement>(selector);
-  if (node == null) {
-    return null;
-  }
-  const disabled =
-    (node instanceof HTMLButtonElement || node instanceof HTMLSelectElement) && node.disabled;
-  return disabled ? null : node;
-}
-
-/**
- * Whether focus is outside every `<input>` and outside every ask card. `0`-`3` and `Shift+P` are
- * the two keys that write the issue without focusing a control, so they are the two that have to
- * say where the reader is not: a digit typed straight after pressing the Conversation's `Open`
- * filter or picking an ask's option belongs to that control's own surface, not to the issue's
- * priority. The registry passes single keys through every control that takes no typed text, so
- * this is the page's own question to answer.
- *
- * A focused `<button>` is deliberately not excluded. Every single-key binding in the registry
- * fires from one: a digit has no native meaning on a button, and after any click - a tab, a
- * disclosure, Copy - focus sits on the button that was clicked, which is where a reader reaching
- * for the next shortcut stands. Withholding these keys there would make them work only from the
- * page's own background. An ask card's buttons are the exception, and that is what
- * `outsideAskCard` covers (`inbox/ask-card.ts`, the one definition both pages read): inside the
- * card, the card's controls own the keys. `l` and `e` open a control rather
- * than write, so a stray press is visible and undoable and they are offered throughout.
- */
-function outsideInputsAndAskCards(): boolean {
-  return !(document.activeElement instanceof HTMLInputElement) && outsideAskCard();
-}
-
-/** The tabs the chords reach, each through the tablist button `IssueTabs` renders for it. */
-const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
-  { keys: "t s", label: "Spec tab", tab: "spec" },
-  // `t v` is Activity and `t c` the Conversation, so Verification takes its checks' `k`; `t p`
-  // is free (`p` alone focuses the priority, which is a different scope of key).
-  { keys: "t k", label: "Verification tab", tab: "verification" },
-  { keys: "t p", label: "Plan tab", tab: "plan" },
-  { keys: "t c", label: "Conversation tab", tab: "conversation" },
-  { keys: "t h", label: "Children tab", tab: "children" },
-  { keys: "t a", label: "Artifacts tab", tab: "artifacts" },
-  // `t a` is Artifacts and `l` is the issue's label editor, so Activity takes `t v`.
-  { keys: "t v", label: "Activity tab", tab: "activity" },
-  { keys: "t d", label: "Decisions tab", tab: "decisions" },
-];
-
-/** One of the two role-document tab panels, Verification and Plan. They differ only in the tab
- *  they name and the component that frames the document; the panel itself, the lazy-mount guard
- *  and the `ArtifactDocument` under it are one thing, written once. */
-function RoleDocumentPanel({
-  Tab,
-  activated,
-  active,
-  artifact,
-  isClosed,
-  issueKey,
-  onVersionChange,
-  tab,
-}: {
-  Tab: (props: {
-    artifact: Artifact | undefined;
-    children?: ReactNode;
-    issueKey: string;
-  }) => ReactNode;
-  activated: boolean;
-  active: boolean;
-  artifact: Artifact | undefined;
-  isClosed: boolean;
-  issueKey: string;
-  onVersionChange: (artifact: Artifact, version: number | null) => void;
-  tab: "verification" | "plan";
-}): ReactNode {
-  return (
-    <div
-      aria-hidden={!active}
-      aria-labelledby={`issue-${tab}-tab`}
-      hidden={!active}
-      id={`issue-${tab}-panel`}
-      role="tabpanel"
-    >
-      {activated ? (
-        <Tab artifact={artifact} issueKey={issueKey}>
-          {artifact === undefined ? null : (
-            <ArtifactDocument
-              artifact={artifact}
-              isClosed={isClosed}
-              owner={{ key: issueKey, kind: "issue" }}
-              onVersionChange={(version) => onVersionChange(artifact, version)}
-              showDiff={false}
-              version={undefined}
-            />
-          )}
-        </Tab>
-      ) : null}
-    </div>
   );
 }
 
@@ -238,6 +143,45 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     }
   }, []);
 
+  // The issue page's own root is the frame the shell draws around this column and the margin
+  // beside it: the identity block, the body and the panel's properties are one page, however the
+  // shell mounts them (`features/shell/page-frame.tsx`, `e2e/issue-page.ts`).
+  usePageFrame(ISSUE_PAGE_FRAME);
+  // Where the panel goes: the shell's margin at the width that has one, and the page's own
+  // column under the identity block below it, where the margin is a sheet and the properties
+  // would otherwise be behind it (R11, R12).
+  const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
+  const details = issue.data;
+  const focusedNode = useFocusedNode();
+  // Nothing has the focus until the tree lands, and a reader on no node is reading the issue,
+  // so the issue itself is what the panel draws the facts of. Held across renders, because the
+  // panel the margin draws is registered under this value.
+  const focused = useMemo<FocusedNode>(
+    () =>
+      focusedNode ?? {
+        id: route.key,
+        state: details === undefined ? undefined : statusText(details.status),
+        title: details?.title ?? route.key,
+        type: "issue",
+      },
+    [details, focusedNode, route.key]
+  );
+  const panel = useCallback(
+    (conversation: ReactNode) =>
+      details === undefined ? (
+        conversation
+      ) : (
+        <IssueMarginPanel
+          conversation={conversation}
+          focused={focused}
+          isClosed={details.closed_at !== null}
+          issue={details}
+        />
+      ),
+    [details, focused]
+  );
+  useFillMarginSlot(isCompactViewport ? undefined : panel);
+
   // The Conversation's first placement runs as a child layout effect, before the restore below
   // in the same commit, so a position recorded while the tab showed only its loading text is
   // forgotten here and the reader lands on the newest message. A return to a list the reader was
@@ -245,82 +189,11 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const forgetConversationScroll = useCallback(() => {
     delete panelScroll.current.conversation;
   }, []);
-
-  // The scope is the issue page itself, and every binding drives the header control or the tab
-  // its label names - the same handler a click reaches, offered while that control is. The
-  // digits go through `useIssuePriority` on the route's key, the query key this page reads, so
-  // a keyed priority lands in the same cache the picker writes. `IssueHeader` registers the
-  // palette-only issue actions into this same scope; it never pushes one of its own.
+  // Every key the issue page binds, in its own scope (`useIssueKeymap.ts`). The priority write
+  // is the page's one, shared with the identity block and the palette, so a refusal of any of
+  // them is reported once.
   const priorityWrite = useIssuePriority(route.key);
-  useKeymapScope("issue");
-  useKeymap("issue", [
-    {
-      id: "status",
-      keys: "s",
-      label: "Focus the status",
-      run: () => usableControl(STATUS_SELECT)?.focus(),
-      when: () => usableControl(STATUS_SELECT) !== null,
-    },
-    {
-      id: "priority",
-      keys: "p",
-      label: "Focus the priority",
-      run: () => usableControl(PRIORITY_SELECT)?.focus(),
-      when: () => usableControl(PRIORITY_SELECT) !== null,
-    },
-    {
-      id: "set-priority",
-      keys: ["0", "1", "2", "3"],
-      label: "Set priority P0–P3",
-      run: (event) => priorityWrite.submit(Number(event.key) as IssuePriority),
-      when: () => usableControl(PRIORITY_SELECT) !== null && outsideInputsAndAskCards(),
-    },
-    {
-      id: "labels",
-      keys: "l",
-      label: "Edit labels",
-      run: () => usableControl(LABELS_TRIGGER)?.click(),
-      when: () => usableControl(LABELS_TRIGGER) !== null,
-    },
-    {
-      // The heading takes focus only while the issue is open: closed, its `tabIndex` is -1 and
-      // `onFocus` does not open the editor, so the key is offered exactly while it edits.
-      id: "title",
-      keys: "e",
-      label: "Edit the title",
-      run: () => usableControl(TITLE_HEADING)?.focus(),
-      when: () => usableControl(TITLE_HEADING) !== null,
-    },
-    {
-      id: "pin",
-      keys: "Shift+P",
-      label: "Pin or unpin the issue",
-      run: () => usableControl(PIN_TOGGLE)?.click(),
-      when: () => usableControl(PIN_TOGGLE) !== null && outsideInputsAndAskCards(),
-    },
-    {
-      // `s` and `p` put focus in a native select, where every single-key binding is suspended
-      // and the next keystroke is the select's own type-ahead - `t` would pick Todo or Testing
-      // rather than start the tab chord. Escape is the way back out, as it is on the Inbox
-      // rows, the board's cards and the architecture rows.
-      id: "back",
-      inEditable: true,
-      keys: "Escape",
-      label: "Back out of the focused header control",
-      run: () => (document.activeElement as HTMLElement | null)?.blur(),
-      when: () => {
-        const active = document.activeElement;
-        return active === usableControl(STATUS_SELECT) || active === usableControl(PRIORITY_SELECT);
-      },
-    },
-    ...tabChords.map(({ keys, label, tab }) => ({
-      id: `tab-${tab}`,
-      keys,
-      label,
-      run: () => document.getElementById(tabButtonId("issue", tab))?.click(),
-      when: () => document.getElementById(tabButtonId("issue", tab)) !== null,
-    })),
-  ]);
+  useIssueKeymap(priorityWrite);
 
   useLayoutEffect(() => {
     const top = panelScroll.current[activeTab];
@@ -421,6 +294,14 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         priorityWrite={priorityWrite}
         state={issueState}
       />
+      {/* Below the width the shell's margin keeps a column at, the panel is drawn here, under
+          the identity block, and the margin becomes the phone sheet that holds the
+          conversation: the properties are read at every width with nothing opened (R11, R12). */}
+      {isCompactViewport ? (
+        <div className="mb-3">
+          <IssueMarginPanel focused={focused} isClosed={isClosed} issue={issue.data} />
+        </div>
+      ) : null}
       <IssueTabs
         activeTab={activeTab}
         artifactCount={issue.data.artifacts.length}
