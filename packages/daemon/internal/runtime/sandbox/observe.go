@@ -412,8 +412,9 @@ func (r *Runtime) ended(ctx context.Context, v view, container string, role clai
 
 // outOfMemory reports whether container's instance was ended by the kubelet for running out of
 // memory, and whether that end is one the note is for. The reason is what says the end was an
-// out-of-memory one and the exit code never does: a pod shows OOMKilled with exit code 128, and
-// plenty of other ends carry 128 too. A nil state is no end at all, so it is no out-of-memory one.
+// out-of-memory one and the exit code never does: a pod can show OOMKilled with exit code 128 as
+// well as 137, and plenty of other ends carry those codes too. A nil state is no end at all, so it
+// is no out-of-memory one.
 // The container decides whose end it is, and only the issue pod's one container (every role of
 // the issue runs in it) counts: an init container's end cut no turn off, since it ran before any
 // role's process started; the controller's own pod runs the controller alone, which shares its
