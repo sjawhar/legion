@@ -279,28 +279,28 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // one at the same moment, and it is a caller and not a lease or a hold that needs one.
 //
 // Exclusive takes its connection before it learns whether the lease is held, so a pass that skips
-// because the other process holds the lease holds a connection for that round trip too. Thirteen
+// because the other process holds the lease holds a connection for that round trip too. Fourteen
 // names are leased - the document compaction, the keyed writes' maintenance sweep
 // (api.RunMaintenanceSweep, which keeps the lease name suggestion-outcomes the suggestion sweep
 // carried that work under), the reference-excerpt reconciliation, the block-index reconciliation,
-// the term-statistics refresh, the GitHub webhook redelivery sweep, the architecture import, the
-// delivery reconcile, the edit-notice sweep, the repair of closed and reopened issues' asks
-// (api.RunIssueAskRepair), one per delivery durable for the intake's take-over
-// (delivery.consumerLease, a name each for delivery-events and delivery-jobs) and the server
-// process registry's prune (processes.RunPrune) - by thirteen callers, since each intake takes
-// its own durable's name from its own goroutine, so thirteen callers can be inside Exclusive at
-// once. The suggestion outcome sweep is not among them: it takes no lease, since the cursor row
-// each of its pages holds for update serialises two processes by itself
-// (api/suggestion_outcomes.go).
+// the term-statistics refresh, the GitHub webhook redelivery sweep, the CI reconcile pass
+// (cireconcile.Lease), the architecture import, the delivery reconcile, the edit-notice sweep, the
+// repair of closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for
+// the intake's take-over (delivery.consumerLease, a name each for delivery-events and
+// delivery-jobs) and the server process registry's prune (processes.RunPrune) - by fourteen
+// callers, since each intake takes its own durable's name from its own goroutine, so fourteen
+// callers can be inside Exclusive at once. The suggestion outcome sweep is not among them: it
+// takes no lease, since the cursor row each of its pages holds for update serialises two
+// processes by itself (api/suggestion_outcomes.go).
 //
 // Each of the two intakes also holds its durable's hold, whose every statement is one statement
 // on a connection of this pool for that statement alone. Two can be in flight per intake at once:
 // the hold's renewal goroutine (duty.Hold's renew, every 5 s, each bounded by the renew interval),
 // and the intake's own goroutine (duty.HoldToken, duty.TryHold, SetToken, Release, one at a time),
 // whose SetToken runs inside the take-over and so needs a connection beside the one its lease is
-// held on. That is four more callers, seventeen in all.
+// held on. That is four more callers, eighteen in all.
 //
-// Seventeen connections are exactly those seventeen: the headroom is zero. A renewal that waited
+// Eighteen connections are exactly those eighteen: the headroom is zero. A renewal that waited
 // for a connection behind a compaction pass, which holds its lease for minutes, would see its hold
 // reported lost at the loss deadline and the durable's delivery stop, so the next caller added
 // here - a leased loop, or another hold - takes a connection of its own in this count. They
@@ -308,7 +308,7 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // compaction, and the shared pool's sharedPoolSize connections are what every request reads
 // through. The document compaction holds only its lease here: each document it compacts reads and
 // writes on the compaction pool (Pool.Compaction).
-const leasePoolSize = 17
+const leasePoolSize = 18
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so

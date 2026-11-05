@@ -1,0 +1,5 @@
+kind: Added
+body: Envoy records a CI check run or check suite that names no pull request under pull request n when its check suite's head branch is `refs/pull/<n>/head`, and Dispatch reconciles each open pull request's head with GitHub every 5 minutes, recording every completed check run and check suite the listener's record of that head lacks. One new setting, `DISPATCH_REVIEWER_APP_ID`, the review App's id, which the pass checks a `tester` or `architect` check run against.
+time: 2026-11-05T04:03:30.295429358Z
+custom:
+    Issue: pr2784
