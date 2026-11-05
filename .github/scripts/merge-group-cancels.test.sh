@@ -241,4 +241,38 @@ check "it decides rather than failing" "$(is "$status" 0)"
 check "it cancels the descendant, then itself" \
   "$(is "$out" "$(printf 'cancel 41865489886\nself')")"
 
+echo "case: the reasoning says what the caller will do with the self line"
+# ci.yaml's `cancel-changes` passes `cancel-self: 'false'` to
+# .github/actions/merge-group-cancel, which passes it here as CANCEL_SELF. The decision is the
+# same either way — `self` is printed, and last — so only the line about it differs, and the
+# script's reasoning and the action's notice never say two different things about one run.
+run_cancel_self() { # run_cancel_self <value>: the failed act of the stack, with CANCEL_SELF set.
+  set +e
+  out=$(ACT=failed RUN_ID=41860898444 HEAD_SHA="$head_2589" \
+    HEAD_BRANCH="$(queue_branch 2589 "$main_tip")" RUNS="$stack" CANCEL_SELF="$1" \
+    timeout 60 "$script_dir/merge-group-cancels.sh" 2>"$work/err")
+  status=$?
+  set -e
+  err=$(cat "$work/err")
+}
+run_cancel_self false
+check "decides" "$(is "$status" 0)"
+check "prints the same tokens, self last" \
+  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886\nself')")"
+check "says this caller acts on no self line and leaves the run running" \
+  "$(contains "$err" "^\`self\` is last in the order, after the descendants that had to be cancelled first, and this caller acts on no \`self\` line: run 41860898444 is left running\$")"
+check "does not say the run was force-cancelled" \
+  "$(is "$(contains "$err" 'force-cancelled last')" false)"
+run_cancel_self true
+check "cancel-self true says the run's own jobs are force-cancelled last" \
+  "$(contains "$err" "^run 41860898444's own remaining jobs are force-cancelled last, after the descendants it had to cancel first\$")"
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack"
+check "an unset CANCEL_SELF reads as true, the default of the action's input" \
+  "$(contains "$err" "^run 41860898444's own remaining jobs are force-cancelled last, after the descendants it had to cancel first\$")"
+run_cancel_self False
+check "a CANCEL_SELF that is neither word fails rather than leaving the run alive" \
+  "$(is "$status" 1)"
+check "names it" \
+  "$(contains "$err" "^::error::CANCEL_SELF is whether the caller acts on the self line, true or false, not 'False'\$")"
+
 summary "the merge-group cancel decision"

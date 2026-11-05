@@ -256,4 +256,46 @@ trailer_block=$(list "$(commit "$bypassed" "$(printf 'plan: record handoff\n\nCo
 run_bypass "$trailer_block" "$(readings "$bypassed" '[]')" "$(readings "$bypassed" '[]')"
 check "a trailer block ending in skip-checks starts nothing" "$(is "$out" "")"
 
+echo "case: the message shapes the skip-checks rule reads as a trailer, and those it does not"
+# The rule: the words are the message's last non-empty line, that line ends the message's last
+# block of non-empty lines, every line of the block is a trailer, and an empty line comes before
+# the block (docs.github.com, "Skipping workflow runs": the trailers section is at the end of the
+# message, preceded by two empty lines, and `skip-checks` is last of the trailers). Git's own
+# parsing agrees on every shape below but the mixed block, which `git interpret-trailers --parse`
+# reads as trailers only when one of them is git-generated; this rule reads it as none, which
+# costs one dispatched run and misses no untested commit.
+shape() { # shape <description> <message> <passed over|read>
+  run_bypass "$(list "$(commit "$bypassed" "$2")")" \
+    "$(readings "$bypassed" '[]')" "$(readings "$bypassed" '[]')"
+  if [ "$3" = "passed over" ]; then
+    check "$1: passed over" "$(is "$out" "")"
+  else
+    check "$1: read, and the run is started" "$(is "$out" "dispatch $bypassed")"
+  fi
+}
+shape "a body paragraph, then a trailer block ending in skip-checks" \
+  "$(printf 'plan: record the handoff\n\nA paragraph of body.\n\nOmp-Session: 0a1b2c\nskip-checks: true\n')" \
+  'passed over'
+shape "a trailer folded over two lines, then skip-checks" \
+  "$(printf 'plan: record the handoff\n\nCo-authored-by: a\n <a@example.com>\nskip-checks: true\n')" \
+  'passed over'
+shape "the two empty lines the page asks for, which git's cleanup folds into one" \
+  "$(printf 'plan: record the handoff\n\n\nOmp-Session: 0a1b2c\nskip-checks: true\n')" \
+  'passed over'
+shape "the carriage returns a Windows client sends" \
+  "$(printf 'plan: record the handoff\r\n\r\nCo-authored-by: a <a@example.com>\r\nskip-checks: true\r\n')" \
+  'passed over'
+shape "empty lines after the trailer block" \
+  "$(printf 'plan: record the handoff\n\nCo-authored-by: a <a@example.com>\nskip-checks: true\n\n\n')" \
+  'passed over'
+shape "a last block that mixes a line of prose with the words" \
+  "$(printf 'docs: write the rule down\n\nSome prose here\nskip-checks: true\n')" read
+shape "skip-checks above another trailer, where the page asks for it last" \
+  "$(printf 'plan: record the handoff\n\nskip-checks: true\nCo-authored-by: a <a@example.com>\n')" read
+shape "the words with no empty line above them" \
+  "$(printf 'docs: fold the changelog\nskip-checks: true\n')" read
+shape "the words as the whole message, which makes them its subject" 'skip-checks: true' read
+shape "skip-checks: false, which is no marker of GitHub's" \
+  "$(printf 'plan: record the handoff\n\nCo-authored-by: a <a@example.com>\nskip-checks: false\n')" read
+
 summary "the main bypass check's decision"

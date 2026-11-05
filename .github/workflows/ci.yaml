@@ -3673,25 +3673,31 @@ jobs:
   #   * one follower per job ci-ok waits for, and one for `changes` (`cancel-<job>`), which
   #     `needs:` its job and runs when that job's result is `failure` or `cancelled`.
   #     `cancelled` is the result a job cut off by its `timeout-minutes` reports to its
-  #     follower, and the follower does run (measured on probe run 41869007039); a
-  #     force-cancelled run leaves no follower running at all, so there is no third case to
-  #     tell apart. It cancels every unfinished merge-group run built on this group, the
-  #     nearest descendant first, and then this run.
+  #     follower, and the follower does run: measured on probe run 41961238050, where a job
+  #     with `timeout-minutes: 1` was cut off, reported `cancelled`, and the follower carrying
+  #     the condition below ran and succeeded. A force-cancelled run leaves no follower
+  #     running at all, so there is no third case to tell apart. It cancels every unfinished
+  #     merge-group run built on this group, the nearest descendant first, and then this run.
   #
   # Every follower's `if:` opens with `!cancelled()`, and one of them must name a status-check
   # function: a job `if:` that names none is given an implicit `success()`, which at job level
   # asks that every job in `needs:` succeeded — false in exactly the two results these
   # conditions ask for, so such a follower is skipped in every run it exists for (measured on
   # probe run 41953780019: of two followers of a job that failed, the one whose condition named
-  # no function was skipped, and the one behind `!cancelled()` succeeded). `!cancelled()` is
-  # the function that admits those two results and nothing more. `always()` would also run the
-  # follower when the run itself was cancelled, where there is no failed group and nothing
-  # below it is doomed; `failure()` would not admit a job its own `timeout-minutes` cancelled,
-  # since no job of `needs:` failed then. `cancelled()` is the whole run's state and not one
-  # job's, so a job its own limit cut off leaves it false and the follower runs, while a
-  # cancelled run leaves it true and every follower is skipped. `cancel-started` needs no such
-  # function: it has no `needs:` at all, so the implicit `success()` has no ancestor job to be
-  # false about.
+  # no function was skipped, and the one behind `!cancelled()` succeeded; run 41961238050 shows
+  # the same pair over a job its own time limit cut off). `!cancelled()` is the function that
+  # admits those two results and nothing more. `failure()` would not admit a job its own
+  # `timeout-minutes` cancelled, since no job of `needs:` failed then. `cancelled()` is the
+  # whole run's state and not one job's, so a job its own limit cut off leaves it false and the
+  # follower runs, while a cancelled run leaves it true and every follower is skipped.
+  #
+  # `always()` would run the follower on a run a person cancelled by hand as well, and that run
+  # needs none: its report step posts the failing ci-ok all the same, the queue takes that pull
+  # request out and rebuilds the groups above it, and the start act of each rebuilt group
+  # cancels the older run of its own pull request. So the descendants of a hand-cancelled run
+  # stop at the rebuild rather than at the cancel, and no follower has to fire there.
+  # `cancel-started` needs no such function: it has no `needs:` at all, so the implicit
+  # `success()` has no ancestor job to be false about.
   #
   # Each cancel is `POST /repos/{owner}/{repo}/actions/runs/{id}/force-cancel`, acted on in the
   # order the script printed, and the `self` line LAST: cancelling this run first would kill the
@@ -3765,12 +3771,20 @@ jobs:
           # this act at most the groups below that head, and the cancels it can still prove are
           # made. The warnings are printed here rather than inside the command substitution that
           # gathers CI_OK, whose stdout is the map itself.
+          #
+          # `filter=all`, as in main-bypass-check.yaml's read of the same check run: the
+          # default, `latest`, returns one check run per name, and a commit can carry two — a
+          # failing ci-ok from the run whose job failed, and a passing one from a later run of
+          # the same group. A head that carries both is no failed group, so a `success` among
+          # them is what this map holds for it and nothing below it is doomed by it.
           heads=$(jq -r '[.[] | select(.conclusion != "success") | .headSha] | unique[]' <<<"$RUNS")
           readings=$(mktemp)
+          trap 'rm -f "$readings"' EXIT
           while read -r sha; do
             [ -n "$sha" ] || continue
-            if conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok" \
-              --jq '.check_runs[0].conclusion // empty'); then
+            if conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all" \
+              --jq 'if any(.check_runs[]?; .conclusion == "success") then "success"
+                    else .check_runs[0].conclusion // empty end'); then
               [ -z "$conclusion" ] ||
                 jq -nc --arg sha "$sha" --arg conclusion "$conclusion" '{($sha): $conclusion}' >>"$readings"
             else
@@ -3796,7 +3810,9 @@ jobs:
   # those groups and leaves this run alive: `changes` carries no ci-ok-report step, so the
   # failing ci-ok of this group is still unposted when this follower fires, and a force-cancel
   # would leave every `if: always()` step skipped and the group with no ci-ok at all, waiting on
-  # GitHub's 180-minute check timeout. Three jobs' runner time is the lesser cost. Every other
+  # GitHub's 180-minute check timeout. What the lesser cost is: the first of those three jobs to
+  # report posts the failing ci-ok, and the other two run on to their own end with nothing left
+  # to cancel them — up to `test`'s 80-minute limit, the longest of the three. Every other
   # follower runs after its job posted that ci-ok, so each of those does cancel its own run.
   # `worker-image` has none: its `if:` admits only pull_request (CI_OK_PULL_REQUEST_ONLY names
   # it), so the queue never runs it and a follower of it could never fire — and a job that

@@ -20,12 +20,17 @@ name: CI (dequeued pull request)
 # `beforeCommit.oid` is the head of the group the queue had built, and its `reason` is read from
 # the same item. GitHub can show the event before the timeline holds it, so the read is made up to
 # seven times, ten seconds apart: a fixed list of attempts, which bounds the wait at one minute and
-# cannot spin. A read GitHub refuses counts as one of those attempts and leaves a warning: the
-# attempts are there for an answer that has not come yet, and a 502 or a rate limit is as good a
-# reason to ask again as a timeline that has not caught up, where a step that died on the first
-# refusal would cancel nothing and leave the run it was to end holding its runners. A run left
-# alive by that bound is still stopped by the queue: when the pull request is added again, the
-# new group's `cancel-started` cancels the older groups of the same pull request.
+# cannot spin. A read GitHub refuses counts as one of those attempts and leaves a warning of its
+# own, and no line about what the timeline holds, since a refused read read nothing: the attempts
+# are there for an answer that has not come yet, and a 502 or a rate limit is as good a reason to
+# ask again as a timeline that has not caught up, where a step that died on the first refusal
+# would cancel nothing and leave the run it was to end holding its runners. A run whose seven
+# reads were all refused ends red and names what it could not read: it saw no timeline at all, so
+# a green run there would say this workflow had looked and found nothing, while the removed group
+# kept its runners — a token-scope regression is exactly that shape. A run left alive by the
+# bound, with the timeline read and holding no removal, is still stopped by the queue: when the
+# pull request is added again, the new group's `cancel-started` cancels the older groups of the
+# same pull request.
 #
 # What it deliberately does not do:
 #   * a removal whose reason is `merged` cancels nothing: that group's run tested the tree that
@@ -84,16 +89,29 @@ jobs:
                 | select(.value.__typename == "AddedToMergeQueueEvent") | .key] | last) as $added
             | [$nodes[(($added // -1) + 1):][]
                | select(.__typename == "RemovedFromMergeQueueEvent")] | last // empty'
+          # `refused` counts the reads GitHub answered with an error. A refused read says
+          # nothing about the timeline, so it prints its own line and not the line about a
+          # timeline that holds no removal; a run whose every read was refused read no timeline
+          # at all and ends red, because a token-scope regression or an API that is down for a
+          # minute would otherwise leave this workflow green and silent while the removed
+          # group kept its runners — the one thing it exists to prevent.
+          refused=0
           for attempt in 1 2 3 4 5 6 7; do
-            if ! removal=$(gh api graphql -F owner="${GITHUB_REPOSITORY%%/*}" -F name="${GITHUB_REPOSITORY#*/}" \
+            if removal=$(gh api graphql -F owner="${GITHUB_REPOSITORY%%/*}" -F name="${GITHUB_REPOSITORY#*/}" \
               -F number="$PR_NUMBER" -f query="$query" --jq "$select"); then
+              [ -z "$removal" ] || break
+              echo "read $attempt of 7 of pull request #$PR_NUMBER's timeline holds no removal after its newest queue entry"
+            else
               removal=
-              echo "::warning::GitHub refused read $attempt of 7 of pull request #$PR_NUMBER's timeline; it counts as a read that found no removal"
+              refused=$((refused + 1))
+              echo "::warning::GitHub refused read $attempt of 7 of pull request #$PR_NUMBER's timeline, so that read says nothing about a removal"
             fi
-            [ -z "$removal" ] || break
-            echo "read $attempt of 7 of pull request #$PR_NUMBER's timeline holds no removal after its newest queue entry"
             [ "$attempt" = 7 ] || sleep 10
           done
+          if [ "$refused" = 7 ]; then
+            echo "::error::GitHub refused all 7 reads of pull request #$PR_NUMBER's timeline, so this run read no timeline at all: it cannot name the group the queue removed, and that group's ci.yaml run keeps its runners until the queue's next group ends it"
+            exit 1
+          fi
           if [ -z "$removal" ]; then
             echo "::notice::no removal of pull request #$PR_NUMBER reached its timeline in the minute this run waited, so no run is named and none is cancelled; the group the queue builds next ends this one"
             exit 0

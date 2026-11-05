@@ -13,8 +13,18 @@ description: >-
   such step, and the jobs that post for a run whose `changes` failed (lint, typecheck and test,
   whose `if:` admits a `changes` that did not succeed) are still running when its follower fires.
   Force-cancelling the run there would leave every `if: always()` step skipped and the group with
-  no ci-ok at all, which holds it in the queue until GitHub's 180-minute check timeout. Three
-  jobs' runner time is the lesser cost.
+  no ci-ok at all, which holds it in the queue until GitHub's 180-minute check timeout. What the
+  lesser cost is: the first of those three jobs to report posts this group's failing ci-ok, and
+  the other two run on to their own end with nothing left to cancel them — up to `test`'s
+  80-minute limit, the longest of the three (lint's is 30 and typecheck's is 10). So the act
+  trades up to 80 minutes of this run's runner time for the 180 a group with no ci-ok holds the
+  queue.
+
+  `cancel-self` is read as `true` or `false` and nothing else: a third value is a caller's typo,
+  and reading it as "leave the run alive" would make that trade silently and print a notice
+  saying it was meant. The value also reaches .github/scripts/merge-group-cancels.sh as
+  CANCEL_SELF, which refuses the same values, so the line it prints about `self` says what this
+  step does with that line rather than asserting a force-cancel.
 
   `cancel-started` is no caller: it holds its own body, which differs in ACT, in the CI_OK it
   gathers for the walk and in the `self-doomed` token it acts on.
@@ -37,6 +47,13 @@ runs:
         HEAD_SHA: ${{ github.sha }}
         RUN_ID: ${{ github.run_id }}
       run: |
+        case $CANCEL_SELF in
+          true | false) ;;
+          *)
+            echo "::error::cancel-self is true or false, not '$CANCEL_SELF'"
+            exit 1
+            ;;
+        esac
         RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
           --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
         export RUNS
@@ -45,7 +62,7 @@ runs:
           case $act in
             cancel) ;;
             self)
-              if [ "$CANCEL_SELF" != true ]; then
+              if [ "$CANCEL_SELF" = false ]; then
                 echo "::notice::this run is left to finish, so the jobs that post this group's failing ci-ok can post it"
                 continue
               fi
