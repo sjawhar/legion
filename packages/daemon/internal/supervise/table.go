@@ -1398,11 +1398,15 @@ func (m *Machine) afterTurn(ctx context.Context) error {
 // the daemon sent nothing for keeps such an answer, where it takes a called one back
 // (takeBackSignal).
 //
-// Three more things must hold, and each is the claim as it stands at the end of this turn
-// rather than when the round opened. The claim is in a round and has not answered it. The
-// delivery this turn confirmed is an ask of that same round (updatesRound), so the worker read
-// the words that asked it to push: a turn an Envoy message or a person's steer started read
-// nothing of the round and says nothing about the branch.
+// These things must hold, and each is the claim as it stands at the end of this turn rather
+// than when the round opened. The claim is in a round and has not answered it. The delivery
+// this turn confirmed is an ask of that same round (updatesRound), so the worker read the words
+// that asked it to push: a turn an Envoy message or a person's steer started read nothing of
+// the round and says nothing about the branch.
+//
+// The third is the turn that ends in another pod than the round's own, which is no answer
+// either (Claim.LeftPodRound): the pod the round is about is gone, and nothing this process does
+// can push the work that died with it.
 //
 // The last is the turn this daemon cannot vouch for, and it costs the round one more ask rather
 // than a disk: this daemon saw the turn start (askFirst and unseenTurn, which turnEnded clears
@@ -1410,10 +1414,6 @@ func (m *Machine) afterTurn(ctx context.Context) error {
 // begin — the restored machine would otherwise read the agent's "the turn is over" as the answer
 // — and so is a start confirmed only because askFirst was set (turnStarted), or a turn the
 // agent's own get_state answer reported streaming (askTurnOver).
-//
-// A turn that ends in another pod than the round's own is no answer either
-// (Claim.LeftPodRound): the pod the round is about is gone, and nothing this process does can
-// push the work that died with it.
 //
 // A refusal takes the ask's own clock back (UpdateTaskedAt), so the next sweep asks again at once
 // rather than at the re-task bound hours away. The ask itself is retired by the turn's own
@@ -1439,7 +1439,7 @@ func (m *Machine) answerByTurnEnd() {
 	m.claim.UpdateSignalledAt = &at
 	m.claim.UpdateAnsweredByTurnEnd = true
 	m.log.Info("supervise: the worker ended the turn its update task started without calling ready_for_update, so that end is its answer",
-		"round", m.claim.UpdateRound, "pluginContract", m.claim.PluginContract, "podUpdateContract", PodUpdateContract)
+		"round", m.claim.UpdateRound, "pluginContract", m.claim.PluginContract)
 }
 
 // promptResulted is Oh My Pi's answer to the one question the turn frames cannot settle: which

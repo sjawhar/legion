@@ -36,33 +36,23 @@ import (
 // change exists for.
 const PodUpdateContract = 46
 
-// CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer its update task
+// CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer an update task
 // with: its process runs now (HoldsCapability) and the registration that process made declared a
-// plugin contract below the one that introduced the op. That one rule is what it states, and no
-// more: a process that runs now, whose own registration declared an older contract. The
-// stale-plugin lane is what reads it (refreshPlugin): such a claim is relaunched onto this
-// daemon's plugin, where a claim that can answer is given a plugin round of its own.
+// plugin contract below PodUpdateContract, the contract that introduced the op.
 //
-// It is not the only reading of the contract the daemon takes. internal/daemon's
-// reaskedForPushCheck reads c.PluginContract below PodUpdateContract on its own, with no
-// HoldsCapability beside it, and leaves every such claim out of the second ask a round makes
-// when the pod's shim predates the push check: a claim below the contract has no call to make
-// whether a process of it runs now or not, so the second ask could only take the same turn's-end
-// answer again, one turn later. A suspended claim below the contract is left out there as a
-// running one is.
-//
-// It says nothing about how an update round's answer was given. A plugin at this contract can
-// be built with no ready_for_update in its `legion` tool, and the daemon cannot tell that
-// worker from one that has the op, so the end of the round's own task's turn is an answer at
-// every contract (answerByTurnEnd) and the claim's own mark records which answer this is
-// (Claim.UpdateAnsweredByTurnEnd).
+// refreshPlugin is its one caller, and what it decides there is the whole of what this is for: a
+// claim that cannot answer is relaunched onto this daemon's plugin, once a turn of it has ended,
+// and one that can is given a plugin round of its own and keeps running until it answers.
+// internal/daemon's reaskedForPushCheck reads the contract for a decision of its own, under a
+// rule its own comment states.
 //
 // The running process is half the rule, and the half a reading of the contract alone would get
-// wrong. A claim with none — suspended, failed, launching, or still queued — records the contract
-// of a process that has ended, and the one its next launch starts speaks this daemon's: a claim
-// relaunched onto the current plugin a moment ago registers at this contract, and a suspended
-// claim the round revives comes back on it. Reading those records as "this claim has no op" would
-// take the answer of a worker that is about to make the call itself.
+// wrong, because what the contract records is a statement about a process rather than about a
+// claim. A claim with none — suspended, failed, launching, or still queued — records what a
+// process that has ended declared, and the one its next launch starts speaks this daemon's: a
+// claim relaunched onto the current plugin a moment ago registers at this contract, and a
+// suspended claim the round revives comes back on it. Read as a claim that cannot answer, each
+// of them would be relaunched for a plugin its next launch brings by itself.
 func CannotAnswerUpdate(c Claim) bool {
 	return HoldsCapability(c.State) && c.PluginContract < PodUpdateContract
 }

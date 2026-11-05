@@ -14,12 +14,16 @@ import (
 // rather than losing it at its next reminder turn and being asked for it again.
 //
 // This is the whole proof the finding asks for: the store's harness migrates to any version a
-// test names (migrateThrough), so these rows are written as the released daemon left them, at the
-// migration before this one, and read after it ran.
+// test names (migrateThrough), so these rows are written as the released daemon left them, at
+// the migration before this one, and read after it ran. That version is named here rather than
+// left at the one this branch forked from (20261102095707), because the forward merge put eight
+// of main's migrations between the two: none of them touches a column this seeds or reads, but
+// the schema the upgrade runs against is the one main's head leaves, and that is the schema
+// these rows are written into.
 func TestTheUpdateAnswerBackfillKeepsTheTurnsEndAnswerOfAClaimBelow46(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 20261102095707)
+	migrateThrough(t, store, 20261103214558)
 
 	if _, err := store.Pool().Exec(ctx, `insert into claims (token, project, tree, issue, role, generation,
 		session, session_file, state, launch_failures, prompt_failures, prompt_retires, uncertain_streak,

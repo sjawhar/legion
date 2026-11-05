@@ -309,14 +309,26 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, snaps
 		s.log.Info("supervise: the claims of this issue run in two pods now; this round's replacement waits for the one in flight",
 			"issue", issue, "round", round, "pod", pod)
 		return nil, true
+	case replacementReady:
+		return &podReplacement{issue: issue, round: round, pod: pod, reasons: reasons, now: now}, true
+	default:
+		s.log.Error("supervise: this update round's replacement was held back by a reading this sweep cannot name; nothing is replaced and the round stays open for the next sweep",
+			"issue", issue, "round", round, "pod", pod, "reading", int(reading.wait))
+		return nil, true
 	}
-	return &podReplacement{issue: issue, round: round, pod: pod, reasons: reasons, now: now}, true
 }
 
 // replacementWait is the one reading that holds a round's pod replacement back, and
 // replacementReady where none of the four does. The zero value is a wait rather than the
 // go-ahead, because what these readings decide is the deletion of a pod's disk: a reading nobody
 // took may hold a replacement for a sweep, and may not make one.
+//
+// The same rule is what both switches over it are written to (completePodUpdate,
+// replacePodForRound): replacementReady is the one case that reaches the replacement, and every
+// other value waits, the ones below named each with the line its caller logs and whatever else
+// it decides, and anything else in a default that logs and replaces nothing. A fifth reading
+// added here and missed at one of the two sites would otherwise delete a disk there, and in
+// replacePodForRound call ReplacePod with the empty process of a reading that set none.
 type replacementWait int
 
 const (
@@ -467,6 +479,12 @@ func (s *supervision) replacePodForRound(ctx context.Context, replace podReplace
 	case waitsForPodInFlight:
 		s.log.Info("supervise: the claims of this issue run in two pods now the sweep has reached this update round's replacement; nothing was replaced and the round stays open",
 			"issue", issue, "round", round, "pod", pod)
+		return
+	case replacementReady:
+		// The replacement below is this one reading's; every other one has returned by here.
+	default:
+		s.log.Error("supervise: this update round's replacement was held back by a reading this sweep cannot name; nothing was replaced and the round stays open",
+			"issue", issue, "round", round, "pod", pod, "reading", int(reading.wait))
 		return
 	}
 	// The bound is a sweep interval plus the push check's own (rescueTimeout, and the margin its

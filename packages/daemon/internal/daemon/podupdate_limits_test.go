@@ -22,6 +22,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -550,6 +551,156 @@ func TestPodUpdateMaxOpenRoundsChargesNoSecondSlotForAnOpeningStillInFlight(t *t
 		Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
 		InRound: []string{inFlight, second},
 	})
+}
+
+// limitChangedPod is the pod a claim of an issue comes up in when the pod this daemon opened a
+// round over is replaced out from under that round: another pod of the same cluster, with a uid
+// of its own.
+const limitChangedPod = "00000009-7a92-4c1f-8d35-2f6b9c0ad417"
+
+// podChangedUnderAnOpening is the state the two tests below read a later sweep in, driven
+// through the rig's own levers and no sleep: this daemon has opened a round over the pod of
+// changed and charged the project's one slot for it, the only claim that round asks has failed
+// before its machine took the post, and a claim of the same issue now records another pod. No
+// claim of changed can ever record that round from here — the claim the post went to ignores it
+// (supervise's table), and the pod it is over is gone — while a claim of the issue goes on
+// recording a pod, which is the reading that kept the opening in this daemon's record for ever
+// (podUpdateOpenings). It answers the rig, with the issue behind changed still waiting for the
+// slot.
+//
+// The architect is the one claim the round asks: it has a session, so it blocks the round and
+// the post goes to it. The implementer is a process that has started whose agent has not
+// registered yet, which the round asks nothing and which is what records the pod the round is
+// opened over.
+func podChangedUnderAnOpening(t *testing.T, changed, second string) *fleetRig {
+	t.Helper()
+	posted := limitIssue(1, changed)
+	posted.roles = []claim.Role{claim.RoleArchitect, claim.RoleImplementer}
+	posted.unregistered = []claim.Role{claim.RoleImplementer}
+	rig := newFleetRig(t, posted, limitIssue(2, second))
+	for _, key := range []string{changed, second} {
+		rig.drifts(key, limitDrift)
+	}
+	rig.s.cfg.PodUpdateMaxOpenRounds = new(1)
+
+	// The architect's process dies and the relaunch that follows is refused, which spends the
+	// claim's launch budget — two failures in this rig, the first of them the death's own charge
+	// — and fails it. Its machine is held inside that one relaunch while the sweep below runs,
+	// as a relaunch into a pod being built holds it, so the round's post waits in its inbox
+	// until the claim is failed and its machine ignores it.
+	architect := rig.token(changed, claim.RoleArchitect)
+	died := *rig.claimOf(changed, claim.RoleArchitect).Locator
+	rig.rt.ScriptResume(fake.SpawnResult{Err: errors.New("the pod this process ran in is going")})
+	entered, release := make(chan struct{}), make(chan struct{})
+	releaseMachine := sync.OnceFunc(func() { close(release) })
+	rig.rt.HoldResume(func() {
+		rig.rt.HoldResume(nil)
+		close(entered)
+		<-release
+	})
+	defer releaseMachine()
+	go func() {
+		m, _ := rig.sup.Machine(architect)
+		_ = m.Handle(rig.ctx, supervise.RuntimeObservation{
+			Observation: runtime.Observation{Locator: died, Kind: runtime.Gone, Detail: "the process ended"},
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the architect's machine never reached the Resume this test holds it in")
+	}
+
+	// The sweep opens the round over the pod the implementer records and charges the project's
+	// one slot for it, which leaves the issue behind it waiting for that slot.
+	rig.tick()
+	rig.wantPodUpdateRecord("the sweep that opened the round over the pod that then changed", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(1),
+		InRound:                []string{changed},
+		WaitingOnMaxOpenRounds: []string{second},
+	})
+
+	releaseMachine()
+	testwait.Eventually(t, "the architect of "+changed+" to fail with the round's post unrecorded", func() bool {
+		c := rig.claimOf(changed, claim.RoleArchitect)
+		return c.State == supervise.StateFailed && c.UpdateRound == ""
+	})
+
+	// Then the pod changes under the opening: the implementer's process ends with the pod it ran
+	// in, and its own relaunch comes up in the pod the cluster put there instead. From here no
+	// claim of the issue records a process in the round's pod, and one records a pod all the
+	// same.
+	implementer := rig.token(changed, claim.RoleImplementer)
+	left := *rig.claimOf(changed, claim.RoleImplementer).Locator
+	rig.rt.ScriptSpawn(fake.SpawnResult{Locator: *podUpdateLocator(implementer, changed, limitChangedPod)})
+	m, ok := rig.sup.Machine(implementer)
+	if !ok {
+		t.Fatalf("the implementer of %s is not supervised", changed)
+	}
+	if err := m.Handle(rig.ctx, supervise.RuntimeObservation{
+		Observation: runtime.Observation{Locator: left, Kind: runtime.Gone, Detail: "the process ended with its pod"},
+	}); err != nil {
+		t.Fatalf("relaunch the implementer of %s into the pod that replaced its own: %v", changed, err)
+	}
+	if got := podOf(rig.claimOf(changed, claim.RoleImplementer).Locator); got != limitChangedPod {
+		t.Fatalf("the implementer of %s records the pod %q, want the pod %s that replaced the round's own", changed, got, limitChangedPod)
+	}
+	return rig
+}
+
+// The slot of an opening whose pod changed under it comes back, where the pod in its place has
+// drifted from nothing. The sweep's walk never reaches such an issue — a pod that has drifted
+// from nothing with no round open over it is decided nothing — so the openings' own record is
+// the only thing that can free the slot, and the round it names can never be recorded by any
+// claim: the one claim it was posted to failed before its machine took the post, and the pod it
+// is over is gone. Kept on the reading that a claim of the issue records a pod, the entry holds
+// the slot for ever, and at a cap of one every other drifted issue of the project waits for the
+// daemon to restart.
+func TestPodUpdateMaxOpenRoundsFreesTheSlotOfAnOpeningWhosePodChangedToAnUndriftedOne(t *testing.T) {
+	changed, second := "INFRA-1", "INFRA-2"
+	rig := podChangedUnderAnOpening(t, changed, second)
+	// The pod in its place carries the template the runtime has now, as a pod built after the
+	// one change of these rigs does, so this issue has drifted from nothing.
+	rig.drifts(changed)
+
+	rig.tick()
+
+	rig.wantPodUpdateRecord("the sweep after the pod under this daemon's own opening changed", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(1),
+		InRound: []string{second},
+	})
+	rig.awaitRounds("the slot of the opening whose pod changed came back", second)
+	if got := rig.claimOf(changed, claim.RoleArchitect).UpdateRound; got != "" {
+		t.Errorf("the failed architect of %s records round %q, want none: no machine of a failed claim takes the round's post", changed, got)
+	}
+}
+
+// The same slot comes back where the pod in its place is drifted too, which is the harder half
+// of the reading: the issue is an opening again at the next sweep, over the pod its claims
+// record now, and the entry the openings still hold names the round over the pod that went. Read
+// as a slot held, that entry holds the issue's own opening back — the issue waits behind a slot
+// nothing but its own stale entry is using, which no later sweep can overwrite — and the issue
+// behind it waits with it.
+func TestPodUpdateMaxOpenRoundsFreesTheSlotOfAnOpeningWhosePodChangedToADriftedOne(t *testing.T) {
+	changed, second := "INFRA-1", "INFRA-2"
+	rig := podChangedUnderAnOpening(t, changed, second)
+	// Nothing is scripted here: the pod the cluster put in the place of the round's own was
+	// built before the one template change of these rigs, so it has drifted exactly as the pod
+	// it replaced had.
+
+	rig.tick()
+
+	// The issue whose pod changed is an opening its own claims can record nothing of — its one
+	// claim with a session has failed — so it is charged no slot and the issue behind it takes
+	// the one the dropped entry freed.
+	rig.wantPodUpdateRecord("the sweep after the pod under this daemon's own opening changed and drifted too", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(1),
+		InRound: []string{second},
+	})
+	rig.awaitRounds("the slot of the opening whose pod changed came back", second)
+	if calls := rig.replacementsOf(limitChangedPod); len(calls) != 0 {
+		t.Errorf("the pod that replaced the round's own was replaced %d times, want never: no round was ever opened over it that a claim could record", len(calls))
+	}
 }
 
 // The per-minute limit is what paces a fleet-wide roll in time rather than in slots: with it, the
