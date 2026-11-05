@@ -118,6 +118,7 @@ on:
       - 'packages/daemon/internal/supervise/*'
       - 'packages/daemon/internal/treelifecycle/*'
       - 'packages/daemon/internal/wait/*'
+      - 'packages/daemon/internal/wakepace/*'
       - 'packages/daemon/internal/workflow/*'
       - 'packages/daemon/internal/workspace/*'
       - 'packages/envoy/brokerclient/*'
