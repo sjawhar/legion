@@ -568,6 +568,25 @@ export const LegionReadyForUpdateRequest = z.strictObject({
 
 export type LegionReadyForUpdateRequestBody = z.output<typeof LegionReadyForUpdateRequest>;
 
+/** `claim.TurnOutcomeRequest`, the body of `POST /legion/v1/claims/turn-outcome`: how one turn
+ * of the claim's session ended, as the agent's own plugin classified it, under the sequence that
+ * plugin counts itself from 1 within `generation`. `outcome` is `clean`, `refused` — a
+ * provider's content filter, which the same session often takes on a weaker model — or
+ * `provider-error`, every other provider failure, which may not clear that way. `category` is a
+ * refusal's own category (`reasoning_extraction`); the daemon parses no provider text, and no
+ * field of this body carries the provider's words. The route answers 204. */
+export const LegionTurnOutcomeRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: z.number().int().positive(),
+  sequence: z.number().int().positive(),
+  outcome: z.enum(["clean", "refused", "provider-error"]),
+  category: nonEmptyString.optional(),
+});
+
+export type LegionTurnOutcomeRequestBody = z.output<typeof LegionTurnOutcomeRequest>;
+
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
  * fetched, or a daemon-launched controller's own boot token): the project's controller role token,

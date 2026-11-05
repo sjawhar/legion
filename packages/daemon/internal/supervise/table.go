@@ -438,6 +438,7 @@ func (RequestOperatorRetry) isEvent() {}
 func (RequestForgetSession) isEvent() {}
 func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
+func (RequestTurnOutcome) isEvent()   {}
 
 // eventKind is what the table is keyed on beside the state: an event's type, with a Timer split
 // by its kind, because the six waits mean six different things.
@@ -474,6 +475,7 @@ const (
 	onForgetSession eventKind = "request_forget_session"
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
+	onTurnOutcome   eventKind = "request_turn_outcome"
 
 	onStalePlugin eventKind = "stale_plugin"
 
@@ -544,6 +546,8 @@ func kindOf(ev Event) eventKind {
 		return onDeliver
 	case RequestExit:
 		return onExit
+	case RequestTurnOutcome:
+		return onTurnOutcome
 	}
 	return ""
 }
@@ -573,6 +577,8 @@ func requestName(ev Event) (string, bool) {
 		return "deliver", true
 	case RequestExit:
 		return "exit", true
+	case RequestTurnOutcome:
+		return "turn outcome", true
 	case PodUpdateSignalled:
 		return "ready_for_update", true
 	}
@@ -852,6 +858,17 @@ func fillTable(t *builder) {
 		[]ClaimState{StateRetired, StateSuspended}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onExit, "the exit of a process the daemon already ended", nothingToDo, nil, gone...)
 	t.ignore(onExit, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+
+	// How a turn of this claim's agent ended, as the agent's own plugin classified it. Only a
+	// registered claim has a report: the route authenticates the registration's secret, and a
+	// claim holds the hash that secret is checked against in exactly these four states
+	// (HoldsCapability, read in internal/api's staleClaim).
+	t.row(onTurnOutcome, "keep the newest turn outcome the claim's plugin has reported", turnOutcome,
+		nil, StateRegistered, StateReady, StateWorking, StateIdle)
+	t.ignore(onTurnOutcome, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+	t.ignore(onTurnOutcome, "the claim is suspended and the agent that reported is stopped", StateSuspended)
+	t.ignore(onTurnOutcome, failedClaim, StateFailed)
+	t.ignore(onTurnOutcome, retiredClaim, StateRetired)
 }
 
 type builder struct{ rules map[key]rule }

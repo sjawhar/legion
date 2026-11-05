@@ -98,6 +98,39 @@ type ExitRequest struct {
 	Reason     string `json:"reason"`
 }
 
+// TurnClean, TurnRefused and TurnProviderError are the three words a turn's outcome is reported
+// with, and the only values TurnOutcomeRequest.Outcome takes. They are three rather than two
+// because the daemon acts on a content filter and on any other provider failure differently: a
+// turn a filter refused is sent to the same session again on a weaker model, where it is often
+// taken, and a turn a 429 or a malformed request ended may not clear that way
+// (dispatch://INFRA-956).
+const (
+	TurnClean         = "clean"
+	TurnRefused       = "refused"
+	TurnProviderError = "provider-error"
+)
+
+// TurnOutcomeRequest is how one turn of this claim's agent ended, reported by the agent's own
+// plugin when the turn settled. The plugin classifies the turn and sends the class; the daemon
+// reads no provider text, here or anywhere, which is why a refusal carries a category and never
+// a message. The explanation a content filter writes is itself refused when it is sent back to
+// the provider (dispatch://INFRA-956/artifact/cause-evidence-md), so no field of this report
+// carries the provider's prose.
+//
+// Sequence is the plugin's own count of the turns it has ended at Generation, from 1. The daemon
+// keeps the newest report under the pair, so a report that arrives out of order never replaces a
+// newer one (supervise's turnOutcome). Category is the refusal's own category
+// (`reasoning_extraction`), left out of a clean turn and of a provider error.
+type TurnOutcomeRequest struct {
+	ClaimToken Token  `json:"claimToken"`
+	SessionID  string `json:"sessionId"`
+	Secret     string `json:"secret"`
+	Generation uint64 `json:"generation"`
+	Sequence   uint64 `json:"sequence"`
+	Outcome    string `json:"outcome"`
+	Category   string `json:"category,omitempty"`
+}
+
 // Refusal is one of the ways a claim route says no: the status it answers with and the sentence
 // it puts in the body. Both halves are a contract with the plugins, whose shared claim boot stops
 // the agent on any 4xx from the registration (`bootLegionClaim` in

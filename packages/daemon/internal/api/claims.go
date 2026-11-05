@@ -221,6 +221,54 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// turnOutcome is the agent's own plugin reporting how one turn of its session ended: clean, a
+// content filter's refusal, or any other provider failure, with the plugin's own sequence within
+// the launch generation. The daemon keeps the newest report on the claim's machine and answers
+// 204: it has nothing to tell the reporter, and the decision that reads the report is its own
+// (supervise's turnOutcome).
+//
+// The caller is the claim's agent, which holds the secret its registration was issued and names
+// the claim with it, as the ready and the exit do.
+func (s *server) turnOutcome(w http.ResponseWriter, r *http.Request) {
+	var req claim.TurnOutcomeRequest
+	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
+		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID},
+		field{"secret", req.Secret}, field{"outcome", req.Outcome},
+	) || !requireGeneration(w, req.Generation) {
+		return
+	}
+	if req.Sequence == 0 {
+		// Zero is how a body that named no sequence decodes, and the sequence is what says which
+		// of two reports is the newer, so a report without one is refused rather than kept.
+		writeJSON(w, http.StatusBadRequest, errorBody("sequence is required, counted from 1 within the generation"))
+		return
+	}
+	if req.Outcome != claim.TurnClean && req.Outcome != claim.TurnRefused && req.Outcome != claim.TurnProviderError {
+		writeJSON(w, http.StatusBadRequest, errorBody(fmt.Sprintf("outcome %q is none of %q, %q and %q",
+			req.Outcome, claim.TurnClean, claim.TurnRefused, claim.TurnProviderError)))
+		return
+	}
+	m, ok := s.authenticated(req.ClaimToken, req.Secret)
+	if !ok {
+		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
+		return
+	}
+	if s.refuseIfStaleClaim(w, r, m.Claim()) {
+		return
+	}
+	ctx, decided := s.decision(r, req.ClaimToken)
+	defer decided()
+	err := m.Handle(ctx, supervise.RequestTurnOutcome{
+		Claim: req.ClaimToken, Generation: req.Generation, Sequence: req.Sequence,
+		Outcome: req.Outcome, Category: req.Category,
+	})
+	if err != nil {
+		s.claimFailure(w, "turn outcome", req.ClaimToken, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // authenticated is the claim's machine when secret is the one its registration was issued. A
 // claim the daemon does not supervise, one no agent has registered on, and a wrong secret all
 // answer the same: nothing about the claim is told to a caller that cannot prove it holds it.

@@ -30,6 +30,7 @@ import {
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
+  LegionTurnOutcomeRequest,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "./legion-api";
@@ -52,6 +53,9 @@ const schemas: Record<string, z.ZodType> = {
   // `claim.ReadyForUpdateRequest`: the worker's answer to its pod's update task, saying it has
   // pushed everything it wants kept and its process may be replaced.
   "ready-for-update.json": LegionReadyForUpdateRequest,
+  // `claim.TurnOutcomeRequest`: how one turn of a claim's session ended, as the agent's own
+  // plugin classified it.
+  "turn-outcome.json": LegionTurnOutcomeRequest,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
   "controller-github-credential.json": LegionControllerCredentialResponse,

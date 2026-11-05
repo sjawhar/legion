@@ -54,6 +54,7 @@ import { createModelFallback } from "../src/model-fallback";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
+import { createTurnOutcomeReporter } from "../src/turn-outcome";
 import {
   branchHoldsWorkspaceRecreatedNotice,
   type WorkspaceRecreatedNotice,
@@ -255,6 +256,15 @@ export default function legionExtension(pi: PiApi): void {
     exitProcess: (code) => exitProcess(code),
   });
 
+  // The turn-outcome report (src/turn-outcome.ts): every settled turn of a session holding a
+  // claim tells the daemon how the provider ended it, so the daemon can tell a turn a content
+  // filter refused from one any other provider failure ended (dispatch://INFRA-956).
+  const turnOutcome = createTurnOutcomeReporter({
+    daemon: roleDaemon,
+    claim: (sessionID) => claimSession.capability(sessionID),
+    log: logger,
+  });
+
   /**
    * Names the session by its Legion identity (`src/session-title.ts`), so every Dispatch
    * write stamps it as `origin.session_title` and the Envoy listener lists it. Runs before the
@@ -388,10 +398,12 @@ export default function legionExtension(pi: PiApi): void {
   });
 
   // A turn that has settled: a content filter the host did not walk is walked here, a clean turn
-  // puts the model's wait back to the base, and any other provider failure leaves it alone.
+  // puts the model's wait back to the base, and any other provider failure leaves it alone. The
+  // same settled turn is reported to the daemon, which reads the class rather than the model.
   pi.on("agent_end", async (event, context) => {
     if (!(await modelFallbackSession(context))) return;
     await modelFallback.turnSettled(event, context);
+    await turnOutcome.report(context.sessionManager.getSessionId(), event);
   });
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree

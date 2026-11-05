@@ -577,6 +577,21 @@ func TestReadyForUpdateRequestGolden(t *testing.T) {
 	})
 }
 
+// The turn-outcome request is the agent's own plugin reporting how one turn of its session
+// ended: the class it read, a refusal's category, and the plugin's own sequence within the
+// launch generation. No field carries the provider's own words.
+func TestTurnOutcomeRequestGolden(t *testing.T) {
+	golden(t, "turn-outcome.json", claim.TurnOutcomeRequest{
+		ClaimToken: "legion-legion-legion-208-implementer",
+		SessionID:  "ses_implementer_208",
+		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		Generation: 5,
+		Sequence:   12,
+		Outcome:    claim.TurnRefused,
+		Category:   "reasoning_extraction",
+	})
+}
+
 // A session's report shows on its claim as the names it proved and the gaps it did not, each side
 // in the report's order, and both sides are arrays on the wire even when empty: a session that
 // proved every row has `"open": []`, not `null`, under the plugin's strict reader.

@@ -665,6 +665,9 @@ type Machine struct {
 	// has a lock of its own, held only to set, clear or read it, so a reader never waits on mu.
 	decidingMu sync.Mutex
 	deciding   Event
+	// lastTurnOutcome is the newest turn outcome the claim's plugin has reported, nil until one
+	// arrives (turnoutcome.go, which says why it is never written to the store).
+	lastTurnOutcome *TurnOutcome
 }
 
 type sending struct {
@@ -1675,6 +1678,8 @@ func claimOf(ev Event) claim.Token {
 	case RequestDeliver:
 		return ev.Claim
 	case RequestExit:
+		return ev.Claim
+	case RequestTurnOutcome:
 		return ev.Claim
 	}
 	return ""

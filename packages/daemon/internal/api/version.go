@@ -500,4 +500,19 @@ package api
 // 44 and the handoff records at 45 first, with store migrations 0065, 0066 and 0067, so this
 // change takes the number above them. Its migration is named for the moment it was written,
 // 20261029195520, since main closed the numbered series at 0067.)
-const DaemonAPIVersion = 46
+//
+// 47: INFRA-956 -- the turn-outcome report. `POST /legion/v1/claims/turn-outcome` is a new claim
+// route in the shape of `claims/ready` (`claim.TurnOutcomeRequest`: `claimToken`, `sessionId`,
+// `secret`, `generation`, a `sequence` counted from 1 within that generation, an `outcome` of
+// `clean`, `refused` or `provider-error`, and an optional `category`), answering 204. It is how
+// the agent's own plugin tells the daemon a provider's content filter refused the turn, which
+// the same session often takes on a weaker model, apart from a 429 or a malformed request, which
+// may not clear that way. The plugin classifies the turn and the daemon parses no provider text:
+// `category` is the refusal's own category (`reasoning_extraction`) and no field carries the
+// provider's words. pi-legion reports every settled turn of a claim's session from its
+// `agent_end` hook (`packages/pi-legion/src/turn-outcome.ts`); a plugin before 47 reports none,
+// and a daemon before 47 answers the post a 404, so the boot gate and `legion probe-image`
+// refuse either pair. The daemon keeps the newest report on the claim's machine, in memory, and
+// nothing else: it is read within two minutes of the turn it is about, so no store write and no
+// migration come with it (`internal/supervise/turnoutcome.go`).
+const DaemonAPIVersion = 47
