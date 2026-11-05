@@ -28,11 +28,11 @@ func reserveAll(l *Limiter, now time.Time, n int) []time.Time {
 	return releases
 }
 
-// jitterCycle draws the given parts in turn, which is how a test reads an exact schedule out of a
-// jittered limiter. It is for one goroutine only.
-func jitterCycle(parts ...time.Duration) func() time.Duration {
+// jitterCycle draws the given parts in turn, whatever interval it is handed, which is how a test
+// reads an exact schedule out of a jittered limiter. It is for one goroutine only.
+func jitterCycle(parts ...time.Duration) func(time.Duration) time.Duration {
 	next := 0
-	return func() time.Duration {
+	return func(time.Duration) time.Duration {
 		part := parts[next%len(parts)]
 		next++
 		return part
@@ -83,7 +83,7 @@ func TestSaturatedQueueLeavesOneIntervalApart(t *testing.T) {
 // the rate holds, and less than two, so a queue still drains. A jitter that varies makes gaps that
 // vary, which is what keeps two daemons restarted together off the same instants.
 func TestJitterKeepsEveryGapBetweenOneIntervalAndTwo(t *testing.T) {
-	for name, jitter := range map[string]func() time.Duration{
+	for name, jitter := range map[string]func(time.Duration) time.Duration{
 		"half an interval every time": jitterCycle(interval / 2),
 		"a part that varies":          jitterCycle(0, interval/4, interval/2, 3*interval/4, interval-time.Nanosecond),
 	} {

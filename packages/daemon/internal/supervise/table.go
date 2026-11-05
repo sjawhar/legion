@@ -737,11 +737,8 @@ func fillTable(t *builder) {
 	// is every other live state.
 	t.row(onWakeTimer, "the wake the pacing held runs its launch now, or a suspension held meanwhile ends it instead", wakeNow,
 		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, live...)
-	t.ignore(onWakeTimer, "no wake is waiting: a paced wake of a claim with no process is written launching before it waits", StateQueued)
-	t.ignore(onWakeTimer, "no wake is waiting: nothing is launched for this claim until its previous launch's pane is decided", StateLaunchUncertain)
-	t.ignore(onWakeTimer, "no wake is waiting: the suspension let the claim's process go, and the wake with it", StateSuspended)
-	t.ignore(onWakeTimer, "no wake is waiting: the failure let the claim's process go, and the wake with it", StateFailed)
-	t.ignore(onWakeTimer, "no wake is waiting: the retirement let the claim's process go, and the wake with it", StateRetired)
+	t.ignore(onWakeTimer, "no wake is waiting: a paced wake of a claim with no process is written launching before it waits, and a suspension, a failure, a retirement and an undecided pane each leave the claim without one",
+		processless...)
 
 	// A re-adopted claim found still speaking another plugin contract, at boot or at a later sweep.
 	t.row(onStalePlugin, "the process speaks another plugin contract: relaunch it onto the current one", refreshStalePlugin,

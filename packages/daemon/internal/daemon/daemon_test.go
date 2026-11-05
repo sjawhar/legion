@@ -617,8 +617,8 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 func TestTheStateNamesTheWakeThePacingHoldsUntilItRuns(t *testing.T) {
 	cfg := testConfig(t)
 	// Thirty wakes a minute, one at a time: the wake behind the burst's waits one two-second
-	// interval and the part of one the daemon's jitter draws (wakeJitter), which is long enough to
-	// read the state while it waits and short enough that the test waits it out.
+	// interval and the part of one the daemon's jitter draws (openSupervision's rand.N), which is
+	// long enough to read the state while it waits and short enough that the test waits it out.
 	cfg.WorkerWakesPerMinute, cfg.WorkerWakeBurst = 30, 1
 	project, err := claim.ProjectToken(cfg.Project)
 	if err != nil {

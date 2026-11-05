@@ -92,15 +92,15 @@ type outbox struct {
 	// writes states and whose kept approval pair a start task names (workflow.QueueCatchUp). A
 	// test that builds the runner by hand leaves it zero, which reads as the shipped policy.
 	designGate config.DesignGate
-	// wakeRate and wakeBurst are the pace the operator set (`worker_wakes_per_minute`,
-	// `worker_wake_burst`, config.Config), carried for the one line a paced catch-up writes when
-	// this runner runs it (wakeRan) and read for nothing else: the reservation that decides when
-	// such a row is due is the workflow engine's (workflow.Config.Reserve), taken from the one
-	// limiter the daemon paces every wake from. A test that builds the runner by hand leaves both
-	// zero, which is the pacing off and the line's own reading of it.
-	wakeRate  int
-	wakeBurst int
-	log       *slog.Logger
+	// wakePace is the pace the operator set (`worker_wakes_per_minute`, `worker_wake_burst`,
+	// config.Config), carried for the one line a paced catch-up writes when this runner runs it
+	// (wakeRan) and read for nothing else — its Rate and its Burst alone, never its Reserve: the
+	// reservation that decides when such a row is due is the workflow engine's
+	// (workflow.Config.Reserve), taken from the one limiter the daemon paces every wake from. A
+	// test that builds the runner by hand leaves it zero, which is the pacing off and the line's
+	// own reading of it.
+	wakePace supervise.WakePace
+	log      *slog.Logger
 	// now is the moment a row is listed, claimed, renewed and retried at; clock arms the lanes'
 	// timers — the sweep's, a lane's wait for its next due row, a running row's lease renewal.
 	// Both are the wall clock in production, and a test holds both still (heldClock). A test that
@@ -159,13 +159,13 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, wakeRate, wakeBurst int, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, wakePace supervise.WakePace, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, designGate: designGate, wakeRate: wakeRate, wakeBurst: wakeBurst,
+		handlers: handlers, designGate: designGate, wakePace: wakePace,
 		project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
@@ -715,15 +715,14 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 
 // wakeRan is the one line a wake the outbox runs writes, where it runs: the catch-up a start row
 // wrote in place of a launch, which the pacing held until row.NextAt (workflow's claimReady). It
-// is written in the shape supervise's own wakeRan writes — the same message at Info, the same
-// kind, waited, waitedFor, paced, rate and burst — rather than through something the two share,
-// because the two have nothing else in common: that one is a method of a claim's machine, reading
-// its own clock and its own WakePace, and this one reads an outbox row. The shape is what matters
-// to its reader: one grep over the daemon's log finds every wake of a restart or a plugin wave,
+// is the shape internal/supervise composes for every wake of the daemon, prepended with the claim
+// this one wakes (supervise.WakeRanMessage, WakeRanFields): the shape is what matters to its
+// reader, since one grep over the daemon's log finds every wake of a restart or a plugin wave,
 // whichever lane caused it, and counts the wakes of a minute against the rate and burst each line
 // names. The claim is the architect the catch-up goes to, the root architect of the row's issue
 // (QueueCatchUp writes the row for the root), spelled as a machine's own lines spell a claim,
-// since this logger is the runner's and carries no claim of its own.
+// since this logger is the runner's and carries no claim of its own — where a machine's logger
+// carries one already, which is why the field is this caller's to add.
 //
 // How long the wake waited is the row's own record, not a clock: the engine composed the row at
 // the moment it reserved and wrote it due at the moment the pacing gave it, so next_at less
@@ -734,12 +733,9 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 func (r *outbox) wakeRan(row record.OutboxRow) {
 	architect, _ := claim.NewToken(r.project, row.Issue, claim.RoleArchitect)
 	waitedFor := row.NextAt.Sub(row.CreatedAt)
-	fields := []any{"claim", string(architect), "kind", wakeCatchUp, "waited", waitedFor > 0}
-	if waitedFor > 0 {
-		fields = append(fields, "waitedFor", waitedFor)
-	}
-	fields = append(fields, "paced", true, "rate", r.wakeRate, "burst", r.wakeBurst)
-	r.log.Info("supervise: wake ran", fields...)
+	fields := append([]any{"claim", string(architect)},
+		supervise.WakeRanFields(wakeCatchUp, true, waitedFor, r.wakePace.Rate, r.wakePace.Burst)...)
+	r.log.Info(supervise.WakeRanMessage, fields...)
 }
 
 // wakeCatchUp is the kind of wake a paced catch-up is, as the line it writes names it (wakeRan).

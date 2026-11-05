@@ -662,12 +662,12 @@ type WakeWaiting struct {
 }
 
 // WakesWaitingOf is every wake still waiting, from both of the places one can wait, in claim order:
-// views are the machines of the daemon's supervisor as each last published itself
-// (supervise.Machine.View), which hold the launches and the plugin tasks in memory, and queued are
-// the wakes that wait on a durable row, which the caller composes from the store — today the paced
-// catch-ups (daemon's pacedCatchUps). The two are merged here rather than at either source so that
-// one read of the state is one ordered list, whichever lane is holding a wave back: an operator or
-// a controller asking whether a wave is still running must not have to know which lane each wake of
+// held are the wakes the daemon's machines hold in memory, each as its machine last published it
+// (supervise.Machine.WaitingWake) — the launches and the plugin tasks — and queued are the wakes
+// that wait on a durable row, which the caller composes from the store — today the paced catch-ups
+// (daemon's pacedCatchUps). The two are merged here rather than at either source so that one read
+// of the state is one ordered list, whichever lane is holding a wave back: an operator or a
+// controller asking whether a wave is still running must not have to know which lane each wake of
 // it is in.
 //
 // The machines are read as the operator's claim listing and the capability report read theirs: a
@@ -677,15 +677,10 @@ type WakeWaiting struct {
 // sides are empty; the state's own marshalling is what keeps the empty list an array on the wire
 // (State.MarshalJSON). The sort is stable, so two wakes of one claim — a row and a machine's, or
 // two rows — keep the order their sources gave them.
-func WakesWaitingOf(views []supervise.ClaimView, queued []WakeWaiting) []WakeWaiting {
+func WakesWaitingOf(held []supervise.WaitingWake, queued []WakeWaiting) []WakeWaiting {
 	var wakes []WakeWaiting
-	for _, v := range views {
-		if v.WakeWaiting == nil {
-			continue
-		}
-		wakes = append(wakes, WakeWaiting{
-			Claim: v.Token, Issue: v.Issue, Role: v.Role, Kind: v.WakeWaiting.Kind, DueAt: v.WakeWaiting.At,
-		})
+	for _, w := range held {
+		wakes = append(wakes, WakeWaiting{Claim: w.Claim, Issue: w.Issue, Role: w.Role, Kind: w.Kind, DueAt: w.At})
 	}
 	wakes = append(wakes, queued...)
 	slices.SortStableFunc(wakes, func(a, b WakeWaiting) int { return cmp.Compare(a.Claim, b.Claim) })

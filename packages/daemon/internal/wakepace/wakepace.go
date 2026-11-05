@@ -7,8 +7,11 @@
 // The limiter holds no clock. Every caller passes its own now and arms its own timer or writes its
 // own next_at from the moment Reserve returns, which is what lets internal/supervise keep its own
 // Clock, the outbox keep its next_at column and the workflow engine keep its timer, and what lets
-// a test decide the whole behaviour with no clock at all. golang.org/x/time/rate reads the wall
-// clock and takes none, which is why the daemon paces its wakes here instead.
+// a test decide the whole behaviour with no clock at all. golang.org/x/time/rate takes a caller's
+// instant too (ReserveN, AllowN), but it has no place for the jitter — a spread added outside a
+// limiter does not push its next reservation out, so the spacing between one paced wake and the
+// next would not hold — and its float token arithmetic would not reproduce the exact instants this
+// package's tests assert, which is why the daemon paces its wakes here instead.
 package wakepace
 
 import (
@@ -26,8 +29,9 @@ type Limiter struct {
 	interval time.Duration
 	// burst is how many wakes may leave at once before the pacing bites, never below 1.
 	burst int
-	// jitter draws the part of an interval added to a paced release, and is nil for none.
-	jitter func() time.Duration
+	// jitter draws the part of an interval added to a paced release, given the interval it is a
+	// part of, and is nil for none.
+	jitter func(interval time.Duration) time.Duration
 
 	mu sync.Mutex
 	// tat is the theoretical arrival time: the moment the bucket is empty again, counting every
@@ -36,14 +40,15 @@ type Limiter struct {
 }
 
 // New builds a limiter of rate wakes a minute in bursts of burst, spreading each paced release by
-// jitter. The daemon passes a jitter drawing uniformly from [0, interval); a caller that wants an
-// exact spacing — a test, mostly — passes nil, which adds nothing.
+// jitter, which is handed the interval one wake costs. The daemon passes math/rand/v2's
+// rand.N[time.Duration], a draw from [0, interval); a caller that wants an exact spacing — a test,
+// mostly — passes nil, which adds nothing.
 //
 // A rate of zero or less turns the pacing off: every Reserve then returns its own now. A burst
 // below 1 is treated as 1. The configuration layer refuses a smaller one by name, and a burst of
 // zero would hold each release a further interval out and so hand the operator half the rate it
 // asked for.
-func New(rate, burst int, jitter func() time.Duration) *Limiter {
+func New(rate, burst int, jitter func(interval time.Duration) time.Duration) *Limiter {
 	l := &Limiter{burst: max(burst, 1), jitter: jitter}
 	if rate > 0 {
 		l.interval = time.Minute / time.Duration(rate)
@@ -73,7 +78,7 @@ func (l *Limiter) Reserve(now time.Time) time.Time {
 	if base := l.tat.Add(-time.Duration(l.burst-1) * l.interval); base.After(now) {
 		release = base
 		if l.jitter != nil {
-			release = release.Add(l.jitter())
+			release = release.Add(l.jitter(l.interval))
 		}
 		// A jitter is meant to draw from [0, interval), but the contract that no caller is sent
 		// into its own past is the limiter's to keep whatever a caller's jitter returns.

@@ -818,15 +818,15 @@ func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, paylo
 
 // attach gives the workflow what only supervision has: the outbox, built on its supervisor and
 // its runtime, and the daemon's one wake limiter, which the engine reserves the catch-up it
-// writes in place of a launch from (reserveWake) and whose rate and burst the outbox names in
-// the line that catch-up writes when it runs (wakeRan).
+// writes in place of a launch from (reserveWake) and whose pace — the rate and the burst the
+// machines themselves are held to (supervise.WakePace) — the outbox names in the line that
+// catch-up writes when it runs (wakeRan).
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.wakes.Store(supervision.wakes)
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
 		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design,
-		supervision.cfg.WorkerWakesPerMinute, supervision.cfg.WorkerWakeBurst,
-		w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
+		supervision.supervisor.deps.WakePace, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)

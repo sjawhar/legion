@@ -154,10 +154,7 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	}
 	controller := claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree)
 	if !CannotAnswerUpdate(m.claim) && !controller {
-		if waits, err := m.reserveWake(ctx, wakePluginTask, false, m.openPluginUpdateIfStale); waits || err != nil {
-			return err
-		}
-		return m.openPluginUpdate(ctx)
+		return m.reserveWake(ctx, wakePluginTask, false, m.openPluginUpdateIfStale)
 	}
 	if m.claim.State == StateWorking && !controller {
 		m.holdStaleRelaunch(trigger)
@@ -231,13 +228,15 @@ func (m *Machine) openPluginUpdate(ctx context.Context) error {
 	})
 }
 
-// openPluginUpdateIfStale is openPluginUpdate at the wake's turn (wakeNow): the comparison
-// refreshPlugin makes before it reserves is made again here, because the turn runs as much later
-// as the whole queue's wait, and a registration that landed meanwhile may have recorded this
-// daemon's own contract. It is the same fact refreshPlugin re-checks for the boot's own post,
-// over a longer wait: a round opened over a current process would ask its worker to push and
-// answer, hold every task of its next phase behind the ask, and end hours later in a relaunch of
-// a process that is already on this daemon's plugin.
+// openPluginUpdateIfStale is what the wake gate runs for a plugin task, at its turn (wakeNow) or
+// at once where the pacing holds nothing back: the comparison refreshPlugin makes before it
+// reserves is made again here, because the turn runs as much later as the whole queue's wait, and
+// a registration that landed meanwhile may have recorded this daemon's own contract; a wake the
+// gate let straight through re-reads, under the one lock, the fact refreshPlugin read a moment
+// earlier. It is the same fact refreshPlugin re-checks for the boot's own post, over a longer
+// wait: a round opened over a current process would ask its worker to push and answer, hold every
+// task of its next phase behind the ask, and end hours later in a relaunch of a process that is
+// already on this daemon's plugin.
 func (m *Machine) openPluginUpdateIfStale(ctx context.Context) error {
 	if m.claim.PluginContract == m.deps.PluginContract {
 		m.log.Info("supervise: the claim registered on this daemon's plugin while its update task waited its turn; no round is opened",

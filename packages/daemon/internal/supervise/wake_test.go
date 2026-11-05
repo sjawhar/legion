@@ -39,7 +39,7 @@ const (
 func pacedHarness(t *testing.T, rate int) *harness {
 	t.Helper()
 	h := newBareHarness(t)
-	limiter := wakepace.New(rate, 1, func() time.Duration { return wakePart })
+	limiter := wakepace.New(rate, 1, func(time.Duration) time.Duration { return wakePart })
 	h.deps.WakePace = WakePace{Reserve: limiter.Reserve, Rate: rate, Burst: 1}
 	c := queuedClaim()
 	if err := h.store.PutClaim(h.ctx, c); err != nil {

@@ -1049,36 +1049,26 @@ func shimAddress(bound, advertiseHost string) (string, error) {
 	return "tcp://" + net.JoinHostPort(advertiseHost, port), nil
 }
 
-// wakeJitter is the spread the daemon gives every paced release of its wake limiter: drawn
-// uniformly from [0, interval), where interval is what one wake costs at rate wakes a minute.
-// Without it two daemons restarted together would let their wakes out on the same instants, and
-// the organization they share would see both bursts in one minute. A rate of zero or less is the
-// pacing off, which draws nothing because the limiter never releases late (wakepace.New).
-func wakeJitter(rate int) func() time.Duration {
-	if rate <= 0 {
-		return nil
-	}
-	interval := time.Minute / time.Duration(rate)
-	return func() time.Duration { return rand.N(interval) }
-}
-
-// claimViews is every claim this daemon supervises as its machine last published it, which the
-// state's wakes waiting are read from (api.WakesWaitingOf, source.views): the view rather than the
-// claim, so the read never waits on a decision in flight — a Sandbox relaunch holds its machine
-// for as long as the runtime waits out its pods, and with many claims one is nearly always
-// relaunching — exactly as the operator's claim listing and the capability report read their
-// claims. It reads memory alone, which is where a machine's wake lives: no store holds one, and a
-// restart raises the wave again through its own paths.
-func (s *supervision) claimViews() []supervise.ClaimView {
+// waitingWakes is every wake this daemon's machines hold, as each machine last published itself,
+// which the state names beside the catch-ups waiting on their rows (api.WakesWaitingOf,
+// source.wakes): the published view rather than the claim, so the read never waits on a decision
+// in flight — a Sandbox relaunch holds its machine for as long as the runtime waits out its pods,
+// and with many claims one is nearly always relaunching — exactly as the operator's claim listing
+// and the capability report read their claims. Only the wakes are taken, and nothing is allocated
+// while none waits, which is every moment outside a wave (supervise.Machine.WaitingWake). It reads
+// memory alone, which is where a machine's wake lives: no store holds one, and a restart raises
+// the wave again through its own paths.
+func (s *supervision) waitingWakes() []supervise.WaitingWake {
 	if s.supervisor == nil {
 		return nil
 	}
-	machines := s.supervisor.supervised()
-	views := make([]supervise.ClaimView, 0, len(machines))
-	for _, m := range machines {
-		views = append(views, m.View())
+	var waiting []supervise.WaitingWake
+	for _, m := range s.supervisor.supervised() {
+		if wake := m.WaitingWake(); wake != nil {
+			waiting = append(waiting, *wake)
+		}
 	}
-	return views
+	return waiting
 }
 
 // pacedCatchUps is every catch-up the wake pacing is still holding, as the state names them beside
@@ -1089,11 +1079,12 @@ func (s *supervision) claimViews() []supervise.ClaimView {
 // transaction that could see another instant.
 //
 // The rows are the ones a ready would otherwise release and this mark holds back (the outbox's
-// releaseWaiting reads the same set through the same WaitingNotices), filtered to those still ahead
-// of now: a row whose moment has come is a wake that is running or about to, not one waiting. Each
-// goes to the root architect of its issue, whose token it is composed for exactly as the line that
-// wake writes composes it (the outbox's wakeRan), since the row names the issue and the kind alone.
-// A project whose outbox holds no such row allocates nothing.
+// releaseWaiting reads the same set through the same WaitingNotices), which the query itself
+// returns only while their moment is still ahead of now (`next_at > $2`): a row whose moment has
+// come is a wake that is running or about to, not one waiting. Each goes to the root architect of
+// its issue, whose token it is composed for exactly as the line that wake writes composes it (the
+// outbox's wakeRan), since the row names the issue and the kind alone. A project whose outbox
+// holds no such row allocates nothing.
 func pacedCatchUps(ctx context.Context, tx pgx.Tx, records record.Store, project, dispatchProject string, now time.Time) ([]api.WakeWaiting, error) {
 	waiting, err := records.WaitingNotices(ctx, tx, dispatchProject, now)
 	if err != nil {
@@ -1106,7 +1097,7 @@ func pacedCatchUps(ctx context.Context, tx pgx.Tx, records record.Store, project
 			return nil, fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
 		}
 		notice, ok := payload.(record.Notice)
-		if !ok || !notice.Paced || !row.NextAt.After(now) {
+		if !ok || !notice.Paced {
 			continue
 		}
 		architect, err := claim.NewToken(project, row.Issue, claim.RoleArchitect)
@@ -1161,8 +1152,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	// One limiter for the whole daemon: every wake it causes — the launches supervision makes
 	// here, and the tasks and notices its other lanes queue to wake a live session in place of a
 	// launch — draws from the same rate, because what the cap counts is the uncached input of the
-	// minute after the wake, whichever lane caused it.
-	wakes := wakepace.New(cfg.WorkerWakesPerMinute, cfg.WorkerWakeBurst, wakeJitter(cfg.WorkerWakesPerMinute))
+	// minute after the wake, whichever lane caused it. Its jitter is a draw from [0, interval),
+	// the limiter's own interval: without one, two daemons restarted together would let their
+	// wakes out on the same instants, and the organization they share would see both bursts in one
+	// minute.
+	wakes := wakepace.New(cfg.WorkerWakesPerMinute, cfg.WorkerWakeBurst, rand.N[time.Duration])
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
@@ -1655,7 +1649,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
 			reports:      s.capabilityReports,
-			views:        s.claimViews,
+			wakes:        s.waitingWakes,
 			repositories: p.repositories,
 			caches:       repositoryCachesOf(s.runtime),
 			settings:     api.SettingsOf(cfg),
@@ -1782,9 +1776,9 @@ type source struct {
 	// reports is each claim's latest capability report (supervision.capabilityReports), which the
 	// projection shows on the claim's view whatever process reported it.
 	reports func() map[claim.Token]capabilities.Report
-	// views is every supervised claim as its machine last published it (supervision.claimViews),
-	// which the wakes the machines hold are read from; nil for a daemon that supervises nothing.
-	views func() []supervise.ClaimView
+	// wakes is every wake the daemon's machines hold, as each machine last published it
+	// (supervision.waitingWakes); nil for a daemon that supervises nothing.
+	wakes func() []supervise.WaitingWake
 	// repositories is the project's repository mapping as the workflow serves it, empty for a
 	// daemon with no workflow, whose state serves no repository.
 	repositories *repositories
@@ -1928,11 +1922,11 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	var views []supervise.ClaimView
-	if s.views != nil {
-		views = s.views()
+	var held []supervise.WaitingWake
+	if s.wakes != nil {
+		held = s.wakes()
 	}
-	state.WakesWaiting = api.WakesWaitingOf(views, paced)
+	state.WakesWaiting = api.WakesWaitingOf(held, paced)
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
 		SchemaVersion: version,

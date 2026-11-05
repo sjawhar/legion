@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -37,10 +38,10 @@ const (
 var wakeOrigin = time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
 
 // pacedWakes is the daemon's own wake limiter at the shipped pace, with the jitter the daemon
-// spreads its paced releases by (wakeJitter): a test that reads the schedule reads the production
-// one, gaps and all.
+// spreads its paced releases by (openSupervision's rand.N): a test that reads the schedule reads
+// the production one, gaps and all.
 func pacedWakes() *wakepace.Limiter {
-	return wakepace.New(testWakeRate, testWakeBurst, wakeJitter(testWakeRate))
+	return wakepace.New(testWakeRate, testWakeBurst, rand.N[time.Duration])
 }
 
 // wakeEngine is the workflow engine as the daemon builds it when the pacing is on: its clock held
@@ -399,8 +400,9 @@ func TestTheOutboxWritesTheWakeLineWhenItRunsAPacedNoticeRow(t *testing.T) {
 	now := wakeOrigin
 	var logged bytes.Buffer
 	runner := &outbox{log: slog.New(slog.NewJSONHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records,
-		notices: &holderPublisher{}, supervisor: sup, project: "legion", wakeRate: testWakeRate, wakeBurst: testWakeBurst,
-		now: func() time.Time { return now }}
+		notices: &holderPublisher{}, supervisor: sup, project: "legion",
+		wakePace: supervise.WakePace{Rate: testWakeRate, Burst: testWakeBurst},
+		now:      func() time.Time { return now }}
 
 	held := 3 * testWakeInterval
 	pacedCatchUp(t, pool, records, "LEGION-1", 1, now, now.Add(held))

@@ -304,10 +304,11 @@ type ClaimView struct {
 	// (chargePrompt, the registration deadline) is not stopping: its claim keeps its role.
 	Stopping bool
 	// WakeWaiting is the wake the pacing holds over this claim until its turn (reserveWake), nil
-	// while none waits. It is published here rather than read through a method of its own because
-	// the one reader of it is a reader of every claim — the state route, through the daemon's
-	// supervision (api.State.WakesWaiting) — and such a reader must never wait on the decision in
-	// flight, which is the whole reason View exists.
+	// while none waits. It travels on the published view rather than behind the machine's lock
+	// because the one reader of it is a reader of every claim — the state route, through the
+	// daemon's supervision (api.State.WakesWaiting) — and such a reader must never wait on the
+	// decision in flight, which is the whole reason View exists. That reader takes it through
+	// Machine.WaitingWake, which copies no claim.
 	WakeWaiting *WakeWaiting
 }
 
@@ -319,6 +320,18 @@ type ClaimView struct {
 type WakeWaiting struct {
 	Kind string
 	At   time.Time
+}
+
+// WaitingWake is one claim's waiting wake as the reader of every claim takes it
+// (Machine.WaitingWake): the claim the wake will wake, that claim's issue and role, and the kind
+// and the moment the view names (WakeWaiting). It is every field the daemon's state names a wake
+// by (api.WakesWaitingOf), so that read copies these five and nothing else of the claim.
+type WaitingWake struct {
+	Claim claim.Token
+	Issue string
+	Role  claim.Role
+	Kind  string
+	At    time.Time
 }
 
 // treeRoot is whether the claim is its tree's root claim (claim.IsTreeArchitect), which ends only
@@ -1004,6 +1017,21 @@ func (m *Machine) View() ClaimView {
 	return v
 }
 
+// WaitingWake is the wake the pacing holds over this claim, nil while none waits: what the
+// published view names (ClaimView.WakeWaiting) with the claim's token, issue and role beside it,
+// for the reader of every claim the state route is (the daemon's waitingWakes,
+// api.WakesWaitingOf). It never waits on the decision in flight, as View does not, and it copies
+// no claim: publish stores a view built fresh and mutates no stored one, so every field read here
+// is one nothing writes again. A machine holding no wake allocates nothing, which is every machine
+// outside a wave.
+func (m *Machine) WaitingWake() *WaitingWake {
+	v := m.view.Load()
+	if v.WakeWaiting == nil {
+		return nil
+	}
+	return &WaitingWake{Claim: v.Token, Issue: v.Issue, Role: v.Role, Kind: v.WakeWaiting.Kind, At: v.WakeWaiting.At}
+}
+
 // Deciding is the event the decision in flight handles (Handle), or nil when the machine decides
 // nothing. It never waits on the decision.
 func (m *Machine) Deciding() Event {
@@ -1261,12 +1289,9 @@ func (m *Machine) launchAfter(ctx context.Context, charged, exempt bool) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return m.relaunchRefused(ctx, func(ctx context.Context) error { return m.launchAfter(ctx, charged, exempt) }, err)
 	}
-	if waits, err := m.reserveWake(ctx, wakeLaunch, exempt, func(ctx context.Context) error {
+	return m.reserveWake(ctx, wakeLaunch, exempt, func(ctx context.Context) error {
 		return m.launchNow(ctx, charged, exempt)
-	}); waits || err != nil {
-		return err
-	}
-	return m.launchNow(ctx, charged, exempt)
+	})
 }
 
 // launchNow is launchAfter past its lifecycle check and its wake gate: the launch itself, and the
@@ -1348,9 +1373,9 @@ type wake struct {
 }
 
 // reserveWake is the wake gate: it asks the pacing when this wake may run and, when that moment
-// is later than now, records the wake on the machine, arms TimerWake for it (wakeNow) and reports
-// that the caller's work waits. A wake that need not wait reports false, having written the line
-// it writes as it goes (wakeRan).
+// is later than now, parks the wake on the machine until its turn (parkWake, wakeNow) and returns
+// with the caller's work left to that turn. A wake that need not wait runs that work here, having
+// written the line it writes as it goes (wakeRan).
 //
 // A claim that records no process when the gate holds it — a spawn from queued, a rule resume
 // from suspended, a retry from failed or retired, a process already retired by the decision that
@@ -1371,30 +1396,41 @@ type wake struct {
 // of its own; the one the first took is spent either way, since the limiter charges on the
 // reserve. No paced request reaches here twice over a parked claim: the table answers a second
 // start of a claim at launching without launching anything.
-func (m *Machine) reserveWake(ctx context.Context, kind string, exempt bool, run func(context.Context) error) (bool, error) {
+func (m *Machine) reserveWake(ctx context.Context, kind string, exempt bool, run func(context.Context) error) error {
 	exempt = exempt || claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree)
 	reserve := m.deps.WakePace.Reserve
-	// The operator counts the paced wakes of a minute against the rate and the burst this line
-	// names (R6), so a wake no pacing could have held — the pacing off, or this wake let through
-	// — says so rather than swelling that count.
-	paced := reserve != nil && m.deps.WakePace.Rate > 0 && !exempt
 	if exempt || reserve == nil {
-		m.wakeRan(kind, paced, 0)
-		return false, nil
+		// The operator counts the paced wakes of a minute against the rate and the burst this line
+		// names (R6), so a wake no pacing could have held — the pacing off, or this wake let
+		// through — says so rather than swelling that count.
+		m.wakeRan(kind, false, 0)
+		return run(ctx)
 	}
+	// paced is whether the pacing could have held this wake at all. Past the return above there is
+	// a limiter and this wake is not one it lets through, so all that is left of the question is
+	// the rate the operator set, 0 being the pacing off.
+	paced := m.deps.WakePace.Rate > 0
 	now := m.deps.Clock.Now()
 	at := reserve(now)
 	if !at.After(now) {
 		m.wakeRan(kind, paced, 0)
-		return false, nil
+		return run(ctx)
 	}
-	m.wake = &wake{at: at, reserved: now, kind: kind, state: m.claim.State, run: run}
-	m.arm(TimerWake, at.Sub(now), "")
+	return m.parkWake(ctx, &wake{at: at, reserved: now, kind: kind, state: m.claim.State, run: run}, at.Sub(now))
+}
+
+// parkWake is the park the gate and the re-park share (reserveWake, reparkWake): waiting waits on
+// the machine, TimerWake is armed for after — what is left of its wait — and a claim that records
+// no process is written launching and persisted, which is what reserveWake states. A claim that
+// still records its process is left exactly as it stands.
+func (m *Machine) parkWake(ctx context.Context, waiting *wake, after time.Duration) error {
+	m.wake = waiting
+	m.arm(TimerWake, after, "")
 	if m.claim.Locator != nil {
-		return true, nil
+		return nil
 	}
 	m.claim.State = StateLaunching
-	return true, m.persist(ctx)
+	return m.persist(ctx)
 }
 
 // wakeNow is the wake's turn (TimerWake): the launch the gate held runs now, and takes no second
@@ -1425,12 +1461,26 @@ func wakeNow(m *Machine, ctx context.Context, _ Event) error {
 // left out of a wake that was not. rate and burst are the pace it was held to, so one line says
 // both what happened and what the operator set. The claim is the logger's own (NewMachine).
 func (m *Machine) wakeRan(kind string, paced bool, waitedFor time.Duration) {
+	m.log.Info(WakeRanMessage, WakeRanFields(kind, paced, waitedFor, m.deps.WakePace.Rate, m.deps.WakePace.Burst)...)
+}
+
+// WakeRanMessage and WakeRanFields are the shape of that line, for the one wake lane outside this
+// package: the catch-up the daemon's outbox runs, which the pacing held on its row rather than in
+// a machine (the outbox's wakeRan). The shape is the contract — one grep over the daemon's log
+// finds every wake of a restart or a plugin wave, whichever lane caused it, and a reader counts
+// the wakes of a minute against the rate and the burst each line names — so the two lanes compose
+// it here rather than each write their own. A caller with a claim of its own, where this package's
+// logger already carries one, prepends it to the fields.
+const WakeRanMessage = "supervise: wake ran"
+
+// WakeRanFields is the fields of a wake's line, in order, as wakeRan states them. A wake that
+// waited nothing leaves waitedFor out.
+func WakeRanFields(kind string, paced bool, waitedFor time.Duration, rate, burst int) []any {
 	fields := []any{"kind", kind, "waited", waitedFor > 0}
 	if waitedFor > 0 {
 		fields = append(fields, "waitedFor", waitedFor)
 	}
-	fields = append(fields, "paced", paced, "rate", m.deps.WakePace.Rate, "burst", m.deps.WakePace.Burst)
-	m.log.Info("supervise: wake ran", fields...)
+	return append(fields, "paced", paced, "rate", rate, "burst", burst)
 }
 
 // dropWakeFor is an operator's wake never waiting: a request the pacing lets through, reaching a
@@ -1470,9 +1520,9 @@ func (m *Machine) dropWakeFor(ev Event) *wake {
 // (Handle, after both the named ignore's refusal and the row that acted): the claim is in the
 // state the gate found, with no process and no wake of its own, which is where a refusal, an
 // ignore and a forget-session each leave it — and the launch the wake holds is still owed. It is
-// parked again exactly as reserveWake parked it, at the same release moment, for whatever is
-// left of the wait: the token was taken once, so this costs nothing and the wakes behind it keep
-// their turns.
+// parked again by the park the gate itself makes (parkWake), at the same release moment, for
+// whatever is left of the wait: the token was taken once, so this costs nothing and the wakes
+// behind it keep their turns.
 //
 // A write that fails is logged and changes no verdict: the request is answered as the table
 // answered it, and the claim stands as that answer left it, which is what a refusal leaves today.
@@ -1481,12 +1531,9 @@ func (m *Machine) reparkWake(ctx context.Context, dropped *wake) {
 	if dropped == nil || m.wake != nil || m.claim.Locator != nil || m.claim.State != dropped.state {
 		return
 	}
-	m.wake = dropped
-	m.arm(TimerWake, max(dropped.at.Sub(m.deps.Clock.Now()), 0), "")
-	m.claim.State = StateLaunching
 	m.log.Info("supervise: the request launched nothing; the wake the pacing holds keeps its turn",
 		"kind", dropped.kind, "due", dropped.at, "state", dropped.state)
-	if err := m.persist(ctx); err != nil {
+	if err := m.parkWake(ctx, dropped, max(dropped.at.Sub(m.deps.Clock.Now()), 0)); err != nil {
 		m.log.Warn("supervise: the wake that keeps its turn could not be written; it waits in memory alone",
 			"kind", dropped.kind, "due", dropped.at, "error", err)
 	}
