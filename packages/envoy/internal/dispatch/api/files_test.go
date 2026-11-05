@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -250,10 +251,22 @@ func (h heldPut) Put(ctx context.Context, sha, mime string, body []byte) error {
 	return h.Memory.Put(ctx, sha, mime, body)
 }
 
+// uploadLockProbeWindow bounds how long the probe below retries the issue's row lock. It is far
+// longer than any write this test's own setup makes - the issue create and the settlement of the
+// spec document it wrote - and shorter than the package's test timeout, so a lock an upload holds
+// is reported as a failure rather than a hang.
+const uploadLockProbeWindow = 20 * time.Second
+
 // An upload writes its object before its transaction opens, so while the store takes the bytes
 // the issue's row is free: the transaction locks it for no key update, and every other writer
 // of the issue (a comment, an ask, a status change) would queue behind a store write nothing
 // bounds.
+//
+// The upload stays in Put until this test releases it, so a lock the upload holds is held for
+// every attempt of the probe below, while the issue's own setup holds that row only for a
+// moment: the spec document fileIssue wrote settles a settle delay later, and that settlement's
+// transaction takes the issue row as the owner of the event it appends (events/broker.go,
+// lockEventOwner). The probe therefore retries, and takes the lock once that writer commits.
 func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	held := heldPut{Memory: filestest.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
@@ -302,8 +315,16 @@ func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	case response := <-uploaded:
 		t.Fatalf("the upload answered without writing to the store: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if _, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue); err != nil {
-		t.Fatalf("lock the issue while its upload's bytes are in flight: %v", err)
+	deadline := time.Now().Add(uploadLockProbeWindow)
+	for {
+		_, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lock the issue while its upload's bytes are in flight, over %s of attempts: %v", uploadLockProbeWindow, err)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 	release()
 	if response := <-uploaded; response.Code != http.StatusCreated {
