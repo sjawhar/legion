@@ -1284,7 +1284,8 @@ A link is stale when the decision's text changed after the relation was written 
 The link's `to.pin` also retains the shaped passage's explicit target version, or its text when the relation was written, and says when the passage changed.
 `?artifact=<id>&version=N` reads the historical shaped passages of a document on this issue; a document on another issue is refused.
 The dashboard shows each shaping decision beside the passage itself; historical untyped blocks without stored ids match their recorded text, with every identical candidate shown and explicitly labelled rather than assigned an invented position.
-`GET /api/v1/issues/{key}/decisions-shadow` compares the typed source nodes with the graph projection and reports source/node counts, missing/extra references and the difference count.
+`GET /api/v1/issues/{key}/decisions-shadow` compares independent decision sources and interpretation relations with their graph projections, reporting source/projection counts, missing/extra signatures and the difference count.
+An interpretation relation is the document identity, interpretation block ID and decision target, decoded independently from source attributes and query rows. A wrong parent appears as one missing expected relation and one extra observed relation even when counts match.
 `POST /api/v1/artifacts/{id}/interpretations` inserts an agent's reading with a same-document `interprets` pointer and records its author in the write's event.
 `GET /api/v1/issues/{key}/interpretations` lists those readings in document order, the primary document first; a handmade block has no recorded author and is labelled `Interpretation`.
 An approval remains current when only interpretation blocks were added or edited and each ask still agrees with its row; removing an interpretation or changing any other text carries no approval by this rule.

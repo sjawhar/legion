@@ -3,6 +3,8 @@ package api
 import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"net/http"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -117,29 +119,78 @@ func TestInterpretationGraphEqualityAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := 0
+	source := map[[3]string]bool{}
+	document := "dispatch://" + issue.Key + "/spec"
 	for _, block := range blocks {
 		if block.Type == "interpretation" {
-			source++
+			for _, parent := range strings.Fields(blockAttribute(block, "interprets")) {
+				source[[3]string{document, block.ID, parent}] = true
+			}
 		}
 	}
-	count := len(readInterpretations(t, handler, issue.Key))
-	if source != 1 || count != source {
-		t.Fatalf("source=%d graph=%d", source, count)
+	graph := map[[3]string]bool{}
+	for _, item := range readInterpretations(t, handler, issue.Key) {
+		itemDocument, _, _ := strings.Cut(item.Ref, "#")
+		graph[[3]string{itemDocument, item.BlockID, item.DecisionRef}] = true
 	}
-	t.Logf("interpretation equality: source=%d graph=%d differences=0", source, count)
+	if len(source) != 1 || !reflect.DeepEqual(source, graph) {
+		t.Fatalf("interpretation identity/parent pairs: source=%v graph=%v", source, graph)
+	}
+	t.Logf("interpretation equality: source=%v graph=%v", source, graph)
 	if _, err := database.Pool.Exec(t.Context(), `delete from block_refs where artifact_id=$1 and kind='interprets'`, issue.PrimaryArtifactID); err != nil {
 		t.Fatal(err)
 	}
-	count = len(readInterpretations(t, handler, issue.Key))
-	if count != 0 {
-		t.Fatalf("negative control: expected one missing edge, got graph=%d", count)
+	if items := readInterpretations(t, handler, issue.Key); len(items) != 0 {
+		t.Fatalf("negative control: expected one missing edge, got %#v", items)
 	}
-	t.Logf("negative control: source=%d graph=%d differences=%d", source, count, source-count)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/interpretations", nil, "")
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous read: %d", response.Code)
 	}
+}
+
+func TestInterpretationShadowFindsWrongParentAtEqualCounts(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", ":::decision{#first}\nFirst decision.\n:::\n\n:::decision{#second}\nSecond decision.\n:::\n\n:::interpretation{#reading interprets=\"dispatch://CORE-1/spec#b-first\"}\nMy reading.\n:::\n")
+	type census struct {
+		Source      int      `json:"source_count"`
+		Nodes       int      `json:"node_count"`
+		Differences int      `json:"differences"`
+		Missing     []string `json:"missing"`
+		Extra       []string `json:"extra"`
+	}
+	read := func() census {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/decisions-shadow", nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("census: %d %s", response.Code, response.Body.String())
+		}
+		return decodeBody[census](t, response)
+	}
+	before := read()
+	items := readInterpretations(t, handler, issue.Key)
+	if len(items) != 1 || items[0].DecisionRef != "dispatch://CORE-1/spec#b-first" {
+		t.Fatalf("original parent: %#v", items)
+	}
+	changed, err := database.Pool.Exec(t.Context(), `update block_refs set to_id=$2 where artifact_id=$1 and block_id='reading' and kind='interprets'`, issue.PrimaryArtifactID, issue.Key+"/spec#second")
+	if err != nil || changed.RowsAffected() != 1 {
+		t.Fatalf("retarget one derived pointer: %d %v", changed.RowsAffected(), err)
+	}
+	items = readInterpretations(t, handler, issue.Key)
+	if len(items) != 1 || items[0].DecisionRef != "dispatch://CORE-1/spec#b-second" {
+		t.Fatalf("wrong-parent control did not preserve count and change parent: %#v", items)
+	}
+	after := read()
+	if after.Source != before.Source || after.Nodes != before.Nodes || after.Differences != before.Differences+2 {
+		t.Fatalf("equal-count wrong parent went undetected: before=%#v after=%#v", before, after)
+	}
+	wantMissing := "dispatch://CORE-1/spec#b-reading interprets dispatch://CORE-1/spec#b-first"
+	wantExtra := "dispatch://CORE-1/spec#b-reading interprets dispatch://CORE-1/spec#b-second"
+	if !slices.Contains(after.Missing, wantMissing) || !slices.Contains(after.Extra, wantExtra) {
+		t.Fatalf("wrong-parent diagnostics: missing=%v extra=%v", after.Missing, after.Extra)
+	}
+	t.Logf("equal-count wrong parent: source=%d graph=%d differences=%d -> %d", after.Source, after.Nodes, before.Differences, after.Differences)
 }
 
 func TestNestedInterpretationIsNeverDecisionText(t *testing.T) {
@@ -255,4 +306,19 @@ func TestInterpretationReportsApprovalSupersededByUnsettledSpecEdit(t *testing.T
 		t.Fatalf("superseded approval advice: %s", response.Body.String())
 	}
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+}
+
+func TestInterpretationEditCannotHideChangedNestedDecisionReasoning(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", "::::decision{#choice}\nApproved reasoning.\n\n:::interpretation{#reading interprets=\"dispatch://CORE-1/spec#b-choice\"}\nOriginal interpretation.\n:::\n::::\n")
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	advice := agentEdit(t, handler, issue.PrimaryArtifactID, 2,
+		replaceOp("Approved reasoning.", "Substantively different reasoning."),
+		replaceOp("Original interpretation.", "Edited interpretation."),
+	)
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+	if advice.SupersededApproval == nil || advice.SupersededApproval.ApprovedVersion != 1 || advice.SupersededApproval.Version != 2 {
+		t.Fatalf("changed nested reasoning did not supersede approval: %#v", advice.SupersededApproval)
+	}
 }

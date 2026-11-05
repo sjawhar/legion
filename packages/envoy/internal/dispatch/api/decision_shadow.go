@@ -135,7 +135,14 @@ func (s *server) getIssueDecisionShadow(w http.ResponseWriter, r *http.Request) 
 			extra = append(extra, ref)
 		}
 	}
+	interpretations, err := s.compareInterpretations(ctx, key)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	missing = append(missing, interpretations.missing...)
+	extra = append(extra, interpretations.extra...)
 	sort.Strings(missing)
 	sort.Strings(extra)
-	WriteJSON(w, http.StatusOK, map[string]any{"source_count": len(sections), "node_count": len(graph), "differences": len(missing) + len(extra), "missing": missing, "extra": extra, "sections": sections})
+	WriteJSON(w, http.StatusOK, map[string]any{"source_count": len(sections) + interpretations.sourceCount, "node_count": len(graph) + interpretations.nodeCount, "differences": len(missing) + len(extra), "missing": missing, "extra": extra, "sections": sections})
 }
