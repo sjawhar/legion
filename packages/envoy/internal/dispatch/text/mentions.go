@@ -386,7 +386,13 @@ func endsWithWhitespaceReference(prefix string) bool {
 		return false
 	}
 	value, err := strconv.ParseUint(digits, base, 32)
-	return err == nil && isReferenceSpace(rune(value))
+	if err != nil || value > unicode.MaxRune {
+		// A number past the last code point is no character, so it is no whitespace either.
+		// The digit limits above already hold value below it; the check is what makes the
+		// conversion to rune safe to read, rather than safe only while those limits stand.
+		return false
+	}
+	return isReferenceSpace(rune(value))
 }
 
 // isReferenceSpace is the whitespace that ends a reference (referenceEnd): tab, line feed, form
