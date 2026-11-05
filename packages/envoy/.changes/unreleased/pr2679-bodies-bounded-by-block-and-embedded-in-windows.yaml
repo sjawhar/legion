@@ -1,0 +1,19 @@
+kind: Changed
+body: |-
+    Dispatch holds a body block by block rather than as a whole: each block of a comment, comment
+    edit, message, broadcast or delivery reply to `contracts.DispatchBlockUnits` and a body to
+    `contracts.DispatchItemBlocks` blocks, each refusal naming the block that passed the bound,
+    and an ask's question and its options together to `contracts.DispatchEventBodyMax` wherever
+    the ask is written, a document's decision block included. `GET /api/v1/limits` publishes every
+    bound. An event carries at most `contracts.DispatchEventBodyMax` of a body and says
+    `body_truncated` when it carried a part. An envelope NATS refuses as too large goes out as a
+    stand-in on the same topic, under the same event id, carrying the payload's short top-level
+    fields and `payload_omitted: true`, so a reader learns which event it is and reads the item
+    itself where it learnt nothing before. Meaning search embeds windows of
+    neighbouring blocks (`document_block`, `comment_block`, `message_block` and `ask_part`, each
+    row carrying `covers`) rather than one vector per item cut at 32,000 runes, so a passage at
+    the end of a long document is found, and a hit names the block that matched. A local harness
+    embeds with no model service under `DISPATCH_DEV_EMBEDDER=1`, beside dev sign-in alone.
+time: 2026-11-03T09:01:00.000000000Z
+custom:
+    Issue: pr2679

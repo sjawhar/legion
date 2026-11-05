@@ -31,10 +31,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/cireconcile"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/dashboard"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -77,6 +79,10 @@ type bootConfig struct {
 	DefaultProject string
 	EnvoyURL       string
 	GitHubAPIBase  string
+	// ReviewerAppID is DISPATCH_REVIEWER_APP_ID, the id of the App whose `tester` and `architect`
+	// check runs are Legion's verdicts, as the text of the number GitHub's own objects carry it
+	// as. Empty means the CI reconcile pass records no verdict check at all.
+	ReviewerAppID  string
 	IdentityHeader string
 	// SignInIssuer, SignInClientID and SignInClientSecret, with exactly one of SignInGroup and
 	// SignInDomain, configure Google sign-in (DISPATCH_SIGNIN_*): through a Cognito sign-in pool
@@ -96,18 +102,38 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// MarkWait is how long a mark the browser says it wrote is waited for before the server
+	// answers that the document does not hold it, zero for the document service's own 1 s; only
+	// DISPATCH_TEST_MARK_WAIT, under the test hooks, sets it.
+	MarkWait time.Duration
+	// UnrecordedMarkTTL is how long a mark no row records is kept before the settlement sweep
+	// expires it, zero for the document service's own minute; only
+	// DISPATCH_TEST_UNRECORDED_MARK_TTL, under the test hooks, sets it.
+	UnrecordedMarkTTL time.Duration
 	// RouteRosterTTL is how long a stored listener answer serves issue reads' route_status, zero
 	// for the server's own five seconds; only DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks,
 	// sets it.
 	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow is how long a sender keeps trying a listener that is being replaced,
+	// zero for the server's own twelve seconds; only DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW, under
+	// the test hooks, sets it.
+	ListenerTakeoverWindow time.Duration
 	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
 	EditNoticeQuiet time.Duration
+	// CIReconcileInterval is how often the CI reconcile pass runs, zero for cireconcile.Interval's
+	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
+	// no process-level test can wait five minutes for a pass.
+	CIReconcileInterval time.Duration
 	// ListenerRosterUncached makes every read of the listener's session list ask the listener
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
 	ListenerRosterUncached bool
+	// EmbedderOff builds no embedder, whatever DISPATCH_EMBEDDER and the AWS SDK's own variables
+	// would have built: meaning search answers keyword-only and the embedding queue does nothing.
+	// Only DISPATCH_TEST_EMBEDDER_OFF=1, under the test hooks, sets it.
+	EmbedderOff bool
 	// ReconcileAtStart makes the delivery reconcile run one pass as it starts rather than only after
 	// its jittered first tick; only DISPATCH_TEST_RECONCILE_AT_START=1, under the test hooks, sets
 	// it.
@@ -355,12 +381,14 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
-		Store:           database,
-		Events:          broker,
-		Identity:        requestIdentity,
-		ServerURL:       serverURL,
-		Settle:          boot.SettleDelay,
-		EditNoticeQuiet: boot.EditNoticeQuiet,
+		Store:             database,
+		Events:            broker,
+		Identity:          requestIdentity,
+		ServerURL:         serverURL,
+		Settle:            boot.SettleDelay,
+		MarkWait:          boot.MarkWait,
+		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
+		EditNoticeQuiet:   boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
@@ -368,6 +396,7 @@ func main() {
 	// restoreDecidedWordings, which takes the copy lock (see below).
 	issueAskRepairDeps := api.Deps{Store: database, Docs: documentService, Events: broker}
 	repairIssueAsks(ctx, issueAskRepairDeps, issueAskRepairBootTimeout)
+	fillReviewContentHashes(ctx, database.Pool, reviewContentHashFillTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
@@ -384,10 +413,18 @@ func main() {
 	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
 	// the default place, finds no AWS region/credentials at boot - a CI job or a devbox with no
 	// AWS_REGION set - which newEmbedder logs as a warning rather than a reason to refuse to boot.
-	embedder, err := newEmbedder(ctx, boot.Embedder)
-	if err != nil {
-		slog.Error("dispatch: build the embedder", "error", err)
-		os.Exit(1)
+	// DISPATCH_TEST_EMBEDDER_OFF=1 is the same nil without that check, for a test process that
+	// does have the variables and no model service to spend them on.
+	var embedder embed.Embedder
+	if boot.EmbedderOff {
+		slog.Warn("dispatch: meaning search unavailable", "error", "DISPATCH_TEST_EMBEDDER_OFF=1")
+	} else {
+		client, err := newEmbedder(ctx, boot.Embedder)
+		if err != nil {
+			slog.Error("dispatch: build the embedder", "error", err)
+			os.Exit(1)
+		}
+		embedder = client
 	}
 
 	built := routes.AppContextOptions{
@@ -634,6 +671,33 @@ func main() {
 		go sweeper.Run(ctx, redeliver.Interval, leases)
 	} else {
 		slog.Info("dispatch: webhook redelivery off: it needs NATS and the GitHub App private key")
+	}
+
+	// INFRA-1211: a webhook that never arrived leaves a head short of a check, and a head short
+	// of a check never settles, so every interval one process reads each open pull request's head
+	// from GitHub and records the completed checks Envoy's record of that head lacks. It is a
+	// timer that stays, as the webhook redelivery sweep and the delivery reconcile beside it are:
+	// GitHub has no feed of the webhook it never delivered, so there is nothing to wake on.
+	reconciler, err := ciReconciler(natsClient, database, appCfg, boot.GitHubAPIBase, boot.ReviewerAppID)
+	if err != nil {
+		slog.Error("dispatch: open the CI reconcile pass", "error", err)
+		os.Exit(1)
+	}
+	if reconciler != nil {
+		interval := cireconcile.Interval
+		if boot.CIReconcileInterval > 0 {
+			interval = boot.CIReconcileInterval
+		}
+		slog.Info("dispatch: reconciling the CI records GitHub's webhook never delivered", "client_id", appCfg.ClientID, "interval", interval)
+		if boot.ReviewerAppID == "" {
+			slog.Info("dispatch: the CI reconcile pass records no tester or architect check run: DISPATCH_REVIEWER_APP_ID is unset, so no App's verdict checks are trusted")
+		}
+		// The period argument is what makes one process serve each period (duty_passes): the
+		// lease alone only keeps two passes from overlapping, and the App's budget pays for every
+		// pass that runs.
+		go duty.RunLeased(ctx, leases, cireconcile.Lease, interval, duty.TickAfterInterval, reconciler.Pass)
+	} else {
+		slog.Info("dispatch: CI reconcile off: it needs NATS and the GitHub App private key")
 	}
 
 	go architecture.Run(ctx, appCtx.Architecture(), leases)
@@ -922,24 +986,31 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		target *time.Duration
 	}{
 		{"DISPATCH_TEST_SETTLE_DELAY", &boot.SettleDelay},
+		{"DISPATCH_TEST_MARK_WAIT", &boot.MarkWait},
+		{"DISPATCH_TEST_UNRECORDED_MARK_TTL", &boot.UnrecordedMarkTTL},
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
+		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
+		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
 			return bootConfig{}, err
 		}
 	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_ROSTER_UNCACHED")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED")
-		}
-		boot.ListenerRosterUncached = raw == "1"
+	if boot.ReviewerAppID, err = reviewerAppID(env); err != nil {
+		return bootConfig{}, err
 	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_RECONCILE_AT_START")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_RECONCILE_AT_START")
+	for _, setting := range []struct {
+		name   string
+		target *bool
+	}{
+		{"DISPATCH_TEST_ROSTER_UNCACHED", &boot.ListenerRosterUncached},
+		{"DISPATCH_TEST_EMBEDDER_OFF", &boot.EmbedderOff},
+		{"DISPATCH_TEST_RECONCILE_AT_START", &boot.ReconcileAtStart},
+	} {
+		if err := testHookBool(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
+			return bootConfig{}, err
 		}
-		boot.ReconcileAtStart = raw == "1"
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
@@ -1010,6 +1081,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	boot.Embedder, err = resolveEmbedder(env)
 	if err != nil {
 		return bootConfig{}, err
+	}
+	// The dev embedder's vectors mean nothing beyond the words a text and a query share, so a
+	// deployment that set it would answer meaning search with them and never know.
+	if !devSignIn && boot.Embedder.Place == embed.PlaceDev {
+		return bootConfig{}, errors.New("DISPATCH_DEV_EMBEDDER is read only with DISPATCH_DEV_SIGNIN=1, by the processes of one local harness; unset it, and set DISPATCH_EMBEDDER to embed a deployment's text at a model service")
 	}
 
 	if devSignIn {
@@ -1255,6 +1331,17 @@ func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeou
 		})
 }
 
+const reviewContentHashFillTimeout = 30 * time.Second
+
+// fillReviewContentHashes pins reviews from before the hash columns were added.
+func fillReviewContentHashes(ctx context.Context, pool *store.Pool, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: fill reviews' content hashes", "dispatch: filled reviews' content hashes",
+		func(ctx context.Context) ([]any, error) {
+			result, err := docs.FillReviewContentHashes(ctx, pool)
+			return []any{"filled", result.Filled, "unhashable", result.Unhashable}, err
+		})
+}
+
 // issueAskRepairBootTimeout bounds the boot's repair of the asks of closed and reopened issues.
 // Each issue commits on its own, so a repair cut short keeps what it repaired, and the interval
 // pass (api.RunIssueAskRepair) repairs what it left.
@@ -1306,6 +1393,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
 	built.RouteRosterTTL = boot.RouteRosterTTL
+	built.ListenerTakeoverWindow = boot.ListenerTakeoverWindow
 	built.ListenerRosterUncached = boot.ListenerRosterUncached
 	built.DevSignIn = boot.DevSignIn
 	return built
@@ -1590,6 +1678,22 @@ func testHookDuration(env settingValues, name string, testHooksEnabled bool, tar
 		return fmt.Errorf("%s=%q (expected a positive Go duration)", name, raw)
 	}
 	*target = value
+	return nil
+}
+
+// testHookBool reads the test-only yes/no setting name into target, leaving target as it is when
+// the setting is unset. Such a setting is refused without DISPATCH_TEST_HOOKS=1; set, only "1"
+// turns the hook on, so a value meant as a yes in another spelling leaves it off rather than
+// quietly changing the server a test reads.
+func testHookBool(env settingValues, name string, testHooksEnabled bool, target *bool) error {
+	raw := strings.TrimSpace(env.get(name))
+	if raw == "" {
+		return nil
+	}
+	if !testHooksEnabled {
+		return fmt.Errorf("DISPATCH_TEST_HOOKS=1 required with %s", name)
+	}
+	*target = raw == "1"
 	return nil
 }
 

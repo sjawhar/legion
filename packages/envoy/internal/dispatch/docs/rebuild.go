@@ -103,7 +103,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	if err := pmdoc.AskContentError(tree); err != nil {
+	if err := validateWrittenAskBlocks(tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {

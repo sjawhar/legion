@@ -1,8 +1,9 @@
 # Pi Envoy Extension
 
 Tracked Oh My Pi extension package `@sjawhar/pi-envoy`: the Envoy messaging and Dispatch tools
-every session loads, in one entry, `extensions/envoy.ts`, with the five skills every session with
-Dispatch reads (`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `envoy`) staged into
+every session loads, in one entry, `extensions/envoy.ts`, with the eight skills every session with
+Dispatch reads (`agent-secrets`, `asd-ste100`, `dispatch`, `dispatch-first`,
+`dispatch-writing-specs`, `envoy`, `outside-message`, `plain-words`) staged into
 `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. The Legion entry, its
 modules, agents and skills are `@sjawhar/pi-legion` (`packages/pi-legion`, its `AGENTS.md`), which a
 Legion pane loads beside this plugin and which reaches it through the interface in
@@ -203,7 +204,12 @@ built-in printed (`/session`'s `Session:`, `Title:` and `CWD:` lines; `/compact`
 submits), that a built-in only the terminal runs (`/new`, `/resume`) runs only in the session's own
 terminal and nothing was sent, that a host mode which does not wire the method (an SDK embedder, a
 guest in a shared session) did not run it and nothing was sent, or why the host failed it; a
-prompt, skill or command that printed nothing gets no reply. On a host without `sendUserInput` a
+prompt, skill or command that printed nothing gets no reply. The reply is posted whole: nothing
+here cuts it, Dispatch holds it to the bounds the server owns, and a refusal from Dispatch
+(`DispatchServiceError.fromDispatch`) is posted in its place as
+`Your command ran, and Dispatch refused its output: <the server's words>`, so a person who typed
+a command whose output holds a block over the bound reads why rather than nothing. On a host
+without `sendUserInput` a
 body that starts with `/` is not sent, since the host would hand it to the model as words, and the
 reply names the host's Oh My Pi version and says nothing was sent; any other body goes through
 `pi.sendUserMessage` as before. The live view's model and thinking-level switch is this path too: a
@@ -1121,7 +1127,7 @@ state never nudges.
 | The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts`, `package.json`'s `omp.bin` | The extension registers no Dispatch tool: Oh My Pi puts the plugin's `bin/` on `PATH` from `omp.bin`, and at load the extension puts it first on `PATH` itself only when no entry already resolves to it, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
 | Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no Dispatch or Envoy section and turns AskGate off (its "AskGate" tests turn it on, with the host modules stood in) with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
 | AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules-check.ts`, `breaker.ts`, `decision-record.ts` (the Dispatch record of each rule decision, each override and each unmarked write that carries an ask) and `text.ts` its modules, the seven prompt files (`*.md`), `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and the report: `scripts/askgate-report.ts` over the `advisor-gate` entries on disk (`--sessions`), which also reads the command line of both modes, `scripts/askgate-report-dispatch.ts` over a project's decision documents (`--dispatch-project`), and `scripts/askgate-report-common.ts` what the two count with. The gate's own Dispatch, like the extension's, is built by `src/dispatch-session.ts` |
-| Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The five skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
+| Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The eight skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |

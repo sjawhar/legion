@@ -1,4 +1,7 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { expect, type Page, type TestInfo, test, type WebSocketRoute } from "@playwright/test";
+
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import { PIPELINE_AT, seedDeliveryFixture, seedPipelineFixture } from "./delivery-seed";
 import { seedDeliveryReconcileGithub } from "./fake-github-helpers";
 import { sql } from "./psql";
@@ -195,6 +198,17 @@ function insertMergedPR(
   );
 }
 
+/** Inserts a merged pull request and waits for the delta it sends, which marks every frame the
+ *  view had already sent on `live`'s subscription. */
+async function insertMarkerDelta(
+  live: LiveSocket,
+  number: number,
+  title: string
+): Promise<LiveFrame> {
+  await insertMergedPR(number, title);
+  return waitForFrame(live.frames, (frame) => deltaIncludesPR(frame, `acme/widgets#${number}`));
+}
+
 async function deliveryRequest(page: Page, path: string): Promise<unknown> {
   const response = await page.request.get(path, { headers: { Authorization: "Bearer e2e-token" } });
   expect(response.status()).toBe(200);
@@ -282,14 +296,19 @@ test("a reconcile-style re-write sends no frame", async ({ browser }) => {
     const live = await openLiveDelivery(page);
     const snapshot = await waitForFrame(live.frames, (frame) => frame.type === "snapshot");
     const sub = snapshotSubscription(snapshot);
-    await page.waitForTimeout(100);
+    // The snapshot's own trailing frames land first; a short margin of real time keeps them out
+    // of the window this row reads.
+    await sleep(100);
     const before = live.frames.length;
     await sql(
       `UPDATE delivery_pull_requests SET updated_at = now() WHERE repo = 'acme/widgets' AND number = 1`
     );
-    await page.waitForTimeout(5_000);
+    // A re-write that changes nothing sends no frame, and nothing marks a frame that never
+    // comes. A later insert does: frames for one view arrive in order on one subscription, so
+    // once the marker's delta is in, every frame the re-write could have caused is in too.
+    const marker = await insertMarkerDelta(live, 697, "feat: the marker after the re-write");
     const data = live.frames
-      .slice(before)
+      .slice(before, live.frames.indexOf(marker))
       .filter(
         (frame) => (frame.type === "snapshot" || frame.type === "delta") && frame.sub === sub
       );
@@ -336,6 +355,10 @@ test("after every socket is dropped, the page resumes and equals the GET answer"
   const page = await context.newPage();
 
   try {
+    // The page waits a draw from [0, RECONNECT_SPREAD_MS) (`web/src/api/live-socket.ts`) before
+    // it reopens; its own clock spends it. The jump repeats because the 1012 close may not have
+    // reached the page when the first one lands.
+    await page.clock.install();
     await openLiveDelivery(page);
     await insertMergedPR(693, "feat: before the reconnect");
     await expect(page.getByText("feat: before the reconnect", { exact: true })).toBeVisible();
@@ -345,9 +368,15 @@ test("after every socket is dropped, the page resumes and equals the GET answer"
     });
     expect(disconnected.status()).toBe(200);
     await insertMergedPR(694, "feat: while the socket reconnects");
-    await expect(
-      page.getByText("feat: while the socket reconnects", { exact: true })
-    ).toBeVisible();
+    await expect
+      .poll(
+        async () => {
+          await page.clock.fastForward(RECONNECT_SPREAD_MS);
+          return page.getByText("feat: while the socket reconnects", { exact: true }).count();
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(1);
 
     const body = await deliveryRequest(
       page,
@@ -466,8 +495,7 @@ test("on a phone the delivery page shows a merge without a reload", async ({
   const page = await context.newPage();
 
   try {
-    await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+    // The delivery page is opened directly: this row never asserts arriving from the Inbox.
     await openDeliveryPage(page);
     const freshness = page
       .getByRole("region", { name: "Source freshness" })

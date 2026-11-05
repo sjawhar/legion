@@ -1,0 +1,65 @@
+{
+  "releases": [
+    {
+      "id": 101,
+      "issue": "LEGION-208",
+      "generation": 3,
+      "roles": [
+        "implementer",
+        "tester"
+      ],
+      "at": "2026-11-01T12:00:00Z",
+      "bundleBytes": 4096
+    },
+    {
+      "id": 102,
+      "issue": "LEGION-209",
+      "generation": 1,
+      "roles": [],
+      "at": "2026-11-01T12:15:00Z",
+      "bundleBytes": 0
+    }
+  ],
+  "resumes": [
+    {
+      "id": 201,
+      "release": 101,
+      "issue": "LEGION-208",
+      "role": "implementer",
+      "kind": "delivery",
+      "at": "2026-11-01T12:30:00Z",
+      "podReadyAt": "2026-11-01T12:31:00Z",
+      "firstTurnAt": "2026-11-01T12:32:00Z",
+      "stuck": false
+    },
+    {
+      "id": 202,
+      "release": 0,
+      "issue": "LEGION-207",
+      "role": "architect",
+      "kind": "backstop",
+      "at": "2026-11-01T12:45:00Z",
+      "podReadyAt": "2026-11-01T12:46:00Z",
+      "stuck": true
+    }
+  ],
+  "holds": [
+    {
+      "id": 301,
+      "issue": "LEGION-210",
+      "reason": "background_work",
+      "detail": "subagent,async-job",
+      "firstAt": "2026-11-01T13:00:00Z",
+      "at": "2026-11-01T13:10:00Z",
+      "passes": 11
+    },
+    {
+      "id": 302,
+      "issue": "LEGION-211",
+      "reason": "overtaken",
+      "firstAt": "2026-11-01T13:05:00Z",
+      "at": "2026-11-01T13:05:00Z",
+      "passes": 1
+    }
+  ]
+}

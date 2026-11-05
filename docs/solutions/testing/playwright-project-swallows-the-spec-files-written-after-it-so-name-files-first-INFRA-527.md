@@ -21,8 +21,10 @@ Extends docs/solutions/testing/a-layout-change-is-proven-by-the-whole-project-an
 - **Write the spec files before `--project`, or use `--project=<name>`.** `--project` takes a
   list, so the file names after `--project chromium` are read as more project names:
   `bun run e2e -- e2e/a.e2e.ts e2e/b.e2e.ts --project=chromium --project=iphone`.
-- **Split a whole-project run to fit a command's time limit.** The suite runs one worker
-  (`workers: 1`, `e2e/playwright.config.ts`). In an issue pod the whole `chromium` project did not
+- **Split a whole-project run to fit a command's time limit.** The suite runs one worker per
+  lane (`workers: lanes`, `e2e/playwright.config.ts`), and a run that sets no
+  `DISPATCH_E2E_WORKERS` has one lane and so one worker, which is what a pod runs. In an issue
+  pod the whole `chromium` project did not
   finish in 3,500 s. Run it as two halves of the spec list, and write a run that a limit cut short
   as cut short, naming the files it did not reach.
 

@@ -19,6 +19,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): 2.1 s - a two-task plan and its plan review seeded, then one load of the Plan tab,
+// which opens the plan's live document room and resolves the four references the two tasks draw
+// (each task's own block title, both `serves` pointers and the one `needs` pointer) before the
+// first of the row's assertions can read.
 test("the Plan tab shows each plan task with the requirements it serves and the tasks it needs, and the plan review's approval", async ({
   browser,
 }, testInfo) => {

@@ -1,5 +1,50 @@
 # Changelog
 
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- Document reads print the version's content SHA-256 and the approval's pinned hash. Approvals hashed after they were recorded are labeled as such; older servers keep the existing output when they do not report hashes.
+
+## [main@804d3695e12e] - 2026-11-05
+
+### Added
+
+- A session whose Dispatch or Envoy listener names no bearer at all now presents the access
+  token the secrets broker mints for this machine's own identity: a pod's projected
+  service-account token, or a Compute Engine machine's Google identity token, traded at
+  `AGENT_SECRETS_URL` through `@legion/broker-client` when `AGENT_SECRETS_MACHINE_IDENTITY`
+  names one. That token is bound to a key this process makes, so every request carries
+  `Authorization: DPoP <token>` and a proof of that key naming the request and hashing the
+  token (RFC 9449); `src/bearer.ts` holds a bearer and that credential as one
+  `RequestCredential`, and a resolved section carries exactly one of them in its `credential`
+  field. `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `ENVOY_TOKEN`, `ENVOY_TOKEN_FILE` and an
+  envoy.json's own token are resolved first and unchanged, so a session that has one behaves
+  exactly as it did.
+
+
+### Changed
+
+- A resolved Dispatch and a resolved Envoy carry one credential, not two: `ActiveDispatchConfig`
+  and `EnabledEnvoySettings` have a single `credential` field, and `DispatchClient` and the
+  listener client take only a `RequestCredential`. The `token` and `brokered` fields, the
+  `dispatchCredential` and `envoyCredential` helpers and the empty-string guard are gone, so a
+  caller can no longer present half of a credential and the compiler names every call site. Both
+  resolvers take the session a broker trade writes under, as a name or as a function read at every
+  trade, since one process holds more than one session over its life.
+
+
+### Fixed
+
+- Three ways the secrets broker could take a working session down are closed. The broker's `429`
+  no longer drops the access token in hand: it is the one refusal a later trade may answer
+  differently, so a client that holds a live token keeps writing with it until that token lapses,
+  as the Go client does, and the shared wire corpus both clients replay now carries a `429`
+  exchange. `AGENT_SECRETS_MACHINE_IDENTITY=pool` reads as a machine with no TypeScript route
+  rather than an error, so Envoy stays on where only the Go client can federate. And a credential
+  this machine could not mint no longer fails a listener that asks for none: the request goes
+  without it, and only a `401` or `403` reports the failed trade.
+
 ## [main@43a994db0ea1] - 2026-11-04
 
 ### Added
