@@ -165,7 +165,10 @@ type Config struct {
 	MaxFixAttempts  int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
-	// admission's rule (admit.Admission.wakeController and its callers).
+	// admission's rule (admit.Admission.wakeController and its callers). The same tick runs the
+	// workflow's status repair (workflow.Engine.correctStatuses), so this period is also how long
+	// an issue's Dispatch status can stand wrong before the daemon puts it back: an operator who
+	// raises it to quiet the controller slows that repair by as much.
 	ControllerWakeInterval time.Duration
 	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
 	// the file says the daemon does.
@@ -240,7 +243,7 @@ var countKeys = []struct {
 // would.
 var tossedKeys = map[string]string{
 	"worker_cap":                 "the running-worker cap no longer exists (LEGION-208 Requirement 8)",
-	"worker_idle_retire_seconds": `a worker stays live from its role's first assignment until its issue closes, and nothing retires it after an idle window (LEGION-462)`,
+	"worker_idle_retire_seconds": `an idle window retires no worker: it releases the worker's issue pod, and the key for it is runtime.kubernetes.idle_release (idle_minutes, backstop_minutes), which suspends every claim of the released pod with the source released and brings them back on the next wake (INFRA-945)`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
 }
@@ -1004,6 +1007,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	cfg.WorkerBackends = file.WorkerBackends
 	cfg.RoleConfigFiles = file.RoleConfigFiles
 	if err := checkRoleConfigFiles(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkMemory(cfg); err != nil {
 		return Config{}, err
 	}
 	if err := checkRepositoryRenames(file, &cfg); err != nil {

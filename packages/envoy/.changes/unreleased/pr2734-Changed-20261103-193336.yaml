@@ -1,5 +1,0 @@
-kind: Changed
-body: 'The Envoy image the compose files and `deploy/scripts/autodeploy.sh` pull by default is `ghcr.io/cybermonklabs/legion/envoy`, and the broker''s refusal of a `BROKER_DATABASE_URL` with no password links its RDS IAM-token guide at `https://cybermonklabs.github.io/legion/`: this repository moved to that owner.'
-time: 2026-11-03T19:33:36.333010617Z
-custom:
-    Issue: pr2734

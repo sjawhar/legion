@@ -209,8 +209,15 @@ func TestClassOfReadsTheTemplatedPaths(t *testing.T) {
 }
 
 // Every path the refusals name is one an operator can write, and each reason says what is in the
-// way rather than only that the path is refused.
-func TestTheFixedPathsAreTheOnesBootBound(t *testing.T) {
+// way rather than only that the path is refused. A fixed path is one of two things: a thing boot
+// bound, which nothing can rebind under the work it is serving (the sockets, the store, the
+// project token, the runtime the daemon's processes run in), or a value boot settled into
+// something the daemon never builds again (the idle release, in the workflow's idle pass and the
+// outbox's backstop; a project's memory mode and instructions, in admission, the API server and
+// the launch specs). A new fixed path belongs in this list deliberately, with a reason an
+// operator can act on: the alternative is a key the route answers `rebuilt` for and that reaches
+// nothing.
+func TestTheFixedPathsAreTheOnesBootSettled(t *testing.T) {
 	var fixed []string
 	for _, row := range Classes {
 		if row.Class == ClassFixed && !slices.Contains(fixed, row.Path) {
@@ -219,9 +226,12 @@ func TestTheFixedPathsAreTheOnesBootBound(t *testing.T) {
 	}
 	slices.Sort(fixed)
 	want := []string{
-		"bind", "port", "postgres_dsn", "project", "runtime", "runtime.kubernetes",
-		"runtime.kubernetes.namespace", "runtime.tmux", "runtime.tmux.take_over", "state_dir",
-		"worker_stream_port",
+		"bind", "port", "postgres_dsn", "project", "projects.<KEY>.memory",
+		"projects.<KEY>.memory.instructions", "projects.<KEY>.memory.mode", "runtime",
+		"runtime.kubernetes", "runtime.kubernetes.idle_release",
+		"runtime.kubernetes.idle_release.backstop_minutes",
+		"runtime.kubernetes.idle_release.idle_minutes", "runtime.kubernetes.namespace",
+		"runtime.tmux", "runtime.tmux.take_over", "state_dir", "worker_stream_port",
 	}
 	if !slices.Equal(fixed, want) {
 		t.Errorf("the fixed paths are %q, want %q", fixed, want)

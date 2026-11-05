@@ -210,8 +210,35 @@ func awaitsMerge(issue record.Issue) bool {
 // reaches planning, and is running again from the reopen. It is the production check's "runs
 // again" predicate (check.go) and the outbox's (checkLookHolds): a look of an issue that runs
 // again would resume the implementer and relaunch its Sandbox under the run, so none starts.
+//
+// The rule itself is pods.Standing.InWorkflow, which the pod gate reads with the issue's linger
+// (pods.InWorkflowNotLingering) and this reads without it: one statement, so a terminal phase
+// added to it moves admission, the linger, the production check and the release gate together.
 func InWorkflow(issue record.Issue) bool {
-	return !record.OutOfWorkflow(issue.Status) && issue.Phase != phase.Done
+	return issue.Standing().InWorkflow(record.OutOfWorkflow)
+}
+
+// runningTree is issue's tree's root, and whether the daemon is running that tree: the root is
+// recorded, holds an admission slot, and does not linger. byKey and slotted are one read of the
+// issues and one of the slots, indexed (indexIssues). The boot's resume and the status repair both
+// ask it, so the rule is stated once: a root waiting for a slot can carry a workflow phase of its
+// own, and a lingering tree runs nothing.
+func runningTree(byKey map[string]record.Issue, slotted map[string]bool, issue record.Issue) (record.Issue, bool) {
+	root, ok := byKey[issue.Tree]
+	return root, ok && slotted[root.Key] && !root.Lingers()
+}
+
+// indexIssues is issues by key and the keys slots holds, the pair runningTree reads.
+func indexIssues(issues []record.Issue, slots []record.Slot) (map[string]record.Issue, map[string]bool) {
+	byKey := make(map[string]record.Issue, len(issues))
+	for _, issue := range issues {
+		byKey[issue.Key] = issue
+	}
+	slotted := make(map[string]bool, len(slots))
+	for _, slot := range slots {
+		slotted[slot.Issue] = true
+	}
+	return byKey, slotted
 }
 
 // beginLinger suspends the root's whole tree and arms its linger deadline, ending the root's hold

@@ -122,6 +122,8 @@ const (
 	whyRuntime = "the processes the daemon supervises are that runtime's, panes of its own tmux server or pods of its Sandboxes, and no running process moves to the other"
 	whyNamespc = "every Sandbox, pod, volume, Service and Secret the daemon works with lives in it: a daemon that changed it would see none of the pods it is supervising"
 	whyTakeOve = "it is read once at boot, when the daemon adopts the claims of the tmux server it takes over; a later change has nothing left to adopt"
+	whyIdleRel = "the idle release is settled at boot into the workflow's idle pass and the outbox's backstop, and the daemon builds neither again: a change of it reaches the next boot and nothing before it"
+	whyMemory  = "a tree's memory group is drawn once, as the tree is opened, under the mode admission and the API server were given at boot, and the instructions are read at boot into the launch specs: a change of either reaches the next boot and no tree already drawn"
 )
 
 // Caller is which arm asked for a change through the settings route: what that caller may set.
@@ -303,6 +305,15 @@ var Classes = []Row{
 	{Field: "Deploy.Step", Path: "projects.<KEY>.deploys[].step", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "MergeRules.ByHand", Path: "projects.<KEY>.merge.by_hand", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "PathPattern.Expression", Path: "projects.<KEY>.merge.by_hand[]", Class: ClassRebuild, Holder: HolderAPIServer},
+	// The project's memory block: the overlays a memory-group role's Oh My Pi loads reach that
+	// role at its next launch, through the runtime that builds its pod (sandboxOptions'
+	// MemoryConfigFiles), while the mode and the instructions are settled at boot — admission
+	// draws each tree it opens under the mode it was given, the API server's own spawn reads
+	// that same value, and the instructions file is read once into the launch specs.
+	{Field: "Project.Memory", Path: "projects.<KEY>.memory", Class: ClassFixed, Why: whyMemory, Block: true},
+	{Field: "Memory.Mode", Path: "projects.<KEY>.memory.mode", Class: ClassFixed, Why: whyMemory},
+	{Field: "Memory.ConfigFiles", Path: "projects.<KEY>.memory.config_files", Class: ClassLaunch, Holder: HolderRuntime},
+	{Field: "Memory.InstructionsPath", Path: "projects.<KEY>.memory.instructions", Class: ClassFixed, Why: whyMemory},
 	// Each App's credential: the manager mints every role's token from it.
 	{Field: "Config.GitHubApps", Path: "github_apps", Class: ClassRebuild, Holder: HolderGitHubApps, Block: true},
 	{Field: "GitHubApps.Implement", Path: "github_apps.implement", Class: ClassRebuild, Holder: HolderGitHubApps, Secret: true},
@@ -339,6 +350,11 @@ var Classes = []Row{
 	// built — so every change of it rebuilds the runtime; what the operator is told is whether the
 	// value does anything before the next pod is built.
 	{Field: "Kubernetes.Namespace", Path: "runtime.kubernetes.namespace", Class: ClassFixed, Why: whyNamespc},
+	// The idle release, which the workflow settles at boot into its idle pass and the outbox's
+	// backstop (internal/daemon's workflow.go, idle.go): neither is built again.
+	{Field: "Kubernetes.IdleRelease", Path: "runtime.kubernetes.idle_release", Class: ClassFixed, Why: whyIdleRel, Block: true},
+	{Field: "IdleReleaseConfig.IdleMinutes", Path: "runtime.kubernetes.idle_release.idle_minutes", Class: ClassFixed, Why: whyIdleRel},
+	{Field: "IdleReleaseConfig.BackstopMinutes", Path: "runtime.kubernetes.idle_release.backstop_minutes", Class: ClassFixed, Why: whyIdleRel},
 	{Field: "Kubernetes.Image", Path: "runtime.kubernetes.image", Class: ClassLaunch, Holder: HolderRuntime},
 	{Field: "Kubernetes.StorageClass", Path: "runtime.kubernetes.storage_class", Class: ClassLaunch, Holder: HolderRuntime},
 	{Field: "Kubernetes.IssueVolume", Path: "runtime.kubernetes.issue_volume", Class: ClassLaunch, Holder: HolderRuntime},

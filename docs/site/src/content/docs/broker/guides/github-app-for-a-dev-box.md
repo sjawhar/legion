@@ -199,8 +199,10 @@ secret:
   one time for each repository, at most 100 times. Give the repository name without the account.
   The token keeps every permission the App holds, its organization permissions too, unless you
   also give `--github-read-only`.
-- `--github-read-only` limits the token to `contents: read`, `metadata: read` and `pull_requests: read`. A machine that
-  must only read needs it, with or without `--github-repo`.
+- `--github-read-only` limits the token to `contents: read`, `metadata: read`,
+  `pull_requests: read` and `actions: read`, the last of which an App whose installation has not
+  been granted Actions does not get. A machine that must only read needs it, with or without
+  `--github-repo`.
 
 `--github-repo` and `--github-read-only` need `--github-owner`. `agent-secrets` checks the flags
 before it asks for the secret: a flag the broker would refuse exits 2, and nothing is sent.

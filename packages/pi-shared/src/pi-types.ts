@@ -92,6 +92,12 @@ export interface SessionContext {
    * a plain abort, whose queue the next run takes.
    */
   readonly hasPendingMessages?: () => boolean;
+  /**
+   * The host's `ctx.getAsyncJobSnapshot()`: this session's async-job manager as it stands now, or
+   * null when no session owns the context (upstream `docs/extensions.md`, "Handler context"). Read
+   * live from a context kept since `session_start`. Absent on a host that predates it.
+   */
+  readonly getAsyncJobSnapshot?: () => AsyncJobSnapshot | null;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     /**
@@ -101,6 +107,57 @@ export interface SessionContext {
      */
     readonly setWidget?: (key: string, lines: string[] | undefined) => void;
   };
+}
+
+/**
+ * `ctx.getAsyncJobSnapshot()`'s answer: the session's own async jobs, the running ones and the
+ * ones that have just ended, with the manager's delivery queue for the results it still owes the
+ * conversation.
+ *
+ * Measured on Oh My Pi 18.12.2, the pin this repository runs (`.omp-pin`), by reading the
+ * snapshot from an extension while a backgrounded `bash` job ran. Running:
+ * `{"running":[{"id":"bg_1","type":"bash","status":"running","label":"sleep 8",
+ * "command":"sleep 8","startTime":1793568518094,"ownerId":"Main"}],"recent":[],
+ * "delivery":{"queued":0,"delivering":false,"pendingJobIds":[]}}`; once it had ended, the same
+ * job moved to `recent` with an `endTime` beside its `startTime`.
+ */
+export interface AsyncJobSnapshot {
+  readonly running: readonly AsyncJob[];
+  /** The jobs that have ended, newest first; five of them unless the caller asked for more. */
+  readonly recent: readonly AsyncJob[];
+  readonly delivery: AsyncJobDelivery;
+}
+
+/** One async job of the session. Measured on Oh My Pi 18.12.2: `command`, `endTime`, `agentId`
+ * and `ownerId` are absent from the JSON when the host has none for the job. */
+export interface AsyncJob {
+  readonly id: string;
+  /**
+   * What registered the job with the manager. Measured on Oh My Pi 18.12.2: `bash` for a
+   * backgrounded shell command, `task` for a subagent, `eval` for an eval run. Any extension or
+   * tool may register another, so it stays a string.
+   */
+  readonly type: string;
+  /** Every status the manager writes on Oh My Pi 18.12.2. */
+  readonly status: "running" | "completed" | "failed" | "cancelled";
+  readonly label: string;
+  readonly command?: string;
+  /** Epoch milliseconds. */
+  readonly startTime: number;
+  readonly endTime?: number;
+  /** The subagent the job belongs to, and the session or agent that owns it. */
+  readonly agentId?: string;
+  readonly ownerId?: string;
+}
+
+/** The results the manager still owes the conversation: how many jobs wait, whether one is being
+ * delivered now, when the next retry is due (epoch milliseconds, absent when none is), and the
+ * jobs waiting. */
+export interface AsyncJobDelivery {
+  readonly queued: number;
+  readonly delivering: boolean;
+  readonly nextRetryAt?: number;
+  readonly pendingJobIds: readonly string[];
 }
 
 /** A side turn: one question to the session's model, answered without touching the transcript. */

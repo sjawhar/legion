@@ -1,0 +1,4 @@
+kind: Changed
+body: |-
+  The plugin declares daemon API contract 49, which adds each issue's tree memory draw to the
+  state. A daemon below 49 is refused by the boot gate, as it is for every contract change.

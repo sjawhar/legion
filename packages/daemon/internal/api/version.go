@@ -1,7 +1,7 @@
 package api
 
 // DaemonAPIVersion is the contract this daemon speaks with the Legion plugin (@sjawhar/pi-legion):
-// the claim, credential, workflow, controller and state shapes the plugin's client parses strictly
+// the claim, credential, workflow, controller and state shapes the plugin's client parses
 // (`packages/pi-shared/src/daemon-client.ts`, through
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
@@ -501,15 +501,60 @@ package api
 // change takes the number above them. Its migration is named for the moment it was written,
 // 20261029195520, since main closed the numbered series at 0067.)
 //
-// 47: INFRA-1077 -- three fields of `GET /legion/v1/state`, each refused by a strict reader
-// before 47 (`packages/contracts/src/legion-api.ts` mirrors all three). The `daemon` block names
-// the commit the daemon was built from (`commit`, the release build's own revision, empty in a
-// build that is not a release), so a reader can tell which release runs. Each pull request says
-// whether its base branch requires a check (`requiresChecks`, from the daemon's record of that
-// branch's required status checks and workflows), which is what a reader waiting on CI reads
-// beside `checksVerdict`. And a `settingSources` block beside `settings` says where each setting
-// came from — the file the daemon read or the settings route, with who asked and when — keyed by
-// the dotted `legion.yaml` path the daemon's class table writes, every settable path included,
-// the ones `settings` withholds among them, so a rotated credential is visible without the
-// credential. `settings` itself is untouched, and stays the loose object it was.
-const DaemonAPIVersion = 47
+// 48: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
+// released claim is a new suspension source. Each session reports its activity to the daemon on
+// POST /legion/v1/claims/activity, authenticated by its claim as `claims/ready` is: whether it
+// runs background work and of which kinds, and when the phase reminder armed in it is due, if
+// one still is. The daemon releases an issue pod no claim of which has reported
+// background work and none of whose phase workers is due a reminder inside the idle period
+// (`runtime.kubernetes.idle_release`), suspending each of its claims with the new
+// `suspendedBy` value `released`, which keeps the claim's phase and its pending delivery and
+// which the operator routes now serve. A released pod's unpushed work travels as a git bundle,
+// which the shim builds on the daemon's `bundle-workspace` frame and the next pod's launcher
+// restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 48
+// knows neither frame, and a shim before 48 answers none, so the image probe holds this daemon
+// and the image that runs its roles together. A claim may read the deployment's release, resume
+// and hold records on POST /legion/v1/claims/release-records, which names its claim, that
+// claim's secret and the window's start in its body, as the other claim routes do: the secret is
+// a credential, and a query string reaches every proxy and access log between the pod and the
+// daemon. No session-facing body carries the new `suspendedBy` value: the state's
+// `strandedClaims` keeps the three keys it has had since 23, and an operator reads a released
+// claim apart from a suspended one on the operator claim routes, which no plugin calls. This
+// change adds ten store migrations. (This branch took 47 while main's #2538 was unmerged; main
+// then landed 45 and, as sjawhar/legion#2538, 46, and sjawhar/legion#2539 takes 47, so this
+// branch takes the number above them, as the collision note says.)
+//
+// 49: INFRA-1101 -- the memory group of an issue's tree on `GET /legion/v1/state`. Every issue
+// record of the state gains `memoryGroup` (`memory` or `none`), `memoryDrawMode` (the project's
+// `projects.<KEY>.memory.mode` in force at the draw) and `memoryDrawnAt`, the three absent
+// together while nothing has drawn for the issue's tree; the draw is made once on the tree's root
+// record, and every issue of the tree is shown its root's (api.Issue, filled by
+// internal/projection). `packages/contracts/src/legion-api.ts` mirrors them on `legionIssue`,
+// which is a `z.strictObject`, so a reader before 49 refuses a whole state carrying any of the
+// three — and every worker's `read_record` parses the state through it. `GET /legion/v1/state`
+// authenticates nobody, so a caller from a pod whose claims record a contract below 49 is served
+// the state without them (api's stateFor, withoutMemory), as a caller below 46 is served it
+// without the claim views' update rounds; a caller below both is served it without either. The
+// settings carry the project's `memory` block (mode, config files, instructions), which every
+// plugin reads loosely and which changes no strictly parsed shape. This change adds no store
+// migration of its own: the three columns are the issue record's
+// (20261104073148_issue_memory_group), and the hand-over's answer beside them is too
+// (20261104153554_issue_memory_carried). (This branch took 47 while main's idle-release change
+// was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
+// note says.)
+//
+// 50: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
+// commit ships (`packages/contracts/src/legion-api.ts` mirrors all three), so a plugin built
+// from here refuses a state an older daemon sends. The `daemon` block names the commit the
+// daemon was built from (`commit`, the release build's own revision, empty in a build that is
+// not a release), so a reader can tell which release runs. Each pull request says whether its
+// base branch requires a check (`requiresChecks`, from the daemon's record of that branch's
+// required status checks and workflows), which is what a reader waiting on CI reads beside
+// `checksVerdict`. And a `settingSources` block beside `settings` says where each setting came
+// from — the file the daemon read or the settings route, with who asked and when — keyed by the
+// dotted `legion.yaml` path the daemon's class table writes, every settable path included, the
+// ones `settings` withholds among them, so a rotated credential is visible without the
+// credential. `settings` itself is untouched, and stays the loose object it was. (This branch
+// took 47 while main's idle release and memory group were unmerged; main landed them as 48 and
+// 49, so this branch takes the number above them, as the collision note says.)
+const DaemonAPIVersion = 50

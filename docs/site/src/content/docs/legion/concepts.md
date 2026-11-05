@@ -62,9 +62,11 @@ reaches it through Dispatch. The daemon wakes it when something needs a judgment
 
 The daemon also wakes it when an admission slot frees and on a timer, every
 `controller_wake_interval_seconds` (an hour by default), and on its first turn of each UTC day the
-controller posts a report on what Legion finished, closed and is running. A free slot is never a
-reason for the controller to take an issue: it takes only what a person hands over and the clear
-defects Legion's agents report.
+controller posts a report on what Legion finished, closed and is running. That same timer runs the
+daemon's status repair, which puts back the Dispatch status of any issue Legion works whose status
+is not the status of the phase it stands in, so a longer interval slows that repair as well. A free
+slot is never a reason for the controller to take an issue: it takes only what a person hands over
+and the clear defects Legion's agents report.
 
 No Legion agent files an issue for a problem it finds outside its own issue. A defect with a clear
 fix in code the agent's own tree touches or depends on is fixed in that tree's pull request, while
@@ -100,9 +102,13 @@ of its own, inside the same tree.
 
 ## Phase workers
 
-The daemon starts each phase's worker itself, one phase at a time, in the order below. A role stays
-live and idle between its assignments until its issue leaves the workflow, so its next task reaches
-the same session.
+The daemon starts each phase's worker itself, one phase at a time, in the order below. A role keeps
+its session between its assignments until its issue leaves the workflow, so its next task reaches
+the same session. Under the Kubernetes runtime the pod is shorter-lived than the session: the
+daemon releases an issue's pod once no role of it has a turn in progress or a turn due for ten
+minutes, after saving the workspace's unpushed work, and the next wake for one of its roles — a
+task, a notice, a message to the role or to its session, or a CI settlement on the pull request's
+head — brings the pod back and resumes the same sessions where they stopped.
 
 | Phase | Worker | What it does | GitHub identity |
 | --- | --- | --- | --- |
@@ -156,8 +162,8 @@ off a waiting root takes it out of line; taking it off a running tree does not s
 A root whose architect asked you a question and now waits only on your answer gives its slot back
 rather than holding the project up: once nothing else of its tree runs and the architect has taken
 the task it was last given, the root moves to `awaiting_person` and the slot goes to the next root
-in line at once. Its architect stays live and reads your comments and replies as they arrive. Its
-tree stays live for its children, and `waitingOn` in `legion state` names the question and when the
+in line at once. Its architect keeps its pod, reading your comments and replies as they arrive.
+Its tree stays live for its children, and `waitingOn` in `legion state` names the question and when the
 wait began. Your act on any ask of the root answers it, whichever ask the wait names: your answer,
 resolution, or reply that hands an open ask back to the agent; so does your approval or changes
 request of the root's spec, and so does the spec's design gate standing open. The wait also ends

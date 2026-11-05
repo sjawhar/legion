@@ -347,6 +347,9 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 // stream's address, the connection directory and the token source, which boot hands the factory.
 // The issue pod's one container gets runtime.kubernetes.resources.issue as its requirements, and
 // the daemon-launched controller's container runtime.kubernetes.resources.controller (requirements).
+// The project's memory overlays (`memory.config_files`) reach the runtime whatever its mode is,
+// as they reach tmuxOptions: a tree already drawn into the memory group names them under any
+// mode, and a project with no block hands over none.
 // lookup is the daemon's environment, which can name the NATS nkey seed (launchSecrets).
 func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
 	issueVolume, err := resource.ParseQuantity(k.IssueVolume)
@@ -375,7 +378,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 	if err != nil {
 		return sandbox.Options{}, err
 	}
-	return sandbox.Options{
+	opts := sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, IssueVolume: issueVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
 		Resources:  sandbox.PodResources{Issue: issue, Controller: controller},
@@ -407,7 +410,9 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		AgentSecrets:          agentSecrets,
 		RepositoryCache:       cache,
 		Log:                   log,
-	}, nil
+	}
+	opts.MemoryConfigFiles = cfg.Projects[cfg.Project].Memory.ConfigFiles
+	return opts, nil
 }
 
 // repositoryCache is runtime.kubernetes.repository_cache as the runtime takes it: the volume as a
@@ -524,14 +529,25 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // bundle (gitHubCredential, a directory for each of owners) and the owner set those directories
 // are built from (appauth.GitHubOwners), which the runtime reads a running pod's gh projection
 // against, with the workflow's mapping as the repositories its repository caches follow (mapped),
-// and registers its launcher acceptor on the stream listener. A daemon with no GitHub Apps hands
-// it neither tokens nor a mapping, and sandbox.New's own refusal names what is missing. Boot has
-// already run the cluster check (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of
-// a layout before this one — per-claim pods, or issue pods on one tree volume — remains.
+// with the store's own workspace bundles as what a replacement pod's launcher is sent and what
+// its restore drops, and registers its launcher acceptor on the stream listener. A daemon with no
+// GitHub Apps hands it neither tokens nor a mapping, and sandbox.New's own refusal names what is
+// missing. Boot has already run the cluster check (plan.clusterCheck): Agent Sandbox is installed
+// and no Sandbox of a layout before this one — per-claim pods, or issue pods on one tree volume —
+// remains.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string, renames ghrepo.Renames) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
+		// The two halves of the release's saved work: an idle release puts the issue's unpushed
+		// work here (outbox's release), and the runtime hands it to the launcher of the pod that
+		// replaces the released one before any role of that pod starts. The confirmation deletes
+		// the bundle of the release the launcher's report names and no other, so a report that
+		// arrives late takes no newer release's work with it. The read is the bundle's one restore
+		// attempt: the first pod that is not the one the work came off takes it, whether the
+		// bundle is sent or that pod is refused as no newer than the save, and nothing is
+		// answered for that bundle again.
+		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
 			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)

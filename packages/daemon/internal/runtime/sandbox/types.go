@@ -133,6 +133,14 @@ type Options struct {
 	// operator's mounts', which every pod and the image probe's carry, and the image probe reads
 	// every role's (probeManifest). Nil is none.
 	RoleConfigFiles map[claim.Role][]string
+	// MemoryConfigFiles is the project's `memory.config_files`: absolute paths of Oh My Pi
+	// settings overlays a role whose tree is in the memory group (runtime.SpawnSpec.Memory) names
+	// last in PI_CONFIG_FILES, after the operator's own and the role's own, so they outrank both
+	// (roleOperatorEnv). The files are the operator's mounts', as a role's own are, and the image
+	// probe reads them with every workflow role's (probeManifest). The daemon hands them over
+	// whatever the project's mode is, since a tree already drawn into the memory group names them
+	// under any mode; a project with no block names none. Nil is none.
+	MemoryConfigFiles []string
 	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret
 	// (ProvidersSecretName) that holds its value. With any, every pod mounts exactly those keys at
 	// ProvidersDir and the worker's shim exports them into Oh My Pi's environment alone; with none,
@@ -241,6 +249,14 @@ type Options struct {
 	// sweep makes or repairs each one's cache (EnsureRepositoryCache), and retires the cache of a
 	// repository it no longer names once that cache's retention passes. Required for supervision.
 	Mapped func() []ghrepo.Repository
+	// SavedWorkspaceBundle is the bundle an issue's last release saved, and WorkspaceBundleRestored
+	// the confirmation that drops it once the issue's new pod holds it. The pair carries the work a
+	// release took off the released pod's disk back into the pod that replaces it: the runtime
+	// sends it to that pod's launcher before any role of the pod starts (launchers.restoreWorkspace),
+	// and confirms it on the launcher's Held. The daemon fills them from its store; a runtime given
+	// neither restores nothing, which is what a pod whose issue was never released does anyway.
+	SavedWorkspaceBundle    runtime.SavedWorkspaceBundle
+	WorkspaceBundleRestored runtime.WorkspaceBundleRestored
 	// Now stamps observations and ages pods and orphans; time.Now when nil.
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
