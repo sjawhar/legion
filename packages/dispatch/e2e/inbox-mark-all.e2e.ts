@@ -1,7 +1,9 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { GROUP_PAGE } from "../web/src/features/inbox/InboxGroups";
 
 import { setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, listMyReplies } from "./api";
+import { typeFilterCount } from "./inbox-filter";
 import {
   asSession,
   compactInboxLink,
@@ -22,8 +24,12 @@ import { asUser } from "./users";
 
 /**
  * The Inbox's **Mark all read** (INFRA-450): one click over a list of six hundred and twenty
- * unread threads, what it takes off the page before the server answers, what the server's
- * answer leaves behind, and what comes back when it refuses.
+ * unread threads, what it takes off the counts before the server answers, what it leaves in the
+ * list, and what comes back when it refuses.
+ *
+ * A thread stays in the Inbox, read or not, until the reader dismisses it, so one click changes
+ * how every row is drawn and takes none of them away (`e2e/inbox-dismiss.e2e.ts` is the Dismiss
+ * that does).
  *
  * Everything here is made up: this repository is public, so nothing names a real person, host or
  * project.
@@ -65,51 +71,11 @@ async function seedMany(): Promise<Seeded> {
   return { issueKey: threads.key };
 }
 
-/** The **View** menu, opened. */
-async function openView(page: Page, within: Locator): Promise<Locator> {
-  const menu = page.getByRole("menu", { name: "View" });
-  if ((await menu.count()) === 0) await within.locator("[data-inbox-view]").click();
-  await expect(menu).toHaveCount(1);
-  return menu;
-}
-
-/** What the **Unread** side of the read-threads switch says it holds. The menu is shut again by
- *  its own trigger: Escape there is the drawer's, which would close the peek with it. */
-async function unreadSwitchLabel(page: Page, within: Locator): Promise<string> {
-  const menu = await openView(page, within);
-  const label = (
-    (await menu
-      .getByRole("group", { name: "Show read threads" })
-      .locator('[data-inbox-view-choice="unread"]')
-      .locator("xpath=..")
-      .textContent()) ?? ""
-  ).trim();
-  await within.locator("[data-inbox-view]").click();
-  await expect(menu).toHaveCount(0);
-  return label;
-}
-
-/** How many rows the Type filter counts for one of the two thread kinds. */
-async function typeCount(page: Page, within: Locator, name: string): Promise<number> {
-  if ((await page.locator("[data-inbox-filter-fields]").count()) === 0) {
-    await within.locator("[data-inbox-filter]").click();
-  }
-  const trigger = within.getByRole("button", { name: "Filter by type" });
-  if ((await trigger.getAttribute("aria-expanded")) !== "true") await trigger.click();
-  const options = page.getByRole("listbox", { name: "Type options" });
-  const label =
-    (await options
-      .getByRole("option", { name: new RegExp(`^${name},`) })
-      .getAttribute("aria-label")) ?? "";
-  await page.keyboard.press("Escape");
-  return Number(label.replace(`${name}, `, "").replace(" rows", ""));
-}
-
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("one click marks six hundred and twenty threads read, and the counts stay down", async ({
+test("one click marks six hundred and twenty threads read, leaves every row in the list, and the counts stay down", async ({
   browser,
 }) => {
   const seeded = await seedMany();
@@ -120,27 +86,38 @@ test("one click marks six hundred and twenty threads read, and the counts stay d
     const rows = page.locator("[data-inbox-row]");
     await expect(rows.first()).toBeVisible();
     const inbox = page.locator("[data-inbox-bar]");
+    const unreadMarks = page.locator("[data-inbox-row] [aria-label='Unread']");
     await expectSidebarInboxCount(page, ASKS + REPLY_THREADS + AGENT_THREADS);
-    expect(await unreadSwitchLabel(page, inbox)).toBe(`Unread ${REPLY_THREADS + AGENT_THREADS}`);
+    // Six hundred and twenty-two rows stand in the one band this seed makes - no issue here
+    // carries a priority - so the band draws its first page of them, the two open asks among
+    // them, and every thread row it draws is unread.
+    const threadRows = page.locator('[data-inbox-row^="reply:"], [data-inbox-row^="agent:"]');
+    await expect(rows).toHaveCount(GROUP_PAGE);
+    await expect(threadRows).toHaveCount(GROUP_PAGE - ASKS);
+    await expect(unreadMarks).toHaveCount(GROUP_PAGE - ASKS);
 
-    // One click, with the request held open: the page is already at zero.
+    // One click, with the request held open: every row is drawn as read where it stands, the
+    // Type filter still counts all of them, and the reader's Inbox number is already at zero.
     const held = await holdPosts(page, MARK_ALL);
     await inbox.locator("[data-inbox-mark-all]").click();
     await expect(page.locator("[data-inbox-mark-all]")).toHaveCount(0);
-    expect(await unreadSwitchLabel(page, inbox)).toBe("Unread 0");
-    expect(await typeCount(page, inbox, "Reply")).toBe(0);
-    expect(await typeCount(page, inbox, "Agent message")).toBe(0);
+    await expect(unreadMarks).toHaveCount(0);
+    await expect(rows).toHaveCount(GROUP_PAGE);
+    expect(await typeFilterCount(page, inbox, "Reply")).toBe(REPLY_THREADS);
+    expect(await typeFilterCount(page, inbox, "Agent message")).toBe(AGENT_THREADS);
     await expectSidebarInboxCount(page, ASKS);
-    await expect(rows).toHaveCount(ASKS);
 
-    // The server answers; a reload reads the same numbers back from it.
+    // The server answers; a reload reads the same list and the same numbers back from it, every
+    // marked thread still in the Inbox and drawn as read.
     held.release();
     await held.settled();
     await expect.poll(async () => unreadThreadRows()).toBe(0);
     await page.reload();
-    await expect(rows).toHaveCount(ASKS);
+    await expect(rows).toHaveCount(GROUP_PAGE);
+    await expect(unreadMarks).toHaveCount(0);
     await expectSidebarInboxCount(page, ASKS);
-    expect(await unreadSwitchLabel(page, inbox)).toBe("Unread 0");
+    expect(await typeFilterCount(page, inbox, "Reply")).toBe(REPLY_THREADS);
+    expect(await typeFilterCount(page, inbox, "Agent message")).toBe(AGENT_THREADS);
 
     // The compact header carries the same number, as a link to the Inbox from another page.
     await page.setViewportSize({ height: 900, width: 1024 });
@@ -148,11 +125,6 @@ test("one click marks six hundred and twenty threads read, and the counts stay d
     await expect(page.getByRole("heading", { name: "Agents" })).toBeVisible();
     await expect(compactInboxLink(page)).toHaveText(`Inbox ${ASKS}`);
     await page.setViewportSize({ height: 720, width: 1280 });
-
-    // Every thread is still there to read, drawn as read.
-    await page.goto("/?threads=all");
-    await expect(rows.first()).toBeVisible();
-    await expect(page.locator("[data-inbox-row] [aria-label='Unread']")).toHaveCount(0);
 
     // The Agents page counts the accepted Send's reply alone: the twenty Agent rows' replies
     // are read, and that one was never an Inbox row to mark.
@@ -170,16 +142,18 @@ test("one click marks six hundred and twenty threads read, and the counts stay d
     );
     await seedAgentThread({ body: "And the rollout?", replies: ["Still green."] });
     await expect(page.locator(`[data-inbox-row="${replyRowId(late)}"]`)).toBeVisible();
-    await expect(page.locator("[data-inbox-row] [aria-label='Unread']")).toHaveCount(2);
+    await expect(unreadMarks).toHaveCount(2);
     await page.locator("[data-inbox-mark-all]").click();
-    await expect(page.locator("[data-inbox-row] [aria-label='Unread']")).toHaveCount(0);
+    await expect(unreadMarks).toHaveCount(0);
     await expect.poll(async () => unreadThreadRows()).toBe(0);
   } finally {
     await alice.close();
   }
 });
 
-test("the drawer's Mark all read clears the same counts @phone", async ({ browser }) => {
+test("the drawer's Mark all read clears the same counts and keeps its rows @phone", async ({
+  browser,
+}) => {
   await seedMany();
   const alice = await asUser(browser, "alice");
   try {
@@ -192,15 +166,16 @@ test("the drawer's Mark all read clears the same counts @phone", async ({ browse
     const drawer = page.getByTestId("inbox-drawer");
     await expect(drawer).toBeVisible();
     await expect(drawer.locator("[data-inbox-row]").first()).toBeVisible();
+    await expect(drawer.locator("[data-inbox-row]")).toHaveCount(GROUP_PAGE);
 
     const held = await holdPosts(page, MARK_ALL);
     await drawer.locator("[data-inbox-mark-all]").click();
     await expect(drawer.locator("[data-inbox-mark-all]")).toHaveCount(0);
     const bar = drawer.locator("[data-inbox-bar]");
-    expect(await unreadSwitchLabel(page, bar)).toBe("Unread 0");
-    expect(await typeCount(page, bar, "Reply")).toBe(0);
+    await expect(drawer.locator("[data-inbox-row] [aria-label='Unread']")).toHaveCount(0);
+    expect(await typeFilterCount(page, bar, "Reply")).toBe(REPLY_THREADS);
     await expectInboxCount(page, ASKS);
-    await expect(drawer.locator("[data-inbox-row]")).toHaveCount(ASKS);
+    await expect(drawer.locator("[data-inbox-row]")).toHaveCount(GROUP_PAGE);
 
     held.release();
     await held.settled();
@@ -211,7 +186,7 @@ test("the drawer's Mark all read clears the same counts @phone", async ({ browse
   }
 });
 
-test("a refused Mark all read brings the rows and the counts back and says nothing was marked", async ({
+test("a refused Mark all read brings the marks and the counts back and says nothing was marked", async ({
   browser,
 }) => {
   await seedMany();
@@ -230,14 +205,23 @@ test("a refused Mark all read brings the rows and the counts back and says nothi
     const before = await rows.count();
     expect(before).toBeGreaterThan(ASKS);
 
+    const unreadBefore = await page.locator("[data-inbox-row] [aria-label='Unread']").count();
+    expect(unreadBefore).toBeGreaterThan(0);
+
     const refuse = await refusePosts(page, MARK_ALL);
+    const unreadMarks = page.locator("[data-inbox-row] [aria-label='Unread']");
     await page.locator("[data-inbox-mark-all]").click();
-    await expect(rows).toHaveCount(ASKS);
+    // The press takes the marks and the Inbox number, never a row: a read thread stays in the
+    // Inbox until it is dismissed.
+    await expect(unreadMarks).toHaveCount(0);
+    await expect(rows).toHaveCount(before);
+    await expectSidebarInboxCount(page, ASKS);
     refuse();
 
     const alert = page.locator("[data-inbox-mark-all-refused]");
     await expect(alert).toHaveRole("alert");
     await expect(alert).toHaveText("Nothing was marked read.");
+    await expect(unreadMarks).toHaveCount(unreadBefore);
     await expect(rows).toHaveCount(before);
     await expectSidebarInboxCount(page, ASKS + REPLY_THREADS + AGENT_THREADS);
     expect(await unreadThreadRows()).toBe(REPLY_THREADS);

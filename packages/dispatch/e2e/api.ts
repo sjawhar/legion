@@ -445,13 +445,15 @@ export function listMyAnswers(
  *  someone else has written since they last read it, and, with `kind` naming it, their one-off
  *  messages to an agent session holding a reply - newest reply first. An absent `kind` is the
  *  route's own default, `reply` alone; an absent `state` is `unread`; an absent `limit` is every
- *  row, which is what the Inbox itself reads. */
+ *  row, which is what the Inbox itself reads. `inbox` is every row of the caller's Inbox, read or
+ *  not, less what they have dismissed, and `dismissed` is what they dismissed out of it, newest
+ *  dismissal first and `INBOX_DISMISSED_PAGE` rows at a time. */
 export function listMyReplies(
   page: {
     kind?: readonly ("reply" | "agent")[];
     limit?: number;
     offset?: number;
-    state?: "all" | "unread";
+    state?: "dismissed" | "inbox" | "unread";
   } = {},
   options: ApiOptions = {}
 ): Promise<MyRepliesResponse> {

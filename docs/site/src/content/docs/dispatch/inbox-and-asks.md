@@ -54,7 +54,7 @@ stands rather than disappearing under you.
 
 Below 1280 px, and in the [Inbox drawer](#opening-the-inbox-as-a-drawer) at any width, there is
 no second column. Each row holds its own card: a question with its controls, a thread with its
-messages, **Open** and **Mark read**.
+messages, **Open**, **Mark read** and **Dismiss**.
 
 ## How the list is ordered and grouped
 
@@ -71,13 +71,13 @@ A band draws 50 rows. Where it holds more, **Show more** under it draws the next
 - **Group by**: the same five fields, plus **Waiting on** and **None**. **None** is one list with
   no headings. A band is drawn only when it holds a row, and a snoozed ask is in **Later**
   whatever you group by.
-- **Show read threads**: **Unread**, the default, or **All threads**, which keeps the threads you
-  have already read in the list, drawn as read. Each choice shows how many threads it holds.
+- **Show**: **Inbox**, the default, or **Dismissed**, the threads you have taken out of the
+  Inbox. A thread stays in the Inbox, read or not, until you dismiss it.
 - **Thread order**: whether a thread's replies read **Oldest first**, the default, or **Newest
   first**. This choice is yours everywhere: it sets the order of every thread in Dispatch, not
   only the ones in the Inbox.
 
-The sort, the grouping and the read-thread switch are part of the page's address, so a link
+The sort, the grouping and the **Show** switch are part of the page's address, so a link
 carries the view you are looking at. The thread order, the column width and the bands you folded
 are kept for your browser instead.
 
@@ -203,20 +203,30 @@ with a dot while it holds something you have not read. Open the row and the thre
 whole: every message, each one you have not read marked **New**, and the box to reply at the end.
 A reply you write here goes exactly where one written on the thread's own page goes.
 
-Reading a thread marks it read. The row stays where you read it, drawn as read, rather than
-vanishing under you; it leaves the list the next time the list is read. Where you would rather
-not read them one at a time, **Mark all read**, in the bar between **Filter** and **View**, marks
-every thread the list is showing. It asks nothing first: the rows go and every count drops at
-once, and if the server refuses the press the rows come back and the bar says `Nothing was marked
-read.` A filtered list marks only what it is showing, and a thread somebody wrote in after the
-list was read stays unread.
+Reading a thread marks it read. The row stays where it is, drawn as read: a thread stays in your
+Inbox, read or not, until you dismiss it, the way an email stays in its inbox until it is
+archived. Where you would rather not read them one at a time, **Mark all read**, in the bar
+between **Filter** and **View**, marks every thread the list is showing. It asks nothing first:
+every row is redrawn as read and every count drops at once, and if the server refuses the press
+the marks come back and the bar says `Nothing was marked read.` A filtered list marks only what
+it is showing, and a thread somebody wrote in after the list was read stays unread.
 
-Threads you have already read are behind **View → Show read threads → All threads**. The
-**Type** filter has a value for each kind, so **Reply** narrows the list to those threads alone,
-which is also what the address `/replies` opens.
+**Dismiss** is what takes a thread out of the Inbox. It is on the row itself — while your pointer
+is on the row, and always on the row you are reading — in the right column's head, and on the
+card where there is no second column. The key `e` dismisses the row you are on, and with rows
+selected the bar above them dismisses all of them at once. A question has no **Dismiss**: you
+answer or snooze an ask instead.
+
+What you dismissed is behind **View → Show → Dismissed**, newest dismissal first, where the same
+control reads **Move to Inbox** and one press puts the thread back. Somebody else writing in a
+thread you dismissed brings it back to the Inbox, unread, on its own; a reply you send from the
+**Dismissed** view leaves the thread where it is.
+
+The **Type** filter has a value for each kind, so **Reply** narrows the list to those threads
+alone, which is also what the address `/replies` opens.
 
 Where there is no second column each thread row is a card, with **Open**, which goes to the
-thread's own page, and **Mark read**.
+thread's own page, **Mark read** and **Dismiss**.
 
 ## Answering an ask
 

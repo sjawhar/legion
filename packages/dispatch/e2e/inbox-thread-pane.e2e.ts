@@ -193,15 +193,16 @@ test("a thread of six read replies folds the oldest four and ends in its reply b
   const listed = await listMyReplies({ state: "unread" });
   const row = listed.rows.find((candidate) => candidate.thread_id === root.id);
   expect(row?.unread).toBe(true);
-  // Every reply read: the thread leaves the unread list and stands under **All threads**.
+  // Every reply read: the thread leaves the unread list and stays in the Inbox, drawn as read.
   await markThreadRead(root.id, row?.reply.created_at ?? "");
   expect((await listMyReplies({ state: "unread" })).total).toBe(0);
+  expect((await listMyReplies({ state: "inbox" })).total).toBe(1);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await holdReadMarks(page);
-    await page.goto("/?threads=all");
+    await page.goto("/");
     await selectRow(page, replyRowId(root.id));
     const body = inboxPane(page).locator("[data-inbox-thread-body]");
     await expect(body).toBeVisible();
@@ -354,9 +355,7 @@ test("a reply sent from the pane reaches the thread, and an Agent reply goes in 
   try {
     const page = await alice.newPage();
     await holdReadMarks(page);
-    // Under **All threads**: the reader's own reply moves their read mark past every write, so
-    // the row would leave an Unread list the moment it landed and take the pane with it.
-    await page.goto("/?threads=all");
+    await page.goto("/");
 
     // A reply to a comment thread, sent from the pane, lands in the thread. The box is the
     // thread's own, drawn with it: a row is selected before its thread has been read, so the

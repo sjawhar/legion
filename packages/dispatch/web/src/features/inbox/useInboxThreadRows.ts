@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import type { RefObject } from "react";
+import { type RefObject, useMemo } from "react";
 
 import { dismissedThreadsQuery, inboxThreadsQuery } from "../../api/queries";
 import { useIsHuman } from "../../hooks/useIsHuman";
@@ -55,7 +55,12 @@ export function useInboxThreadRows({
     enabled: human && !asksOnly && show === "dismissed",
   });
   const pages = dismissed.data?.pages;
-  const read = show === "dismissed" ? pages?.flatMap((page) => page.rows) : threads.data?.rows;
+  // One array per set of pages, and the same array until they change: the motion hold adopts what
+  // it is given by identity (`motion-hold.ts`), so a fresh `flatMap` on every render would have it
+  // adopt - and so re-render - for ever. The Inbox read above hands over its own `rows`, which the
+  // query cache keeps for it.
+  const paged = useMemo(() => pages?.flatMap((page) => page.rows), [pages]);
+  const read = show === "dismissed" ? paged : threads.data?.rows;
   // A refetch can land while a pointer travels between rows; adopt it once that pointer settles.
   const adopted = useMotionHold(read, listRef);
   const listed = asksOnly ? [] : (adopted ?? []);

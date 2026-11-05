@@ -77,9 +77,10 @@ async function indexedRow(match: (row: InboxRow) => boolean): Promise<InboxRow> 
 }
 
 /**
- * Ten unread rows covering every kind, every priority and none, every urgency and none, two
- * projects and none, and three holders - plus one thread the reader has already read, which
- * only **Show read threads** lists.
+ * Eleven rows covering every kind, every priority and none, every urgency and none, two
+ * projects and none, and three holders - the last of them a thread the reader has already read,
+ * which the Inbox lists like any other, drawn as read, since a thread stays until it is
+ * dismissed.
  */
 async function seedEveryField(): Promise<{
   read: string;
@@ -215,8 +216,7 @@ async function seedEveryField(): Promise<{
     urgency: "none",
   });
 
-  // One thread the reader has already read: no row under Unread, a row drawn as read under
-  // **Show read threads**.
+  // One thread the reader has already read: a row of the list like any other, drawn as read.
   const readIssue = await createIssue({ project: "CORE", title: "Retired note" });
   const read = await seedCommentThread(
     readIssue.key,
@@ -227,6 +227,15 @@ async function seedEveryField(): Promise<{
   const readRow = listed.rows.find((row) => row.thread_id === read);
   if (readRow === undefined) throw new Error("the thread to mark read was never listed");
   await markThreadRead(read, readRow.reply.created_at);
+  rows.push({
+    assignee: "alice",
+    id: replyRowId(read),
+    issueKey: readIssue.key,
+    priority: "none",
+    project: "CORE",
+    type: "reply",
+    urgency: "none",
+  });
 
   return { read: replyRowId(read), rows };
 }
@@ -237,7 +246,7 @@ async function lastActivity(): Promise<ReadonlyMap<string, string>> {
   for (const ask of await getInbox()) {
     at.set(ask.id, ask.last_reply?.created_at ?? ask.created_at);
   }
-  for (const thread of (await listMyReplies({ kind: ["reply", "agent"], state: "all" })).rows) {
+  for (const thread of (await listMyReplies({ kind: ["reply", "agent"], state: "inbox" })).rows) {
     at.set(
       `${thread.kind === "agent" ? "agent" : "reply"}:${thread.thread_id}`,
       thread.reply.created_at
@@ -566,7 +575,7 @@ test("each of the five fields filters, bands and orders the list", async ({ brow
   }
 });
 
-test("a band folds and stays folded, and Show read threads lists what the reader has read", async ({
+test("a band folds and stays folded, and a thread the reader has read stays in the list", async ({
   browser,
 }) => {
   const { read, rows } = await seedEveryField();
@@ -599,15 +608,13 @@ test("a band folds and stays folded, and Show read threads lists what the reader
     await p0.click();
     await expect(listed).toHaveCount(rows.length);
 
-    // Show read threads puts the thread the reader has read among the rows, drawn as read.
-    await expect(page.locator(`[data-inbox-row="${read}"]`)).toHaveCount(0);
-    await chooseView(page, "Show read threads", "all");
-    await expect(page).toHaveURL(/threads=all/);
+    // The thread the reader has already read is a row of the list like any other, drawn as read:
+    // no unread dot, and a title in the plain weight rather than the unread one.
     const readRow = page.locator(`[data-inbox-row="${read}"]`);
     await expect(readRow).toBeVisible();
     await expect(readRow.locator("[aria-label='Unread']")).toHaveCount(0);
     await expect(readRow.locator("a[data-inbox-owner]").first()).not.toHaveClass(/font-semibold/);
-    await expect(listed).toHaveCount(rows.length + 1);
+    await expect(listed).toHaveCount(rows.length);
   } finally {
     await alice.close();
   }

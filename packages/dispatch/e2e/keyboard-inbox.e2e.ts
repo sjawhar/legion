@@ -1041,9 +1041,9 @@ test("j, k and the arrows step through thread rows, o opens them, y copies only 
   try {
     const page = await context.newPage();
     const copied = await recordClipboard(page);
-    // Under **All threads**: a thread the column shows is read where it stands, and an Unread
-    // list would drop its row the moment the walk moved on, renumbering the rows underfoot.
-    await page.goto("/?threads=all");
+    // A thread the column shows is read where it stands and its row stays there, so the walk
+    // never has the rows renumbered underfoot.
+    await page.goto("/");
     await expect(page.locator("[data-inbox-row]")).toHaveCount(3);
     await page.locator("body").focus();
     test.skip(!hasReadingPane(page), "the selection the keys move is the reading column's");

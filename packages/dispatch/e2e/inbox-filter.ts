@@ -28,6 +28,25 @@ export async function openFilterFields(page: Page): Promise<void> {
   await expect(fields).toHaveCount(1);
 }
 
+/** How many rows the **Type** filter counts for one of its values, read off that option's own
+ *  accessible name. `within` is the bar the panel belongs to - the page's or the drawer's - and
+ *  the popover is shut again before this answers, so the next read of the list is not made
+ *  through it. */
+export async function typeFilterCount(page: Page, within: Locator, name: string): Promise<number> {
+  if ((await page.locator("[data-inbox-filter-fields]").count()) === 0) {
+    await within.locator("[data-inbox-filter]").click();
+  }
+  const trigger = within.getByRole("button", { name: "Filter by type" });
+  if ((await trigger.getAttribute("aria-expanded")) !== "true") await trigger.click();
+  const options = page.getByRole("listbox", { name: "Type options" });
+  const label =
+    (await options
+      .getByRole("option", { name: new RegExp(`^${name},`) })
+      .getAttribute("aria-label")) ?? "";
+  await page.keyboard.press("Escape");
+  return Number(label.replace(`${name}, `, "").replace(" rows", ""));
+}
+
 /** Opens the popover unless it is open already; the trigger says which it is. */
 export async function openAssigneeFilter(page: Page): Promise<void> {
   await openFilterFields(page);
