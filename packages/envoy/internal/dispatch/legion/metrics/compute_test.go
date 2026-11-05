@@ -642,6 +642,38 @@ func TestEachClassOfFiledIssue(t *testing.T) {
 	}
 }
 
+// A table names a phase by the bar it falls on (spec version 18, "Phase words in tables"). The
+// merger's bar holds three of the daemon's phases, so a filer in `retro` — which the merger's
+// first event starts — is named merging, while a filer in a phase of its own bar keeps its own
+// word.
+func TestTheSplittingTableNamesAFilerInRetroAsMerging(t *testing.T) {
+	root := newIssue("INFRA-1").
+		worked("architect", hour(0)).
+		worked("implementer", hour(5)).
+		worked("merger", hour(10)).
+		closedAt(hour(20))
+	inRetro := newIssue("INFRA-5").under("INFRA-1")
+	whileImplementing := newIssue("INFRA-6").under("INFRA-1")
+	population := fixture(hour(-24), hour(48), root, inRetro, whileImplementing)
+	population.Filed = []Filed{
+		{Key: "INFRA-6", At: hour(6), Filer: legion.SessionTitle{Role: "implementer", Issue: "INFRA-1"}, Parent: "INFRA-1", Ancestors: []string{"INFRA-1"}},
+		{Key: "INFRA-5", At: hour(11), Filer: legion.SessionTitle{Role: "merger", Issue: "INFRA-1"}, Parent: "INFRA-1", Ancestors: []string{"INFRA-1"}},
+	}
+
+	report := Compute(population, ScopeAll, hour(48))
+
+	phaseOf := map[string]string{}
+	for _, row := range report.Splitting.Filed {
+		phaseOf[row.Key] = row.FilerPhase
+	}
+	if phaseOf["INFRA-5"] != legion.PhaseMerging {
+		t.Errorf("the filing made while the filer was in retro names the phase %q, want merging", phaseOf["INFRA-5"])
+	}
+	if phaseOf["INFRA-6"] != legion.PhaseImplementing {
+		t.Errorf("the filing made while the filer was implementing names the phase %q, want implementing", phaseOf["INFRA-6"])
+	}
+}
+
 // TestAMedianInterpolatesBetweenTheClosestRanks: "Medians and p90s use linear interpolation
 // between the closest ranks".
 func TestAMedianInterpolatesBetweenTheClosestRanks(t *testing.T) {

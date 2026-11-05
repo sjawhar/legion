@@ -664,7 +664,7 @@ func (c *computation) classify(filed Filed) FiledIssue {
 	if filed.Parent == "" || c.treeRoot(filed.Parent) != root {
 		return row
 	}
-	row.FilerPhase = phaseAt(c.phasesOf(filer), filed.At)
+	row.FilerPhase = tablePhase(phaseAt(c.phasesOf(filer), filed.At))
 	// "created before the filer's issue had its first implementer event": an issue whose filer
 	// never reached an implementer never passed that moment, so its filings are at design.
 	implementer, started := filer.FirstRoleEvent["implementer"]
@@ -684,6 +684,18 @@ func phaseAt(timeline []PhaseSpan, at time.Time) string {
 		}
 	}
 	return ""
+}
+
+// tablePhase is the word a table names a phase by: the bar it falls on (the spec's "Phase words
+// in tables"). The merger's bar holds three of the daemon's phases — `retro`, `merging` and
+// `awaiting_merge` — so a filer in any of them is named merging, and every other phase is named
+// as the timeline names it.
+func tablePhase(phase string) string {
+	switch phase {
+	case legion.PhaseRetro, legion.PhaseMerging, legion.PhaseAwaitingMerge:
+		return legion.PhaseMerging
+	}
+	return phase
 }
 
 // weekStart is the UTC Monday the moment's week begins on.
