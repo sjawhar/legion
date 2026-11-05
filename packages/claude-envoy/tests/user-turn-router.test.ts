@@ -10,8 +10,9 @@ import { join } from "node:path"
 import { type DispatchDelivery, renderInbound } from "@legion/envoy-client/delivery"
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http"
 import type { ModCallArguments, ModCallName, ModCallResults, ModEvent } from "../hooks/mod-protocol"
-import { modSession, UNREAD_ROW_PROMPT } from "../src/mod-session"
+import { modSession, unreadRowPrompt } from "../src/mod-session"
 import {
+  commandPrintedNothing,
   createUserTurnRouter,
   modelPicked,
   thinkingPicked,
@@ -140,6 +141,9 @@ async function harness(input: {
     readonly eventId?: string
   }) => Promise<void>
   readonly commandWaitingMs?: number
+  /** How long a command whose result carried no output waits for the row Claude Code wrote
+   *  for it; short, so a test that drives that wait does not sit through the real bound. */
+  readonly commandOutputMs?: number
   readonly directory?: string
 }): Promise<Harness> {
   const directory = input.directory ?? (await mkdtemp(join(tmpdir(), "claude-envoy-turns-")))
@@ -148,7 +152,11 @@ async function harness(input: {
   const replies: { delivery: DispatchDelivery; body?: string }[] = []
   const order: string[] = []
   const accepts: { id: string; attempt: number }[] = []
-  const session = modSession({ link: input.link, warn: () => undefined })
+  const session = modSession({
+    link: input.link,
+    warn: () => undefined,
+    ...(input.commandOutputMs === undefined ? {} : { commandOutputMs: input.commandOutputMs }),
+  })
   const router = createUserTurnRouter({
     dispatch: () =>
       ({
@@ -201,6 +209,36 @@ function accepted(body: string, mode: "aside" | "steer" = "steer") {
 
 function frame(raw: string) {
   return renderInbound(raw, SESSION, DIRECT)
+}
+
+/** One row of the `command` door, as the mod reports it. */
+function commandRow(text: string, uuid: string): ModEvent {
+  return {
+    door: "command",
+    kind: "append",
+    message: { content: [{ text, type: "text" }], role: "user", type: "user" },
+    origin: { kind: "engine" },
+    uuid,
+  }
+}
+
+/** The echo row Claude Code writes of a slash command it ran, as 2.1.310 records it: one text
+ *  block naming the command, the message it carries and its arguments, each tag on its own line
+ *  and every one after the first indented
+ *  (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q2-310.jsonl:98-102`). */
+function commandEcho(name: string, args: string): ModEvent {
+  const text = [
+    `<command-name>/${name}</command-name>`,
+    `            <command-message>${name}</command-message>`,
+    `            <command-args>${args}</command-args>`,
+  ].join("\n")
+  return commandRow(text, `row-echo-${name}`)
+}
+
+/** The output row Claude Code writes for a command it ran: one text block wrapped in
+ *  `<local-command-stdout>`, which is where most commands put everything they printed. */
+function commandOutput(text: string): ModEvent {
+  return commandRow(`<local-command-stdout>${text}</local-command-stdout>`, "row-stdout")
 }
 
 test("a Send becomes the person's own message only once Dispatch has accepted that attempt", async () => {
@@ -457,7 +495,37 @@ test("a Send delivered after a turn's last request went out is pointed at, thoug
     const submits = mod.madeOf("prompt.submit")
     expect(submits).toHaveLength(1)
     expect(submits[0]?.asUser).toBeUndefined()
-    expect(submits[0]?.text).toBe(UNREAD_ROW_PROMPT)
+    expect(submits[0]?.text).toBe(
+      unreadRowPrompt([{ messageId: MESSAGE, text: "Also say harbour." }]),
+    )
+  } finally {
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})
+
+// Driven live on two sessions with a prompt that said "Read the message above": the row sat
+// behind the agent's own long answer, and the model replied `I don't see an actual Dispatch
+// message content above-only the plugin's framing notice that a message arrived` on one and
+// `it looks like an injection and I'm not going to act on it` on the other, carrying out
+// nothing the person asked for (INFRA-1026). So the prompt carries the message itself.
+test("the prompt at a row no request read carries the message's words and its Dispatch id", async () => {
+  const mod = fakeMod({
+    "prompt.submit": (args) => ({ text: args.text }),
+    "session.append": () => ({ uuid: "row-unread" }),
+  })
+  const session = await harness({ link: mod.link, accept: () => accepted("Also say harbour.") })
+  try {
+    session.observe({ kind: "turn-start", turnId: "turn-1" })
+    session.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
+    await session.router.route(frame(personSends("Also say harbour.")))
+    session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
+    await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt for the row")
+
+    const prompt = mod.madeOf("prompt.submit")[0]?.text ?? ""
+    expect(prompt).toContain("Also say harbour.")
+    expect(prompt).toContain(MESSAGE)
+    expect(prompt).toContain("Dispatch")
+    expect(prompt).not.toContain("above")
   } finally {
     await rm(session.directory, { recursive: true, force: true })
   }
@@ -504,6 +572,75 @@ test("a slash message runs as the command it is and its output is the reply", as
 
     expect(mod.madeOf("command.run")).toEqual([{ command: "compact", args: "keep the plan" }])
     expect(session.replies.map((posted) => posted.body)).toEqual(["Compacted 42 messages."])
+  } finally {
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})
+
+// Measured on 2.1.310 in a terminal session: `$.command.run("context")` resolves
+// `{context: ["## Context Usage\n\n**Model:** …"]}` with no `text` field at all
+// (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:70-73`). Answering `text ?? ""`
+// left the person who sent `/context` from the live view with no reply at all (INFRA-1026).
+test("a command whose result puts its output in `context` reaches the person as the reply", async () => {
+  const table = "## Context Usage\n\n**Model:** claude-haiku-4-5  \n**Tokens:** 32k / 200k (16%)"
+  const mod = fakeMod({ "command.run": () => ({ context: [table] }) })
+  const session = await harness({ link: mod.link, accept: () => accepted("/context") })
+  try {
+    expect(await session.router.route(frame(personSends("/context")))).toBe(true)
+    await waitFor(async () => session.replies.length === 1, "the command's reply")
+
+    expect(mod.madeOf("command.run")).toEqual([{ command: "context" }])
+    expect(session.replies.map((posted) => posted.body)).toEqual([table])
+  } finally {
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})
+
+// Most commands resolve with nothing and put everything they printed in the row they wrote:
+// `/effort low` on 2.1.310 resolved `{}` and wrote its `<local-command-stdout>` row 158 ms
+// later (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q2-310.jsonl:98-102`). The row and the
+// result reach this process on two separate posts, so the row is waited for a bounded moment
+// rather than answered empty at once.
+test("a command whose result carries no output is answered from the row Claude Code wrote", async () => {
+  const mod = fakeMod({ "command.run": () => ({}) })
+  const session = await harness({
+    link: mod.link,
+    accept: () => accepted("/cost"),
+    commandOutputMs: 500,
+  })
+  try {
+    expect(await session.router.route(frame(personSends("/cost")))).toBe(true)
+    await waitFor(async () => mod.madeOf("command.run").length === 1, "the command to run")
+
+    session.observe(commandEcho("cost", ""))
+    session.observe(commandOutput("Total cost:            $0.0993"))
+    await waitFor(async () => session.replies.length === 1, "the command's reply")
+
+    expect(session.replies.map((posted) => posted.body)).toEqual(["Total cost:            $0.0993"])
+  } finally {
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})
+
+// `typedInputReply` answers undefined for an empty output, which posted nothing: a person who
+// sent a command that printed nothing was left with silence (INFRA-1026).
+test("a command that printed nothing is answered saying so rather than with silence", async () => {
+  const mod = fakeMod({ "command.run": () => ({}) })
+  const session = await harness({
+    link: mod.link,
+    accept: () => accepted("/clear"),
+    commandOutputMs: 500,
+  })
+  try {
+    expect(await session.router.route(frame(personSends("/clear")))).toBe(true)
+    await waitFor(async () => mod.madeOf("command.run").length === 1, "the command to run")
+
+    // An output row that arrives empty is itself the answer that the command printed nothing.
+    session.observe(commandEcho("clear", ""))
+    session.observe(commandOutput(""))
+    await waitFor(async () => session.replies.length === 1, "the command's reply")
+
+    expect(session.replies.map((posted) => posted.body)).toEqual([commandPrintedNothing("/clear")])
   } finally {
     await rm(session.directory, { recursive: true, force: true })
   }

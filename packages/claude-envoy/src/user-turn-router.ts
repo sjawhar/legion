@@ -71,6 +71,18 @@ export function commandStillRunning(command: string): string {
   return `${command} is still running: it waits for the turn this session is in, or for an answer at the session's own terminal. Its output follows in another reply.`
 }
 
+/**
+ * What a person is told when the command they sent printed nothing at all, so a Send is never
+ * met with silence.
+ *
+ * `typedInputReply` answers undefined for an empty output, and that helper is the Oh My Pi
+ * plugin's too (`packages/pi-shared/src/dispatch-user-turn.ts`), so the line is written here
+ * rather than there.
+ */
+export function commandPrintedNothing(command: string): string {
+  return `${command} ran in this session and printed nothing.`
+}
+
 /** What a person is told once their model pick is in force. */
 export function modelPicked(model: string): string {
   return `The session's model is now ${model}.`
@@ -267,6 +279,9 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
     if (!inPane) {
       const row = await session.deliver({
         content: blocks,
+        // The prompt at a row the turn never read carries both: the person's own words, and
+        // which Dispatch message they are (`unreadRowPrompt`, `./mod-session`).
+        messageId: turn.messageId,
         text: turn.body,
         // A prompt waits behind the turn before it and is never awaited here, so a prompt that
         // never entered is the one failure this path answers on Dispatch rather than throwing.
@@ -375,10 +390,11 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
         options.effortPicked(inForce)
         said = thinkingPicked(inForce)
       } else {
-        said = typedInputReply(body, {
-          handled: "command",
-          output: await session.runCommand(name, value),
-        })
+        const output = await session.runCommand(name, value)
+        // A command that printed nothing is answered all the same: `typedInputReply` has
+        // nothing to say for an empty output, and silence is what the person was left with.
+        const printed = typedInputReply(body, { handled: "command", output })
+        said = printed ?? commandPrintedNothing(`/${name}`)
       }
     } catch (error) {
       said = typedInputReply(body, { error: messageFor(error) })

@@ -143,7 +143,7 @@ function appendRow(
 /** The echo row Claude Code writes of a slash command a person ran, as 2.1.310 records it: one
  *  text block naming the command, the message it carries and its arguments, newline-separated,
  *  with every tag after the first indented (the transcripts `COMMAND_BOOKKEEPING_TAGS` names in
- *  `../src/agent-stream-claude`). */
+ *  `../src/claude-rows`). */
 function commandEcho(name: string, args: string, uuid: string): ModEvent {
   const text = [
     `<command-name>/${name}</command-name>`,

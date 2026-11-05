@@ -30,6 +30,7 @@ import type {
   ModEffort,
   ModEvent,
 } from "../hooks/mod-protocol"
+import { claudeEchoedCommandLine, claudeRowText, isCommandBookkeeping } from "./claude-rows"
 
 /** The provider every model of Claude Code's is named under, so a frame carries the same
  *  `provider/id` reference an Oh My Pi session's does (`anthropic/claude-sonnet-5`). */
@@ -146,27 +147,6 @@ export interface ClaudeAgentStream {
   readonly reset: () => void
 }
 
-/** The text a row's content holds, blocks flattened: a tool result is shown as text alone. A
- *  block with no text of its own is named rather than dropped, as the publisher names one. */
-function flatten(value: unknown): string {
-  if (typeof value === "string") return value
-  if (!Array.isArray(value)) return ""
-  const pieces: string[] = []
-  for (const item of value as readonly unknown[]) {
-    if (typeof item === "string") {
-      pieces.push(item)
-      continue
-    }
-    if (typeof item !== "object" || item === null) continue
-    const block = item as Record<string, unknown>
-    const text = block["text"]
-    const type = block["type"]
-    if (typeof text === "string") pieces.push(text)
-    else if (typeof type === "string") pieces.push(`[${type}]`)
-  }
-  return pieces.join("\n")
-}
-
 /** One block of a row as a part the publisher reads. A kind it does not know crosses as its type
  *  alone, which the viewer shows as `[image]` and the like. */
 function partOf(block: ModContentBlock): ClaudeStreamPart {
@@ -206,65 +186,9 @@ function roleOf(message: ModAppendMessage): "assistant" | "user" {
   return message.type === "assistant" ? "assistant" : "user"
 }
 
-/**
- * The tags Claude Code wraps its own bookkeeping of a slash command in.
- *
- * Measured on 2.1.310: a command a person runs writes three rows by the `command` door - the
- * caveat row, which says the command's output went to the person rather than to the model and
- * carries `isMeta: true`; the echo row, which holds what was typed; and the output row. The
- * output row's `message.type` is `user` in some runs and `system` (`name: "local_command"`) in
- * others, so the tag its text starts with is the only safe discriminator
- * (`/legion/scratch/tmp/infra-1026-spike/config/projects/-legion-scratch-tmp-infra-1026-proof-work/22a2c318-8433-4659-9568-a5ce1a873926.jsonl:42-44`,
- * this plugin's own mod running `/usage`).
- */
-const COMMAND_BOOKKEEPING_TAGS = [
-  "<local-command-caveat>",
-  "<local-command-stdout>",
-  "<local-command-stderr>",
-] as const
-
 /** The command the daemon's bridge seeds a fresh Legion pane with before anything else
  *  (`packages/daemon/internal/claudebridge/bridge.go:210-213`), which names the pane. */
 const PANE_SEEDED_COMMAND = "/rename"
-
-/** The value one of the echo row's tags holds, trimmed: the recorded row indents every tag after
- *  the first, so the whitespace around a value is the row's layout and not part of it. */
-function taggedValue(text: string, tag: string): string | undefined {
-  const open = `<${tag}>`
-  const from = text.indexOf(open)
-  if (from === -1) return undefined
-  const to = text.indexOf(`</${tag}>`, from + open.length)
-  if (to === -1) return undefined
-  return text.slice(from + open.length, to).trim()
-}
-
-/**
- * The plain command line a row of the `command` door echoes, or `undefined` where the row is not
- * the echo of a command a person ran.
- *
- * Measured on 2.1.310: the echo row holds one text block naming `<command-name>/usage</command-
- * name>`, `<command-message>usage</command-message>` and `<command-args></command-args>`,
- * newline-separated, each tag on its own line (same transcript as
- * `COMMAND_BOOKKEEPING_TAGS`). The command line is the name, and the arguments after a space
- * where there are any - `/clear`, `/effort low` - which is what the person typed and all of the
- * command the live view shows.
- */
-export function claudeEchoedCommandLine(content: readonly ModContentBlock[]): string | undefined {
-  const text = flatten(content)
-  const name = taggedValue(text, "command-name")
-  if (name === undefined || name === "") return undefined
-  const args = taggedValue(text, "command-args") ?? ""
-  return args === "" ? name : `${name} ${args}`
-}
-
-/** Whether a row of the `command` door is Claude Code's bookkeeping of the command rather than
- *  anything a person wrote: the caveat it records before the command runs, and the command's own
- *  output, which published shows the person raw tags and a `/context` table in the agent's
- *  conversation (INFRA-1026). */
-function isCommandBookkeeping(content: readonly ModContentBlock[]): boolean {
-  const text = flatten(content)
-  return COMMAND_BOOKKEEPING_TAGS.some((tag) => text.startsWith(tag))
-}
 
 /** Whether a line is the command a pane is seeded with, with or without the title it names. */
 function isPaneSeededRename(line: string): boolean {
@@ -414,14 +338,14 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     if (door === "prompt") {
       // A prompt this plugin submitted without `asUser` is not a person's message: Claude Code
       // frames it as "The claude-envoy plugin sent a message:" and the only one the server sends
-      // is the nudge at a row a turn never read (`../src/mod-session`, `UNREAD_ROW_PROMPT`).
+      // is the nudge at a row a turn never read (`./mod-session`, `unreadRowPrompt`).
       // Measured on 2.1.310: a submit with `asUser` carries `asUser: true` on the row's origin
       // and one without it carries no such field, which is what tells the two apart.
       if (origin.kind === "plugin" && origin.asUser !== true) return
       // The command a pane is seeded with arrives by this door, written to the session's input
       // by the daemon's bridge before anything else happens in the pane: it names the pane, and
       // no person sent it.
-      if (isPane && isPaneSeededRename(flatten(message.content))) return
+      if (isPane && isPaneSeededRename(claudeRowText(message.content))) return
       // Each block crosses as the part it is, as it does by every other door: the person's text
       // stays a part of its own and a picture becomes the `[image]` part the publisher names it
       // (`conversationParts` in `@legion/pi-shared/agent-stream`). Flattened into one
@@ -451,7 +375,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
         record(
           subject,
           {
-            content: flatten(block["content"]),
+            content: claudeRowText(block["content"]),
             isError: block["is_error"] === true,
             role: "toolResult",
             timestamp: now(),
@@ -465,10 +389,10 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     }
     if (door === "command") {
       // A command a person ran writes three rows by this door and only one of them is a message
-      // (`COMMAND_BOOKKEEPING_TAGS`): the echo of what was typed, which the view draws as the
-      // plain command line the person would have typed - `/clear`, `/effort low` - rather than
-      // as the tags Claude Code wrote it in. A row that is neither the echo nor the bookkeeping
-      // goes the way every other row does, below.
+      // (`./claude-rows`, `COMMAND_BOOKKEEPING_TAGS`): the echo of what was typed, which the
+      // view draws as the plain command line the person would have typed - `/clear`,
+      // `/effort low` - rather than as the tags Claude Code wrote it in. A row that is neither
+      // the echo nor the bookkeeping goes the way every other row does, below.
       const line = claudeEchoedCommandLine(message.content)
       if (line !== undefined) {
         if (isPane && isPaneSeededRename(line)) return
