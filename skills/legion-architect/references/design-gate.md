@@ -172,9 +172,9 @@ A settled decision is the human's. A plan that would overturn one goes back to t
 decision kept, unless the planner brings evidence the human did not weigh that would change it
 (such as a measurement showing the settled choice cannot pass a check); then a decision
 block names the decision and that evidence. A plan never overturns a settled decision on its own.
-An owner's act after the approval binds at once, with no new version: one asking for work here
-adds a requirement, one saying this issue will not do one removes it, the later act governing,
-and each role reads them from the issue's events, copied into neither the spec nor the plan.
+A person's request after the approval becomes a requirement only when you write it into the spec
+and they approve that version; it is never another issue's, and no comment or answer of theirs
+takes a requirement out.
 
 A design change that leaves the Summary, the requirements, the checks, the scope and the settled
 decisions intact (a planner's measurement finding a better way to the same outcome) goes in the

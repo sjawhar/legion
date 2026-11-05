@@ -191,7 +191,7 @@ and decides there, the only gate on such an issue.
   `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
   is made in the running round: a later round costs a CI pass and a re-read of the whole
   change. A requirement on the `Not proven / risk:` line is unmet, not declared away, unless only
-  the deploy can show it and the plan names its observation, or the owner's record lets it go;
+  the deploy can show it and the plan names its observation;
   the `Fast-follow:` line never carries one, and reads `none` or names only cleanup in files
   this pull request does not touch. A base frozen for others to stack on is
   never rewritten (*Rewriting pushed commits* in

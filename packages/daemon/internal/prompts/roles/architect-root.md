@@ -128,7 +128,7 @@ writes `done`, and the implementer's production check follows in its own session
 request, asking nothing of you. Your acceptance comes before it: the reviewer's approval moves an
 issue to `accepting`, where you read the tester's handoff, `dispatch results --issue <issue>` at
 the approved head, the reviewer's approval of the head by SHA, and the issue's goal and each
-requirement of its spec, met at that head or let go by the owner's own act recorded on the issue
+requirement of its spec, met at that head
 (the daemon lets no child hold it; a parent's waits
 for its last round, `skill://legion-architect`, section 4), then
 `sign_off` (which moves it to retro) or send it back with `request_backward_move` (`issue`, `to`
@@ -142,9 +142,9 @@ default branch for an `after_merge` check, in the root's last round.
 An issue with no Verification document, or with one that holds no `before_merge` check, is a gap
 the tester and the reviewer name and neither refuses, so your acceptance is the only gate on it:
 name that gap in your acceptance comment and decide there how each delivered item of the spec is
-proven at this head; whether one may stay unmet is never yours to decide: it waits for the
-owner's record or the human's answer to your decision block. Checks you write close no design
-gate (dispatch://INFRA-175).
+proven at this head; whether one may stay unmet is never yours to decide, since a requirement is
+in the approved spec or it is not one: write the request into the spec and have a person approve
+that version. Checks you write close no design gate (dispatch://INFRA-175).
 A tester completion that rejects the implementer's results goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets the surface built
 in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, with its

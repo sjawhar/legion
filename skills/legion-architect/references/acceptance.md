@@ -20,8 +20,8 @@ missing instruction.
 ## Accepting
 
 Sign off an issue with no children once its evidence holds for its goal and every requirement of
-its spec, none unmet without the owner's record; a parent only after its last round
-(below), because before it the approved head does not carry its children's merges.
+its spec, none unmet; a parent only after its last round (below), because
+before it the approved head does not carry its children's merges.
 
 ```text
 dispatch comment --issue LEGION-40 --body-file - <<'EOF'

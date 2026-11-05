@@ -113,8 +113,9 @@ template, and the later phases fill in their own lines:
 Legion's reviewer judges the change against the issue's goal and every requirement of its spec, not
 only against the plan and the acceptance lines, and sends a red team of its own over the same
 question. A requirement the change does not meet is a request for changes whether or not the pull
-request declares the gap; only your own act recorded on the issue — an answered ask, a comment, an
-approved spec version — lets one go. The architect applies the same test before it accepts.
+request declares the gap, and only a new spec version you approve takes a requirement out: a
+request you make after the approval reaches the work as that version, which the architect writes
+for you. The architect applies the same test before it accepts.
 
 Legion's reviewer posts its review as the review App. A review from anyone with write access to the
 repository, submitted on GitHub while the issue is in `needs_review`, counts the same way:
