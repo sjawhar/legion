@@ -1,0 +1,14 @@
+MemTotal:        8176632 kB
+MemFree:         3012344 kB
+MemAvailable:    5612344 kB
+Buffers:           12344 kB
+Cached:           912344 kB
+SwapCached:            0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:               128 kB
+Writeback:             0 kB
+AnonPages:       2097152 kB
+Mapped:           234567 kB
+Shmem:            524288 kB
+Slab:             123456 kB

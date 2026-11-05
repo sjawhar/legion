@@ -1,0 +1,44 @@
+55a1b2c00000-55a1b8d00000 r-xp 00000000 fe:01 1179649                    /opt/legion/bin/legion
+Size:              99328 kB
+Rss:               67584 kB
+Pss:               67584 kB
+Shared_Clean:          0 kB
+Private_Clean:     67584 kB
+Private_Dirty:         0 kB
+Referenced:        67584 kB
+Anonymous:             0 kB
+AnonHugePages:         0 kB
+Locked:                0 kB
+55a1b8d00000-55a1bd100000 rw-p 00000000 00:00 0                          [heap]
+Size:              24576 kB
+Rss:               20480 kB
+Pss:               20480 kB
+Shared_Clean:          0 kB
+Private_Clean:         0 kB
+Private_Dirty:     20480 kB
+Referenced:        20480 kB
+Anonymous:         20480 kB
+AnonHugePages:         0 kB
+Locked:                0 kB
+7f3c40000000-7f3c41000000 rw-p 00000000 00:00 0
+Size:              16384 kB
+Rss:               14476 kB
+Pss:               14476 kB
+Shared_Clean:          0 kB
+Private_Clean:         0 kB
+Private_Dirty:     14476 kB
+Referenced:        14476 kB
+Anonymous:         14476 kB
+AnonHugePages:         0 kB
+Locked:                0 kB
+7ffd6b1e0000-7ffd6b201000 rw-p 00000000 00:00 0                          [stack]
+Size:                132 kB
+Rss:                 132 kB
+Pss:                 132 kB
+Shared_Clean:          0 kB
+Private_Clean:         0 kB
+Private_Dirty:       132 kB
+Referenced:          132 kB
+Anonymous:             0 kB
+AnonHugePages:         0 kB
+Locked:                0 kB

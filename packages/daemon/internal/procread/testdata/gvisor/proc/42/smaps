@@ -1,0 +1,24 @@
+560f1a000000-560f1a200000 r-xp 00000000 fe:01 1179703                    /usr/bin/omp
+Size:               2048 kB
+Rss:                1024 kB
+Pss:                1024 kB
+Private_Dirty:         0 kB
+Referenced:         1024 kB
+Anonymous:             0 kB
+AnonHugePages:         0 kB
+560f1b000000-560f1b100000 rw-p 00000000 00:00 0                          [heap]
+Size:               1024 kB
+Rss:                 128 kB
+Pss:                 128 kB
+Private_Dirty:       128 kB
+Referenced:          128 kB
+Anonymous:           128 kB
+AnonHugePages:         0 kB
+7f9a80000000-7f9a80400000 rw-p 00000000 00:00 0
+Size:               4096 kB
+Rss:                1024 kB
+Pss:                1024 kB
+Private_Dirty:      1024 kB
+Referenced:         1024 kB
+Anonymous:          1024 kB
+AnonHugePages:         0 kB
