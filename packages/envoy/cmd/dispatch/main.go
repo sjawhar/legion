@@ -45,6 +45,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/texttreefill"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/pglisten"
@@ -496,9 +497,11 @@ func main() {
 	//     batch is full), the repair of closed and reopened issues' asks (api.RunIssueAskRepair,
 	//     every 10 minutes on a plain ticker, after the boot's own unleased pass), the prune of
 	//     the server process registry (processes.RunPrune, every minute, which joinRegistry starts
-	//     below), the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute) and
-	//     the document compaction sweep (docs.Service.RunCompactionSweep, every hour from a tick at
-	//     start, with or without NATS), each recording its passes in duty_passes like the timers
+	//     below), the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute), the
+	//     document compaction sweep (docs.Service.RunCompactionSweep, every hour from a tick at
+	//     start, with or without NATS) and the display tree fill (texttreefill.Run, every hour
+	//     from a tick at start, whose first pass of a display parser version runs until every
+	//     stored text has a tree at it), each recording its passes in duty_passes like the timers
 	//     above; each tick sends its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
@@ -635,6 +638,11 @@ func main() {
 	// dropped from one - fold within an hour of coming due, whether or not NATS is configured
 	// (INFRA-593).
 	go documentService.RunCompactionSweep(ctx, leases)
+	// Every stored text written before INFRA-635 stored display trees, and every stored text at
+	// all after a deploy raises pmdoc.DisplayTreeVersion, gets its tree without waiting for a
+	// reader to open it; the same pass drops the trees of every version before the two newest,
+	// which is what lets a rolling deploy and a rollback read each other's rows.
+	go texttreefill.Run(ctx, database.Pool, leases)
 	// Each document's edit notice goes once its quiet window after a person's last
 	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
 	// still pending when this process stops is sent by the next sweep of either process. The sweep
