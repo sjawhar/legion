@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -520,6 +521,72 @@ func TestTheRolesContainerEndingEndsEveryRole(t *testing.T) {
 			!strings.Contains(obs.Detail, "last lines of "+string(role)) || strings.Contains(obs.Detail, "fake logs") {
 			t.Fatalf("%s: %s %q, want Gone naming the container's end and quoting only %s's lines", token, obs.Kind, obs.Detail, role)
 		}
+	}
+}
+
+// An issue pod's one container ending for want of memory is marked on the Gone of every role
+// whose turn that end cut off (Observation.OutOfMemory), which is what the daemon tells each of
+// them why its turn stopped from. The kubelet's reason is the whole of what says so, read
+// wherever the end is: off the ended container itself, and off the LastTerminationState of one
+// the kubelet has already restarted, whose role launcher reports no child and so died with that
+// instance. A launcher that reports the recorded generation's own exit has been running since
+// before that generation started, so the container did not end under it and its role's process
+// ended on its own: no mark. Neither does an end whose reason is Error, which carries 128, the
+// very exit code an out-of-memory end carries — the reason decides and the code never does.
+func TestTheRolesContainerOutOfMemoryEndIsMarkedOnTheRolesItCut(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	outOfMemoryEnd := corev1.ContainerStateTerminated{ExitCode: 128, Reason: "OOMKilled"}
+	erroredEnd := corev1.ContainerStateTerminated{ExitCode: 128, Reason: "Error"}
+	// ended is the container as the kubelet reports it the moment it ends, and restarted once the
+	// kubelet has started it again over that same end.
+	ended := func(end corev1.ContainerStateTerminated) corev1.ContainerStatus {
+		return corev1.ContainerStatus{Name: runtime.IssuePodContainer, State: corev1.ContainerState{Terminated: &end}}
+	}
+	restarted := func(end corev1.ContainerStateTerminated) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name: runtime.IssuePodContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			RestartCount: 1, LastTerminationState: corev1.ContainerState{Terminated: &end},
+		}
+	}
+	podStatus := func(container corev1.ContainerStatus) corev1.PodStatus {
+		return corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{container}}
+	}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels),
+		podObject(name, recorded, sandboxUID, labels, podStatus(ended(outOfMemoryEnd)))}, withoutController())
+	for _, tc := range []struct {
+		name      string
+		container corev1.ContainerStatus
+		launcher  *shimwire.LauncherState
+		want      bool
+	}{
+		{"the container was ended OOMKilled", ended(outOfMemoryEnd), nil, true},
+		{"the kubelet restarted it and the role's launcher reports no child", restarted(outOfMemoryEnd), &shimwire.LauncherState{}, true},
+		{"the role's launcher reports the recorded generation's own exit", restarted(outOfMemoryEnd),
+			&shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 1}}, false},
+		{"the container was ended with reason Error at the same exit code", ended(erroredEnd), nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g.update(g.pod(name), func(p *corev1.Pod) { p.Status = podStatus(tc.container) })
+			g.eventually("the pod store to see "+tc.name, func() bool {
+				pod := g.r.storedPod(name)
+				if pod == nil {
+					return false
+				}
+				status := containerStatus(pod, runtime.IssuePodContainer)
+				return status != nil && reflect.DeepEqual(*status, tc.container)
+			})
+			if tc.launcher != nil {
+				g.reportLauncher(workerToken, *tc.launcher)
+			}
+			obs, err := g.r.Probe(g.ctx, rolesLocator(workerToken, recorded))
+			if err != nil {
+				t.Fatalf("Probe: %v", err)
+			}
+			if obs.Kind != runtime.Gone || obs.OutOfMemory != tc.want {
+				t.Fatalf("%s OutOfMemory=%t %q, want Gone OutOfMemory=%t", obs.Kind, obs.OutOfMemory, obs.Detail, tc.want)
+			}
+		})
 	}
 }
 
