@@ -751,7 +751,8 @@ func fillTable(t *builder) {
 	// The worker's answer to the update task — its work is pushed and its process may be
 	// replaced — and the round taking that answer back. Both are weighed in the same states:
 	// answering is every state a claim whose agent is registered can give or lose an answer in,
-	// and unregistered is every state before that agent, where there is no answer either way.
+	// and unregistered is every state before that agent, where no process is there to signal or
+	// to read a second ask, whatever answer the claim's record still carries.
 	answering := []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended}
 	unregistered := []ClaimState{StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected}
 	t.row(onPodUpdateSignalled, "the worker signalled that its work is pushed and its process may be replaced", podUpdateSignalled,
@@ -764,7 +765,8 @@ func fillTable(t *builder) {
 	// cannot be asked what the disk still holds (internal/daemon's checkUnpushed).
 	t.row(onPodUpdateReask, "take back the answer the turn's end gave, and let the round ask this worker again", podUpdateReask,
 		nil, answering...)
-	t.ignore(onPodUpdateReask, "a claim with no registered agent has given no answer to take back", unregistered...)
+	t.ignore(onPodUpdateReask, "the claim is relaunching and keeps the answer it gave, but no process of it is registered to read a second ask; the next replacement attempt posts this again, one sweep later",
+		unregistered...)
 	t.ignore(onPodUpdateReask, "the claim failed; the process whose turn answered is gone, and the round asks it nothing", StateFailed)
 	t.ignore(onPodUpdateReask, "the claim is retired; its update round ended with it", StateRetired)
 
@@ -2347,7 +2349,15 @@ func podUpdateSignalled(m *Machine, ctx context.Context, ev Event) error {
 // from a turn that ended rather than from a call it made or a disk anybody looked at.
 //
 // The answer goes, the mark of how it was given goes with it, and the ask's own clock goes too
-// (UpdateTaskedAt), so the next sweep asks at once rather than at the re-task bound hours away.
+// (UpdateTaskedAt), so the next sweep asks rather than waiting out the re-task bound hours away.
+// That sweep asks at once only where the claim holds no task of its own, because the answer this
+// clears is also what was holding that task back (answeredOpenRound): with it gone,
+// askForUpdate's queue meets ErrDeliveryPending and sends the task the claim holds (sendPending),
+// and the round's own ask takes the slot that task's turn frees (takeSlotForUpdate, run by
+// afterTurn). Holding the task back instead would deadlock the slot — nothing else sends it, and
+// the round it waits for cannot end until this worker answers — so what the re-ask costs is one
+// turn: it comes at once, or after the turn of the task the claim holds.
+//
 // What stays is the record that this round has now asked this claim once more for this reason
 // (UpdateReaskedForPushCheck), which the daemon reads before it refuses a replacement again: a
 // second turn-end answer is taken as it stands, and the round ends.

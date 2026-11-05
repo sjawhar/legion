@@ -661,19 +661,26 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 // front of them either way, and the claims themselves stay on the operator's screen. A daemon
 // whose first sweep has not run says so, where every list empty would read as a sweep that found
 // nothing to do.
+//
+// A daemon of a release before this record serves a body with no `pod_update_rounds` member at
+// all. decodeAnswer takes such a body — it refuses a member this binary does not know, never a
+// member it does not find — so the line says what that daemon is rather than printing the
+// not-swept sentence, which would be false of a daemon sweeping every minute.
 func TestClaimsListPodUpdateLine(t *testing.T) {
 	waiting := make([]string, 25)
 	for i := range waiting {
 		waiting[i] = fmt.Sprintf("INFRA-%d", 100+i)
 	}
 	for _, testCase := range []struct {
-		name   string
-		rounds api.PodUpdateRounds
+		name string
+		// rounds is the record the daemon's answer carries; nil is an answer that carries no
+		// `pod_update_rounds` member at all.
+		rounds *api.PodUpdateRounds
 		want   string
 	}{
 		{
 			name: "both limits set",
-			rounds: api.PodUpdateRounds{
+			rounds: &api.PodUpdateRounds{
 				Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
 				InRound: []string{"INFRA-10", "INFRA-1000"}, WaitingOnMaxOpenRounds: []string{"INFRA-2"},
 			},
@@ -682,13 +689,13 @@ func TestClaimsListPodUpdateLine(t *testing.T) {
 		},
 		{
 			name:   "neither key set",
-			rounds: api.PodUpdateRounds{Swept: true, InRound: []string{"INFRA-10"}},
+			rounds: &api.PodUpdateRounds{Swept: true, InRound: []string{"INFRA-10"}},
 			want: "pod update rounds: max open no limit, no limit a minute; in a round: 1 — INFRA-10; " +
 				"waiting on the open-round limit: none; waiting on the limit a minute: none",
 		},
 		{
 			name: "more issues waiting than the line names",
-			rounds: api.PodUpdateRounds{
+			rounds: &api.PodUpdateRounds{
 				Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
 				InRound: []string{"INFRA-10", "INFRA-1000"}, WaitingOnMaxOpenRounds: waiting,
 			},
@@ -698,14 +705,23 @@ func TestClaimsListPodUpdateLine(t *testing.T) {
 		},
 		{
 			name:   "a daemon that has not swept",
-			rounds: api.PodUpdateRounds{},
+			rounds: &api.PodUpdateRounds{},
 			want:   podUpdateNotSwept,
+		},
+		{
+			name:   "a daemon that does not report the rounds",
+			rounds: nil,
+			want:   "pod update rounds: this daemon does not report them; it is older than this binary",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			answer, err := json.Marshal(api.OperatorClaims{PodUpdateRounds: testCase.rounds})
-			if err != nil {
-				t.Fatalf("encode the daemon's answer: %v", err)
+			answer := []byte(`{"claims":[]}`)
+			if testCase.rounds != nil {
+				encoded, err := json.Marshal(api.OperatorClaims{PodUpdateRounds: testCase.rounds})
+				if err != nil {
+					t.Fatalf("encode the daemon's answer: %v", err)
+				}
+				answer = encoded
 			}
 			var out bytes.Buffer
 			if err := printClaims(&out, answer); err != nil {

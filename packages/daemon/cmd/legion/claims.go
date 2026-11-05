@@ -124,7 +124,16 @@ func printClaims(w io.Writer, answer []byte) error {
 //
 // A daemon that has not swept says so rather than print each list empty, which would read as a
 // sweep that found nothing to do.
-func podUpdateRoundsLine(rounds api.PodUpdateRounds) string {
+//
+// A daemon that does not report the rounds at all says that instead. decodeAnswer refuses a
+// member this binary does not know but takes a body that leaves one out, so an answer from a
+// release before the daemon served this record decodes with the field nil rather than failing.
+// Read as the zero record it would print the line above, and an operator would be told a daemon
+// that sweeps every minute has not swept yet.
+func podUpdateRoundsLine(rounds *api.PodUpdateRounds) string {
+	if rounds == nil {
+		return "pod update rounds: this daemon does not report them; it is older than this binary"
+	}
 	if !rounds.Swept {
 		return "pod update rounds: the daemon has not swept yet"
 	}

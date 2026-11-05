@@ -1254,7 +1254,9 @@ func TestForgetSessionRefusesDaemonStopAfterPreflight(t *testing.T) {
 // read as a project that opens no round at all; and each list is an array, empty rather than
 // `null`, because the readers on the other side of this wire are strict (packages/contracts's
 // LegionOperatorClaimsResponse). A daemon whose first sweep has not run answers the zero record,
-// whose `swept` says so.
+// whose `swept` says so. The route fills the field on every answer it writes (list), so a body
+// that carries no `pod_update_rounds` at all is a daemon of an older release, which the
+// operator's own command tells apart (cmd/legion's podUpdateRoundsLine).
 func TestClaimsListPodUpdateLine(t *testing.T) {
 	h := newHarness(t)
 	for _, testCase := range []struct {

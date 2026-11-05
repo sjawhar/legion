@@ -23,5 +23,26 @@
 --
 -- Both go with the round: the end of a round clears every column the round wrote, these two
 -- included, so the next round over the claim starts with neither mark.
+--
+-- The update at the end is what keeps a claim of the release this upgrades from answering as it
+-- answers today. That release held a claim's answer through a turn the daemon sent nothing for
+-- whenever the claim's running process had registered a plugin contract below the one that
+-- introduced ready_for_update, and this release reads update_answered_by_turn_end in its place.
+-- Every row the table already holds takes the column's default, false, so without the backfill a
+-- claim below that contract which had answered its open round by the end of its task's turn would
+-- lose that answer at its next reminder turn and be asked for it again. The rows the backfill
+-- marks are the claims that have answered (update_signalled_at is not null) and could not have
+-- called the op (plugin_contract below it), because the release this upgrades from gave such a
+-- claim no way to answer but the end of its turn.
+--
+-- 46 is written as a literal because no SQL statement can read the Go constant that holds it
+-- (supervise.PodUpdateContract), and because this statement says what a released build did rather
+-- than what this daemon does: it runs once, against the rows that daemon left, so the number it
+-- names is the contract that introduced ready_for_update and stays 46 however the daemon's own
+-- constants are renumbered later. internal/api's
+-- TestPodUpdateContractIsTheContractThatIntroducedTheOp pins the Go constant to the same 46, so
+-- the two cannot drift apart without that test failing.
 alter table claims add column update_answered_by_turn_end boolean not null default false;
 alter table claims add column update_reasked_for_push_check boolean not null default false;
+update claims set update_answered_by_turn_end = true
+where update_signalled_at is not null and plugin_contract < 46;

@@ -112,18 +112,28 @@ type DeliveryView struct {
 type OperatorClaims struct {
 	Claims []OperatorClaim `json:"claims"`
 	// PodUpdateRounds is the sweep's own last word, which no claim row carries: a claim shows the
-	// round it is in, and nothing on it says why the drifted issue beside it was given none.
-	PodUpdateRounds PodUpdateRounds `json:"pod_update_rounds"`
+	// round it is in, and nothing on it says why the drifted issue beside it was given none. It
+	// is a pointer so that a reader can tell an answer that carries no record at all — a daemon
+	// of a release before this field — from one whose first sweep has not run, which carries the
+	// zero record and says so in `swept` (cmd/legion's podUpdateRoundsLine). The list route
+	// fills it on every answer, so only a daemon too old to know the field serves one without it.
+	PodUpdateRounds *PodUpdateRounds `json:"pod_update_rounds"`
 }
 
-// MarshalJSON keeps `claims` an array on the wire, empty rather than `null`. The sweep's record
-// normalises its own lists, which this carries rather than repeats: `type wire` drops the methods
-// of OperatorClaims alone, so the field keeps its own (PodUpdateRounds.MarshalJSON).
+// MarshalJSON keeps `claims` an array on the wire, empty rather than `null`, and
+// `pod_update_rounds` an object, the zero record rather than `null`: the field is nil only where
+// nobody filled it, and the readers on the other side of this wire take it as required
+// (packages/contracts's LegionOperatorClaimsResponse). The sweep's record normalises its own
+// lists, which this carries rather than repeats: `type wire` drops the methods of OperatorClaims
+// alone, so the field keeps its own (PodUpdateRounds.MarshalJSON).
 func (c OperatorClaims) MarshalJSON() ([]byte, error) {
 	type wire OperatorClaims
 	out := wire(c)
 	if out.Claims == nil {
 		out.Claims = []OperatorClaim{}
+	}
+	if out.PodUpdateRounds == nil {
+		out.PodUpdateRounds = &PodUpdateRounds{}
 	}
 	return json.Marshal(out)
 }
@@ -588,7 +598,9 @@ func treeOthers(claims []supervise.Claim, tree string, root claim.Token) []claim
 //
 // What the last pod-update sweep decided is answered beside them (Options.PodUpdateRounds), and a
 // daemon with no sweep behind it answers the zero record, which says so: an operator who is served
-// no record at all cannot tell a daemon that holds no issue back from one too old to say.
+// no record at all cannot tell a daemon that holds no issue back from one too old to say. Every
+// answer this route writes carries the record, so an answer without it is an older daemon's and
+// nothing else (OperatorClaims.PodUpdateRounds).
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
@@ -608,7 +620,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	if s.podUpdateRounds != nil {
 		rounds = s.podUpdateRounds()
 	}
-	writeJSON(w, http.StatusOK, OperatorClaims{Claims: views, PodUpdateRounds: rounds})
+	writeJSON(w, http.StatusOK, OperatorClaims{Claims: views, PodUpdateRounds: &rounds})
 }
 
 // operatorFailure answers an operator request its machine did not take: 409 with the machine's

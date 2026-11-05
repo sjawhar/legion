@@ -38,9 +38,18 @@ const PodUpdateContract = 46
 
 // CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer its update task
 // with: its process runs now (HoldsCapability) and the registration that process made declared a
-// plugin contract below the one that introduced the op. It is the one statement of that rule,
-// and the stale-plugin lane is what reads it (refreshPlugin): such a claim is relaunched onto
-// this daemon's plugin, where a claim that can answer is given a plugin round of its own.
+// plugin contract below the one that introduced the op. That one rule is what it states, and no
+// more: a process that runs now, whose own registration declared an older contract. The
+// stale-plugin lane is what reads it (refreshPlugin): such a claim is relaunched onto this
+// daemon's plugin, where a claim that can answer is given a plugin round of its own.
+//
+// It is not the only reading of the contract the daemon takes. internal/daemon's
+// reaskedForPushCheck reads c.PluginContract below PodUpdateContract on its own, with no
+// HoldsCapability beside it, and leaves every such claim out of the second ask a round makes
+// when the pod's shim predates the push check: a claim below the contract has no call to make
+// whether a process of it runs now or not, so the second ask could only take the same turn's-end
+// answer again, one turn later. A suspended claim below the contract is left out there as a
+// running one is.
 //
 // It says nothing about how an update round's answer was given. A plugin at this contract can
 // be built with no ready_for_update in its `legion` tool, and the daemon cannot tell that

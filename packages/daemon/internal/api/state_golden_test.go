@@ -719,7 +719,10 @@ func TestForgetSessionOperatorClaimGolden(t *testing.T) {
 	})
 }
 
-// What the list route answers: a queued claim carries no locator and no delivery yet.
+// What the list route answers: a queued claim carries no locator and no delivery yet. The
+// pod-update record is left out of the value this marshals, so the fixture is also the proof
+// that OperatorClaims.MarshalJSON writes the zero record for a nil field and the wire carries
+// the object either way.
 func TestOperatorClaimsGolden(t *testing.T) {
 	golden(t, "operator-claims.json", OperatorClaims{Claims: []OperatorClaim{
 		{
