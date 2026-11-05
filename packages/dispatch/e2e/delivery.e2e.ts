@@ -25,7 +25,12 @@ const FAILURE_501 = { series: "Pipeline failures", x: 0.85, at: "2024-06-01T12:2
  *  echarts chunk once; importing the same URL here hands back that module, whose
  *  `getInstanceByDom` finds the chart the page made. `x` and `at` name the point; without them it
  *  is the series' first data point (a merge dot's x carries a per-PR jitter). Null until the
- *  chart has painted the series. */
+ *  chart has painted the series, the moments it holds an instance that has drawn nothing
+ *  included: `Timeline.tsx` registers the chart with `echarts.init` in its mount effect and
+ *  pushes the first `setOption` from a second effect React runs in a later task, and in between
+ *  `getOption()` answers undefined (`this._model && this._model.getOption()`, echarts' own
+ *  `core/echarts.js`). A caller polls this function, and a poll fails on a throw rather than
+ *  asking again, so that moment has to read as "nothing painted yet". */
 async function shapePosition(
   page: Page,
   shape: { series: string; x?: number; at?: string }
@@ -33,7 +38,7 @@ async function shapePosition(
   return page.evaluate(async ({ series, x, at }) => {
     interface Chart {
       convertToPixel: (finder: { seriesName: string }, value: number[]) => number[];
-      getOption: () => { series?: { name?: string; data?: { value?: number[] }[] }[] };
+      getOption: () => { series?: { name?: string; data?: { value?: number[] }[] }[] } | undefined;
     }
     const host = document.querySelector<HTMLElement>("[data-testid=delivery-chart]");
     if (host === null) return null;
@@ -51,7 +56,7 @@ async function shapePosition(
       if (chart !== undefined) break;
     }
     if (chart === undefined) return null;
-    const painted = chart.getOption().series?.find((candidate) => candidate.name === series);
+    const painted = chart.getOption()?.series?.find((candidate) => candidate.name === series);
     const first = painted?.data?.[0]?.value;
     if (first === undefined) return null;
     const value = x !== undefined && at !== undefined ? [x, Date.parse(at)] : first;

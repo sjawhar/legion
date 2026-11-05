@@ -6,15 +6,17 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
 import type { FakeInterest, FakeSession } from "./agents";
+import { withoutHarnessPort } from "./harness-ports";
 
 // The fake Envoy is the harness's own fixture, so this row starts a second one on a port of its
-// own rather than reseeding the listener every other row in the run shares: with FAKE_ENVOY_PORT
-// unset it binds a port the OS chooses, and the row reads it from the fake's listening line.
+// own rather than reseeding the listener every other row in the run shares: with the fake Envoy
+// port unset under every name this lane carries it under, the second fake binds a port the OS
+// chooses, and the row reads it from the fake's listening line.
 const fakeEnvoyModule = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 
 test("an interests seed whose body arrives during a session reseed is kept", async () => {
   test.skip(test.info().project.name !== "chromium", "the fixture has no browser to vary");
-  const { FAKE_ENVOY_PORT: _harnessFake, ...env } = process.env;
+  const env = withoutHarnessPort("fakeEnvoy");
   const fake = spawn("bun", [fakeEnvoyModule], { env, stdio: ["ignore", "pipe", "inherit"] });
   const exited = once(fake, "exit");
   try {

@@ -148,8 +148,9 @@ the human's answer to your decision block. Checks you write close no design gate
 (dispatch://INFRA-175).
 A tester completion that rejects the implementer's results goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets the surface built
-in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and not
-suspended, until you tell it to continue (`envoy_publish` to its role topic): once that child
+in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, with its
+phase and its task kept, until you tell it to continue (`envoy_publish` to its role topic, which
+wakes it when its idle pod was released): once that child
 closes, or at once when the surface folds into an open pull request of this tree and a backward
 move to `implementing` builds it there.
 

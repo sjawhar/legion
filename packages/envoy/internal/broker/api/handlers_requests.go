@@ -174,7 +174,8 @@ type githubNarrowing struct {
 	// organization permissions among them, unless read_only is set too. The answer names them
 	// sorted, each once.
 	Repositories []string `json:"repositories,omitempty"`
-	// Optional: true limits the token to contents: read, metadata: read and pull_requests: read. A machine that must
+	// Optional: true limits the token to contents: read, metadata: read, pull_requests: read and
+	// actions: read, less the Actions grant the installation does not hold. A machine that must
 	// only read needs it, with or without repositories.
 	ReadOnly bool `json:"read_only,omitempty"`
 }

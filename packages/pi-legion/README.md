@@ -47,9 +47,10 @@ judges a change against its issue's goal and requirements; `deep-worker`; the pl
 `plan-gap-analyst` and `plan-reviewer`, which also review a root spec before every approval
 request, `plan-reviewer` checking each of its factual claims), each
 declaring its model as a role the operator maps (`docs/kubernetes.md`, "Model roles"). The Dispatch
-and Envoy skills (`asd-ste100`, `dispatch`, `dispatch-first`,
-`dispatch-writing-specs`, `envoy`) ship in `@sjawhar/pi-envoy`; a link from a Legion skill into one
-of them is written `skill://dispatch/...`, which resolves by name once both are installed.
+and Envoy skills, the text skills and the secrets broker's client (`agent-secrets`, `asd-ste100`,
+`dispatch`, `dispatch-first`, `dispatch-writing-specs`, `envoy`, `outside-message` and
+`plain-words`) ship in `@sjawhar/pi-envoy`; a link from a Legion skill into one of them is written
+`skill://dispatch/...`, which resolves by name once both are installed.
 
 `scripts/pi-plugin-prepack.sh` at the repository root is both plugins' `prepack`: it builds the one
 entry, writes the notices and stages this package's partition of `skills/`. It refuses to pack with

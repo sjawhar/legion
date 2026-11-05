@@ -100,9 +100,13 @@ of its own, inside the same tree.
 
 ## Phase workers
 
-The daemon starts each phase's worker itself, one phase at a time, in the order below. A role stays
-live and idle between its assignments until its issue leaves the workflow, so its next task reaches
-the same session.
+The daemon starts each phase's worker itself, one phase at a time, in the order below. A role keeps
+its session between its assignments until its issue leaves the workflow, so its next task reaches
+the same session. Under the Kubernetes runtime the pod is shorter-lived than the session: the
+daemon releases an issue's pod once no role of it has a turn in progress or a turn due for ten
+minutes, after saving the workspace's unpushed work, and the next wake for one of its roles — a
+task, a notice, a message to the role or to its session, or a CI settlement on the pull request's
+head — brings the pod back and resumes the same sessions where they stopped.
 
 | Phase | Worker | What it does | GitHub identity |
 | --- | --- | --- | --- |
@@ -156,8 +160,8 @@ off a waiting root takes it out of line; taking it off a running tree does not s
 A root whose architect asked you a question and now waits only on your answer gives its slot back
 rather than holding the project up: once nothing else of its tree runs and the architect has taken
 the task it was last given, the root moves to `awaiting_person` and the slot goes to the next root
-in line at once. Its architect stays live and reads your comments and replies as they arrive. Its
-tree stays live for its children, and `waitingOn` in `legion state` names the question and when the
+in line at once. Its architect keeps its pod, reading your comments and replies as they arrive.
+Its tree stays live for its children, and `waitingOn` in `legion state` names the question and when the
 wait began. Your act on any ask of the root answers it, whichever ask the wait names: your answer,
 resolution, or reply that hands an open ask back to the agent; so does your approval or changes
 request of the root's spec, and so does the spec's design gate standing open. The wait also ends

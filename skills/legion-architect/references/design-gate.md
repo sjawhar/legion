@@ -195,7 +195,8 @@ A check sometimes needs evidence from a production or external system before a
 human can approve it: a measurement, a current count, a stored record. First check whether a
 credential this tree's pods carry reaches it: the model route every pod has, and any identity the
 operator's deployment grants pods. Read the pod's own environment (for example `AWS_CONFIG_FILE` or
-`AGENT_SECRETS_URL`), because a credential can exist without any skill naming it.
+`AGENT_SECRETS_URL`), because a credential can exist without any skill naming it;
+`skill://agent-secrets` says how a pod's session uses the secrets broker's client.
 
 When the evidence is not reachable, do not have another running session read it for this tree and
 fold the result into the spec, because that hides the gap from the next tree that hits it. Write
