@@ -43,7 +43,7 @@ func pooledDocumentHandlerWith(
 		t.Cleanup(pool.Close)
 		service = docs.New(docs.Deps{Store: database, Settle: settle})
 		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), concurrentWait)
 			defer cancel()
 			if err := service.Shutdown(ctx); err != nil {
 				t.Errorf("shutdown document service: %v", err)
@@ -87,7 +87,7 @@ func TestConditionalEditFloodDoesNotStarveSmallPool(t *testing.T) {
 		}()
 		select {
 		case <-finished:
-		case <-time.After(20 * time.Second):
+		case <-time.After(concurrentWait):
 			t.Fatalf("round %d wedged: conditional edit flood did not return", round)
 		}
 	}
@@ -127,7 +127,7 @@ func TestConcurrentConditionalAndUnconditionalEditsDoNotWedge(t *testing.T) {
 		}()
 		select {
 		case <-finished:
-		case <-time.After(20 * time.Second):
+		case <-time.After(concurrentWait):
 			t.Fatalf("round %d wedged: concurrent conditional and unconditional edits did not return", round)
 		}
 	}

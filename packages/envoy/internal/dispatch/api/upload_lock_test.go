@@ -126,10 +126,6 @@ func TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTh
 			t.Fatalf("hold the upload and the answer before their events: %v", err)
 		}
 	}
-	dropWhenDone(t, database,
-		`drop trigger dispatch_test_hold_upload on artifact_versions`,
-		`drop trigger dispatch_test_hold_answer on asks`,
-		`drop function dispatch_test_hold()`)
 	hold := func(key int64) pgx.Tx {
 		t.Helper()
 		tx, err := database.Pool.Begin(ctx)
@@ -235,7 +231,7 @@ func awaitLockWaits(t *testing.T, ctx context.Context, database *store.Store, ne
 		}
 		return count
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for !reached(waiting) {
 		if time.Now().After(deadline) {
 			t.Fatal(never)
@@ -248,7 +244,7 @@ func awaitLockWaits(t *testing.T, ctx context.Context, database *store.Store, ne
 // settlement.
 func awaitCopyShows(t *testing.T, ctx context.Context, database *store.Store, copy, want string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		var markdown string
 		var pending int

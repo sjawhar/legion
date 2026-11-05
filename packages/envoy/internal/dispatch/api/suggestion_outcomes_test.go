@@ -157,10 +157,10 @@ func startIdleSweep(t *testing.T, project string, settle time.Duration) idleSwee
 	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, counted.Pool, srv.horizon(), wake, schedule) })
 	select {
 	case <-connected:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the hub did not connect within 10s")
+	case <-time.After(concurrentWait):
+		t.Fatalf("the hub did not connect within %s", concurrentWait)
 	}
-	waitUntil(t, 10*time.Second, "the boot pass to set the cursor", func() bool { return outcomeCursor(t, database) != nil })
+	waitUntil(t, concurrentWait, "the boot pass to set the cursor", func() bool { return outcomeCursor(t, database) != nil })
 	// The hub's signal after its LISTEN earns one more pass, no sooner than the gap after the boot
 	// pass began; after it the loop is idle.
 	time.Sleep(time.Until(started.Add(idleSweepGap + 300*time.Millisecond)))
@@ -197,7 +197,7 @@ func TestAnEventByTheActorOnTheSuggestedIssueWakesTheSweepAndMarksActedOn(t *tes
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
 
 	postOutcomeMessage(t, sweep.handler, sweep.target, "alice", "Adding the new detail here instead.")
-	waitUntil(t, 5*time.Second, "the suggestion to be marked acted_on", func() bool {
+	waitUntil(t, concurrentWait, "the suggestion to be marked acted_on", func() bool {
 		return readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target).Outcome == "acted_on"
 	})
 	if row := readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target); row.Detail != "the suggested issue was updated directly" {
@@ -217,7 +217,7 @@ func TestWritesMomentsApartAreJudgedTogetherAsActedOn(t *testing.T) {
 	postOutcomeMessage(t, sweep.handler, sweep.source, "alice", "Looking into this here first.")
 	time.Sleep(300 * time.Millisecond)
 	postOutcomeMessage(t, sweep.handler, sweep.target, "alice", "Adding the new detail here instead.")
-	waitUntil(t, 10*time.Second, "the suggestion to be judged", func() bool {
+	waitUntil(t, concurrentWait, "the suggestion to be judged", func() bool {
 		return readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target).Outcome != "ignored"
 	})
 	if row := readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target); row.Outcome != "acted_on" {
@@ -469,25 +469,20 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 	if _, err := database.Pool.Exec(ctx, `vacuum analyze write_suggestions`); err != nil {
 		t.Fatalf("vacuum write_suggestions: %v", err)
 	}
-	// The events table's statistics are this half's own rows, as write_suggestions' are. A
-	// database the harness recycled carries the statistics of whatever the test before it wrote:
-	// its reset is a truncate, which empties a table without analysing it, so pg_statistic still
-	// describes the rows that stood there (the reset of storetest.Open's free list). That decided
-	// the plan of the two rules that probe events by issue and by document, and so how many rows
-	// of events the page read: 8 for a half on a freshly cloned database against 10 for a half on
-	// the database recycled from the test that analyses a log of 200,000 events, which is CI run
-	// 41789493503's failure, reproduced by running that test and this one in one go. Both halves
-	// hold the same nine events, so statistics read from them are the same statistics.
-	if _, err := database.Pool.Exec(ctx, `analyze events`); err != nil {
-		t.Fatalf("analyze events: %v", err)
-	}
+	// Both halves hold the same nine events and the same write_suggestions rows, and each runs
+	// on a database of its own cloned from the template, so the statistics the planner reads are
+	// the same statistics on both sides. That is what makes the two row counts comparable: a
+	// database carrying another test's statistics gave 8 rows for a half against 10 for the
+	// other in CI run 41789493503, back when a test could be handed a database the test before
+	// it had written in (dispatch://INFRA-1075).
 
 	// The page is bounded by this database's own event head, not by the safe horizon. Both are
 	// an id every event at or below which is final, and here every event is this test's and
 	// committed; but the horizon is proven from pg_snapshot_xmin, the oldest transaction id
 	// running anywhere on the instance (internal/dispatch/events, horizon.go), so a transaction
-	// another test or the harness's reset workers held open while one of the two measurements
-	// ran left that half a shorter range of the log to read, and the two then disagreed about
+	// another test or the harness's own create and drop held open while one of the two
+	// measurements ran left that half a shorter range of the log to read, and the two then
+	// disagreed about
 	// how many rows of events a page reads - two rows apart in CI run 41762847452. The head is
 	// the same bound for both halves whatever else is running.
 	safe := eventHead(t, database)

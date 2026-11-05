@@ -239,7 +239,7 @@ func TestIssueProgressReconciliationCountsDriftedIssues(t *testing.T) {
 	wantNull(t, "uncounted tasks before the pass", progressOf(t, handler, uncounted.Key).Tasks)
 	wantCount(t, "stale tasks before the pass", progressOf(t, handler, stale.Key).Tasks, 0, 1)
 
-	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	deps.Docs.(*docs.Service).ReconcileTaskProgress(runCtx)
 

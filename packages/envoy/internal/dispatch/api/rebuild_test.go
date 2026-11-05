@@ -291,10 +291,6 @@ func TestSuppliedRebuildThatFailsBeforeItsVersionLeavesTheDocument(t *testing.T)
 	`); err != nil {
 		t.Fatalf("make the version write fail: %v", err)
 	}
-	dropWhenDone(t, database,
-		`drop trigger dispatch_test_reject_rebuild_version on artifact_versions`,
-		`drop function dispatch_test_reject_rebuild_version()`)
-
 	broken.failNextLoad(artifact.ID)
 	rebuilt := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/rebuild", map[string]any{"markdown": "changed\n"}, "alice")
 	if rebuilt.Code != http.StatusInternalServerError {

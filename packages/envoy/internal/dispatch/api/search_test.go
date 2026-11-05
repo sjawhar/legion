@@ -227,7 +227,7 @@ func TestSearchReadsOnlyTheLatestDocumentVersion(t *testing.T) {
 		t.Fatalf("edit document: status=%d body=%s", edit.Code, edit.Body.String())
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		var versions int
 		if err := database.Pool.QueryRow(context.Background(), "select count(*) from artifact_versions where artifact_id = $1", issue.PrimaryArtifactID).Scan(&versions); err != nil {

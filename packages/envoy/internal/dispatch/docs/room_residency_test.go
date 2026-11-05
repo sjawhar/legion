@@ -194,7 +194,7 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		t.Fatalf("%d rounds of reads and versions, %d sockets and %d writes, too few to say anything", rounds.Load(), sockets.Load(), result.writes)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
@@ -265,7 +265,7 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 	// The server has handled the departure, and whatever it does when a room's last peer leaves,
 	// once the socket's handler returns (Service.ServeHTTP removes the connection after that).
 	state := service.room(artifactID)
-	for deadline := time.Now().Add(5 * time.Second); ; {
+	for deadline := time.Now().Add(roomWait(t)); ; {
 		state.mu.Lock()
 		connected := len(state.connected)
 		state.mu.Unlock()
@@ -288,7 +288,7 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 		t.Fatalf("second write: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
@@ -683,7 +683,7 @@ func newRetiringRoomService(t *testing.T) (*Service, *store.Store) {
 		Settle:    time.Hour,
 	})
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 		defer cancel()
 		if err := service.Shutdown(ctx); err != nil {
 			t.Logf("shutdown document service: %v", err)
@@ -803,7 +803,7 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 			case <-committed:
 			case err := <-written:
 				t.Fatalf("the write finished (%v) without publishing through the room", err)
-			case <-time.After(10 * time.Second):
+			case <-time.After(roomWait(t)):
 				t.Fatal("the write's publish never reached the room")
 			}
 			live := service.srv.GetDoc(artifactID)
@@ -829,7 +829,7 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 				if err != nil {
 					t.Fatalf("write: %v", err)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(roomWait(t)):
 				t.Fatal("the committed write's publish never returned once it was let go")
 			}
 			select {
@@ -845,7 +845,7 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 			}
 			// The publish's slot does not outlive it: every later room of the document persists
 			// behind the slots queued under its name.
-			for deadline := time.Now().Add(5 * time.Second); ; {
+			for deadline := time.Now().Add(roomWait(t)); ; {
 				service.suppressMu.Lock()
 				queued := len(service.suppressed[artifactID])
 				service.suppressMu.Unlock()
@@ -915,7 +915,7 @@ func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 					if err != nil {
 						t.Errorf("trial %d: commit: %v", trial, err)
 					}
-				case <-time.After(10 * time.Second):
+				case <-time.After(roomWait(t)):
 					hung++
 					continue
 				}

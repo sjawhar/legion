@@ -77,7 +77,7 @@ func TestRunDeliversACommentBodyAtTheCapThroughNATS(t *testing.T) {
 			t.Fatalf("the delivered body is %d bytes, want the %d bytes published unchanged",
 				len(delivered.Payload.Body), len(body))
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatalf("nothing arrived on %s, though the event is marked published: a body of %d UTF-16 units was recorded delivered and reached no one",
 			issueTopic, contracts.DispatchBodyMax)
 	}

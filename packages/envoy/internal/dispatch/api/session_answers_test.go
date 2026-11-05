@@ -155,7 +155,7 @@ func (f *answersFixture) publishOutbox(t *testing.T) {
 		cancel()
 		<-stopped
 	}()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		var unpublished int
 		if err := f.database.Pool.QueryRow(context.Background(), `

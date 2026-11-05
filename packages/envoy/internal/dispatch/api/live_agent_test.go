@@ -132,7 +132,7 @@ func TestAgentStreamRearmsTheSessionAndDeliversItsReplayOnItsFirstAnswer(t *test
 	if data := client.agentFrame(t, "agent", "responder"); data != `{"v":1,"responding":false}` {
 		t.Fatalf("the first frame's data is %s, want the no-responder verdict", data)
 	}
-	pollUntil(t, 5*time.Second, "the view re-arms the session", func() bool { return source.Watches(plannerSessionID) >= 3 })
+	pollUntil(t, concurrentWait, "the view re-arms the session", func() bool { return source.Watches(plannerSessionID) >= 3 })
 
 	source.SetReplay(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"late-replay"}`))
 	if data := client.agentFrame(t, "agent", "responder"); data != `{"v":1,"responding":true}` {
@@ -334,7 +334,7 @@ func TestAgentStreamEndsTheStreamWhenAViewerFallsBehind(t *testing.T) {
 	stream := newGatedStream()
 	running := served.startAgentSubscription(t.Context(), stream, "agent", plannerSessionID)
 	t.Cleanup(running.stop)
-	pollUntil(t, 5*time.Second, "the view arms the session", func() bool { return source.Watches(plannerSessionID) >= 1 })
+	pollUntil(t, concurrentWait, "the view arms the session", func() bool { return source.Watches(plannerSessionID) >= 1 })
 
 	// More frames than the view holds for a page that reads nothing.
 	for index := range agentStreamBuffer * 4 {
@@ -363,7 +363,7 @@ func TestAgentStreamEndsTheStreamWhenAViewerFallsBehind(t *testing.T) {
 		}
 		break
 	}
-	pollUntil(t, 5*time.Second, "the view that fell behind leaves the session's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
+	pollUntil(t, concurrentWait, "the view that fell behind leaves the session's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
 }
 
 // The relay ending a viewer, as a connection lost on the way to the page does, ends the
@@ -387,7 +387,7 @@ func TestARelayDropEndsTheSubscriptionAsDropped(t *testing.T) {
 	if reason := client.endedAs(t, "agent"); reason != "dropped" {
 		t.Fatalf("the dropped view ended %q, want dropped", reason)
 	}
-	pollUntil(t, 5*time.Second, "the dropped view leaves the session's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
+	pollUntil(t, concurrentWait, "the dropped view leaves the session's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
 	source.Publish(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"message","seq":1}`))
 	client.quiet(t, 300*time.Millisecond, "after the relay dropped the view")
 	if !client.open() {
@@ -438,7 +438,7 @@ func TestAFrameThatIsNotJSONIsSkipped(t *testing.T) {
 
 	client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: "agent"})
 	const message = "dispatch: skipped agent frames that are not JSON"
-	pollUntil(t, 5*time.Second, "the ended view logs what it skipped", func() bool { return logs.Lines(message) != "" })
+	pollUntil(t, concurrentWait, "the ended view logs what it skipped", func() bool { return logs.Lines(message) != "" })
 	lines := logs.Lines(message)
 	if strings.Count(lines, message) != 1 || !strings.Contains(lines, "level=WARN") || !strings.Contains(lines, "skipped=3") {
 		t.Fatalf("the view logged %q, want one WARN counting 3 skipped frames", lines)
@@ -488,7 +488,7 @@ func TestTwoAgentViewsShareOneSocket(t *testing.T) {
 	}
 
 	client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: "planner"})
-	pollUntil(t, 5*time.Second, "the unsubscribed view leaves the planner's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
+	pollUntil(t, concurrentWait, "the unsubscribed view leaves the planner's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
 	if got := source.Viewers(reviewerSessionID); got != 1 {
 		t.Fatalf("the reviewer's frames have %d viewers after the planner's view stopped, want 1", got)
 	}
@@ -616,7 +616,7 @@ func TestAnAgentViewWhoseRelayFailsEndsAsDropped(t *testing.T) {
 			if waited := time.Since(began); waited < retry {
 				t.Fatalf("the view ended %s after it started, before the relay's retry (%s)", waited, retry)
 			}
-			pollUntil(t, 5*time.Second, "the failed view leaves the session's frames", func() bool {
+			pollUntil(t, concurrentWait, "the failed view leaves the session's frames", func() bool {
 				return source.Viewers(plannerSessionID) == 0
 			})
 		})

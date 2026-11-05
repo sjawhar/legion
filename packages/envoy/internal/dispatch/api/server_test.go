@@ -192,23 +192,6 @@ func seedPeople(t testing.TB, database *store.Store, emails ...string) {
 	}
 }
 
-// dropWhenDone runs each statement when t ends, before the harness takes the database back.
-// storetest.Open hands a test a database off a free list and puts it back once a reset has
-// emptied its tables; that reset restores rows, and the fingerprint that decides whether a
-// database may go back at all reads the tables and columns of schema public, so a function or a
-// trigger a test left behind rides into the next test that opens that database and fails it.
-// Every test here that creates one drops it through this.
-func dropWhenDone(t *testing.T, database *store.Store, statements ...string) {
-	t.Helper()
-	t.Cleanup(func() {
-		for _, statement := range statements {
-			if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
-				t.Errorf("undo what this test added to its database (%s): %v", statement, err)
-			}
-		}
-	})
-}
-
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	handler, _, _ := newTestServer(t, testServerOptions{})
@@ -341,7 +324,7 @@ func waitBackgroundOf(t testing.TB, served *server) {
 	}()
 	select {
 	case <-waited:
-	case <-time.After(5 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Log("the failed test left background work running; its later cleanups release it")
 	}
 }

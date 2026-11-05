@@ -877,7 +877,7 @@ func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
 		if err != nil {
 			t.Fatalf("open the %s's session registry: %v", name, err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		if err := sessions.WaitForCacheReady(ctx); err != nil {
 			t.Fatalf("warm the %s's session cache: %v", name, err)
@@ -1130,7 +1130,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		if claimant.sessions, err = session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1)); err != nil {
 			t.Fatalf("open the claimant's session registry: %v", err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
 			t.Fatalf("warm the session cache: %v", err)
@@ -1410,7 +1410,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restore session registry: %v", err)
 	}
-	readyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	readyCtx, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if err := restoredSessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("restore session cache: %v", err)
@@ -1716,7 +1716,7 @@ func TestRoleSetHandlerSoftClaimPredecessorInstance(t *testing.T) {
 		_, sessions, _, post := setup(t)
 		registerInstance(t, sessions, "ses_claimant", claimantInstance)
 		claim(t, post, `{"session_id":"ses_claimant","role":"sre","soft":true}`)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		stored, err := sessions.Refresh(ctx, "ses_claimant")
 		if err != nil {
@@ -1757,7 +1757,7 @@ func TestRoleSetHandlerSoftClaimPredecessorInstance(t *testing.T) {
 		registerInstance(t, observer.sessions, "ses_pred", claimantInstance)
 		registerInstance(t, claimant.sessions, "ses_pred", otherInstance)
 		registerInstance(t, observer.sessions, "ses_claimant", claimantInstance)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		if cached, err := observer.sessions.Get("ses_pred"); err != nil || cached.ClientInstanceID != claimantInstance {
 			t.Fatalf("the observer's cached predecessor = %+v, %v; want the claimant's instance %q", cached, err, claimantInstance)
@@ -2318,7 +2318,7 @@ func TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket(t *testin
 		t.Run(route.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
 			registry, sessions := setupSessionsTest(t, nil, []string{target})
-			endCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			endCtx, cancel := context.WithTimeout(context.Background(), listenerWait)
 			registry.EndWatch(endCtx)
 			cancel()
 			writer, err := store.Open(setupPublishTestClient(t).Conn, store.WithReplicas(1))

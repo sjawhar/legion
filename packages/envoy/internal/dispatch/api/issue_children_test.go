@@ -132,9 +132,9 @@ func TestTheIssueChildrenAnswerWhatMainsStatementDid(t *testing.T) {
 // parent and a child of its own each. A plan is a judgement about data: over five issues the
 // whole table is one page, so reading it whole and hashing it is the planner's right answer and
 // the statement's own shape says nothing. The test read whichever plan the database it was
-// handed happened to make - a clone of the template, whose issues has never been analysed
+// handed happened to make - a clone of the template, whose issues no migration analysed
 // (pg_class.reltuples = -1, where the planner assumes a table of ten pages), takes the index;
-// a database pgclone emptied and analysed for the next test (reltuples = 0, a table the planner
+// a database whose issues had been analysed and hold no row (reltuples = 0, a table the planner
 // knows is empty) merges the whole of issues_parent_key into the walk - which is how it failed
 // in CI run 41897075339.
 //

@@ -688,7 +688,7 @@ func TestTheBlockIndexAfterTheBootRepairIndexesAClosedIssuesDocument(t *testing.
 	}()
 	var indexed *int
 	var owed int
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(20 * time.Millisecond) {
 		if err := f.database.Pool.QueryRow(ctx, `
 			select (select version from document_block_versions where artifact_id = $1),
 			       (select count(*) from document_block_versions where version is null)
@@ -731,7 +731,7 @@ func TestTheBlockIndexAfterTheBootRepairIndexesAClosedIssuesDocument(t *testing.
 // awaitOwedSettlement waits until document owes a settlement.
 func awaitOwedSettlement(t *testing.T, database *store.Store, document string) {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(20 * time.Millisecond) {
 		var owed bool
 		if err := database.Pool.QueryRow(context.Background(), `
 			select exists (select 1 from doc_settlements_pending where artifact_id = $1)
@@ -750,7 +750,7 @@ func awaitOwedSettlement(t *testing.T, database *store.Store, document string) {
 // awaitLiveText waits until document's live text, as this server reads it, holds part.
 func awaitLiveText(t *testing.T, handler http.Handler, document, part string) {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(20 * time.Millisecond) {
 		live, _ := documentTexts(t, handler, document)
 		if strings.Contains(live, part) {
 			return

@@ -642,7 +642,7 @@ func settledWithoutVersion(t *testing.T, database *store.Store, documents *docs.
 		t.Fatal("the document owes no settlement, want the live write's settlement still owed")
 	}
 	documents.SettleNow(artifactID)
-	for deadline := time.Now().Add(5 * time.Second); owed(); time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); owed(); time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the document's settlement never committed")
 		}

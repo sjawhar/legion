@@ -48,7 +48,7 @@ func TestSettlementBetweenCommitAndPublishWaitsForTheWrite(t *testing.T) {
 	})
 	select {
 	case <-paused:
-	case <-time.After(5 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("settlement never reached its warm hook")
 	}
 
@@ -78,7 +78,7 @@ func TestSettlementBetweenCommitAndPublishWaitsForTheWrite(t *testing.T) {
 	close(resume)
 	select {
 	case <-settled:
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("paused settlement did not finish")
 	}
 	ledger.publish()

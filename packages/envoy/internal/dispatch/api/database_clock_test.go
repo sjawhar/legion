@@ -77,7 +77,6 @@ func databaseClockAhead(t *testing.T, database *store.Store, ahead time.Duration
 		int64(ahead/time.Second))); err != nil {
 		t.Fatalf("create the shadowing now(): %v", err)
 	}
-	dropWhenDone(t, database, `drop function public.now()`)
 	config := database.Pool.Config()
 	config.ConnConfig.RuntimeParams["search_path"] = "public, pg_catalog"
 	opened, err := pgxpool.NewWithConfig(ctx, config)

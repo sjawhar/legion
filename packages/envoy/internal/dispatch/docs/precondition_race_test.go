@@ -131,7 +131,7 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			}()
 			select {
 			case <-browserMutated:
-			case <-time.After(2 * time.Second):
+			case <-time.After(roomWait(t)):
 				t.Fatal("browser writer did not mutate the live tree")
 			}
 			if err := gate.Commit(context.Background()); err != nil {
@@ -211,7 +211,7 @@ func documentTokenForTest(t *testing.T, service *Service, artifactID, markdown s
 
 func waitForAsksQueryLock(t *testing.T, database *store.Store) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		var waiting int
 		if err := database.Pool.QueryRow(context.Background(), `
@@ -234,7 +234,7 @@ func awaitRaceResult(t *testing.T, result <-chan error) error {
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("conditional edit did not complete")
 		return nil
 	}

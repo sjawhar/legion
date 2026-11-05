@@ -15,8 +15,8 @@ import (
 // The rows below are what makes that a claim about the queries. A plan is a judgement about data,
 // and on an empty user_threads the partial index and user_threads_thread cost the same, so which
 // one Postgres takes turns on what the table's statistics happen to be: a clone of the template,
-// whose user_threads has never been analysed, takes the partial index, and a database the harness
-// emptied and analysed (pgclone's reset) takes user_threads_thread with the unread rows filtered
+// whose user_threads no migration analysed, takes the partial index, and a database whose
+// user_threads had been analysed empty takes user_threads_thread with the unread rows filtered
 // out afterwards, which is how the count failed in CI run 41821928631. Seeded with a table of
 // threads where the caller has a handful unread, the partial index is the cheaper plan by what it
 // skips, and both queries take it with nothing turned off.

@@ -34,7 +34,7 @@ func TestTheBackgroundWaitHoldsForWorkARequestLeftRunning(t *testing.T) {
 	close(release)
 	select {
 	case <-waited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the background wait never returned once the detached worker ended")
 	}
 }
@@ -61,7 +61,7 @@ func TestTheBackgroundWaitHoldsForAnOpenLiveSocket(t *testing.T) {
 	_ = client.conn.Close()
 	select {
 	case <-waited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the background wait never returned once the live socket closed")
 	}
 }
@@ -86,7 +86,7 @@ func TestTheBackgroundWaitHoldsForTheDeliveryHub(t *testing.T) {
 	seedHubSettings(t, rig.database)
 	client := rig.dial(t, asUser("alice"))
 	client.send(t, deliverySubscribe("p", presetView(deliveryLiveTimeline, 7, "")))
-	client.snapshot(t, 10*time.Second, "p")
+	client.snapshot(t, eventFeedWait, "p")
 	_ = client.conn.Close()
 	rig.sockets(t, 0)
 	requireBackgroundWaitHoldsUntilTheLifetimeEnds(t, rig, "the delivery hub")
@@ -110,7 +110,7 @@ func requireBackgroundWaitHoldsUntilTheLifetimeEnds(t *testing.T, rig *liveSocke
 	rig.stop()
 	select {
 	case <-waited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatalf("the background wait never returned once the server's lifetime ended (%s)", what)
 	}
 }

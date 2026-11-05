@@ -172,13 +172,12 @@ Each item below names a task and where its code is, then notes on it.
   each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`.
   `Hub` shares one `Listener` among many subscribers and channels: `cmd/dispatch` runs one per process (`dispatch background wakes`) for its woken background loops, and every `Wake` is signalled after each successful LISTEN as well as on each notification, so a subscriber catches up then on what it missed while the listener had no connection (`cmd/dispatch/README.md`, "Background loops")
 
-- **Test databases' shared rules**: `internal/pgclone/`
+- **Test databases' shared rules**: `internal/dispatch/store/storetest/`, `internal/broker/store/storetest/`
 
-  Dispatch's and the secrets broker's `storetest` harnesses:
-  one migrated template per test process, a `strategy file_copy` clone per test, and a free list a test's database goes back on once a reset worker has emptied it, rather than a drop per test (`Pool`, `Take`, `Release`, `Main`).
-  A database whose schema a test changed - a column default, a function, a trigger, a constraint, a schema or an `alter database` setting - fails the fingerprint the reset holds it to and is dropped instead, and `Main` reports how many were (`fingerprintQuery`).
-  Each harness keeps its own exported surface, environment variable, migrations and seed-schema name, and hands the pool a `Config`;
-  nothing in the pool names a table, a column or a migration, since it reads the schema it works on from the template's catalog at prepare time
+  Dispatch's harness migrates one template per test process and hands each test a `strategy file_copy` clone of it, dropped when that test ends (`Open`, `OpenFresh`, `Main`);
+  the broker's gives each test a migrated schema of its own on the one server, and a database of its own only where a schema cannot serve (`URL`, `Open`, `DatabaseURL`).
+  Nothing is handed from one test to the next, so no test can be given a database another test wrote in; what makes three forced checkpoints a test affordable is the server, a container deleted with the job running with `fsync`, `full_page_writes` and `synchronous_commit` off (docs/testing.md, "A database a Go test creates").
+  Each harness keeps its own exported surface, environment variable and migrations
 
 - **GitHub webhook redelivery**: `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go`
 

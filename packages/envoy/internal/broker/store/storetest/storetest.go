@@ -4,168 +4,165 @@
 // CopyAsOtherKind), for the tests that pin what a release or an authentication refuses. It is an
 // ordinary package rather than a _test.go file so every broker package can import it.
 //
-// The databases themselves come from internal/pgclone, which this package and Dispatch's
-// storetest share: every database is a clone of a template this test process migrates once, a
-// test's database is emptied and handed to the next caller rather than dropped, and one a test
-// changed beyond its rows is dropped instead. Its package comment says what each of those costs
-// and why. What this package decides is the broker's half: the environment variable, the
-// migrations, and the snapshot schema's name.
+// URL clones each database from a template this test process migrates once. Migrate applies the
+// whole set inside one transaction under a database-wide advisory lock (internal/broker/store),
+// so tests that each migrated a schema of their own on one shared database both re-ran every
+// migration and queued on that one lock, which was most of the Postgres work a broker test did
+// (dispatch://INFRA-1075). A clone costs one create database.
 //
-// Migrate applies the whole set inside one transaction under a database-wide advisory lock
-// (internal/broker/store), so tests that each migrated a schema of their own on one shared
-// database both re-ran every migration and queued on that one lock, which is most of the
-// Postgres work a broker test did (dispatch://INFRA-1075). A clone costs one create database,
-// and emptying one costs one truncate of the tables that hold rows, while creating a database
-// and dropping one each force a checkpoint that every package testing against the same server
-// queues on.
+// A clone copies the template's files (strategy file_copy), for the reason the Dispatch harness's
+// clones do (docs/testing.md, "A database a Go test creates"): Postgres's default from 15 writes
+// every page of the template into the write-ahead log instead. A file copy forces a checkpoint
+// before the copy and another after it, and the drop at the end of the test forces one more; what
+// makes that affordable is the server rather than any machinery here, since every CI job that
+// runs a Postgres service runs a container deleted with the job, with fsync, full_page_writes and
+// synchronous_commit off.
 //
-// OpenFresh is for a test that must have a database no other test has written into, or that
-// leaves a session or a process of its own on the database past its cleanup.
+// Nothing is handed from one test to the next: a test's database is dropped by its own cleanup,
+// so no test can be given a database another test wrote in.
 //
 // The harness changes no Postgres setting: fsync, full_page_writes and max_wal_size belong to
 // the whole server DatabaseURLEnv names, which can hold other databases, and a change to them
 // outlives the run.
 //
 // A package whose tests call URL, Open or OpenFresh uses Main as its TestMain:
-// func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }. Main is what drops the free list
-// and then the template. A package that installs none still works: with nobody to drop those at
-// the end, each call makes a database of its own, migrates it and drops it with the test, which
-// is what every broker test cost before this harness, and what the one or two calls such a
-// package makes cost now.
+// func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }. Main waits for the tests' drops and
+// then drops the template. A package that installs none still works: with nobody to drop the
+// template at the end, each call makes a database of its own, migrates it and drops it with the
+// test, which is what every broker test cost before this harness.
 package storetest
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
-	"github.com/sjawhar/envoy/internal/pgclone"
 )
 
 // DatabaseURLEnv names the Postgres server the broker's tests run against.
 const DatabaseURLEnv = "BROKER_TEST_DATABASE_URL"
 
-// seedSchema holds the harness's copy of every table the template has rows in. It lives in the
-// template rather than in this process, so every clone carries it from its first page and no
-// test pays for taking the snapshot; the fingerprint leaves it out, since it is the harness's
-// and not the schema under test.
-const seedSchema = "broker_storetest_seed"
+var shared struct {
+	// main is set by Main before the package's tests run. Only Main drops the template and waits
+	// for the per-test drops, so a package that installs none takes the ownMigratedURL path.
+	main     bool
+	once     sync.Once
+	err      error
+	server   url.URL
+	admin    *pgxpool.Pool
+	template string
 
-// shared hands out this package's databases. Main drops what its tests leave.
-var shared = pgclone.New(pgclone.Config{
-	Name:           "storetest",
-	DatabaseURLEnv: DatabaseURLEnv,
-	SkipMessage:    DatabaseURLEnv + " must be set to run Postgres-backed broker tests",
-	DatabasePrefix: "broker_test_",
-	TemplatePrefix: "broker_template_",
-	SeedSchema:     seedSchema,
-	Migrate:        migrateTemplate,
-})
+	drops     sync.WaitGroup
+	dropMu    sync.Mutex
+	dropFails []string
+}
 
-// URL returns the DSN of a database carrying every migration and nothing another test wrote,
-// which goes back on the free list once t ends. params are extra connection parameters as
-// key=value (e.g. "pool_max_conns=2"). It skips t when DatabaseURLEnv is unset.
+// serverURL is the DatabaseURLEnv server every database here is made on, skipping t when the
+// variable is unset: a run with no server is skipped rather than failed, which is the contract
+// URL, Open and DatabaseURL all state.
+func serverURL(t testing.TB) string {
+	t.Helper()
+	raw := os.Getenv(DatabaseURLEnv)
+	if raw == "" {
+		t.Skip(DatabaseURLEnv + " must be set to run Postgres-backed broker tests")
+	}
+	return raw
+}
+
+// randomName mints the name of the database one test gets of its own, kind naming what it is in
+// a failure. It is random rather than derived from t.Name() because two concurrent runs of one
+// test - this package's tests and a sibling package's, against the one server - would otherwise
+// mint the same name and act on each other's rows.
+func randomName(t testing.TB, kind string) string {
+	t.Helper()
+	suffix, err := randomSuffix()
+	if err != nil {
+		t.Fatalf("random %s name: %v", kind, err)
+	}
+	return "broker_test_" + suffix
+}
+
+func randomSuffix() (string, error) {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", fmt.Errorf("random database name: %w", err)
+	}
+	return hex.EncodeToString(suffix[:]), nil
+}
+
+// URL returns the DSN of a database of t's own, carrying every migration and nothing another test
+// wrote, dropped when t ends. params are extra connection parameters as key=value (e.g.
+// "pool_max_conns=2"). It skips t when DatabaseURLEnv is unset.
 func URL(t testing.TB, params ...string) string {
 	t.Helper()
-	dsn, _ := openURL(t, true, params)
-	return dsn
+	raw := serverURL(t)
+	if !shared.main {
+		return ownMigratedURL(t, raw, params)
+	}
+	shared.once.Do(func() { shared.err = prepare(raw) })
+	if shared.err != nil {
+		t.Fatalf("prepare the migrated template database: %v", shared.err)
+	}
+	name := randomName(t, "database")
+	if _, err := shared.admin.Exec(context.Background(), cloneStatement(name)); err != nil {
+		t.Fatalf("clone a test database from the template: %v", err)
+	}
+	t.Cleanup(func() { dropDatabase(name) })
+	return databaseURL(shared.server, name, params...)
 }
 
-// URLFresh returns the DSN of a database cloned for t alone and dropped once t ends; it is
-// OpenFresh's DSN, for a caller that opens the database itself or hands it to a process.
+// URLFresh is URL: every database this harness hands out is one no other test has written in.
 func URLFresh(t testing.TB, params ...string) string {
 	t.Helper()
-	dsn, _ := openURL(t, false, params)
-	return dsn
+	return URL(t, params...)
 }
 
-// Open is store.Open on a database of t's own, closed when t ends.
+// Open is store.Open on a fresh URL(t, params...), closed when t ends.
 func Open(t testing.TB, params ...string) *store.Store {
 	t.Helper()
-	return openStore(t, true, params)
-}
-
-// OpenFresh returns a store on a database cloned for t alone and dropped once t ends. Use it for
-// a test that must have a database no other test has written into - one that counts what a
-// sweep or a migration wrote across the whole of a table, where a row an earlier test left in a
-// table the reset does not reach would change the answer - and for one that leaves a session or
-// a process of its own on the database past its cleanup, which a database that goes back on the
-// free list cannot carry. Every other test uses Open: a clone and a drop each force a checkpoint
-// that every package on the server queues on (the package comment).
-func OpenFresh(t testing.TB, params ...string) *store.Store {
-	t.Helper()
-	return openStore(t, false, params)
-}
-
-// openStore opens the store a caller gets and hands its close to the cleanup that gives the
-// database back, which runs it before the database is emptied or dropped.
-func openStore(t testing.TB, reusable bool, params []string) *store.Store {
-	t.Helper()
-	dsn, holding := openURL(t, reusable, params)
-	st, err := store.Open(context.Background(), dsn)
+	st, err := store.Open(context.Background(), URL(t, params...))
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
-	if holding == nil {
-		// A package with no Main got a database of its own, which its own cleanup drops; nothing
-		// takes it back, so t closes the store.
-		t.Cleanup(st.Close)
-		return st
-	}
-	holding.close = st.Close
+	// The store closes before the drop its own cleanup runs, which t.Cleanup's reverse order
+	// gives: a plain drop meeting a session of this process's own waits that session out.
+	t.Cleanup(st.Close)
 	return st
 }
 
-// held is what a caller opened on the database it was handed. The cleanup that gives the
-// database back closes it first, rather than relying on the order two cleanups were registered
-// in: a database queued with a session still on it is dropped rather than emptied and reused,
-// and a plain drop of one is refused. A URL caller opens the database itself and leaves this
-// nil; its own cleanup, registered after the harness's, still runs first.
-type held struct{ close func() }
-
-// openURL makes the database one caller gets: one off the free list when reusable allows it and
-// the list has one, a clone of the template when it does not, and, with no Main to drop either,
-// a database of its own that it migrates and drops.
-func openURL(t testing.TB, reusable bool, params []string) (string, *held) {
+// OpenFresh is Open, for the tests that say in the name what they need of their database: one no
+// other test has written in, and one they may leave a session or a process of their own on.
+func OpenFresh(t testing.TB, params ...string) *store.Store {
 	t.Helper()
-	if !shared.Installed() {
-		return ownMigratedURL(t, shared.Server(t), params), nil
-	}
-	name := shared.Take(t, reusable)
-	holding := &held{}
-	if reusable {
-		t.Cleanup(func() { shared.Release(name, holding.close) })
-	} else {
-		t.Cleanup(func() {
-			if holding.close != nil {
-				holding.close()
-			}
-			shared.Drop(name)
-		})
-	}
-	return shared.URL(name, params...), holding
+	return Open(t, params...)
 }
 
-// ownMigratedURL is what a package with no Main gets: a database of its own, migrated and
-// dropped with the test, which is what every broker test cost before the template.
+// ownMigratedURL is what a package with no Main gets: a database of its own, migrated and dropped
+// with the test, which is what every broker test cost before the template.
 func ownMigratedURL(t testing.TB, raw string, params []string) string {
 	t.Helper()
-	name := shared.RandomName(t)
+	name := randomName(t, "database")
+	// The database is a file copy of template1 (docs/testing.md, "A database a Go test creates").
 	admin(t, raw, "create database "+name+" strategy file_copy")
 	t.Cleanup(func() { admin(t, raw, "drop database "+name+" with (force)") })
 	server, err := url.Parse(raw)
 	if err != nil {
 		t.Fatalf("parse %s: %v", DatabaseURLEnv, err)
 	}
-	dsn := pgclone.DatabaseURL(*server, name, params...)
+	dsn := databaseURL(*server, name, params...)
 	ctx := context.Background()
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
@@ -178,26 +175,120 @@ func ownMigratedURL(t testing.TB, raw string, params []string) string {
 	return dsn
 }
 
-// migrateTemplate migrates the template every clone comes from. The harness reads the migrated
-// schema through the store's own pool, so the template is opened the way a test's database is.
-func migrateTemplate(ctx context.Context, dsn string) (pgclone.Querier, func(), error) {
-	database, err := store.Open(ctx, dsn)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open the template database: %w", err)
-	}
-	if err := database.Migrate(ctx); err != nil {
-		database.Close()
-		return nil, nil, fmt.Errorf("migrate the template database: %w", err)
-	}
-	return database.Pool, database.Close, nil
+// cloneStatement returns the create database that makes name a copy of the template's files
+// rather than a copy through the write-ahead log (the package comment says why).
+func cloneStatement(name string) string {
+	return "create database " + name + " template " + shared.template + " strategy file_copy"
 }
 
-// Main runs the package's tests, waits for the last of their databases to be emptied, drops
-// every database its tests left - the free list's and the ones no reset could take back - then
-// drops the template they were cloned from. A package whose tests call URL, Open or OpenFresh
-// uses it as its TestMain:
-// func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }.
-func Main(m *testing.M) int { return shared.Main(m) }
+// Main runs the package's tests, waits for their databases to drop, then drops the template they
+// were cloned from.
+func Main(m *testing.M) int {
+	shared.main = true
+	code := m.Run()
+	if shared.admin == nil {
+		return code
+	}
+	defer shared.admin.Close()
+	shared.drops.Wait()
+	for _, failure := range shared.dropFails {
+		fmt.Fprintf(os.Stderr, "storetest: %s\n", failure)
+		if code == 0 {
+			code = 1
+		}
+	}
+	if shared.template == "" {
+		return code
+	}
+	if _, err := shared.admin.Exec(context.Background(), "drop database "+shared.template); err != nil {
+		fmt.Fprintf(os.Stderr, "storetest: drop template database %s: %v\n", shared.template, err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	return code
+}
+
+// dropDatabase drops name without waiting for it; Main waits for every drop. Drops in flight
+// together share one checkpoint. It forces the drop, since a test may have left a session of its
+// own on the database.
+func dropDatabase(name string) {
+	shared.drops.Go(func() {
+		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+			shared.dropMu.Lock()
+			shared.dropFails = append(shared.dropFails, fmt.Sprintf("drop test database %s: %v", name, err))
+			shared.dropMu.Unlock()
+		}
+	})
+}
+
+// prepare opens the admin pool and migrates the template every URL clones.
+func prepare(raw string) error {
+	server, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", DatabaseURLEnv, err)
+	}
+	shared.server = *server
+	ctx := context.Background()
+	config, err := pgxpool.ParseConfig(databaseURL(shared.server, "postgres"))
+	if err != nil {
+		return fmt.Errorf("parse the admin database URL: %w", err)
+	}
+	// One create and one drop a test run on this pool, so it is sized for the tests a package
+	// runs at once rather than for the drops alone.
+	config.MaxConns = 8
+	admin, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return fmt.Errorf("open the admin pool: %w", err)
+	}
+	shared.admin = admin
+
+	suffix, err := randomSuffix()
+	if err != nil {
+		return err
+	}
+	name := "broker_template_" + suffix
+	// The template is a file copy of template1, for the reason each clone of it is one.
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
+		return fmt.Errorf("create the template database: %w", err)
+	}
+	shared.template = name
+	st, err := store.Open(ctx, databaseURL(shared.server, name))
+	if err != nil {
+		return fmt.Errorf("open the template database: %w", err)
+	}
+	err = st.Migrate(ctx)
+	st.Close()
+	if err != nil {
+		return fmt.Errorf("migrate the template database: %w", err)
+	}
+	// Postgres refuses to clone a database another session is connected to. Refusing connections
+	// to the template keeps any stray session from making a clone wait or fail.
+	if _, err := admin.Exec(ctx, "alter database "+name+" with allow_connections false"); err != nil {
+		return fmt.Errorf("close the template database to connections: %w", err)
+	}
+	return nil
+}
+
+// databaseURL is server's DSN pointed at database, carrying params as extra connection parameters
+// given as key=value.
+func databaseURL(server url.URL, database string, params ...string) string {
+	server.Path = "/" + database
+	if len(params) > 0 {
+		query := server.Query()
+		for _, param := range params {
+			values, err := url.ParseQuery(param)
+			if err != nil {
+				panic("storetest: connection parameter " + param + ": " + err.Error())
+			}
+			for key := range values {
+				query.Set(key, values.Get(key))
+			}
+		}
+		server.RawQuery = query.Encode()
+	}
+	return server.String()
+}
 
 // DatabaseURL creates a fresh, UNMIGRATED database on the DatabaseURLEnv server, drops it when t
 // ends, and returns its DSN. URL remains the right helper for everything else: it hands out a
@@ -207,8 +298,8 @@ func Main(m *testing.M) int { return shared.Main(m) }
 // processes are there to settle. A caller that wants tables runs store.Migrate on it itself.
 func DatabaseURL(t testing.TB) string {
 	t.Helper()
-	raw := shared.Server(t)
-	name := shared.RandomName(t)
+	raw := serverURL(t)
+	name := randomName(t, "database")
 	// Both statements go through admin, whose bare Exec runs them outside a transaction: a
 	// create database cannot run inside one. The drop forces the connections a test left behind
 	// (a listener that outlived its own cleanup, a pool closing) off the database, because a

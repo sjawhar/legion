@@ -1151,7 +1151,7 @@ func TestARepeatOfAnUploadStillRunningWaitsForItsAnswerAfterTheIssueCloses(t *te
 	go func() { answered <- sendBigUpload(t, handler, issue.Key, "running-upload") }()
 	select {
 	case <-held.reached:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the first upload never reached the file store")
 	}
 	closeArtifactIssue(t, handler, issue.Key)
@@ -1171,7 +1171,7 @@ func TestARepeatOfAnUploadStillRunningWaitsForItsAnswerAfterTheIssueCloses(t *te
 	var first sentUpload
 	select {
 	case first = <-answered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the first upload never answered once released")
 	}
 	if code, _ := refusalOf(t, first.ResponseRecorder); first.Code != http.StatusConflict || code != "ISSUE_CLOSED" {

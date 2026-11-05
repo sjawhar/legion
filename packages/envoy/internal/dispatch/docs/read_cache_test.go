@@ -490,7 +490,7 @@ func TestCancelledColdReaderLeavesTheFoldForOtherReaders(t *testing.T) {
 	}()
 	select {
 	case <-persistence.entered:
-	case <-time.After(time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the cold fold never reached LoadDocument")
 	}
 
@@ -515,7 +515,7 @@ func TestCancelledColdReaderLeavesTheFoldForOtherReaders(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancelled leader = %v, want context.Canceled", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the cancelled leader stayed blocked on the shared fold")
 	}
 	close(persistence.release)

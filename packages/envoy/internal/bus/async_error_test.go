@@ -108,7 +108,7 @@ func TestAHandshakeTheServerClosedIsAFailedReconnectAttempt(t *testing.T) {
 		}
 		return out
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(busWait)
 	for len(lines()) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the client never reported the handshake the server closed")

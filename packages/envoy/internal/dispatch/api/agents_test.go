@@ -392,8 +392,8 @@ func TestAnAgentsListWhoseRequestEndsWhileItWaitsOnTheFetchAnswers503(t *testing
 	cancel()
 	select {
 	case <-answered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("an agents list did not answer within 5 s of its request ending")
+	case <-time.After(concurrentWait):
+		t.Fatalf("an agents list did not answer within %s of its request ending", concurrentWait)
 	}
 	body := response.Body.String()
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"ENVOY_UNAVAILABLE"`) ||

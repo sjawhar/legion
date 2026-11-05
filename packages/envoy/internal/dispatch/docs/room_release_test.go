@@ -316,7 +316,7 @@ func openInEditor(t *testing.T, service *Service, serverURL string, ids []string
 					failures <- fmt.Errorf("open document %s: %w", id, err)
 					continue
 				}
-				deadline := time.Now().Add(10 * time.Second)
+				deadline := time.Now().Add(roomWait(t))
 				for service.srv.GetDoc(id) == nil && time.Now().Before(deadline) {
 					time.Sleep(time.Millisecond)
 				}

@@ -51,7 +51,7 @@ func lockWaiters(t *testing.T, database *store.Store) int {
 // awaitLockWaiters waits until at least count backends of this test's own database wait on a lock.
 func awaitLockWaiters(t *testing.T, database *store.Store, count int) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		waiting := lockWaiters(t, database)
 		if waiting >= count {
@@ -78,7 +78,7 @@ func awaitAnswer(t *testing.T, answered <-chan *httptest.ResponseRecorder, what 
 	select {
 	case response := <-answered:
 		return response
-	case <-time.After(15 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatalf("%s never answered", what)
 		return nil
 	}
@@ -190,9 +190,6 @@ func TestRepoProjectOppositeMovesDoNotDeadlock(t *testing.T) {
 			t.Fatalf("hold every event insert: %v", err)
 		}
 	}
-	dropWhenDone(t, database,
-		`drop trigger dispatch_test_hold_events on events`,
-		`drop function dispatch_test_hold_events()`)
 	release := holdLock(t, database, `select pg_advisory_xact_lock($1)`, holdEvents)
 	first := putMappingAsync(t, handler, "acme/from-core", map[string]any{"project": "OTHER"})
 	awaitLockWaiters(t, database, 1)

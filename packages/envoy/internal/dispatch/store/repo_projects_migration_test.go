@@ -164,7 +164,7 @@ func isSQLState(err error, code string) bool {
 // poll waits on a lock: the migration, queued behind a writer's open transaction.
 func awaitMigrationLockWait(t *testing.T, store *Store) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for {
 		var waiting int
 		if err := store.Pool.QueryRow(context.Background(), `

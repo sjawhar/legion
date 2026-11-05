@@ -687,7 +687,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 				t.Fatalf("revise document: %v", err)
 			}
 			waitForArtifactVersion(t, doc.handler, doc.artifactID, 2)
-			deadline := time.After(5 * time.Second)
+			deadline := time.After(concurrentWait)
 			for {
 				select {
 				case event, ok := <-published:
@@ -945,7 +945,7 @@ func eventDeliveries(t *testing.T, database *store.Store, eventType, id string) 
 		<-stopped
 	}()
 	const about = `from events where type = $1 and payload->>'id' = $2`
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		var unpublished, total int
 		if err := database.Pool.QueryRow(context.Background(), `select count(*) filter (where published_at is null), count(*) `+about,

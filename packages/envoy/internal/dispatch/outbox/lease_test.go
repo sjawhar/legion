@@ -130,7 +130,7 @@ func startProcess(t *testing.T, name string, database *store.Store, url string, 
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(eventWait):
 			t.Errorf("%s's outbox did not stop", name)
 		}
 	})

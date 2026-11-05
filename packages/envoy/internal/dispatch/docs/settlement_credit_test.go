@@ -672,7 +672,7 @@ func TestAnUploadsFullReleaseClearsTheDurableRowOfAPendingAuthorItWasNeverCredit
 	browser := connectBrowser(t, httpServer.URL, artifactID, bob.ID)
 	editAsBrowser(t, service, artifactID, browser, "First.\n\nSecond, bob.\n")
 	t.Cleanup(browser.Close)
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), roomWait(t))
 	if err := service.waitForDurableAppends(waitCtx, artifactID); err != nil {
 		waitCancel()
 		t.Fatalf("wait for bob's edit to become durable: %v", err)
@@ -839,7 +839,7 @@ func TestABrowserEditAfterARoomReloadIsOwed(t *testing.T) {
 		agent := model.Actor{Kind: "session", ID: fmt.Sprintf("agent-%d", round)}
 		writeThroughLedger(t, service, artifactID, agent, fmt.Sprintf("Round %d.\n", round), withSnapshotVersion)
 	}
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), roomWait(t))
 	if err := service.waitForDurableAppends(waitCtx, artifactID); err != nil {
 		waitCancel()
 		t.Fatalf("wait for the setup rounds to become durable: %v", err)

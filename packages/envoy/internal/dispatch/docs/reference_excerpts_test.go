@@ -168,8 +168,8 @@ func runExcerpts(t *testing.T, run func(ctx context.Context)) {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("the reconciliation did not return within 10s of its context ending")
+		case <-time.After(roomWait(t)):
+			t.Error("the reconciliation did not return once its context ended, within roomWait")
 		}
 	})
 }
@@ -367,10 +367,10 @@ func TestAMentionOwedAnExcerptWakesTheReconciliation(t *testing.T) {
 	runExcerpts(t, func(ctx context.Context) { service.RunReferenceExcerptReconciliation(ctx, leases, wake) })
 	select {
 	case <-connected:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the hub did not connect within 10s")
+	case <-time.After(roomWait(t)):
+		t.Fatal("the hub did not connect within roomWait")
 	}
-	waitFor(t, 10*time.Second, "the boot pass to store the excerpt", func() bool { return !isOwed(t, database, document) })
+	waitFor(t, roomWait(t), "the boot pass to store the excerpt", func() bool { return !isOwed(t, database, document) })
 	// The hub's signal after its LISTEN earns one more pass, no sooner than the gap after the
 	// boot pass began; after it the loop is idle.
 	time.Sleep(time.Until(started.Add(service.referenceExcerptSweep.minGap + 200*time.Millisecond)))

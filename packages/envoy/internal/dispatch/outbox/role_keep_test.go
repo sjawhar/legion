@@ -31,7 +31,7 @@ import (
 // exactly as one the listener kept.
 func keptCopies(t *testing.T, client *bus.Client, role string) []contracts.Envelope {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), eventWait)
 	defer cancel()
 	var copies []contracts.Envelope
 	for seq := uint64(1); ; {

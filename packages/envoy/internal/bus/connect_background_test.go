@@ -119,7 +119,7 @@ func TestSubscriptionsMadeBeforeTheFirstConnectionDeliverAfterIt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a core subscription before the first connection: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("SubscribeCore waited for a connection the server cannot give")
 	}
 

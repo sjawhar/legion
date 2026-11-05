@@ -23,8 +23,11 @@ import (
 // A failed room's eviction flushes the document and compacts its rows older than the tail under
 // its advisory lock. An operation inside a database transaction that waited for that eviction
 // could be waiting on its own transaction, which Postgres cannot see, so these tests bound every
-// such wait.
-const recoveryBound = 10 * time.Second
+// such wait. The bound is where a test gives up, never a measurement: each asserts that the
+// operation answered - ErrServiceUnavailable, or the recovery finishing - and never how soon, so
+// it allows for a loaded runner. Every package of this module now runs at once, four CI cores to
+// some 3,800 parallel tests and the race detector besides (dispatch://INFRA-1075).
+const recoveryBound = 30 * time.Second
 
 // seedFoldableText seeds the document as markdown in rows older than the tail, so a failed room's
 // eviction has rows to compact and waits for the document's advisory lock to write them: every

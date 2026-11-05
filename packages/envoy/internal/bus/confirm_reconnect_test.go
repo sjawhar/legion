@@ -107,7 +107,7 @@ func TestConfirmPublishedRefusesADenialAReconnectCleared(t *testing.T) {
 	// (doReconnect), so once it runs the violation is gone and the reconnect has not counted.
 	select {
 	case <-disconnected:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the client never saw the server drop the connection")
 	}
 	if err := confirmPublished(conn, subject, before); !errors.Is(err, ErrPublishUnconfirmed) {
@@ -144,7 +144,7 @@ func TestConfirmPublishedRefusesADenialACompletedReconnectCleared(t *testing.T) 
 	// nats.go queues the reconnect callback once the new connection is marked connected.
 	select {
 	case <-reconnected:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the client never reconnected")
 	}
 	if err := confirmPublished(conn, subject, before); !errors.Is(err, ErrPublishUnconfirmed) {
@@ -261,7 +261,7 @@ func TestPublishConfirmedReadsTheStateBeforeThePublish(t *testing.T) {
 		return conn.Flush()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), busWait)
 	defer cancel()
 	err := client.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Data: []byte("{}")}, answered)
 	if !errors.Is(err, ErrPublishDenied) {

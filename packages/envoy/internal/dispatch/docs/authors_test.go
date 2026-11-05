@@ -387,7 +387,7 @@ func holdObserver(t *testing.T, service *Service, artifactID string, hook *func(
 	go func() { done <- write() }()
 	select {
 	case <-held:
-	case <-time.After(5 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the held write never reached its observer hook")
 	}
 	return func() {
@@ -398,7 +398,7 @@ func holdObserver(t *testing.T, service *Service, artifactID string, hook *func(
 			if err != nil {
 				t.Fatalf("held write: %v", err)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(roomWait(t)):
 			t.Fatal("the held write never finished applying")
 		}
 	}

@@ -871,8 +871,8 @@ func TestAKeptLaneGuardStopsWaitingWhenTheHandoversContextEnds(t *testing.T) {
 		if ok {
 			t.Fatalf("the cancelled hold of role %s reported that it took the guard, which the first hold still holds", role)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatalf("the hold of role %s's guard did not return within 10 s of its context ending", role)
+	case <-time.After(listenerWait):
+		t.Fatalf("the hold of role %s's guard did not return within %s of its context ending", role, listenerWait)
 	}
 
 	// The guard is the first holder's throughout: a release the cancelled wait never made would

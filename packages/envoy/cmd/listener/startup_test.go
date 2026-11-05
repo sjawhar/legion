@@ -124,7 +124,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		if forwarded.Topic != contracts.RoleTopicPrefix+role || !strings.HasPrefix(forwarded.DedupeKey, roleForwardDedupePrefix) {
 			t.Fatalf("the holder received topic %q dedupe key %q, want the role forward of %s", forwarded.Topic, forwarded.DedupeKey, contracts.RoleTopicPrefix+role)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatalf("the role holder received no forward while another task holds the durable:\n%s", listener.Output.String())
 	}
 
@@ -205,7 +205,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 				t.Fatalf("the holder received dedupe key %q, want one prefixed %s", frame.DedupeKey, roleForwardDedupePrefix)
 			}
 			keys[frame.DedupeKey]++
-		case <-time.After(10 * time.Second):
+		case <-time.After(listenerWait):
 			t.Fatalf("the holder received %d of %d role messages", received, messages)
 		}
 	}
@@ -446,7 +446,7 @@ func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 	listener.waitHealthy(t)
 	// The positive control, TestAListenerWithAGitHubRouteSettlesTheCIBucket, settles this seed
 	// within a few one-second ticks of turning healthy; five seconds covers them.
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
+	for deadline := time.Now().Add(listenerWait); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
 		consumers := 0
 		for range client.JS().ConsumerNames("KV_" + bus.CIStateBucket) {
 			consumers++
@@ -493,7 +493,7 @@ func TestAListenerWithAGitHubRouteSettlesTheCIBucket(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Logf("settled %s after turning healthy", time.Since(healthy).Round(10*time.Millisecond))
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+	for deadline := time.Now().Add(listenerWait); ; time.Sleep(100 * time.Millisecond) {
 		entry, err := kv.Get(key)
 		if err != nil {
 			t.Fatalf("read the seeded CI record: %v", err)

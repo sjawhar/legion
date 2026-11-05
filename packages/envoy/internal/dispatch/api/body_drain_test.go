@@ -153,14 +153,14 @@ func TestAnEarlyAnswerToAnUploadReachesAClientThatSendsItsWholeBodyFirst(t *test
 	go func() { first <- sendUpload(t, handler, running.Key, "running-upload", file) }()
 	select {
 	case <-held.reached:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the first upload never reached the file store")
 	}
 	t.Cleanup(func() {
 		releaseOnce()
 		select {
 		case <-first:
-		case <-time.After(10 * time.Second):
+		case <-time.After(concurrentWait):
 			t.Error("the first upload never answered once released")
 		}
 	})
@@ -453,7 +453,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 			}()
 			select {
 			case <-first.running:
-			case <-time.After(10 * time.Second):
+			case <-time.After(concurrentWait):
 				t.Fatal("the first request never ran")
 			}
 			header := http.Header{}
@@ -463,7 +463,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 			repeat := sendPartOfBody(t, server.Listener.Addr().String(), path, header, len(judged.repeat), []byte(judged.repeat[:5]))
 			select {
 			case <-found:
-			case <-time.After(10 * time.Second):
+			case <-time.After(concurrentWait):
 				t.Fatal("the repeat never found its key in flight")
 			}
 			finishFirst := func() keyedAnswered {
@@ -475,7 +475,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 						t.Fatalf("the first request: %v", answered.err)
 					}
 					return answered
-				case <-time.After(10 * time.Second):
+				case <-time.After(concurrentWait):
 					t.Fatal("the first request never answered once released")
 				}
 				return keyedAnswered{}

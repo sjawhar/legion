@@ -30,7 +30,7 @@ func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
 		if !got {
 			t.Fatal("the second reservation was refused once the first gave 4 back (8 left)")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the second reservation still waited after the first settled")
 	}
 
@@ -43,7 +43,7 @@ func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
 		if got {
 			t.Fatal("a third reservation of 6 was granted with 2 of 10 left")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("a third reservation waited with nothing in flight to give calls back")
 	}
 	if budget.spent != 8 {
@@ -86,7 +86,7 @@ func TestConcurrentReadsNeverOverspendACallBudget(t *testing.T) {
 			if !granted {
 				t.Fatalf("reservation %d of %d was refused with %d of %d calls free", i+1, held, allowance-i*cost, allowance)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(eventWait):
 			t.Fatalf("only %d of %d reservations answered before any settled", i, held)
 		}
 	}

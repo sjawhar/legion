@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -240,7 +239,7 @@ func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 	personal := personalTokenHolding(t, database, model.ScopePerson, model.ScopeApprove)
 	personOnly := personalTokenHolding(t, database, model.ScopePerson)
 	probe := func(route apiRoute, credential string) *httptest.ResponseRecorder {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), concurrentWait)
 		defer cancel()
 		request := httptest.NewRequestWithContext(ctx, route.Method, routeProbePath(route.Pattern), bytes.NewReader([]byte(routeProbeBody(route))))
 		request.Header.Set("Content-Type", "application/json")

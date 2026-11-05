@@ -53,7 +53,7 @@ func awaitCreateFailure(t *testing.T, failed <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-failed:
-	case <-time.After(10 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the relay's restart never reached its create")
 	}
 }
@@ -324,7 +324,7 @@ func TestSessionConsumerBurstOfRestartsDeliversEveryBacklog(t *testing.T) {
 	})
 	startedAt := time.Now()
 	got := map[string][]burstFrame{}
-	deadline := time.After(10 * time.Second)
+	deadline := time.After(listenerWait)
 	var last time.Time
 	for received := range burstSessions * perSession {
 		select {

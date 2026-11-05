@@ -249,7 +249,7 @@ func TestTheBackgroundWaitWaitsForARunningKeyedHandler(t *testing.T) {
 	awaitResponse(t, answered)
 	select {
 	case <-waited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the background wait never returned once the handler answered")
 	}
 }
@@ -276,7 +276,7 @@ func TestTheBackgroundWaitWaitsForWorkStartedWhileItWaits(t *testing.T) {
 	work.done()
 	select {
 	case <-waited:
-	case <-time.After(5 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the wait never returned once the work ended")
 	}
 }
@@ -443,7 +443,7 @@ func TestAKeyedClaimFinishesWhenItsClientGivesUpDuringIt(t *testing.T) {
 	}
 	select {
 	case <-served:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the request never finished once the hold on its key was released")
 	}
 	if response.Code != http.StatusCreated || rig.runs.Load() != 1 {

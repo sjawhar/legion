@@ -144,8 +144,8 @@ func TestAnEventsSubscriptionFromTheWhoamiHeadReplaysWhatCommittedSince(t *testi
 	// (internal/dispatch/events, horizon.go). Its own parallel neighbours hold such ids open on
 	// purpose: TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpen holds
 	// one for three seconds, TestWhoamiEventHeadStaysBelowAnEventStillOpen holds an event insert,
-	// and every storetest.Open that finds the free list empty holds one for its `create database
-	// ... strategy file_copy`. Beside the first two this test took 9.44 s of its socket's ten-second
+	// and every storetest.Open holds one for its `create database ... strategy file_copy`.
+	// Beside the first two this test took 9.44 s of its socket's ten-second
 	// read deadline on a two-core pod, against 0.48 s with the package to itself, and on CI run
 	// 41868325451 it failed that deadline waiting for its events_start. The api package took the
 	// same family of tests out of its parallel set for this (dispatch://INFRA-1075).

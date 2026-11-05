@@ -68,7 +68,7 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 42, envelopeFields)
 
 	var count int
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for {
 		if err := pool.QueryRow(ctx, "select count(*) from delivery_pull_requests where repo = $1 and number = $2", "acme/widgets", 42).Scan(&count); err != nil {
 			t.Fatalf("count rows: %v", err)

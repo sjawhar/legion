@@ -151,7 +151,7 @@ func recv(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
 	select {
 	case <-ch:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatalf("%s never happened", what)
 	}
 }
@@ -259,7 +259,7 @@ func waitAll(t testing.TB, wg *sync.WaitGroup, what string) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatalf("%s: a caller never returned", what)
 	}
 }

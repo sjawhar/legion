@@ -36,8 +36,8 @@ import (
 )
 
 // TestMain hands the package's tests to storetest, which clones the ones that stand a broker up
-// (brokertest's rig) a database off the one migrated template, and drops the template and the
-// free list when the last test has ended.
+// (brokertest's rig) a database off the one migrated template, drops each with its test, and
+// drops the template when the last test has ended.
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the

@@ -111,7 +111,7 @@ func (p *syncedPeer) barrier(t *testing.T) {
 	for len(conn.Answers) > 0 {
 		<-conn.Answers
 	}
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(concurrentWait)
 	for {
 		if err := conn.AskForDocument(); err != nil {
 			t.Fatalf("send browser peer sync step 1: %v", err)

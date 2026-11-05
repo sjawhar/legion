@@ -70,7 +70,7 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 			if err != nil {
 				t.Fatalf("publish %d was answered %v, want accepted", index, err)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(busWait):
 			t.Fatalf("publish %d was never answered", index)
 		}
 	}
@@ -151,7 +151,7 @@ func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.
 		t.Fatalf("first publish answered %v", err)
 	}
 	server.Stop(t)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(busWait)
 	for client.Connected() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -188,7 +188,7 @@ func TestAWindowAnswersNoRespondersOnACurrentConnectionAsNotAcknowledged(t *test
 		if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, natsgo.ErrNoResponders) || errors.Is(err, bus.ErrUnavailable) {
 			t.Fatalf("a publish answered with no responders on a current connection answered %v, want ErrNotAcknowledged wrapping nats.ErrNoResponders, not ErrUnavailable", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the publish was never answered")
 	}
 	if !client.Connected() {
@@ -219,7 +219,7 @@ func TestAWindowAnswersAnUnacknowledgedPublishOnACurrentConnectionAsNotAcknowled
 		if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, natsgo.ErrAsyncPublishTimeout) || errors.Is(err, bus.ErrUnavailable) {
 			t.Fatalf("a publish never acknowledged on a current connection answered %v, want ErrNotAcknowledged wrapping nats.ErrAsyncPublishTimeout, not ErrUnavailable", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the publish was never answered")
 	}
 	if !client.Connected() {

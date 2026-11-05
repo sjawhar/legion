@@ -678,7 +678,7 @@ func TestABlockAskBelongsToTheVersionThatAddedIt(t *testing.T) {
 	succeeded(t, "answer the block ask", dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
 		"selected": []string{"Ship"}, "expected_edited_at": ask.EditedAt,
 	}, "alice"))
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for readNode(t, handler, blockRef).ChangedVersion <= before {
 		if time.Now().After(deadline) {
 			t.Fatalf("the answer never moved the block's changed version past %d", before)

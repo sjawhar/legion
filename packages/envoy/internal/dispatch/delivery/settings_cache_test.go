@@ -42,8 +42,8 @@ func settingsWake(t *testing.T, pool *store.Pool) <-chan struct{} {
 	})
 	select {
 	case <-connected:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the settings hub did not listen within 10s")
+	case <-time.After(eventWait):
+		t.Fatalf("the settings hub did not listen within %s", eventWait)
 	}
 	return wake
 }

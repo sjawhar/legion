@@ -419,8 +419,8 @@ func race(t *testing.T, round int, first, second func() *httptest.ResponseRecord
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("round %d: the two writes did not both finish within 10 s", round)
+	case <-time.After(concurrentWait):
+		t.Fatalf("round %d: the two writes did not both finish within %s", round, concurrentWait)
 	}
 	return a, b
 }

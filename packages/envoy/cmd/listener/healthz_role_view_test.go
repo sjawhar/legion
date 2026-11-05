@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
@@ -34,7 +33,7 @@ func healthzRoleViewRig(t *testing.T, consumer string) (func() (int, map[string]
 		t.Fatalf("open session registry: %v", err)
 	}
 	t.Cleanup(sessions.StopWatch)
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), listenerWait)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for the registry's caches: %v", err)

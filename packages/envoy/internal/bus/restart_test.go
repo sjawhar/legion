@@ -158,7 +158,7 @@ func TestAReconnectDuringDrainClosesQuietly(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 

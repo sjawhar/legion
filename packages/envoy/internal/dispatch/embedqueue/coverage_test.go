@@ -232,7 +232,7 @@ func TestRunEmbedsItemsNoTriggerSawWithNoCommand(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("Run did not return after its context ended")
 	}
 }
@@ -967,7 +967,7 @@ func TestTheCoverageLoopStopsOnceNoForeignRowRemains(t *testing.T) {
 			database := storetest.Open(t)
 			tc.seed(t, database)
 			shortenIdentityRecheck(t, tc.recheck)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), eventWait)
 			defer cancel()
 			runCoverage(ctx, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity), proven: newProof()})
 			if ctx.Err() != nil {
@@ -1240,10 +1240,10 @@ func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) 
 
 	select {
 	case <-proxy.paused:
-	case <-time.After(15 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the scan loop's claim of SIDE-2 never reached the client")
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for {
 		var waiting int
 		if err := database.Pool.QueryRow(ctx, `

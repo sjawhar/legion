@@ -551,7 +551,7 @@ func TestHorizonStallWarningNamesAnOpenTransaction(t *testing.T) {
 // waitForStallWarnings waits up to ten seconds for logged to hold want stall warnings, which a
 // Horizon logs on a goroutine of its own, and returns how many it holds.
 func waitForStallWarnings(logged *storetest.LockedLog, want int) int {
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		got := strings.Count(logged.String(), "event horizon held back")
 		if got >= want || time.Now().After(deadline) {

@@ -74,7 +74,7 @@ func setupUnboundDurableFixture(t *testing.T, client *bus.Client, consumer strin
 		t.Fatalf("open interest registry: %v", err)
 	}
 	t.Cleanup(registry.StopWatch)
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), listenerWait)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)
@@ -173,7 +173,7 @@ func TestTheSelfHealthMonitorRebindsARecreatedDurable(t *testing.T) {
 	terminated, stop := startUnboundDurableMonitor(t, client, consumer, logging.New("test"), handler)
 
 	// The probe's confirming read alone costs 250ms, so the repair takes several intervals.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for delivered.Load() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("the message published after the recreation was never delivered")

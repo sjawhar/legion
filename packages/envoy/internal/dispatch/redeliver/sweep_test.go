@@ -2247,7 +2247,7 @@ func TestTheSweepSummaryCountsEveryOutcome(t *testing.T) {
 		defer close(done)
 		h.sweeper().Run(ctx, time.Hour, leases)
 	}()
-	for deadline := time.Now().Add(10 * time.Second); h.logs.count("webhook redelivery sweep") == 0; {
+	for deadline := time.Now().Add(30 * time.Second); h.logs.count("webhook redelivery sweep") == 0; {
 		if time.Now().After(deadline) {
 			cancel()
 			t.Fatalf("no summary line:\n%s", h.logs)

@@ -668,7 +668,7 @@ func (sh *renderShadow) check(t *testing.T) {
 		if replica == nil {
 			t.Fatal("the room has no replica")
 		}
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(roomWait(t))
 		for replica.hold() == nil {
 			if time.Now().After(deadline) {
 				t.Fatal("the replica never stood at the room's latest commit")
@@ -1551,7 +1551,7 @@ func forceRecover(replica *renderedReplica) {
 // replica's lock held for the caller to release (renderedReplica.hold).
 func heldReplica(t *testing.T, replica *renderedReplica) *crdt.Doc {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for {
 		if doc := replica.hold(); doc != nil {
 			return doc

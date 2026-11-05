@@ -164,7 +164,7 @@ func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 	go func() { answered <- send() }()
 	select {
 	case <-reading:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the first send never read the registry")
 	}
 	retry := send()
@@ -302,7 +302,7 @@ func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.
 	}
 	want := []string{"archivist 1 pending", "planner 1 sent", "reviewer 1 sent", "tester 1 sent"}
 	var settled []string
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		if settled = settledStates(); equalStrings(settled, want) {
 			break
 		}

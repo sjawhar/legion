@@ -393,7 +393,7 @@ func TestRelatedCheckBoundsARequestThatEndsFirstIsRecordedCancelled(t *testing.T
 			record: true,
 		})
 	}()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(10 * time.Millisecond) {
 		var waiting int
 		if err := database.Pool.QueryRow(context.Background(), `
 			select count(*) from pg_locks where relation = 'search_term_stats'::regclass and not granted
@@ -411,8 +411,8 @@ func TestRelatedCheckBoundsARequestThatEndsFirstIsRecordedCancelled(t *testing.T
 	var suggestions *model.Suggestions
 	select {
 	case suggestions = <-answered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the check did not answer within 10s of its request ending")
+	case <-time.After(concurrentWait):
+		t.Fatalf("the check did not answer within %s of its request ending", concurrentWait)
 	}
 	if err := lockTx.Rollback(context.Background()); err != nil {
 		t.Fatalf("release the lock: %v", err)
@@ -536,10 +536,10 @@ func TestRelatedCheckRecordBlockedPastItsSecondIsWrittenOnceTheLockIsReleased(t 
 	// only once it had failed, so an insert started more than half that before is the first.
 	poll := func(what string, done func() bool) {
 		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(concurrentWait)
 		for !done() {
 			if time.Now().After(deadline) {
-				t.Fatalf("%s: not within 5s", what)
+				t.Fatalf("%s: not within %s", what, concurrentWait)
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
@@ -630,8 +630,8 @@ func TestRelatedCheckRecordRetryStartedWhileShutdownWaitsIsWaitedFor(t *testing.
 		if recovered != nil {
 			t.Fatalf("the shutdown wait panicked: %v", recovered)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the shutdown wait did not return within 10s of the lock's release")
+	case <-time.After(concurrentWait):
+		t.Fatalf("the shutdown wait did not return within %s of the lock's release", concurrentWait)
 	}
 	rows := readRelatedCheckRows(t, database, "source_issue_key = $1 and outcome = 'not_made'", source)
 	if len(rows) != 1 || deref(rows[0].Reason) != "timeout" {

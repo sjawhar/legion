@@ -1014,7 +1014,7 @@ const longHold = 100 * time.Millisecond
 func awaitTransactionOlderThan(t *testing.T, store *Store, pid uint32, age time.Duration) {
 	t.Helper()
 	ctx := context.Background()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+	for deadline := time.Now().Add(eventWait); ; time.Sleep(time.Millisecond) {
 		var held float64
 		if err := store.Pool.QueryRow(ctx,
 			`select coalesce(extract(epoch from clock_timestamp() - xact_start), 0) from pg_stat_activity where pid = $1`,

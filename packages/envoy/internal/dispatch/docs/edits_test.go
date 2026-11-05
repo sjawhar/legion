@@ -218,7 +218,7 @@ func TestLockTableAnchorRowsRejectsCommentReopenedAfterPrevalidation(t *testing.
 		if err != nil {
 			t.Fatalf("comment body update: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("comment body update remained blocked after the edit transaction released its share lock")
 	}
 }

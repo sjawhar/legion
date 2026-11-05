@@ -53,7 +53,7 @@ func newBrokerRig(t *testing.T) *brokerRig {
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)
 	}
-	ready, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ready, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if err := sessions.WaitForCacheReady(ready); err != nil {
 		t.Fatalf("warm the session cache: %v", err)

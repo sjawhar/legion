@@ -205,8 +205,8 @@ func TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline(t *testing.T) 
 	var err error
 	select {
 	case err = <-answer:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the send was not answered within 10 s")
+	case <-time.After(busWait):
+		t.Fatalf("the send was not answered within %s", busWait)
 	}
 	if !errors.Is(err, ErrNotStored) || !errors.Is(err, ErrWindowDeadline) {
 		t.Fatalf("a not-stored send whose window's deadline passed = %v, want ErrNotStored and ErrWindowDeadline", err)

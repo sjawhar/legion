@@ -19,6 +19,14 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
+// eventWait is how long a test here waits FOR AN EVENT: a heartbeat landing, a prune deleting a
+// row, a registration losing its key. It is where the test gives up, never a measurement - the
+// test still fails when the event never comes, and on an idle machine the wait returns in
+// milliseconds - so it allows for a loaded runner: every package of this module now runs at once,
+// four CI cores to some 3,800 parallel tests, under the race detector besides
+// (dispatch://INFRA-1075). A test whose SUBJECT is a span keeps its own number.
+const eventWait = 30 * time.Second
+
 // fingerprints is the fingerprint list a process holding setting (DISPATCH_SIGNING_KEY's form)
 // registers with.
 func fingerprints(t *testing.T, setting string) []string {
@@ -152,10 +160,10 @@ func TestTheHeartbeatKeepsARegisteredProcessLive(t *testing.T) {
 	registration := mustRegister(t, database, "c1", "K0")
 	ageHeartbeat(t, database, registration.ID, time.Hour)
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for !slices.Contains(liveIDs(t, database), registration.ID) {
 		if time.Now().After(deadline) {
-			t.Fatal("a registered process aged past the live window was not live again within 10 s of heartbeats")
+			t.Fatalf("a registered process aged past the live window was not live again within %s of heartbeats", eventWait)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -205,10 +213,10 @@ func TestPruneRemovesRowsOlderThanTenMinutesAndKeepsNewerOnes(t *testing.T) {
 		cancel()
 		<-done
 	}()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for rowExists(t, database, old.ID) {
 		if time.Now().After(deadline) {
-			t.Fatal("the prune loop did not delete a row whose heartbeat is ten minutes and a second old within 10 s")
+			t.Fatalf("the prune loop did not delete a row whose heartbeat is ten minutes and a second old within %s", eventWait)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -454,10 +462,10 @@ func livePeer(t *testing.T, tx pgx.Tx, setting string) string {
 // waitForLive waits up to 10 s of heartbeats for id to be live again.
 func waitForLive(t *testing.T, database *store.Store, id, what string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for !slices.Contains(liveIDs(t, database), id) {
 		if time.Now().After(deadline) {
-			t.Fatalf("%s was not live again within 10 s of heartbeats", what)
+			t.Fatalf("%s was not live again within %s of heartbeats", what, eventWait)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -481,8 +489,8 @@ func requireRefusal(t *testing.T, database *store.Store, registration *Registrat
 	var refusal error
 	select {
 	case refusal = <-registration.Lost():
-	case <-time.After(10 * time.Second):
-		t.Fatalf("%s reported no refusal within 10 s of heartbeats; live = %v", what, liveIDs(t, database))
+	case <-time.After(eventWait):
+		t.Fatalf("%s reported no refusal within %s of heartbeats; live = %v", what, eventWait, liveIDs(t, database))
 	}
 	if !errors.Is(refusal, ErrKeySetMismatch) {
 		t.Fatalf("%s reported %v, want ErrKeySetMismatch", what, refusal)
@@ -601,10 +609,10 @@ func TestALiveRowsHeartbeatChecksNoPeer(t *testing.T) {
 	}
 	// Three heartbeats stamped after the peer was written.
 	last := heartbeat()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for stamped := 0; stamped < 3; {
 		if time.Now().After(deadline) {
-			t.Fatalf("the live process's heartbeat stamped its row %d times in 10 s, want 3", stamped)
+			t.Fatalf("the live process's heartbeat stamped its row %d times in %s, want 3", stamped, eventWait)
 		}
 		if at := heartbeat(); at.After(last) {
 			last = at

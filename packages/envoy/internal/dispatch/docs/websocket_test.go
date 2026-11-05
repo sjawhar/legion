@@ -112,7 +112,7 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 			case <-reader.Answers:
 			case <-reader.Ended:
 				t.Fatal("the room closed the read-only reader's connection over its keystroke")
-			case <-time.After(10 * time.Second):
+			case <-time.After(roomWait(t)):
 				t.Fatal("the room did not answer the reader after its keystroke")
 			}
 			if text := documentText(t, service, artifactID); text != "before\n" {
@@ -130,8 +130,8 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 			// browser's provider answers by reconnecting.
 			select {
 			case <-reader.Ended:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the connection admitted while the issue was closed was still open 5s after the reopen")
+			case <-time.After(roomWait(t)):
+				t.Fatal("the connection admitted while the issue was closed was still open after the reopen, within roomWait")
 			}
 			// The room a connection now loads takes edits. It loads from the store, so its copy
 			// also shows the read-only reader's keystroke never reached the store.

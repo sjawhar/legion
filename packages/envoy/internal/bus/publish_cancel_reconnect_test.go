@@ -86,7 +86,7 @@ func (f *reconnectWaitFixture) awaitAnswer(t *testing.T, answer <-chan error) er
 	select {
 	case err := <-answer:
 		return err
-	case <-time.After(15 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the publish never returned")
 		return nil
 	}
@@ -135,7 +135,7 @@ func TestAPublishCancelledWhileWaitingForAReconnectSendsNothing(t *testing.T) {
 		case <-waiting:
 		case err := <-answer:
 			t.Fatalf("the publish answered %v without entering the reconnect wait", err)
-		case <-time.After(5 * time.Second):
+		case <-time.After(busWait):
 			t.Fatal("the publish never entered the reconnect wait")
 		}
 		release()

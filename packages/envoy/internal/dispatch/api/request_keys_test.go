@@ -785,7 +785,7 @@ func TestAWriteDetachedPastTheAnswerCommits(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the detached write after the answer = %v, want it committed", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the detached write never finished")
 	}
 	if writes := rig.writes(t); len(writes) != 1 {

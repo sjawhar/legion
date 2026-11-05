@@ -82,7 +82,7 @@ func TestARepairRefusesRatherThanWaitsForACloseUnderWay(t *testing.T) {
 	}()
 	select {
 	case <-settled:
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		release()
 		t.Fatal("the settlement waited for the close under way instead of refusing its repair")
 	}
@@ -158,7 +158,7 @@ func TestACancelledEvictionLeavesTheFailedRoomForItsOwnEviction(t *testing.T) {
 		recoverRoom()
 		<-applied
 		service.evictWG.Wait()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {
 			t.Errorf("shutdown: %v", err)
@@ -193,7 +193,7 @@ func TestACancelledEvictionLeavesTheFailedRoomForItsOwnEviction(t *testing.T) {
 	recoverRoom()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the failed room's eviction did not finish")
 	}
 	if server.GetDoc("room") != nil || service.roomFailed("room") {

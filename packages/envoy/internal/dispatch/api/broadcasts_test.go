@@ -681,7 +681,7 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 // delivery runs behind the create response, so a test that asserts on settled attempts waits for it.
 func awaitBroadcastDeliveries(t *testing.T, handler http.Handler, id string) broadcastResponse {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts/"+id, nil, "alice")
 		if read.Code != http.StatusOK {
@@ -854,7 +854,7 @@ func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 	}
 	close(release)
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		var pending int
 		if err := database.Pool.QueryRow(context.Background(),
@@ -978,10 +978,6 @@ func installReverseBroadcastMessageIDDefault(t *testing.T, database *store.Store
 	if err != nil {
 		t.Fatalf("install reverse broadcast message id default: %v", err)
 	}
-	dropWhenDone(t, database,
-		`alter table messages alter column id set default gen_random_uuid()`,
-		`drop function broadcast_test_message_id()`,
-		`drop sequence broadcast_test_message_ids`)
 }
 
 func broadcastRecipientSessionIDs(response broadcastResponse) []string {

@@ -20,7 +20,10 @@ import (
 
 // eventFeedWait bounds a wait for one frame of the event feed: a frame that never arrives fails the
 // test by name rather than holding it until the package's own timeout, which would take every other
-// test's result with it.
+// test's result with it. It is a give-up bound and never a measurement: a wait FOR AN EVENT proves
+// the event came, not how soon, so every caller waiting on a frame names this rather than a few
+// seconds of its own. A test whose SUBJECT is a span - a heartbeat's period, a view's quiet window,
+// a replay that must end before its timeout - passes that span instead (dispatch://INFRA-1075).
 const eventFeedWait = 30 * time.Second
 
 // eventHead is the newest committed event id: what a page resuming now would name as its since.
@@ -610,11 +613,11 @@ func TestARelayDropEndsTheSubscriptionAsBehind(t *testing.T) {
 	running := served.startEventsSubscription(ctx, stream, "feed", new(int64(0)))
 	t.Cleanup(running.stop)
 	relay := served.eventRelay
-	pollUntil(t, 5*time.Second, "the subscription subscribes to the relay", func() bool { return relay.stream.SubscriberCount() == 1 })
+	pollUntil(t, concurrentWait, "the subscription subscribes to the relay", func() bool { return relay.stream.SubscriberCount() == 1 })
 
 	// More events in one commit than the relay holds for one subscriber.
 	seedEvents(t, database, issue, 100, 0)
-	pollUntil(t, 5*time.Second, "the relay drops the subscription that fell behind", func() bool {
+	pollUntil(t, concurrentWait, "the relay drops the subscription that fell behind", func() bool {
 		return relay.stream.SubscriberCount() == 0
 	})
 
@@ -646,8 +649,8 @@ func TestARelayDropEndsTheSubscriptionAsBehind(t *testing.T) {
 	// Nothing says how far the drained subscription got: that is why its end sends the page back.
 	select {
 	case <-running.(*runningSubscription).done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the dropped subscription's goroutine was still running 5s after its end")
+	case <-time.After(concurrentWait):
+		t.Fatalf("the dropped subscription's goroutine was still running %s after its end", concurrentWait)
 	}
 
 	// The page's resubscribe, from the last id it applied, is served every event through the head
@@ -732,7 +735,7 @@ func TestAnEventCommittedDuringTheCatchUpIsSentOnce(t *testing.T) {
 	stream := newGatedStream()
 	running := served.startEventsSubscription(ctx, stream, "feed", new(int64(0)))
 	t.Cleanup(running.stop)
-	pollUntil(t, 5*time.Second, "the subscription subscribes to the relay", func() bool {
+	pollUntil(t, concurrentWait, "the subscription subscribes to the relay", func() bool {
 		return served.eventRelay.stream.SubscriberCount() == 1
 	})
 
@@ -778,10 +781,10 @@ func TestAStoppedEventsSubscriptionLeavesTheRelayWhileItsSocketStaysOpen(t *test
 
 	subscribeEvents(t, client, "feed", nil)
 	subscribeEvents(t, client, "feed", nil)
-	pollUntil(t, 5*time.Second, "the replaced subscription leaves the relay", func() bool { return relay.stream.SubscriberCount() == 1 })
+	pollUntil(t, concurrentWait, "the replaced subscription leaves the relay", func() bool { return relay.stream.SubscriberCount() == 1 })
 
 	client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: "feed"})
-	pollUntil(t, 5*time.Second, "the unsubscribed subscription leaves the relay", func() bool { return relay.stream.SubscriberCount() == 0 })
+	pollUntil(t, concurrentWait, "the unsubscribed subscription leaves the relay", func() bool { return relay.stream.SubscriberCount() == 0 })
 	renameIssue(t, rig.handler, issue.Key, "Renamed after the unsubscribe")
 	client.quiet(t, 500*time.Millisecond, "after the page unsubscribed")
 	if !client.open() {
@@ -813,7 +816,7 @@ func TestAnEventsViewNamesOnlyItsKindAndItsSinceIsAnEventID(t *testing.T) {
 		{"an empty since", liveSubscribe("g", eventsView(), `{"since":""}`)},
 	} {
 		client.send(t, test.frame)
-		client.refusal(t, 3*time.Second, test.frame.Sub, "INVALID_FRAME")
+		client.refusal(t, eventFeedWait, test.frame.Sub, "INVALID_FRAME")
 	}
 	client.quiet(t, 300*time.Millisecond, "after every refused events view")
 	if subscribers := rig.served.eventRelay.stream.SubscriberCount(); subscribers != 0 {
@@ -851,7 +854,7 @@ func TestTheDisconnectHookSendsTheEventFeedThroughItsResume(t *testing.T) {
 	if disconnect := agentRequest(t, rig.handler, http.MethodPost, "/api/v1/live/_test/disconnect", nil, "agent-token"); disconnect.Code != http.StatusOK {
 		t.Fatalf("disconnect hook: status=%d body=%s", disconnect.Code, disconnect.Body.String())
 	}
-	if code, _ := client.closeCode(t, 5*time.Second); code != gws.CloseServiceRestart {
+	if code, _ := client.closeCode(t, eventFeedWait); code != gws.CloseServiceRestart {
 		t.Fatalf("the disconnect hook closed the socket with %d, want 1012", code)
 	}
 	// The close frame reaches the page before the handler's deferred teardown has ended its

@@ -590,7 +590,7 @@ func TestAnOpenedAskPublishesWhatItsQuestionCites(t *testing.T) {
 		t.Fatalf("open a citing ask: status=%d body=%s", opened.Code, opened.Body.String())
 	}
 	askID := decodeBody[writtenRecord](t, opened).ID
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(concurrentWait)
 	for {
 		select {
 		case event := <-published:

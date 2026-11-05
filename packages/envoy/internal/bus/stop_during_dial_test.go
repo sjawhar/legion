@@ -41,7 +41,7 @@ func TestARecoveryStoppedMidDialInstallsNothingAndLogsNoError(t *testing.T) {
 	client.Conn.Close()
 	select {
 	case <-proxy.held:
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the recovery never dialled")
 	}
 	_ = client.Drain(5 * time.Second)
@@ -96,7 +96,7 @@ func TestARecoveryDiallingALostServerEndsAtTheStop(t *testing.T) {
 	client.Conn.Close()
 	select {
 	case <-proxy.held:
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the recovery never dialled")
 	}
 	client.Close()

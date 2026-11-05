@@ -769,7 +769,7 @@ func requireLiveText(t *testing.T, handler http.Handler, document string, parts 
 // awaitSettled waits until none of documents owes a settlement.
 func awaitSettled(t *testing.T, database *store.Store, documents ...string) {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(20 * time.Millisecond) {
 		var pending int
 		if err := database.Pool.QueryRow(context.Background(), `
 			select count(*) from doc_settlements_pending where artifact_id = any($1::uuid[])

@@ -95,7 +95,7 @@ func heldRosterListener(t *testing.T) (url string, calls *atomic.Int32, release 
 // awaitCalls waits until the listener has seen want calls, failing after a few seconds.
 func awaitCalls(t *testing.T, calls *atomic.Int32, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for calls.Load() < want {
 		if time.Now().After(deadline) {
 			t.Fatalf("the listener saw %d calls, want %d", calls.Load(), want)
@@ -342,8 +342,8 @@ func TestAShutdownEndsAFetchInFlight(t *testing.T) {
 		if roster.answered {
 			t.Fatal("a read answered a roster after the shutdown")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("a read waiting on a listener that hangs did not return within 5 s of the shutdown")
+	case <-time.After(concurrentWait):
+		t.Fatalf("a read waiting on a listener that hangs did not return within %s of the shutdown", concurrentWait)
 	}
 }
 

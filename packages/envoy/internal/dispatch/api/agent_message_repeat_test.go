@@ -213,7 +213,7 @@ func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 	go func() { answered <- send() }()
 	select {
 	case <-held:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the send never reached the listener")
 	}
 	// The deploy's signal, while the listener holds the send. A send cut off by it ends its
@@ -228,7 +228,7 @@ func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 	var created *httptest.ResponseRecorder
 	select {
 	case created = <-answered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the send in flight at shutdown never answered")
 	}
 
@@ -317,7 +317,7 @@ func TestConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
 			default:
 				t.Errorf("status=%d body=%s", response.Code, response.Body.String())
 			}
-		case <-time.After(20 * time.Second):
+		case <-time.After(concurrentWait):
 			t.Fatal("a concurrent send did not answer")
 		}
 	}
@@ -372,14 +372,14 @@ func TestAClientAbortMidSendStillDeliversOnce(t *testing.T) {
 	}()
 	select {
 	case <-sending:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the send never reached the listener")
 	}
 	cancel()
 	close(release)
 	select {
 	case <-answered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the cut-off send never finished")
 	}
 

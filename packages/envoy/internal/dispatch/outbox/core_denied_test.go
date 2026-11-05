@@ -191,7 +191,7 @@ func TestRunDeliversTheGrantedRoutesOfAnEventWhoseRoleForwardNATSDenies(t *testi
 	}
 	select {
 	case <-authorReceived:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the author received nothing, though its route is granted")
 	}
 	select {
@@ -235,7 +235,7 @@ func TestTheRetryAfterAGrantDeliversOnlyTheDeniedRoute(t *testing.T) {
 	}
 	select {
 	case <-forwarded:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the role's holder received nothing after the grant")
 	}
 	// Everything the two attempts published was answered before the event was marked published,
@@ -288,7 +288,7 @@ func TestRunForwardsAGrantedRoleRoute(t *testing.T) {
 		if item.Topic != roleTopic || item.SourceEventID == "" || !strings.HasPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix) {
 			t.Fatalf("the role's holder received %+v, want the event's role forward on %s", item, roleTopic)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the role's holder received nothing through a granted forward")
 	}
 	select {

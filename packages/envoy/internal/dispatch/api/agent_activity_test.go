@@ -98,14 +98,13 @@ func TestTheAgentsLastActivityAnswersWhatMainsStatementDid(t *testing.T) {
 // agentActivityHistorySessions sessions of their own. A plan is a judgement about data: over
 // the fixture's six rows a sequential scan of events and a sort is the cheapest way to answer
 // each session's newest event, and it is the planner's right answer there, so the test asked
-// the planner to be wrong and read whichever plan the database it was handed happened to make.
-// It read one answer on a clone of the template, whose events has never been analysed
-// (pg_class.reltuples = -1, where the planner assumes a table of ten pages), and another on a
-// database pgclone emptied and analysed for the next test (reltuples = 0, a table the planner
-// knows is empty), which is how it failed in CI run 41897075339 and fails under
-// `go test -count=12` here. With a history of this size the partial index is the cheaper plan
-// by what it skips, whatever the statistics started as, and the analyze below makes the choice
-// the planner's own rather than an artefact of when it last looked.
+// the planner to be wrong and read whichever plan the statistics of the moment happened to
+// make: on a clone of the template, whose events no migration analysed (pg_class.reltuples =
+// -1, where the planner assumes a table of ten pages), the answer differed from the one a
+// database whose events had been analysed gave, which is how it failed in CI run 41897075339.
+// With a history of this size the partial index is the cheaper plan by what it skips, whatever
+// the statistics started as, and the analyze below makes the choice the planner's own rather
+// than an artefact of when it last looked.
 const (
 	agentActivityHistory         = 4000
 	agentActivityHistorySessions = 200

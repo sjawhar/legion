@@ -928,7 +928,7 @@ func TestACloseOfARoomBehindTheHeadHoldsItAgainstTheIdleSweep(t *testing.T) {
 		browser.Close()
 		// The service forgets the browser once ygo's teardown of it has returned, which is after
 		// that teardown stamped the room idle.
-		for deadline := time.Now().Add(10 * time.Second); connected() != 0; time.Sleep(10 * time.Millisecond) {
+		for deadline := time.Now().Add(roomWait(t)); connected() != 0; time.Sleep(10 * time.Millisecond) {
 			if time.Now().After(deadline) {
 				holdErr = errors.New("the browser's leaving was never torn down")
 				return

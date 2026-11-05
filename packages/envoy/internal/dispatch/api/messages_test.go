@@ -555,7 +555,7 @@ func TestTargetedMessagePrefixesUnavailableListenerErrors(t *testing.T) {
 		}
 		select {
 		case <-cancelled:
-		case <-time.After(time.Second):
+		case <-time.After(concurrentWait):
 			t.Fatal("listener request was not cancelled after the Dispatch timeout")
 		}
 	})
@@ -1556,7 +1556,7 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	}()
 	select {
 	case <-held:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the send never reached the listener")
 	}
 	select {
@@ -1607,7 +1607,7 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	var late *httptest.ResponseRecorder
 	select {
 	case late = <-answered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the stalled sender never answered")
 	}
 	if late.Code != http.StatusCreated {

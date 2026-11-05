@@ -266,7 +266,7 @@ func TestExclusiveFreesTheLeaseWhenShutdownInterruptsThePeriodRead(t *testing.T)
 		if ran {
 			t.Error("a gate stopped while it read its period reported a pass that ran")
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the gate stopped while it read its period did not return")
 	}
 	if passRan {

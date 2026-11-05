@@ -88,8 +88,8 @@ func runSweep(t *testing.T, run func(ctx context.Context)) {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("the suggestion outcome sweep did not return within 10s of its context ending")
+		case <-time.After(concurrentWait):
+			t.Errorf("the suggestion outcome sweep did not return within %s of its context ending", concurrentWait)
 		}
 	})
 }
@@ -189,7 +189,7 @@ func TestALoneSuggestionSweepRunnerPassesOnEveryWake(t *testing.T) {
 
 	const wakes = 5
 	for woken := 0; woken <= wakes; woken++ {
-		waitUntil(t, 10*time.Second, "the pass the last wake earned", func() bool { return passes() == woken+1 })
+		waitUntil(t, concurrentWait, "the pass the last wake earned", func() bool { return passes() == woken+1 })
 		if woken < wakes {
 			wake <- struct{}{}
 		}

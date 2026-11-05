@@ -36,8 +36,8 @@ func nextUpdate(t *testing.T, watcher natsgo.KeyWatcher) natsgo.KeyValueEntry {
 			t.Fatal("Updates closed")
 		}
 		return entry
-	case <-time.After(5 * time.Second):
-		t.Fatal("no delivery within 5s")
+	case <-time.After(busWait):
+		t.Fatalf("no delivery within %s", busWait)
 		return nil
 	}
 }
@@ -50,8 +50,8 @@ func awaitClosed(t *testing.T, watcher natsgo.KeyWatcher) {
 		if open {
 			t.Fatalf("delivered %v, want Updates closed", entry)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Updates still open 5s after the watch ended: the watcher hangs")
+	case <-time.After(busWait):
+		t.Fatalf("Updates still open %s after the watch ended: the watcher hangs", busWait)
 	}
 }
 
@@ -268,14 +268,14 @@ func TestResumedWatchesLeaveNoGoroutineBehindWhenTheirConnectionCloses(t *testin
 	for i, done := range drained {
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatalf("watch %d did not end within 10 s of the connection closing", i)
+		case <-time.After(busWait):
+			t.Fatalf("watch %d did not end within %s of the connection closing", i, busWait)
 		}
 	}
 	// The cancel wakes nats.go's goroutine, which unsubscribes and returns, so the count falls
 	// back over the moments after the last watch ended rather than at it.
 	count := runtime.NumGoroutine()
-	for deadline := time.Now().Add(10 * time.Second); count > baseline+goroutineSlack && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(busWait); count > baseline+goroutineSlack && time.Now().Before(deadline); {
 		time.Sleep(20 * time.Millisecond)
 		count = runtime.NumGoroutine()
 	}

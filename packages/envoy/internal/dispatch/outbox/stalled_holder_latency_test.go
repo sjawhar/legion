@@ -47,7 +47,7 @@ func TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents(t *testing.T) {
 	rig.routedEvent(t, "T-1", silentRole, model.Actor{Kind: "user", ID: "alice"})
 	select {
 	case <-silent.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the silent holder never received its forward")
 	}
 
@@ -61,7 +61,7 @@ func TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents(t *testing.T) {
 			t.Fatalf("the answering holder received T-2's forward %s after its commit, want within %s: "+
 				"the silent holder's receipt wait held back another issue's send", waited.Round(time.Millisecond), within)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the answering holder never received T-2's forward")
 	}
 }

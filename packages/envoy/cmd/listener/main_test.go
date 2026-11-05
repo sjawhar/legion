@@ -491,7 +491,7 @@ func TestPublishHandlerRefusesATopicOutsideNotifications(t *testing.T) {
 		if msg.Subject != adhoc {
 			t.Fatalf("received subject %q, want %q", msg.Subject, adhoc)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the ad-hoc publish reached nobody")
 	}
 }
@@ -686,7 +686,7 @@ func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *
 		t.Fatalf("human-sourced forwarded event id = %q, want %q", externalForwarded.EventID, externalHuman.EventID)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	var info *natsgo.StreamInfo
 	for {
 		info, err = harness.client.JS().StreamInfo(bus.Stream)
@@ -816,7 +816,7 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 				if forwarded.DedupeKey != roleForwardDedupePrefix+"publish.resend-1" {
 					t.Fatalf("%s: holder received dedupe %q, want it with the forward prefix", what, forwarded.DedupeKey)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(listenerWait):
 				t.Fatalf("%s: holder received no forward", what)
 			}
 		}
@@ -1171,7 +1171,7 @@ func TestSessionHealthFields_PopulatedAfterReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if err := sessions.WaitForCacheReady(ctx); err != nil {
 		t.Fatalf("WaitForCacheReady: %v", err)
@@ -1694,7 +1694,7 @@ func claimRoles(t *testing.T, registry *store.Registry, sessionID string, roles 
 // waits before the freeze, never after.
 func waitForRegistry(t *testing.T, registry *store.Registry) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if err := registry.WaitForCacheReady(ctx); err != nil {
 		t.Fatalf("wait for the registry's caches: %v", err)
@@ -2171,7 +2171,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 		t.Fatalf("publish first failed: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for time.Now().Before(deadline) {
 		mu.Lock()
 		count := len(delivered)
@@ -2189,7 +2189,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 	}
 
 	firstListener.Close()
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(listenerWait)
 	for time.Now().Before(deadline) {
 		info, infoErr := publisher.JS().ConsumerInfo(bus.Stream, consumer)
 		if infoErr == nil && !info.PushBound {
@@ -2241,7 +2241,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 	}
 	defer resub.Unsubscribe()
 
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(listenerWait)
 	for time.Now().Before(deadline) {
 		mu.Lock()
 		count := len(delivered)
@@ -2451,7 +2451,7 @@ func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
 	if _, err := client.JS().Publish("notifications.github.acme.widgets.push.branch.main", []byte(`{}`)); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for deliveries.Load() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the rebuilt subscription never delivered")
@@ -2482,7 +2482,7 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 	t.Cleanup(func() { _ = firstSub.Unsubscribe(); _ = first.JS().DeleteConsumer(bus.Stream, consumer) })
 	// Subscribe returns before the server has processed the SUB, and the consumer is push-bound
 	// only once it has; the property under test is about a consumer that is already bound.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for {
 		info, err := first.JS().ConsumerInfo(bus.Stream, consumer)
 		if err == nil && info.PushBound {
@@ -2538,6 +2538,15 @@ func durableHeldElsewhere(t *testing.T, uri, consumer string) (*bus.Client, *nat
 	})
 	return old, holder
 }
+
+// listenerWait is how long a test of this package waits FOR AN EVENT: a forward reaching a
+// session, a durable being bound, a monitor terminating, a bind returning once its context ended.
+// It is where the test gives up, never a measurement - the test still fails when the event never
+// comes, and on an idle machine the wait returns in milliseconds - so it allows for a loaded
+// runner: every package of this module now runs at once, four CI cores to some 3,800 parallel
+// tests, under the race detector besides (dispatch://INFRA-1075). A test whose SUBJECT is a span -
+// a quiet window, a receipt timeout, a monitor's interval - keeps its own number.
+const listenerWait = 30 * time.Second
 
 // waitFor polls cond every 50 ms until it holds, and fails the test as waiting for desc once
 // timeout passes.
@@ -2596,7 +2605,7 @@ func TestBindListenerDurableBindsWithinOneIntervalOfRelease(t *testing.T) {
 		if outcome.bind.attempts < 2 {
 			t.Fatalf("the bind took %d attempts, want the refused ones before the release counted too", outcome.bind.attempts)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the replacement never bound the released durable")
 	}
 	if !replacement.SubOK() {
@@ -2673,7 +2682,7 @@ func TestBindListenerDurableStopsWhenTheContextEnds(t *testing.T) {
 		if after := outcome.at.Sub(cancelled); after > 500*time.Millisecond {
 			t.Fatalf("the bind returned %s after the context ended, want at once rather than at its next 2 s attempt", after)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the bind never returned after the context ended")
 	}
 }
@@ -2828,7 +2837,7 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	}
 	select {
 	case <-durableReceived:
-	case <-time.After(5 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("migrated durable listener did not receive a non-role message")
 	}
 	if err := client.Publish(contracts.Envelope{
@@ -2845,7 +2854,7 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	}
 	select {
 	case <-roleReceived:
-	case <-time.After(5 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("migrated listener role lane did not receive the core message")
 	}
 }
@@ -2969,7 +2978,7 @@ func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotS
 		holderID = "ses_unseen_holder"
 		role     = "unseen-holder"
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
 		t.Fatalf("warm the session cache: %v", err)
@@ -3768,10 +3777,10 @@ func wireTestRoleForwarder(t *testing.T, cfg listenerDeliveryHandlerConfig) list
 // reads what a forward did after it, since the forwarder publishes and reports off the handler.
 func (f *roleForwarder) settled(t *testing.T) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if !f.wait(ctx) {
-		t.Fatalf("%d role forwards were still outstanding after 20s", f.outstanding())
+		t.Fatalf("%d role forwards were still outstanding after %s", f.outstanding(), listenerWait)
 	}
 }
 
@@ -4163,7 +4172,7 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 
 	select {
 	case <-recovered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("monitor stopped before the transient NATS failures recovered")
 	}
 	if got := atomic.LoadInt32(&probeCalls); got < 4 {
@@ -4172,7 +4181,7 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("monitor did not stop after shutdown")
 	}
 }
@@ -4210,12 +4219,12 @@ func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T
 		if got != 20 {
 			t.Fatalf("the monitor terminated after %d disconnected probes, want exactly 20", got)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the monitor never terminated a disconnected probe that never recovered")
 	}
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the monitor did not return after terminating")
 	}
 	if got := rebuilds.Load(); got != 0 {
@@ -4261,12 +4270,12 @@ func TestRunSelfHealthMonitor_CountsADisconnectedProbeAfterARebuild(t *testing.T
 		if got != 20 {
 			t.Fatalf("the monitor terminated after %d disconnected probes, the post-rebuild probe among them, want exactly 20", got)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the monitor never terminated a disconnection that began on the probe after a rebuild")
 	}
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the monitor did not return after terminating")
 	}
 	if got := rebuilds.Load(); got != 1 {
@@ -4298,7 +4307,7 @@ func TestRunSelfHealthMonitor_DoesNotTerminateOnSustainedConnectedTransientFailu
 		runSelfHealthMonitor(ctx, logging.New("test"), probe, isUnrecoverable, connected, nil,
 			func() { terminated <- struct{}{} }, time.Millisecond, 3)
 	}()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(listenerWait)
 	for probeCalls.Load() < disconnectedFailureThreshold*2 {
 		select {
 		case <-terminated:
@@ -4311,7 +4320,7 @@ func TestRunSelfHealthMonitor_DoesNotTerminateOnSustainedConnectedTransientFailu
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("monitor did not stop after shutdown")
 	}
 }
@@ -4373,13 +4382,13 @@ func TestRunSelfHealthMonitor_DisconnectedFailuresDoNotAccumulateAcrossRecoverie
 			case <-terminated:
 				t.Fatalf("the monitor terminated after %d probes: %d outages of %d disconnected failures each, every one ended by a connected probe, must not add up to the bound",
 					calls.Load(), outages, disconnectedFailureThreshold-1)
-			case <-time.After(5 * time.Second):
+			case <-time.After(listenerWait):
 				t.Fatalf("probe calls = %d, want more than %d", calls.Load(), outages*cycle)
 			}
 			cancel()
 			select {
 			case <-done:
-			case <-time.After(time.Second):
+			case <-time.After(listenerWait):
 				t.Fatal("monitor did not stop after shutdown")
 			}
 		})
@@ -4401,7 +4410,7 @@ func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *t
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
 	}
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), listenerWait)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)
@@ -4429,7 +4438,7 @@ func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *t
 	if _, err := other.Upsert(store.Interest{SessionID: "ses_after_move", MachineID: "other-listener"}, []string{"notifications.agent.ses_after_move"}); err != nil {
 		t.Fatalf("subscribe through another listener: %v", err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for {
 		found := false
 		for _, interest := range registry.List() {
@@ -4460,13 +4469,13 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), listenerWait)
 	defer readyCancel()
 	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for session cache: %v", err)
 	}
 	watcherConn.Close()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for sessions.WatchErr() == nil {
 		if time.Now().After(deadline) {
 			t.Fatal("stopped watcher was not detected")
@@ -4620,12 +4629,12 @@ func TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault(t *testing.
 			}()
 			select {
 			case <-terminated:
-			case <-time.After(2 * time.Second):
+			case <-time.After(listenerWait):
 				t.Fatal("the monitor never terminated a fault three rebuilds left in place")
 			}
 			select {
 			case <-done:
-			case <-time.After(time.Second):
+			case <-time.After(listenerWait):
 				t.Fatal("the monitor did not return after terminating")
 			}
 			if got := rebuilds.Load(); got != 3 {
@@ -4690,7 +4699,7 @@ func TestRunSelfHealthMonitor_ShutdownCutRebuildLogsNoError(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the monitor did not return after the shutdown cut its rebuild")
 	}
 	if got := terminates.Load(); got != 0 {
@@ -4721,7 +4730,7 @@ func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
 	}
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), listenerWait)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)
@@ -4757,12 +4766,12 @@ func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
 	}()
 	select {
 	case <-terminated:
-	case <-time.After(5 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatalf("the listener stayed up without its role bucket: %d rebuilds, no termination", rebuilds.Load())
 	}
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the monitor did not return after terminating")
 	}
 	if got := rebuilds.Load(); got != 3 {
@@ -4835,7 +4844,7 @@ func endInterestWatcherWhileConnected(t *testing.T, client *bus.Client, registry
 	if err := client.JS().DeleteStream("KV_" + bus.InterestBucket); err != nil {
 		t.Fatalf("delete the interest bucket's stream: %v", err)
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for registry.WatchErr() == nil {
 		if time.Now().After(deadline) {
 			t.Fatal("the interest watcher never ended after its stream was deleted")
@@ -4859,7 +4868,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		t.Fatalf("open interest registry: %v", err)
 	}
 	t.Cleanup(registry.StopWatch)
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), listenerWait)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)
@@ -4892,7 +4901,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		t.Fatalf("write an interest after the rebuild: %v", err)
 	}
 	// Match reads only the cache, which is what delivery reads; Get would fall back to KV on a miss.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for len(registry.Match("m1", "notifications.rebuilt")) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the rebuilt registry's cache never saw an interest written after the rebuild")
@@ -4913,7 +4922,7 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 		t.Fatalf("open interest registry: %v", err)
 	}
 	t.Cleanup(registry.StopWatch)
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), listenerWait)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)

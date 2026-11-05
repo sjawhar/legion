@@ -83,7 +83,7 @@ func newRelayRigUnowned(t *testing.T, first, max time.Duration) *relayRig {
 		t.Fatalf("start the session relays: %v", err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		relays.stop(ctx)
 	})
@@ -321,7 +321,7 @@ func awaitAcked(t *testing.T, consumers *bus.SessionConsumers, sessionID string,
 // every message through floor acked.
 func awaitAckState(t *testing.T, consumers *bus.SessionConsumers, sessionID string, pending int, floor uint64) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for {
 		info, err := consumers.Info(context.Background(), sessionID)
 		if err != nil {
@@ -501,7 +501,7 @@ func TestRelayRunRetryWaitEndsOnAWake(t *testing.T) {
 		if !ok {
 			t.Fatal("the retry wait reported the run stopped")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the retry wait did not end on the wake sent before it")
 	}
 }
@@ -877,7 +877,7 @@ func TestSessionConsumerWithoutTheGrantProbesItOncePerTenMinutes(t *testing.T) {
 		}
 	}
 	awaitRefusedCalls := func(want int) {
-		deadline := time.Now().Add(2 * time.Second)
+		deadline := time.Now().Add(listenerWait)
 		for refusedCalls() < want && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 		}

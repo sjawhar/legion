@@ -27,7 +27,7 @@ func watchedBucket(t *testing.T, client *bus.Client, uri, bucket string) (*kvwat
 	}
 	watcher := kvwatch.New("drain-test", kv, func(natsgo.KeyValueEntry) {}, func() {})
 	watcher.Start()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), busWait)
 	defer cancel()
 	if err := watcher.WaitReady(ctx); err != nil {
 		t.Fatalf("wait for the watcher: %v", err)
@@ -154,7 +154,7 @@ func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	left := make(chan time.Duration, 1)
@@ -202,7 +202,7 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	type observed struct {
@@ -252,7 +252,7 @@ func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	watcher.Stop()

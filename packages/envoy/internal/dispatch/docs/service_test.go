@@ -4991,7 +4991,7 @@ func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string,
 // settlement after a quiet settle delay does; settleNow settles the room as it stands.
 func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for live updates to reach persistence: %v", err)
@@ -5405,7 +5405,7 @@ func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 	}
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	locked := false
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		var waiting int
 		if err := service.store.Pool.QueryRow(context.Background(), `
@@ -5432,7 +5432,7 @@ func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("shutdown error = %v, want deadline exceeded", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("shutdown waited on the blocked settlement")
 	}
 }
@@ -5610,7 +5610,7 @@ func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
 	}
 	select {
 	case <-settled:
-	case <-time.After(time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("settlement did not complete")
 	}
 	version := waitForDocumentVersion(t, service.store, artifactID, 2)
@@ -5621,7 +5621,7 @@ func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
 
 func waitForDatabaseLock(t *testing.T, database *store.Store) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		var waiting int
 		if err := database.Pool.QueryRow(context.Background(), `
@@ -6001,7 +6001,7 @@ func persistedProofTree(t *testing.T, database *store.Store, artifactID string) 
 
 func waitForPersistedProofText(t *testing.T, database *store.Store, artifactID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		markdown, err := renderTree(persistedProofTree(t, database, artifactID))
 		if err == nil && markdown == want {
@@ -6116,7 +6116,7 @@ func deleteRun(text string) func(*pmdoc.Node) *pmdoc.Node {
 // failure; the completed eviction of a room that was live is the same observation.
 func waitForRoomFailure(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		if service.roomFailure(artifactID) != nil {
 			return
@@ -6131,7 +6131,7 @@ func waitForRoomFailure(t *testing.T, service *Service, artifactID string) {
 
 func waitForNoLiveDocument(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		if service.srv.GetDoc(artifactID) == nil {
 			return
@@ -6142,7 +6142,7 @@ func waitForNoLiveDocument(t *testing.T, service *Service, artifactID string) {
 }
 func waitForDocumentText(t *testing.T, service *Service, artifactID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		got, err := service.Text(context.Background(), artifactID)
 		if err == nil && got == want {
@@ -6221,7 +6221,7 @@ func TestSettleSurvivesEvictionBetweenWarmAndTreeRead(t *testing.T) {
 		}
 	}
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for evicted.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

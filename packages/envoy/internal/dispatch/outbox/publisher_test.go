@@ -23,6 +23,15 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
+// eventWait is how long a test here waits FOR AN EVENT: a forward reaching its holder, a scan
+// starting, an outbox stopping once its context ended. It is where the test gives up, never a
+// measurement - the test still fails when the event never comes, and on an idle machine the wait
+// returns in milliseconds - so it allows for a loaded runner: every package of this module now
+// runs at once, four CI cores to some 3,800 parallel tests, under the race detector besides
+// (dispatch://INFRA-1075). A test whose SUBJECT is a span - a receipt window, a lease's period,
+// a stop that must beat the shutdown budget - keeps its own number.
+const eventWait = 30 * time.Second
+
 // answered is a channel already holding err, the outcome of a test publisher that answers each
 // publish before it returns: the outbox reads such an answer the moment it sends, as it reads one
 // a bus.Client.WindowUntil window's PublishAsync decides before anything is sent.
@@ -1111,7 +1120,7 @@ func TestLoadRootCommentAuthorsTerminatesOnACycle(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("loadRootCommentAuthors did not terminate on a cyclic reply_to chain")
 	}
 	if err != nil {
@@ -1556,7 +1565,7 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 
 	select {
 	case <-publisher.attempt:
-	case <-time.After(time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("initial publication was not attempted")
 	}
 	if publishedAt(t, database, event.ID) != nil {
@@ -1716,7 +1725,7 @@ func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 
 	select {
 	case <-publisher.started:
-	case <-time.After(time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("initial outbox scan did not start")
 	}
 	for range 65 {

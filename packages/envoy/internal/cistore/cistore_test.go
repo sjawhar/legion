@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -20,6 +19,15 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
+
+// eventWait is how long a test here waits FOR AN EVENT: a watcher applying a key, a replica
+// reaching its publish, a caller returning. It is where the test gives up, never a measurement -
+// the test still fails when the event never comes, and on an idle machine the wait returns in
+// milliseconds - so it allows for a loaded runner: every package of this module now runs at once,
+// four CI cores to some 3,800 parallel tests, under the race detector besides
+// (dispatch://INFRA-1075). A test whose SUBJECT is a span - a debounce, a summary tick's period -
+// keeps its own number.
+const eventWait = 30 * time.Second
 
 // connectNATS connects to the package's shared NATS server, in the JetStream account
 // testnats.URL hands t, where no earlier test made a CI bucket.
@@ -53,8 +61,8 @@ func within(f func() error) error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(10 * time.Second):
-		return errors.New("did not return within 10 s")
+	case <-time.After(eventWait):
+		return fmt.Errorf("did not return within %s", eventWait)
 	}
 }
 
@@ -353,7 +361,7 @@ func TestListReflectsRecords(t *testing.T) {
 	if err := recordCheck(s, "o", "r", "7", "sha7", "build", "1", "", "completed", "success", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventWait)
 	for {
 		list := s.List()
 		if len(list) == 1 && list[0].Number == "7" {
@@ -537,7 +545,7 @@ func TestWatchEvictsMalformedState(t *testing.T) {
 		t.Fatalf("put malformed state: %v", err)
 	}
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventWait)
 	for {
 		if len(s.List()) == 0 {
 			return

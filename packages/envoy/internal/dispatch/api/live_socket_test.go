@@ -68,7 +68,7 @@ func withBearer(token string) http.Header {
 // sockets waits for exactly n sockets open on the server and answers them.
 func (rig *liveSocketRig) sockets(t *testing.T, n int) []*liveSocket {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(eventFeedWait)
 	for {
 		open := rig.served.liveSockets.all()
 		if len(open) == n {
@@ -512,7 +512,7 @@ func (held *heldWrites) release() {
 // the writer writes nothing and takes nothing from either queue until release.
 func (held *heldWrites) waitHeld(t *testing.T, socket *liveSocket) {
 	t.Helper()
-	pollUntil(t, 10*time.Second, "the writer held with the stream queue full", func() bool {
+	pollUntil(t, concurrentWait, "the writer held with the stream queue full", func() bool {
 		return held.waiting.Load() > 0 && streamFull(socket)
 	})
 }
@@ -585,7 +585,8 @@ func (c *heldConn) Write(p []byte) (int, error) {
 }
 
 // pollUntil polls condition every 10 ms for up to within, failing the test with what when it
-// never holds.
+// never holds. A caller waiting for a condition to come true names concurrentWait; one whose
+// subject is the span itself - a view that must end inside a replay timeout - names that span.
 func pollUntil(t *testing.T, within time.Duration, what string, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -650,7 +651,7 @@ func TestTheDeliverySocketAnswersASubscribeWithASnapshot(t *testing.T) {
 
 	client := rig.dial(t, asUser("alice"))
 	client.send(t, deliverySubscribe("t", timelineRange(now.Add(-48*time.Hour), now, "")))
-	snapshot := client.snapshot(t, 10*time.Second, "t")
+	snapshot := client.snapshot(t, eventFeedWait, "t")
 	requireSameBody(t, "the socket's snapshot", snapshot.Body, getBody(t, rig.handler, windowTarget(t, deliveryLiveTimeline, snapshot.Body, "")))
 	if _, ok := snapshot.Revs.Items["prs"]["acme/widgets#1"]; !ok {
 		t.Fatalf("the snapshot's revisions %v hold no revision of acme/widgets#1", snapshot.Revs.Items)
@@ -658,7 +659,7 @@ func TestTheDeliverySocketAnswersASubscribeWithASnapshot(t *testing.T) {
 
 	// A merge after the snapshot reaches the page as a delta that lands on the GET route's body.
 	upsertPR(t, rig.database, hubPR(2, now.Add(-2*time.Hour)))
-	delta := client.delta(t, 10*time.Second, "t")
+	delta := client.delta(t, eventFeedWait, "t")
 	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#2"}) {
 		t.Fatalf("the merge's delta upserts %v, want acme/widgets#2", got)
 	}
@@ -703,7 +704,7 @@ func TestAForeignOriginIsRefused(t *testing.T) {
 	own.Set("Origin", "http://"+rig.host)
 	client := rig.dial(t, own)
 	client.send(t, LiveUnsubscribe{Type: "unsubscribe"})
-	client.refusal(t, 3*time.Second, "", "INVALID_FRAME")
+	client.refusal(t, eventFeedWait, "", "INVALID_FRAME")
 }
 
 func TestABearerMayReadTheSocket(t *testing.T) {
@@ -719,7 +720,7 @@ func TestABearerMayReadTheSocket(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			client := rig.dial(t, withBearer(token))
 			client.send(t, deliverySubscribe("p", presetView(deliveryLiveTimeline, 7, "")))
-			client.snapshot(t, 10*time.Second, "p")
+			client.snapshot(t, eventFeedWait, "p")
 		})
 	}
 }
@@ -789,7 +790,7 @@ func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
 		if err := client.conn.WriteMessage(kind, []byte(test.frame)); err != nil {
 			t.Fatalf("%s: send: %v", test.name, err)
 		}
-		refusal := client.refusal(t, 3*time.Second, test.sub, test.code)
+		refusal := client.refusal(t, eventFeedWait, test.sub, test.code)
 		if !strings.HasPrefix(refusal.Message, test.names) || strings.ContainsRune(refusal.Message, 0) {
 			t.Fatalf("%s: refusal %q, want one naming %q with no NUL in it", test.name, refusal.Message, test.names)
 		}
@@ -797,7 +798,7 @@ func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
 
 	// The socket is still open, and the hub answers its next subscribe.
 	client.send(t, deliverySubscribe("h", presetView(deliveryLiveTimeline, 7, "")))
-	client.refusal(t, 10*time.Second, "h", "DELIVERY_NOT_CONFIGURED")
+	client.refusal(t, eventFeedWait, "h", "DELIVERY_NOT_CONFIGURED")
 }
 
 func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
@@ -830,7 +831,7 @@ func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
 	// limit as it reads the frame's header, so Dispatch answers before reading any of the 9 MiB.
 	oversized := []byte(`{"type":"unsubscribe","sub":"` + strings.Repeat("a", 9<<20) + `"}`)
 	go func() { _ = client.conn.WriteMessage(gws.TextMessage, oversized) }()
-	if code, _ := client.closeCode(t, 10*time.Second); code != gws.CloseMessageTooBig {
+	if code, _ := client.closeCode(t, eventFeedWait); code != gws.CloseMessageTooBig {
 		t.Fatalf("a 9 MiB frame closed the socket with %d, want 1009", code)
 	}
 	rig.sockets(t, 0)
@@ -879,13 +880,13 @@ func TestAWindowWiderThanTheMaximumIsAnErrorFrame(t *testing.T) {
 	to := time.Now().UTC().Truncate(time.Second)
 
 	client.send(t, deliverySubscribe("wide", timelineRange(to.Add(-maxDeliveryWindow-time.Second), to, "")))
-	if refusal := client.refusal(t, 3*time.Second, "wide", "INVALID_QUERY"); refusal.Message != "from..to must not span more than 84 days" {
+	if refusal := client.refusal(t, eventFeedWait, "wide", "INVALID_QUERY"); refusal.Message != "from..to must not span more than 84 days" {
 		t.Fatalf("refusal %q, want the GET route's", refusal.Message)
 	}
 
 	// The widest window the GET route answers is answered too, on the same socket.
 	client.send(t, deliverySubscribe("widest", timelineRange(to.Add(-maxDeliveryWindow), to, "")))
-	client.snapshot(t, 10*time.Second, "widest")
+	client.snapshot(t, eventFeedWait, "widest")
 }
 
 func TestASlowReaderIsClosedNotBuffered(t *testing.T) {
@@ -905,7 +906,7 @@ func TestASlowReaderIsClosedNotBuffered(t *testing.T) {
 		client.sendText(t, []byte(`{"type":"resubscribe","sub":"`+sub+strconv.Itoa(n)+`"}`))
 	}
 	socket := rig.sockets(t, 1)[0]
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(eventFeedWait)
 	for !socket.overflowed() {
 		if time.Now().After(deadline) {
 			t.Fatalf("the socket's %d-frame queue never overflowed", liveSocketQueue)
@@ -915,7 +916,7 @@ func TestASlowReaderIsClosedNotBuffered(t *testing.T) {
 
 	// Once the page reads again it is sent what the connection already carried, then 1013, and not
 	// the answers queued behind the overflow.
-	code, messages := client.read().closeCode(t, 15*time.Second)
+	code, messages := client.read().closeCode(t, eventFeedWait)
 	if code != gws.CloseTryAgainLater {
 		t.Fatalf("the slow page's socket closed with %d, want 1013", code)
 	}
@@ -937,13 +938,13 @@ func TestShutdownClosesEverySocketWithServiceRestart(t *testing.T) {
 	person := rig.dial(t, asUser("alice"))
 	agent := rig.dial(t, withBearer("agent-token"))
 	person.send(t, deliverySubscribe("t", presetView(deliveryLiveTimeline, 7, "")))
-	person.snapshot(t, 10*time.Second, "t")
+	person.snapshot(t, eventFeedWait, "t")
 	agent.send(t, liveSubscribe("e", eventsView(), ""))
-	running := events.next(t, 5*time.Second, "the agent's events subscription")
+	running := events.next(t, eventFeedWait, "the agent's events subscription")
 
 	rig.stop()
 	for name, client := range map[string]*socketClient{"the person's": person, "the agent's": agent} {
-		if code, _ := client.closeCode(t, 5*time.Second); code != gws.CloseServiceRestart {
+		if code, _ := client.closeCode(t, eventFeedWait); code != gws.CloseServiceRestart {
 			t.Errorf("%s socket closed with %d, want 1012", name, code)
 		}
 	}
@@ -1022,14 +1023,14 @@ func requireTheHookClosesEverySocket(t *testing.T, hook string, code int, reason
 		t.Fatalf("POST %s: status=%d body=%s", hook, response.Code, response.Body.String())
 	}
 	for name, client := range map[string]*socketClient{"the person's": person, "the agent's": agent} {
-		if closed := client.closeError(t, 5*time.Second); closed.Code != code || closed.Text != reason {
+		if closed := client.closeError(t, eventFeedWait); closed.Code != code || closed.Text != reason {
 			t.Errorf("%s socket closed with %d %q, want %d %q", name, closed.Code, closed.Text, code, reason)
 		}
 	}
 
 	again := rig.dial(t, asUser("alice"))
 	again.send(t, LiveUnsubscribe{Type: "unsubscribe"})
-	again.refusal(t, 3*time.Second, "", "INVALID_FRAME")
+	again.refusal(t, eventFeedWait, "", "INVALID_FRAME")
 }
 
 func TestTheRotateHookClosesEverySocketWithMaxAge(t *testing.T) {
@@ -1065,7 +1066,7 @@ func TestTheLiveTestHooksAreMountedOnlyUnderTestHooks(t *testing.T) {
 			}
 		}
 		client.send(t, LiveUnsubscribe{Type: "unsubscribe"})
-		client.refusal(t, 3*time.Second, "", "INVALID_FRAME")
+		client.refusal(t, eventFeedWait, "", "INVALID_FRAME")
 	})
 	t.Run("the delivery socket's hook is gone", func(t *testing.T) {
 		rig := newLiveSocketRig(t, testServerOptions{testHooks: true}, nil)
@@ -1089,7 +1090,7 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 	client := rig.open(t, gws.DefaultDialer, asUser("alice"))
 	held.hold(t)
 	client.send(t, liveSubscribe("busy", eventsView(), ""))
-	busy.next(t, 5*time.Second, "the busy events subscription")
+	busy.next(t, eventFeedWait, "the busy events subscription")
 	socket := rig.sockets(t, 1)[0]
 	held.waitHeld(t, socket)
 
@@ -1101,7 +1102,7 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 		subs[n] = "d" + strconv.Itoa(n)
 		client.send(t, deliverySubscribe(subs[n], livePipelineView(nil)))
 	}
-	pollUntil(t, 10*time.Second, "the hub answers every delivery view", func() bool { return len(socket.queue) == answers })
+	pollUntil(t, concurrentWait, "the hub answers every delivery view", func() bool { return len(socket.queue) == answers })
 	if socket.overflowed() {
 		t.Fatal("the hub's queue overflowed beside a full stream queue")
 	}
@@ -1110,10 +1111,10 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 	// then the stream again.
 	held.release()
 	client.read()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventFeedWait)
 	var first LiveError
 	for {
-		frame := decodeSocketFrame(t, client.takeBy(t, deadline, 10*time.Second, "the first hub frame"))
+		frame := decodeSocketFrame(t, client.takeBy(t, deadline, eventFeedWait, "the first hub frame"))
 		if refusal, ok := frame.(LiveError); ok {
 			first = refusal
 			break
@@ -1126,8 +1127,8 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 	if len(rest) != answers-1 {
 		t.Fatalf("the first hub frame refuses %q, not one of the delivery views %v", first.Sub, subs)
 	}
-	client.refusals(t, 3*time.Second, "DELIVERY_NOT_CONFIGURED", rest...)
-	client.event(t, 5*time.Second, "busy")
+	client.refusals(t, eventFeedWait, "DELIVERY_NOT_CONFIGURED", rest...)
+	client.event(t, eventFeedWait, "busy")
 	if !client.open() {
 		t.Fatalf("the socket ended: %v", client.err)
 	}

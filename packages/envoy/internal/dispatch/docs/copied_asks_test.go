@@ -309,7 +309,7 @@ func openAsksUnder(t *testing.T, service *Service, blockID string) []string {
 func requireOneOpenAskOn(t *testing.T, service *Service, blockID, document string) {
 	t.Helper()
 	var open []string
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		if open = openAsksUnder(t, service, blockID); len(open) == 1 && open[0] == document {
 			return
@@ -999,7 +999,7 @@ func TestThreeCopiesOfARetractedAskShareTheOneAskTheFirstOpens(t *testing.T) {
 	var open []string
 	var shown map[string]string
 	pending := -1
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		open = openAsksUnder(t, service, "shared")
 		shown = map[string]string{}
@@ -1059,7 +1059,7 @@ func settlementBarrier(t *testing.T, service *Service, n int) func(string) {
 		mu.Lock()
 		arrived++
 		mu.Unlock()
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(roomWait(t))
 		for time.Now().Before(deadline) {
 			waiting, err := storetest.CountLockWaits(context.Background(), service.store, copyLockWait)
 			if err != nil {
@@ -1082,7 +1082,7 @@ func settlementBarrier(t *testing.T, service *Service, n int) func(string) {
 // settlement of it runs at (settleCurrentGeneration).
 func roomGeneration(t *testing.T, service *Service, document string) uint64 {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, document); err != nil {
 		t.Fatalf("wait for live updates to reach persistence: %v", err)

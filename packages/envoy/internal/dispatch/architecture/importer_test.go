@@ -146,8 +146,8 @@ func (h *releasableHold) waitHeld(t *testing.T) {
 	held, _ := h.channels(t)
 	select {
 	case <-held:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no read reached the hold within 10s")
+	case <-time.After(30 * time.Second):
+		t.Fatal("no read reached the hold within 30s")
 	}
 }
 
@@ -782,7 +782,7 @@ func TestTheFlightCounterWaitsForEveryFlightAndThenRefusesMore(t *testing.T) {
 	flights.done()
 	select {
 	case <-stopped:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("stop did not return once the last flight ended")
 	}
 	if flights.begin() {

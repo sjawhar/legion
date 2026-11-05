@@ -187,7 +187,7 @@ func TestTheDeliverySweepFinishesEveryDeliveringRouteOnce(t *testing.T) {
 			var key string
 			select {
 			case key = <-listener.started:
-			case <-time.After(10 * time.Second):
+			case <-time.After(concurrentWait):
 				t.Fatal("the write never sent its attempt")
 			}
 			owner, _, _ := strings.Cut(key, ":")
@@ -318,7 +318,7 @@ func TestACommentsMentionFinishesWhenItsClientGivesUp(t *testing.T) {
 				t.Fatal("the client was answered before it gave up")
 			}
 			letProceed()
-			deadline := time.Now().Add(10 * time.Second)
+			deadline := time.Now().Add(concurrentWait)
 			var state string
 			for time.Now().Before(deadline) {
 				if err := database.Pool.QueryRow(context.Background(),

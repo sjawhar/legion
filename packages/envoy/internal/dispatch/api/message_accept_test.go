@@ -589,7 +589,7 @@ func TestAcceptAClaimAndAReplyOfOneAttemptAllLand(t *testing.T) {
 					if landed.response.Code >= http.StatusInternalServerError {
 						t.Errorf("%s: status=%d body=%s", landed.call, landed.response.Code, landed.response.Body.String())
 					}
-				case <-time.After(10 * time.Second):
+				case <-time.After(concurrentWait):
 					t.Fatalf("the three calls did not all return; returned so far %v", got)
 				}
 			}

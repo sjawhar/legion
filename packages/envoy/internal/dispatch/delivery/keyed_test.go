@@ -57,8 +57,8 @@ func awaitStart(t *testing.T, starts <-chan keyedItem) keyedItem {
 	select {
 	case item := <-starts:
 		return item
-	case <-time.After(5 * time.Second):
-		t.Fatal("no item started within 5s")
+	case <-time.After(eventWait):
+		t.Fatalf("no item started within %s", eventWait)
 		return keyedItem{}
 	}
 }

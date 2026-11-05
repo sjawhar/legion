@@ -74,7 +74,7 @@ func TestAnotherSubscriptionOnOneTransportIsRefused(t *testing.T) {
 				if got != "still held" {
 					t.Fatalf("received %q, want the held subscription's message", got)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(busWait):
 				t.Fatal("the held subscription stopped delivering after the refused registration")
 			}
 

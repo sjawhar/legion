@@ -151,7 +151,7 @@ func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 	}
 	select {
 	case <-reconnected:
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("connection did not automatically reconnect after its initial context expired")
 	}
 }

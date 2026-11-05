@@ -96,11 +96,11 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 			}
 			select {
 			case <-started:
-			case <-time.After(5 * time.Second):
+			case <-time.After(busWait):
 				t.Fatal("the first role message never reached the handler")
 			}
 			// nats.go counts a delivery as pending until its handler returns.
-			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			for deadline := time.Now().Add(busWait); ; time.Sleep(10 * time.Millisecond) {
 				if pending, _, _ := sub.Pending(); pending == 2 {
 					break
 				}
@@ -127,7 +127,7 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 				if err != nil {
 					t.Fatalf("drain: %v", err)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(busWait):
 				t.Fatal("Drain never returned")
 			}
 			if finished := finished.Load(); finished != 2 {

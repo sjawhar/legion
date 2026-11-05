@@ -84,8 +84,8 @@ func startStaleRoomEvictor(t *testing.T, evictor *staleRoomEvictor) (<-chan stal
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("the stale-room evictor did not return within 10s of its context ending")
+		case <-time.After(roomWait(t)):
+			t.Error("the stale-room evictor did not return once its context ended, within roomWait")
 		}
 	})
 	return notes, listening

@@ -93,7 +93,7 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 		t.Fatalf("store session %s by a direct bucket write: %v", invalidKey, err)
 	}
 	listed := []string{ordinary, readableLegacy, unreadableLegacy, invalidKey}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for _, id := range listed {
 		for {
 			if _, err := sessions.Get(id); err == nil {

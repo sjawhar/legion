@@ -159,7 +159,7 @@ func TestAWindowRequestReportsAForwardNATSDenies(t *testing.T) {
 		if !errors.Is(err, bus.ErrPublishDenied) || errors.Is(err, bus.ErrNotAcknowledged) {
 			t.Fatalf("denied Request answered %v, want ErrPublishDenied", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the denied Request was never answered")
 	}
 	if elapsed := time.Since(started); elapsed >= 2*time.Second {
@@ -239,7 +239,7 @@ func TestCoreSubOKIsFalseWhileTheServerRefusesTheResentSubscription(t *testing.T
 		if got != topic {
 			t.Fatalf("the subscription received %s, want %s", got, topic)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the subscription the server granted again received nothing")
 	}
 	if !client.CoreSubOK() {

@@ -319,7 +319,7 @@ func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t 
 		var forward contracts.Envelope
 		select {
 		case forward = <-recv.arrived:
-		case <-time.After(10 * time.Second):
+		case <-time.After(eventWait):
 			t.Fatal("the holder received no forward")
 		}
 		if forward.Topic != contracts.RoleTopicPrefix+role || forward.DedupeKey != contracts.RoleForwardDedupePrefix+fmt.Sprintf("dispatch-%d", event.ID) ||

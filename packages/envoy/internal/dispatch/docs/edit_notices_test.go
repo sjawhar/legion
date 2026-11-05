@@ -484,7 +484,7 @@ func TestEditNoticeSweepSendsADueNotice(t *testing.T) {
 		if event.Type != "artifact.human_edited" {
 			t.Fatalf("published %q, want artifact.human_edited", event.Type)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the sent notice was never published")
 	}
 }
@@ -674,7 +674,7 @@ func TestEditNoticeSweepDuringSettlement(t *testing.T) {
 			sent, err := service.sendDueEditNotices(store.WithTransactionTracking(context.Background()))
 			swept <- sweepResult{sent, err}
 		}()
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(roomWait(t))
 		for {
 			waiting, err := storetest.CountLockWaits(context.Background(), service.store, "%from issues where key = $1 for no key update%")
 			if err != nil {
@@ -705,11 +705,11 @@ func TestEditNoticeSweepDuringSettlement(t *testing.T) {
 		if result.err != nil || result.sent != 0 {
 			t.Fatalf("the sweep that met the settlement = %d sent, %v; want none sent, since the settlement moved the notice on", result.sent, result.err)
 		}
-	case <-time.After(30 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the sweep that met the settlement never finished")
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for len(humanEdits(t, service.store, artifactID)) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("no notice went once the quiet time passed")

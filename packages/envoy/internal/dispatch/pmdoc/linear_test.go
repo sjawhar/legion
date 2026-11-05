@@ -884,7 +884,7 @@ func TestALateCallFinishingAfterItsTestDoesNotPanicHelper(t *testing.T) {
 	select {
 	case <-finished:
 		t.Log(lateCallFinished)
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("the late call never returned")
 	}
 }
@@ -899,7 +899,7 @@ func waitForLeakToClear(t *testing.T, cleared <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-cleared:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("a synthetic leaked call never deregistered")
 	}
 }

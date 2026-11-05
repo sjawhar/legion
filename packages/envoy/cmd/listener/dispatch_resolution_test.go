@@ -151,7 +151,7 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		t.Fatalf("start the session relays: %v", err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		relays.stop(ctx)
 	})
@@ -300,7 +300,7 @@ func (s *rigSession) awaitFrame(t *testing.T) string {
 	select {
 	case frame := <-s.standIn.frames:
 		return string(frame.msg.Data)
-	case <-time.After(15 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatalf("no frame reached %s's own consumer", s.id)
 		return ""
 	}
@@ -428,7 +428,7 @@ type rigBroadcast struct {
 // work cancelled by its own t.Context() rather than finished.
 func (rig *dispatchRig) awaitBroadcastDeliveries(t *testing.T, broadcastID string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for {
 		read := rig.asHuman(t, http.MethodGet, "/api/v1/broadcasts/"+broadcastID, nil)
 		if read.Code != http.StatusOK {

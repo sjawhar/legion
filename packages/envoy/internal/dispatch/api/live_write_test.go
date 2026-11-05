@@ -370,7 +370,7 @@ func (f *heldWriteFixture) startFailingEdit(t *testing.T) <-chan *httptest.Respo
 		closeTestGate(f.failure.release)
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(concurrentWait):
 			t.Error("transactional edit did not exit after releasing test gates")
 		}
 	})
@@ -416,7 +416,7 @@ func (f *heldWriteFixture) waitForLiveText(t *testing.T, want string) {
 // waitForLiveText waits until the live document's text holds want.
 func waitForLiveText(t *testing.T, documentService *docs.Service, artifactID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		text, err := documentService.Text(context.Background(), artifactID)
 		if err != nil {
@@ -467,7 +467,7 @@ func (f *heldWriteFixture) versions(t *testing.T) []string {
 
 func (f *heldWriteFixture) waitForVersionHolding(t *testing.T, text string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		for _, version := range f.versions(t) {
 			if strings.Contains(version, text) {
@@ -505,7 +505,7 @@ func (f *heldWriteFixture) assertNoVersionHolds(t *testing.T, text string) {
 // assertDurableText renders the document the store would load, update by update.
 func (f *heldWriteFixture) assertDurableText(t *testing.T, want string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		got := f.durableText(t)
 		if got == want {
@@ -547,7 +547,7 @@ func (f *heldWriteFixture) durableText(t *testing.T) string {
 // behind the held transaction.
 func (f *heldWriteFixture) waitForLockWaiter(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		var waiting int
 		if err := f.probe.QueryRow(context.Background(), `

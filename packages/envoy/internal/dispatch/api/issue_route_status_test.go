@@ -478,7 +478,7 @@ func TestAnOlderListenerAnswerNeverReplacesANewerOne(t *testing.T) {
 		if got := sreReach(roster); got != "live ses-sre" {
 			t.Fatalf("the read waiting on the older fetch reads %s, want the newer stored live ses-sre", got)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the read waiting on the older fetch never returned")
 	}
 	if got := sreReach(readRoster(t, first, context.Background())); got != "live ses-sre" {

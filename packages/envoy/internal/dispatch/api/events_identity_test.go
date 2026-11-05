@@ -69,7 +69,7 @@ func TestTheEventFeedClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 	subscribeEvents(t, client, "events", nil)
 
 	person.ended.Store(true)
-	if closed := client.closeError(t, 5*time.Second); closed.Code != gws.ClosePolicyViolation {
+	if closed := client.closeError(t, eventFeedWait); closed.Code != gws.ClosePolicyViolation {
 		t.Fatalf("the event feed's socket closed with %d %q once its person stopped resolving, want 1008", closed.Code, closed.Text)
 	}
 }
@@ -109,10 +109,10 @@ func TestAgentStreamClosesOnceItsViewerNoLongerResolves(t *testing.T) {
 	}
 
 	person.ended.Store(true)
-	if closed := client.closeError(t, 5*time.Second); closed.Code != gws.ClosePolicyViolation {
+	if closed := client.closeError(t, eventFeedWait); closed.Code != gws.ClosePolicyViolation {
 		t.Fatalf("the agent view's socket closed with %d %q once its viewer stopped resolving, want 1008", closed.Code, closed.Text)
 	}
-	pollUntil(t, 5*time.Second, "the closed socket's view leaves the session's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
+	pollUntil(t, concurrentWait, "the closed socket's view leaves the session's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
 }
 
 // A person whose session ends while their editor holds a document open loses the live document

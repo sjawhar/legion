@@ -279,7 +279,7 @@ func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 				if conn != client.Conn {
 					t.Fatal("the reconnect hook ran on a connection the client no longer has")
 				}
-			case <-time.After(15 * time.Second):
+			case <-time.After(busWait):
 				t.Fatal("the reconnect hook never ran while the durable refuses the bind")
 			}
 			if client.SubOK() {
@@ -408,7 +408,7 @@ func TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent(t *
 			if run == 2 {
 				recoveryGoroutine = got.goroutine
 			}
-		case <-time.After(15 * time.Second):
+		case <-time.After(busWait):
 			t.Fatalf("the reconnect hooks ran %d time(s) after an in-place reconnect whose first run failed; want them run again", run-1)
 		}
 	}
@@ -515,7 +515,7 @@ func TestAnInPlaceReconnectDoesNotWaitForABindInFlight(t *testing.T) {
 	}()
 	select {
 	case <-proxy.swallowed:
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the bind's consumer lookup never reached the link")
 	}
 	dropped := time.Now()
@@ -854,7 +854,7 @@ func TestReconnectHookRunsAfterReconnect(t *testing.T) {
 		if conn != client.Conn {
 			t.Fatal("reconnect hook received a stale connection")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("reconnect hook did not run")
 	}
 }

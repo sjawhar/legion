@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -175,7 +174,7 @@ func TestIssueAncestorsStopsAtTheDepthCap(t *testing.T) {
 	})
 	setParent(t, ctx, pool, "LIVED-1", "LIVED-3")
 	for _, maxDepth := range []int{1, 2, 32} {
-		bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
+		bounded, cancel := context.WithTimeout(ctx, eventWait)
 		ancestors, err := IssueAncestors(bounded, pool, []string{"LIVED-2"}, maxDepth)
 		cancel()
 		if err != nil {

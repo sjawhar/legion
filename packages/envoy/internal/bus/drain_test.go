@@ -38,7 +38,7 @@ func connectWithHandler(t *testing.T, hold time.Duration) (*bus.Client, *atomic.
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	return client, finished
@@ -64,7 +64,7 @@ func connectWithHeldHandler(t *testing.T) *bus.Client {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	return client
@@ -176,7 +176,7 @@ func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the first role message never reached its handler")
 	}
 
@@ -238,7 +238,7 @@ func TestDrainClosesAtItsDeadlineWhileADeliverySubscriptionDrains(t *testing.T) 
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	began := time.Now()
@@ -311,7 +311,7 @@ func TestDrainDoesNotWaitForABindInFlight(t *testing.T) {
 	}()
 	select {
 	case <-proxy.swallowed:
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the bind's consumer lookup never reached the link")
 	}
 	proxy.drop()
@@ -387,7 +387,7 @@ func TestDrainKeepsAConnectionThatReconnectedBeforeIt(t *testing.T) {
 	}
 	select {
 	case <-inHandler:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 
@@ -409,7 +409,7 @@ func TestDrainKeepsAConnectionThatReconnectedBeforeIt(t *testing.T) {
 	releaseCallbacks()
 	select {
 	case <-reconnectRan:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the reconnect callback never ran")
 	}
 	select {
@@ -466,7 +466,7 @@ func TestDrainEndsWhenTheConnectionClosesWhileNATSDrainsIt(t *testing.T) {
 		}
 		select {
 		case <-inHandler:
-		case <-time.After(5 * time.Second):
+		case <-time.After(busWait):
 			t.Fatal("the delivery never reached its handler")
 		}
 		drained := make(chan error, 1)

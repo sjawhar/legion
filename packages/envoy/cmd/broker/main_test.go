@@ -29,7 +29,8 @@ import (
 )
 
 // TestMain hands the package's tests to storetest, which clones each of them a database off the
-// one migrated template and drops the template and the free list when the last test has ended.
+// one migrated template, drops each with its test, and drops the template when the last test
+// has ended.
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 // testSecretsPrefix and testSecretsKMSKeyARN are the name prefix every agent secret sits under

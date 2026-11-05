@@ -102,7 +102,7 @@ func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *test
 		// This raw ygo close stands in for the idle sweep, which can evict the idle room between
 		// settlement's read and repair because no Server.Apply holds it then.
 		go func() { _ = service.srv.Server.CloseRoom(room, true) }()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(roomWait(t))
 		for service.srv.GetDoc(room) == held {
 			if time.Now().After(deadline) {
 				t.Error("the room was never closed")
@@ -410,7 +410,7 @@ func TestBackfillStoresNothingForAStampTheDocumentNoLongerNeeds(t *testing.T) {
 		tree.Children[0].Attrs[pmdoc.BlockIDAttr] = "marker"
 		return tree
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
@@ -560,7 +560,7 @@ func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.
 			}{{"the settlement", settled}, {"the second writer", written}, {"the room's close", closed}} {
 				select {
 				case <-step.done:
-				case <-time.After(10 * time.Second):
+				case <-time.After(roomWait(t)):
 					service.purgeSuppressedPersistence(artifactID)
 					endRoomLockHolders(t, service)
 					t.Fatalf("deadlock: %s never returned once the room closed under the settlement's repair commit", step.name)
@@ -590,7 +590,7 @@ func owedStamp(t *testing.T, service *Service, artifactID string) uint64 {
 	seedServiceText(t, service, artifactID, "before")
 	settleCurrentGeneration(t, service, artifactID)
 	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "added"))
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the edit to reach persistence: %v", err)
@@ -631,7 +631,7 @@ func settleUnderPause(t *testing.T, service *Service, pause *repairCommitPause, 
 	case <-pause.held:
 	case <-settled:
 		t.Fatal("the settlement returned without committing into the room")
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the settlement never committed into the room")
 	}
 	return settled
@@ -806,7 +806,7 @@ func appendUnidentifiedBlocks(t *testing.T, markdown string) func(*pmdoc.Node) *
 // so the worker it holds lets the test's shutdown finish.
 func requireNoSuppressedSlots(t *testing.T, service *Service, room, when string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for {
 		service.suppressMu.Lock()
 		queued := len(service.suppressed[room])

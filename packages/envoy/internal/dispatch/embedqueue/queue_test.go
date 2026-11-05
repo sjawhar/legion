@@ -20,6 +20,14 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
+// eventWait is how long a test here waits FOR AN EVENT, and the floor eventually runs on: a row
+// embedded, a hub listening, Run returning once its context ended. It is where the test gives up,
+// never a measurement - the test still fails when the event never comes, and on an idle machine
+// the wait returns in milliseconds - so it allows for a loaded runner: every package of this
+// module now runs at once, four CI cores to some 3,800 parallel tests, under the race detector
+// besides (dispatch://INFRA-1075). A test whose SUBJECT is a span keeps its own number.
+const eventWait = 30 * time.Second
+
 // bedrockShaped gives a test embedder the Identity and Limits embed.Embedder asks for: Bedrock's
 // own, so the batch size and token ceiling the tests below count against are Bedrock's. Every
 // fake in this file embeds it.
@@ -1425,6 +1433,7 @@ func (e *syncEmbedder) canaryCalls() int {
 // eventually polls done until it reports true, failing once within passes.
 func eventually(t *testing.T, within time.Duration, what string, done func() bool) {
 	t.Helper()
+	within = max(within, eventWait)
 	deadline := time.Now().Add(within)
 	for !done() {
 		if time.Now().After(deadline) {
@@ -1448,8 +1457,8 @@ func runQueue(t *testing.T, deps Deps) {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("Run did not return within 10s of its context ending")
+		case <-time.After(eventWait):
+			t.Errorf("Run did not return within %s of its context ending", eventWait)
 		}
 	})
 }
@@ -1551,8 +1560,8 @@ func TestAWriteIsEmbeddedOnItsNotification(t *testing.T) {
 	runQueue(t, Deps{Store: counted, Embedder: newSyncEmbedder(configuredIdentity), Wake: wake})
 	select {
 	case <-connected:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the hub did not connect within 10s")
+	case <-time.After(eventWait):
+		t.Fatalf("the hub did not connect within %s", eventWait)
 	}
 	eventually(t, 10*time.Second, "NTFY-1 embedded at boot", func() bool { return pendingCount(t, database) == 0 })
 	// The catch-up signal earns a scan no sooner than retryInterval after the boot scan began.

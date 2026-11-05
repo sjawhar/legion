@@ -147,7 +147,7 @@ func (g *firstReplaceGate) AcceptSuggestion(ctx context.Context, artifactID, mar
 
 func waitForSecondReplacementOrCommentLock(t *testing.T, database *store.Store, secondReplacement <-chan struct{}) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for time.Now().Before(deadline) {
 		select {
 		case <-secondReplacement:
@@ -1323,7 +1323,7 @@ func TestReopenOrphanedSuggestionSucceeds(t *testing.T) {
 
 func waitForArtifactVersion(t *testing.T, handler http.Handler, artifactID string, number int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for time.Now().Before(deadline) {
 		version := dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", artifactID, number), nil, "alice")
 		if version.Code == http.StatusOK {
@@ -1561,7 +1561,7 @@ func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
 	}()
 	select {
 	case <-gate.firstEntered:
-	case <-time.After(time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("first acceptance did not reach the document replacement")
 	}
 	go func() {
@@ -1582,7 +1582,7 @@ func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
 					conflict++
 				}
 			}
-		case <-time.After(time.Second):
+		case <-time.After(concurrentWait):
 			t.Fatal("concurrent acceptance did not complete")
 		}
 	}
@@ -2427,7 +2427,7 @@ func TestGetCommentReturnsNotFound(t *testing.T) {
 // the live document carries the mark, and persistence follows on its own schedule.
 func loadMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) map[string]any {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		projection, found := findMarkProjection(t, database, artifactID, markID)
 		if found {
@@ -2448,7 +2448,7 @@ func loadMarkProjection(t *testing.T, database *store.Store, artifactID, markID 
 // write - the record either appears here or the caller's assertion fails on the empty result.
 func awaitMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) (map[string]any, bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		projection, found := findMarkProjection(t, database, artifactID, markID)
 		if found || time.Now().After(deadline) {

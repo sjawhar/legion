@@ -366,7 +366,7 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 				answered <- response
 			}()
 			// Two tries the sender made while holding the attempt.
-			deadline := time.Now().Add(10 * time.Second)
+			deadline := time.Now().Add(concurrentWait)
 			for {
 				claimsMu.Lock()
 				seen := len(claims)
@@ -403,7 +403,7 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 			var response *httptest.ResponseRecorder
 			select {
 			case response = <-answered:
-			case <-time.After(15 * time.Second):
+			case <-time.After(concurrentWait):
 				t.Fatal("the request never answered after the take-over ended")
 			}
 			if response.Code != http.StatusCreated {

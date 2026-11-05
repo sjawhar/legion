@@ -133,7 +133,7 @@ func TestAGitHubCIDeliveryAnswersAFrozenBusInsideTheRecordWait(t *testing.T) {
 		t.Fatalf("open the CI store: %v", err)
 	}
 	t.Cleanup(store.StopWatch)
-	ready, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ready, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if err := store.WaitForCacheReady(ready); err != nil {
 		t.Fatalf("wait for the CI cache: %v", err)

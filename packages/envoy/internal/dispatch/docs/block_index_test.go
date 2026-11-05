@@ -37,7 +37,7 @@ func blockIndexService(t *testing.T) (*store.Store, *Service) {
 	}
 	service := New(Deps{Store: database, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: time.Hour})
 	t.Cleanup(func() {
-		stop, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stop, cancel := context.WithTimeout(context.Background(), roomWait(t))
 		defer cancel()
 		_ = service.Shutdown(stop)
 	})

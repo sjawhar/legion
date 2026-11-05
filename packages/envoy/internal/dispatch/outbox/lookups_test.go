@@ -78,7 +78,7 @@ func TestLoadCommentRecipientsReadsEveryThreadOfABatchInOneQuery(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("loadCommentRecipients did not end on a cyclic reply_to chain")
 	}
 	if err != nil {

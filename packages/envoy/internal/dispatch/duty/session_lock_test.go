@@ -37,7 +37,7 @@ func requireLockFree(t *testing.T, pool *store.Pool, key int64) {
 		t.Fatalf("acquire a connection of the shared pool: %v", err)
 	}
 	defer other.Release()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for {
 		var taken bool
 		if err := other.QueryRow(ctx, `select pg_try_advisory_lock($1)`, key).Scan(&taken); err != nil {
@@ -60,7 +60,7 @@ func requireLockFree(t *testing.T, pool *store.Pool, key int64) {
 // connection released closed is destroyed by the pool on a goroutine of its own.
 func requireConnections(t *testing.T, leases *pgxpool.Pool, total, idle int32, why string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for {
 		stat := leases.Stat()
 		if stat.TotalConns() == total && stat.IdleConns() == idle {

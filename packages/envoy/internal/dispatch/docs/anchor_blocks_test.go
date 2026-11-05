@@ -114,7 +114,7 @@ func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
 	// A content change is what makes the settlement write a version, and a version write is what
 	// refreshes the anchors.
 	editLiveTree(t, service, artifactID, replaceRun("Introduction.", "Intro."))
-	settleCtx, cancelSettle := context.WithTimeout(context.Background(), 10*time.Second)
+	settleCtx, cancelSettle := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancelSettle()
 	if err := service.waitForPendingUpdates(settleCtx, artifactID); err != nil {
 		t.Fatalf("wait for live updates to reach persistence: %v", err)
@@ -176,7 +176,7 @@ func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
 // position; nothing here assumes how long a step takes.
 func waitForHeldAnchorRefresh(t *testing.T, service *Service, key int64) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		var waiting int
 		if err := service.store.Pool.QueryRow(context.Background(), `

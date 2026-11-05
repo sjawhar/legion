@@ -37,7 +37,7 @@ type keptPublishAnswer struct {
 // when it holds none.
 func readKeptRoleMessage(t *testing.T, client *bus.Client, role string) (contracts.Envelope, bool) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	stored, err := client.LastStoredMessage(ctx, bus.KeptRoleSubject(role))
 	if errors.Is(err, natsgo.ErrMsgNotFound) {
@@ -57,7 +57,7 @@ func readKeptRoleMessage(t *testing.T, client *bus.Client, role string) (contrac
 // which the role lane writes after its own handler has answered, and returns it.
 func waitForKeptRoleMessage(t *testing.T, client *bus.Client, role, eventID string) contracts.Envelope {
 	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(listenerWait); ; time.Sleep(10 * time.Millisecond) {
 		item, ok := readKeptRoleMessage(t, client, role)
 		if ok && item.EventID == eventID {
 			return item
@@ -241,7 +241,7 @@ func TestNoKeptRoleCopyOrPublishAnswerCarriesAKeepKey(t *testing.T) {
 	}
 	assertNoKeepKey(t, "the route's 202 kept answer", recorder.Body.Bytes())
 	waitForKeptRoleMessage(t, client, role, answer.EventID)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	stored, err := client.LastStoredMessage(ctx, bus.KeptRoleSubject(role))
 	if err != nil {
@@ -362,7 +362,7 @@ func TestAKeptRoleMessageOlderThanTheKeepWindowIsDroppedAndTheCursorMovesPastIt(
 	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
 	drain := func(now func() time.Time) {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		if err := drainKeptRole(ctx, cfg, role, now); err != nil {
 			t.Fatalf("drain role %s's kept lane: %v", role, err)
@@ -825,9 +825,9 @@ func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 		if forwarded.KeptAt == nil || *forwarded.KeptAt <= 0 {
 			t.Fatalf("the forwarded copy carries kept_at %v, want the time the stream stored it", forwarded.KeptAt)
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatalf("the copy kept for %s, which held the role already, reached it in no 20 seconds and no second claim comes:\n%s",
-			holder, harness.logs.String())
+	case <-time.After(listenerWait):
+		t.Fatalf("the copy kept for %s, which held the role already, reached it within no %s and no second claim comes:\n%s",
+			holder, listenerWait, harness.logs.String())
 	}
 }
 
@@ -915,7 +915,7 @@ func TestAPublishToTheListenersKeptLaneIsRefused(t *testing.T) {
 			if body := recorder.Body.String(); !strings.Contains(body, bus.KeptTopicPrefix) {
 				t.Fatalf("the refusal of %s is %q, want it to name %s", subject, body, bus.KeptTopicPrefix)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 			defer cancel()
 			if _, err := client.LastStoredMessage(ctx, subject); !errors.Is(err, natsgo.ErrMsgNotFound) {
 				t.Fatalf("the stream holds a message on %s (%v); the refused publish stored nothing", subject, err)

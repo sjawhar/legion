@@ -525,13 +525,11 @@ var itemTables = []string{"issues", "artifacts", "artifact_versions", "comments"
 // it took sequentially and the rows it fetched through an index.
 //
 // pg_stat_xact_user_tables, not pg_stat_user_tables: the second is the database's count and
-// nobody's in particular, and three other things move it on a database this harness hands out.
+// nobody's in particular, and two other things move it on a database this harness hands out.
 // Another connection of the test reports what it read up to a second after it goes idle
 // (PostgreSQL's PGSTAT_MIN_INTERVAL), so the fixture's writes and its first full pass can be
-// reported between two readings and read as the measured pass's work; the harness keeps a
-// reset session of its own on the database (internal/pgclone, keepConn) that no test can make
-// report; and a reading summed by relname alone also counts the harness's copy of the
-// template's seeded tables, which carries the same names in a schema of its own. The
+// reported between two readings and read as the measured pass's work; and a reading summed by
+// relname alone also counts any other table of that name the database holds. The
 // transaction's own count has none of those: it is what this backend did in this transaction
 // and nothing else, so the reading needs no flush and no quiet database. CI run 41939604288 is
 // the red that says a database-wide reading cannot be held to the pass: six rows read with an

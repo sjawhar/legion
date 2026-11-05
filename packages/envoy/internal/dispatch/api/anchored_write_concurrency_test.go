@@ -186,7 +186,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 // the holders it arranged are in place before it releases the write they are queued behind.
 func waitForAcquiredConns(t *testing.T, database *store.Store, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for time.Now().Before(deadline) {
 		if database.Pool.Stat().AcquiredConns() >= want {
 			return

@@ -83,7 +83,7 @@ func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOu
 	}
 
 	close(release)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if !forwarder.wait(ctx) {
 		t.Fatalf("%d forwards still outstanding after the silent holder's waits ended", forwarder.outstanding())
@@ -239,7 +239,7 @@ func roleForwardsLogged(role string, listeners ...*listenerProcess) int {
 // settledRoleForwards waits, up to 10 s, until the listeners logged want forwards on role's lane,
 // then a second more for any past it, and returns how many they logged.
 func settledRoleForwards(role string, want int, listeners ...*listenerProcess) int {
-	for deadline := time.Now().Add(10 * time.Second); roleForwardsLogged(role, listeners...) < want && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(listenerWait); roleForwardsLogged(role, listeners...) < want && time.Now().Before(deadline); {
 		time.Sleep(50 * time.Millisecond)
 	}
 	time.Sleep(time.Second)

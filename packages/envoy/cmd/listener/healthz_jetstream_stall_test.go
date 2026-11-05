@@ -170,7 +170,7 @@ func TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget(t *testing.
 				t.Fatalf("open the session registry: %v", err)
 			}
 			t.Cleanup(sessions.StopWatch)
-			ready, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ready, cancel := context.WithTimeout(context.Background(), listenerWait)
 			defer cancel()
 			if err := registry.WaitForCacheReady(ready); err != nil {
 				t.Fatalf("wait for the interest cache: %v", err)

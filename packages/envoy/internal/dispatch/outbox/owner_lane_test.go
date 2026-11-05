@@ -61,12 +61,12 @@ func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T
 
 	select {
 	case <-silent.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the silent holder never received its forward")
 	}
 	select {
 	case <-live.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the answering holder never received its issue's first forward")
 	}
 
@@ -81,7 +81,7 @@ func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T
 			t.Fatalf("the answering holder received its issue's later forward %s after its commit, want within %s: "+
 				"the owner was held in flight until its batch ended", waited.Round(time.Millisecond), within)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the answering holder never received its issue's later forward")
 	}
 }
@@ -106,7 +106,7 @@ func TestAnOwnersSecondEventDoesNotOvertakeItsFirstWhileItsHolderIsSilent(t *tes
 	var forward contracts.Envelope
 	select {
 	case forward = <-silent.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the silent holder never received its forward")
 	}
 	if forward.SourceEventID != fmt.Sprint(first.ID) {
@@ -177,7 +177,7 @@ func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *tes
 
 	select {
 	case <-silent.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the silent holder never received the first issue's forward")
 	}
 	// The first issue is in flight on its receipt wait. The second issue falls due, which wakes

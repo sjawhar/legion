@@ -126,7 +126,7 @@ func TestSeedRepoProjectsRacingAPutOfTheSameRepositoryWaitsForIt(t *testing.T) {
 	awaitLockWaiters(t, database, 1)
 	seeded := make(chan error, 1)
 	go func() { seeded <- SeedRepoProjects(ctx, database, events.NewBroker(), "acme/new=CORE") }()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for lockWaiters(t, database) < 2 {
 		select {
 		case err := <-seeded:
@@ -151,7 +151,7 @@ func TestSeedRepoProjectsRacingAPutOfTheSameRepositoryWaitsForIt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed acme/new=CORE after the PUT: %v", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatalf("the seed never returned after the PUT committed")
 	}
 	if other := tableMappings(t, database, "OTHER"); !other["acme/new"] {

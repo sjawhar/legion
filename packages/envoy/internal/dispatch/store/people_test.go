@@ -617,7 +617,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAConcurrentFirstSignIn(t *testing.T) {
 	}
 	second := make(chan error, 1)
 	go func() { second <- people.SignInSubject(ctx, email, "subject-2", "refresh-2") }()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventWait)
 	for {
 		var waiting int
 		if err := database.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity where datname = current_database() and cardinality(pg_blocking_pids(pid)) > 0`).Scan(&waiting); err != nil {

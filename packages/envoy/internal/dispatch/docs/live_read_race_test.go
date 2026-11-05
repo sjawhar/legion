@@ -504,10 +504,10 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 	})
 	select {
 	case <-first:
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the peer sent no update")
 	}
-	waitFor(t, 10*time.Second, "the room to load", func() bool {
+	waitFor(t, roomWait(t), "the room to load", func() bool {
 		return service.srv.GetDoc(artifactID) != nil
 	})
 	return peer.Doc.ClientID()

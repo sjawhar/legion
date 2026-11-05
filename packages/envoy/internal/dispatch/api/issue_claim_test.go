@@ -107,7 +107,7 @@ func awaitLookup(t *testing.T, lookups <-chan int, want int) {
 		if got != want {
 			t.Fatalf("listener lookup %d, want lookup %d", got, want)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatalf("the request never took listener lookup %d", want)
 	}
 }
@@ -1121,7 +1121,7 @@ func whileTheRowIsHeld(
 	select {
 	case response := <-answered:
 		return response
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the request never answered once the row was free")
 		return nil
 	}

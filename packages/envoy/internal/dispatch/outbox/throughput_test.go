@@ -631,7 +631,7 @@ func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publ
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(eventWait):
 			t.Fatal("outbox did not stop")
 		}
 	}

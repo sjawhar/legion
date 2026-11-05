@@ -20,7 +20,7 @@ import (
 
 // raceDeadline bounds every request a race starts: a deadlock fails the test here instead of
 // hanging it.
-const raceDeadline = 10 * time.Second
+const raceDeadline = 30 * time.Second
 
 // A resolution of an open ask and the close of its issue, released together, serialise on the
 // issue's row. Either the resolution commits first, so the ask keeps the resolver's record and the

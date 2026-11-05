@@ -160,16 +160,16 @@ func TestASubscriptionPastTheCapIsRefused(t *testing.T) {
 	running := map[string]*fakeLiveSubscription{}
 	for n := range contracts.LiveSocketMaxSubscriptions - deliveryViews {
 		client.send(t, liveSubscribe("e"+strconv.Itoa(n), eventsView(), ""))
-		started := events.next(t, 5*time.Second, "events subscription "+strconv.Itoa(n))
+		started := events.next(t, eventFeedWait, "events subscription "+strconv.Itoa(n))
 		running[started.sub] = started
 	}
-	client.refusals(t, 10*time.Second, "DELIVERY_NOT_CONFIGURED", delivery...)
+	client.refusals(t, eventFeedWait, "DELIVERY_NOT_CONFIGURED", delivery...)
 
 	// One more, of either kind, is refused, and starts nothing.
 	client.send(t, deliverySubscribe("over-d", livePipelineView(nil)))
-	client.refusal(t, 3*time.Second, "over-d", "TOO_MANY_SUBSCRIPTIONS")
+	client.refusal(t, eventFeedWait, "over-d", "TOO_MANY_SUBSCRIPTIONS")
 	client.send(t, liveSubscribe("over-e", eventsView(), ""))
-	client.refusal(t, 3*time.Second, "over-e", "TOO_MANY_SUBSCRIPTIONS")
+	client.refusal(t, eventFeedWait, "over-e", "TOO_MANY_SUBSCRIPTIONS")
 	events.none(t, 200*time.Millisecond, "a subscribe past the cap")
 	if held := hubSubs(rig.served.deliveryHub); held != deliveryViews {
 		t.Fatalf("the hub holds %d subscriptions, want the %d under the cap", held, deliveryViews)
@@ -177,18 +177,18 @@ func TestASubscriptionPastTheCapIsRefused(t *testing.T) {
 
 	// A sub the socket holds is replaced at the cap, not refused.
 	client.send(t, liveSubscribe("e0", eventsView(), ""))
-	events.next(t, 5*time.Second, "e0's replacement")
-	if err := running["e0"].ended(t, 5*time.Second); !errors.Is(err, context.Canceled) && err != nil {
+	events.next(t, eventFeedWait, "e0's replacement")
+	if err := running["e0"].ended(t, eventFeedWait); !errors.Is(err, context.Canceled) && err != nil {
 		t.Fatalf("the replaced e0 ended with %v", err)
 	}
 
 	// An unsubscribe makes room for one more, and only one.
 	client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: "e1"})
-	running["e1"].ended(t, 5*time.Second)
+	running["e1"].ended(t, eventFeedWait)
 	client.send(t, liveSubscribe("over-e", eventsView(), ""))
-	events.next(t, 5*time.Second, "over-e, once e1 left")
+	events.next(t, eventFeedWait, "over-e, once e1 left")
 	client.send(t, deliverySubscribe("over-d", livePipelineView(nil)))
-	client.refusal(t, 3*time.Second, "over-d", "TOO_MANY_SUBSCRIPTIONS")
+	client.refusal(t, eventFeedWait, "over-d", "TOO_MANY_SUBSCRIPTIONS")
 }
 
 func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
@@ -205,25 +205,25 @@ func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
 	// it, while x's events subscription fills the stream queue.
 	held.hold(t)
 	client.send(t, liveSubscribe("x", eventsView(), ""))
-	first := events.next(t, 5*time.Second, "x's events subscription")
+	first := events.next(t, eventFeedWait, "x's events subscription")
 	socket := rig.sockets(t, 1)[0]
 	held.waitHeld(t, socket)
 
 	// A delivery view in its place stops it, and the hub's answer waits behind the held writer with
 	// x's last frames still on the stream queue. None of them follows the answer.
 	client.send(t, deliverySubscribe("x", livePipelineView(nil)))
-	if err := first.ended(t, 5*time.Second); !errors.Is(err, context.Canceled) {
+	if err := first.ended(t, eventFeedWait); !errors.Is(err, context.Canceled) {
 		t.Fatalf("the replaced events subscription's SendWait answered %v, want its context's end", err)
 	}
-	pollUntil(t, 10*time.Second, "the hub answers x", func() bool { return len(socket.queue) == 1 })
+	pollUntil(t, concurrentWait, "the hub answers x", func() bool { return len(socket.queue) == 1 })
 	if len(socket.stream) == 0 {
 		t.Fatal("no frame of x's was left on the stream queue for the answer to overtake")
 	}
 	held.release()
 	client.read()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventFeedWait)
 	for {
-		frame := decodeSocketFrame(t, client.takeBy(t, deadline, 10*time.Second, "the hub's answer for x"))
+		frame := decodeSocketFrame(t, client.takeBy(t, deadline, eventFeedWait, "the hub's answer for x"))
 		if refusal, ok := frame.(LiveError); ok {
 			if refusal.Sub != "x" || refusal.Code != "DELIVERY_NOT_CONFIGURED" {
 				t.Fatalf("refusal = %+v, want DELIVERY_NOT_CONFIGURED for x", refusal)
@@ -238,16 +238,16 @@ func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
 
 	// An events subscription in a delivery view's place leaves the hub.
 	client.send(t, liveSubscribe("x", eventsView(), ""))
-	second := events.next(t, 5*time.Second, "x's second events subscription")
-	client.event(t, 5*time.Second, "x")
+	second := events.next(t, eventFeedWait, "x's second events subscription")
+	client.event(t, eventFeedWait, "x")
 	if held := hubSubs(rig.served.deliveryHub); held != 0 {
 		t.Fatalf("the hub holds %d subscriptions once an events subscription took x's place, want none", held)
 	}
 
 	// And an events subscription in another's place stops it.
 	client.send(t, liveSubscribe("x", eventsView(), ""))
-	events.next(t, 5*time.Second, "x's third events subscription")
-	if err := second.ended(t, 5*time.Second); !errors.Is(err, context.Canceled) {
+	events.next(t, eventFeedWait, "x's third events subscription")
+	if err := second.ended(t, eventFeedWait); !errors.Is(err, context.Canceled) {
 		t.Fatalf("the replaced events subscription's SendWait answered %v, want its context's end", err)
 	}
 	if stops := second.stops.Load(); stops != 1 {
@@ -288,10 +288,10 @@ func TestAReplacedDeliveryViewsAnswerGoesOutBeforeItsReplacementsFrames(t *testi
 		// view under sub (delivery is not configured), and then an events subscription takes sub
 		// and queues its first event.
 		client.send(t, deliverySubscribe(sub, livePipelineView(nil)))
-		pollUntil(t, 10*time.Second, "the hub answers "+sub, func() bool { return len(socket.queue) == 1 })
+		pollUntil(t, concurrentWait, "the hub answers "+sub, func() bool { return len(socket.queue) == 1 })
 		client.send(t, liveSubscribe(sub, eventsView(), ""))
-		running := events.next(t, 5*time.Second, sub+"'s events subscription")
-		pollUntil(t, 5*time.Second, sub+"'s first event on the stream", func() bool { return len(socket.stream) == 1 })
+		running := events.next(t, eventFeedWait, sub+"'s events subscription")
+		pollUntil(t, concurrentWait, sub+"'s first event on the stream", func() bool { return len(socket.stream) == 1 })
 		if queued := len(socket.queue); queued != 1 {
 			t.Fatalf("round %d: the hub's queue holds %d frames when the writer picks, want its answer to %s", round, queued, sub)
 		}
@@ -301,16 +301,16 @@ func TestAReplacedDeliveryViewsAnswerGoesOutBeforeItsReplacementsFrames(t *testi
 		writer.holdNext()
 		writer.release()
 		writer.waitHeld(t)
-		first := client.next(t, 5*time.Second, "the first frame for "+sub)
+		first := client.next(t, eventFeedWait, "the first frame for "+sub)
 		if event, ok := first.(LiveEventFrame); ok {
 			t.Fatalf("round %d: the first event of the events subscription that took %s (%+v) went out before the hub's answer to the delivery view it replaced", round, sub, event)
 		}
 		if refusal, ok := first.(LiveError); !ok || refusal.Sub != sub || refusal.Code != "DELIVERY_NOT_CONFIGURED" {
 			t.Fatalf("round %d: the first frame for %s = %+v, want DELIVERY_NOT_CONFIGURED", round, sub, first)
 		}
-		client.event(t, 5*time.Second, sub)
+		client.event(t, eventFeedWait, sub)
 		client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: sub})
-		running.ended(t, 5*time.Second)
+		running.ended(t, eventFeedWait)
 	}
 	// A writer that holds back a stream frame its pick took while the hub's answer waited looks
 	// once with that answer waiting and the stream empty. None in every round would mean the pick
@@ -371,8 +371,8 @@ func (writer *idleWriterHold) waitHeld(t *testing.T) {
 	t.Helper()
 	select {
 	case <-writer.held:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the writer was not held at a look that found nothing waiting within 5s")
+	case <-time.After(eventFeedWait):
+		t.Fatalf("the writer was not held at a look that found nothing waiting within %s", eventFeedWait)
 	}
 }
 
@@ -407,7 +407,7 @@ func TestAResumeOfTheWrongShapeIsAnInvalidFrame(t *testing.T) {
 		{"a resume that is not an object", liveSubscribe("e", eventsView(), `"7"`)},
 	} {
 		client.send(t, test.frame)
-		client.refusal(t, 3*time.Second, test.frame.Sub, "INVALID_FRAME")
+		client.refusal(t, eventFeedWait, test.frame.Sub, "INVALID_FRAME")
 	}
 	events.none(t, 200*time.Millisecond, "an events view with a resume of another shape")
 	agent.none(t, 0, "an agent view with a resume")
@@ -418,17 +418,17 @@ func TestAResumeOfTheWrongShapeIsAnInvalidFrame(t *testing.T) {
 	// Each kind takes its own: an events view its since, an agent view none (null is none), and a
 	// delivery view its seq and revisions.
 	client.send(t, liveSubscribe("f", eventsView(), eventsResume))
-	if started := events.next(t, 5*time.Second, "an events view with its resume"); started.resume == nil || started.resume.Since != "7" {
+	if started := events.next(t, eventFeedWait, "an events view with its resume"); started.resume == nil || started.resume.Since != "7" {
 		t.Fatalf("the events subscription started with resume %+v, want since 7", started.resume)
 	}
 	client.send(t, liveSubscribe("g", agentView(session), ""))
-	if started := agent.next(t, 5*time.Second, "an agent view"); started.resume != nil || started.view.SessionID == nil || *started.view.SessionID != session {
+	if started := agent.next(t, eventFeedWait, "an agent view"); started.resume != nil || started.view.SessionID == nil || *started.view.SessionID != session {
 		t.Fatalf("the agent subscription started with resume %+v and view %+v", started.resume, started.view)
 	}
 	client.sendText(t, []byte(`{"type":"subscribe","sub":"h","view":{"kind":"agent","session_id":"`+session+`"},"resume":null}`))
-	agent.next(t, 5*time.Second, "an agent view with a null resume")
+	agent.next(t, eventFeedWait, "an agent view with a null resume")
 	client.send(t, liveSubscribe("i", pipeline, deliveryResume))
-	client.refusal(t, 10*time.Second, "i", "DELIVERY_NOT_CONFIGURED")
+	client.refusal(t, eventFeedWait, "i", "DELIVERY_NOT_CONFIGURED")
 }
 
 func TestASubscriptionKnowsWhichScopesItsCallerHolds(t *testing.T) {
@@ -448,7 +448,7 @@ func TestASubscriptionKnowsWhichScopesItsCallerHolds(t *testing.T) {
 	} {
 		client := rig.dial(t, test.header)
 		client.send(t, liveSubscribe("e", eventsView(), ""))
-		if started := events.next(t, 5*time.Second, name+"'s events subscription"); started.holdsPerson != test.holdsPerson {
+		if started := events.next(t, eventFeedWait, name+"'s events subscription"); started.holdsPerson != test.holdsPerson {
 			t.Errorf("%s: the subscription's stream says Holds(person) = %t, want %t", name, started.holdsPerson, test.holdsPerson)
 		}
 	}
@@ -469,9 +469,9 @@ func TestASlowStreamWaitsAndNeverClosesTheSocket(t *testing.T) {
 		func(listener net.Listener) net.Listener { return smallSendBuffers{listener} })
 	client := rig.open(t, smallReadDialer(), asUser("alice"))
 	client.send(t, liveSubscribe("slow", eventsView(), ""))
-	running := events.next(t, 5*time.Second, "the slow events subscription")
+	running := events.next(t, eventFeedWait, "the slow events subscription")
 	socket := rig.sockets(t, 1)[0]
-	pollUntil(t, 5*time.Second, "the stream queue fills while the page reads nothing", func() bool { return streamFull(socket) })
+	pollUntil(t, concurrentWait, "the stream queue fills while the page reads nothing", func() bool { return streamFull(socket) })
 
 	// The queue is full and the page reads nothing, so the subscription can only be waiting in
 	// SendWait: what it has queued stops moving. Two reads of its count that agree, one poll
@@ -495,7 +495,7 @@ func TestASlowStreamWaitsAndNeverClosesTheSocket(t *testing.T) {
 
 	client.read()
 	for n := 1; n <= frames; n++ {
-		if event := client.event(t, 10*time.Second, "slow"); event.ID != strconv.Itoa(n) {
+		if event := client.event(t, eventFeedWait, "slow"); event.ID != strconv.Itoa(n) {
 			t.Fatalf("event %s arrived where %d was due", event.ID, n)
 		}
 	}
@@ -519,13 +519,13 @@ func TestSendWaitReturnsWhenItsSubscriptionStops(t *testing.T) {
 		client := rig.open(t, gws.DefaultDialer, asUser("alice"))
 		held.hold(t)
 		client.send(t, liveSubscribe("x", eventsView(), ""))
-		running := events.next(t, 5*time.Second, "x's events subscription")
+		running := events.next(t, eventFeedWait, "x's events subscription")
 		socket := rig.sockets(t, 1)[0]
 		held.waitHeld(t, socket)
 
 		// The queue never drains, and the page's unsubscribe still ends the wait.
 		client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: "x"})
-		if err := running.ended(t, 3*time.Second); !errors.Is(err, context.Canceled) {
+		if err := running.ended(t, eventFeedWait); !errors.Is(err, context.Canceled) {
 			t.Fatalf("SendWait answered %v once x was unsubscribed, want its context's end", err)
 		}
 	})
@@ -594,8 +594,8 @@ func awaitReturn(t *testing.T, returned <-chan error) error {
 	select {
 	case err := <-returned:
 		return err
-	case <-time.After(time.Second):
-		t.Fatal("SendWait never returned")
+	case <-time.After(eventFeedWait):
+		t.Fatalf("SendWait never returned within %s", eventFeedWait)
 		return nil
 	}
 }
@@ -653,8 +653,8 @@ func TestASubscriptionsContextEndsWhenItsSocketEnds(t *testing.T) {
 			client.send(t, liveSubscribe("e", eventsView(), ""))
 			select {
 			case <-started:
-			case <-time.After(5 * time.Second):
-				t.Fatal("no subscription started within 5s")
+			case <-time.After(eventFeedWait):
+				t.Fatalf("no subscription started within %s", eventFeedWait)
 			}
 
 			end(t, rig, client)
@@ -665,8 +665,8 @@ func TestASubscriptionsContextEndsWhenItsSocketEnds(t *testing.T) {
 			}()
 			select {
 			case <-returned:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the socket's handler had not returned 5s after the socket ended: its subscription's context had not ended, so its stop never returned")
+			case <-time.After(eventFeedWait):
+				t.Fatalf("the socket's handler had not returned %s after the socket ended: its subscription's context had not ended, so its stop never returned", eventFeedWait)
 			}
 		})
 	}

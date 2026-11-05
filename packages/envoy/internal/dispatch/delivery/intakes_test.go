@@ -17,6 +17,15 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 )
 
+// eventWait is how long a test here waits FOR AN EVENT: an intake fetching a pull request, a
+// reservation being answered, a hub listening, a stop returning. It is where the test gives up,
+// never a measurement - the test still fails when the event never comes, and on an idle machine
+// the wait returns in milliseconds - so it allows for a loaded runner: every package of this
+// module now runs at once, four CI cores to some 3,800 parallel tests, under the race detector
+// besides (dispatch://INFRA-1075). A test whose SUBJECT is a span - a call budget's window, an
+// intake's stop against Dispatch's 30 s shutdown - keeps its own number.
+const eventWait = 30 * time.Second
+
 // TestBothIntakesKeepTheirSubscriptions starts the two intakes as cmd/dispatch does (StartIntakes,
 // beside a client of its own that owns the stream and publishes) and holds that each connects under
 // its own name, keeps its durable push-bound and handles what is published to it. A bus.Client
@@ -281,7 +290,7 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 	}()
 	select {
 	case <-stopped:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("stopping intakes with no GitHub App did not return")
 	}
 }

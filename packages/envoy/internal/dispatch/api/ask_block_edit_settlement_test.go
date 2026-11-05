@@ -120,7 +120,7 @@ func documentVersions(t *testing.T, handler http.Handler, artifactID string) []m
 // stored version, the signal that settlement has finished.
 func awaitSettledVersion(t *testing.T, published <-chan model.Event, artifactID string, number int) {
 	t.Helper()
-	deadline := time.After(10 * time.Second)
+	deadline := time.After(concurrentWait)
 	for {
 		select {
 		case event, ok := <-published:
@@ -323,7 +323,7 @@ func TestAnEditedBlockAskPublishesItsDocumentEventsBeforeItsOwn(t *testing.T) {
 	}
 
 	var order []model.Event
-	deadline := time.After(10 * time.Second)
+	deadline := time.After(concurrentWait)
 	for {
 		select {
 		case event := <-published:
