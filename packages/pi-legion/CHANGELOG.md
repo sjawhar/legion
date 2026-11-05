@@ -3,6 +3,12 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.8.0] - 2026-11-05
+
+### Changed
+
+- The worker guide tells a worker that an issue pod runs no heavy build and no whole test suite: in the pod it compiles and vets what its change touches, builds the program a check drives and runs Postgres-backed tests by name, while a whole module's or whole package's run goes to CI on the pull request or where the deployment's instructions say. The skill's own table sends a worker there before such a run rather than after one fails.
+
 ## [18.7.0] - 2026-11-05
 
 ### Fixed
