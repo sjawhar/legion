@@ -326,6 +326,14 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 		return attempts > 0 || publishedAt(t, database, event.ID) != nil ||
 			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
 	})
+	// The counter and the log below are the publisher's, and the publisher is still running: it
+	// backs the denied event off and attempts it again, and that attempt is denied the same way
+	// and counts again, so an exact count read from a running publisher is a race - the one
+	// denial asserted here becomes two the moment the back-off fires between the read of
+	// attempt_count above and the read of /metrics below. Stopping it here holds the counter and
+	// the log still for every assertion that follows; the deferred stop() is then the no-op that
+	// covers a failure before this line (runDeps).
+	stop()
 	destinations, attempts := publishedDestinations(t, database, event.ID)
 	if at := publishedAt(t, database, event.ID); at != nil {
 		t.Fatalf("event marked published at %s with destinations %v, though NATS denied its issue topic", at, destinations)
@@ -427,6 +435,13 @@ func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 		return attempts > 0 || publishedAt(t, database, event.ID) != nil ||
 			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
 	})
+	// The counter below is the publisher's, and the publisher is still running: it backs the
+	// denied event off and attempts it again, and that attempt denies both destinations again
+	// and counts both, so the exact count of two read from a running publisher is a race - it
+	// reads four when the back-off fires between the read of attempt_count below and the read of
+	// /metrics. Stopping it here holds the counter still for the assertions that follow; the
+	// deferred stop() is then the no-op that covers a failure before this line (runDeps).
+	stop()
 	for _, line := range strings.Split(logged.String(), "\n") {
 		if strings.Contains(line, bus.ErrUnavailable.Error()) {
 			t.Fatalf("line %q reports a denied publish as an outage of the bus", line)
@@ -515,6 +530,12 @@ func TestRunCountsADeniedSubjectOncePerRefusedMessage(t *testing.T) {
 		return (firstAttempts > 0 && secondAttempts > 0) ||
 			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
 	})
+	// The counter below is the publisher's, and the publisher is still running: it backs both
+	// denied events off and attempts them again, and each attempt is denied again and counts
+	// again, so the exact count of two read from a running publisher is a race. Stopping it here
+	// holds the counter still for the assertions that follow; the deferred stop() is then the
+	// no-op that covers a failure before this line (runDeps).
+	stop()
 	for _, line := range strings.Split(logged.String(), "\n") {
 		if strings.Contains(line, bus.ErrUnavailable.Error()) {
 			t.Fatalf("line %q reports a denied publish as an outage of the bus", line)

@@ -1733,18 +1733,26 @@ func run(t *testing.T, database *store.Store, publisher Publisher, broker *event
 // runDeps runs New(deps) until the returned func stops it, which fails t unless Run returns within
 // stopWithin. A test that needs more of Deps than run's store, publisher and broker - a metrics
 // counter among them - builds it itself and calls this.
+//
+// The returned func may be called more than once: it stops the outbox on the first call and does
+// nothing on the rest (sync.Once). A test that reads a counter the running publisher keeps
+// writing stops the publisher where its assertions begin and still keeps its `defer stop()`,
+// which is then the no-op that covers the paths that fail before it.
 func runDeps(t *testing.T, deps Deps, stopWithin time.Duration) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { New(deps).Run(ctx); close(done) }()
+	var once sync.Once
 	return func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(stopWithin):
-			t.Fatal("outbox did not stop")
-		}
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(stopWithin):
+				t.Fatal("outbox did not stop")
+			}
+		})
 	}
 }
 
