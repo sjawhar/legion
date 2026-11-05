@@ -44,6 +44,52 @@ const MIN_INTERVAL_MS = 25;
 // days, far past any configuration anyone means.
 const MAX_INTERVAL_MS = 2_147_483_647;
 
+/**
+ * How long a deregistration waits for a registration already on the wire. One that lands after
+ * the DELETE writes the record back, and the session stays registered with nothing heartbeating
+ * it (dispatch://INFRA-392); a listener call can take a timeout and a retry (5.25 s) to fail, so
+ * this is the whole of one attempt, past which the DELETE goes out anyway — one never sent always
+ * leaves the record behind, where one that races a slow registration only may.
+ */
+export const REGISTRATION_SETTLE_MS = 5_000;
+
+/**
+ * The whole of what a shutdown path spends settling, over the writes its chain holds and the
+ * registration on the wire. `REGISTRATION_SETTLE_MS` on each of them is 10 s before the DELETE is
+ * even sent, and no plugin is given that long: Oh My Pi abandons a shutdown handler after 2 s,
+ * and in a Legion pane the process group has 5 s between SIGTERM and SIGKILL (`DefaultGrace`,
+ * `packages/daemon/internal/shim`), shared with the agent itself. A quarter of a second covers a
+ * listener round trip many times over and leaves the rest of the budget for the DELETE to reach
+ * the wire.
+ */
+export const SHUTDOWN_SETTLE_MS = 250;
+
+/**
+ * The window the one extra registration a failed heartbeat makes waits out, before the heartbeat
+ * returns to its plain interval. A registration that times out under listener load costs the
+ * session a third of its live window (`.github/scripts/check-heartbeat-margin.sh`), and three
+ * missed refreshes drop a running session out of every live listing (dispatch://INFRA-392), so
+ * one failure buys one extra call rather than a whole interval's wait.
+ */
+export const HEARTBEAT_RETRY_MIN_MS = 20_000;
+export const HEARTBEAT_RETRY_MAX_MS = 40_000;
+
+/**
+ * How far out that extra registration is: a fresh draw between `HEARTBEAT_RETRY_MIN_MS` and
+ * `HEARTBEAT_RETRY_MAX_MS` per call, so the sessions a slow listener failed together come back
+ * spread over twenty seconds instead of in one burst — the listener sees one extra call per
+ * failing session per interval, never a herd on the same tick. Every plugin that heartbeats
+ * draws here, so the rule is one rule (`packages/pi-envoy/extensions/envoy.ts`,
+ * `packages/claude-envoy/src/envoy-channel-server.ts`). `draw` is `Math.random` unless a test
+ * passes its own, so a test reads a known delay without making the spread predictable in
+ * production.
+ */
+export function heartbeatRetryDelayMs(draw: () => number = Math.random): number {
+  return Math.round(
+    HEARTBEAT_RETRY_MIN_MS + draw() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS)
+  );
+}
+
 /** The interval `raw` names, when it names a usable one: a finite number above zero. Unusable is
  * undefined, which each caller replaces with its own fallback. The number is as written, before
  * the bounds a resolved interval is held to, so a notice about an adjustment names the value the
