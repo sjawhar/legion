@@ -23,6 +23,7 @@ import { DocumentRuntime, type DocumentRuntimeValue } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap, DIALOG_SCOPE } from "../shell/keymap";
+import { READING_PANE_QUERY } from "../shell/useDialog";
 import { Inbox } from "./Inbox";
 import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 
@@ -2219,6 +2220,48 @@ function widenToReadingPane(): () => void {
   return () => window_.happyDOM.setViewport({ width: was });
 }
 
+/** A width the test can move while the Inbox is mounted, which `widenToReadingPane` cannot:
+ *  happy-dom answers `matchMedia` from its own window, but it delivers no `change` to a list
+ *  made before `setViewport`, so a column already standing never hears the viewport narrow.
+ *  This is the stub `__tests__/responsive-shell.test.tsx` installs - one object per query,
+ *  answering `matches` for the query it was asked - with the one addition a move needs: it keeps
+ *  the listeners `useMediaQuery` registers, so `setWidth` delivers the `change` a browser sends.
+ */
+function movableReadingPaneWidth(width: number): {
+  restore: () => void;
+  setWidth: (next: number) => void;
+} {
+  const originalMatchMedia = window.matchMedia;
+  const changeListeners = new Set<(event: Event) => void>();
+  let now = width;
+  window.matchMedia = ((query: string) =>
+    ({
+      addEventListener: (type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (type === "change" && typeof listener === "function") changeListeners.add(listener);
+      },
+      addListener: () => {},
+      dispatchEvent: () => true,
+      get matches() {
+        return query === READING_PANE_QUERY && now >= 1280;
+      },
+      media: query,
+      onchange: null,
+      removeEventListener: (type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (type === "change" && typeof listener === "function") changeListeners.delete(listener);
+      },
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  return {
+    restore: () => {
+      window.matchMedia = originalMatchMedia;
+    },
+    setWidth: (next: number) => {
+      now = next;
+      for (const listener of changeListeners) listener(new Event("change"));
+    },
+  };
+}
+
 /** One row by its ask id: a short row holds no card, so there is no `ask-<id>` to find it by. */
 function shortRow(askId: string): HTMLElement {
   const row = document.querySelector<HTMLElement>(`[data-inbox-row="${askId}"]`);
@@ -3067,6 +3110,216 @@ test("a window or tab blur keeps the record: the reader has not left the column"
   }
 });
 
+test("a focus that leaves the column for the body alone drops the record", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+
+    // The column is showing ask-b while the focus is on ask-a, so the row `l` records is not
+    // the row the column is showing and the two ways back are told apart.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // A click on the page's own background is the route this stands for: the scroller loses the
+    // focus to `document.body`, nothing takes it, and so no `focusin` reports the move. The
+    // wrapper's `onBlur` - naming no target, with the body holding the focus - is the only
+    // report that the reader has left. The keep above is this same event with the focus still in
+    // the column, which is why both halves of that null are read.
+    act(() => scroller().blur());
+    expect(document.activeElement).toBe(document.body);
+
+    // So a column re-entered the way a click takes the reader returns to the question it is
+    // showing, not to the row they pressed `l` on before they clicked away.
+    scroller().focus();
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-b"));
+    expect(selectedIds()).toEqual(["ask-b"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+// This row and the one below drive the one unmount inside the column the Inbox can reach from
+// the keyboard: the head's `Assign to me`, which goes once its write lands, leaving the focus it
+// held on `document.body` with no blur and no `focusin` behind it. The cleared filter is what
+// keeps the column on that question through the assignment - under a `?assignee=` the viewer
+// holds, the row would leave the list and the column with it, which is `holdPane`'s drop and not
+// the focus rule under test.
+//
+// What they prove is the rule for a focused node React removes, which is what the keep rests on.
+// They do not prove a browser's own ordering through this control: it disables itself while its
+// write is out, and a browser blurs a control it disables where happy-dom does not, so there the
+// wrapper's `onBlur` may reach the record first and drop it before the unmount.
+test("an unmount inside the column keeps the record: the focus falls to the body and comes back in", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    issueAsk({
+      id: "ask-b",
+      issue: { assignee: null, key: "CORE-2", title: "Nobody's issue" },
+      issue_key: "CORE-2",
+      question: "Which format?",
+    }),
+  ];
+  let served: InboxRow[] = rows;
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const save = Promise.withResolvers<Issue>();
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
+  const { unmount } = renderInbox("/?assignee=everyone");
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+
+    // The column shows ask-b while the focus is on ask-a, so the row `l` records is not the row
+    // the column is showing.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // The reader takes the question's issue from the column's own head, with the focus on the
+    // control that writes.
+    const assign = await within(screen.getByTestId("inbox-pane")).findByRole("button", {
+      name: "Assign CORE-2 to me",
+    });
+    assign.focus();
+    expect(document.activeElement).toBe(assign);
+    fireEvent.click(assign);
+    served = served.map((row) =>
+      row.id === "ask-b"
+        ? { ...row, issue: { assignee: "alice", key: "CORE-2", title: "Nobody's issue" } }
+        : row
+    );
+    await act(async () => {
+      save.resolve(narrowIssueOf(rows[1] as InboxRow, "alice"));
+      await save.promise;
+    });
+
+    // The issue is theirs, so the control goes - an unmount inside the column, which leaves the
+    // focus on the body: React fires no blur for a focused node it removes, and the body is
+    // focused by nothing, so neither drop of the focus rule has anything to read.
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("inbox-pane")).queryByRole("button", {
+          name: "Assign CORE-2 to me",
+        })
+      ).toBeNull()
+    );
+    expect(selectedIds()).toEqual(["ask-b"]);
+    expect(document.activeElement).toBe(document.body);
+
+    // The reader never left the question in front of them, so the record is still theirs: the
+    // focus landing back inside the column is no exit, and Escape is still their way back to the
+    // row they pressed `l` on.
+    scroller().focus();
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-a"));
+    expect(selectedIds()).toEqual(["ask-b"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+    patchIssue.mockRestore();
+  }
+});
+
+test("a focus landing outside the column drops the record an unmount inside it left standing", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    issueAsk({
+      id: "ask-b",
+      issue: { assignee: null, key: "CORE-2", title: "Nobody's issue" },
+      issue_key: "CORE-2",
+      question: "Which format?",
+    }),
+  ];
+  let served: InboxRow[] = rows;
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const save = Promise.withResolvers<Issue>();
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
+  const { unmount } = renderInbox("/?assignee=everyone");
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+
+    // The same column and the same record as the row above, left standing by the same unmount
+    // inside it, with the focus on the body.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    const assign = await within(screen.getByTestId("inbox-pane")).findByRole("button", {
+      name: "Assign CORE-2 to me",
+    });
+    assign.focus();
+    fireEvent.click(assign);
+    served = served.map((row) =>
+      row.id === "ask-b"
+        ? { ...row, issue: { assignee: "alice", key: "CORE-2", title: "Nobody's issue" } }
+        : row
+    );
+    await act(async () => {
+      save.resolve(narrowIssueOf(rows[1] as InboxRow, "alice"));
+      await save.promise;
+    });
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("inbox-pane")).queryByRole("button", {
+          name: "Assign CORE-2 to me",
+        })
+      ).toBeNull()
+    );
+    expect(document.activeElement).toBe(document.body);
+
+    // Now the reader leaves: `f` hands the focus to the search box. The column loses no focus it
+    // was holding, so no blur of its wrapper fires - the focus landing outside it is the whole
+    // report, and the document's rule is what reads it.
+    fireEvent.keyDown(document.body, { key: "f" });
+    expect(document.activeElement).toBe(screen.getByRole("searchbox", { name: "Search asks" }));
+
+    // Back in the column the way a click takes them: Escape owes them the question in front of
+    // them, not the row they pressed `l` on before they ever went near the head.
+    scroller().focus();
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-b"));
+    expect(selectedIds()).toEqual(["ask-b"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+    patchIssue.mockRestore();
+  }
+});
+
 test("a second l from inside the column leaves the record on the row the reader came from", async () => {
   const narrow = widenToReadingPane();
   const rows = [
@@ -3299,7 +3552,11 @@ test("a snooze under h drops the record: Escape lands on the question the column
     expect(document.activeElement).toBe(scroller());
 
     // `h` hands the focus to the column's own Snooze, which is a move inside the column and
-    // keeps the record: what the pick then does to it is the question changing, nothing else.
+    // keeps the record. The deferral is what ends it, and both of the drops that keep the
+    // record's question true cover that between them: the row folds into Later for a commit with
+    // nothing shown at all, where the column goes and `holdPane` drops first, and the question
+    // the column is handed next is the change the layout effect reads. This row pins where
+    // Escape goes, which the two of them agree on; it does not tell them apart.
     fireEvent.keyDown(scroller(), { key: "h" });
     const snooze = document.activeElement;
     expect(snooze?.matches("[data-inbox-snooze]")).toBe(true);
@@ -3350,7 +3607,10 @@ test("a question the server withdraws drops the record: Escape lands on the one 
     expect(document.activeElement).toBe(scroller());
 
     // The server takes the selected question away while the reader is reading it: nothing of
-    // theirs is typed or sent, so the column hands the selection on rather than keeping it.
+    // theirs is typed or sent, so the column hands the selection on rather than keeping it. As
+    // with the snooze above, both drops cover this row: the withdrawn row leaves the list for a
+    // commit with nothing shown, where the column goes and `holdPane` drops the record, and the
+    // question the column takes next is the change the layout effect reads after it.
     served = rows.filter((row) => row.id !== "ask-b");
     await act(async () => {
       queryClient.setQueryData<AskRead>(["ask-thread", "ask-b"], retracted(rows[1] as InboxRow));
@@ -3367,6 +3627,58 @@ test("a question the server withdraws drops the record: Escape lands on the one 
   } finally {
     unmount();
     narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("the column going when the Inbox narrows drops the record, where nothing else can", async () => {
+  const width = movableReadingPaneWidth(1440);
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+
+    // The column shows ask-b while the focus is on ask-a, so the row `l` records is not the row
+    // the column is showing.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(address()).toBe("/?item=ask-b");
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // Below the column's width the Inbox is the list of cards it has always been. The selection
+    // stands - the address still names it - so no question changed and the layout effect drops
+    // nothing; the scroller goes with the column, taking the focus to the body with no blur and
+    // no `focusin` behind it, so neither focus drop reads anything either. The wrapper's own
+    // unmount is the only report there is, which makes this `holdPane`'s row alone.
+    act(() => width.setWidth(1279));
+    await waitFor(() => expect(screen.queryByTestId("inbox-pane")).toBeNull());
+    expect(address()).toBe("/?item=ask-b");
+    expect(document.activeElement).toBe(document.body);
+
+    // Widened again, the column comes back on the same question with nothing recorded: Escape
+    // owes the reader the question in front of them, never the row they pressed `l` on in the
+    // column that has since gone.
+    act(() => width.setWidth(1440));
+    await screen.findByTestId("inbox-pane");
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    scroller().focus();
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-b"));
+  } finally {
+    unmount();
+    width.restore();
     getAsk.mockRestore();
     getInbox.mockRestore();
     getIssue.mockRestore();

@@ -1,6 +1,14 @@
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useQuery } from "@tanstack/react-query";
-import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FocusEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { inboxQuery, whoAmIQuery } from "../../api/queries";
@@ -731,43 +739,54 @@ export function Inbox({
    *  focus stayed in the list. Null for every other way into the column, where Escape returns
    *  to the row the column is showing, as it always has.
    *
-   *  The record stands exactly while two things are true of the reader: the column still shows
-   *  the question the record was made on, and their focus has not left the column. It is
-   *  written by one key - `read-pane`'s `run`, and only by the press that carries the focus in
-   *  from outside, so a second `l` cannot write the row the column is showing over the row the
-   *  reader came from - and read by one accessor, `paneWayBack`, which both halves of Escape
-   *  ask, so the `when` and the `run` cannot disagree about where the key goes.
+   *  It is written by one key - `read-pane`'s `run`, and only by the press that carries the
+   *  focus in from outside, so a second `l` cannot write the row the column is showing over the
+   *  row the reader came from - and read by one accessor, `paneWayBack`, which both halves of
+   *  Escape ask, so the `when` and the `run` cannot disagree about where the key goes.
    *
-   *  Three drops keep that pair true, and between them no route can outlive the record:
+   *  The record stands exactly while two facts hold of the reader, each with its own drops;
+   *  between them no route can outlive the record.
    *
-   *  - The column shows another question: the effect below, which reads `paneSelection.id`
-   *    after every commit. Every way the selection moves is one of those - the reader's own
-   *    answer, a snooze of theirs, a question the server withdraws, a step of `j` or `k` - so
-   *    no route is handled a second time where it happens.
-   *  - The column unmounts: `holdPane`, its wrapper's own ref. React delivers no `onBlur` for
-   *    a focused node it removes, so the blur below cannot stand in for this.
-   *  - The focus leaves the column inside the document: `forgetPaneReturn`, the wrapper's
-   *    `onBlur`, which covers every route out at once - `f` to the search box, Escape to the
-   *    row, a Tab onto a row's checkbox, a click into the list, and the row a step out of the
-   *    column focuses on its way.
+   *  (a) The column still shows the question the record was made on. The layout effect below
+   *      drops it wherever `paneSelection.id` has changed under a standing column: a step of
+   *      `j` or `k`, the reader's own answer. Where the commit has nothing shown at all the
+   *      column itself goes and `holdPane` drops the record first - a snooze of theirs and a
+   *      question the server withdraws both take the selected row off the list before the next
+   *      one is handed the selection - and that is also the only drop for the Inbox falling
+   *      below the column's width, where the selection stands and the column goes.
+   *  (b) The reader's focus has not left the column. The document's `focusin` below drops the
+   *      record wherever the focus lands outside the wrapper, which is every route out at once:
+   *      `f` to the search box, Escape to the row, a Tab onto a row's checkbox, a click into
+   *      the list, the row a step out of the column focuses on its way, the dialog a picture
+   *      opens full size. `forgetPaneReturn`, the wrapper's `onBlur`, covers the one exit that
+   *      lands nowhere and so fires no `focusin`: a focus leaving the column for no node at all
+   *      - a click on the page's own background, a `blur()` of the control holding it - which
+   *      leaves `document.body` holding the focus.
    *
-   *  Two cases look like one of those and keep the record, because neither breaks that pair. A
-   *  window or tab blur moves no focus at all: the scroller still holds it, and back on the tab
-   *  Escape owes the reader the row they came from. An unmount inside the column - the head's
-   *  Snooze going, one body component swapped for another - while the column still shows the
-   *  question the record was made on leaves the reader on that question, so the record is still
-   *  theirs; only the wrapper's own unmount is the column going. */
+   *  Two cases look like a route out and keep the record, because neither breaks that pair. A
+   *  window or tab blur moves no focus at all: nothing is focused anew, so no `focusin` fires,
+   *  and the `onBlur` that does names no target while the scroller still holds the focus - the
+   *  reader is still in the column, and back on the tab Escape owes them the row they came
+   *  from. An unmount inside the column - the head's `Assign to me` going once its write lands,
+   *  one body component swapped for another - while the column still shows the question the
+   *  record was made on leaves the reader on that question, so the record is still theirs:
+   *  React fires no blur for a focused node it removes, and the `document.body` the focus falls
+   *  to is focused by nothing, so neither drop of (b) reads it. Their next focus does. */
   const paneReturn = useRef<string | null>(null);
   /** The question the column was showing when this component last looked, which is how the
-   *  effect below tells a commit that changed it from one that did not. Nothing else writes
-   *  it, so the record itself still names a row and nothing more. */
+   *  layout effect below tells a commit that changed it from one that did not. Nothing else
+   *  writes it, so the record itself still names a row and nothing more. */
   const shownQuestion = useRef<string | undefined>(undefined);
   // The column shows another question, so the record is spent: the row it names belongs to a
   // question the reader has been carried off, whichever route carried them. Read after every
   // commit, as the selection's own settling is (`pane-selection.ts`), and dropped here rather
   // than tested against the question at Escape, because a record kept past its question would
-  // come back the moment the reader selected that question again.
-  useEffect(() => {
+  // come back the moment the reader selected that question again. On the layout lane, so that
+  // the drop lands in the commit that changed the question: React flushes a passive effect
+  // before the next key only for the changes it commits synchronously, and the question can
+  // change on another lane - a transition, a `?item=` the router settles - which would leave the
+  // reader one Escape with a record its question has already left.
+  useLayoutEffect(() => {
     if (shownQuestion.current === paneSelection.id) return;
     shownQuestion.current = paneSelection.id;
     paneReturn.current = null;
@@ -779,24 +798,45 @@ export function Inbox({
   const holdPane = useCallback((node: HTMLDivElement | null) => {
     paneRef.current = node;
     // The column has gone, taking the question the record was made on off the screen and the
-    // focus the scroller held to `document.body` with it. No blur reports that, so this is the
-    // drop that covers the commit a question leaves the column with none selected, before the
-    // next one is handed the selection, and the only one that covers the Inbox falling below
-    // the column's width, where the selection stands and the column goes.
+    // focus the scroller held to `document.body` with it. Nothing else reports that: no blur
+    // fires for a node React removes and `body` takes no `focusin`. So this is the drop that
+    // covers the commit a snooze or a withdrawal of the selected question leaves with nothing
+    // shown, before the next question is handed the selection - it is first there, ahead of the
+    // layout effect above - and the only one that covers the Inbox falling below the column's
+    // width, where the selection stands and the column goes.
     if (node === null) paneReturn.current = null;
   }, []);
-  /** The drop the focus leaving the column makes, as one rule over every route out: React's
-   *  `onBlur` bubbles from the column's descendants, so the record is dropped exactly while the
-   *  reader is no longer in there, rather than by each binding that moves the focus out. `l`
-   *  focuses the scroller from a row outside this wrapper, so no blur of it fires and the
-   *  record `l` has just made stands; Escape's own run reads the record before it focuses the
-   *  row, so the blur that follows drops nothing it still needs.
+  // Fact (b), stated as itself: wherever the focus lands, the record stands only while that
+  // place is inside the column. A focus the column itself takes - the head's Snooze under `h`,
+  // a link in the drawn document, the scroller `l` focuses as it writes the record - lands
+  // inside the wrapper and changes nothing, so the key's own `focusin` cannot undo it, and
+  // Escape's `run` reads the record before it focuses the row, so the drop that press makes
+  // takes nothing it still needs.
+  //
+  // One listener for this component's life, not one put up and taken down around each record:
+  // the record is a ref precisely so that `l` commits nothing, so there is no render to hang a
+  // record-shaped subscription on, and making one would mean rendering the Inbox twice per `l`.
+  // The handler reads refs alone and nothing of this render, so it never goes stale and the
+  // effect has nothing to depend on: it binds once on mount, unbinds on unmount, and no render
+  // in between churns it.
+  useEffect(() => {
+    const dropWhereFocusLands = () => {
+      // `focusin` fires once the focus has landed, so the document already names where.
+      if (paneRef.current?.contains(document.activeElement) !== true) paneReturn.current = null;
+    };
+    document.addEventListener("focusin", dropWhereFocusLands);
+    return () => document.removeEventListener("focusin", dropWhereFocusLands);
+  }, []);
+  /** The drop a focus that lands nowhere makes, which is the half of fact (b) no `focusin`
+   *  reports: React's `onBlur` bubbles from the column's descendants, so a reader who clicks the
+   *  page's background or whose control blurs itself has left the column with `document.body`
+   *  holding the focus, and nothing is focused for the listener above to read.
    *
-   *  Where the focus went is `relatedTarget`, and `document.activeElement` where the event
-   *  names none, because those two nulls mean opposite things: a window or tab blur moves no
-   *  focus and keeps the record, while a focus that moved to a node outside the column drops
-   *  it. A focus the column itself takes - the head's Snooze under `h`, a link in the drawn
-   *  document - stays inside this wrapper and changes nothing. */
+   *  Where the focus went is `relatedTarget`, and `document.activeElement` where the event names
+   *  none, because those two nulls mean opposite things: a window or tab blur moves no focus and
+   *  keeps the record, while a focus that left for the body drops it. The routes out that land
+   *  on a node are this handler's too, a commit before the listener above reads them, so what
+   *  needs it is only the focus that lands nowhere. */
   const forgetPaneReturn = (event: FocusEvent<HTMLDivElement>) => {
     if (!event.currentTarget.contains(event.relatedTarget ?? document.activeElement)) {
       paneReturn.current = null;
