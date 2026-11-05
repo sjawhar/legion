@@ -23,8 +23,12 @@ so what a test binary grows to in its last seconds is never seen: the next walk 
 
 The first walk whose peak passes the limit ends the run there and then: the log names that walk's
 tests and the second it was taken, the command's process group is sent SIGTERM and then SIGKILL,
-and the script exits 1, so the step goes red while the runner still has room rather than after an
-hour of running on. A command that had already ended of its own accord keeps its own status.
+and the step goes red while the runner still has room rather than after an hour of running on. The
+status is the command's own wherever that is non-zero, so a command that catches the stop's
+SIGTERM and exits 2 returns 2; a run a walk stopped whose command exited 0, or that someone else
+signalled meanwhile, returns 1; a command no walk stopped that a signal killed returns 128 plus
+that signal. A SIGINT, SIGTERM or SIGHUP to this script stops the command's group the same way
+and exits 128 plus that signal, so a Ctrl-C or a cancelled step leaves nothing of it running.
 
 Usage: race_memory.py <command> [args...], for example
 
@@ -53,16 +57,24 @@ DEFAULT_LIMIT_KB = 8388608
 
 SAMPLE_SECONDS = 5.0
 
-# How long the command's process group has between SIGTERM and SIGKILL. SIGTERM is what lets
-# `go test` and the test binary under it write out what they are holding - the -json lines of the
-# tests still running, the race detector's own report - and a 4-vCPU runner swapping nothing needs
-# a moment to schedule all of that. One sampling interval is long enough for it and short enough
-# that a step the limit has already failed does not sit there.
+# How long the command's process group has between SIGTERM and SIGKILL. It buys no report out of
+# `go test`: `cmd/go` ignores only `os.Interrupt` and `SIGQUIT`, and the test binary registers no
+# handler, so both die on the SIGTERM and a stopped run's log ends at this script's own line.
+# What the grace is for is the dying itself - a 4-vCPU runner scheduling the end of a tree of
+# hundreds of processes, so that the SIGKILL stays a backstop rather than the usual route - and a
+# command that does catch SIGTERM, which has this long to write what it holds and exit with a
+# status of its own, which this script then reports. One sampling interval is long enough for
+# either and short enough that a step the limit has already failed does not sit there.
 TERM_GRACE_SECONDS = SAMPLE_SECONDS
 
 # The -json actions that end a test. "cont" and "pause" leave it running; "output" carries the
 # text and changes nothing.
 DONE_ACTIONS = frozenset({"pass", "fail", "skip"})
+
+# The signals that end this script. The command has a session of its own, so these reach the
+# script alone; each one is answered by stopping the command's group and then exiting 128 plus
+# the signal's number, as a shell reports a signalled command.
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 def status_field(text: str, field: str) -> str | None:
@@ -254,7 +266,8 @@ def limit_from_env(environ: Mapping[str, str]) -> tuple[int, str]:
 
 def stop_command(process: subprocess.Popen, log: Log) -> None:
     """Stop the command and everything it started: SIGTERM to its process group, then SIGKILL to
-    whatever is still there after the grace above.
+    whatever is still there after the grace above. A walk past the limit stops the command this
+    way, and so does a signal to this script.
 
     The command has a session of its own (`start_new_session=True` in main), so the group holds it
     and its descendants and not this script, which lives on to write the lines that follow. The
@@ -265,7 +278,10 @@ def stop_command(process: subprocess.Popen, log: Log) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except OSError:
-        # The whole group has gone already: it ended between the walk and this signal.
+        # Nothing of the group is left, not even a zombie leader to carry the group: the command
+        # ended and was reaped before a signal to this script brought us here. A walk past the
+        # limit cannot arrive here - it has reaped nothing, and a zombie leader still takes the
+        # group's signal - so this is the signalled path's case alone.
         return
     try:
         process.wait(timeout=TERM_GRACE_SECONDS)
@@ -278,6 +294,94 @@ def stop_command(process: subprocess.Popen, log: Log) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except OSError:
         pass
+
+
+class Signalled(Exception):
+    """One of STOP_SIGNALS arrived; `signum` is which of them."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def raise_signalled(signum: int, _frame: object) -> None:
+    """The handler STOP_SIGNALS are installed with: it raises, and does nothing else.
+
+    A handler runs on the main thread, between two of its bytecodes - the thread that samples,
+    that may be holding the log's lock, and that sits in `Popen.wait`. Raising there leaves the
+    stopping to ordinary unwinding, which releases those locks on its way out, so there is no
+    handler-against-thread deadlock to reason about. It is what Python's own SIGINT handler does
+    with KeyboardInterrupt.
+    """
+    raise Signalled(signum)
+
+
+def watch(
+    process: subprocess.Popen,
+    reader: threading.Thread,
+    tests: RunningTests,
+    log: Log,
+    limit_kb: int,
+) -> int:
+    """Sample the command's tree until the command ends or a walk's peak passes the limit, and
+    give the status this script is to exit with.
+
+    Both peaks are folded in walk by walk rather than kept as every text sampled: a forty-minute
+    package at one walk every five seconds is hundreds of walks of a tree that is itself hundreds
+    of processes while the race binary compiles, and this script runs inside the memory it
+    measures.
+
+    The status is the command's own wherever that is non-zero, which covers a command that caught
+    the SIGTERM of an over-limit stop and exited 2 of its own accord: 2 is then what this gives.
+    Otherwise a run a walk stopped is 1, whether the command exited 0 under that SIGTERM or
+    something else signalled it meanwhile; a command no walk stopped that a signal killed is 128
+    plus that signal, as a shell reports one; and everything else is 0.
+    """
+    peak_hwm_kb = 0
+    peak_rss_kb = 0
+    stopped = False
+    started = time.monotonic()
+    while True:
+        walked = tree_statuses(process.pid)
+        sample = summarize(walked, time.monotonic() - started, tests.names())
+        if sample is not None:
+            peak_hwm_kb = max(peak_hwm_kb, sample.hwm_kb or 0)
+            peak_rss_kb = max(peak_rss_kb, sample.rss_kb)
+            log.line(sample.line())
+            walk_kb, walk_field = choose_peak(sample.hwm_kb, sample.rss_kb)
+            if walk_kb > limit_kb:
+                stopped = True
+                log.line(
+                    f"race memory: at {sample.seconds:.1f} s the peak of {walk_kb} kB "
+                    f"({walk_field}) passed the limit of {limit_kb} kB; these tests were "
+                    f"running: {sample.tests}. Stopping the command. VmHWM can be reached "
+                    "between two samples, so the peak itself may belong to an earlier moment."
+                )
+                stop_command(process, log)
+                break
+        try:
+            process.wait(timeout=SAMPLE_SECONDS)
+        except subprocess.TimeoutExpired:
+            continue
+        break
+
+    reader.join()
+    if process.stdout is not None:
+        process.stdout.close()
+    status = process.wait()
+
+    peak_kb, field = choose_peak(peak_hwm_kb, peak_rss_kb)
+    log.line(f"race memory: the peak was {peak_kb} kB ({field}), the limit {limit_kb} kB")
+
+    if status > 0:
+        return status
+    if stopped:
+        return 1
+    if status < 0:
+        # Something other than this script signalled it - the kernel's out-of-memory killer, say.
+        # A signalled command has a negative returncode; report it as a shell does.
+        return 128 - status
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -314,60 +418,27 @@ def main(argv: list[str]) -> int:
     reader = threading.Thread(target=pump, args=(process.stdout, tests, log), daemon=True)
     reader.start()
 
-    # The peak and the highest sample are folded in walk by walk rather than kept as every text
-    # sampled: a forty-minute package at one walk every five seconds is hundreds of walks of a
-    # tree that is itself hundreds of processes while the race binary compiles, and this script
-    # runs inside the memory it measures. The Sample already carries both of the walk's numbers,
-    # so nothing is read twice.
-    peak_hwm_kb = 0
-    highest: Sample | None = None
-    over: Sample | None = None
-    started = time.monotonic()
-    while True:
-        walked = tree_statuses(process.pid)
-        sample = summarize(walked, time.monotonic() - started, tests.names())
-        if sample is not None:
-            peak_hwm_kb = max(peak_hwm_kb, sample.hwm_kb or 0)
-            # Strictly greater, so the first of equally high samples is the one kept.
-            if highest is None or sample.rss_kb > highest.rss_kb:
-                highest = sample
-            log.line(sample.line())
-            walk_kb, walk_field = choose_peak(sample.hwm_kb, sample.rss_kb)
-            if walk_kb > limit_kb:
-                over = sample
-                log.line(
-                    f"race memory: at {sample.seconds:.1f} s the peak of {walk_kb} kB "
-                    f"({walk_field}) passed the limit of {limit_kb} kB; these tests were "
-                    f"running: {sample.tests}. Stopping the command. VmHWM can be reached "
-                    "between two samples, so the peak itself may belong to an earlier moment."
-                )
-                stop_command(process, log)
-                break
-        try:
-            process.wait(timeout=SAMPLE_SECONDS)
-        except subprocess.TimeoutExpired:
-            continue
-        break
+    # The command runs in a session of its own from here, so the terminal's Ctrl-C, which goes to
+    # the foreground process group, and a `kill` to this script both reach this script alone.
+    # Without these handlers the script would end and leave the command - a race-built `go test`
+    # holding memory and the test databases - running with nothing watching it. They go in over
+    # whatever the caller left: a background job of a shell with no job control inherits SIGINT
+    # ignored, and a run that sampled on through a Ctrl-C with no one left watching it is the
+    # thing being fixed.
+    for signum in STOP_SIGNALS:
+        signal.signal(signum, raise_signalled)
 
-    reader.join()
-    if process.stdout is not None:
-        process.stdout.close()
-    status = process.wait()
-
-    peak_kb, field = choose_peak(peak_hwm_kb, highest.rss_kb if highest is not None else 0)
-    log.line(f"race memory: the peak was {peak_kb} kB ({field}), the limit {limit_kb} kB")
-
-    if status > 0:
-        # The command ended of its own accord, and its own status says more than the limit does:
-        # a test that failed has named itself in the log above.
-        return status
-    if over is not None:
-        return 1
-    if status < 0:
-        # Signalled by something other than this script - the kernel's out-of-memory killer, say.
-        # A signalled command has a negative returncode; report it as a shell does.
-        return 128 - status
-    return 0
+    try:
+        return watch(process, reader, tests, log, limit_kb)
+    except Signalled as arrival:
+        # Stopping the group is the last thing this script owes anyone, so a second signal must
+        # not cut that stop short between its SIGTERM and its SIGKILL.
+        for signum in STOP_SIGNALS:
+            signal.signal(signum, signal.SIG_IGN)
+        name = signal.Signals(arrival.signum).name
+        log.line(f"race memory: {name} arrived, so the command's process group is being stopped")
+        stop_command(process, log)
+        return 128 + arrival.signum
 
 
 if __name__ == "__main__":

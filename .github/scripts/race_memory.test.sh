@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `race_memory.py`: a command's status passes through, a peak over the limit stops the
 # command and fails the step while the run is still going, naming the tests that were running, a
-# run within the limit ends with the peak, and a `go test -json` stream's output reaches the log.
+# signal to the script stops the command's group and takes that signal's own number, a run within
+# the limit ends with the peak, and a `go test -json` stream's output reaches the log.
 #
 # Each case runs the real script around a stand-in command — a shell or a Python program that
 # prints a -json stream and grows — so no Go, no race binary and no database are needed. The two
@@ -20,6 +21,11 @@ sampler="$script_dir/race_memory.py"
 
 # shellcheck source=.github/scripts/test-lib.sh
 source "$script_dir/test-lib.sh"
+
+# The signal case reads the script's output while the script is still running, so that output
+# goes to a file rather than into a variable.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
 # run_sampler <limit in kB, or '' for the default> <command...>: runs the script under test and
 # leaves its merged output in $out, its status in $status, and the whole seconds it took in
@@ -59,40 +65,111 @@ sys.stdout.write("held %d bytes\n" % len(block))
 PY
 }
 
+# signal_sampler <signal name>: runs the script under `setsid`, so that the script has a process
+# group of its own as it does in a terminal, waits for the stand-in `sh` and the `sleep` that
+# stand-in starts, and sends the signal to the script's whole group - which is what a terminal's
+# Ctrl-C and a `kill` to a cancelled step both do. It leaves the two pids it found in $stand_in
+# and $child, the script's status in $status, its output in $out, and whatever of the stand-in's
+# tree outlived the signal in $leftover. Each call gives its stand-in a nap of its own length, so
+# that nothing an earlier call left behind can be taken for this one's.
+signal_cases=0
+signal_sampler() {
+  signal_cases=$((signal_cases + 1))
+  local signal_name=$1 naptime="30$signal_cases.$$" log="$work/signal-$1.log" waited=0
+  local parent="" pgid=""
+  stand_in=""
+  child=""
+  env -u RACE_MEM_LIMIT_KB setsid --wait "$sampler" sh -c "sleep $naptime; echo woke" \
+    >"$log" 2>&1 &
+  local launcher=$!
+  while [ "$waited" -lt 100 ]; do
+    stand_in=$(pgrep -f "^sh -c sleep $naptime" || true)
+    child=$(pgrep -f "^sleep $naptime\$" || true)
+    if [ -n "$stand_in" ] && [ -n "$child" ]; then
+      break
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ -n "$stand_in" ]; then
+    parent=$(ps -o ppid= -p "$stand_in" | tr -d ' ')
+  fi
+  if [ -n "$parent" ] && [ "$parent" -gt 1 ]; then
+    pgid=$(ps -o pgid= -p "$parent" | tr -d ' ')
+  fi
+  # The group signalled is the script's own, which a new session put it in: never this harness's,
+  # whose run the signal would end, and never `-1`, which is every process this user has. The
+  # stand-in's parent is the script, so a stand-in whose parent has gone is not this call's and
+  # the case asserts its way out instead of sending anything.
+  if [ -n "$pgid" ] && [ "$pgid" -gt 1 ] && [ "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ]; then
+    kill -"$signal_name" -- "-$pgid"
+  fi
+  # A script that only died of the signal can hang at its own exit rather than end: the tree it
+  # left behind still holds the command's stdout, so the thread reading that pipe never reaches
+  # an end of file. The watchdog keeps such a run from hanging the whole suite - the case then
+  # fails on the status it reports, 137, instead.
+  (sleep 15 && kill -KILL "$launcher") >/dev/null 2>&1 &
+  local watchdog=$!
+  set +e
+  wait "$launcher"
+  status=$?
+  kill -KILL "$watchdog" >/dev/null 2>&1
+  wait "$watchdog" >/dev/null 2>&1
+  set -e
+  waited=0
+  while [ "$waited" -lt 50 ]; do
+    leftover=$(pgrep -f "^sh -c sleep $naptime|^sleep $naptime\$" || true)
+    if [ -z "$leftover" ]; then
+      break
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  # A case that failed must not leave the stand-in's tree running for the five minutes it sleeps.
+  pkill -KILL -f "sleep $naptime" >/dev/null 2>&1 || true
+  out=$(cat "$log")
+}
+
 echo "case: a failing command's status passes through"
 run_sampler '' sh -c 'exit 3'
 check "exits 3" "$(is "$status" 3)"
 check "names the default limit" "$(contains "$out" 'the limit is 8388608 kB (the default')"
 
-echo "case: a peak over the limit fails the run and names the test that was running"
-# 64 MiB held past a 40960 kB limit: the first walk finds the stand-in before it has grown, well
-# under the limit, and the walk at 5 s finds it over - by when the stream naming the test has
-# been read.
-run_sampler 40960 python3 -c "$(holder TestTheSamplerNamesMe 64 6)"
-check "exits 1" "$(is "$status" 1)"
-check "names the limit it was given" \
-  "$(contains "$out" 'the limit is 40960 kB (RACE_MEM_LIMIT_KB)')"
-check "names the test that was running" \
-  "$(contains "$out" 'these tests were running: TestTheSamplerNamesMe')"
-check "says the peak passed the limit" "$(contains "$out" 'passed the limit of 40960 kB')"
-check "warns that the peak may be between two samples" \
-  "$(contains "$out" 'VmHWM can be reached between two samples')"
-check "took a sample at 0 s and another at 5 s" \
-  "$([ "$(grep -c -- ' s, VmRSS ' <<<"$out")" -ge 2 ] && echo true || echo false)"
-
-echo "case: the command is stopped at that sample rather than waited out"
-# The same limit, 256 MiB held past it, and then a minute of sleep: twelve more samples. The
+echo "case: a peak over the limit stops the command at that sample rather than waiting it out"
+# 256 MiB held past a 40960 kB limit, and then a minute of sleep. The first walk finds the
+# stand-in before it has grown, well under the limit; the walk at 5 s finds it over, by when the
+# stream naming the test has been read; twelve more walks would follow if the command ran on. The
 # limit used to be read only after the command had ended, so a case that asserts the status alone
 # would have passed then too; this one asserts the clock.
 run_sampler 40960 python3 -c "$(holder TestTheSamplerStopsMe 256 60)"
 check "exits 1" "$(is "$status" 1)"
+check "names the limit it was given" \
+  "$(contains "$out" 'the limit is 40960 kB (RACE_MEM_LIMIT_KB)')"
 check "stopped the command after ${elapsed} s, well inside the stand-in's 62 s" \
   "$([ "$elapsed" -lt 25 ] && echo true || echo false)"
 check "names the test it stopped" \
   "$(contains "$out" 'these tests were running: TestTheSamplerStopsMe')"
 check "says it stopped the command" "$(contains "$out" 'Stopping the command')"
+check "warns that the peak may be between two samples" \
+  "$(contains "$out" 'VmHWM can be reached between two samples')"
+check "took a sample at 0 s and another at 5 s" \
+  "$([ "$(grep -c -- ' s, VmRSS ' <<<"$out")" -ge 2 ] && echo true || echo false)"
 check "the stand-in never reached the end of its sleep" \
   "$(is "$(contains "$out" '^held [0-9][0-9]* bytes$')" false)"
+
+echo "case: a signal to the script stops the command's group and takes that signal's number"
+# The script gives the command a session of its own, so a signal to the script reaches the script
+# alone and the command is what must not be left behind: the stand-in `sh` and the `sleep` under
+# it are looked for by name once the script has gone.
+for named in INT:130 TERM:143 HUP:129; do
+  signal_sampler "${named%%:*}"
+  check "SIG${named%%:*}: the stand-in and its own child were running before the signal" \
+    "$([ -n "$stand_in" ] && [ -n "$child" ] && echo true || echo false)"
+  check "SIG${named%%:*}: nothing of the command's tree outlived it" "$(is "$leftover" '')"
+  check "SIG${named%%:*}: the script exits ${named##*:}" "$(is "$status" "${named##*:}")"
+  check "SIG${named%%:*}: the log names the signal and the stop" \
+    "$(contains "$out" "SIG${named%%:*} arrived, so the command's process group")"
+done
 
 echo "case: a run within the limit exits 0 and ends with the peak"
 run_sampler '' sh -c 'echo the command spoke; sleep 6'
