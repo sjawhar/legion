@@ -807,6 +807,8 @@ jobs:
               - *omp_install
             dispatch: &dispatch
               - '.github/workflows/ci.yaml'
+              # The install step runs it, so a change to it must re-run this job.
+              - '.github/scripts/playwright-deps-current.sh'
               - *bun_install
               - *biome
               - 'packages/dispatch/**'
@@ -1836,6 +1838,9 @@ jobs:
       - name: Test the repository path derivation
         run: .github/scripts/repo-paths.test.sh
 
+      - name: Test the Playwright dependency list check
+        run: .github/scripts/playwright-deps-current.test.sh
+
       # The proof selector e2e.yaml's select job runs, over fixture trees and over this
       # repository's own .github/e2e-scripts.json and scripts/e2e/.
       - name: Test the e2e proof selector
@@ -2535,50 +2540,13 @@ jobs:
           # The browsers alone. Named, because with no argument Playwright resolves its own
           # default set rather than this job's three.
           bunx playwright install chromium webkit firefox
-          # Has the pinned list fallen behind Playwright? install-deps --dry-run simulates its
-          # whole ubuntu24.04-x64 list against what is now installed, prints what is missing and
-          # exits 1 when anything is, which must not end the step. It exits non-zero for its own
-          # failures too, so read the output rather than the status: a run that reports neither
-          # outcome checked nothing, and must not pass as a clean one.
-          dry_run=$(bunx playwright install-deps --dry-run chromium webkit firefox 2>&1 || true)
-          echo "$dry_run"
-          case "$dry_run" in
-            *"Missing system dependencies ("* | *"All system dependencies are installed."*) ;;
-            *) echo "::error::playwright install-deps --dry-run reported neither the packages it" \
-                 "found missing nor that all are installed, so it failed before it could check" \
-                 "the pinned list; its output is above"
-               exit 1 ;;
-          esac
-          missing=$(printf '%s\n' "$dry_run" | awk '
-            /^Missing system dependencies \([0-9]+\):$/ { reading = 1; next }
-            reading && /^  [^ ]/ { print $1; next }
-            reading { reading = 0 }' | sed '/^$/d' | sort -u)
-          # What that missing set is expected to be: the closure of the four media packages the
-          # list drops. A simulation needs no root. Both sides are read after the install, in
-          # this step, so the comparison cannot go stale. The status is taken before the pipe,
-          # because this shell has errexit and no pipefail: a simulation that failed would
-          # otherwise leave an empty set and blame the pinned list for apt's failure.
-          simulated=$(apt-get install -s --no-install-recommends gstreamer1.0-libav \
-            gstreamer1.0-plugins-bad gstreamer1.0-plugins-good libavcodec60 2>&1) || {
-            echo "$simulated"
-            echo "::error::the simulated install of the four media packages this step drops" \
-              "failed, so what Playwright reports missing cannot be compared against it"
-            exit 1
-          }
-          dropped=$(printf '%s\n' "$simulated" | awk '$1 == "Inst" { print $2 }' | sed '/^$/d' | sort -u)
-          # Either side can be empty, and printf then writes one blank line: against a non-empty
-          # other side it is comm's only output and $( ) strips it, against an empty one the two
-          # blank lines match and -2 drops them. Both ways $unexpected ends up empty.
-          unexpected=$(comm -23 <(printf '%s\n' "$missing") <(printf '%s\n' "$dropped"))
-          if [ -n "$unexpected" ]; then
-            echo "::error::Playwright now needs system packages this step's list does not hold:" \
-              "$(printf '%s ' $unexpected)" \
-              "- re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
-              "lib/coreBundle.js, as the comment above this step says."
-            exit 1
-          fi
-          echo "The pinned list is current: every package Playwright reports missing is in the" \
-            "closure of the four media packages this step drops."
+          # Has the pinned list fallen behind Playwright? That check lives in
+          # .github/scripts/playwright-deps-current.sh now, which the four dropped package names
+          # moved into with it. It is run here, after the install above, so Playwright's missing
+          # set and the apt closure it is held against are read from the same state. The step's
+          # working-directory is packages/dispatch, so the script is reached through
+          # $GITHUB_WORKSPACE, the checkout root GitHub sets.
+          "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh"
         working-directory: packages/dispatch
       # Beside the install, not at the end of the job: it keeps what the install just downloaded,
       # so a job that installs the browsers and then fails a row does not throw the install away.
