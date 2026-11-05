@@ -13,6 +13,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
@@ -267,7 +268,7 @@ func (r *SessionRegistry) notifyChanged(sessionIDs ...string) {
 }
 
 func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*SessionRegistry, error) {
-	opts := sessionRegistryOpts{replicas: 1, ttl: 5 * time.Minute}
+	opts := sessionRegistryOpts{replicas: 1, ttl: contracts.SessionRecordLifetime}
 	for _, o := range options {
 		o(&opts)
 	}

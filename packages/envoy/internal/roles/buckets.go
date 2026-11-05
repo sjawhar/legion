@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -21,8 +22,9 @@ import (
 const readTimeout = 2 * time.Second
 
 // defaultSessionTTL is the session bucket's liveness window when its status does not say, the
-// window session.OpenSessionRegistry creates the bucket with.
-const defaultSessionTTL = 5 * time.Minute
+// window session.OpenSessionRegistry creates the bucket with: contracts.SessionRecordLifetime,
+// the one declaration both read.
+const defaultSessionTTL = contracts.SessionRecordLifetime
 
 // JetStream is the client Buckets reads through: its JetStream context on the current connection
 // (bus.Client.JS).
