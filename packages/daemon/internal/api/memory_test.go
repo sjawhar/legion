@@ -179,7 +179,7 @@ func TestTheStateServedToAPodBeforeTheMemoryContractLeavesTheNextCallersStateWho
 // memoryContract is the contract whose entry in version.go added the three fields, and this
 // daemon's own contract is never below it: a caller at this contract is served them.
 func TestTheMemoryContractIsTheContractThatAddedTheFields(t *testing.T) {
-	const addedMemory = 47
+	const addedMemory = 49
 	if memoryContract != addedMemory {
 		t.Fatalf("memoryContract = %d, want %d, the contract whose entry in version.go added the issues' memory group",
 			memoryContract, addedMemory)

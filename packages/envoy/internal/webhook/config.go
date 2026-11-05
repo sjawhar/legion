@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/ghrename"
 )
 
 // WebhookConfig holds parsed configuration for enabled webhook providers.
@@ -19,6 +21,12 @@ type GitHubWebhook struct {
 	Secret         string
 	MentionTrigger string
 	ReviewerAppID  string
+	// RepositoryRenames is each repository GitHub renamed, as ENVOY_GITHUB_REPOSITORY_RENAMES
+	// configures it: the listener publishes a copy of every envelope of the current repository
+	// under the former name, so a session that subscribed before the rename keeps hearing about
+	// it. The pair is one-way — a current name is published under its former name, never the
+	// other way round — and the zero value configures none.
+	RepositoryRenames ghrename.Renames
 }
 
 // SlackWebhook holds Slack-specific webhook configuration.
@@ -54,14 +62,19 @@ func LoadWebhookConfig() (*WebhookConfig, error) {
 			if trigger == "" {
 				trigger = "@legion"
 			}
+			renames, err := ghrename.Parse(os.Getenv("ENVOY_GITHUB_REPOSITORY_RENAMES"))
+			if err != nil {
+				return nil, fmt.Errorf("ENVOY_GITHUB_REPOSITORY_RENAMES: %w", err)
+			}
 			reviewerAppID := strings.TrimSpace(os.Getenv("ENVOY_REVIEWER_APP_ID"))
 			if reviewerAppID == "" {
 				return nil, fmt.Errorf("ENVOY_REVIEWER_APP_ID required when github enabled")
 			}
 			cfg.GitHub = &GitHubWebhook{
-				Secret:         secret,
-				MentionTrigger: trigger,
-				ReviewerAppID:  reviewerAppID,
+				Secret:            secret,
+				MentionTrigger:    trigger,
+				ReviewerAppID:     reviewerAppID,
+				RepositoryRenames: renames,
 			}
 		case "slack":
 			secret := strings.TrimSpace(os.Getenv("ENVOY_SLACK_SIGNING_SECRET"))

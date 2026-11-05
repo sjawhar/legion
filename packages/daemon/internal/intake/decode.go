@@ -67,6 +67,11 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, de
 	var unread []string
 	var err error
 	switch {
+	case subject == legionWakeSubject:
+		if envelope.Source != "envoy" {
+			return decodedMessage{}, fmt.Errorf("the listener wake subject has envelope source %q", envelope.Source)
+		}
+		fact, err = decodeListenerWake(envelope.EventID, envelope.Payload)
 	case subject == serverStartedSubject:
 		if envelope.Source != "dispatch" {
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
@@ -154,6 +159,60 @@ func decodeServerStarted(payload string) (Fact, error) {
 		return nil, nil
 	}
 	return ServerStarted{Commit: started.Commit}, nil
+}
+
+// legionWakeSubject is the one subject the Envoy listener reports a wake of a released pod on,
+// and the whole of the wake durable's filter (OpenConsumers). It is a new leaf under
+// notifications.legion.>, which the stream already carries, so it needs no stream change and no
+// new grant. Every daemon consumes it: the listener does not know which daemon owns a session.
+const legionWakeSubject = "notifications.legion.wake"
+
+// decodeListenerWake decodes one wake report of the Envoy listener (ListenerWake). Its wire shape
+// is `{"kind":..., "role":..., "session":..., "at":<epoch milliseconds>}`, the listener's own
+// clock in At's shape, because the stream's store time is the NATS server's. A report of a kind
+// this daemon does not know, and a role or agent report naming neither a role nor a session, is
+// no fact rather than poison: a listener of a later release can report a kind this build has no
+// wake for, and nothing is lost by acknowledging it.
+//
+// The report's clock is bounded to the daemon's own: a payload naming a time in the future is
+// read as now. The subject is a stream subject, and a publisher that reaches it chooses every
+// field of the envelope and the payload, this `at` and the envelope's source among them; a
+// `listener_ready` dated in the year 9999 would otherwise hold R7's gate open for good
+// (store.PodRecords.RecordListenerReady keeps the greatest it is given), so a session that can
+// publish could have pods released into a silence nothing wakes them out of. The listener
+// refuses a client publish on its own subject as well (packages/envoy/cmd/listener/api.go), so
+// a forged report has to reach the bus directly; this is the half that holds whatever does.
+func decodeListenerWake(eventID, payload string) (Fact, error) {
+	var report struct {
+		Kind    string `json:"kind"`
+		Role    string `json:"role"`
+		Session string `json:"session"`
+		At      int64  `json:"at"`
+	}
+	if err := json.Unmarshal([]byte(payload), &report); err != nil {
+		return nil, fmt.Errorf("decode the listener's wake report: %w", err)
+	}
+	switch report.Kind {
+	case ListenerWakeReady:
+	case ListenerWakeRole:
+		if report.Role == "" {
+			return nil, nil
+		}
+	case ListenerWakeAgent:
+		if report.Session == "" {
+			return nil, nil
+		}
+	default:
+		return nil, nil
+	}
+	if report.At <= 0 {
+		return nil, nil
+	}
+	at := time.UnixMilli(report.At).UTC()
+	if now := time.Now().UTC(); at.After(now) {
+		at = now
+	}
+	return ListenerWake{Kind: report.Kind, Role: report.Role, Session: report.Session, At: at, Report: eventID}, nil
 }
 
 type dispatchEvent struct {

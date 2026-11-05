@@ -1,4 +1,5 @@
 import {
+  type LegionActivityRequest,
   LegionChildRequest,
   LegionControllerGrantRequest,
   LegionControllerRegisterResponse,
@@ -17,6 +18,8 @@ import {
   type LegionReadyRequest,
   LegionRegisterResponse,
   type LegionRegistration,
+  LegionReleaseRecordsRequest,
+  LegionReleaseRecordsResponse,
   LegionRootCloseRequest,
   LegionSignOffRequest,
   type LegionState,
@@ -69,6 +72,10 @@ export interface ExitInput {
   readonly reason: string;
 }
 
+/** `claim.ActivityRequest`: what a live role's session is doing, which the daemon writes onto its
+ * claim and the idle rule reads (`src/session-activity.ts` builds it). */
+export type ActivityInput = z.input<typeof LegionActivityRequest>;
+
 export interface LegionDaemonClient {
   /** The daemon's whole state. `signal` aborts the request, its answer's body included: a caller
    * that stops waiting for a daemon that does not answer (the phase reminder's bounded record
@@ -81,6 +88,16 @@ export interface LegionDaemonClient {
   readonly ready: (input: ReadyInput) => Promise<void>;
   readonly readyForUpdate: (input: ReadyForUpdateInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
+  /** The session's report of what it is doing, after each of its turns and whenever the report's
+   * content changes. It is authenticated by the claim, as `ready` is, and answers 204. */
+  readonly activity: (input: ActivityInput) => Promise<void>;
+  /** The deployment's idle-release records of one window: every release, resume and hold the
+   * daemon recorded at or after `since`, oldest first. It is authenticated by the claim, as
+   * `activity` is, and the claim's secret rides in the body rather than a query string, which
+   * would carry it into every proxy and access log between the pod and the daemon. */
+  readonly releaseRecords: (
+    input: z.input<typeof LegionReleaseRecordsRequest>
+  ) => Promise<z.output<typeof LegionReleaseRecordsResponse>>;
   readonly grant: (
     input: z.input<typeof LegionGrantRequest>
   ) => Promise<z.output<typeof LegionGrantResponse>>;
@@ -426,6 +443,14 @@ export function createLegionDaemonClient(
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
     readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
+    activity: (input) => acknowledge("/legion/v1/claims/activity", input),
+    releaseRecords: (input) =>
+      post(
+        "/legion/v1/claims/release-records",
+        LegionReleaseRecordsRequest,
+        LegionReleaseRecordsResponse,
+        input
+      ),
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) =>
       post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),
