@@ -2496,6 +2496,7 @@ jobs:
         timeout-minutes: 8
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          sleep 600
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
           fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-plugins-base libasound2t64
           libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavif16 libcairo-gobject2
@@ -2525,11 +2526,11 @@ jobs:
           }
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
           # sudo holding it.
-          twice "apt-get update" sudo timeout 60 apt-get update
+          twice "apt-get update" sudo apt-get update
           # Download only, so an attempt the timeout kills holds no dpkg lock and the retry is
           # free to start. It prints what it fetched, which is this step's own byte record.
           # $packages is left unquoted on purpose, to split into words.
-          twice "the package download" sudo timeout 90 apt-get install -y --no-install-recommends -d $packages
+          twice "the package download" sudo apt-get install -y --no-install-recommends -d $packages
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
           # The browsers alone. Named, because with no argument Playwright resolves its own
