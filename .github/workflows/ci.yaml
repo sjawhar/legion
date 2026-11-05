@@ -2878,8 +2878,12 @@ jobs:
       # of wall. Four lanes on a four-core runner would be four waits at a time, not four
       # workers. The two numbers are bounded by what the runner's own Postgres can serve beside
       # them, which is why max_connections is raised above, and by the race lanes' memory, which
-      # is why those jobs set their own (envoy-go-race-docs). 20 minutes is the deadline for
-      # every package of the call, which the API and documents packages are the reason for.
+      # is why those jobs set their own (envoy-go-race-docs). Twelve is measured rather than
+      # chosen: at twenty-four the step went 749 s to 1,105 s and ten tests of the document
+      # service and the outbox failed on their own deadlines, the runner's four cores being the
+      # bound once the waits overlap (run 42035294257, dispatch://INFRA-1075). 20 minutes is the
+      # deadline for every package of the call, which the API and documents packages are the
+      # reason for.
       #
       # internal/dispatch/routes runs beside that call, at the same time, against the second
       # Postgres service, which is its alone: its tests wait on the event log's safe horizon, and
@@ -2910,10 +2914,10 @@ jobs:
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
-            xargs go test -json -count=1 -p 8 -parallel 24 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
+            xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
           rest=$!
           DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \
-            go test -json -count=1 -parallel 24 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
+            go test -json -count=1 -parallel 12 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
           routes=$!
           rest_status=0
           routes_status=0
