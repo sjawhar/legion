@@ -579,16 +579,23 @@ on_vm_for() {
   timeout "$seconds" "${SSH[@]}" "$(vm_ssh "$vm")" "$(remote_argv "$@")"
 }
 
-# put_file VM FILE DEST: FILE written on VM as DEST, mode 600, its directory made first. The file
-# goes over ssh's standard input, so a credential in it never reaches a command line. It is
-# written beside DEST and renamed onto it, because a plain write onto a file that is running
-# answers ETXTBSY ("Text file busy") -- which is what a second up of a deployment whose loadgen
-# or stub embedder is still running would meet -- and because a rename leaves no half-written
-# file where a whole one was.
+# put_file VM FILE DEST [MODE]: FILE written on VM as DEST, mode 600 by default, its directory
+# made first. The file goes over ssh's standard input, so a credential in it never reaches a
+# command line. It is written beside DEST and renamed onto it, because a plain write onto a file
+# that is running answers ETXTBSY ("Text file busy") -- which is what a second up of a deployment
+# whose loadgen or stub embedder is still running would meet -- and because a rename leaves no
+# half-written file where a whole one was.
+#
+# MODE is for a file a container must read. A container runs as a user of its own, not as the
+# ssh user this script writes as, so a mode-600 file mounted into one is unreadable there: the
+# stub embedder's certificate went in at 600 and Dispatch, which reads it through SSL_CERT_FILE,
+# silently trusted nothing and answered every embed `tls: bad certificate`. A certificate is
+# public, so it goes in at 644; a credential keeps the default and is given to a container
+# through its environment file instead, which docker reads as root before the container starts.
 put_file() {
-  local vm=$1 file=$2 dest=$3
+  local vm=$1 file=$2 dest=$3 mode=${4:-600}
   # shellcheck disable=SC2016 # expanded by the VM's sh
-  on_vm "$vm" sh -c 'mkdir -p -- "$(dirname -- "$1")" && umask 077 && cat >"$1.new" && mv -f -- "$1.new" "$1"' sh "$dest" <"$file" ||
+  on_vm "$vm" sh -c 'mkdir -p -- "$(dirname -- "$1")" && umask 077 && cat >"$1.new" && chmod "$2" "$1.new" && mv -f -- "$1.new" "$1"' sh "$dest" "$mode" <"$file" ||
     die "copying $file to $vm as $dest failed"
 }
 
@@ -943,7 +950,9 @@ stub_embed_start() {
     waited=$((waited + 2))
   done
   get_file "$LOAD_VM" "$work/stub-embed.pem" "$cert"
-  put_file "$DISPATCH_VM" "$cert" "$(cert_path)"
+  # 644: the Dispatch container reads this through SSL_CERT_FILE as its own user, not as the ssh
+  # user that writes it, and a certificate is public (put_file).
+  put_file "$DISPATCH_VM" "$cert" "$(cert_path)" 644
   note "the stub embedder serves $(stub_embed_url) on the $LOAD_VM VM; its certificate is $(cert_path) on the $DISPATCH_VM VM"
 }
 

@@ -77,13 +77,19 @@
 # ENVOY_MACHINE_ID and ENVOY_ALLOW_REMOTE_NATS in Dispatch's environment, the database up makes
 # when the instance lacks it, what wait_healthz takes for ready and when it refuses at once,
 # the run-time limit read out of the object the Compute API answers, and every production
-# address tried from every machine; and (u) no credential of the deployment -- Dispatch's agent
+# address tried from every machine; (u) no credential of the deployment -- Dispatch's agent
 # token, the listener's token, the embedder's api-key or the instance's password -- reaches the
 # command line of an ssh, a docker, a psql or a loadgen of an up, a seed and a step, or a file
 # the run keeps, while each still reaches the command that needs it in a file of mode 600 -- on
 # the load machine for the commands that run there, under the run's directory on this pod for
 # the seed's own phases, which is removed when the seed ends -- and psql in a passfile, and down
-# removes the run's credential files from the load machine, leaving none of them there.
+# removes the run's credential files from the load machine, leaving none of them there; and (v)
+# every file up puts on a machine is at the mode its own reader needs, read off the file itself
+# -- the stub embedder's certificate readable by the Dispatch container's own user, every
+# credential file its owner's alone, the loadgen copy executable -- and every path up hands a
+# container, read out of the docker run calls up made rather than listed here, is reachable by
+# whoever reads it: a mounted path by the container's own user, an environment file by docker as
+# root alone.
 set -euo pipefail
 # Nothing here is read from this test's own standard input, and the fake ssh reads a pipe it is
 # given as ssh does, so the suite runs with /dev/null under it: whatever the caller's standard
@@ -1679,9 +1685,13 @@ pass "every ssh accepts a new host key into the run's own known_hosts file and r
 # 3. put_file writes beside its target and renames it on, because a plain write onto a file that
 # is running answers ETXTBSY -- which is what a second up of a deployment whose loadgen or stub
 # embedder is still running meets -- and because a rename leaves no half-written file where a
-# whole one was.
-grep -qF 'cat >"$1.new" && mv -f -- "$1.new" "$1"' "$fake/actions.log" ||
-  fail "put_file does not write beside its target and rename it on: $(grep -F 'umask 077' "$fake/actions.log" | head -n1)"
+# whole one was. What it does between the two is its own: since INFRA-988 it chmods the file it
+# wrote to the mode the reader of that file needs, which case (v) below reads off the files.
+put_cmd=$(grep -m1 -F 'cat >"$1.new"' "$fake/actions.log" || true)
+[ -n "$put_cmd" ] ||
+  fail "put_file does not write beside its target: $(grep -F 'umask 077' "$fake/actions.log" | head -n1)"
+[[ $put_cmd == *'mv -f -- "$1.new" "$1"'* ]] ||
+  fail "put_file does not rename onto its target what it wrote beside it: $put_cmd"
 # The kernel under this pod refuses no write to a running binary, so this case puts in its place
 # a file the kernel does refuse to open for writing. What it proves is what ETXTBSY asks for:
 # put_file never opens the target itself, so a target it could not have opened is replaced all
@@ -1972,5 +1982,127 @@ while IFS=$'\t' read -r name value; do
     fail "down left the deployment's $name on the load machine: $(grep -rlF -- "$value" "$remote/work" | head -n1)"
 done < <(credentials)
 pass "down removes the run's credential files from the load machine, leaving none of its credentials there, and says it did"
+
+# ---- (v) every file up puts on a machine is at the mode its own reader needs ----------------
+
+# dispatch://INFRA-988. put_file wrote every file at mode 600, which is what a credential needs
+# and the opposite of what the one file a container reads off the machine's own disk needs: the
+# stub embedder's certificate. A container runs as a user of its own, not as the ssh user this
+# script writes as, so SSL_CERT_FILE named Dispatch a file its process could not open; Go then
+# trusted nothing and answered every embedding `tls: bad certificate` -- 12,412 of them on the
+# deployment, with the whole seed's embedding gate hanging on it -- while the certificate itself
+# was correct in every other way. The local stack cannot show this at all: there Dispatch runs
+# as the user that writes the file.
+#
+# So this case reads the mode of every file up puts on a machine off the file itself, never off
+# the arguments put_file was given, and holds each to what its own reader needs. A later change
+# of how the mode is applied -- a umask, a chmod somewhere else, a copy that drops it -- still
+# fails this case when what lands on the machine is wrong.
+
+reset_fake
+# The machines' own umask, which this pod stands in for: Container-Optimized OS gives the ssh
+# user 022, and the mode of what up makes with a plain mkdir rather than with put_file follows
+# the shell its ssh ran in, not this test's caller.
+saved_umask=$(umask)
+umask 022
+run_vm up --config "$config"
+umask "$saved_umask"
+((RC == 0)) || fail "up failed before the file mode case: see the output above"
+run_secrets=$remote/work/runs/$(cat "$LOADTEST_VM_ROOT/current")
+
+# reader_mode PATH: the mode PATH's reader needs and who that reader is, tab separated; empty
+# for a path this case knows nothing of, which is a file up has learnt to put since and whose
+# reader nobody has named.
+reader_mode() {
+  case $1 in
+    "$remote/app/stub-embed.pem")
+      printf '644\tthe Dispatch container, as its own user, through SSL_CERT_FILE: at 600 it opens nothing, trusts nothing, and answers every embedding tls: bad certificate\n'
+      ;;
+    "$remote/app/loadgen")
+      printf '755\tthe load machine, which executes it\n'
+      ;;
+    "$remote"/app/env/*.env)
+      printf '600\tdocker, as root, before the container starts, which is why a credential needs nothing looser\n'
+      ;;
+    "$run_secrets"/*)
+      printf '600\tthe command on the load machine that is given it as a -…-file flag, running as the ssh user that wrote it\n'
+      ;;
+  esac
+}
+
+# Every file up put on a machine, its machine and its path, out of the action log: put_file's
+# own remote command is the one that writes beside its target and renames it on. The mode it
+# was given is the last word of that command and this case reads none of it; what it reads is
+# the file.
+put_files=$(awk -F'\t' '$1 == "ssh" && index($3, "cat >\"$1.new\"") > 0 {
+    n = split($3, a, " ")
+    print $2 "\t" a[n - 1]
+  }' "$fake/actions.log" | sort -u)
+[ -n "$put_files" ] || fail "up put no file on any machine, so this case proves nothing"
+while IFS=$'\t' read -r target path; do
+  want=$(reader_mode "$path")
+  [ -n "$want" ] ||
+    fail "up puts $path on the $target machine and this case names no reader of it: say which reader needs which mode, as the certificate's defect was the mode of a file nobody had asked that of"
+  reader=${want#*$'\t'} want=${want%%$'\t'*}
+  [ -f "$path" ] || fail "up put $path on the $target machine and no such file is there"
+  mode=$(stat -c %a "$path")
+  [ "$mode" = "$want" ] ||
+    fail "$path is mode $mode on the $target machine, not $want; its reader is $reader"
+done <<<"$put_files"
+# And each of them was put: a mode case proves nothing of a file that stopped being written.
+for role in dispatch dispatch-listener hub-listener load-listener-1 load-listener-2 load-listener-3 load-listener-4; do
+  grep -qF "	$remote/app/env/$role.env" <<<"$put_files" ||
+    fail "up put no environment file on $role's machine: $put_files"
+done
+for file in "$remote/app/stub-embed.pem" "$remote/app/loadgen" "$run_secrets/embed-key"; do
+  grep -qF "	$file" <<<"$put_files" || fail "up put no $file on a machine: $put_files"
+done
+pass "every file up puts on a machine is at the mode its own reader needs: the certificate 644 for the container's user, every credential 600, the loadgen copy executable"
+
+# The sibling question, which is the one that matters: the certificate is one of the paths up
+# hands a container, and every other one is read by somebody too. They are read out of the
+# docker run calls up made rather than listed here, so a path a later container takes is held to
+# the same question. A --volume is opened inside the container, by the container's own user, so
+# it must not be the ssh user's alone -- that is the certificate's own defect, and it is the
+# JetStream store's too, which up makes with a plain mkdir and the NATS container writes in as
+# its own user. An --env-file is read by docker, as root, before the container starts, so 600 is
+# right there and anything looser hands a credential to every user of the machine. Docker
+# resolves the host side of both as root, so what the container's user meets is the mode of the
+# path itself and not of the directories above it.
+given_to_containers=$(awk '$2 == "run" {
+    name = ""
+    for (i = 3; i <= NF; i++) {
+      if ($i == "--name") name = $(i + 1)
+      else if ($i == "--volume") print $1 "\t" name "\tvolume\t" $(i + 1)
+      else if ($i == "--env-file") print $1 "\t" name "\tenv-file\t" $(i + 1)
+    }
+  }' "$fake/docker.log" | sort -u)
+[ -n "$given_to_containers" ] || fail "up handed no path to any container, so this case proves nothing"
+grep -qF "	volume	$remote/app/stub-embed.pem:" <<<"$given_to_containers" ||
+  fail "up mounts no stub embedder certificate into the Dispatch container: $given_to_containers"
+grep -qF "	volume	$remote/app/nats:" <<<"$given_to_containers" ||
+  fail "up mounts no JetStream store into the NATS container: $given_to_containers"
+while IFS=$'\t' read -r target name kind spec; do
+  case $kind in
+    volume)
+      # <host path>:<path in the container>[:ro], as docker takes it.
+      host=${spec%%:*} inside=${spec#*:} inside=${inside%%:*}
+      [ -e "$host" ] || fail "up mounts $host into the $name container on the $target machine and nothing is there"
+      mode=$(stat -c %a "$host")
+      ((8#$mode & 8#044)) ||
+        fail "$host is mode $mode on the $target machine, which its owner alone can read, and the $name container reads it at $inside as its own user, not as the ssh user that wrote it"
+      if [ -d "$host" ]; then
+        ((8#$mode & 8#011)) ||
+          fail "$host is mode $mode on the $target machine, which its owner alone can enter, and the $name container works in it at $inside as its own user"
+      fi
+      ;;
+    env-file)
+      mode=$(stat -c %a "$spec")
+      [ "$mode" = 600 ] ||
+        fail "$spec is mode $mode on the $target machine: docker reads an --env-file as root before the $name container starts, so this one needs nothing looser than 600 and holds credentials that forbid it"
+      ;;
+  esac
+done <<<"$given_to_containers"
+pass "every path up hands a container is reachable by the reader that reads it: a mounted path by the container's own user, an environment file by docker as root alone"
 
 printf 'PASS: packages/envoy/loadtest/vm/vm.test.sh\n'

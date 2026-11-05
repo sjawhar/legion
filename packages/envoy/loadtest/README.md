@@ -2900,6 +2900,30 @@ deployment that is turned off should leave no token, no api-key and no database 
 disk that outlives it. The containers' environment files are their machines' own and stay with
 them, as the machines and the instance do (`dispatch://INFRA-1051`'s merge removes those).
 
+#### What reads each file on a machine, and at what mode
+
+Mode 600 is a credential's: the writer's own and nobody else's. A container runs as a user of its
+own, not as the ssh user this script writes as, so a path a container opens for itself needs more
+than that. The stub embedder's certificate — the one such file `put_file` writes — went in at 600
+once, and Dispatch, which reads it through `SSL_CERT_FILE`, opened nothing, trusted nothing, and
+answered every embedding of the seed `tls: bad certificate` — 12,412 of them, with the whole
+seed's embedding gate hanging on it — while the certificate itself was correct in every other way
+([INFRA-988](dispatch://INFRA-988)). The local stack cannot show that defect at all: there
+Dispatch runs as the user that writes the file. So `put_file` takes the mode its file's own
+reader needs, and these are the readers:
+
+| Path on the machine | Read by | Mode |
+| --- | --- | --- |
+| `paths.cert`, mounted read-only at `/etc/ssl/stub-embed.pem` in `dispatch` | the Dispatch container, **as its own user**, through `SSL_CERT_FILE` | 644 — a certificate is public, and a 600 one is unreadable to every user but the ssh user that wrote it |
+| `paths.nats_store`, mounted at `/data` in `nats` | the NATS container, **as its own user**, as its JetStream store | 755 — `up` makes it with `mkdir` under the machine's own umask, never with `put_file`, so it is no owner-only directory |
+| `<paths.remote_root>/env/<container>.env`, given as `--env-file` | `docker`, as **root**, before the container starts | 600 — it holds the credentials above, and no container user reads it |
+| `<paths.remote_work>/runs/<run id>/<name>` | the command on the load machine it is given to as a `-…-file` flag, as the ssh user that wrote it | 600 |
+| `paths.remote_loadgen` | the load machine, which executes it | 755 |
+
+`vm/vm.test.sh` reads every one of those modes off the file itself after an `up`, and takes the
+paths handed to a container out of the `docker run` calls `up` made rather than from a list of its
+own, so a file that lands at the wrong mode fails the suite however the mode came to be applied.
+
 ### The deployment file
 
 Nothing of the deployment is named in the script. Every machine, address, port, image, credential
@@ -2959,14 +2983,14 @@ by a tag, so a run can name the bytes it measured. Which machine each one runs o
 this table: `containers` in the deployment file says it (The machines, and the containers on
 them, above):
 
-| Container | CPU | Memory | Other |
-| --- | --- | --- | --- |
-| `dispatch` | 16 | 32 GiB | `DISPATCH_PPROF_PORT`, host networking, the entrypoint `envoy-dispatch` |
-| `auth-proxy` | 200m | 256 MiB | |
-| `dispatch-listener` | 500m | 512 MiB | |
-| `nats` | none | none | JetStream, its store on its machine's disk |
-| `hub-listener` | none | none | |
-| `load-listener-1` to `-4` | 500m | 512 MiB | The listeners the loop's sessions register on: the unit sessions round-robin over the first three and the driver takes the fourth |
+| Container | CPU | Memory | Other | What it reads off its machine's disk |
+| --- | --- | --- | --- | --- |
+| `dispatch` | 16 | 32 GiB | `DISPATCH_PPROF_PORT`, host networking, the entrypoint `envoy-dispatch` | `paths.cert` read-only at `/etc/ssl/stub-embed.pem`, mode 644, as its own user; its environment file, mode 600, read by `docker` as root |
+| `auth-proxy` | 200m | 256 MiB | | nothing: its arguments are addresses alone |
+| `dispatch-listener` | 500m | 512 MiB | | its environment file, mode 600, read by `docker` as root |
+| `nats` | none | none | JetStream, its store on its machine's disk | `paths.nats_store` at `/data`, mode 755, written as its own user |
+| `hub-listener` | none | none | | its environment file, mode 600, read by `docker` as root |
+| `load-listener-1` to `-4` | 500m | 512 MiB | The listeners the loop's sessions register on: the unit sessions round-robin over the first three and the driver takes the fourth | its environment file, mode 600, read by `docker` as root |
 
 NATS and the hub listener have no limit, as production's hub VM gives its two processes the whole
 machine. Dispatch's container names its own entrypoint because the Envoy image carries four
