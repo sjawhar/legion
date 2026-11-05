@@ -101,14 +101,14 @@ func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState
 // died in a turn of it, and behind outOfMemoryTask between the two when that death was the pod
 // running out of memory — the agent reads that its turn was interrupted, then why, then the task.
 func (d Delivery) message() string {
-	message := d.Task
-	if d.OutOfMemory {
-		message = outOfMemoryTask + message
-	}
+	var prefix string
 	if d.Interrupted {
-		message = interruptedTask + message
+		prefix = interruptedTask
 	}
-	return message
+	if d.OutOfMemory {
+		prefix += outOfMemoryTask
+	}
+	return prefix + d.Task
 }
 
 // HashBootToken is the one hash a boot token is stored and looked up by. A launch mints the token
@@ -670,7 +670,7 @@ const outOfMemoryTask = "Your pod ran out of memory. Kubernetes ended the contai
 // the new process's shim has no record of, marked Interrupted, so it is sent behind
 // interruptedTask. outOfMemory says that end was the pod running out of memory, which adds
 // outOfMemoryTask to what is sent; it is written on every call, true or false, so a second
-// interruption of the same task for another reason takes back a note that no longer describes it.
+// interruption of the same task for another reason clears a note that no longer describes it.
 // The task is neither retired nor its run marked served, since the turn never finished. A task
 // with no turn running is left as it is: the relaunch sends it as it was.
 //
@@ -687,8 +687,7 @@ func (m *Machine) interrupted(ctx context.Context, why string, outOfMemory bool)
 	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
 	m.awaitingResult = ""
 	next := *p
-	next.ID, next.ConfirmedAt, next.Interrupted = rotateTaskID(p.ID), time.Time{}, true
-	next.OutOfMemory = outOfMemory
+	next.ID, next.ConfirmedAt, next.Interrupted, next.OutOfMemory = rotateTaskID(p.ID), time.Time{}, true, outOfMemory
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
 		return err
 	}
@@ -703,6 +702,12 @@ const (
 	taskRead   = true
 	taskUnread = false
 )
+
+// ordinaryEnd is interrupted's outOfMemory at a call site that ends the turn of a process still
+// running — one replaced mid-turn, or one a held suspension's deadline stops — where nothing
+// ended the pod's container, so the end was not the pod running out of memory. A death and a
+// displacement pass the observation's own OutOfMemory instead.
+const ordinaryEnd = false
 
 // markRead and clearReadMark are the only writers of the pending task's read mark: its
 // acknowledgement time (DeliveredAt) and the delivery id the acknowledged prompt carried

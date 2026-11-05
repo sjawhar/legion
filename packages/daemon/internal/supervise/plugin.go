@@ -165,7 +165,7 @@ func (m *Machine) relaunchStale(ctx context.Context, trigger string) error {
 		"incarnation", m.claim.Locator.Incarnation, "pluginContract", m.claim.PluginContract,
 		"daemonApiVersion", m.deps.PluginContract, "trigger", trigger)
 	m.claim.PluginRelaunchFor = m.deps.PluginContract
-	return m.replaceProcess(ctx, "the process on another plugin contract is replaced mid-turn", false)
+	return m.replaceProcess(ctx, "the process on another plugin contract is replaced mid-turn", ordinaryEnd)
 }
 
 // openPluginUpdate opens this claim's own update round for the plugin contract it is behind: the

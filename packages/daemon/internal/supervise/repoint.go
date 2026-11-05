@@ -24,7 +24,7 @@ import (
 func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: the process is alive at a stale address; replacing it with one at the current address",
 		"incarnation", m.claim.Locator.Incarnation, "detail", observation.Detail)
-	return m.replaceProcess(ctx, "the process at a stale address is replaced mid-turn", false)
+	return m.replaceProcess(ctx, "the process at a stale address is replaced mid-turn", ordinaryEnd)
 }
 
 // displaced is the claim's process found gone, or found to be some other process, through no
