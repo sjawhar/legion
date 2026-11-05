@@ -32,7 +32,6 @@ create table identity_mentions (
 
 -- One identity's mentions, newest first: the read behind a person's page and every ?to= query.
 create index identity_mentions_target on identity_mentions (to_kind, to_id, created_at desc);
--- The source's own mentions: what the outbox and the census read by from_kind and from_id.
 create index identity_mentions_source on identity_mentions (from_kind, from_id);
 
 -- graph_mention_resolutions is every record of an identity mention, before the person expansion:
