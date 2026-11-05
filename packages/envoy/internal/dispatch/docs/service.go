@@ -1841,6 +1841,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			authors:          credit.authors,
 			capture:          &credit.capture,
 			docUpdateVersion: &snapshotCursor,
+			priorMarkdown:    latest.markdown,
 		})
 		if writeErr != nil {
 			return abandon(writeErr)

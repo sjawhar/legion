@@ -1822,7 +1822,7 @@ A block reference pinned to a version of its document, `#b-<id>@v<N>` with N at 
 the node's `pin` carries the block's text at `N` and says whether the block is `unchanged`, `changed` or `removed` since.
 `GET /api/v1/block-links?from=<document>&to=<document>` lists the links from the blocks of one document to the blocks of another.
 A typed block's `block[]` attribute holds canonical block references joined by one space, and its `targets` limit the types of the blocks it points at (`packages/envoy/AGENTS.md`, the typed block rules):
-an agent's or API write introducing a pointer to an existing block of another type is refused, a browser's write never is, and every block-aware read lists a pointer's edge only while its target has an allowed type, so retyping the target hides or shows it.
+an agent's or API write introducing a pointer to a block of another type is refused. Browser edits reach the live room, but a version checks their new pointers before indexing them. Reads list an existing pointer's edge only while its target has an allowed type, so retyping the target hides or shows it.
 Text stored before the release, and text an earlier build writes during the roll, is indexed by the server's block-index reconciliation (lease `block-index`), with no command run.
 
 A comment and a message are blocks too (migrations `0142`-`0144`; `packages/envoy/AGENTS.md`, "References form one graph").
@@ -1905,7 +1905,7 @@ The conversion keeps the original ask rows and their answers; it does not create
 Narrative that merely cites an ask but may contain independent reasoning is retained as an agent record and flagged for attribution review rather than silently discarded.
 A source with open comments or asks is left untouched, with those conversation ids listed.
 Converted sources keep their original name, slug, blocks and Keep receipts, so the unchanged reader and name-based `decisions.md` uploads address the same artifact until cutover. A system-authored conversion version identifies completed sources without renaming them. The converter replaces the spec's pointer line in the same transaction; the census flags later legacy edits until they have been reconciled with the nodes.
-Another run appends no duplicate node. Agent document writes cannot remove an answered ask or set a decision node's `decided_by`; a person's own write is allowed.
+Another run appends no duplicate node. Agent document writes cannot remove an answered ask or set a decision node's `decided_by`. A signed-in person may name only their own login. Every version checks answered attribution against the ask row and checks new `from` and `from_ask` targets against the writing issue or its ancestors, including browser edits. An invalid browser ask loses answer metadata that no row backs.
 Answered asks can be restored when their original rows and spec block history remain, including an id now occupied by a different block type: restoration keeps that later block and moves the original ask row to a free block id. Deleted ask rows and removals predating that history cannot be detected automatically.
 
 Old builds refuse decision blocks. The schema-version bump makes already-open editors read-only until reload, and rolling back does not convert stored nodes back to the old schema.
@@ -3208,7 +3208,7 @@ Each item below names a status and code, then its meaning.
   Malformed edit replacements report `INVALID_OP`.
   A typed block's `block[]` value that is not canonical block references joined by exactly one space is refused naming the attribute and the value, as any attribute value the schema refuses is.
   A write introducing a `block[]` pointer to an existing block whose type the attribute's `targets` do not allow is refused naming the typed block, the attribute, the reference, the target's type and the allowed types, on every route but `POST /edits`, which answers it `INVALID_OP` on `attributes`;
-  a browser's edit is never refused for a pointer.
+  a browser's live edit is stored, but its immutable version and graph edges refuse invalid new pointers.
   An upload that moves an open anchor's quote where that anchor cannot stand - an ask's quote into a code block, or any open ask's, comment's or suggestion's quote into the front matter - and leaves no copy where it can is refused naming the anchor, its quote and where the text landed:
   move the text out, or resolve the anchor first.
   A copy there beside the original is taken, and the anchor stays on the original.

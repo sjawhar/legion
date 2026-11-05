@@ -188,8 +188,9 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, err
 	}
 	written, err := s.writeVersionTx(ctx, tx, artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor, &versionWrite{
-		authors: actorSlice(capture.authors),
-		capture: &capture,
+		authors:       actorSlice(capture.authors),
+		capture:       &capture,
+		priorMarkdown: latest.markdown,
 	})
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err

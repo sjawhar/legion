@@ -29,6 +29,13 @@ func TestDecisionAgentCreationCannotClaimPerson(t *testing.T) {
 				t.Fatalf("refused creation wrote attribution edges: %d (%v)", edges, err)
 			}
 			delete(body, "actor")
+			response = dispatchRequest(t, handler, http.MethodPost, path, body, "bob")
+			if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "alice") || !strings.Contains(response.Body.String(), "forged") {
+				t.Fatalf("another person's creation: %d %s, want 409 naming the block and decider", response.Code, response.Body.String())
+			}
+			if err := database.Pool.QueryRow(t.Context(), `select count(*) from graph_edges where kind='decided_by' and to_kind='person' and to_id='alice'`).Scan(&edges); err != nil || edges != 0 {
+				t.Fatalf("refused personal creation wrote attribution edges: %d (%v)", edges, err)
+			}
 			response = dispatchRequest(t, handler, http.MethodPost, path, body, "alice")
 			if response.Code != http.StatusCreated {
 				t.Fatalf("person's own creation: %d %s", response.Code, response.Body.String())

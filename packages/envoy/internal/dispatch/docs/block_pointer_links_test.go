@@ -147,10 +147,9 @@ func TestATargetsChangeReachesStoredPointersAtTheNextIndexing(t *testing.T) {
 	closeDocumentRoom(t, service, checks)
 }
 
-// A browser's write is never refused: a settled browser tree holding a pointer to a block of a type
-// the attribute does not allow writes its version and stores the pointer, which the graph does not
-// list until its target has an allowed type.
-func TestABrowserWrittenPointerToADisallowedTypeIsStoredAndNotListed(t *testing.T) {
+// A browser may store an unchecked live update, but its invalid pointer writes no immutable
+// version or edge. Settlement can publish it once the target has an allowed type.
+func TestABrowserWrittenPointerToADisallowedTypeIsNotVersioned(t *testing.T) {
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	database, service := blockIndexService(t)
 	target := writeIndexedDocument(t, database, service, "target", ":::callout{#k1 kind=\"note\" title=\"\"}\nA callout.\n:::\n")
@@ -168,22 +167,20 @@ func TestABrowserWrittenPointerToADisallowedTypeIsStoredAndNotListed(t *testing.
 	if err := database.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, checks).Scan(&versions); err != nil {
 		t.Fatalf("count the versions of checks.md: %v", err)
 	}
-	state.mu.Lock()
-	failed, failures := state.failed, state.settleFailures
-	state.mu.Unlock()
-	if versions != 2 || failed != nil || failures != 0 {
-		t.Fatalf("settlement wrote %d versions (failed %v, %d failures), want version 2 and no failure", versions, failed, failures)
+	if versions != 1 {
+		t.Fatalf("settlement wrote %d versions, want only the version before the invalid browser pointer", versions)
 	}
 	var stored []pointerRow
 	for _, row := range pointerRowsOf(t, database, checks) {
 		stored = append(stored, pointerRow{BlockID: row.BlockID, Kind: row.Kind, ToKind: row.ToKind, ToID: row.ToID, ToTypes: row.ToTypes, CreatedVersion: row.CreatedVersion})
 	}
-	if want := []pointerRow{{BlockID: "c1", Kind: "serves", ToKind: "block", ToID: "CORE-1/target#k1", ToTypes: []string{"requirement"}, CreatedVersion: 2}}; !reflect.DeepEqual(stored, want) {
-		t.Fatalf("block_refs of checks.md = %#v, want %#v", stored, want)
+	if len(stored) != 0 {
+		t.Fatalf("an invalid browser pointer wrote block_refs: %#v", stored)
 	}
 	requireLinksTo(t, database, "pointing at a callout", "CORE-1/target#k1")
 
 	editIndexedDocument(t, service, target, model.EditOp{Op: "retype", Block: "k1", Type: "requirement"})
+	settleCurrentGeneration(t, service, checks)
 	requireLinksTo(t, database, "k1 retyped to a requirement", "CORE-1/target#k1", "serves CORE-1/checks#c1")
 }
 

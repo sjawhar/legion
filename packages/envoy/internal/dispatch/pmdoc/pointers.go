@@ -132,23 +132,21 @@ type BlockWriting struct {
 // prior (a new document, or one outside the schema) holds none. A pointer the write leaves
 // unchanged is never refused, so a target retyped elsewhere blocks no unrelated edit. Its pointers
 // are BlockPointers', so a typed block repeating the id of a typed block before it is never
-// checked. The block index writes no edge for it while it repeats the id, but settlement's
-// EnsureBlockIDs then gives it a fresh id, and its unchecked pointer becomes an edge, which the
-// readers hide while its target has a type the attribute does not allow (block_ref_listed). A
-// typed block repeating the id of an earlier paragraph is checked, though the index writes no edge
-// for it either.
+// checked until settlement assigns it a fresh id. The version write then checks that distinct
+// block before indexing it. A typed block repeating the id of an earlier paragraph is checked,
+// though the index writes no edge for it either.
 //
 // A pointer is refused when it names a block no document holds, a block of a type the attribute's
 // targets do not allow (more than one type is refused when any is outside them), a block of an
 // issue that is neither the writing document's own issue nor one above it, a block of another
 // document when a project holds the writing document and no issue does, or a block of another
 // document under an attribute the schema scopes to its own document (BlockAttributeScope).
-// Only a write that comes this way is held to this: a browser's edit never does, and a pointer it
-// leaves at a block no document holds stays the unresolved reference it is.
+// Ask pointers resolve their actual owner and obey the same issue rule. Person attribution is
+// checked against the writer or the authoritative ask row by the document service.
 //
-// resolve is called at most once, with the target of each introduced pointer whose attribute has
-// targets, and answers where the write lands and the block each target names by node id
-// (text.TargetID), with none for an id no block has. Its error is returned as it is.
+// resolve is called at most once for the introduced constrained block pointers and ask pointers.
+// It answers where the write lands and each target's real owner by text.TargetID, omitting missing
+// targets. Its error is returned as it is.
 func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (BlockWriting, map[string]BlockTarget, error)) error {
 	pointers := BlockPointers(tree)
 	if len(pointers) == 0 {
@@ -161,7 +159,7 @@ func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (Blo
 	var introduced []BlockPointer
 	var targets []text.Ref
 	for _, pointer := range pointers {
-		if len(pointer.Targets) == 0 && pointer.Scope == "" {
+		if pointer.Target.Kind == "person" || pointer.Target.Kind == "block" && len(pointer.Targets) == 0 && pointer.Scope == "" {
 			continue
 		}
 		if _, unchanged := held[[4]string{pointer.Block, pointer.BlockType, pointer.Attribute, pointer.Ref}]; unchanged {

@@ -36,6 +36,9 @@ func TestDecisionConversionKeepsLegacyUploadIdentity(t *testing.T) {
 	if _, err := deps.Docs.(*docs.Service).ConvertDecisionDocuments(t.Context(), true, &out); err != nil {
 		t.Fatal(err)
 	}
+	if census := readDecisionCensus(t, handler, issue.Key); census.Differences != 0 {
+		t.Fatalf("freshly converted legacy decision differs before any later write: %#v", census)
+	}
 	response := agentRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
 		"name": "decisions.md", "content": "## New choice\n\nNew reasoning.\n", "actor": map[string]any{"kind": "session", "id": "legacy-writer"},
 	}, "agent-token")

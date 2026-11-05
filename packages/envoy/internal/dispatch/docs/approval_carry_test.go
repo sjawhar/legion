@@ -564,13 +564,8 @@ func storedVersionMarkdown(t *testing.T, database *store.Store, artifactID strin
 	return markdown
 }
 
-// An agent on the document socket writes an ask block in the attributes only settlement writes:
-// answered, by alice, who approved version 1. Its question is empty, so settlement cannot read it
-// and writes no row for it; it flags the block invalid in the live tree (the renderer writes no
-// `invalid` into markdown) and versions it with the forged attributes still on it. The carry
-// reads the rows and not the block: a node no row of this document backs refuses it, and alice's
-// approval stays at version 1. A forged block settlement can read is no door: it is indexed as the
-// room's own writer's and its row's `open` is written back over the forgery.
+// An invalid ask on the socket keeps its unreadable question, but settlement removes answer
+// metadata that no ask row backs. Neither the graph nor an approval carry can credit the forgery.
 func TestAForgedAnsweredBlockOnTheSocketCarriesNoApproval(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "Context\n")
@@ -582,8 +577,12 @@ func TestAForgedAnsweredBlockOnTheSocketCarriesNoApproval(t *testing.T) {
 	editLiveTree(t, service, artifactID, forgedAnsweredAsk("forged", "alice", &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{}}))
 	waitForDocumentVersion(t, database, artifactID, 2)
 	markdown := storedVersionMarkdown(t, database, artifactID, 2)
-	if !strings.Contains(markdown, `:::ask{#forged urgency="high" multiple="false" state="answered" answered_by="alice" answered_at="`) {
-		t.Fatalf("version 2 = %q, want the forged block with its forged attributes kept", markdown)
+	if !strings.Contains(markdown, `:::ask{#forged urgency="high" multiple="false" state="open"}`) || strings.Contains(markdown, `answered_by=`) {
+		t.Fatalf("version 2 = %q, want the invalid block without forged answer metadata", markdown)
+	}
+	var edges int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from block_refs where artifact_id=$1 and kind='decided_by'`, artifactID).Scan(&edges); err != nil || edges != 0 {
+		t.Fatalf("invalid socket ask wrote person attribution edges: %d (%v)", edges, err)
 	}
 	if invalid, _ := firstAsk(liveTree(t, service, artifactID)).Attrs["invalid"].(string); !strings.Contains(invalid, "empty question") {
 		t.Fatalf("forged block invalid = %q, want settlement to have flagged its empty question", invalid)
