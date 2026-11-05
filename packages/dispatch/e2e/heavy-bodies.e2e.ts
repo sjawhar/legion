@@ -4,7 +4,9 @@
 // two measure the very same bytes. The one surface where a body grows under a paint - the live
 // view, where a streaming turn arrives whole with every frame - is `heavy-streamed-turn.e2e.ts`,
 // which reads a drawn body through the same `heavy-bodies-page.ts` as the rows here
-// (sjawhar/legion#2519).
+// (sjawhar/legion#2519). What a row here holds the main thread for is measured by
+// `main-thread-hold.ts`, which `nested-directive.e2e.ts` measures its own two rows with, so one
+// instrument and one bound answer for both (sjawhar/legion#2612).
 import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
 
 // `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the
@@ -24,17 +26,12 @@ import {
   plainList,
 } from "./heavy-bodies";
 import { expectSettled, markdownBody } from "./heavy-bodies-page";
+import { expectUnderTheBound, measureDraw, record } from "./main-thread-hold";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 declare global {
   interface Window {
-    /** The largest gap, in milliseconds, between two ticks of the page's main-thread heartbeat. */
-    __heavyBodiesLongestGap?: number;
-    /** `performance.now()` when the record last started, so a row can time the draw from it. */
-    __heavyBodiesResetAt?: number;
-    /** Starts the heartbeat's record again: no gap so far, and the last tick now. */
-    __heavyBodiesResetGap?: () => void;
     /** How far the reader's own scroll moved the page, once `scrollOnTheFirstBatch` has run it;
      *  0 until then. */
     __heavyBodiesReaderScrolled?: number;
@@ -45,9 +42,6 @@ const agent = {
   actor: { id: "e2e-heavy-bodies-agent", kind: "session" as const },
   as: "agent" as const,
 };
-
-/** The longest the main thread may go without running a task while the card draws. */
-const longestGapMs = 1_000;
 
 /**
  * The parse worker's own chunk, as Vite names a module worker's bundle - the diagram renderer
@@ -94,98 +88,6 @@ function deepestNesting(element: Locator, selector: string): Promise<number> {
  *  without shipping 30,000 characters into an assertion message. */
 function textLength(element: Locator): Promise<number> {
   return element.evaluate((node) => node.textContent?.length ?? 0);
-}
-
-interface Measured {
-  /** Milliseconds from the record's start until this row saw the formatted body; the row's own
-   *  polling rounds it up. */
-  readonly drawn: number;
-  /** The largest gap, in milliseconds, between two ticks of the main-thread heartbeat since the
-   *  record started. */
-  readonly gap: number;
-}
-
-/**
- * Installs a heartbeat before the page's own scripts: a `setTimeout(0)` loop that records the
- * largest gap between its ticks, which a parse holding the main thread widens to the parse's
- * length. The record starts again when the page first asks for the data the body comes in,
- * before that request goes out: the bundle has been evaluated and the tab drawn by then, and the
- * body cannot draw before the answer.
- */
-async function measureDraw(
-  page: Page,
-  {
-    drawn,
-    open,
-    reset,
-  }: {
-    /** Resolves once the formatted body is in the page. */
-    readonly drawn: () => Promise<void>;
-    /** What the reader does: open the page, and whatever else reaches the body. */
-    readonly open: () => Promise<void>;
-    /** The first GET of this request starts the record. */
-    readonly reset: RegExp;
-  }
-): Promise<Measured> {
-  await page.addInitScript(() => {
-    let last = performance.now();
-    window.__heavyBodiesLongestGap = 0;
-    window.__heavyBodiesResetAt = last;
-    window.__heavyBodiesResetGap = () => {
-      last = performance.now();
-      window.__heavyBodiesLongestGap = 0;
-      window.__heavyBodiesResetAt = last;
-    };
-    const tick = () => {
-      const now = performance.now();
-      window.__heavyBodiesLongestGap = Math.max(window.__heavyBodiesLongestGap ?? 0, now - last);
-      last = now;
-      setTimeout(tick, 0);
-    };
-    setTimeout(tick, 0);
-  });
-  // Only the first request resets: a later one could wait out the draw, then erase its gap.
-  let started = false;
-  await page.route(reset, async (route) => {
-    if (!started && route.request().method() === "GET") {
-      started = true;
-      await page.evaluate(() => window.__heavyBodiesResetGap?.());
-    }
-    await route.continue();
-  });
-
-  await open();
-  await drawn();
-  if (!started) {
-    throw new Error(`the page never asked for ${reset.source}`);
-  }
-  const measured = await page.evaluate(() => ({
-    drawn: performance.now() - (window.__heavyBodiesResetAt ?? Number.NaN),
-    gap: window.__heavyBodiesLongestGap,
-  }));
-  if (measured.gap === undefined) {
-    throw new Error("the main-thread heartbeat never started");
-  }
-  return { drawn: measured.drawn, gap: measured.gap };
-}
-
-/** Both measurements are the run's evidence, so they are kept on the result even when it passes.
- *  Only the gap is asserted; the time to the formatted body is recorded, never a limit. */
-function record({ drawn, gap }: Measured): void {
-  test.info().annotations.push(
-    { description: `${Math.round(gap)} ms`, type: "longest main-thread gap" },
-    {
-      description: `${Math.round(drawn)} ms, as this row polled for it`,
-      type: "time to the formatted body",
-    }
-  );
-}
-
-function expectUnderTheBound({ gap }: Measured): void {
-  expect(
-    gap,
-    `the main thread ran no task for ${Math.round(gap)} ms while the card drew`
-  ).toBeLessThan(longestGapMs);
 }
 
 interface HeldWorker {
@@ -328,6 +230,13 @@ const rows: readonly Row[] = [
 // Conversation tab with that thread open, so these rows measure what a reader who followed one
 // waits for: both of the card's parses of the body, preview and body, from the first comments GET.
 for (const row of rows) {
+  // SLOW(>=2s): the draw is the measurement. Each row of the table seeds its own body, opens a
+  // page that has loaded nothing and waits for the whole formatted shape - the comments GET of
+  // a body up to the comment cap, the parse (the worker's, or the page's own for the two bodies
+  // under its threshold) and the paint that attaches as many as 16,000 elements in batches -
+  // and the hold it asserts is read over exactly that. The heaviest body is 32,000 characters,
+  // which is what a reader is given to draw and what the bound is about, so no part of this is
+  // fixture a faster seed could take out.
   test(`Conversation draws a comment of ${row.name} without holding the main thread for a second`, async ({
     browser,
   }) => {
@@ -355,6 +264,9 @@ for (const row of rows) {
   });
 }
 
+// SLOW(>=2s): the 8,000 items are drawn before anything is read off them - the messages GET, the
+// worker's parse and the paint of 16,000 elements - and the hold this row bounds is read over
+// that draw, which is the row.
 test("Conversation draws a message of 8,000 list items without holding the main thread for a second", async ({
   browser,
 }) => {
@@ -387,6 +299,9 @@ test("Conversation draws a message of 8,000 list items without holding the main 
 // at `contracts.AskQuestionMax` (2,000 UTF-16 units), under the worker's own threshold, so no ask
 // question can carry this list. The surface under test is the same one - the Inbox's ask card,
 // drawing a body through `MarkdownBody` - and its reply is the longest body it ever draws.
+// SLOW(>=2s): the reply's 8,000 items are drawn in the card before the hold is read, and the
+// Inbox pays for them where a reader does: the inbox GET brings the card and its reply together,
+// so the parse and the paint of 16,000 elements are what this row waits out.
 test("the Inbox's ask card draws a reply of 8,000 list items without holding the main thread for a second", async ({
   browser,
 }) => {
@@ -508,6 +423,11 @@ async function atRest(
 
 // The reader's place is proven in Chromium and WebKit: the compensation reads layout the two
 // engines measure and anchor differently.
+// SLOW(>=2s): the row holds the body pending, reads the reader's place once the page has stopped
+// moving - 600 ms of one answer, since a deep link's own `New` marks relayout the document after
+// it lands (`atRest`) - and only then lets the 8,000 items format above that place. The late
+// paint it is about is that formatting, so the row pays a whole draw of 16,000 elements after a
+// whole load.
 test("a long comment above the reader keeps the comment they are reading where it was when it formats", async ({
   browser,
 }, testInfo) => {
@@ -592,6 +512,9 @@ async function scrollOnTheFirstBatch(page: Page, by: number): Promise<void> {
 // body's growth swallowed their own scroll whole (sjawhar/legion#2519). The row scrolls between
 // two batches and asks for exactly one thing: the card they are reading ends where their scroll
 // put it, with the rest of the body still landing above it.
+// SLOW(>=2s): the scroll has to land between two batches of the paint, so the row waits out the
+// page coming to rest (600 ms, `atRest`), then the ~32 batches the 8,000 items arrive in: the
+// window it measures exists only while that draw runs, and a shorter body has no such window.
 test("a reader who scrolls while a long body above them formats keeps where they scrolled to", async ({
   browser,
 }, testInfo) => {
@@ -661,6 +584,10 @@ async function underTheComposer(page: Page): Promise<number> {
   return newest.y - (composer.y + composer.height);
 }
 
+// SLOW(>=2s): a reader reaches Jump to latest only from a page of thirteen turns they have
+// scrolled back through, and the place it gives them is read once the page has come to rest
+// (600 ms, `atRest`). What the row proves - that the place survives the late paint - is then the
+// 8,000 items formatting under the composer, which is a whole draw of 16,000 elements.
 test("Jump to latest keeps a newest long comment under the composer when it formats late", async ({
   browser,
 }, testInfo) => {
@@ -709,6 +636,10 @@ test("Jump to latest keeps a newest long comment under the composer when it form
 // A reader who opens a long body reads its text while the worker is still parsing: it is in the
 // page as text, and it is theirs to select and copy. Nothing covers it and nothing turns
 // selection off, so a drag across the pending card answers with the body's own words.
+// SLOW(>=2s): the body has to be in the page as pending text for the drag to cross, so the row
+// loads the card with the worker's chunk held, drags across it, and then lets that same body
+// through to its 8,000 items - the selection is only worth proving of a body that still ends
+// formatted, and formatting 8,000 items is the draw it is.
 test("a long body's text can be selected while the worker still owes its formatting", async ({
   browser,
 }) => {
@@ -764,6 +695,9 @@ test("a long body's text can be selected while the worker still owes its formatt
 // reads the body as a list. `data-markdown-fallback` keeps meaning only that the parser itself
 // refused the body, so it is absent here. This row measures no main-thread gap: the page is
 // doing on its own thread what the worker could not.
+// SLOW(>=2s): with the worker's chunk refused, the 8,000 items are parsed and painted on the
+// page's own thread, which is the slower of the two paths by design and the one this row is
+// here to prove still ends in a formatted list.
 test("a comment of 8,000 list items still ends formatted when the parse worker's chunk cannot load", async ({
   browser,
 }) => {

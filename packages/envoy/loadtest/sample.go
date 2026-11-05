@@ -36,10 +36,11 @@ type sample struct {
 	PoolWait   int                `json:"pool_acquire_goroutines"`
 	// HeapLiveBytes and HeapLiveObjects are the heap read this sample carries, if any: the sums of
 	// /debug/pprof/heap's inuse_space and inuse_objects, the runtime's sampled estimate of the live
-	// heap at its last GC, not runtime.MemStats HeapInuse. The read runs on its own
-	// (sampler.readHeaps) and lands in the first sample that looks for it once it has ended.
-	// HeapAt is when it ended (zero when the sample carries none), and HeapInWindow applies
-	// InWindow's rule to HeapAt, so the window holds a read by its own time, not its sample's.
+	// heap at its last GC, not runtime.MemStats HeapInuse. Only a run given -heap-samples reads the
+	// heap at all; the read then runs on its own (sampler.readHeaps) and lands in the first sample
+	// that looks for it once it has ended. HeapAt is when it ended (zero when the sample carries
+	// none), and HeapInWindow applies InWindow's rule to HeapAt, so the window holds a read by its
+	// own time, not its sample's.
 	HeapLiveBytes   float64 `json:"heap_live_bytes"`
 	HeapLiveObjects float64 `json:"heap_live_objects"`
 	// MemStatsHeapInuse is an older run's heap read (samples.json `heap_inuse`): runtime.MemStats
@@ -66,12 +67,15 @@ const (
 
 // sampler takes a sample every 5 s: CPU and RSS of each stack process and of loadgen from /proc,
 // Postgres connections, Dispatch's goroutines and pool waiters, NATS /varz and /jsz, and the
-// pull-request counts of the pull spy. Dispatch's heap is read on its own every 15 s (readHeaps), so
-// that a slow read of a large heap delays no sample. A failed Postgres, pprof or NATS /varz read is
-// marked in its sample (sample.FailedReads); a /jsz read that fails leaves its keys out of the
-// sample. At each sample it also checks that every stack process is alive (checkAlive). It reads
-// stack.json again at each sample, so a process stack.sh restarted is followed to its new pid, and
-// each process's CPU ticks run on across its pids (cpuStitch).
+// pull-request counts of the pull spy. It reads no heap profile unless heapSamples is set: the
+// profile is written inside Dispatch, so the harness would charge its own sampling to the process
+// it measures (README.md, "Why the harness reads no heap profile in the window"). With it,
+// Dispatch's heap is read on its own every 15 s (readHeaps), so that a slow read of a large heap
+// delays no sample. A failed Postgres, pprof or NATS /varz read is marked in its sample
+// (sample.FailedReads); a /jsz read that fails leaves its keys out of the sample. At each sample
+// it also checks that every stack process is alive (checkAlive). It reads stack.json again at
+// each sample, so a process stack.sh restarted is followed to its new pid, and each process's CPU
+// ticks run on across its pids (cpuStitch).
 type sampler struct {
 	pids      map[string]int // by name; "postgres" is the postmaster
 	stackPath string         // stack.json, read again at each sample; empty under -allow-foreign
@@ -80,6 +84,10 @@ type sampler struct {
 	pgURL     string
 	stitch    map[string]*cpuStitch // by name
 	kick      chan struct{}         // takes a sample at once (sampleNow)
+	// heapSamples turns on the periodic heap read (readHeaps), which loadgen run's -heap-samples
+	// sets; without it the sampler sends no request to /debug/pprof/heap and every heap figure
+	// of the step is empty.
+	heapSamples bool
 	// pulls counts the pull requests on the stream's consumers; nil when the spy did not start.
 	pulls   *pullSpy
 	mu      sync.Mutex
@@ -373,19 +381,25 @@ func boxBusy(ctx context.Context, window time.Duration) (float64, bool) {
 
 // loop samples every 5 s until ctx ends. A failed read is marked in its sample and logged as
 // readErrors does, one count each for the Postgres, the pprof and the NATS reads. A read that
-// failed once ctx had ended is neither marked nor counted, as poll does. The heap reads run in
-// readHeaps; each sample takes the one that has ended since the last sample, if any, in place of
-// reading the heap itself. A heap read that ends once the last sample is taken is lost.
+// failed once ctx had ended is neither marked nor counted, as poll does. Under heapSamples the
+// heap reads run in readHeaps; each sample takes the one that has ended since the last sample, if
+// any, in place of reading the heap itself. A heap read that ends once the last sample is taken
+// is lost. Without heapSamples readHeaps never starts, so the window holds no request to
+// /debug/pprof/heap and no sample carries a heap read.
 func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.Logger) {
 	var pg *pgx.Conn
 	pgErrs := readErrors{name: "sampler: postgres", lg: lg}
 	pprofErrs := readErrors{name: "sampler: pprof", lg: lg}
 	natsErrs := readErrors{name: "sampler: nats", lg: lg}
 	heaps, heapsDone := make(chan heapRead, 1), make(chan struct{})
-	go func() {
-		defer close(heapsDone)
-		s.readHeaps(ctx, heaps)
-	}()
+	if s.heapSamples {
+		go func() {
+			defer close(heapsDone)
+			s.readHeaps(ctx, heaps)
+		}()
+	} else {
+		close(heapsDone)
+	}
 	defer func() {
 		if pg != nil {
 			pg.Close(context.Background())

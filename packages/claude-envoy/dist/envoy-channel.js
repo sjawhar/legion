@@ -48750,6 +48750,55 @@ var LegionReadyForUpdateRequest = strictObject({
   round: nonEmptyString,
   head: string2().optional()
 });
+var LegionSessionActivity = strictObject({
+  at: timestamp,
+  backgroundWork: strictObject({ running: boolean2(), kinds: array(nonEmptyString) }),
+  phase: strictObject({ nextReminderAt: timestamp.nullable() })
+});
+var LegionActivityRequest = strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  activity: LegionSessionActivity
+});
+var legionReleaseRecord = strictObject({
+  id: number2().int().positive(),
+  issue: issueKey,
+  generation: number2().int().nonnegative(),
+  roles: array(nonEmptyString),
+  at: timestamp,
+  bundleBytes: number2().int().nonnegative()
+});
+var legionResumeRecord = strictObject({
+  id: number2().int().positive(),
+  release: number2().int().nonnegative(),
+  issue: issueKey,
+  role: nonEmptyString,
+  kind: nonEmptyString,
+  at: timestamp,
+  podReadyAt: timestamp.optional(),
+  firstTurnAt: timestamp.optional(),
+  stuck: boolean2()
+});
+var legionHoldRecord = strictObject({
+  id: number2().int().positive(),
+  issue: issueKey,
+  reason: nonEmptyString,
+  detail: nonEmptyString.optional(),
+  firstAt: timestamp,
+  at: timestamp,
+  passes: number2().int().positive()
+});
+var LegionReleaseRecordsRequest = strictObject({
+  claimToken: nonEmptyString,
+  secret: nonEmptyString,
+  since: timestamp
+});
+var LegionReleaseRecordsResponse = strictObject({
+  releases: array(legionReleaseRecord),
+  resumes: array(legionResumeRecord),
+  holds: array(legionHoldRecord)
+});
 var LegionControllerRegisterResponse = strictObject({
   claimToken: nonEmptyString,
   role: literal("controller"),
@@ -48802,7 +48851,7 @@ var LegionOperatorClaimResponse = strictObject({
   }),
   uncertainStreak: number2().int().nonnegative(),
   pending: legionDeliveryView.optional(),
-  suspendedBy: _enum2(["unknown", "operator", "daemon", "exit"]).optional(),
+  suspendedBy: _enum2(["unknown", "operator", "daemon", "exit", "released"]).optional(),
   suspensionHeld: literal(true).optional(),
   pluginContract: number2().int().nonnegative(),
   updateRound: nonEmptyString.optional(),
@@ -49070,6 +49119,8 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
     readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
+    activity: (input) => acknowledge("/legion/v1/claims/activity", input),
+    releaseRecords: (input) => post("/legion/v1/claims/release-records", LegionReleaseRecordsRequest, LegionReleaseRecordsResponse, input),
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) => post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),
     handoffComplete: (input) => post("/legion/v1/handoff/complete", LegionHandoffCompleteRequest, LegionHandoffCompleteResponse, input),
@@ -51576,7 +51627,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 46
+  daemonApiVersion: 48
 };
 
 // src/channel-forwarder.ts
@@ -52742,6 +52793,7 @@ function createPhaseReminder(deps) {
   let continued = false;
   let lastMessage = "";
   let recorded = "";
+  let armed;
   const entryOf = () => ({
     state: recordedPhaseStall(stall.state),
     count: stall.count,
@@ -52884,6 +52936,7 @@ function createPhaseReminder(deps) {
   };
   const armReminder = (reminder, delayMs) => {
     const armedAt = generation;
+    armed = { at: Date.now() + delayMs, generation: armedAt };
     deps.armTimer(async () => {
       if (generation !== armedAt || stall.state === "closed" || turnRunning)
         return;
@@ -52957,7 +53010,41 @@ function createPhaseReminder(deps) {
     },
     sessionChanged: () => {
       generation += 1;
+    },
+    phaseWake: () => {
+      if (stall.state === "closed" || armed === undefined || armed.generation !== generation) {
+        return { nextReminderAt: null };
+      }
+      return { nextReminderAt: new Date(armed.at).toISOString() };
     }
+  };
+}
+
+// ../pi-shared/src/session-activity.ts
+var CLAUDE_BACKGROUND_TASK_KIND = "claude-background-task";
+function sessionActivity(kinds, phase, at = new Date) {
+  const found = [...new Set(kinds)].sort();
+  return {
+    at: at.toISOString(),
+    backgroundWork: { running: found.length > 0, kinds: found },
+    phase
+  };
+}
+function sessionActivityRequest(input) {
+  const { claim, project } = input;
+  if (project === undefined || project === "")
+    return;
+  let claimToken;
+  try {
+    claimToken = roleToken(project, claim.issue, claim.role);
+  } catch {
+    return;
+  }
+  return {
+    claimToken,
+    sessionId: claim.sessionID,
+    secret: claim.secret,
+    activity: input.report
   };
 }
 
@@ -52992,12 +53079,19 @@ function stallLimits(env, log) {
 
 // ../pi-shared/src/workspace-recreated.ts
 var WORKSPACE_RECREATED_VARIABLE = "LEGION_WORKSPACE_RECREATED";
+var WORKSPACE_RESTORED_VARIABLE = "LEGION_WORKSPACE_RESTORED";
 function workspaceRecreated(environment) {
   return environment[WORKSPACE_RECREATED_VARIABLE] === "true";
 }
 function workspaceRecreatedNotice(environment, issue) {
   if (!workspaceRecreated(environment))
     return;
+  if (environment[WORKSPACE_RESTORED_VARIABLE] === "true") {
+    return {
+      id: crypto.randomUUID(),
+      content: `Your workspace was made again since your last turn: the daemon released this issue's idle ` + `pod and gave its CPU and memory back. It holds what was pushed to legion/${issue} and the ` + "tracked work you had not pushed, which the daemon saved and put back. What is gone is what " + "no commit held: the files your scratch directory held, files git ignores, and anything you " + "started that was running. Check the workspace against what you remember doing before you " + "continue."
+    };
+  }
   return {
     id: crypto.randomUUID(),
     content: `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue} ` + "(the repository's default branch if nothing was), and anything you had not pushed is gone. " + "Before you continue, check the workspace against what you remember doing and re-read the " + `last handoff recorded on ${issue} with \`dispatch handoff-read --issue ${issue} --phase <phase>\` ` + "(plan, implement, test or review); Dispatch keeps it, whatever the workspace lost."
@@ -53173,6 +53267,23 @@ function createPhaseHookEndpoint(deps) {
     log: deps.log
   });
   reminder.restore(restored.entry);
+  const sendActivity = async (claim, backgroundWork) => {
+    const request = sessionActivityRequest({
+      project: configuredValue(deps.env["LEGION_PROJECT"]),
+      claim,
+      report: sessionActivity(backgroundWork ? [CLAUDE_BACKGROUND_TASK_KIND] : [], reminder.phaseWake())
+    });
+    if (request === undefined)
+      return;
+    try {
+      await deps.reportActivity(request);
+    } catch (error) {
+      deps.log.warn("legion: this session's activity report did not reach the daemon", {
+        issue: claim.issue,
+        error: messageFor(error)
+      });
+    }
+  };
   const sendRecreatedNotice = (issue) => {
     if (recreatedNoticeSent)
       return;
@@ -53221,6 +53332,7 @@ function createPhaseHookEndpoint(deps) {
           const reminded = await reminder.settle(event.lastAssistantMessage ?? "", {
             backgroundWork
           });
+          await sendActivity(claim, backgroundWork);
           return reminded === undefined ? {} : { decision: "block", reason: reminded };
         }
         case "StopFailure": {
@@ -53252,6 +53364,7 @@ function createPhaseHookEndpoint(deps) {
 // ../pi-shared/src/legion-phase-ops.ts
 var PHASE_OPS = [
   "read_record",
+  "read_release_records",
   "handoff_complete",
   "request_backward_move",
   "ready_for_update"
@@ -53260,11 +53373,15 @@ var requiredString = (op, field) => {
   const message = `${op} requires ${field}`;
   return string2({ error: message }).refine((value) => value.trim() !== "", { error: message });
 };
+var windowStart = requiredString("read_release_records", "since").refine((value) => value.trim() === "" || exports_iso.datetime({ offset: true }).safeParse(value).success, { error: "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is" });
 var operation = (op, shape) => strictObject({ op: literal(op), ...shape }, {
   error: (issue) => issue.code === "unrecognized_keys" ? issue.keys.map((key) => `${op} does not accept field "${key}"`).join("; ") : undefined
 });
 var PhaseOpArguments = discriminatedUnion("op", [
   operation("read_record", { issue: requiredString("read_record", "issue") }),
+  operation("read_release_records", {
+    since: windowStart
+  }),
   operation("handoff_complete", {
     summary: requiredString("handoff_complete", "summary"),
     verdict: _enum2(["pass", "pending", "fail"], {
@@ -53309,6 +53426,7 @@ function phaseOpParameters(zod) {
 }
 var PHASE_OP_SENTENCES = {
   readRecord: "read_record returns the record of `issue` from the daemon's state. ",
+  readReleaseRecords: "read_release_records returns this deployment's idle-release records from `since` (an RFC 3339 time) on, read with this session's own claim: " + "every release, resume and hold the daemon recorded, and over them the counts of releases, of resumes by wake kind and of holds by reason, " + "the pod-hours released, the share of releases woken again within ten minutes, and the median, 90th percentile and maximum seconds from a " + "wake to the woken role's first turn. ",
   requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
@@ -53347,6 +53465,8 @@ async function executePhaseOp(runtime, input) {
   switch (args.op) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
+    case "read_release_records":
+      return releaseRecords(runtime, args.since);
     case "handoff_complete":
       return retryWhileDaemonRestarts("handoff_complete", () => completeHandoff(runtime, args), runtime.restart);
     case "request_backward_move": {
@@ -53389,6 +53509,69 @@ async function executePhaseOp(runtime, input) {
     }
   }
 }
+var WOKEN_SOON_MS = 10 * 60 * 1000;
+var countedBy = (rows, key) => {
+  const counts = {};
+  for (const row of rows)
+    counts[key(row)] = (counts[key(row)] ?? 0) + 1;
+  return counts;
+};
+var percentile = (sorted, share) => sorted.length === 0 ? null : sorted[Math.max(Math.ceil(share * sorted.length), 1) - 1] ?? null;
+async function releaseRecords(runtime, since) {
+  const { claim } = runtime;
+  const records = await runtime.daemon.releaseRecords({
+    claimToken: claim.claimToken,
+    secret: claim.secret,
+    since
+  });
+  const asOf = runtime.now?.() ?? new Date;
+  const wokenAt = new Map;
+  for (const resume of records.resumes) {
+    if (resume.release === 0)
+      continue;
+    const at = Date.parse(resume.at);
+    const first = wokenAt.get(resume.release);
+    if (first === undefined || at < first)
+      wokenAt.set(resume.release, at);
+  }
+  let releasedMs = 0;
+  let wokenSoon = 0;
+  for (const release of records.releases) {
+    const from = Date.parse(release.at);
+    const woken = wokenAt.get(release.id);
+    releasedMs += Math.max((woken ?? asOf.getTime()) - from, 0);
+    if (woken !== undefined && woken - from <= WOKEN_SOON_MS)
+      wokenSoon += 1;
+  }
+  const waits = records.resumes.flatMap((resume) => resume.firstTurnAt === undefined ? [] : [(Date.parse(resume.firstTurnAt) - Date.parse(resume.at)) / 1000]).sort((one, other) => one - other);
+  const whole = (value) => value === null ? null : Math.round(value);
+  return {
+    since,
+    asOf: asOf.toISOString(),
+    releases: records.releases,
+    resumes: records.resumes,
+    holds: records.holds,
+    counts: {
+      releases: records.releases.length,
+      resumes: records.resumes.length,
+      resumesByKind: countedBy(records.resumes, (resume) => resume.kind),
+      holds: records.holds.length,
+      holdsByReason: countedBy(records.holds, (hold) => hold.reason)
+    },
+    podHoursReleased: Math.round(releasedMs / 3600000 * 100) / 100,
+    wokenWithinTenMinutes: {
+      releases: wokenSoon,
+      share: records.releases.length === 0 ? 0 : Math.round(wokenSoon / records.releases.length * 1000) / 1000
+    },
+    wakeToFirstTurnSeconds: {
+      measured: waits.length,
+      withoutFirstTurn: records.resumes.length - waits.length,
+      median: whole(percentile(waits, 0.5)),
+      p90: whole(percentile(waits, 0.9)),
+      max: whole(waits.at(-1) ?? null)
+    }
+  };
+}
 async function completeHandoff(runtime, args) {
   const { daemon, claim } = runtime;
   const record = recordFrom(await daemon.state(), claim.issue);
@@ -53428,7 +53611,7 @@ function legionToolDefinition() {
     name: LEGION_TOOL_NAME,
     description: legionToolDescription({
       envoyPublish: "mcp__legion__envoy_publish",
-      before: PHASE_OP_SENTENCES.readRecord,
+      before: PHASE_OP_SENTENCES.readRecord + PHASE_OP_SENTENCES.readReleaseRecords,
       after: PHASE_OP_SENTENCES.requestBackwardMove
     }),
     inputSchema: toJSONSchema(object({ op: _enum2(PHASE_OPS), ...phaseOpParameters(exports_external) }))
@@ -54584,6 +54767,7 @@ async function runEnvoyChannelServer() {
     claim: () => claim?.capability(),
     booted: claimBooted.promise,
     readState: (signal) => daemon.state({ signal }),
+    reportActivity: (input) => daemon.activity(input),
     inbox: inbox === undefined ? undefined : (text) => inbox.notification({
       method: CHANNEL_NOTIFICATION_METHOD,
       params: { content: text, meta: {} }

@@ -11,7 +11,14 @@ import {
   setSessionSendDelay,
 } from "./agents";
 import { listComments, publishAgentStreamFrame, slowWrites } from "./api";
-import { dropFirstAnswer, keptWrites, replayed, watchAnswers, watchWrites } from "./keyed-writes";
+import {
+  dropFirstAnswer,
+  keptWrites,
+  replayed,
+  runClockUntil,
+  watchAnswers,
+  watchWrites,
+} from "./keyed-writes";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -45,6 +52,19 @@ async function broadcast(page: Page, body: string): Promise<void> {
   await composer.getByRole("button", { name: "Send to 2" }).click();
 }
 
+/** Every attempt Dispatch has made to deliver a mention of the Planner on `issueKey`'s comments,
+ *  as it has them now: the comment it belongs to, which attempt it is and where it stands. Read
+ *  over every comment rather than one, since the row reads it before Dispatch has answered the
+ *  write and named the comment. */
+async function plannerAttempts(
+  issueKey: string
+): Promise<{ attempt: number; comment: string; state: string }[]> {
+  return (await listComments(issueKey))
+    .flatMap(({ deliveries }) => deliveries)
+    .filter((delivery) => delivery.session_id === plannerSession.session_id)
+    .map(({ attempt, comment_id, state }) => ({ attempt, comment: comment_id, state }));
+}
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -61,10 +81,13 @@ test("a send whose answer is lost is tried again under its key, and delivered on
     // the way back, as a dropped connection loses it.
     const firstAnswer = dropFirstAnswer(page, `**${messages}`, "POST");
     const landed = replayed(page, "POST", messages);
+    // The replay waits `FIRST_BACKOFF_MS` after the lost answer; the page's own clock runs that
+    // wait out, so nothing here is spent on it.
+    await page.clock.install();
     await openAgents(page);
     await send(page, "Exactly once, please");
 
-    const answer = await landed;
+    const answer = await runClockUntil(page, landed);
     expect(await firstAnswer).toBe(201);
     // The repeat is answered what the first attempt was.
     expect(answer.status()).toBe(201);
@@ -113,11 +136,14 @@ test("a send a server that is down answers 503 is tried again, not refused, and 
         new URL(response.url()).pathname === messages &&
         response.status() === 201
     );
+    // The second attempt waits `FIRST_BACKOFF_MS` after the 503; the page's own clock runs that
+    // wait out, so nothing here is spent on it.
+    await page.clock.install();
     await openAgents(page);
     await send(page, "Once, after the outage");
 
     // The 503 never reached Dispatch, so the second attempt is the first it answers.
-    expect((await landed).headers()["idempotency-replayed"]).toBeUndefined();
+    expect((await runClockUntil(page, landed)).headers()["idempotency-replayed"]).toBeUndefined();
     expect(refused).toBe(true);
     expect(posts).toHaveLength(2);
     const [first, second] = posts;
@@ -196,10 +222,13 @@ test("a broadcast whose answer is lost is tried again under its key, and each ag
     const posted = postedBroadcasts(page);
     const firstAnswer = dropFirstAnswer(page, `**${broadcasts}`, "POST");
     const landed = replayed(page, "POST", broadcasts);
+    // The replay waits `FIRST_BACKOFF_MS` after the lost answer; the page's own clock runs that
+    // wait out, so nothing here is spent on it.
+    await page.clock.install();
     await openAgents(page);
     await broadcast(page, "Exactly once, everyone");
 
-    const answer = await landed;
+    const answer = await runClockUntil(page, landed);
     expect(await firstAnswer).toBe(201);
     // The page opens the broadcast the repeat was answered with, which is the one the lost
     // answer made.
@@ -287,7 +316,6 @@ test("a broadcast held through a reload is resumed under its key, and each agent
 test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout @phone", async ({
   browser,
 }) => {
-  test.setTimeout(90_000);
   await seedAgents();
   await publishAgentStreamFrame(
     plannerSession.session_id,
@@ -318,6 +346,7 @@ test("two live-view sends pressed during an outage go out in press order, each o
     const page = await alice.newPage();
     const posts = watchWrites(page, "POST", messages);
     const answers = watchAnswers(page, "POST", messages);
+    await page.clock.install();
     await page.goto(`/agents/${plannerSession.session_id}/live`);
     await expect(page.getByTestId("agent-thread")).toContainText("Start the release notes");
     const composer = page.getByTestId("agent-composer");
@@ -338,11 +367,16 @@ test("two live-view sends pressed during an outage go out in press order, each o
     expect(await getSentMessages()).toEqual([]);
 
     await alice.setOffline(false);
-    await expect
-      .poll(() => new Set(answers.filter((a) => a.status === 201).map((a) => a.key)).size, {
-        timeout: 45_000,
-      })
-      .toBe(2);
+    // Both presses are queued, so driving the clock cannot reorder them: it only runs out the
+    // backoff each held attempt is waiting on (`pause`, `keyed-write.ts`).
+    await runClockUntil(
+      page,
+      expect
+        .poll(() => new Set(answers.filter((a) => a.status === 201).map((a) => a.key)).size, {
+          timeout: 30_000,
+        })
+        .toBe(2)
+    );
     expect((await getSentMessages()).map((sent) => sent.message)).toEqual([first, second]);
     // Two presses, two keys, the first press's key first.
     const keys = [...new Set(posts.map((post) => post.key))];
@@ -356,10 +390,14 @@ test("two live-view sends pressed during an outage go out in press order, each o
 
 // A comment's @-mention is delivered once even when the page gives up on the comment while
 // Dispatch is still writing it. Dispatch is slow on its own side (the slow-write hook holds the
-// comment 18 s once its key is claimed, inside the request), so the page's attempt, silent all
-// that time, is cut off at 15 s. The first run still commits the comment and answers; the page's
-// repeat under the same key waits on it and is answered with the comment, and the mention, sent
-// after the first run's answer, reaches the session once.
+// comment 18 s once its key is claimed, before the handler runs), so the page's attempt, silent
+// all that time, is cut off at the 15 s it waits on one silent attempt (`KEYED_SEND_ATTEMPT_MS`),
+// which its own clock is jumped past inside the hold. The first run still commits the comment and
+// answers; the page's repeat under the same key waits on it and is answered with the comment, and
+// the mention, sent after the first run's answer, reaches the session once.
+// SLOW(>=2s): the hook's 18 s hold is the server's own time, which no page clock can move, and the
+// row waits out the first run before its repeat is answered. The page's own 15 s cut-off is the
+// one `page.clock` drives, which lands it early in that hold.
 test("a comment the page gives up on while Dispatch still writes it is answered from its key, its @-mention delivered once @phone", async ({
   browser,
 }) => {
@@ -372,6 +410,7 @@ test("a comment the page gives up on while Dispatch still writes it is answered 
     const page = await alice.newPage();
     const posts = watchWrites(page, "POST", path);
     const landed = replayed(page, "POST", path);
+    await page.clock.install();
     await page.goto(`/issues/${issueKey}/conversation`);
     const form = page.getByRole("form", { name: "Comment composer" }).last();
     const field = form.getByLabel("Comment");
@@ -383,23 +422,25 @@ test("a comment the page gives up on while Dispatch still writes it is answered 
       .click();
     await form.getByRole("button", { exact: true, name: "Send" }).click();
 
+    // The write is held and has not landed: the page has made its one attempt, and the hook waits
+    // before the handler runs, so nothing is committed and no mention has been sent. That is the
+    // window the page's cut-off has to land in, and the page's own clock is what puts it there.
+    await expect.poll(() => posts.length, { timeout: 15_000 }).toBe(1);
+    expect(await plannerAttempts(issueKey)).toEqual([]);
+    expect(await getSentMessages()).toEqual([]);
+    await page.clock.fastForward(15_000);
+
     const answer = await landed;
     expect(answer.status()).toBe(201);
     const comment: { id: string } = await answer.json();
     // The page gave up on its first attempt and asked again under the same key.
     expect(posts.length).toBeGreaterThanOrEqual(2);
     expect(new Set(posts.map((post) => post.key)).size).toBe(1);
-    // The mention's one attempt was delivered by the first run's sender, not by a later sweep.
+    // The mention's one attempt was delivered by the first run's sender, not by a later sweep, and
+    // it is the landed comment's.
     await expect
-      .poll(
-        async () =>
-          (await listComments(issueKey))
-            .find((listed) => listed.id === comment.id)
-            ?.deliveries.filter((delivery) => delivery.session_id === plannerSession.session_id)
-            .map((delivery) => ({ attempt: delivery.attempt, state: delivery.state })),
-        { timeout: 10_000 }
-      )
-      .toEqual([{ attempt: 1, state: "sent" }]);
+      .poll(() => plannerAttempts(issueKey), { timeout: 10_000 })
+      .toEqual([{ attempt: 1, comment: comment.id, state: "sent" }]);
     expect(
       (await getSentMessages()).filter((sent) => sent.target_session === plannerSession.session_id)
     ).toHaveLength(1);
@@ -416,6 +457,8 @@ test("a comment the page gives up on while Dispatch still writes it is answered 
 // the page is answered while that send is still under way: the mention's attempt reads pending
 // beside the answer, the page never repeats the write, and the mention reaches the session once,
 // by the send that runs after the answer.
+// SLOW(>=2s): the listener's 4 s answer to the mention's send is the server's own time, which no
+// page clock can move, and the row waits out that send to see the attempt it leaves `sent`.
 test("a comment whose @-mention's send is slow is answered before the send, with no repeat, and delivered once @phone", async ({
   browser,
 }) => {
