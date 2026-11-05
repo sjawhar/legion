@@ -1188,6 +1188,95 @@ test("a document's text is asked for before the entry chunk has arrived @phone",
   }
 });
 
+// The Markdown engine the page draws a document with - the headless Proof editor's chunk, 461 KB
+// to download and compile, and the engine built over it - used to be loaded before the page had
+// rendered anything: `openDocumentEarly` warmed it, and the shell warmed it again from its first
+// commit. That buys a reader their first block where the page has to draw it. It buys nothing at
+// all where the server drew the document's opening blocks into the page it sent
+// (`web/src/features/doc/first-screen.ts`), because `DocumentPreview` adopts those blocks instead
+// of parsing them - and on a phone at 4x CPU throttling that load is about a second and a half of
+// the page's own thread, taken in front of the issue page's first render, which is the render
+// that carries the document's surface, its socket and its editor (dispatch://INFRA-341, R11).
+//
+// So on such a page the engine waits for the document's own text, which is the first thing that
+// needs it. This row holds that text back and reads the browser's own resource timing: a page
+// that warmed the engine asked for its chunk seconds before the text answered.
+test("a page the server drew a document into loads no Markdown engine before the document's text @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "iphone",
+    "the engine's one reader here is the document's own preview, which is what a phone draws: " +
+      "at a width that opens the margin, its cards draw Markdown of their own"
+  );
+  test.setTimeout(180_000);
+  const { path } = await seedDocument("notes.md", shortDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // The document's text, held long enough that no order between it and the engine's chunk can
+    // be read as noise. Both routes, since the page reads the text by whichever its address
+    // named.
+    const textHeld = Promise.withResolvers<void>();
+    await page.route(
+      (url) => documentTextRoute.test(url.pathname),
+      async (route) => {
+        await textHeld.promise;
+        await route.continue();
+      }
+    );
+    await page.goto(path, { waitUntil: "commit" });
+
+    // The page has drawn everything it can without the text: the issue's own header, which waits
+    // on the issue read alone. A page that warms the engine has asked for its chunk by now.
+    await expect(page.locator("[data-issue-header]")).toBeVisible({ timeout: 60_000 });
+    textHeld.resolve();
+
+    const firstBlock = page
+      .locator(
+        '[aria-label="Document text"] [data-block-id], [aria-label="Document editor"] [data-block-id]'
+      )
+      .first();
+    await expect(firstBlock).toBeVisible({ timeout: 60_000 });
+    await expect(firstBlock).toContainText("The lease ledger");
+
+    // What the browser itself timed. The engine's chunk is the headless editor's entry
+    // (`@legion/proof-editor/headless`, `packages/proof-editor/src/lib-headless.ts`), which the
+    // build names after that module; nothing else on this page imports it.
+    const timed = await page.evaluate(() => {
+      const resources = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
+      const pathOf = (resource: PerformanceResourceTiming) => new URL(resource.name).pathname;
+      const text = /^\/api\/v1\/(issues\/[^/]+\/artifacts\/[^/]+|artifacts\/[^/]+)\/text$/;
+      return {
+        engineAskedMs: resources.find((resource) =>
+          /^\/assets\/lib-headless-[^/]*\.js$/.test(pathOf(resource))
+        )?.startTime,
+        textAnsweredMs: resources.find((resource) => text.test(pathOf(resource)))?.responseEnd,
+      };
+    });
+
+    expect(
+      timed.textAnsweredMs,
+      "the document's text was never read, so there is no moment to read the engine against"
+    ).toBeDefined();
+    expect(
+      timed.engineAskedMs,
+      "the page drew this document without asking for the Markdown engine's chunk at all: " +
+        "either the chunk is no longer named after `lib-headless.ts`, or nothing draws the " +
+        "document's own text any more"
+    ).toBeDefined();
+    expect(
+      timed.engineAskedMs ?? 0,
+      "the Markdown engine was asked for before the document's text had even answered, so it " +
+        "was warmed ahead of the render rather than loaded by the surface that draws the " +
+        "document (`open-document-early.ts`, `DeploymentResilience.tsx`)"
+    ).toBeGreaterThan(timed.textAnsweredMs ?? Number.POSITIVE_INFINITY);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a phone draws the margin's ask cards only once its reader opens the review panel @phone", async ({
   browser,
 }, testInfo) => {

@@ -8,7 +8,7 @@ import { parseAheadOfTheRender, warmMarkdownRenderer } from "../refs/markdown-en
 import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
 import { parseIssuePath } from "../refs/routes";
 import { leadingBlocks } from "./document-blocks";
-import { currentAddress, dropFirstScreen } from "./first-screen";
+import { currentAddress, dropFirstScreen, firstScreenAwaits } from "./first-screen";
 import { liveTextQueryOptions } from "./live-text";
 
 /**
@@ -53,6 +53,11 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
   // Whatever the address before this one left unread is this navigation's to drop, before
   // anything of this one is started: a read belongs to the opening it was made for.
   earlyTextRead = undefined;
+  // Whether the reader already has this document's opening blocks, because the server drew
+  // them into the page it sent: read before anything of this address is started, since the
+  // page's own preview takes them out as it mounts. It decides what is worth doing ahead of
+  // the render below, and nothing else.
+  const serverDrewTheFirstScreen = firstScreenAwaits(currentAddress(pathname));
   const route = parseIssuePath(pathname, search);
   // Every route whose page opens on a document: the Spec tab's, and a named artifact's, which is
   // a document or is nothing to read ahead for.
@@ -82,7 +87,7 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
           : primarySpec(issue);
       // A blob artifact, and a slug this issue has no artifact for, open no document.
       if (artifact?.kind === "doc") {
-        readTheTextEarly(client, artifact.id, bySlug);
+        readTheTextEarly(client, artifact.id, serverDrewTheFirstScreen, bySlug);
       }
     })
     // The issue could not be read, so nothing names a document to read ahead for.
@@ -92,15 +97,28 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
   // which the shell otherwise asks for only once it has rendered. The document draws inside
   // that page, so a read the page waits on is a read the document waits on.
   void client.prefetchQuery(userStateQuery());
-  // The engine that draws the document, started beside those reads rather than behind them.
-  // Its first screenful is parsed by the read-only headless engine (`DocumentPreview`), whose
-  // schema read and 461 KB chunk the shell otherwise asks for only once it has rendered -
-  // which on a phone put both, and the engine's own build, between the text arriving and the
-  // first block being drawn from it (dispatch://INFRA-341, R11). It is started after the reads
-  // above are out, since the build runs on the page's own thread in a long chain of
-  // continuations and the reads' answers are read on that thread too. The warm-up is the
-  // shell's own (`DeploymentResilience`), loads once however many callers ask, and draws
-  // nothing itself.
+  // The engine that draws the document, started beside those reads rather than behind them -
+  // but only where the reader has no document on the screen yet.
+  //
+  // Where the server drew this address's opening blocks into the page it sent
+  // (`first-screen.ts`), the reader is reading them about a second into the load and
+  // `DocumentPreview` adopts them rather than parsing them again, so neither this warm-up nor
+  // the parse of those same blocks in `readTheTextEarly` puts anything on the screen. What
+  // they do put there is 461 KB of headless editor to compile and an engine to build - one
+  // and a half seconds of the page's own thread on a phone at 4x CPU throttling - in front of
+  // the issue page's first render, which is the page that holds the document's surface, its
+  // socket and its editor (dispatch://INFRA-341, R11). So a page carrying the server's draw
+  // leaves the engine to the surface that needs it: `DocumentPreview`'s own render asks for
+  // it, a batch of the editor's build is already on its way by then, and the blocks the
+  // reader is reading never leave the screen. A page carrying no draw warms it here as
+  // before, since there the engine is what draws the reader's first block.
+  if (serverDrewTheFirstScreen) {
+    return;
+  }
+  // It is started after the reads above are out, since the build runs on the page's own thread
+  // in a long chain of continuations and the reads' answers are read on that thread too. The
+  // warm-up is the shell's own (`DeploymentResilience`), loads once however many callers ask,
+  // and draws nothing itself.
   void warmMarkdownRenderer().catch(() => undefined);
 }
 
@@ -139,10 +157,13 @@ let earlyTextRead: { artifactId: string; read: Promise<ArtifactText> } | undefin
  *  answer about the same document, made for this opening, so the cache takes it rather than
  *  asking a second time. One that fails says nothing about the document - the slug may name a
  *  file this issue no longer has - so the read by id is made in its place, as it would have
- *  been, and so is every retry. */
+ *  been, and so is every retry. `serverDrewTheFirstScreen` says the reader already has this
+ *  document's opening blocks, which is what decides whether those blocks are worth parsing
+ *  ahead of the render. */
 function readTheTextEarly(
   client: QueryClient,
   artifactId: string,
+  serverDrewTheFirstScreen: boolean,
   asked?: Promise<ArtifactText>
 ): void {
   // `staleTime: 0` because an admission takes this read: it has to be a read, never whatever
@@ -162,9 +183,18 @@ function readTheTextEarly(
   // parses it on its own thread inside that commit - 294-545 ms of one task on a phone at 4x
   // CPU throttling, in a task already over the 500 ms a reader feels as a freeze
   // (dispatch://INFRA-341, R11). Nothing waits for it here: there is no page yet.
-  void read
-    .then(({ markdown }) => parseAheadOfTheRender(leadingBlocks(markdown, markdownWorkerThreshold)))
-    .catch(() => undefined);
+  //
+  // Not where the server drew those same blocks into the page: the preview adopts them
+  // instead of parsing them (`first-screen.ts`), so this parse would draw nothing, and the
+  // engine it builds to make it is a second and a half of the page's own thread in front of
+  // the render it was meant to spare (`openDocumentEarly`).
+  if (!serverDrewTheFirstScreen) {
+    void read
+      .then(({ markdown }) =>
+        parseAheadOfTheRender(leadingBlocks(markdown, markdownWorkerThreshold))
+      )
+      .catch(() => undefined);
+  }
   void read.catch(() => {
     // A failed read is the document's own to report and to retry; what it must not do is wait
     // here for an admission to take.
