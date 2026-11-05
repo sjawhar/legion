@@ -396,7 +396,10 @@ func TestAnIssuePodOfTheEarlierLayoutIsStaleForEveryRoleAndReplacedByTheNextLaun
 
 // A pod of the earlier layout that ended before this daemon replaced it has no `roles` container:
 // each role's Gone names its own container's end and quotes that container's log, as the release
-// that built the pod did, rather than a status and a log of a container the pod never ran.
+// that built the pod did, rather than a status and a log of a container the pod never ran. The
+// tester's own container ended OOMKilled here, and its Gone carries no out-of-memory mark: the
+// note that mark sends is written for a role of an issue pod's one container, which this pod
+// never had (outOfMemory).
 func TestAnEndedPodOfTheEarlierLayoutReportsTheRolesOwnContainer(t *testing.T) {
 	labels := claimLabels(claim.RoleTester)
 	name := SandboxName(workerToken)
@@ -431,6 +434,9 @@ func TestAnEndedPodOfTheEarlierLayoutReportsTheRolesOwnContainer(t *testing.T) {
 		}
 		if obs.Kind != runtime.Gone || !strings.Contains(obs.Detail, "pod "+name+" (uid "+recorded+") Failed: ") || !strings.HasSuffix(obs.Detail, want) {
 			t.Errorf("%s: %s %q, want Gone ending %q", token, obs.Kind, obs.Detail, want)
+		}
+		if obs.OutOfMemory {
+			t.Errorf("%s: %q is marked out of memory; a container of the layout before one container is no issue pod's one container", token, obs.Detail)
 		}
 	}
 }

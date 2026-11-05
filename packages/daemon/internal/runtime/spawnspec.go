@@ -82,6 +82,9 @@ func ValidateSpawnSpec(spec SpawnSpec, runtimeOwned map[string]bool) error {
 	if len(spec.Prompt.RolePromptPaths) == 0 {
 		return refuse("no role prompt")
 	}
+	if path := spec.Prompt.MemoryInstructionsPath; path != "" && !filepath.IsAbs(path) {
+		return refuse("the memory instructions %q is not an absolute path", path)
+	}
 	backend, err := LookupBackend(spec.Backend)
 	if err != nil {
 		return refuse("%v", err)
@@ -154,7 +157,9 @@ func validateClaimShape(spec SpawnSpec, refuse func(string, ...any) error) error
 
 // validateControllerShape is the project controller's launch (`controller: daemon`): no issue, no
 // tree, no repository and no workspace — the controller works Dispatch, never a checkout — under
-// the project's controller token, which every runtime names its Secret and pod after.
+// the project's controller token, which every runtime names its Secret and pod after. It is in no
+// memory group and is told no memory instructions either: a memory group is a tree's, and the
+// controller runs in none.
 func validateControllerShape(spec SpawnSpec, refuse func(string, ...any) error) error {
 	for _, field := range []struct{ name, value string }{{"project", spec.Project}, {"boot token", spec.BootToken}} {
 		if field.value == "" {
@@ -172,6 +177,12 @@ func validateControllerShape(spec SpawnSpec, refuse func(string, ...any) error) 
 	}
 	if spec.DefaultBranch != "" {
 		return refuse("the controller works no repository, so it has no default branch (got %s)", spec.DefaultBranch)
+	}
+	if spec.Memory {
+		return refuse("the controller runs in no tree, so it is in no memory group")
+	}
+	if spec.Prompt.MemoryInstructionsPath != "" {
+		return refuse("the controller is told no memory instructions (got %s)", spec.Prompt.MemoryInstructionsPath)
 	}
 	return nil
 }

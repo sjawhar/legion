@@ -326,6 +326,43 @@ Run inside the Dispatch container it reaches that deployment's NATS with `ENVOY_
 It connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names and runs no `!` command, so it never reads `envoy.natsSeed`:
 a run against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
+## CI reconcile
+
+The Envoy listener records a check run and a check suite from the webhook GitHub sends it, and the Legion daemon reads the settlement those records produce.
+A webhook that reached no record leaves a head short of a check, and a head short of a check never settles: nothing announces it, and nobody is waiting on anything else.
+So every 5 minutes (`cireconcile.Interval`, Background loops, below) one Dispatch process reads each open pull request's head from GitHub and records every completed check run and completed check suite the listener's record of that head lacks.
+It runs under the lease `ci-reconcile` with that 5 minutes as its period, so one process serves each period however many run (Running more than one process, below), and its first pass is one interval after the start.
+
+- It is on when NATS is configured and the App's private key (`DISPATCH_APP_PEM_B64`) is present.
+  When it is off it logs one line at start, whichever of the two it lacks: `dispatch: CI reconcile off: it needs NATS and the GitHub App private key`.
+  It writes through the listener's own CI bucket, `envoy_ci_state`, which every pass binds afresh and none creates:
+  the listener stays the one owner of that bucket's TTL and its copies, and a pass that finds no bucket says so and reads GitHub nothing.
+
+- A pass reads every row of `repo_projects`, resolves each against GitHub (`GET /repos/{owner}/{repo}`) for the name and id GitHub itself gives it, and deduplicates by that id, so a repository mapped under both an old and a new name is read once.
+  Every record it writes is keyed by GitHub's own owner and name, never the row's, which is stored lower-cased:
+  a record keyed from the row would be a second record of the same head on a second settlement subject.
+  A row GitHub does not answer, or the App is not installed on, is named at WARN, counted and passed over.
+
+- For each head it reads the commit's check runs (`filter=all`) and its check suites, page by page, and records each completed one through the mapping a webhook's own body goes through, so a pass over a run the listener already recorded changes no record and publishes no settlement.
+  Only a completed run and a completed suite are recorded:
+  the CI store refuses to settle a head while any check its record holds is queued or running, and nothing takes a check out of a record, so one abandoned queued run would stop that head settling for good.
+  A `tester` or `architect` check run counts only from the App `DISPATCH_REVIEWER_APP_ID` names, by the rule the listener's webhook handler calls;
+  with that variable unset no verdict check is recorded, and the server says so once at start.
+
+- Every page is conditional on the `ETag` of its own last answer, so an unchanged page costs none of the rate limit, and requests go no more than two a second.
+  A head's ETags are kept only when every page answered and every observation the rules name was recorded, and are dropped when a page failed, when a write a later pass might land did not, and when the record they stand for has gone (the bucket's seven-day TTL, or a delete), so nothing is hidden behind a `304`.
+  A head whose answer held nothing to record keeps its ETags: it has no record to lose, and dropping them would read it in full at every pass for ever.
+  A write the CI store refuses because the record would pass its bound keeps them too: the record is written marked overflowed and never settles on the checks it could not hold, exactly as the listener's own writes leave it, so every later pass would meet the same refusal.
+
+- The shared GitHub rate limits in `github_rate_limits` are read before the pass, before each repository and before each head, under the App's scope and the installation's, and the first limit — one this process read, or one GitHub answered with — ends the pass where it stands.
+  The pass records no limit of its own: the App client records GitHub's own answer, as every process's App call does.
+
+- Every pass logs one INFO `msg="ci reconcile pass"` line: `list_pages`, `heads`, `head_requests`, `heads_not_modified`, `records`, `mappings_skipped`, `heads_too_large`, `rate_limited`, with `rate_limit_scope` and `rate_limit_until` when it stopped at one, and `duration`.
+  `records` counts the records the pass changed, one for each head whose record a write of the pass changed, never one for each observation it wrote:
+  a head's runs and its suites all write the one record of that head (`cistore.Key`), so a pass that records a head's run and its suite reports 1;
+  a write the CI store refuses for its bound counts for nothing, although it marks the record overflowed.
+  `DISPATCH_TEST_CI_RECONCILE_INTERVAL` replaces the 5 minutes for an end-to-end test, and a deployment never sets it.
+
 ## Moving uploaded files to the bucket
 
 With `DISPATCH_FILE_STORE_BUCKET` set, new uploads go to the bucket;
@@ -722,7 +759,7 @@ What the two processes share, and what each keeps to itself:
 
 - No leased background loop runs a pass beside another process's pass of the same loop.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose attempt lands inside another's pass finds it held and logs a skip.
-  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the hourly document compaction sweep (lease `document-compaction`, first tick at start, with or without NATS), the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
+  The ten timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the CI reconcile pass (lease `ci-reconcile`, beside the redelivery sweep in what it recovers), the hourly document compaction sweep (lease `document-compaction`, first tick at start, with or without NATS), the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
   — also record each pass in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
   — finds the period already served and logs the same skip: each runs once per period across the processes.
@@ -880,6 +917,12 @@ A process that finds it held tries again
   The webhook redelivery sweep (Webhook redelivery, above; `redeliver.Interval`) runs every 2 minutes, its first sweep at start.
   Each waits the interval plus up to a tenth again after every pass (`duty.Jittered`), drawn afresh every period, so two processes' passes drift apart rather than ticking in step.
   GitHub has no feed of what these three would miss.
+
+- The CI reconcile pass (`cireconcile.Interval`, lease `ci-reconcile`) runs every 5 minutes through `duty.RunLeased`, its first pass one interval after the start, and reads each open pull request's head of every repository `repo_projects` maps, recording every completed check run and completed check suite Envoy's listener record of that head lacks.
+  A webhook GitHub never delivered leaves a head short of a check, and a head short of a check never settles, which no notification announces either.
+  It needs NATS, whose `envoy_ci_state` bucket it binds and never creates, and the App private key; without either it is off and says so at start.
+  The pass compares a `tester` or `architect` check run's `app.id` against `DISPATCH_REVIEWER_APP_ID`, and with that variable unset records no verdict check at all.
+  Its tick records its period in `duty_passes`, so one process serves each period however many run, and `DISPATCH_TEST_CI_RECONCILE_INTERVAL` replaces the 5 minutes for an end-to-end test.
 
 - The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
   its pass records its period in `duty_passes` like the timers above, so the other process's tick inside a period already served skips.
