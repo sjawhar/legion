@@ -94,7 +94,18 @@ function report(overrides: Partial<LegionMetricsResponse> = {}): LegionMetricsRe
       finished_roots: 1,
       median_hours_roots_with_children: 40,
       median_hours_roots_without_children: 0,
-      weeks: [{ filed: { in_tree_at_design: 1 }, finished: 2, week: "2026-10-26T00:00:00Z" }],
+      weeks: [
+        {
+          filed: {
+            by_the_controller: 0,
+            in_tree_at_design: 1,
+            in_tree_later: 0,
+            out_of_tree: 0,
+          },
+          finished: 2,
+          week: "2026-10-26T00:00:00Z",
+        },
+      ],
     },
     to: WINDOW.to,
     work_time: {

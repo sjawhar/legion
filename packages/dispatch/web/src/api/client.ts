@@ -84,6 +84,7 @@ import type {
   LegionMetricsScope,
   LegionSetting,
   LegionSettingsChangeResponse,
+  LegionSettingVerdict,
   ListUsersResponse,
   MachineLoginsResponse,
   Message,
@@ -141,12 +142,20 @@ interface ErrorPayload {
   code?: string;
   error?: string;
   state?: UserIssueState;
+  /** The daemon's own verdict per dotted path. A Legion settings change the daemon applied and
+   *  could not record answers 500 with this body and no `error`
+   *  (`LegionSettingsChangeResponse`, which Dispatch relays with the daemon's status unchanged),
+   *  so the one refusal that says the change took effect is told apart by it. */
+  settings?: Readonly<Record<string, LegionSettingVerdict>>;
 }
 
 export class ApiError extends Error {
   readonly code: string | undefined;
   readonly status: number;
   readonly state: UserIssueState | undefined;
+  /** The per-path verdicts the body carried, for the one route that answers them with a failing
+   *  status (`ErrorPayload.settings`); undefined for every other refusal. */
+  readonly settings: Readonly<Record<string, LegionSettingVerdict>> | undefined;
   /** How long the server asked the caller to wait before trying again (`Retry-After` in
    *  delta-seconds, as Dispatch sends with a 503 refusing excess load), in milliseconds;
    *  undefined when the response carried none. */
@@ -158,6 +167,7 @@ export class ApiError extends Error {
     this.code = payload.code;
     this.status = status;
     this.state = payload.state;
+    this.settings = payload.settings;
     this.retryAfterMs = retryAfterMs;
   }
 }

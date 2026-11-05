@@ -56,6 +56,28 @@ const earlierDeploys: ChartSeries = {
   ],
 } as ChartSeries;
 
+/** Two issues of a window, as the Legion section's work-time card draws them: a row is an issue,
+ *  not a day, so two ranges hold different rows in the same positions. */
+const workTime: ChartSeries = {
+  kind: "spark",
+  format: (v) => `${v}h`,
+  label: "Work time",
+  max: 9,
+  points: [
+    { label: "INFRA-1", value: 5, partial: false },
+    { label: "INFRA-2", value: 2, partial: false },
+  ],
+};
+
+/** The compare range's own issues: one the window holds too, and one it does not. */
+const earlierWorkTime: ChartSeries = {
+  ...workTime,
+  points: [
+    { label: "INFRA-2", value: 4, partial: false },
+    { label: "INFRA-9", value: 9, partial: false },
+  ],
+} as ChartSeries;
+
 function rows(): string[][] {
   const table = screen.getByRole("table");
   return within(table)
@@ -166,6 +188,34 @@ test("a compare table puts the two ranges side by side with the change between t
   expect(screen.getByRole("table").querySelector("caption")?.textContent).toContain(
     "compared with 2026-08-04 to 2026-08-31"
   );
+});
+
+test("rows a chart names, rather than days, pair with the compare range by that name", () => {
+  const compare: ChartCompare = {
+    onRange: mock(),
+    range: precedingRange(WINDOW),
+    series: [earlierWorkTime],
+  };
+  render(
+    <Chart
+      compare={compare}
+      label="Work time to merge"
+      range={WINDOW}
+      rows={{ header: "Issue", over: "issue", pair: "name" }}
+      series={[workTime]}
+    />
+  );
+  showTable("Work time to merge");
+
+  // Row 1 of each range is a different issue, so the window's rows pair with the compare range's
+  // by key: the issue both ranges hold shows its change, and an issue only one of them holds
+  // has nothing on the other side rather than another issue's number.
+  expect(rows()).toEqual([
+    ["Issue", "Compare issue", "Work time", "Work time compare", "Work time change"],
+    ["INFRA-1", "\u2014", "5h", "\u2014", "\u2014"],
+    ["INFRA-2", "INFRA-2", "2h", "4h", "-2h"],
+    ["\u2014", "INFRA-9", "\u2014", "9h", "\u2014"],
+  ]);
 });
 
 test("a rolling window, whose end is the present, is named to the day its last bar draws", () => {

@@ -401,6 +401,38 @@ test("a refusal Dispatch itself made lands on the row it was made from", async (
   }
 });
 
+// The daemon applied the change and could not write it back to its `legion.yaml`: it answers
+// its own verdicts with a 500, which Dispatch relays unchanged (the daemon's
+// internal/api/settings_route.go, its `config.NotRecorded` arm). The change took effect, so the
+// row must not go back to the old value and must not read as a failure; the daemon's file is
+// what is missing, and its next restart is where the old value comes back.
+test("a change the daemon applied and could not store stays applied on the row, and says what is missing", async () => {
+  const put = spyOn(api, "putLegionProjectSettings").mockRejectedValue(
+    new ApiError(500, { settings: { admission_cap: { applied: "at-once" } } })
+  );
+  try {
+    await renderView(board({}, SETTINGS));
+
+    fireEvent.change(screen.getByLabelText("New value for admission_cap"), {
+      target: { value: "6" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Change admission_cap" }));
+
+    const answer = await screen.findByText(/could not write the change to its legion.yaml/);
+    expect(answer.textContent).toContain("Applied at once");
+    expect(screen.queryByText(/Couldn't change admission_cap/)).toBeNull();
+    const cap = document.querySelector('[data-legion-setting="admission_cap"]');
+    await waitFor(() =>
+      expect(cap?.querySelector("[data-legion-setting-value]")?.textContent).toBe("6")
+    );
+    expect(cap?.querySelector('[data-legion-setting-source="route"]')?.textContent).toContain(
+      "Changed here by alice"
+    );
+  } finally {
+    put.mockRestore();
+  }
+});
+
 test("a value that is not JSON is refused here, and nothing is sent", async () => {
   const put = spyOn(api, "putLegionProjectSettings");
   try {

@@ -118,16 +118,29 @@ export interface DeliverySectionProps {
 }
 
 /** What one row of a chart's table is, where it is not a UTC day: the heading of the table's
- *  first column, and the caption's own words for the run the series draw ("<label> by <over>").
- *  The Legion section's cards draw a measure over the window by issue, by worker type and by UTC
- *  week; every other chart on the page draws one per UTC day. */
+ *  first column, the caption's own words for the run the series draw ("<label> by <over>"), and
+ *  how a compare range's rows pair with the window's. The Legion section's cards draw a measure
+ *  over the window by issue, by worker type and by UTC week; every other chart on the page draws
+ *  one per UTC day. */
 export interface ChartRows {
   readonly header: string;
   readonly over: string;
+  /** How the table pairs a compare range's row with the window's, which is what its change
+   *  column is the change between:
+   *
+   *    - `"position"`, the default: row *i* of each range is the *i*-th of its own run, which is
+   *      what a run of days or of UTC weeks is — two ranges of one length cover the same number
+   *      of them, and the pairs are the two ranges' first days, second days, and so on.
+   *    - `"name"`: a row pairs with the compare range's row of the same name, and a name only
+   *      one range holds is a row with nothing on the other side. A run whose rows are issues or
+   *      worker types is this: row *i* of two ranges is two different issues, so a change
+   *      between them would be the change between two unrelated numbers.
+   */
+  readonly pair?: "position" | "name";
 }
 
 /** What a run of per-day bars is: the rows every chart has unless it names its own. */
-const UTC_DAYS: ChartRows = { header: "Day", over: "UTC day" };
+const UTC_DAYS: ChartRows = { header: "Day", over: "UTC day", pair: "position" };
 
 export interface ChartProps {
   /** What the chart draws, in the reader's words: it names both controls and heads the table. */
@@ -282,6 +295,48 @@ function tableOf(series: readonly ChartSeries[]): ChartTable {
   };
 }
 
+/** The compare range's table while its read is out: no row pairs with anything. */
+const emptyTable: ChartTable = { columns: [], rows: [] };
+
+/** One line of the table: the window's row and the compare range's it is read against, either
+ *  of which is absent where that range holds no such row. */
+interface ChartPair {
+  readonly before: ChartRow | undefined;
+  readonly row: ChartRow | undefined;
+}
+
+/** The table's lines: every row of the window, each against the compare range's row it pairs
+ *  with, and then every row of the compare range that paired with none. `compared` is null where
+ *  nothing is compared, which is one line per window row.
+ *
+ *  `pair` is the chart's own rule (`ChartRows`): by position for a run of days or weeks, where
+ *  the *i*-th row of each range is the *i*-th of its own run, and by name for a run the rows
+ *  name — the issues, the worker types — where the *i*-th rows of two ranges are two different
+ *  things and a change between them would be no change at all. */
+function pairedRows(
+  table: ChartTable,
+  compared: ChartTable | null,
+  pair: "position" | "name"
+): ChartPair[] {
+  if (compared === null) return table.rows.map((row) => ({ before: undefined, row }));
+  if (pair === "position") {
+    return Array.from(
+      { length: Math.max(table.rows.length, compared.rows.length) },
+      (_, index) => ({
+        before: compared.rows[index],
+        row: table.rows[index],
+      })
+    );
+  }
+  const before = new Map(compared.rows.map((row) => [row.day, row]));
+  const paired: ChartPair[] = table.rows.map((row) => ({ before: before.get(row.day), row }));
+  const named = new Set(table.rows.map((row) => row.day));
+  for (const row of compared.rows) {
+    if (!named.has(row.day)) paired.push({ before: row, row: undefined });
+  }
+  return paired;
+}
+
 /** A number as the table reads it: nothing measured where there is none, and an ellipsis where
  *  the read that would hold it is still out. */
 function numberText(
@@ -413,14 +468,8 @@ function NumberTable({
   }
   notes.push(`${NOTHING} is a ${naming.header.toLowerCase()} with nothing measured`);
   const rows = useMemo(
-    () =>
-      !comparing
-        ? table.rows.map((row) => ({ before: undefined, row }))
-        : Array.from(
-            { length: Math.max(table.rows.length, compared?.rows.length ?? 0) },
-            (_, index) => ({ before: compared?.rows[index], row: table.rows[index] })
-          ),
-    [comparing, compared, table]
+    () => pairedRows(table, comparing ? (compared ?? emptyTable) : null, naming.pair ?? "position"),
+    [comparing, compared, naming.pair, table]
   );
   return (
     <div className={`max-h-48 overflow-auto rounded border ${borderDefault}`}>

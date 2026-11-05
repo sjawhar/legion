@@ -112,6 +112,11 @@ function retryAfter(
     return { grows: true, ms: backoff, wakes: true };
   }
   if (isUnauthorized(error)) return { grows: true, ms: backoff, wakes: false };
+  // A Legion settings change the daemon applied and could not write back to its `legion.yaml`
+  // is answered with the daemon's own per-path verdicts and the daemon's failing status, which
+  // Dispatch relays unchanged (`ApiError.settings`). It is Dispatch's verdict on the write, not
+  // a failure to reach it: the change took effect, and asking again would apply it again.
+  if (error instanceof ApiError && error.settings !== undefined) return undefined;
   if (!(error instanceof ApiError) || !retriesUnderKey(error.status, error.code)) return undefined;
   // Dispatch said when to come back: the first request under the key is still running, it is
   // turning requests away for now (`429`), or it was too busy for this one (`503 DATABASE_BUSY`,

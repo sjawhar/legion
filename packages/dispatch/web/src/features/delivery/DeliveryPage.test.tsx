@@ -527,6 +527,42 @@ test("while a facet pick waits for its snapshot, the header and freshness keep t
   serve(socket, snapshotFrame(picked.sub, { ...emptyTimeline, prs: [listedPR] }));
 });
 
+// The row is the page's one source row, and the page's other two sections read answers of their
+// own: a timeline read that fails leaves them drawing, so a row that went with it would read as
+// "no source has a verdict" rather than "this read failed" (INFRA-1077, review round 2).
+test("a timeline read that fails leaves the freshness row on screen beside the sections that still draw", async () => {
+  renderPage("/delivery?mode=list&window=7d");
+  const socket = await openSocket();
+  const { sub } = await subscription(socket, "timeline");
+  serve(socket, snapshotFrame(sub, emptyTimeline));
+  await screen.findByText(/^Generated .* · window/);
+  expect(
+    screen
+      .getByRole("region", { name: "Source freshness" })
+      .querySelector('[data-source="dispatch"]')?.textContent
+  ).toMatch(/^Dispatch \d+ s ago$/);
+
+  // A new window is a read of its own, which Dispatch refuses: the page holds no answer for it.
+  fireEvent.change(await screen.findByLabelText("Window"), { target: { value: "28d" } });
+  const moved = await subscriptionTo(socket, {
+    kind: "timeline",
+    window: { preset: 28 },
+    query: "",
+  });
+  serve(socket, errorFrame(moved.sub, "INTERNAL", "database unavailable"));
+  expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
+
+  // The Legion section still draws, and the row still says when each source was last checked.
+  expect(screen.getByRole("heading", { level: 2, name: "Legion: issue to merge" })).toBeDefined();
+  const row = screen.getByRole("region", { name: "Source freshness" });
+  expect(row.querySelector('[data-source="dispatch"]')?.textContent).toMatch(
+    /^Dispatch \d+ s ago$/
+  );
+  expect(
+    [...row.querySelectorAll("[data-source]")].map((node) => node.getAttribute("data-source"))
+  ).toEqual(["prs", "runs", "ci", "dispatch", "agents", "events"]);
+});
+
 test("the list sorts by its headers and a row opens the PR's details", async () => {
   const shipped: DeliveryPR = {
     ...listedPR,

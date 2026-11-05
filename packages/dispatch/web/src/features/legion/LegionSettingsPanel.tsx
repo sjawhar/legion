@@ -16,7 +16,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useMemo, useState } from "react";
 
-import { api, apiErrorMessage } from "../../api/client";
+import { ApiError, api, apiErrorMessage } from "../../api/client";
 import { legionBoardQuery, whoAmIQuery } from "../../api/queries";
 import type {
   LegionBoardResponse,
@@ -44,11 +44,13 @@ import {
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { describeSettingSource, describeVerdict, formatSettingValue } from "./lib/format";
 
-/** What one key of a change ended as, on the row it was made from: the daemon's verdict, a
+/** What one key of a change ended as, on the row it was made from: the daemon's verdict, that
+ *  verdict where the daemon applied the change and could not write it to its `legion.yaml`, a
  *  refusal Dispatch itself made (no daemon, the daemon unreachable, a credential naming one
  *  project), or an answer Dispatch could not keep. */
 type RowResult =
   | { readonly kind: "verdict"; readonly verdict: LegionSettingVerdict }
+  | { readonly kind: "unstored"; readonly verdict: LegionSettingVerdict }
   | { readonly kind: "failed"; readonly message: string }
   | { readonly kind: "unanswered" };
 
@@ -134,6 +136,20 @@ export function LegionSettingsPanel({ board }: { readonly board: LegionBoardResp
     inline: true,
     label: ({ key }) => `${key} changed on ${project}'s Legion daemon`,
     onError: (error, variables, context) => {
+      // A change the daemon applied and could not write back to its `legion.yaml` is answered
+      // with the daemon's own verdicts and a failing status, which Dispatch relays unchanged
+      // (daemon internal/api/settings_route.go's `config.NotRecorded` arm). The daemon is
+      // running on the new value, so the row stands as it was changed and says what is missing:
+      // rolling it back and calling the change failed would be false.
+      const unstored = error instanceof ApiError ? error.settings?.[variables.key] : undefined;
+      if (unstored !== undefined) {
+        setResults((current) => ({
+          ...current,
+          [variables.key]: { kind: "unstored", verdict: unstored },
+        }));
+        setDrafts((current) => withEntry(current, variables.key, undefined));
+        return;
+      }
       rollBack(variables.key, context?.previous);
       setResults((current) => ({
         ...current,
@@ -320,6 +336,14 @@ function RowAnswer({ result }: { readonly result: RowResult }): ReactNode {
       <span className={`text-xs ${textSecondaryOnSurface}`} role="status">
         Dispatch did not keep the daemon&apos;s answer; the next read of the daemon shows what it
         did.
+      </span>
+    );
+  }
+  if (result.kind === "unstored") {
+    return (
+      <span className={`text-xs ${textSecondaryOnSurface}`} role="status">
+        {describeVerdict(result.verdict).text} The daemon could not write the change to its
+        legion.yaml, so it runs on the new value and its next restart reads the file&apos;s own.
       </span>
     );
   }

@@ -8,6 +8,7 @@ import type {
   ISSUE_ROUTE_STATUSES,
   IssueStatus,
 } from "./dispatch-tools";
+import type { LegionRole } from "./legion-roles";
 
 export type AskUrgency = (typeof ASK_URGENCIES)[number];
 export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
@@ -4477,11 +4478,15 @@ export interface LegionBoardResponse {
 /** Which of a project's Legion issues an answer counts: the Legion section's own toggle. */
 export type LegionMetricsScope = "all" | "roots" | "children";
 
+/** The bar of metric 2 an hour falls on: one of Legion's six worker types (`LegionRole`), or the
+ *  seventh bar for the phases no role works (`metrics.bars`). */
+export type LegionBarRole = LegionRole | "no_role";
+
 /** One worker type's bar of metric 2, and the seventh bar for the phases no role works
  *  (`no_role`): the hours of every finished issue on it, how many of them spent time on it, the
  *  median hours per issue, and the bar split into the five segments in the precedence's order. */
 export interface LegionRoleBar {
-  readonly role: string;
+  readonly role: LegionBarRole;
   readonly hours: number;
   readonly issues: number;
   readonly median_hours_per_issue: number;
@@ -4523,12 +4528,21 @@ export interface LegionReworkIssue {
   readonly testing_hours_after_first_review: number;
 }
 
-/** One UTC week of metric 4: how many issues a Legion session filed in it of each class
- *  (`in_tree_at_design`, `in_tree_later`, `out_of_tree`, `by_the_controller`), against how many
- *  issues finished in it. `week` is the week's Monday. */
+/** What a filing of metric 4 is: filed by a Legion session of the filer's own tree at design or
+ *  after it, filed out of that tree, or filed by the project's controller, which works under no
+ *  issue (`metrics.classes`, in the order the card lists them). */
+export type LegionFilingClass =
+  | "in_tree_at_design"
+  | "in_tree_later"
+  | "out_of_tree"
+  | "by_the_controller";
+
+/** One UTC week of metric 4: how many issues a Legion session filed in it of each class, every
+ *  class counted even where nothing was filed of it, against how many issues finished in it.
+ *  `week` is the week's Monday. */
 export interface LegionSplittingWeek {
   readonly week: string;
-  readonly filed: Readonly<Record<string, number>>;
+  readonly filed: Readonly<Record<LegionFilingClass, number>>;
   readonly finished: number;
 }
 
@@ -4539,7 +4553,7 @@ export interface LegionFiledIssue {
   readonly key: string;
   readonly title: string;
   readonly at: string;
-  readonly class: string;
+  readonly class: LegionFilingClass;
   readonly filer: string;
   readonly filer_issue: string;
   readonly filer_phase: string;

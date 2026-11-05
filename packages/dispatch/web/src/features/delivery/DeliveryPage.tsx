@@ -41,6 +41,7 @@ import {
   PLACEHOLDER_LABELS,
   type ReworkFacet,
 } from "./lib/facets";
+import type { DeliveryFreshness } from "./lib/freshness";
 import { parentAgentLabel } from "./lib/parentAgent";
 import {
   DEFAULT_WINDOW_PRESET,
@@ -358,6 +359,15 @@ export function DeliveryPage(): ReactNode {
   const answeredAtRef = useRef(0);
   if (query.dataUpdatedAt > 0) answeredAtRef.current = query.dataUpdatedAt;
   const answeredAt = answeredAtRef.current;
+  // The freshness that answer carried, kept the same way: a window change starts a query of its
+  // own, and a read that fails leaves `query.data` undefined while the Legion and Pipeline
+  // sections go on drawing their own answers. A row that vanished there would read as "no source
+  // has a verdict" rather than "this read failed", so the last verdict stays on screen, ageing
+  // from `answeredAt`, until a read answers a new one. Null until the first answer, which is
+  // every source unknown and nothing to say.
+  const freshnessRef = useRef<DeliveryFreshness | null>(null);
+  if (data !== undefined) freshnessRef.current = data.freshness;
+  const freshness = freshnessRef.current;
 
   const activeWindow = useMemo(
     () =>
@@ -453,13 +463,15 @@ export function DeliveryPage(): ReactNode {
         )}
       </header>
 
-      {/* One freshness row for the whole page, at its head: the three sections read the same
-          reconcile, the same Dispatch tables and the same event intake, so one row names every
-          source of all three (INFRA-1077). Two rows would be two regions a reader, and a
-          screen reader, could not tell apart. */}
-      {data === undefined ? null : (
-        <SourceFreshness freshness={data.freshness} readAtMs={answeredAt} />
-      )}
+      {/* One freshness row for the whole page, at its head: the Pipeline and Delivery sections
+          read the same reconcile pass, the same Dispatch tables and the same event intake, so
+          one row names every source both of them draw from (INFRA-1077). Two rows would be two
+          regions a reader, and a screen reader, could not tell apart. The Legion section is not
+          in it: its numbers come from the sampler's own reads of each project's daemon
+          (`legion_reads`), which this row reports no source of. It is the freshness the page was
+          last answered (`freshness`), so a read that fails leaves it on screen beside the
+          sections that still draw. */}
+      {freshness === null ? null : <SourceFreshness freshness={freshness} readAtMs={answeredAt} />}
 
       <LegionSection compare={compareRange} onCompare={setCompareRange} window={state.window} />
 

@@ -19,6 +19,8 @@ import { type ReactNode, useMemo, useState } from "react";
 
 import { legionMetricsQuery, legionSettingsQuery } from "../../api/queries";
 import type {
+  LegionBarRole,
+  LegionFilingClass,
   LegionMetricsResponse,
   LegionMetricsScope,
   LegionReworkIssue,
@@ -68,12 +70,24 @@ const SEGMENTS: readonly { readonly key: keyof LegionSegments; readonly label: s
 ];
 
 /** The four classes of filing, in the order the card lists them (`metrics.classes`). */
-const CLASSES: readonly { readonly key: string; readonly label: string }[] = [
+const CLASSES: readonly { readonly key: LegionFilingClass; readonly label: string }[] = [
   { key: "in_tree_at_design", label: "In the tree, at design" },
   { key: "in_tree_later", label: "In the tree, later" },
   { key: "out_of_tree", label: "Out of the tree" },
   { key: "by_the_controller", label: "By the controller" },
 ];
+
+/** What each bar of metric 2 is called: the worker type, and "no role" for the seventh bar,
+ *  which holds the phases no role works. */
+const ROLES: Readonly<Record<LegionBarRole, string>> = {
+  architect: "architect",
+  planner: "planner",
+  implementer: "implementer",
+  tester: "tester",
+  reviewer: "reviewer",
+  merger: "merger",
+  no_role: "no role",
+};
 
 /** Hours as the page's other durations read ("3.2h"), which `formatDuration` writes in minutes. */
 const hours = (value: number): string => formatDuration(value * 60);
@@ -124,10 +138,9 @@ export function workTimeSeries(report: LegionMetricsResponse): ChartSeries[] {
 export function phaseTimeSeries(report: LegionMetricsResponse): ChartSeries[] {
   const bars = report.phase_time.bars;
   const max = topOf(bars.map((bar) => bar.hours));
-  // The seventh bar is the phases no role works, which reads as "no role" rather than its key.
   const points = (value: (bar: (typeof bars)[number]) => number) =>
     bars.map((bar) => ({
-      label: bar.role === "no_role" ? "no role" : bar.role,
+      label: ROLES[bar.role],
       partial: false,
       value: value(bar),
     }));
@@ -202,7 +215,7 @@ export function splittingSeries(report: LegionMetricsResponse): ChartSeries[] {
     })),
   });
   return [
-    ...CLASSES.map((filing) => run(filing.label, (week) => week.filed[filing.key] ?? 0)),
+    ...CLASSES.map((filing) => run(filing.label, (week) => week.filed[filing.key])),
     run("Issues finished", (week) => week.finished),
   ];
 }
@@ -361,7 +374,7 @@ export function LegionMetrics({
             compare={chartCompare(compare, compared?.workTime)}
             label="Work time to merge"
             range={range}
-            rows={{ header: "Issue", over: "issue" }}
+            rows={{ header: "Issue", over: "issue", pair: "name" }}
             series={series.workTime}
           />
         </MetricCard>
@@ -374,7 +387,7 @@ export function LegionMetrics({
             compare={chartCompare(compare, compared?.phaseTime)}
             label="Phase time by worker type"
             range={range}
-            rows={{ header: "Worker type", over: "worker type" }}
+            rows={{ header: "Worker type", over: "worker type", pair: "name" }}
             series={series.phaseTime}
           />
         </MetricCard>
@@ -394,7 +407,7 @@ export function LegionMetrics({
             compare={chartCompare(compare, compared?.rework)}
             label="Rework"
             range={range}
-            rows={{ header: "Issue", over: "issue" }}
+            rows={{ header: "Issue", over: "issue", pair: "name" }}
             series={series.rework}
           />
         </MetricCard>
@@ -419,7 +432,7 @@ export function LegionMetrics({
             compare={chartCompare(compare, compared?.splitting)}
             label="Splitting and follow-ups"
             range={range}
-            rows={{ header: "Week", over: "UTC week" }}
+            rows={{ header: "Week", over: "UTC week", pair: "position" }}
             series={series.splitting}
           />
         </MetricCard>
