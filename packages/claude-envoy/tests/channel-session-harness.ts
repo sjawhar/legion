@@ -371,7 +371,7 @@ export function recordingClient(calls: string[], overrides: Partial<FakeClient> 
       )
       return { claimed: true, interest: noInterest() }
     },
-    getRole: async (role) => ({ role, holder: "ses_claude", last_seen: 1 }),
+    getRole: async (role) => ({ role, holder: "ses_claude", last_seen: 1, state: "live" }),
     getInterest: async (sessionID) => {
       calls.push("getInterest")
       return {
