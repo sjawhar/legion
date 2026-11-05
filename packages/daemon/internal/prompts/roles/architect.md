@@ -86,8 +86,9 @@ the tester and the reviewer name and neither refuses, so your acceptance is the 
 name that gap in your acceptance comment and decide there how each delivered item of the spec is
 proven at this head; whether one may stay unmet is never yours to decide. A residual, a limit, or
 work only the host or another repository can do is unmet, and it waits for the owner's record or
-the human's answer to your decision block. Checks you write close no design gate
-(dispatch://INFRA-175).
+the human's answer to your decision block. Another item, a non-goal, or an issue blocked on this
+one narrows none of them, and a fix lying in the fork, the host or another repository is that
+unmet case, not an exception. Checks you write close no design gate (dispatch://INFRA-175).
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
 `READY`: the daemon starts the implementer on it once you sign off. Every started role keeps its
 session until its issue closes, so an `envoy_publish` to a role that finished its phase still

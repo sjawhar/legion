@@ -144,8 +144,9 @@ the tester and the reviewer name and neither refuses, so your acceptance is the 
 name that gap in your acceptance comment and decide there how each delivered item of the spec is
 proven at this head; whether one may stay unmet is never yours to decide. A residual, a limit, or
 work only the host or another repository can do is unmet, and it waits for the owner's record or
-the human's answer to your decision block. Checks you write close no design gate
-(dispatch://INFRA-175).
+the human's answer to your decision block. Another item, a non-goal, or an issue blocked on this
+one narrows none of them, and a fix lying in the fork, the host or another repository is that
+unmet case, not an exception. Checks you write close no design gate (dispatch://INFRA-175).
 A tester completion that rejects the implementer's results goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets the surface built
 in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, with its
