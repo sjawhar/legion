@@ -566,8 +566,10 @@ package api
 // memory, and nothing else: it is read within two minutes of the turn it is about, so no store
 // write comes with it (`internal/supervise/turnoutcome.go`).
 // The same number carries the end of fix-attempt counting: `legion.yaml` no longer takes
-// `max_fix_attempts`, and a file carrying it is refused by name, so the settings block of `GET
-// /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer models it.
+// `max_fix_attempts`, and a file carrying it loads with a warning naming the removal, which boot
+// logs and `legion start --check-config` prints, rather than a refusal, so the settings block of
+// `GET /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer models
+// it.
 // Each issue's pull request in that state loses `fixAttempts` (`api.PullRequestView`), which
 // counted the heads pushed onto a red verdict. A red CI verdict now sends the work back to the
 // implementer every time it stands, however many came before, and the architect decides when to
@@ -576,9 +578,13 @@ package api
 // block is loose, so a plugin before 50 reads a state without `max_fix_attempts` — but its strict
 // pull-request reader refuses one without `fixAttempts`, which is the second thing this number is
 // for: the boot gate and `legion probe-image` refuse a plugin before 50 against this daemon, and
-// this daemon's own 404 refuses the other order. This change adds no store migration;
+// this daemon's own 404 refuses the other order. The removal adds no store migration;
 // `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped columns that nothing
-// reads, each given its zero on an insert (`record`'s PutPullRequest). (This branch took 47 for
+// reads, each given its zero on an insert (`record`'s PutPullRequest). The turn-outcome half of
+// this number ships one, `20261105004846_provider_error_retry.up.sql`: the two columns a task a
+// provider error took back is kept by (`pending_task_deliveries.provider_error_retries` and
+// `provider_error_note`) and the claim's run of such turns (`claims.provider_error_run`).
+// (This branch took 47 for
 // the route and 48 for the removal; main then merged the idle-pod release at 48 while this branch
 // was open, so both paragraphs are one paragraph at the number above it; main then landed
 // INFRA-1101's memory group at 49 and released pi-legion v18.9.0 declaring it without these

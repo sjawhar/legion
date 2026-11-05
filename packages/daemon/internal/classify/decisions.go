@@ -19,13 +19,13 @@ type Arrival struct {
 	At, Since      time.Time
 }
 
-// AdvancePullRequestHead applies the shipped resetPrHead fix-attempt decision to a new observed
-// head (advance), arriving by the move arrival names. A head that arrives before every push of its
+// AdvancePullRequestHead applies the shipped resetPrHead decision to a new observed head
+// (advance), arriving by the move arrival names. A head that arrives before every push of its
 // move is recorded - no chain of recorded pushes leads to it from the recorded head
 // (arrivalPushes), or its synchronize names a move the pushes cannot yet tell - opens a head run,
 // and a head that arrives while one is open joins it: each push, and each move a late synchronize
-// names (NameMove), replays the run (replayRun), so the count and the planned mark are those every
-// push and synchronize arriving first would have given.
+// names (NameMove), replays the run (replayRun), so the planned mark is the one every push and
+// synchronize arriving first would have given.
 func AdvancePullRequestHead(pr record.PullRequest, arrival Arrival, headSHA string) record.PullRequest {
 	if pr.Run == nil {
 		if read := arrivalPushes(pr, arrival, headSHA, nil); (read.chained(pr.HeadSHA, headSHA) && !read.waits) || pr.HeadSHA == "" {
@@ -852,12 +852,12 @@ func arrivalPlan(pushes []record.ClassifiedPush, from, to string) (planned, chai
 // the same two heads pushed again only by a head's next arrival by that move (arrivalPushes). While
 // a head run is open - a head arrived before every push of its move was recorded - the push joins
 // the run's pushes, the run drops what the record's bound let go, and the run is replayed
-// (replayRun): the count, its mark, the planned mark and the CI settlement become those every push
-// arriving before every head would have given. With no run open no head waits for a push of its
+// (replayRun): the planned mark and the CI settlement become those every push arriving before
+// every head would have given. With no run open no head waits for a push of its
 // move - or the run that held one was cut to its bound (maxRunSteps) - and a push changes no
 // judgement until a head arrives: a push that reached the recorded head from another head - the
-// required-checks pass's compare from an approved head - says nothing about the move the count
-// counted.
+// required-checks pass's compare from an approved head - says nothing about the move that
+// brought the record to that head.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
 	pr, _ = ApplyPushDropping(pr, push)
 	return pr

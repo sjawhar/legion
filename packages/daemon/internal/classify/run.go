@@ -16,8 +16,8 @@ import (
 // arrived first is never cut loose from it, however many heads follow one lost push.
 const maxRunSteps = 32
 
-// A head run (record.PullRequest.Run) makes the fix-attempt count, its mark, the planned mark and
-// the CI settlement the same in every order GitHub delivers a pull request's pushes, heads and
+// A head run (record.PullRequest.Run) makes the planned mark and the CI settlement the same in
+// every order GitHub delivers a pull request's pushes, heads and
 // settlements in. A head that arrives before every push of its move is recorded opens one: its
 // anchor is the judgement before that head, and every fact applied while it is open is a step -
 // a head, a settlement, a required read, the clearing of the head the required workflows were

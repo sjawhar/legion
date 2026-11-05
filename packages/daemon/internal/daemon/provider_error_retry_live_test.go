@@ -36,12 +36,12 @@
 // `runtime.tmux.pi_config_files` carries), so the host walks no fallback chain of its own and
 // every failed turn reaches the daemon.
 //
-// How long it takes. The ladder's first three gaps are waited out where they are real: 30 s, 60 s
-// and 120 s of wall clock, measured between the daemon's sends. The fourth and fifth steps, 240 s
-// and 480 s, are driven on the daemon's own clock (ladderClock, which shortens exactly those two
-// durations and no others), because waiting them out would add twelve minutes and measure the same
-// ladder twice. With the pod's Oh My Pi the whole driver runs in about eight minutes, inside the
-// twenty-minute bound scripts/e2e/lib/live-daemon-proof.sh gives it.
+// How long it takes. The ladder's first ladderWaitedOut rungs are waited out where they are real:
+// 30 s, 60 s and 120 s of wall clock, measured between the daemon's sends. Every rung above them
+// is driven on the daemon's own clock (ladderDriven, ladderClock), because waiting the fourth and
+// fifth out would add twelve minutes and measure the same ladder twice. With the pod's Oh My Pi
+// the whole driver runs in about eight minutes, inside the twenty-minute bound
+// scripts/e2e/lib/live-daemon-proof.sh gives it.
 package daemon
 
 import (
@@ -57,6 +57,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,12 +100,30 @@ const (
 const ladderSends = 6
 
 // ladderDelays are the waits the ladder arms before each re-send, in order (supervise's
-// promptRetryDelay from attempt 1).
+// promptRetryDelay from attempt 1). Each send of step 1 reads the daemon's own armed wait back
+// against the rung here, so a ladder that changed and left this list behind fails the proof
+// rather than passing on the old numbers.
 var ladderDelays = []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute}
 
-// ladderDriven are the two ladder waits the proof drives on the daemon's clock rather than waits
-// out, each shortened to the same short span.
-var ladderDriven = map[time.Duration]time.Duration{4 * time.Minute: 2 * time.Second, 8 * time.Minute: 2 * time.Second}
+// ladderWaitedOut is how many of the ladder's rungs the proof waits out where they are real: its
+// first three. Every rung above them is driven (ladderDriven).
+const ladderWaitedOut = 3
+
+// ladderDrivenSpan is what a driven rung is armed for instead: short enough that the two rungs
+// cost seconds rather than twelve minutes, long enough that the send is the timer's and not a
+// race with the turn that armed it.
+const ladderDrivenSpan = 2 * time.Second
+
+// ladderDriven says whether wait is a rung of the ladder the proof drives on the daemon's clock
+// rather than waits out, and the span it is armed for instead. The rungs are read off
+// ladderDelays, so a ladder that grows a step or changes one is still shortened above
+// ladderWaitedOut rather than leaving a literal duration behind that matches nothing.
+func ladderDriven(wait time.Duration) (time.Duration, bool) {
+	if slices.Contains(ladderDelays[ladderWaitedOut:], wait) {
+		return ladderDrivenSpan, true
+	}
+	return 0, false
+}
 
 // ladderTolerance is how much longer than its armed wait a send-to-send gap may be: the turn whose
 // error armed the wait runs inside the gap, and so does the agent's own start of the next one.
@@ -164,7 +183,7 @@ func newProviderErrorLive(t *testing.T) *providerErrorLive {
 	takeOwnDatabase(t)
 	proof := newLiveProof(t, "scripts/e2e/provider-error-retry.sh")
 	r := &providerErrorLive{
-		liveProof: proof, built: &built{}, clock: newLadderClock(ladderDriven), omp: omp,
+		liveProof: proof, built: &built{}, clock: &ladderClock{}, omp: omp,
 		ladder: proof.cfg.Project + "-1", refused: proof.cfg.Project + "-2", failing: proof.cfg.Project + "-3",
 		stands: map[string]*modelStandin{},
 	}
@@ -338,7 +357,7 @@ func (r *providerErrorLive) ladderWalks() {
 	for attempt := 1; attempt < ladderSends; attempt++ {
 		delay := ladderDelays[attempt-1]
 		within := delay + ladderTolerance
-		if driven, ok := ladderDriven[delay]; ok {
+		if driven, ok := ladderDriven(delay); ok {
 			within = driven + ladderTolerance
 		}
 		r.awaitLog("the ladder's send "+strconv.Itoa(attempt+1), within+time.Minute, func(record loggedRecord) bool {
@@ -358,7 +377,7 @@ func (r *providerErrorLive) ladderWalks() {
 		now := time.Now()
 		gap := now.Sub(sent[attempt-1])
 		sent = append(sent, now)
-		if driven, ok := ladderDriven[delay]; ok {
+		if driven, ok := ladderDriven(delay); ok {
 			r.note("send %d came %s after send %d; its %s wait was driven on the daemon's clock to %s",
 				attempt+1, gap.Round(time.Second), attempt, delay, driven)
 			continue
@@ -1092,30 +1111,19 @@ func (s *modelStandin) requestsHolding(marker string) int {
 
 // ---- the daemon's clock and its log ----------------------------------------------------------------
 
-// ladderClock is the wall clock with named waits shortened. The ladder's fourth and fifth steps
-// are twelve minutes of waiting that prove the same doubling the first three do, so each is armed
-// for a short span instead; every other duration the daemon arms — its probe interval, its
-// registration deadline, its two-minute wait for a turn-outcome report, the ladder's own 30 s,
-// 60 s and 120 s — passes through untouched, so what the proof measures is measured where it is
-// real.
+// ladderClock is the wall clock with the ladder's driven rungs shortened: a timer armed for one
+// of them (ladderDriven, read off ladderDelays) fires after ladderDrivenSpan instead, because
+// waiting the fourth and fifth rungs out would add twelve minutes and prove the same doubling the
+// first three do. Every other duration the daemon arms — its probe interval, its registration
+// deadline, its two-minute wait for a turn-outcome report, and the ladder's own waited-out rungs
+// — passes through untouched, so what the proof measures is measured where it is real.
 type ladderClock struct {
 	supervise.RealClock
-	shorten map[time.Duration]time.Duration
-
-	mu     sync.Mutex
-	driven map[time.Duration]int
-}
-
-func newLadderClock(shorten map[time.Duration]time.Duration) *ladderClock {
-	return &ladderClock{shorten: shorten, driven: map[time.Duration]int{}}
 }
 
 func (c *ladderClock) AfterFunc(d time.Duration, f func()) supervise.Cancel {
-	if to, ok := c.shorten[d]; ok {
-		c.mu.Lock()
-		c.driven[d]++
-		c.mu.Unlock()
-		d = to
+	if driven, ok := ladderDriven(d); ok {
+		d = driven
 	}
 	return c.RealClock.AfterFunc(d, f)
 }
@@ -1130,22 +1138,33 @@ type loggedRecord struct {
 
 // recordingLog is the daemon's own log handler with every record also kept in memory, so a step
 // can read what the daemon decided and when. The records still go wherever liveProof.log() sends
-// them, which is the script's evidence file.
+// them, which is the script's evidence file. A handler the daemon derives with WithAttrs or
+// WithGroup is another recordingLog over the derived inner handler, keeping its records on the
+// same keptRecords and carrying the derivation's attributes, so a step reads a claim's `claim`
+// attribute whether the daemon set it per record or on the logger.
 type recordingLog struct {
+	*keptRecords
 	inner slog.Handler
+	attrs []slog.Attr
+}
 
+// keptRecords is the records the root handler and every handler derived from it share.
+type keptRecords struct {
 	mu      sync.Mutex
 	records []loggedRecord
 }
 
 func newRecordingLog(logger *slog.Logger) *recordingLog {
-	return &recordingLog{inner: logger.Handler()}
+	return &recordingLog{keptRecords: &keptRecords{}, inner: logger.Handler()}
 }
 
 func (l *recordingLog) Enabled(context.Context, slog.Level) bool { return true }
 
 func (l *recordingLog) Handle(ctx context.Context, record slog.Record) error {
 	kept := loggedRecord{Message: record.Message, Attrs: map[string]any{}, at: time.Now()}
+	for _, attr := range l.attrs {
+		kept.Attrs[attr.Key] = decodeAttr(attr.Value)
+	}
 	record.Attrs(func(attr slog.Attr) bool {
 		kept.Attrs[attr.Key] = decodeAttr(attr.Value)
 		return true
@@ -1180,11 +1199,12 @@ func decodeAttr(value slog.Value) any {
 }
 
 func (l *recordingLog) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &recordingLogChild{parent: l, inner: l.inner.WithAttrs(attrs), attrs: attrs}
+	return &recordingLog{keptRecords: l.keptRecords, inner: l.inner.WithAttrs(attrs),
+		attrs: append(append([]slog.Attr{}, l.attrs...), attrs...)}
 }
 
 func (l *recordingLog) WithGroup(name string) slog.Handler {
-	return &recordingLogChild{parent: l, inner: l.inner.WithGroup(name)}
+	return &recordingLog{keptRecords: l.keptRecords, inner: l.inner.WithGroup(name), attrs: l.attrs}
 }
 
 func (l *recordingLog) count() int {
@@ -1216,42 +1236,4 @@ func (l *recordingLog) firstAfter(from int, want func(loggedRecord) bool) *logge
 		}
 	}
 	return nil
-}
-
-// recordingLogChild is a handler the daemon derived with WithAttrs or WithGroup: it writes through
-// to its own inner handler and keeps the record on the root, with the attributes the derivation
-// carries, so a step reads a claim's `claim` attribute whether the daemon set it per record or on
-// the logger.
-type recordingLogChild struct {
-	parent *recordingLog
-	inner  slog.Handler
-	attrs  []slog.Attr
-}
-
-func (l *recordingLogChild) Enabled(context.Context, slog.Level) bool { return true }
-
-func (l *recordingLogChild) Handle(ctx context.Context, record slog.Record) error {
-	kept := loggedRecord{Message: record.Message, Attrs: map[string]any{}, at: time.Now()}
-	for _, attr := range l.attrs {
-		kept.Attrs[attr.Key] = decodeAttr(attr.Value)
-	}
-	record.Attrs(func(attr slog.Attr) bool {
-		kept.Attrs[attr.Key] = decodeAttr(attr.Value)
-		return true
-	})
-	l.parent.mu.Lock()
-	l.parent.records = append(l.parent.records, kept)
-	l.parent.mu.Unlock()
-	if l.inner.Enabled(ctx, record.Level) {
-		return l.inner.Handle(ctx, record)
-	}
-	return nil
-}
-
-func (l *recordingLogChild) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &recordingLogChild{parent: l.parent, inner: l.inner.WithAttrs(attrs), attrs: append(append([]slog.Attr{}, l.attrs...), attrs...)}
-}
-
-func (l *recordingLogChild) WithGroup(name string) slog.Handler {
-	return &recordingLogChild{parent: l.parent, inner: l.inner.WithGroup(name), attrs: l.attrs}
 }

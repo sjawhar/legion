@@ -124,7 +124,7 @@ func TestPushesAreSpentOnceTheirMoveIsJudged(t *testing.T) {
 
 // Dispatch's redelivery sweep can deliver a push up to three days late, after its head arrived and
 // the branch moved on, under a delivery of its own. The push is the move's the record already
-// judged, and it changes nothing: not the count, its mark, the planned mark or the settlement, and
+// judged, and it changes nothing: not the planned mark, not the settlement, and
 // not the pushes the record keeps, recorded once under its two heads. A push so old that the
 // record has let its move go (maxMoves) waits for a link no head brings and, with no head run
 // open, judges nothing and is no code on its way.

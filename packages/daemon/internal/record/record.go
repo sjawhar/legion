@@ -513,7 +513,7 @@ type PullRequest struct {
 	// its bound with none left waiting.
 	Run *HeadRun
 	// PlannedRed is whether the newest head was the review App's (the tester's red tests): a red on
-	// it is planned, so the next head is not a fix attempt.
+	// it is planned, so it sends no work back (workflow's decideChecks).
 	PlannedRed bool
 	// Required is the checks the pull request's base branch requires (its rulesets' required status
 	// checks and its branch protection's), as the daemon last read them from GitHub
@@ -1124,7 +1124,7 @@ type Store interface {
 	// (PullRequestReview.LegionSession).
 	ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Token) (string, error)
 	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
-	// request, the fix-attempt counts and planned mark of a still-open one (the next generation runs on the same
+	// request, the planned mark of a still-open one (the next generation runs on the same
 	// branch and pull request), its design gate, each role's handoff, review rounds, verdict and
 	// summary, and a READY the gate refused. Each role keeps its claim and its last handoff, so a
 	// commit an earlier generation reported is never new again.

@@ -217,7 +217,7 @@ func TestAPathTakesTheFewestMovesOfItsWindowsSeconds(t *testing.T) {
 
 // A second copy of the synchronize that reached the recorded head - GitHub can send two for one
 // push - is no move, whatever its clock: h0>h1 applied, then a copy of h0>h1 a second later,
-// counts no fix attempt and opens no head run.
+// changes no judgement and opens no head run.
 func TestACopyOfTheSynchronizeThatReachedTheHeadIsNoMove(t *testing.T) {
 	code := record.ClassifiedPush{SHA: "h1", Before: "h0", Sender: "dev"}
 	start := delivered(t, redAtH0(), pushed(code), secondAt("h0", "h1", "dev", 1, false), settles("h1", 2, "ci"))
@@ -267,8 +267,9 @@ func TestCopiesOfTwoHeadsOnTheirWayAreBounded(t *testing.T) {
 // A loop in a skipped gap is read as the release before reads it, by the shortest chain of its
 // pushes (withoutLoops): the record at h1, red; the review App's h1..c1, the implementer's code
 // c1..c2, the review App's forced return c2..c1 and its c1..c3, every synchronize but c1..c3's late,
-// the loop's first, so the path from h1 takes the loop. The loop c1>c2>c1 is erased, so the move is the review App's alone: no fix attempt, as with no
-// move named. Counting the loop's pushes, the implementer's code would count one.
+// the loop's first, so the path from h1 takes the loop. The loop c1>c2>c1 is erased, so the move
+// is the review App's alone and its red stays planned, as it is with no move named. Read with the
+// loop's pushes, the move would end at the implementer's code.
 func TestALoopInASkippedGapIsReadAsTheReleaseBeforeReadsIt(t *testing.T) {
 	start := record.PullRequest{HeadSHA: "h1", CheckedHead: "h1", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, HeadUpdatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}

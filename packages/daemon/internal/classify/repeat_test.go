@@ -58,7 +58,7 @@ func moveAgain(by [3]bool, late bool, again string) []runFact {
 // App's and the implementer's pushes, delivered before their heads and after them, against a
 // control whose third push reaches a fresh commit h1b. Judged unchained, as if its push were lost,
 // two of them went wrong: the review App's red tests pushed again after the implementer's forced
-// return counted a fix attempt and sent the work back, and the implementer's code pushed again
+// return sent the work back, and the implementer's code pushed again
 // after the review App's forced return kept the review App's red planned.
 func TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain(t *testing.T) {
 	for mask := range 8 {

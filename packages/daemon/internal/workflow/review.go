@@ -497,8 +497,8 @@ func heldSince(pr record.PullRequest) time.Time {
 
 // holdsRed says whether pr's red is held: a head run is open (record.PullRequest.Run) - a head
 // arrived before every push of its move - and the head arrived less than redHold ago. While it
-// holds, whether the red is planned, and the count it stands at, are not yet what every push
-// arriving first would make them, and a send-back cannot be taken back; the push that closes the
+// holds, whether the red is planned is not yet what every push arriving first would make it, and
+// a send-back cannot be taken back; the push that closes the
 // run, or whose replay changes the judgement, decides the checks (push), and so does the pass once
 // the hold lapses (HoldLapsed).
 func (e *Engine) holdsRed(pr record.PullRequest) bool {

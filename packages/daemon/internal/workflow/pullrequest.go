@@ -231,10 +231,9 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	// the rule (standingRed). A push that closes a head run, or whose replay changed the pull
 	// request's judgement (classify.ApplyPush) - the recorded head's own, or one for an earlier head
 	// that completes the chain of a move in the run - decides the checks as the settlement it
-	// replayed would have (decideChecks): a count taken back can lift the fix-attempt cap off the red
-	// that stands, a planned mark or a settlement can change what the red is, a red held while the
-	// run waited is judged now, a red the replay makes stand in awaiting_merge withdraws the READY,
-	// and a count the red stays held at is reported. A phase with no checks_red row - implementing,
+	// replayed would have (decideChecks): a planned mark or a settlement can change what the red
+	// is, and a red held while the run waited is judged now, a red the replay makes stand in
+	// awaiting_merge withdraws the READY. A phase with no checks_red row - implementing,
 	// planning - moves nothing (sendBack), and in awaiting_merge standingRed does not act. Any other
 	// push for a head that has not arrived yet (its synchronize still on its way) changes nothing the
 	// rule reads at the recorded head, whose red may be the one the push fixed, so it applies

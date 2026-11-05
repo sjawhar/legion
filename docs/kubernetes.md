@@ -1057,7 +1057,7 @@ The plugin writes each arming into the session's own transcript, so a worker the
 
 Every deployment sets `retry.fallbackRevertPolicy: never` beside its `retry.fallbackChains`, wherever it keeps them (the operator's `overlay.yml`, or a `role_config_files` overlay of its own).
 Without it Oh My Pi returns the session to a model it suppressed itself, for a rate limit or for an error it could not classify, as soon as that suppression ends, and its floor for one it cannot time is five minutes, well inside the plugin's hour.
-For a refusal, which the plugin pins, the setting changes nothing: the plugin's own return is what moves the session back.
+For a refusal the setting changes nothing: Oh My Pi pins a classifier refusal's fallback, the plugin's own `setModel` clears that pin as it walks the chain, and the plugin's timed return is what moves the session back.
 `scripts/e2e/refusal-fallback-omp.sh` measures the difference on a ten-minute cooldown: with the setting, no request at all reaches the refused model between the fifth minute and the tenth, and the first request after the tenth goes to that model again.
 
 One command replaces a session worth replacing, a session a provider refuses turn after turn among them:

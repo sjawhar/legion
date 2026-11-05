@@ -3,9 +3,11 @@
 // The loader refuses every key it does not model, in one of three ways it decides once, here: a
 // tossed key is refused naming the key and why its setting no longer exists; a migration-only key
 // is refused with the message that names its replacement, worded exactly as operators have met it;
-// anything else is a typo, refused as an unknown key. Under `runtime: kubernetes` the loader also
-// refuses what a pod could not run with: the `runtime.kubernetes` block's own values, and the keys
-// outside it every pod needs.
+// anything else is a typo, refused as an unknown key. One kind is not refused: a warned key
+// (warnedKeys) is accepted, changes nothing, and is kept as a Warning the daemon logs at boot and
+// `legion start --check-config` prints after its OK line. Under `runtime: kubernetes` the loader
+// also refuses what a pod could not run with: the `runtime.kubernetes` block's own values, and the
+// keys outside it every pod needs.
 //
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
 // `nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, `operator_token_file`,
@@ -187,6 +189,23 @@ type Config struct {
 	// records keep the name each was written under. The zero value, which answers as
 	// strings.EqualFold does, while the file configures none.
 	RepositoryRenames ghrepo.Renames
+	// Warnings are the keys the file carries that the daemon accepts and ignores (warnedKeys), in
+	// file order; empty for a file that carries none. Boot logs each one and `legion start
+	// --check-config` prints each after its OK line, so an operator reads the same sentence
+	// either way.
+	Warnings []KeyWarning
+}
+
+// KeyWarning is one key the loader accepts, reads nothing from, and warns about: the key, and why
+// setting it changes nothing with what to do instead.
+type KeyWarning struct {
+	Key    string
+	Detail string
+}
+
+// Line is the warning as boot logs it and `legion start --check-config` prints it.
+func (w KeyWarning) Line() string {
+	return fmt.Sprintf("setting %s changes nothing: %s", w.Key, w.Detail)
 }
 
 const (
@@ -241,7 +260,17 @@ var tossedKeys = map[string]string{
 	"worker_idle_retire_seconds": `an idle window retires no worker: it releases the worker's issue pod, and the key for it is runtime.kubernetes.idle_release (idle_minutes, backstop_minutes), which suspends every claim of the released pod with the source released and brings them back on the next wake (INFRA-945)`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
-	"max_fix_attempts":           "nothing counts fix attempts: CI red always sends the work back to the implementer, and the architect decides when to stop (dispatch://INFRA-956 R4)",
+}
+
+// warnedKeys are the settings that no longer exist and that a file may carry all the same, mapped
+// to why setting one changes nothing and what to do instead. The daemon accepts the key, reads no
+// value from it, and warns: the reviewer's rule for this loader is that a refusal must close a
+// vulnerability, and a count nothing reads closes none, so refusing a boot over it would stop a
+// deployment for a word in a file. The refusal this key would otherwise carry is the warning's
+// own text (Config.Warnings, KeyWarning.Line), which boot logs and `legion start --check-config`
+// prints, so the operator reads what the refusal would have said and the daemon runs.
+var warnedKeys = map[string]string{
+	"max_fix_attempts": "nothing counts fix attempts any more, a red CI verdict always sends the work back to the implementer however many came before, and the architect decides when to stop; remove max_fix_attempts from legion.yaml, where review_round_cap is the one cap left that blocks a pull request (dispatch://INFRA-956 R4)",
 }
 
 // migrationKeys are the keys refused with a migration message, mapped to that message verbatim.
@@ -302,6 +331,8 @@ type fileConfig struct {
 	WorkerBackends         map[claim.Role]runtime.Backend
 	RoleConfigFiles        map[claim.Role][]string
 	RepositoryRenames      []ghrepo.Rename
+	// Warnings are the warned keys the file carries, in file order (warnedKeys).
+	Warnings []KeyWarning
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -444,9 +475,14 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case repositoryRenamesKey:
 			file.RepositoryRenames, err = readRepositoryRenames(value, key)
 		default:
-			if isDurationKey(key) || isCountKey(key) {
+			switch {
+			case isDurationKey(key) || isCountKey(key):
 				err = readPositive(value, key, file)
-			} else {
+			case warnedKeys[key] != "":
+				// The value is read for nothing, so no shape of it is refused: the key changes
+				// nothing whatever it says.
+				file.Warnings = append(file.Warnings, KeyWarning{Key: key, Detail: warnedKeys[key]})
+			default:
 				err = classify(key)
 			}
 		}
@@ -897,6 +933,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		PodUpdateRetask:      time.Hour,
 		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
+		Warnings:             file.Warnings,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")

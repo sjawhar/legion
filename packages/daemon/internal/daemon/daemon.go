@@ -227,6 +227,11 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if log == nil {
 		log = slog.Default()
 	}
+	// The keys the loader accepted and read nothing from, before anything else this boot says:
+	// each line is the refusal the key would have carried, and what to change (config.KeyWarning).
+	for _, warning := range cfg.Warnings {
+		log.Warn(warning.Line(), "key", warning.Key)
+	}
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
 		return err
