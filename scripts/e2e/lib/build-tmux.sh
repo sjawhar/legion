@@ -31,7 +31,11 @@
 # Each download is pinned by version to its project's own canonical host (ftp.gnu.org for make and
 # ncurses, invisible-island.net for byacc, each project's GitHub release for libevent and tmux) and
 # held to the sha256 written below. A tarball whose bytes hash to anything else stops the build
-# where it is, named, rather than being compiled.
+# where it is, named, rather than being compiled. byacc has a second source after its own,
+# https://distfiles.macports.org/byacc/, because invisible-island.net refuses most of a pod's
+# requests with 403 (measured from an issue pod on 2026-11-05: three of four, and the fourth 200);
+# the sha256 is the same for both, so a mirror is another place to get the pinned bytes and never
+# another thing to trust.
 #
 # Each stage writes its compiler output to $P/log/<stage>.log and says on stderr when it starts and
 # when it finishes, so a caller watching a cold build of some minutes can see which stage it is in.
@@ -51,7 +55,12 @@ ncurses_url=https://ftp.gnu.org/gnu/ncurses/ncurses-$ncurses_version.tar.gz
 ncurses_sha256=136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6
 
 byacc_version=20240109
-byacc_url=https://invisible-island.net/archives/byacc/byacc-$byacc_version.tgz
+# byacc's own host refuses most of a pod's requests with 403, so the MacPorts distfiles mirror
+# follows it. Both are tried in turn and both are held to the one sha256 below.
+byacc_urls=(
+  https://invisible-island.net/archives/byacc/byacc-$byacc_version.tgz
+  https://distfiles.macports.org/byacc/byacc-$byacc_version.tgz
+)
 byacc_sha256=f2897779017189f1a94757705ef6f6e15dc9208ef079eea7f28abec577e08446
 
 libevent_version=2.1.12-stable
@@ -108,11 +117,16 @@ run() {
   exit 1
 }
 
-# fetch FILE URL SHA256 leaves FILE in the source directory with those bytes. A download already
-# there is re-used when it hashes to SHA256 and re-downloaded when it does not; bytes that hash to
-# anything else after the download stop the build.
+# fetch FILE SHA256 URL... leaves FILE in the source directory with those bytes. A download already
+# there is re-used when it hashes to SHA256 and re-downloaded when it does not. The URLs are tried
+# in turn, and every download is held to SHA256 whichever one answered: a second URL is another
+# place to get the same bytes, never a second thing to trust. Bytes that hash to anything else stop
+# the build where they are, rather than sending the build on to the next URL: a tarball under a
+# pinned name whose content is not the pinned content is not a source that failed to answer. A URL
+# that does not answer is said so and the next is tried; the last one failing stops the build too.
 fetch() {
-  local file=$1 url=$2 want=$3 path=$src/$1 got
+  local file=$1 want=$2 path=$src/$1 got url
+  shift 2
   if [ -f "$path" ]; then
     got=$(sha256sum -- "$path" | cut -d' ' -f1)
     if [ "$got" = "$want" ]; then
@@ -122,16 +136,23 @@ fetch() {
     say "$stage: the $file already here has sha256 $got, not the pinned $want; downloading it again"
     rm -f -- "$path"
   fi
-  say "$stage: downloading $url"
-  curl -fsSL --retry 3 --retry-delay 2 -o "$path.part" -- "$url" ||
-    fail "curl could not download $url"
-  got=$(sha256sum -- "$path.part" | cut -d' ' -f1)
-  if [ "$got" != "$want" ]; then
-    rm -f -- "$path.part"
-    fail "$file downloaded from $url has sha256 $got, and this script pins $want: the build stops rather than compile bytes it cannot name"
-  fi
-  mv -- "$path.part" "$path"
-  say "$stage: $file has the pinned sha256 $got"
+  for url in "$@"; do
+    say "$stage: downloading $url"
+    if ! curl -fsSL --retry 3 --retry-delay 2 -o "$path.part" -- "$url"; then
+      rm -f -- "$path.part"
+      say "$stage: $url did not answer; trying the next source for $file"
+      continue
+    fi
+    got=$(sha256sum -- "$path.part" | cut -d' ' -f1)
+    if [ "$got" != "$want" ]; then
+      rm -f -- "$path.part"
+      fail "$file downloaded from $url has sha256 $got, and this script pins $want: the build stops rather than compile bytes it cannot name"
+    fi
+    mv -- "$path.part" "$path"
+    say "$stage: $file has the pinned sha256 $got, from $url"
+    return 0
+  done
+  fail "no source answered for $file; tried $*"
 }
 
 # unpack FILE DIR unpacks FILE into a fresh DIR under the build directory, so a stage that failed
@@ -170,7 +191,7 @@ say "building tmux $tmux_version under $prefix with $jobs jobs; the logs are in 
 # ---- GNU make, bootstrapped by its own build.sh -------------------------------------------------
 begin make
 if ! skip "$bin/make"; then
-  fetch "make-$make_version.tar.gz" "$make_url" "$make_sha256"
+  fetch "make-$make_version.tar.gz" "$make_sha256" "$make_url"
   unpack "make-$make_version.tar.gz" "make-$make_version"
   cd "$build/make-$make_version"
   run "configure" ./configure --prefix="$prefix" --disable-dependency-tracking
@@ -187,7 +208,7 @@ export PATH
 # ---- ncurses, static and wide, with its terminfo library split out -------------------------------
 begin ncurses
 if ! skip "$prefix/lib/libncursesw.a"; then
-  fetch "ncurses-$ncurses_version.tar.gz" "$ncurses_url" "$ncurses_sha256"
+  fetch "ncurses-$ncurses_version.tar.gz" "$ncurses_sha256" "$ncurses_url"
   unpack "ncurses-$ncurses_version.tar.gz" "ncurses-$ncurses_version"
   cd "$build/ncurses-$ncurses_version"
   run "configure" ./configure --prefix="$prefix" --without-shared --enable-widec --with-termlib
@@ -201,7 +222,7 @@ finish
 # ---- byacc, the yacc tmux's configure requires ---------------------------------------------------
 begin byacc
 if ! skip "$bin/yacc"; then
-  fetch "byacc-$byacc_version.tgz" "$byacc_url" "$byacc_sha256"
+  fetch "byacc-$byacc_version.tgz" "$byacc_sha256" "${byacc_urls[@]}"
   unpack "byacc-$byacc_version.tgz" "byacc-$byacc_version"
   cd "$build/byacc-$byacc_version"
   run "configure" ./configure --prefix="$prefix"
@@ -214,7 +235,7 @@ finish
 # ---- libevent, static, with no TLS of its own ----------------------------------------------------
 begin libevent
 if ! skip "$prefix/lib/libevent.a"; then
-  fetch "libevent-$libevent_version.tar.gz" "$libevent_url" "$libevent_sha256"
+  fetch "libevent-$libevent_version.tar.gz" "$libevent_sha256" "$libevent_url"
   unpack "libevent-$libevent_version.tar.gz" "libevent-$libevent_version"
   cd "$build/libevent-$libevent_version"
   run "configure" ./configure --prefix="$prefix" --disable-shared --disable-openssl
@@ -229,7 +250,7 @@ finish
 # does not hold; the four flag variables are what it falls back to, and they name this prefix only.
 begin tmux
 if ! skip "$bin/tmux"; then
-  fetch "tmux-$tmux_version.tar.gz" "$tmux_url" "$tmux_sha256"
+  fetch "tmux-$tmux_version.tar.gz" "$tmux_sha256" "$tmux_url"
   unpack "tmux-$tmux_version.tar.gz" "tmux-$tmux_version"
   cd "$build/tmux-$tmux_version"
   run "configure" ./configure --prefix="$prefix" \
