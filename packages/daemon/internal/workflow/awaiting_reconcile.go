@@ -30,14 +30,11 @@ import (
 // returns the roots that entered awaiting_person, whose slots the caller releases, and whether
 // it wrote any issue of the snapshot, which the caller then reads again.
 //
-// It reads no slot row, and asks the rule the slot is granted by instead: a root enters the
-// wait only while a worker of it has work (record.AtWork, decideAwait's rule 0), which for an
-// admitted root is true exactly until its design gate first opens. That is the spec's own
-// condition, and reading it of the record rather than of the slots keeps this rule and the
-// release of a slot (admit's releaseSlots) from disagreeing about one root. The slot the wait
-// used to give back is now released by that rule itself. The boot's catch-up reads the roots
-// this can move (the daemon's catchesUp) by the same record.AtWork, with the slot row standing
-// for rule 1, the hand-back the catch-up is itself there to discover.
+// It reads the slot rows once for the pass, because the wait is the root's slot going back: a
+// root enters it only while it holds a slot for work of its own (record.CanWaitOnPerson,
+// decideAwait's rule 0), which for an admitted root is the architect writing the spec, before
+// the design gate first opens. That is the spec's own condition, and the boot's catch-up reads
+// the roots this pass can move (the daemon's catchesUp) by that same predicate.
 func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project string, issues []record.Issue, held func(string) bool) ([]string, bool, error) {
 	changed, err := e.answerOpenGates(ctx, tx, project, issues, held)
 	if err != nil {
@@ -82,6 +79,14 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 	if err != nil {
 		return nil, false, err
 	}
+	slots, err := e.store.Slots(ctx, tx)
+	if err != nil {
+		return nil, false, err
+	}
+	slotted := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		slotted[slot.Issue] = struct{}{}
+	}
 	var entered []string
 	for i, root := range roots {
 		gate, err := e.store.Gate(ctx, tx, root.Key)
@@ -92,7 +97,8 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 		if err != nil {
 			return nil, false, err
 		}
-		view := awaitView{Root: root, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key], Gate: gate, Armed: e.armed()}
+		_, holds := slotted[root.Key]
+		view := awaitView{Root: root, Slotted: holds, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key], Gate: gate, Armed: e.armed()}
 		for _, member := range issues {
 			if member.Tree == root.Key && member.Key != root.Key {
 				view.Members = append(view.Members, member)
@@ -214,7 +220,8 @@ const (
 	actTakeIn
 )
 
-// awaitView is what decideAwait reads of one root: its record, the other members of its tree,
+// awaitView is what decideAwait reads of one root: its record, whether it holds an admission slot
+// (Slotted, read from the slot rows by ReconcileAwaiting), the other members of its tree,
 // why it could not resume (Unresumable, "" when it could), its architect's run
 // at the root's generation, its asks' mirror rows, its design gate (nil for none), and whether the
 // design gate is armed. The gate's document (gateArtifact) names its approval requests — every
@@ -222,6 +229,7 @@ const (
 // ask (RootAsk.PersonActSeq).
 type awaitView struct {
 	Root        record.Issue
+	Slotted     bool
 	Members     []record.Issue
 	Unresumable string
 	Run         record.RoleRun
@@ -242,9 +250,8 @@ type awaitDecision struct {
 
 // decideAwait is the rule for whether a root waits on a person, checked cheapest first:
 //
-//  0. a root not at admitted, lingering, out of the workflow, or holding no slot — a root whose
-//     design gate has opened at some point, whose own turns are no longer work (record.AtWork) —
-//     stays;
+//  0. a root not at admitted, lingering, out of the workflow, or holding no admission slot for
+//     work of its own (record.CanWaitOnPerson) stays;
 //  1. one whose architect handed nothing back since it was last given work (DeclaredSeq) stays;
 //  2. one with nothing still with the person (withHuman) takes in what it handed back
 //     (actTakeIn): that was answered or closed first, and the running architect has that act;
@@ -258,27 +265,27 @@ type awaitDecision struct {
 //     architect is told of it where it stands (actTellInPlace); otherwise the root enters
 //     awaiting_person (actEnter).
 //
-// Rule 0's slot condition is the spec's (dispatch://INFRA-980, "Which issue needs a slot"): a
-// root enters awaiting_person only while it holds a slot, so only a root whose gate has never
-// opened, whose architect is writing the spec and holds the tree's whole work. It is read as
-// record.AtWork rather than as a slot row, so that the rule is the one the release of a slot
-// and the waiting line both read, and because this pass reads only the record. Rule 1 is what
-// keeps a root still waiting in line for its first slot out of the wait: only an architect the
-// daemon has started can have handed anything back, and the handout that starts one clears the
-// mark (record.Store.StartHandout). The boot's catch-up names the same roots by those two
-// rules, reading the slot row where it cannot read the mark (the daemon's catchesUp).
+// Rule 0 is the spec's own condition (dispatch://INFRA-980, "Which issue needs a slot"): a root
+// enters awaiting_person only while it holds a slot, since the wait is that slot going back, and
+// it is read as the root's own slot row (awaitView.Slotted). A root still waiting in line for
+// its first slot holds none, so it starts no wait however its architect's hand-back stands —
+// a re-admitted root the old architect declared on again before the linger's suspend ran is
+// kept out by this rule, not by rule 1. The boot's catch-up of the roots this pass can move
+// calls the same predicate (the daemon's catchesUp).
 //
-// A root whose gate has opened waits for its children by the children-first rule instead. It
-// holds no slot there, so the wait would give nothing back; its own architect stays live to
-// answer the person either way; and entering it would take every first-phase member of the tree
-// out of the line (record.Waiting), stopping the children the root is waiting for.
+// The predicate reads the design gate as well, because a root whose gate has opened waits for
+// its children by the children-first rule: the slot row it still holds in this pass is one
+// admission's own release takes back later in the pass (admit's promoteHolds), so the row alone
+// would say work it no longer has. Entering the wait there would give nothing back; its own
+// architect stays live to answer the person either way; and it would take every first-phase
+// member of the tree out of the line (record.Waiting), stopping the children it waits for.
 func decideAwait(v awaitView) awaitDecision {
 	root := v.Root
 	switch {
 	case root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !record.InWorkflow(root):
 		return awaitDecision{Why: "it is not an admitted root of a tree in the workflow"}
-	case !record.AtWork(root, gateOf(v.Gate)):
-		return awaitDecision{Why: "its design gate has opened, so it holds no slot to hand back"}
+	case !record.CanWaitOnPerson(root, gateOf(v.Gate), v.Slotted):
+		return awaitDecision{Why: "it holds no admission slot for work of its own"}
 	case root.DeclaredSeq == 0:
 		return awaitDecision{Why: "its architect has handed nothing to a person since it was last given work"}
 	}

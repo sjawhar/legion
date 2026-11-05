@@ -811,8 +811,8 @@ func TestTheFirstBootAfterTheUpgradeReplaysNothing(t *testing.T) {
 }
 
 // The boot's catch-up reads an admitted root only while the root's own architect is the worker
-// at work: its design gate has never opened (record.AtWork) and it holds the slot that work
-// takes. Both ends matter, and this seeds a root that fails each one.
+// at work: it holds the slot that work takes and its design gate has never opened
+// (record.CanWaitOnPerson). Both ends matter, and this seeds a root that fails each one.
 //
 // CAPTURE-100's gate has opened, so under the children-first rule it is waiting for its
 // children rather than working, and ReconcileAwaiting can start no wait on a person for it
@@ -843,6 +843,31 @@ func TestTheCatchUpReadsNoRootWhoseArchitectDoesNotHoldTheWork(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// A root a person parked, iceboxed or closed has left the workflow, so ReconcileAwaiting moves
+// it nowhere however long its slot row outlives that act — admission releases the row in its
+// next pass, and the workflow records the linger. The catch-up reads the roots that pass can
+// move (record.CanWaitOnPerson), so it opens no Dispatch window for such a root either: the
+// window could decide nothing, and the hold would keep the root out of the admission pass that
+// is there to take its slot back.
+func TestTheCatchUpReadsNoRootThatLeftTheWorkflow(t *testing.T) {
+	cursor := catchUpHandout
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 9},
+		events: []json.RawMessage{askOpened(7, "ask-q1")}}
+	pool, w := catchUpRig(t, client, 1)
+	slottedCapture(t, pool, nil, &cursor)
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		parked := captureRoot(phase.Admitted, nil)
+		parked.Status, parked.DispatchStatus = "backlog", "backlog"
+		return records.PutIssue(ctx, tx, parked)
+	})
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	if len(client.afters) != 0 {
+		t.Fatalf("event log read after %v, want no read: the root has left the workflow", client.afters)
+	}
 }
 
 // A question its architect opened and a person answered while the daemon was down is applied at

@@ -63,25 +63,19 @@ const (
 )
 
 // catchesUp says whether the boot's catch-up reads issue: a tree root of the daemon's project,
-// not lingering, either in awaiting_person or at admitted with its own architect at work — a
-// worker of the root itself has work (record.AtWork), which at admitted is true until its
-// design gate first opens, and it holds the slot that work takes (slotted). gate is the root's
-// own design gate, the zero value for a root with none registered. A root in a phase of its
-// own tree is read by neither this nor ReconcileAwaiting: the phase's worker holds the work,
-// and the root's architect waits for it.
+// not lingering, either in awaiting_person or a root ReconcileAwaiting could move into it —
+// at admitted, holding the admission slot its own work takes, its design gate never opened
+// (record.CanWaitOnPerson, which is decideAwait's rule 0). gate is the root's own design gate,
+// the zero value for a root with none registered. A root in a phase of its own tree is read by
+// neither this nor ReconcileAwaiting: the phase's worker holds the work, and the root's
+// architect waits for it.
 //
-// The phase and record.AtWork are decideAwait's rule 0, the predicate ReconcileAwaiting decides
-// such a root by, and the boot must read every root that pass can move, or it would decide one
-// on a mirror of its asks that has not caught up with what Dispatch recorded while the daemon
-// was down — a person's answer given then would read as unanswered, and the root would enter
-// awaiting_person. The slot stands for the rest of that rule, which the catch-up cannot read of
-// the record: ReconcileAwaiting moves no root that has handed nothing back (DeclaredSeq), only
-// an architect the daemon has started can have handed anything back, and the handout that
-// starts one clears the mark (record.Store.StartHandout), so a root whose architect runs is
-// exactly an admitted root whose work holds a slot. The hand-back itself is what the catch-up
-// is there to discover, so it cannot ask for that mark instead. A root waiting in line for its
-// first slot never ran: its architect has handed nothing back, its admission is a handout of
-// its own, and the event log below that handout is history this release must not replay.
+// The boot must read every root that pass can move, or it would decide one on a mirror of its
+// asks that has not caught up with what Dispatch recorded while the daemon was down — a person's
+// answer given then would read as unanswered, and the root would enter awaiting_person. A root
+// waiting in line for its first slot is not one of them: its architect has never run and has
+// handed nothing back, its admission is a handout of its own, and the event log below that
+// handout is history this release must not replay.
 func (w *workflowRuntime) catchesUp(issue record.Issue, gate record.DesignGate, slotted map[string]struct{}) bool {
 	if issue.Project != w.dispatchProject || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() {
 		return false
@@ -90,7 +84,7 @@ func (w *workflowRuntime) catchesUp(issue record.Issue, gate record.DesignGate, 
 		return true
 	}
 	_, holds := slotted[issue.Key]
-	return issue.Phase == phase.Admitted && holds && record.AtWork(issue, gate)
+	return record.CanWaitOnPerson(issue, gate, holds)
 }
 
 // slottedIssues is the key of every issue holding an admission slot.

@@ -12,14 +12,16 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// awaitRootView is an admitted root whose architect handed a question back at 5, with its
-// architect's claim working and its task taken: the view decideAwait would enter on.
+// awaitRootView is an admitted root holding its admission slot whose architect handed a question
+// back at 5, with its architect's claim working and its task taken: the view decideAwait would
+// enter on.
 func awaitRootView() awaitView {
 	root := askRoot()
 	root.DeclaredSeq, root.DeclaredAt = 5, time.Date(2026, 9, 22, 23, 0, 0, 0, time.UTC)
 	return awaitView{
-		Root: root,
-		Run:  record.RoleRun{Claim: &record.RoleClaim{State: supervise.StateWorking}},
+		Root:    root,
+		Slotted: true,
+		Run:     record.RoleRun{Claim: &record.RoleClaim{State: supervise.StateWorking}},
 		Asks: []record.RootAsk{
 			{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, Seq: 5, WaitingOn: "human", WaitingOnSeq: 5, ByTree: true},
 		},

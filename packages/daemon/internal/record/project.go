@@ -396,6 +396,28 @@ func NeedsSlot(issue, root Issue, gate DesignGate, live bool) bool {
 	return live && !root.Lingers() && !OutOfWorkflow(issue.Status) && AtWork(issue, gate)
 }
 
+// CanWaitOnPerson says whether root may enter awaiting_person now: it is a root of a tree in the
+// workflow, standing at admitted and not lingering after its close, and it holds the admission
+// slot its own work takes (slotted). At admitted, AtWork is true for a tree root whose design
+// gate has never opened — the architect writing the spec, which holds the whole of the tree's
+// work — so the gate is read here too: the pass that moves a root runs before the pass that
+// takes a slot back (admit's promoteHolds calls ReconcileAwaiting, then releaseSlots), so a root
+// whose gate opened in this very pass still holds the slot row admission is about to release,
+// and its work is its children's by then.
+//
+// It is the one statement of the rule, and the two readers that must never disagree both call
+// it: the pass that starts a wait (workflow's decideAwait, rule 0) and the boot's catch-up of
+// the roots that pass can move (the daemon's catchesUp). A root this answers false for starts no
+// wait on a person, so the boot need not read its Dispatch window either. gate is the root's own
+// design gate, the zero value for a root with none registered.
+//
+// It is not NeedsSlot read backwards: NeedsSlot says what the cap must hold a slot for, of every
+// issue, from the record alone, while this says what one root may hand that slot back for, and
+// asks the slot row itself.
+func CanWaitOnPerson(root Issue, gate DesignGate, slotted bool) bool {
+	return slotted && root.Phase == phase.Admitted && !root.Lingers() && InWorkflow(root) && AtWork(root, gate)
+}
+
 // Waiting is the line of issues that wait for an admission slot, in the order admission gives
 // them one. The cap counts the issues at work rather than the trees, so a child waits in this
 // line as a root does, and the line has two parts.
