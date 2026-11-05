@@ -642,6 +642,16 @@ Each race job runs only when a file its own filter in `.github/workflows/ci.yaml
 — `envoy_go_race_docs`, the closure of the `docs` package alone, whose job gives it a 60-minute deadline, and `envoy_go_race_api` for the API;
 see Critical conventions for what keeps those filters current.
 
+A cleanup this package registers captures nothing that reaches the document it is attached to.
+`runtime.AddCleanup` says what that costs: "If ptr is reachable from cleanup or arg, ptr will never be collected and the cleanup will never run."
+The runtime keeps a cleanup's closure alive for as long as the document, and the service and each of its listings reaches every resident document through ygo's room table, so a closure holding either of them strongly held that document, its replica and its trees for the life of the process, which is what took `envoy-go-race-docs` over its runner's memory (dispatch://INFRA-1085).
+`keepInstance` (`docs/roomcursor.go`) and `listResident` (`docs/tree.go`) therefore hold their owner through `weak.Make` and do nothing when its `Value()` is nil;
+a pointer to a field of the service, such as a listing, counts as the service, and dies with that one allocation.
+`envoy-go-docs-finalizers` runs `GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 40m ./internal/dispatch/docs/` on the same `envoy_go_race_docs` filter, and fails on `is reachable from cleanup or cleanup argument` and then `fatal error: detected possible issues with cleanups and/or finalizers`;
+its `-v` also carries this package's leak line, `docs: <built> services built, <alive> still alive after <duration>`, which names each test that built a service and never shut it down, so a test that builds a `*Service` gives it a `t.Cleanup` that shuts it down.
+This package is the only one of the repository that registers a cleanup today, and one added in another package comes with a detector job of its own, in the same pull request;
+`docs/testing.md` states the rule in full.
+
 Writes to one room never meet each other unlocked.
 A browser's update reaches the room as ygo applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`, `crdt.ApplyUpdateV1`), so two browsers' updates take turns.
 `Server.Apply` holds no lock across its callback, so the service never walks the room's tree there:
