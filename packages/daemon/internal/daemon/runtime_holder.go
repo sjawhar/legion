@@ -104,6 +104,13 @@ func newRuntimeHolder(rt runtime.Runtime, stop context.CancelFunc, log *slog.Log
 // runtime that answered some of them is held by that holder too: each of its three methods
 // answers a runtime that does not carry the interface exactly as the reader's own missed type
 // assertion did (issueResourceHolder).
+//
+// It is read once, as the holder is built, and the shape it chooses is sound only because the
+// runtime's kind cannot change under a running daemon: `runtime`, `runtime.kubernetes` and
+// `runtime.tmux` are ClassFixed rows (config/classes.go), so a rebuild builds the same kind
+// again from its launch keys. A reader who reclassed one of those rows to `rebuild` would leave
+// a daemon that booted on tmux holding a plain holder in front of a Sandbox runtime, with all
+// three behaviours off and no test failing; such a change belongs with a shape chosen per call.
 func answersIssueResources(rt runtime.Runtime) bool {
 	if _, suspends := rt.(runtime.IssueSuspender); suspends {
 		return true
