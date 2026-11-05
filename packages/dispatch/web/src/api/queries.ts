@@ -9,7 +9,7 @@ import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
 import { compareTimestamps, isTimestamp } from "../lib/timestamps";
 
-import { api } from "./client";
+import { api, REFERENCE_TARGETS_MAX } from "./client";
 import { liveSocketFor } from "./live-socket";
 import type {
   DeliveryLiveView,
@@ -118,6 +118,21 @@ export const artifactBlocksQuery = (id: string) =>
     queryKey: ["artifact", id, "blocks"],
     queryFn: () => api.getArtifactBlocks(id),
   });
+
+/** What every `dispatch://` reference a page draws points at, in one read
+ *  (`GET /api/v1/reference-targets`). The key holds the references themselves, sorted, so two
+ *  surfaces naming the same set share one answer and a set that grows by one is a read of its
+ *  own rather than a stale hit. An empty set is never read: `enabled` is off, because a read of
+ *  nothing still costs a request.
+ */
+export const referenceTargetsQuery = (refs: readonly string[]) => {
+  const named = [...new Set(refs)].sort().slice(0, REFERENCE_TARGETS_MAX);
+  return queryOptions({
+    enabled: named.length > 0,
+    queryKey: ["reference-targets", named],
+    queryFn: () => api.getReferenceTargets(named),
+  });
+};
 
 /** The viewer's per-agent conversation state: each session's Clear, read mark, and count of
  *  unread replies to the viewer's direct messages. The navigation, the Agents page, and the

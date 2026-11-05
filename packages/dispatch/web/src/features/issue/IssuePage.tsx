@@ -2,9 +2,8 @@ import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
-import type { Artifact, IssuePriority } from "../../api/types";
+import type { Artifact } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
-import { tabButtonId } from "../../components/Tabs";
 import {
   dangerText,
   linkHoverText,
@@ -18,7 +17,6 @@ import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
-import { outsideAskCard } from "../inbox/ask-card";
 import { useFillMarginSlot } from "../margin/margin-slot";
 import { PlanTab } from "../plan/PlanTab";
 import { statusText } from "../project/board-model";
@@ -29,7 +27,6 @@ import {
   type IssueTab,
   parseIssuePath,
 } from "../refs/routes";
-import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { type FrameAttributes, usePageFrame } from "../shell/page-frame";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
@@ -41,6 +38,7 @@ import { type FocusedNode, FocusedNodeProvider, useFocusedNode } from "./focused
 import { IssueHeader } from "./IssueHeader";
 import { IssueMarginPanel } from "./IssueMargin";
 import { IssueTabs } from "./IssueTabs";
+import { IssueTree } from "./IssueTree";
 import { NODE_TYPE_NAMES, sentenceCase } from "./page-words";
 import { stateForIssue } from "./pins";
 import { RoleDocumentPanel } from "./RoleDocumentPanel";
@@ -195,11 +193,19 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const priorityWrite = useIssuePriority(route.key);
   useIssueKeymap(priorityWrite);
 
+  // Where the reader left this tab, which this commit is about to put them back at. It is read
+  // here, in the render, and not only in the effect below, because the identity block's two
+  // forms are 26 px apart in flow height: the block is told the place first (`restoringTo`), so
+  // its height is final before the scroll is written and the browser anchors nothing away.
+  const restoringTo = panelScroll.current[activeTab];
+
   useLayoutEffect(() => {
     const top = panelScroll.current[activeTab];
-    if (top !== undefined) {
-      window.scrollTo({ top });
-    }
+    if (top === undefined) return;
+    window.scrollTo({ top });
+    // Taken, so the next render of this tab reads the page's own position again rather than a
+    // place the reader has since left; leaving the tab records it afresh.
+    delete panelScroll.current[activeTab];
   }, [activeTab]);
 
   // Once a panel's tab has ever been active, keep rendering its content even
@@ -292,8 +298,18 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         isClosed={isClosed}
         issue={issue.data}
         priorityWrite={priorityWrite}
+        restoringTo={restoringTo}
         state={issueState}
       />
+      {/* The issue's body: one folded tree of its nodes (R1). It sits directly under the
+          identity block, before the panel the compact widths draw here, because the fold opens
+          to the frontier and the first open question has to be on the first screen (R6).
+
+          It is drawn at the issue's own address, which is the Tree preset's (R19): the tabs
+          below still own every other address until the presets replace them
+          (`dispatch://INFRA-1196/artifact/plan-md#b-t9`), and a tree drawn over a tab would say
+          each node's words twice on one page. */}
+      {route.kind === "issue" ? <IssueTree issue={issue.data} /> : null}
       {/* Below the width the shell's margin keeps a column at, the panel is drawn here, under
           the identity block, and the margin becomes the phone sheet that holds the
           conversation: the properties are read at every width with nothing opened (R11, R12). */}

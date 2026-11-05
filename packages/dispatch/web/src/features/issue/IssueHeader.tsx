@@ -52,6 +52,7 @@ export function IssueHeader({
   isClosed,
   issue,
   priorityWrite,
+  restoringTo,
   state,
 }: {
   documentArtifact: Artifact | undefined;
@@ -60,6 +61,10 @@ export function IssueHeader({
   /** The page's one priority write, shared with the keyboard's `0`–`3` and the palette's Set
    *  priority rows, so a refusal of any of them is reported once and by this header. */
   priorityWrite: IssuePriorityWrite;
+  /** Where the page is about to put the reader back, in pixels down the document, while it is
+   *  returning them to a tab they left: the block's form is decided for that place, not for
+   *  where the page stands now (`identity-block.ts`). */
+  restoringTo?: number;
   state: UserIssueState;
 }): ReactNode {
   const writes = useIssueHeaderWrites(issue, state);
@@ -69,7 +74,7 @@ export function IssueHeader({
   // the block, so opening one closes the one before it.
   const [editingField, setEditingField] = useState<IssueField | null>(null);
   const block = useRef<HTMLElement | null>(null);
-  const { condensed } = useIdentityBlock(block);
+  const { condensed } = useIdentityBlock(block, restoringTo);
   useIssuePalette({
     drafts,
     isClosed,

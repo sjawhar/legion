@@ -172,6 +172,39 @@ export const EMPTY_STATE_LINES = freeze({
 } as const);
 
 /**
+ * What the page says of a gap in the reasoning, one line per kind of gap (R4). A gap is drawn on
+ * the node it is about and never as an error: a node nothing explains is a node, and the line
+ * says what is absent.
+ *
+ * `no_check` and `no_plan_task` are the two gaps the coverage read already carries
+ * (`RequirementCoverage.gaps`), said in the page's own words rather than in the server's
+ * `<block id> has no check`, which names a block by its id. `no_origin` is a node whose spine
+ * parent the model does not hold; `shaped_disagreement` is a decision claiming a node the
+ * node's own origin does not name, which the page draws rather than picking one of the two.
+ */
+export const GAP_LINES = freeze({
+  no_check: "No check serves this requirement.",
+  no_origin: "Nothing explains this node: it names nothing it came from.",
+  no_plan_task: "No plan task serves this requirement.",
+  shaped_disagreement: "A decision says it shaped this node, which came from another one.",
+} as const);
+
+/** One kind of gap the page names, which is a row's `data-gap-kind`. */
+export type GapKind = keyof typeof GAP_LINES;
+
+/**
+ * The same gap in the fewest words, which is what a row of the tree draws beside the node (R1:
+ * a row is one line). The sentence above is drawn in the node's body, where there is room for
+ * it, so a reader sees that something is absent on the row and reads what it is by focusing it.
+ */
+export const GAP_WORDS = freeze({
+  no_check: "No check",
+  no_origin: "Nothing explains it",
+  no_plan_task: "No plan task",
+  shaped_disagreement: "Two origins",
+} as const satisfies Record<GapKind, string>);
+
+/**
  * Each `when` value of a check block as words (R15). The values are the `when` choices of the
  * `check` block in `blocks.json`, which `CheckWhen` in `packages/contracts/src/dispatch-api.ts`
  * mirrors; `page-words.test.ts` reads that schema, so a new choice fails until it has words
@@ -215,15 +248,25 @@ export const CONTROL_LABELS = freeze({
   close_issue: "Close issue",
   /** Copies a check's `run` command, which renders as code beside it (R15). */
   copy_command: "Copy the command",
+  /** The one row a branch below the three drawn levels folds to, which opens it in place: the
+   *  count before it is the branch's own and carries `AUTHOR_TEXT_ATTRIBUTE` (R1). */
+  deeper_nodes: "nodes deeper in this branch",
   /** Takes a version of an artifact down (R16). */
   download: "Download",
   /** Gives an issue that has a parent a different one (R11, row one). */
   edit_parent: "Edit parent issue",
   /** Closes a branch of the tree (R1). */
   fold: "Fold",
+  /** What a folded branch says it holds, after the count of the nodes under it (R1). */
+  folded_nodes: "nodes folded",
   /** The one control row one keeps the actions behind: close, reopen and setting the parent.
    *  It names actions, never a property (R11 bans "more"). */
   issue_actions: "Issue actions",
+  /** Keeps a node's body open once the focus leaves it (R2); the focused node's body is open
+   *  without it. */
+  keep_open: "Keep open",
+  /** Lets a node kept open close again (R2). */
+  let_close: "Let it close",
   /** Moves to the next open question that waits on the reader (R6). */
   next_question: "Next open question",
   /** What the route control says while the issue has none to show. */
@@ -248,10 +291,19 @@ export const CONTROL_LABELS = freeze({
   saving_field: "Saving…",
   saving_release: "Releasing…",
   saving_reopen: "Reopening…",
+  /** How many checks serve a requirement, which the coverage read counts without naming them
+   *  (R4, until the chain read lands). */
+  serving_checks: "Checks serving it",
+  /** How many plan tasks serve a requirement, counted the same way (R4). */
+  serving_plan_tasks: "Plan tasks serving it",
   /** Gives an issue with no parent one (R11, row one). */
   set_parent: "Set parent issue",
   /** The whole subtree done of total, labelled beside the direct count (R10). */
   subtree_done: "Whole tree done",
+  /** What a chip says of a target nothing answers to now (`ReferenceTarget.gone`). */
+  target_gone: "Deleted",
+  /** The body of the page, as a reader of the tree hears it named (R1). */
+  tree: "Issue tree",
   /** Opens a branch of the tree (R1). */
   unfold: "Unfold",
   /** Adds an artifact from the node menu (R16). */
@@ -403,6 +455,8 @@ const WORD_SOURCES: readonly unknown[] = [
   NODE_STATE_WORDS,
   PRESET_NAMES,
   EMPTY_STATE_LINES,
+  GAP_LINES,
+  GAP_WORDS,
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
   CONTROL_LABELS,

@@ -19,9 +19,22 @@ const STUCK_SLACK = 1;
  * identity and every one of its controls in a shorter band rather than losing a third of the
  * screen to it. Nothing is hidden by condensing, because a property a reader cannot see is a
  * property the page does not have (R11).
+ *
+ * `restoringTo` is the place the page is about to put the reader back at, in pixels down the
+ * document, where it has one: a tab the reader is returning to carries the position they left
+ * it at (`IssuePage`'s `panelScroll`). The block answers for *that* place rather than for the
+ * page's current one, because its two forms are 26 px apart in flow height: measured after the
+ * scroll, the block would condense once the page was already restored, the content above the
+ * viewport would lose those pixels, and the browser's scroll anchoring would take them off the
+ * reader's position - leaving a reader who left the Conversation at 500 px at 474. Answering
+ * for the place first makes the block's height final in the same commit, before the restore is
+ * written, so nothing moves under the reader and nothing is anchored away.
  */
-export function useIdentityBlock(ref: RefObject<HTMLElement | null>): { condensed: boolean } {
-  const [condensed, setCondensed] = useState(false);
+export function useIdentityBlock(
+  ref: RefObject<HTMLElement | null>,
+  restoringTo?: number
+): { condensed: boolean } {
+  const [stuck, setStuck] = useState(false);
 
   // The height is measured in a layout effect, so the first frame a reader sees already carries
   // it: a row placed against it on that frame would otherwise be placed against nothing.
@@ -47,7 +60,7 @@ export function useIdentityBlock(ref: RefObject<HTMLElement | null>): { condense
     const element = ref.current;
     if (element === null) return;
     const measure = () => {
-      setCondensed(element.getBoundingClientRect().top <= STUCK_SLACK);
+      setStuck(element.getBoundingClientRect().top <= STUCK_SLACK);
     };
     window.addEventListener("scroll", measure, { passive: true });
     window.addEventListener("resize", measure);
@@ -58,5 +71,8 @@ export function useIdentityBlock(ref: RefObject<HTMLElement | null>): { condense
     };
   }, [ref]);
 
-  return { condensed };
+  // The block sits at the top of the page's own column, so a page restored past `STUCK_SLACK`
+  // is a page the block is stuck on. The measurement above takes over as soon as the reader
+  // scrolls again, which is why it keeps running while a restore is pending.
+  return { condensed: restoringTo === undefined ? stuck : restoringTo > STUCK_SLACK };
 }

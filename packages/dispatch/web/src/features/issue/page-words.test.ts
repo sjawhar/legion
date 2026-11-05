@@ -14,6 +14,8 @@ import {
   CONTROL_LABELS,
   DECLARED_WORDS,
   EMPTY_STATE_LINES,
+  GAP_LINES,
+  GAP_WORDS,
   GLYPH_NAMES,
   GLYPH_TOKENS,
   NODE_STATE_WORDS,
@@ -78,6 +80,8 @@ const WORD_SOURCES: readonly unknown[] = [
   NODE_STATE_WORDS,
   PRESET_NAMES,
   EMPTY_STATE_LINES,
+  GAP_LINES,
+  GAP_WORDS,
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
   CONTROL_LABELS,
@@ -175,6 +179,20 @@ test("every empty-state line is one sentence a person reads", () => {
     expect(line).toMatch(/^[A-Z][^_]*\.$/);
   }
   expect(EMPTY_STATE_LINES.check_result).toBe("No result recorded against this check.");
+});
+
+test("every gap line is one sentence that says what is absent", () => {
+  for (const line of Object.values(GAP_LINES)) {
+    expect(line).toMatch(/^[A-Z][^_]*\.$/);
+  }
+  expect(GAP_LINES.no_origin).toBe("Nothing explains this node: it names nothing it came from.");
+});
+
+test("every gap a row draws has a short word, one per gap the page names", () => {
+  expect(Object.keys(GAP_WORDS).sort()).toEqual(Object.keys(GAP_LINES).sort());
+  for (const [kind, word] of Object.entries(GAP_WORDS)) {
+    expect(word, `the gap ${kind} is named with an internal token`).toMatch(/^[A-Z][^_.]*$/);
+  }
 });
 
 test("every property has a plain name, and no name is an internal token", () => {
