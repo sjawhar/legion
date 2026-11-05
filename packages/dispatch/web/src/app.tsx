@@ -31,13 +31,18 @@ import {
   routeIsInbox,
   routeProjectOf,
 } from "./features/refs/routes";
-import { SearchButton } from "./features/search/SearchButton";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
-import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
+import {
+  appKeymap,
+  type KeyBindingDescription,
+  MOD_KEY_LABEL,
+  useKeymap,
+} from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
+import { RailButton } from "./features/shell/RailButton";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
 import {
   SIGN_OUT_SETTLE_MS,
@@ -297,6 +302,7 @@ function NavigationContents({
   closeButtonRef,
   compact,
   onClose,
+  onCreateIssue,
   onHideSidebar,
   onOpenInboxDrawer,
   onSearch,
@@ -308,6 +314,7 @@ function NavigationContents({
   closeButtonRef: RefObject<HTMLButtonElement | null>;
   compact: boolean;
   onClose: () => void;
+  onCreateIssue: () => void;
   onHideSidebar: () => void;
   onOpenInboxDrawer: () => void;
   onSearch: () => void;
@@ -334,11 +341,27 @@ function NavigationContents({
           </button>
         ) : null}
       </div>
-      <SearchButton
+      <RailButton
+        ariaKeyshortcuts="Control+K Meta+K"
+        className="mt-4"
+        label="Search"
         onOpen={() => {
           onClose();
           onSearch();
         }}
+        shortcut={MOD_KEY_LABEL === "⌘" ? "⌘K" : "Ctrl K"}
+      />
+      {/* The hint is `AppShell`'s global `create` binding, written as `?` and the palette write
+          it (`c`); `aria-keyshortcuts` names the same key in ARIA's uppercase form. */}
+      <RailButton
+        ariaKeyshortcuts="C"
+        className="mt-1"
+        label="New issue"
+        onOpen={() => {
+          onClose();
+          onCreateIssue();
+        }}
+        shortcut="c"
       />
       <Sidebar
         onHide={compact ? undefined : onHideSidebar}
@@ -583,6 +606,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       closeButtonRef={closeButtonRef}
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
+      onCreateIssue={() => setCreateOpen(true)}
       onHideSidebar={() => setSidebarHidden(true)}
       onOpenInboxDrawer={() => setInboxDrawerOpen(true)}
       onSearch={() => setPaletteMode("all")}
