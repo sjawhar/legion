@@ -133,6 +133,10 @@ type fakeBroker struct {
 	// enrollArrivals counts every enroll POST this fake received, on arrival and before any gate, so
 	// a test can tell that an enroll is waiting at the gate.
 	enrollArrivals int
+	// heldSessions are omp session ids this broker keeps for ANOTHER principal: an enroll
+	// stating one is refused 403 SESSION_HELD, as the real broker refuses a name whose carry
+	// principal is not the enrolling one (enroll.ErrSessionHeld). Set before the helper runs.
+	heldSessions map[string]bool
 	// renewGate, when set, holds every renew until the test closes it. A renew reads the gate as it
 	// arrives, so a test can hold one renew, swap in another gate for the next, and release them
 	// one at a time.
@@ -188,6 +192,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		f.posts = append(f.posts, body)
 		if kind, _ := body["kind"].(string); f.refuseKinds[kind] {
 			writeJSON(w, 400, map[string]string{"code": "INVALID_KIND", "error": `kind must be "box", "host", or "pod"`})
+			return
+		}
+		if sid, _ := body["session_id"].(string); f.heldSessions[sid] {
+			writeJSON(w, 403, map[string]string{"code": "SESSION_HELD",
+				"error": "the session " + sid + " belongs to another principal; enrol under a name of your own"})
 			return
 		}
 		tp, _ := body["thumbprint"].(string)

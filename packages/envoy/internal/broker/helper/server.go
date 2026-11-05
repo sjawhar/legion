@@ -170,6 +170,13 @@ func (s *Server) reply(conn net.Conn, resp Response) {
 // both sites say so in the same words.
 const sessionHeldMsg = "session %s is already registered as pid %d; a second process may not take its broker identity"
 
+// sessionAlreadyNamedMsg is the refusal a `register --session-id` gets from a process that is
+// already in a session of another name, with the name it has and the one it asked for: an
+// identity a session holds is not one another name may take over. adoptSessionID says it
+// twice, once for the identity it reads before the claim and once for a name another
+// adoptSessionID won while this one was reading, and both say it in the same words.
+const sessionAlreadyNamedMsg = "this process is in session %s, which cannot become session %s"
+
 // sessionGoneMsg is the refusal a register gets when the session it would have answered for was
 // retired — unregistered, or its process exited — before the reply went out. Both membership
 // checks answer with it: the one adoptSessionID makes for a session with no name to claim, and
@@ -290,13 +297,22 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, sessionID st
 // it was still enrolling — the helper holding no launcher credential, a resume interrupted —
 // would otherwise have its KEY dropped, and the identity the broker still holds could never be
 // reclaimed by the session coming back.
+//
+// A key that will not marshal (Registry.record's error, which a generated P-256 key never
+// gives) parks the session without one: the record still names the enrollments the sweep must
+// end, and the session coming back is given a fresh identity rather than this one's. That is
+// the whole of what the record was keeping, so it is logged here.
 func (s *Server) dormantRecord(sess *Session) func(identity) (Record, bool) {
 	return func(cur identity) (Record, bool) {
 		if cur.SessionID == "" {
 			return Record{}, false
 		}
 		gone := time.Now()
-		rec := s.Registry.record(sess, cur)
+		rec, err := s.Registry.record(sess, cur)
+		if err != nil {
+			s.Log.Error("this session is parked without its signing key, so coming back under its name gets it a new identity, not the requests and grants of the one it had",
+				"runtime_id", cur.RuntimeID, "session_id", cur.SessionID, "error", err)
+		}
 		rec.GoneAt = &gone
 		return rec, true
 	}
@@ -369,7 +385,7 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 		return Response{}, false
 	}
 	if cur.SessionID != "" {
-		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("this process is in session %s, which cannot become session %s", cur.SessionID, sessionID)}, true
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf(sessionAlreadyNamedMsg, cur.SessionID, sessionID)}, true
 	}
 	got := s.Registry.ClaimName(sess, sessionID, func(rec Record, kept bool) reclaimed {
 		return s.reclaimIdentity(sessionID, rec, kept)
@@ -391,7 +407,7 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 		// refusal the reading above would have given had it seen this identity.
 		now := sess.identity()
 		if now.SessionID != "" && now.SessionID != sessionID {
-			return Response{Code: CodeBadRequest, Error: fmt.Sprintf("this process is in session %s, which cannot become session %s", now.SessionID, sessionID)}, true
+			return Response{Code: CodeBadRequest, Error: fmt.Sprintf(sessionAlreadyNamedMsg, now.SessionID, sessionID)}, true
 		}
 		return Response{}, false
 	}
@@ -703,6 +719,17 @@ func (s *Server) lacksCredential(err error) bool {
 	return errors.Is(err, errNoCredential) && !s.Broker.HasCredential()
 }
 
+// sessionHeld reports whether err is the broker refusing an enrolment the session name it
+// states belongs to another principal (403 SESSION_HELD, enroll.ErrSessionHeld). The broker
+// keys a name's carry on its principal — person, Google account or service account — and hands
+// a name back to that one alone, so no later attempt by this helper can be answered any
+// differently: only the holder enrolling the name somewhere else, or nobody at all, ever
+// changes it. enrollLoop therefore stops rather than retries (errFinal).
+func sessionHeld(err error) bool {
+	var be *BrokerError
+	return errors.As(err, &be) && be.Status == http.StatusForbidden && be.Code == "SESSION_HELD"
+}
+
 // enrollSessionKey enrolls a key a launcher holds for a session on this machine — a pass-through
 // broker call requiring no registered session (see Broker.EnrollSessionKey), so unlike sign it
 // does not check descendancy at all. An enrollment the helper cannot attempt for want of a
@@ -873,6 +900,9 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// for one runtime id outright). Retrying on here would spin against that refusal,
 		// since this retry waits only on a login, never on the rename's wake.
 		renamed := false
+		// held ends it for the other refusal no retry can mend: the session name belongs to
+		// another principal (403 SESSION_HELD).
+		held := false
 		pass := sess.identity().Generation
 		// A login wakes the retry, so a session registered before it enrolls within about a second
 		// rather than when a backoff of up to a minute comes round.
@@ -881,6 +911,11 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 				return
 			}
 			sess.setError(err.Error())
+			if held {
+				s.Log.Error("session cannot enroll: the broker holds this session name for another principal, and a name another principal holds does not come free; this session stops enrolling and signs nothing. Register it under a name of its own",
+					"runtime_id", sess.RuntimeID(), "session_id", sess.SessionID(), "error", err)
+				return
+			}
 			if s.lacksCredential(err) {
 				s.Log.Error(cannotEnrollMsg, "runtime_id", sess.RuntimeID(), "why", s.Broker.noCredentialReason(), "in", delay)
 				return
@@ -902,6 +937,17 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 			}
 			var err error
 			id, lease, err = s.Broker.EnrollIdentity(ctx, cur)
+			if sessionHeld(err) {
+				// The broker keeps a session name for the principal that first enrolled it
+				// and refuses it to any other (403 SESSION_HELD): this session's name is
+				// another person's or another service's, and nothing this helper can wait
+				// for changes that. Retrying every minute for as long as the session lives
+				// would ask one refused question thousands of times and never enrol, so the
+				// retry ends here and the refusal stays on the session as its last error,
+				// which `sessions`, a register reply and every sign answer report.
+				held = true
+				return fmt.Errorf("%w: %w", err, errFinal)
+			}
 			return err
 		})
 		if renamed {
@@ -1129,13 +1175,24 @@ func (s *Server) watchExit(ctx context.Context, sess *Session) {
 }
 
 // DefaultDormantGrace is how long a named session's identity is kept after its process goes
-// away, before its enrollment is revoked. A session the launcher named can come back — an omp
-// restarted in its pane, an `agentbox move`, a reboot's resume — and ending its enrollment
-// cancels every request its approver has not yet answered and revokes every grant they have
-// given, which is what dispatch://INFRA-1167 is about. It is well under the broker's own
-// 15-minute lease, so a session that never comes back loses its grants here, not at the lease;
-// and a session with no omp session id is revoked at once, exactly as before, since nothing
-// could claim it.
+// away, before the helper revokes its enrollment. A session the launcher named can come back —
+// an omp restarted in its pane, an `agentbox move`, a reboot's resume — and what the grace buys
+// it is ONE enrollment kept rather than an adoption: inside the grace the session is handed
+// back its own key and runtime id and renews the very row it had, so the requests its approver
+// has not answered and the grants that person has given were never moved and never at risk.
+//
+// Outside it this helper revokes, and that revoke is a launcher's, which is endMayCarry
+// (enroll.Revoke): a named enrolment still holding a grant or a pending request is not
+// cancelled but marked dormant, and the session enrolling again under the same name and the
+// same principal within BROKER_SESSION_CARRY_SECONDS adopts them into a NEW row
+// (enroll.adopt). So the grace is not what stands between a person's grant and its loss — the
+// broker's carry is, and enroll.Service.EndCarried is what finally ends them — and what the
+// grace saves is the second row, the moved grants and depending on that window at all. An
+// enrolment holding nothing is ended outright, and a session with no omp session id is revoked
+// the moment its process goes, exactly as before, since nothing could claim it.
+//
+// Three minutes is well under the broker's own 15-minute lease, so a session that never comes
+// back has its enrollment ended here rather than left to lapse (dispatch://INFRA-1167).
 //
 // It belongs to the Server, not to a package variable, so a test can choose it without writing
 // a global that the Server's own goroutines read — which is a data race, and was one: `go test

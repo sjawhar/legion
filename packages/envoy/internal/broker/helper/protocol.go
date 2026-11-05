@@ -183,10 +183,10 @@ const UnitName = "agent-secrets-helper.service"
 
 // configDir is the directory this helper's per-user files live under: $XDG_CONFIG_HOME, and
 // $HOME/.config when that is unset, which is the default the XDG base directory specification
-// names. UnitPath and DefaultStatePath both read it, so the unit and the session records are
-// looked for under one directory whichever of them a caller asks about. getenv is injectable for
-// the reason it is on DefaultSocket: so a caller can test its own defaulting against a fake
-// environment.
+// names. UnitPath reads it, and so does the default machine login StatePath puts the session
+// records beside (cmd/agent-secrets-helper's loadConfig), so a helper with nothing set keeps
+// its unit, its login and its records under one directory. getenv is injectable for the reason
+// it is on DefaultSocket: so a caller can test its own defaulting against a fake environment.
 func configDir(getenv func(string) string) string {
 	dir := getenv("XDG_CONFIG_HOME")
 	if dir == "" {
@@ -201,19 +201,37 @@ func UnitPath(getenv func(string) string) string {
 	return filepath.Join(configDir(getenv), "systemd", "user", UnitName)
 }
 
-// LegacyStatePath is where the helper's session records used to live: beside its socket, under
-// the user's runtime directory. That directory is tmpfs and goes at a reboot, which is exactly
-// the event a named session's records must survive (dispatch://INFRA-1167), so DefaultStatePath
-// replaces it and MigrateStateFile moves what it finds there.
-func LegacyStatePath(getenv func(string) string) string {
-	return filepath.Join(filepath.Dir(DefaultSocket(getenv)), "sessions.json")
+// LegacyStatePath is where the helper's session records used to live: beside socket, the socket
+// THIS helper is configured to listen on, which is the one `install` wrote into its unit where
+// a machine names one (AGENT_SECRETS_HELPER_SOCK) and DefaultSocket otherwise. That directory
+// is the user's runtime dir, which is tmpfs and goes at a reboot — exactly the event a named
+// session's records must survive (dispatch://INFRA-1167) — so StatePath replaces it and
+// MigrateStateFile moves what it finds there. Reading the configured socket rather than the
+// default is what makes a helper installed with a socket of its own migrate its OWN old
+// records, and no other helper's.
+func LegacyStatePath(socket string) string {
+	return filepath.Join(filepath.Dir(socket), "sessions.json")
 }
 
-// DefaultStatePath is where the helper keeps its session records when AGENT_SECRETS_STATE_FILE
-// is unset: under $XDG_CONFIG_HOME (default $HOME/.config), beside the machine login, because a
-// named session's record holds that session's signing key and must outlive a reboot.
-func DefaultStatePath(getenv func(string) string) string {
-	return filepath.Join(configDir(getenv), "agent-secrets", "sessions.json")
+// StatePath is where the helper keeps its session records when AGENT_SECRETS_STATE_FILE names
+// no file: sessions.json beside machineFile, the machine login this helper's sessions enrol
+// under (AGENT_SECRETS_MACHINE_FILE, default $HOME/.config/agent-secrets/machine.json), so a
+// helper with nothing set keeps its records at $HOME/.config/agent-secrets/sessions.json,
+// where one upgraded in place on its default socket finds them.
+//
+// Durable, and not in the runtime directory the socket is in: a named session's record holds
+// that session's signing key, and the identity that key stands for must outlive a reboot, while
+// the runtime directory is tmpfs and goes with one.
+//
+// Beside the machine login, and not at one path every helper on the machine shares: the records
+// now hold named sessions' signing keys, so one helper writing another's records would cost
+// that helper every session it holds. The machine file is what keeps them apart, because a
+// helper refuses to start while another holds that file (claimMachineFile in
+// cmd/agent-secrets-helper), so two helpers that can run at once have machine files of their
+// own and, through this, records of their own. A second helper started with a socket of its own
+// and no machine file of its own does not reach the records at all: the claim refuses it first.
+func StatePath(machineFile string) string {
+	return filepath.Join(filepath.Dir(machineFile), "sessions.json")
 }
 
 // writeFileOwnerOnly writes data to path so that nothing but this user can read it, and

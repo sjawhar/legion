@@ -74,9 +74,10 @@ type config struct {
 	// launcher credential is bound to (helper.LoadOrMakeIdentityKey), beside the machine login
 	// a machine that proves none keeps: ~/.config/agent-secrets/identity-key.pem.
 	IdentityKeyFile string
-	// LegacyStatePath is the runtime-directory path the records used to live at, moved to
-	// StatePath at the first start that finds one (helper.MigrateStateFile). Empty once the
-	// caller named a state file of its own.
+	// LegacyStatePath is the runtime-directory path the records used to live at — beside THIS
+	// helper's socket, so a helper installed with a socket of its own migrates its own file —
+	// moved to StatePath at the first start that finds one (helper.MigrateStateFile). Empty
+	// once the caller named a state file of its own.
 	LegacyStatePath string
 }
 
@@ -122,14 +123,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		// own socket lives in, so both find one place with neither variable set.
 		cfg.KeyDir = filepath.Dir(helper.DefaultSocket(getenv))
 	}
-	// The records hold a named session's signing key and must survive a reboot, so they live
-	// beside the machine login, not in the runtime directory the socket is in: that is tmpfs
-	// (dispatch://INFRA-1167). AGENT_SECRETS_STATE_FILE moves them, for a test or a second
+	// The records hold a named session's signing key, so they must survive a reboot and they
+	// must be this helper's alone (dispatch://INFRA-1167). Both follow from the files this
+	// helper is configured with rather than from the defaults: durable beside its own machine
+	// login, which no second helper may hold at once (claimMachineFile), rather than in the
+	// runtime directory the socket is in, which is tmpfs; and migrated from beside its own
+	// socket, which is where a helper installed with a socket of its own left them.
+	// AGENT_SECRETS_STATE_FILE names the file outright, for a test, a dev stack or a second
 	// helper, and then nothing is migrated into it.
 	cfg.StatePath = getenv("AGENT_SECRETS_STATE_FILE")
 	if cfg.StatePath == "" {
-		cfg.StatePath = helper.DefaultStatePath(getenv)
-		cfg.LegacyStatePath = helper.LegacyStatePath(getenv)
+		cfg.StatePath = helper.StatePath(cfg.MachineFile)
+		cfg.LegacyStatePath = helper.LegacyStatePath(cfg.Socket)
 	}
 	return cfg, nil
 }
@@ -159,9 +164,11 @@ environment:
                                ~/.config/agent-secrets/identity-key.pem, mode 0600
   AGENT_SECRETS_STATE_FILE     where the helper keeps its session records (mode 0600: a named
                                session's signing key is in them, so they must outlive a reboot
-                               and sit beside the machine login, not in the runtime directory);
-                               records found at the old runtime-directory path are moved here
-                               once (default ~/.config/agent-secrets/sessions.json)
+                               and sit beside this helper's own machine login, not in the
+                               runtime directory and not at a path a second helper shares);
+                               records found beside this helper's socket, where they used to
+                               live, are moved here once (default: sessions.json beside
+                               AGENT_SECRETS_MACHINE_FILE, so ~/.config/agent-secrets/sessions.json)
   AGENT_SECRETS_MACHINE_IDENTITY
                                the identity this machine proves at the broker's token exchange:
                                kubernetes (AGENT_SECRETS_MACHINE_TOKEN_FILE), metadata
@@ -244,8 +251,12 @@ func serve(cfg config) error {
 	if err != nil {
 		return err
 	}
+	// The registry logs through the helper's own logger too: a key it could not record is the
+	// one thing Save cannot report by returning (helper.Registry.Log).
+	registry := helper.NewRegistry(cfg.StatePath)
+	registry.Log = log
 	srv := &helper.Server{
-		Registry: helper.NewRegistry(cfg.StatePath),
+		Registry: registry,
 		// The two waits the broker's lease bound counts this renewer by, read from the one
 		// package that holds them (internal/broker/leasetime): the whole-call timeout a
 		// renewal an outage black-holes costs, and the floor under the renew cadence.

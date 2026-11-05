@@ -258,7 +258,8 @@ func TestContractASessionThatDoesNotComeBackLosesItsGrant(t *testing.T) {
 // tests above could not catch, because each hands the helper a records path of its own: in
 // production the path comes from the launcher, and until dispatch://INFRA-1167 it was
 // `$XDG_RUNTIME_DIR/agent-secrets/sessions.json`, beside the socket — tmpfs, gone at the very
-// reboot the key must survive. This drives the DEFAULTS a real helper computes, removes the
+// reboot the key must survive. This drives the paths a real helper derives from the socket and
+// the machine login it is configured with (cmd/agent-secrets-helper's loadConfig), removes the
 // whole runtime directory as a reboot does, and shows the records, the key in them and the
 // enrollment still there afterwards; it also shows a helper upgraded in place carrying the
 // records it finds at the old path over to the new one.
@@ -274,7 +275,12 @@ func TestContractTheProductionRecordsPathSurvivesTheRuntimeDirectoryGoing(t *tes
 		}
 		return ""
 	}
-	legacy, durable := LegacyStatePath(getenv), DefaultStatePath(getenv)
+	// What a helper with nothing set is configured with, as loadConfig defaults them: the
+	// socket under the runtime directory, the machine login under HOME. The records follow
+	// those two files rather than the environment, so a helper installed with a socket or a
+	// machine file of its own keeps its own records and migrates its own old ones.
+	socket, machineFile := DefaultSocket(getenv), filepath.Join(home, ".config", "agent-secrets", "machine.json")
+	legacy, durable := LegacyStatePath(socket), StatePath(machineFile)
 	if filepath.Dir(legacy) != filepath.Join(runtime, "agent-secrets") {
 		t.Fatalf("the old path is not under the runtime directory: %s", legacy)
 	}

@@ -55,6 +55,7 @@
 #   AGENT_SECRETS_HELPER_SOCK             agent-secrets-helper's socket, in the work directory
 #   AGENT_SECRETS_OPERATOR_FILE           the helper's operator file
 #   AGENT_SECRETS_MACHINE_FILE            the machine credential agent-secrets writes
+#   AGENT_SECRETS_STATE_FILE              this run's own session records, in the work directory
 #   AGENT_SECRETS_KEY_DIR                 a session key directory of this run's own
 #   DISPATCH_URL, DISPATCH_TOKEN          Dispatch and its shared agent token
 #   ENVOY_URL                             the listener
@@ -252,7 +253,10 @@ METADATA_SCRIPT="$WORK_DIR/dev-metadata.py"
 # both for the key directory, the socket and the sign-in store. BOX2_SESSION is the session name
 # this box's own machine trade writes under, which BROKER_VM_EXCHANGE_ACCOUNTS leaves to the
 # process; it is not the session a walk moves from one box to the other, which each agent-secrets
-# call names for itself.
+# call names for itself. Its records file is its own for a reason of the shell rather than of the
+# broker: the start line below is `env`, not `env -i`, so a caller with the first box's
+# AGENT_SECRETS_STATE_FILE exported would have this box's helper write the first box's records,
+# which hold the first box's named sessions' signing keys (dispatch://INFRA-1167).
 BOX2_DIR="$WORK_DIR/box-two"
 BOX2_HOME="$BOX2_DIR/home"
 BOX2_RUNTIME_DIR="$BOX2_DIR/run"
@@ -260,6 +264,7 @@ BOX2_STATE_DIR="$BOX2_DIR/state"
 BOX2_KEY_DIR="$BOX2_DIR/keys"
 BOX2_SIGNIN_DIR="$BOX2_DIR/signins"
 BOX2_MACHINE_FILE="$BOX2_DIR/machine.json"
+BOX2_STATE_FILE="$BOX2_DIR/sessions.json"
 BOX2_OPERATOR_FILE="$BOX2_DIR/operator"
 BOX2_HELPER_SOCK="$BOX2_DIR/helper.sock"
 BOX2_METADATA_PORT_FILE="$BOX2_DIR/metadata-port"
@@ -749,6 +754,7 @@ dev-stack: ready.
   export AGENT_SECRETS_HELPER_SOCK=$WORK_DIR/helper.sock
   export AGENT_SECRETS_OPERATOR_FILE=$OPERATOR_FILE
   export AGENT_SECRETS_MACHINE_FILE=$WORK_DIR/machine.json
+  export AGENT_SECRETS_STATE_FILE=$WORK_DIR/sessions.json
   export AGENT_SECRETS_KEY_DIR=$WORK_DIR/keys
   export DISPATCH_URL=$DISPATCH_URL
   export DISPATCH_TOKEN=$DISPATCH_TOKEN_VALUE
@@ -807,8 +813,9 @@ dev-stack: ready.
   A second box, for a session that moves from one box to another. A box at the broker is a key —
   launcher_credentials_live_key allows one live launcher credential per key — so this box shares
   nothing with the box above: its own HOME, its own XDG directories, its own key directory,
-  machine file, sign-in store, operator file and helper socket, and a metadata stand-in of its own
-  on a port of its own. Each is the variable it stands for under DEV_STACK_BOX2_:
+  machine file, records file, sign-in store, operator file and helper socket, and a metadata
+  stand-in of its own on a port of its own. Each is the variable it stands for under
+  DEV_STACK_BOX2_:
 
   export DEV_STACK_BOX2_DIR=$BOX2_DIR
   export DEV_STACK_BOX2_HOME=$BOX2_HOME
@@ -816,6 +823,7 @@ dev-stack: ready.
   export DEV_STACK_BOX2_XDG_STATE_HOME=$BOX2_STATE_DIR
   export DEV_STACK_BOX2_AGENT_SECRETS_KEY_DIR=$BOX2_KEY_DIR
   export DEV_STACK_BOX2_AGENT_SECRETS_MACHINE_FILE=$BOX2_MACHINE_FILE
+  export DEV_STACK_BOX2_AGENT_SECRETS_STATE_FILE=$BOX2_STATE_FILE
   export DEV_STACK_BOX2_AGENT_SECRETS_SIGNIN_DIR=$BOX2_SIGNIN_DIR
   export DEV_STACK_BOX2_AGENT_SECRETS_OPERATOR_FILE=$BOX2_OPERATOR_FILE
   export DEV_STACK_BOX2_AGENT_SECRETS_HELPER_SOCK=$BOX2_HELPER_SOCK
@@ -837,6 +845,7 @@ dev-stack: ready.
       XDG_STATE_HOME=\$DEV_STACK_BOX2_XDG_STATE_HOME \\
       AGENT_SECRETS_KEY_DIR=\$DEV_STACK_BOX2_AGENT_SECRETS_KEY_DIR \\
       AGENT_SECRETS_MACHINE_FILE=\$DEV_STACK_BOX2_AGENT_SECRETS_MACHINE_FILE \\
+      AGENT_SECRETS_STATE_FILE=\$DEV_STACK_BOX2_AGENT_SECRETS_STATE_FILE \\
       AGENT_SECRETS_SIGNIN_DIR=\$DEV_STACK_BOX2_AGENT_SECRETS_SIGNIN_DIR \\
       AGENT_SECRETS_OPERATOR_FILE=\$DEV_STACK_BOX2_AGENT_SECRETS_OPERATOR_FILE \\
       AGENT_SECRETS_HELPER_SOCK=\$DEV_STACK_BOX2_AGENT_SECRETS_HELPER_SOCK \\

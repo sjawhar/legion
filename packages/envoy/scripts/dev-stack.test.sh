@@ -441,17 +441,25 @@ assert_instance_ready() {
   exported_value="$(exported "$log_file" AGENT_SECRETS_ACCOUNT_TOKEN_FILE)"
   [[ -s "$exported_value" ]] ||
     fail "$label exported AGENT_SECRETS_ACCOUNT_TOKEN_FILE=$exported_value, which its issuer never wrote"
+  # The records file this run's helper keeps its sessions in, under this run's own work
+  # directory: a named session's record holds that session's signing key, and the helper keeps
+  # its records beside its machine login by default, so a run that exported only a socket would
+  # have its helper overwrite the records of the helper installed under the caller's own HOME
+  # (dispatch://INFRA-1167).
+  exported_value="$(exported "$log_file" AGENT_SECRETS_STATE_FILE)"
+  [[ "$exported_value" == "${work_dir}/sessions.json" ]] ||
+    fail "$label exported AGENT_SECRETS_STATE_FILE=$exported_value, not a records file of its own under its work directory"
 
   # (g) The second box, which a session moving from one box to another is driven on: a path of
   # its own for each of the first box's, all under this run's work directory, so two boxes of one
   # stack share no state. A box at the broker is a key — launcher_credentials_live_key allows one
   # live launcher credential per key — so a second box holding one path of the first box's would
   # be the first box.
-  local first_box_paths=" ${work_dir} ${work_dir}/keys ${work_dir}/machine.json ${work_dir}/operator ${work_dir}/helper.sock ${work_dir}/metadata-port "
+  local first_box_paths=" ${work_dir} ${work_dir}/keys ${work_dir}/machine.json ${work_dir}/sessions.json ${work_dir}/operator ${work_dir}/helper.sock ${work_dir}/metadata-port "
   local box2_paths=" " variable value
   for variable in DIR HOME XDG_RUNTIME_DIR XDG_STATE_HOME AGENT_SECRETS_KEY_DIR \
-    AGENT_SECRETS_MACHINE_FILE AGENT_SECRETS_SIGNIN_DIR AGENT_SECRETS_OPERATOR_FILE \
-    AGENT_SECRETS_HELPER_SOCK METADATA_PORT_FILE; do
+    AGENT_SECRETS_MACHINE_FILE AGENT_SECRETS_STATE_FILE AGENT_SECRETS_SIGNIN_DIR \
+    AGENT_SECRETS_OPERATOR_FILE AGENT_SECRETS_HELPER_SOCK METADATA_PORT_FILE; do
     value="$(exported "$log_file" "DEV_STACK_BOX2_${variable}")"
     [[ -n "$value" ]] || fail "$label printed no export DEV_STACK_BOX2_${variable} for its second box"
     [[ "$value" == "${work_dir}/"* ]] ||
@@ -476,7 +484,7 @@ assert_instance_ready() {
     fail "$label wrote no operator file for the second box at $value naming the person the first box's names"
   # The helper writes the machine file and the stand-in writes the port file, so neither is there
   # yet: the line the banner prints waits for the port file to hold a port.
-  for variable in AGENT_SECRETS_MACHINE_FILE AGENT_SECRETS_HELPER_SOCK METADATA_PORT_FILE; do
+  for variable in AGENT_SECRETS_MACHINE_FILE AGENT_SECRETS_STATE_FILE AGENT_SECRETS_HELPER_SOCK METADATA_PORT_FILE; do
     value="$(exported "$log_file" "DEV_STACK_BOX2_${variable}")"
     [[ ! -e "$value" ]] ||
       fail "$label created the second box's $variable at $value, which only its helper or its stand-in writes"
@@ -493,7 +501,8 @@ assert_instance_ready() {
   # first box's.
   # shellcheck disable=SC2016 # the banner prints these dollar signs; they are not this shell's
   for value in 'DEV_STACK_METADATA_PORT_FILE=$DEV_STACK_BOX2_METADATA_PORT_FILE' \
-    'AGENT_SECRETS_HELPER_SOCK=$DEV_STACK_BOX2_AGENT_SECRETS_HELPER_SOCK'; do
+    'AGENT_SECRETS_HELPER_SOCK=$DEV_STACK_BOX2_AGENT_SECRETS_HELPER_SOCK' \
+    'AGENT_SECRETS_STATE_FILE=$DEV_STACK_BOX2_AGENT_SECRETS_STATE_FILE'; do
     grep -qF "$value" "$log_file" ||
       fail "$label printed no line that starts the second box with $value"
   done
@@ -587,7 +596,7 @@ box2_dir2="$(exported "$log2" DEV_STACK_BOX2_DIR)"
 [[ "$box2_dir1" != "$box2_dir2" ]] || fail "both instances gave their second box the directory $box2_dir1"
 printf 'PASS: two concurrent instances used two work directories, two sets of ports and two sets of databases (%s| %s)\n' \
   "$(created_databases "$psql_calls1")" "$(created_databases "$psql_calls2")"
-printf 'PASS: each instance laid out a second box of its own, with its own HOME, XDG directories, key directory, machine file, sign-in store, operator file, helper socket and metadata port file (%s | %s)\n' \
+printf 'PASS: each instance laid out a second box of its own, with its own HOME, XDG directories, key directory, machine file, records file, sign-in store, operator file, helper socket and metadata port file (%s | %s)\n' \
   "$box2_dir1" "$box2_dir2"
 
 # (e1) A normal exit: one process of the stack stops by itself, so the run stops the rest, drops

@@ -55,8 +55,12 @@ func namedSession(t *testing.T, pid int, sessionID string, key *ecdsa.PrivateKey
 func dormantRecordFor(t *testing.T, pid int, sessionID, enrollmentID string, key *ecdsa.PrivateKey) Record {
 	t.Helper()
 	gone := time.Now()
+	encoded, err := encodeKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return Record{PID: pid, StartTicks: 1, BootID: otherBootID, RuntimeID: SessionRuntimeID(sessionID),
-		EnrollmentID: enrollmentID, SessionID: sessionID, Key: encodeKey(key), GoneAt: &gone}
+		EnrollmentID: enrollmentID, SessionID: sessionID, Key: encoded, GoneAt: &gone}
 }
 
 // TestOnlyARecordOfThisBootRePinsItsProcess is the regression for defect 1. The three cases
@@ -198,9 +202,15 @@ func TestAProcessComingBackWhileItsSessionRetiresFindsTheIdentity(t *testing.T) 
 			defer wg.Done()
 			<-start
 			reg.Retire(old, func(cur identity) (Record, bool) {
+				// The record the helper's own park function builds (Server.dormantRecord),
+				// so this race runs against the record production parks, key and all.
 				gone := time.Now()
-				return Record{PID: old.PID, StartTicks: old.StartTicks, RuntimeID: cur.RuntimeID,
-					EnrollmentID: cur.EnrollmentID, SessionID: cur.SessionID, Key: encodeKey(cur.Key), GoneAt: &gone}, true
+				rec, err := reg.record(old, cur)
+				if err != nil {
+					panic(err)
+				}
+				rec.GoneAt = &gone
+				return rec, true
 			})
 		}()
 		go func() {
