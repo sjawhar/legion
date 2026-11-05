@@ -125,9 +125,10 @@ on:
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
-      # ci.yaml's *dispatch_server, 54 patterns:
+      # ci.yaml's *dispatch_server, 57 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
+      - 'packages/envoy/internal/cistore/*'
       - 'packages/envoy/internal/contracts/*'
       - 'packages/envoy/internal/dispatch/accesslog/*'
       - 'packages/envoy/internal/dispatch/agentsecrets/*'
@@ -136,6 +137,7 @@ on:
       - 'packages/envoy/internal/dispatch/architecture/*'
       - 'packages/envoy/internal/dispatch/asks/*'
       - 'packages/envoy/internal/dispatch/auth/*'
+      - 'packages/envoy/internal/dispatch/cireconcile/*'
       - 'packages/envoy/internal/dispatch/config/*'
       - 'packages/envoy/internal/dispatch/dashboard/*'
       - 'packages/envoy/internal/dispatch/delivery/**'
@@ -170,6 +172,7 @@ on:
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/internal/id/*'
       - 'packages/envoy/internal/kvwatch/*'
+      - 'packages/envoy/internal/logging/*'
       - 'packages/envoy/internal/metrics/*'
       - 'packages/envoy/internal/oidc/*'
       - 'packages/envoy/internal/pglisten/*'

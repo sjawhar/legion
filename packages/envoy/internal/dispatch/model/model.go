@@ -771,12 +771,14 @@ type ArtifactReview struct {
 	// Kind is who gave the review: "person" for one a person gave, "plan_review" for a plan
 	// review's approval of a plan version. A review Dispatch carried forward to a later version
 	// keeps the kind of the review it carried.
-	Kind      string    `json:"kind"`
-	Actor     Actor     `json:"actor"`
-	Reason    *string   `json:"reason"`
-	AskID     *string   `json:"ask_id"`
-	CreatedAt time.Time `json:"created_at"`
-	EventSeq  *int64    `json:"-"`
+	Kind                string    `json:"kind"`
+	Actor               Actor     `json:"actor"`
+	Reason              *string   `json:"reason"`
+	AskID               *string   `json:"ask_id"`
+	CreatedAt           time.Time `json:"created_at"`
+	ContentSHA256       *string   `json:"content_sha256"`
+	ContentSHA256Source *string   `json:"content_sha256_source"`
+	EventSeq            *int64    `json:"-"`
 }
 
 // ArtifactApproval is a document's approval state as of its latest version:
@@ -793,16 +795,18 @@ type ArtifactReview struct {
 // among them where At, its transaction's start, cannot. Seq orders; Version, not
 // Seq, says which version the review covers.
 type ArtifactApproval struct {
-	State         string  `json:"state"`
-	LatestVersion int     `json:"latest_version"`
-	Version       *int    `json:"version,omitempty"`
-	By            *Actor  `json:"by,omitempty"`
-	At            *string `json:"at,omitempty"`
-	Seq           *int64  `json:"seq,omitempty"`
-	Reason        *string `json:"reason,omitempty"`
-	AskID         *string `json:"ask_id,omitempty"`
-	RequestedBy   *Actor  `json:"requested_by,omitempty"`
-	WaitingOn     string  `json:"waiting_on,omitempty"`
+	State               string  `json:"state"`
+	LatestVersion       int     `json:"latest_version"`
+	Version             *int    `json:"version,omitempty"`
+	By                  *Actor  `json:"by,omitempty"`
+	At                  *string `json:"at,omitempty"`
+	Seq                 *int64  `json:"seq,omitempty"`
+	Reason              *string `json:"reason,omitempty"`
+	AskID               *string `json:"ask_id,omitempty"`
+	ContentSHA256       *string `json:"content_sha256,omitempty"`
+	ContentSHA256Source *string `json:"content_sha256_source,omitempty"`
+	RequestedBy         *Actor  `json:"requested_by,omitempty"`
+	WaitingOn           string  `json:"waiting_on,omitempty"`
 	// Kind is the latest review's Kind, so a reader can say an approval is a plan review's
 	// rather than a person's; empty while no review stands.
 	Kind string `json:"kind,omitempty"`
@@ -818,13 +822,15 @@ type ArtifactApproval struct {
 // ask it answered (nil when given from the document header with no request open at
 // that version).
 type ArtifactReviewEventPayload struct {
-	ArtifactID string  `json:"artifact_id"`
-	Name       string  `json:"name"`
-	Version    int     `json:"version"`
-	Kind       string  `json:"kind"`
-	Actor      Actor   `json:"actor"`
-	Reason     *string `json:"reason"`
-	AskID      *string `json:"ask_id"`
+	ArtifactID          string  `json:"artifact_id"`
+	Name                string  `json:"name"`
+	Version             int     `json:"version"`
+	Kind                string  `json:"kind"`
+	Actor               Actor   `json:"actor"`
+	Reason              *string `json:"reason"`
+	AskID               *string `json:"ask_id"`
+	ContentSHA256       *string `json:"content_sha256,omitempty"`
+	ContentSHA256Source *string `json:"content_sha256_source,omitempty"`
 }
 
 // CurrencyCurrent, CurrencyOlder and CurrencyUnknown are whether a recorded result still speaks

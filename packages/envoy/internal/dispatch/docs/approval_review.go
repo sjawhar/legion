@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -33,7 +34,7 @@ const (
 )
 
 // ReviewColumns selects one artifact_reviews row in the order ScanReview reads it.
-const ReviewColumns = `id::text, artifact_id::text, version, state, kind, actor, reason, ask_id::text, created_at, event_seq`
+const ReviewColumns = `id::text, artifact_id::text, version, state, kind, actor, reason, ask_id::text, created_at, event_seq, content_sha256, content_sha256_source`
 
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
@@ -55,7 +56,7 @@ const ReviewOrder = `event_seq desc nulls last, created_at desc, artifact_review
 func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 	var review model.ArtifactReview
 	var actor []byte
-	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &review.Kind, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq); err != nil {
+	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &review.Kind, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq, &review.ContentSHA256, &review.ContentSHA256Source); err != nil {
 		return model.ArtifactReview{}, err
 	}
 	if err := json.Unmarshal(actor, &review.Actor); err != nil {
@@ -106,6 +107,10 @@ func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Arti
 			return fmt.Errorf("insert artifact review: %w", err)
 		}
 		review = scanned
+		if review.ContentSHA256 == nil {
+			slog.Warn("dispatch: review recorded with no content hash: the version names no stored text",
+				"artifact", artifact.ID, "version", version, "review", review.ID)
+		}
 		return nil
 	})
 	if err := broker.QueueAppend(b, documentAskEvent(
@@ -118,10 +123,38 @@ func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Arti
 			Actor:      actor,
 			Reason:     reason,
 			AskID:      askID,
+			// content_sha256 and content_sha256_source are not set here: the insert's trigger
+			// derives them, and the statement after this append writes them into this payload.
 		},
 	), func(appended model.Event) { event = appended }); err != nil {
 		return fmt.Errorf("append %s: %w", eventType, err)
 	}
+	// The digest of the bytes the review approves is the row's, which the insert's trigger wrote
+	// (migration 20261105084017), and the event's payload must carry the same two values. Nothing
+	// of this batch is read in Go before the event is appended - the write phase sends every
+	// statement back to back - so the payload takes them in SQL, from the row this batch
+	// inserted, as the event's own sequence is taken. A carry needs it that way: it pins a
+	// version this same batch writes, so no read before the batch could know the digest at all.
+	b.Queue("record the approved bytes' digest on "+eventType, `
+		update events set payload = payload || jsonb_build_object(
+			'content_sha256', review.content_sha256,
+			'content_sha256_source', review.content_sha256_source)
+		from artifact_reviews review
+		where review.id = $1 and events.id = `+store.LatestEventID+`
+		returning review.content_sha256, review.content_sha256_source
+	`, id).QueryRow(func(row pgx.Row) error {
+		var digest, source *string
+		if err := row.Scan(&digest, &source); err != nil {
+			return fmt.Errorf("record the approved bytes' digest on %s: %w", eventType, err)
+		}
+		payload, ok := event.Payload.(model.ArtifactReviewEventPayload)
+		if !ok {
+			return fmt.Errorf("%s payload must be model.ArtifactReviewEventPayload", eventType)
+		}
+		payload.ContentSHA256, payload.ContentSHA256Source = digest, source
+		event.Payload = payload
+		return nil
+	})
 	b.Queue("record the sequence of "+eventType, `
 		update artifact_reviews set event_seq = (select seq from events where id = `+store.LatestEventID+`)
 		where id = $1
@@ -132,6 +165,40 @@ func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Arti
 		return nil
 	})
 	return nil
+}
+
+// ReviewHashFill counts rows pinned at boot and rows whose version has no stored text.
+type ReviewHashFill struct{ Filled, Unhashable int }
+
+// FillReviewContentHashes pins old reviews in bounded batches. The update trigger
+// derives the true hash and marks its provenance backfill; an existing pin never moves.
+func FillReviewContentHashes(ctx context.Context, q Queryer) (ReviewHashFill, error) {
+	var result ReviewHashFill
+	for {
+		rows, err := q.Query(ctx, `
+			update artifact_reviews set content_sha256 = artifact_version_text_sha256(artifact_id, version)
+			where id in (
+				select id from artifact_reviews
+				where content_sha256 is null and artifact_version_text_sha256(artifact_id, version) is not null
+				limit 500
+			)`)
+		if err != nil {
+			return result, fmt.Errorf("fill review content hashes: %w", err)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return result, fmt.Errorf("fill review content hashes: %w", err)
+		}
+		filled := int(rows.CommandTag().RowsAffected())
+		result.Filled += filled
+		if filled == 0 {
+			break
+		}
+	}
+	if err := q.QueryRow(ctx, `select count(*) from artifact_reviews where content_sha256 is null`).Scan(&result.Unhashable); err != nil {
+		return result, fmt.Errorf("count unhashable reviews: %w", err)
+	}
+	return result, nil
 }
 
 // latestApprovedReviewQuery selects the newest approval of the document $1 names. Like
