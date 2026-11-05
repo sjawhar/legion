@@ -33,6 +33,7 @@ func withDeadline(handler http.Handler) http.Handler {
 // needs a second connection waits for one its own peers can only release by finishing, and the
 // server never recovers. Real callers reach this whenever enough agents comment on one issue.
 func TestConcurrentAnchoredWritesDoNotWedgeTheirPool(t *testing.T) {
+	t.Parallel()
 	const maxConns = 4
 	for _, writers := range []int{maxConns, maxConns * 2} {
 		t.Run(fmt.Sprintf("writers=%d", writers), func(t *testing.T) {
@@ -106,6 +107,7 @@ func (g *gatedMarkQuote) MarkQuote(
 // pins closes at any size and four reaches it with four callers - so the write in the middle
 // must finish without asking that pool for anything else.
 func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
+	t.Parallel()
 	const maxConns = 4
 	gate := &gatedMarkQuote{entered: make(chan struct{}), release: make(chan struct{})}
 	handler, service, database := pooledDocumentHandlerWith(t, maxConns, 10*time.Millisecond,

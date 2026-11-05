@@ -218,6 +218,7 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 // faster whole than through any index, so this says the statement's shape permits the index scan,
 // which is the claim under test.
 func TestEveryDocumentArmSearchesTheDocumentSearchIndex(t *testing.T) {
+	t.Parallel()
 	fixture := newDocumentSearchFixture(t)
 	firstKeys := explaintest.NewIndexKeys(fixture.database.Pool)
 	for _, statement := range fixture.statements() {
@@ -236,6 +237,7 @@ func TestEveryDocumentArmSearchesTheDocumentSearchIndex(t *testing.T) {
 // arguments, searches no document_search index and does test a tsquery against artifact_versions.
 // Without it a plan assertion that happened to hold for any statement would pass unnoticed.
 func TestMainsDocumentArmSearchesNoDocumentSearchIndex(t *testing.T) {
+	t.Parallel()
 	fixture := newDocumentSearchFixture(t)
 	statement := fixture.statements()[0]
 	plan := planWithoutSeqScans(t, fixture.database, statement.oracle, statement.arguments...)
@@ -254,6 +256,7 @@ func TestMainsDocumentArmSearchesNoDocumentSearchIndex(t *testing.T) {
 // package's helpers, so an edit that changed what the document arm returns would move one side
 // and not the other.
 func TestEveryDocumentArmAnswersWhatMainsStatementDoes(t *testing.T) {
+	t.Parallel()
 	fixture := newDocumentSearchFixture(t)
 	ctx := context.Background()
 	for _, statement := range fixture.statements() {

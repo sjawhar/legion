@@ -63,6 +63,7 @@ var auditedReads = []auditedRead{
 // and still read the whole index, so the scan's condition is held to the index's own first key
 // column too.
 func TestTheAuditedReadsSearchTheirIndex(t *testing.T) {
+	t.Parallel()
 	database := newAuditedReadFixture(t)
 	ctx := context.Background()
 	connection, err := database.Pool.Acquire(ctx)

@@ -1327,6 +1327,10 @@ func (r *hubRig) isP0(key string) bool {
 // horizon, which a's open transaction holds below a, so b's commit (its notification, as another
 // task's write reaches the hub) moves the cursor nowhere near a until a commits, and then past both.
 func TestAHubCatchUpNeverMovesItsCursorPastAnOpenLowerID(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	rig := newHubRig(t, nil)
 	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
 	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
@@ -1353,6 +1357,10 @@ func TestAHubCatchUpNeverMovesItsCursorPastAnOpenLowerID(t *testing.T) {
 // cursor past cursor+1, which it would then never act on), and on both once cursor+1 commits.
 // Each event makes its own issue a P0 in the hub's view, which is what shows it was acted on.
 func TestAHubActsOnABrokerEventOnlyOnceEveryLowerIDIsFinal(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	rig := newHubRig(t, nil)
 	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
 	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
@@ -1401,6 +1409,10 @@ func TestAHubActsOnABrokerEventOnlyOnceEveryLowerIDIsFinal(t *testing.T) {
 // and carries a delivery change to it while the transaction is open, and the issue event committed
 // meanwhile reaches the page once the horizon is proven.
 func TestAFreshHubServesDeliveryChangesWhileATransactionHoldsTheEventHorizon(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	rig := idleHubOn(t, handler, database, deps, newNoonHubClock(), nil)
 	seedHubSettings(t, rig.database)
@@ -1449,6 +1461,10 @@ func TestAFreshHubServesDeliveryChangesWhileATransactionHoldsTheEventHorizon(t *
 // open takes no connection a request needs. The reset check, two shared-pool queries, runs on the
 // catch-ups a notification wakes.
 func TestAHubGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	rig := newHubRig(t, nil)
 	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
 	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})

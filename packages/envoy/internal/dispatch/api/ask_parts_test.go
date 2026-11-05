@@ -660,6 +660,9 @@ func TestAPinnedAskPartShowsTheRevisionItNames(t *testing.T) {
 // and no older one; an unstamped row is invisible to every such read. awaitSinceRead settles
 // which answer of the read after the answer is final.
 func TestAnAnsweredAsksPartEdgesAreListedSince(t *testing.T) {
+	// No t.Parallel: this test waits on the event log's safe horizon, which is proven from
+	// pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+	// (internal/dispatch/events, horizon.go), through awaitSinceRead.
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")

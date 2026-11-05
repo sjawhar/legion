@@ -50,6 +50,9 @@ import (
 // would otherwise spend its drain budget settling 1 MiB documents, finds no document loaded and
 // leaves each to resume.
 func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
+	// No t.Parallel: this test measures the process. It times each save and holds the series
+	// to growsLinearly, so another test's CPU on the same core would read as the write's own
+	// growth.
 	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createArtifactIssue(t, handler)
 	documents := 0
@@ -106,8 +109,8 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 	// blocks between them, still cost a walk each in ygo (pmdoc's TestUpdateIsLinearInTheBlockCount).
 	// Each rung is timed in this process's CPU (cputest.Process), since a rung's wall time at these
 	// sizes is mostly the request's own cost and the runner's load, over as many replacements, each
-	// of a document of its own, as the clock needs to resolve their time (cputest.Measure). No test
-	// in this package calls t.Parallel.
+	// of a document of its own, as the clock needs to resolve their time (cputest.Measure). The
+	// test it is part of calls no t.Parallel, so the CPU a rung reads is its own.
 	t.Run("replacing many blocks", func(t *testing.T) {
 		const from, to = "> #\n", "> ***\n"
 		growsLinearly(t, "replacing a quote of headings with a quote of rules", []int{682 * len(to), 5_461 * len(to), 21_844 * len(to)}, func(size int) time.Duration {
@@ -141,6 +144,8 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 // first rung, even when a prior rung fills the permitted per-step growth. The helper must fail for
 // both an ordinary first sample and one artificial slow first sample.
 func TestGrowsLinearlyRejectsQuadraticFinalRung(t *testing.T) {
+	// No t.Parallel: this test measures the process. It runs the helper below in a child of
+	// this test binary and reads the growth that child timed.
 	for _, slowFirstSample := range []bool{false, true} {
 		t.Run(fmt.Sprintf("slow first sample %t", slowFirstSample), func(t *testing.T) {
 			command := exec.Command(os.Args[0], "-test.run=^TestGrowsLinearlyRejectsQuadraticFinalRungHelper$")
@@ -161,6 +166,8 @@ func TestGrowsLinearlyRejectsQuadraticFinalRung(t *testing.T) {
 const quadraticFinalRung = 64
 
 func TestGrowsLinearlyRejectsQuadraticFinalRungHelper(t *testing.T) {
+	// No t.Parallel: this test measures the process. It is the child the test above starts,
+	// and it times the samples growsLinearly judges.
 	slowFirstValue, helper := os.LookupEnv("GROWS_LINEARLY_SLOW_FIRST")
 	if !helper {
 		t.Skip("subprocess helper")

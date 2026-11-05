@@ -194,6 +194,8 @@ func TestARebuildFromMarkdownRefusesABlockPointerToADisallowedType(t *testing.T)
 // its project holds points only inside itself. Every refusal names the reference and writes
 // nothing.
 func TestAWriteRefusesABlockPointerOutsideItsIssueOrDocument(t *testing.T) {
+	// No t.Parallel: pmdoctest.UseBlockSchema swaps pmdoc's package-level block schema,
+	// which every test in this process parses against.
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -249,6 +251,8 @@ func TestAWriteRefusesABlockPointerOutsideItsIssueOrDocument(t *testing.T) {
 // document holds writes its version and stores the pointer, which stays an unresolved reference,
 // as any citation of an absent block is.
 func TestABrowserWritePointingAtAMissingBlockIsSavedAndUnresolved(t *testing.T) {
+	// No t.Parallel: pmdoctest.UseBlockSchema swaps pmdoc's package-level block schema,
+	// which every test in this process parses against.
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	documents, handler, database := browserDocumentService(t)
 	issue, _ := pointerSpec(t, handler)

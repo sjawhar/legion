@@ -281,6 +281,9 @@ func timedRosterServer(t *testing.T, delay time.Duration, hang bool, lifetime co
 // their scale; the read can only be late, and a late read asks again under either rule, so what
 // a loaded machine costs this test is the distinction, never a pass it should not have.
 func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
+	// No t.Parallel: this test measures the process. It bounds how long the cached answer
+	// outlives the call that fetched it, against a TTL of 450 ms, and another test's work on
+	// the same core would read as the cache holding it longer.
 	served, calls := timedRosterServer(t, 300*time.Millisecond, false, nil)
 	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = 450*time.Millisecond, time.Minute, time.Minute
 	started := time.Now()
@@ -300,6 +303,9 @@ func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
 // the send would have ended at 600 ms. A read later than 1 s would ask again and fail this test,
 // so the 200 ms on either side of it is the margin a loaded machine has.
 func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
+	// No t.Parallel: this test measures the process. It bounds when the failure window starts
+	// from, against a silence TTL of 600 ms, and another test's work on the same core would
+	// read as the window running long.
 	served, calls := timedRosterServer(t, 0, true, nil)
 	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = time.Minute, 600*time.Millisecond, 400*time.Millisecond
 	started := time.Now()

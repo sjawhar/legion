@@ -201,6 +201,7 @@ func TestSearchAskStateRidesAMeaningMatch(t *testing.T) {
 // their InputQuery calls go straight to the unwrapped fake embedder and are never subject to
 // that backoff at all.
 func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
+	t.Parallel()
 	const title, spec = "Celestial navigation device maintenance", "Routine upkeep notes."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
 		issueEmbeddingText(title, spec): angledVector(0.9, 2),

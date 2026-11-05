@@ -98,6 +98,7 @@ func analyzePlan(t *testing.T, database *store.Store, statement string, argument
 // issue. The fixture's project holds several hundred issues, so a plan that resolved them all
 // would show it.
 func TestAPagedListingResolvesItsPageAlone(t *testing.T) {
+	t.Parallel()
 	fixture := newIssueListFixture(t)
 	for _, listing := range []struct {
 		name      string
@@ -155,6 +156,7 @@ func TestAPagedListingResolvesItsPageAlone(t *testing.T) {
 // An unpaged listing resolves every issue its filters match, and reads each of the three tables
 // its joins reach once for all of them rather than once per issue.
 func TestAnUnpagedListingReadsEachResolvedTableOnce(t *testing.T) {
+	t.Parallel()
 	fixture := newIssueListFixture(t)
 	plan, text := analyzePlan(t, fixture.database, listIssuesQuery, "LIST", "", "", nil, []string{}, false, []int16{}, false)
 	for _, relation := range []string{"issue_links", "issue_components", "repo_projects"} {
@@ -182,6 +184,7 @@ func TestAnUnpagedListingReadsEachResolvedTableOnce(t *testing.T) {
 // predicate, `state = 'open'`, is this read's filter, so the whole of it is exactly the rows
 // the grouped read counts, and a condition it does carry is held to its first key column.
 func TestTheListingReadsOpenAsksThroughTheirIndex(t *testing.T) {
+	t.Parallel()
 	fixture := newIssueListFixture(t)
 	firstKeys := explaintest.NewIndexKeys(fixture.database.Pool)
 	for name, read := range map[string]struct {
@@ -202,6 +205,7 @@ func TestTheListingReadsOpenAsksThroughTheirIndex(t *testing.T) {
 // The project list counts every project's open asks in one grouped read: no node of its plan is
 // a subquery run for each project row, and the asks it counts are read once.
 func TestTheProjectListRunsNoSubqueryPerProject(t *testing.T) {
+	t.Parallel()
 	fixture := newIssueListFixture(t)
 	plan, text := analyzePlan(t, fixture.database, projectListQuery)
 	for _, node := range plan.everyNode() {

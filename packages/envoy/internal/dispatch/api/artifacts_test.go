@@ -358,6 +358,8 @@ func TestUploadRefusesAMalformedMultipartBodyAsBadInput(t *testing.T) {
 // that file, the failure is the server's, not the caller's: 500, logged, never a 400 that tells the
 // caller its upload was malformed.
 func TestAnUploadTheServerCannotSpoolIsItsOwnFailure(t *testing.T) {
+	// No t.Parallel: this test swaps process-wide state. t.Setenv points TMPDIR at a directory
+	// that does not exist, which every spooling upload in the process would then use.
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
@@ -373,6 +375,9 @@ func TestAnUploadTheServerCannotSpoolIsItsOwnFailure(t *testing.T) {
 // until the pod's ephemeral storage ran out and the kubelet evicted it. The upload removes the
 // files itself, whether it stores the file or refuses the request after parsing it.
 func TestAnUploadLeavesNoSpooledFileBehind(t *testing.T) {
+	// No t.Parallel: this test swaps process-wide state. t.Setenv points TMPDIR at a spool
+	// directory of its own and counts what is left in it, which every other upload in the
+	// process would write to.
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	spool := t.TempDir()

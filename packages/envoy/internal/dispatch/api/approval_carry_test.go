@@ -1128,6 +1128,7 @@ func requestApprovalWithVerification(t *testing.T, handler http.Handler, artifac
 // human's name and leaves the request open, because nobody has approved the Verification
 // document; his approval of that document then answers the request, reviewing both.
 func TestACarryOnOneDocumentOfATwoDocumentRequestLeavesItOpen(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Carry one of two", "Context\n")
 	verification := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", "# Verification\n\nOne.\n")
@@ -1170,6 +1171,7 @@ func TestACarryOnOneDocumentOfATwoDocumentRequestLeavesItOpen(t *testing.T) {
 // the Verification document answers that request in the same transaction, as a carry on a
 // one-document request does.
 func TestACarryOnTheVerificationDocumentAnswersTheRequestWhenTheSpecStandsApproved(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Carry the verification", "Context\n")
 	verification := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", "# Verification\n\nOne.\n")
