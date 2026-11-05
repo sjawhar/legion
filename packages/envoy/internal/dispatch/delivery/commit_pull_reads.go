@@ -37,13 +37,22 @@ const CommitPullReadStaleAfter = 5 * time.Minute
 // request opened would be refused a read-through of its own and answer `older` — which is the
 // whole of what dispatch://INFRA-1240 repairs.
 //
-// Nothing evicts an entry: the map holds one moment per repository-and-commit pair a results
-// read has asked GitHub about, which is at most one per recorded result's commit, and a restart
-// empties it.
+// One decision, one lock: Claim tests the bound and records the read together, so no caller can
+// hold the two apart and two reads that ask at once cannot both be granted. The map holds one
+// moment per repository-and-commit pair asked about within the last CommitPullReadStaleAfter,
+// since a granted claim drops every older entry once the map has passed commitPullReadSweepAt.
+// That sweep walks the whole map under the lock, and it runs only on a claim that is granting a
+// GitHub call, so what waits for it is already waiting for a round trip.
 type CommitPullReads struct {
 	mu    sync.Mutex
 	reads map[commitPullKey]time.Time
 }
+
+// commitPullReadSweepAt is the size the map is swept from. An entry read CommitPullReadStaleAfter
+// ago or longer refuses nothing and is overwritten by the next claim for its pair, so it is dead
+// weight; below this size the weight is not worth a walk, and above it a process that reads the
+// results of many issues for weeks would otherwise hold one entry per commit it ever asked about.
+const commitPullReadSweepAt = 1024
 
 // commitPullKey is the pair one read-through is spent on: a repository, under the canonical name
 // its caller resolved (refs.CanonicalRepo), and a commit.
@@ -52,27 +61,29 @@ type commitPullKey struct {
 	sha  string
 }
 
-// ReadDue reports whether sha's pull requests in repoFull may be read through at now: nothing is
-// held for the pair, or what is held was read CommitPullReadStaleAfter ago or longer.
+// Claim reports whether sha's pull requests in repoFull may be read through at now — nothing is
+// held for the pair, or what is held was read CommitPullReadStaleAfter ago or longer — and
+// records the read when it answers yes, under the one lock that read the bound.
 //
-// The caller records the read itself (RecordRead), so two reads that ask together both read: the
-// bound is about one call per pair per span rather than exactly one, and one read of one issue's
-// results asks about a commit once whatever this answers (currencyReader.headOf's memo).
-func (c *CommitPullReads) ReadDue(repoFull, sha string, now time.Time) bool {
+// A read that fails is claimed with the rest: GitHub was asked, and a repository whose every ask
+// fails must not be asked again on every read. One read of one issue's results asks about a
+// commit once whatever this answers (api/results_currency.go, currencyReader.headOf's memo).
+func (c *CommitPullReads) Claim(repoFull, sha string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	last, found := c.reads[commitPullKey{repo: repoFull, sha: sha}]
-	return !found || now.Sub(last) >= CommitPullReadStaleAfter
-}
-
-// RecordRead records that sha's pull requests in repoFull were read through at now. A read that
-// failed is recorded with the rest: GitHub was asked, and a repository whose every ask fails
-// must not be asked again on every read.
-func (c *CommitPullReads) RecordRead(repoFull, sha string, now time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	key := commitPullKey{repo: repoFull, sha: sha}
+	if last, found := c.reads[key]; found && now.Sub(last) < CommitPullReadStaleAfter {
+		return false
+	}
 	if c.reads == nil {
 		c.reads = map[commitPullKey]time.Time{}
+	} else if len(c.reads) >= commitPullReadSweepAt {
+		for key, last := range c.reads {
+			if now.Sub(last) >= CommitPullReadStaleAfter {
+				delete(c.reads, key)
+			}
+		}
 	}
-	c.reads[commitPullKey{repo: repoFull, sha: sha}] = now
+	c.reads[key] = now
+	return true
 }

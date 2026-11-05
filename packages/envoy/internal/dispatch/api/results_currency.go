@@ -38,16 +38,18 @@ import (
 // reviewer refuse an approval.
 //
 // The repository each issue resolves to, whether the App can read it, the pull request heads of
-// each issue-and-commit pair and GitHub's answer about each commit are each read once per read
-// of the results. Across reads, a repository's default branch, a commit's answer and the last
-// read-through of a commit's pull requests are held by delivery (server.defaultBranches,
-// default_branch_commits and server.commitPulls).
+// each issue-and-commit pair, the stored heads of each repository-and-commit pair and GitHub's
+// answer about each commit are each read once per read of the results. Across reads, a
+// repository's default branch, a commit's answer and the last read-through of a commit's pull
+// requests are held by delivery (server.defaultBranches, default_branch_commits and
+// server.commitPulls).
 type currencyReader struct {
-	server   *server
-	repos    map[string]*string
-	readable map[string]bool
-	heads    map[[2]string]bool
-	commits  map[[2]string]commitAnswer
+	server      *server
+	repos       map[string]*string
+	readable    map[string]bool
+	heads       map[[2]string]bool
+	storedHeads map[[2]string]bool
+	commits     map[[2]string]commitAnswer
 }
 
 // commitAnswer is what delivery said about one commit: whether it is on the default branch, and
@@ -60,13 +62,20 @@ type commitAnswer struct {
 func newCurrencyReader(s *server) *currencyReader {
 	return &currencyReader{
 		server: s, repos: map[string]*string{}, readable: map[string]bool{},
-		heads: map[[2]string]bool{}, commits: map[[2]string]commitAnswer{},
+		heads: map[[2]string]bool{}, storedHeads: map[[2]string]bool{},
+		commits: map[[2]string]commitAnswer{},
 	}
 }
 
-func (c *currencyReader) of(ctx context.Context, check model.CheckBlock, result model.CheckResult) string {
+// of is the currency of one of a check's results: results is every result recorded against that
+// check, the slice the read already holds (results.go's listCheckResults), and index names the
+// one being answered. The others are read for one thing, which no result can answer about
+// itself: whether this one is the newest its check has, which is what decides whether asking
+// GitHub about its commit could change the answer (readThroughHead).
+func (c *currencyReader) of(ctx context.Context, check model.CheckBlock, results []model.CheckResult, index int) string {
+	result := results[index]
 	if check.When == checkWhenBeforeMerge {
-		atHead, known := c.headOf(ctx, result)
+		atHead, known := c.headOf(ctx, result, newestResult(results, index))
 		switch {
 		case !known:
 			return model.CurrencyUnknown
@@ -101,55 +110,102 @@ func (c *currencyReader) of(ctx context.Context, check model.CheckBlock, result 
 // all: the read-through a record makes (results.go's readThroughPullRequests) ran before the
 // pull request was opened, a deployment holding no delivery settings binds no `pull_request`
 // durable and so consumes no such event ever, and the reconcile's head pass only re-reads rows
-// that already exist. So a "no" is read through once and asked again (readThroughHead), which
-// is how a result recorded at a commit before any pull request carried it stops reading `older`
-// for ever (dispatch://INFRA-1240).
-func (c *currencyReader) headOf(ctx context.Context, result model.CheckResult) (bool, bool) {
+// that already exist. So a "no" is read through wherever GitHub's answer can repair it
+// (readThroughHead), which is how a result recorded at a commit before any pull request carried
+// it stops reading `older` for ever (dispatch://INFRA-1240).
+//
+// The stored rows are read once, and again only after a read-through that wrote some: nothing
+// else can have changed them between the two reads. Either read failing is the unknown answer,
+// handled in the one place both reach.
+func (c *currencyReader) headOf(ctx context.Context, result model.CheckResult, newest bool) (bool, bool) {
 	key := [2]string{result.CheckIssueKey, result.CommitSHA}
 	if atHead, memoized := c.heads[key]; memoized {
 		return atHead, true
 	}
-	atHead, err := delivery.HeadAttributedTo(ctx, c.server.deps.Store.Pool, result.CheckIssueKey, result.CommitSHA)
+	attributed := func() (bool, error) {
+		return delivery.HeadAttributedTo(ctx, c.server.deps.Store.Pool, result.CheckIssueKey, result.CommitSHA)
+	}
+	atHead, err := attributed()
+	if err == nil && !atHead && c.readThroughHead(ctx, result, newest) {
+		atHead, err = attributed()
+	}
 	if err != nil {
 		slog.Warn("dispatch: read a result's pull request head", "issue", result.CheckIssueKey, "error", err)
 		return false, false
 	}
-	if !atHead && c.readThroughHead(ctx, result) {
-		atHead, err = delivery.HeadAttributedTo(ctx, c.server.deps.Store.Pool, result.CheckIssueKey, result.CommitSHA)
-		if err != nil {
-			slog.Warn("dispatch: read a result's pull request head", "issue", result.CheckIssueKey, "error", err)
-			return false, false
-		}
-	}
 	c.heads[key] = atHead
 	return atHead, true
+}
+
+// newestResult reports whether results[index] is the newest result its check has: nothing else
+// recorded against that check was recorded later, and of two recorded in the same moment the
+// greater id is the newer, which is the order the read lists them in (results.go's
+// loadCheckResults). The rule is read from the results themselves rather than from the slice's
+// order, so a caller holding them in another order still gets it right; a check carries a handful
+// of results, so the pass costs nothing beside the reads one currency answer makes.
+func newestResult(results []model.CheckResult, index int) bool {
+	answered := results[index]
+	for other := range results {
+		if other == index {
+			continue
+		}
+		if results[other].CreatedAt.After(answered.CreatedAt) ||
+			(results[other].CreatedAt.Equal(answered.CreatedAt) && results[other].ID > answered.ID) {
+			return false
+		}
+	}
+	return true
 }
 
 // readThroughHead teaches Dispatch the pull requests GitHub names for a result's commit
 // (delivery.ReadThroughCommitPulls) and reports whether it wrote any row, which is the only case
 // worth asking the stored heads again for.
 //
-// Three things come first, so no GitHub call is wasted. A deployment holding no App key can ask
-// nothing. A repository Dispatch cannot see is the unknown answer whatever GitHub would say, and
-// it is the test the `of` switch makes next, so it decides here first and costs nothing twice
+// It asks GitHub only where GitHub's answer can repair the result, since listCheckResults reads
+// the currency of every result of every check and the Verification tab reads them all again on
+// every result.recorded. Two conditions decide that, and each rules out a kind of result that
+// could never pass headOf's test however often GitHub is asked:
+//
+//   - The result is the newest its check has (newest). An older result is superseded by a newer
+//     one and reads `older` whatever GitHub says, so the call is spent for nothing: for a commit
+//     a later push replaced, GitHub still names the pull request, and the read writes that row at
+//     the current head and leaves this result exactly where it was; for a squash-merged pull
+//     request's old commit, GitHub names nothing and the read writes no row at all.
+//   - Dispatch has been told of no pull request at that commit (headStoredAt), whatever issue
+//     that row is attributed to and whether it is attributed at all. A commit some row heads is
+//     one Dispatch's own passes keep — the reconcile re-reads an open row every five minutes and
+//     offers a merged one once per attribution rule (delivery.ListStalePullRequestHeads) — so a
+//     read from here repairs nothing. This is a child's result on its parent's tab: the row is
+//     the child's own pull request, attributed to the child, and no answer of GitHub's makes that
+//     result current, since the issue a result was recorded on counts for nothing here.
+//
+// Three tests cost nothing and bound the rest. A deployment holding no App key can ask nothing.
+// A repository Dispatch cannot see is the unknown answer whatever GitHub would say, and it is the
+// test the `of` switch makes next, so it decides here first and costs nothing twice
 // (repositoryReadable's memo); it also answers false for an issue resolving to no repository,
 // which is why the repository read below has one. And one commit is read through at most once
-// every delivery.CommitPullReadStaleAfter, however many reads ask (server.commitPulls).
+// every delivery.CommitPullReadStaleAfter, however many reads ask: server.commitPulls.Claim
+// tests that bound and records the read together, so two reads that ask at once spend one call.
 //
 // The read is against the canonical repository the check's issue resolves to (repositoryOf), the
 // same pair headOf asks the stored rows about. A read that fails leaves the currency exactly as
 // the stored rows say, which is what a result reads with no read-through at all: a GitHub call
 // that did not land is no evidence either way.
-func (c *currencyReader) readThroughHead(ctx context.Context, result model.CheckResult) bool {
+func (c *currencyReader) readThroughHead(ctx context.Context, result model.CheckResult, newest bool) bool {
+	if !newest {
+		return false
+	}
 	if c.server.deps.GitHub == nil || !c.repositoryReadable(ctx, result.CheckIssueKey) {
 		return false
 	}
 	repo := c.repositoryOf(ctx, result.CheckIssueKey)
-	now := time.Now()
-	if !c.server.commitPulls.ReadDue(*repo, result.CommitSHA, now) {
+	if c.headStoredAt(ctx, *repo, result.CommitSHA) {
 		return false
 	}
-	c.server.commitPulls.RecordRead(*repo, result.CommitSHA, now)
+	now := time.Now()
+	if !c.server.commitPulls.Claim(*repo, result.CommitSHA, now) {
+		return false
+	}
 	written, err := delivery.ReadThroughCommitPulls(
 		ctx, c.server.deps.Store.Pool, c.server.deps.GitHub, *repo, result.CommitSHA, now)
 	if err != nil {
@@ -158,6 +214,25 @@ func (c *currencyReader) readThroughHead(ctx context.Context, result model.Check
 		return false
 	}
 	return written > 0
+}
+
+// headStoredAt is whether Dispatch holds any pull request whose head is that commit of that
+// repository (delivery.HeadStoredAt), read once per read of the results. A read that failed
+// answers that it may hold one, so a database hiccup spends no GitHub call and the currency
+// stands exactly as the stored rows leave it, as it does after any failed read here.
+func (c *currencyReader) headStoredAt(ctx context.Context, repo, sha string) bool {
+	memo := [2]string{repo, sha}
+	if stored, memoized := c.storedHeads[memo]; memoized {
+		return stored
+	}
+	stored, err := delivery.HeadStoredAt(ctx, c.server.deps.Store.Pool, repo, sha)
+	if err != nil {
+		slog.Warn("dispatch: read the stored pull request heads of a commit",
+			"repo", repo, "commit", sha, "error", err)
+		stored = true
+	}
+	c.storedHeads[memo] = stored
+	return stored
 }
 
 // repositoryOf is the repository the check's issue resolves to: its own, the nearest one above

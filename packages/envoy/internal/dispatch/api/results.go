@@ -253,7 +253,7 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 			results = []model.CheckResult{}
 		}
 		for result := range results {
-			results[result].Currency = currency.of(r.Context(), checks[index], results[result])
+			results[result].Currency = currency.of(r.Context(), checks[index], results, result)
 		}
 		checks[index].Results = results
 	}

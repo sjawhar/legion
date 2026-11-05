@@ -940,9 +940,10 @@ func TestAResultReadsCurrentOnceAPullRequestOpensAtItsCommit(t *testing.T) {
 	// The pull request opens at that head, and no event reaches Dispatch.
 	fake.answers(openPullAt(91, issue.Key))
 	// The read-through the first read spent holds the next one off for
-	// delivery.CommitPullReadStaleAfter, so that span is moved behind us: what the clock does on
-	// its own between a reviewer's refetches, without the test waiting for it.
-	served.commitPulls.RecordRead("acme/widgets", headCommit, time.Now().Add(-delivery.CommitPullReadStaleAfter))
+	// delivery.CommitPullReadStaleAfter, so the cache is rewound to its zero value, an empty one:
+	// what the clock does on its own between a reviewer's refetches, without the test waiting for
+	// it.
+	served.commitPulls = delivery.CommitPullReads{}
 
 	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyCurrent {
 		t.Fatalf("a result at the head of a pull request opened after it was recorded = %q, want current: the read of the results reads GitHub itself", got)
@@ -1002,5 +1003,76 @@ func TestAResultsReadReadsThroughNeitherAnUnseenRepositoryNorAKnownHead(t *testi
 	}
 	if asked := fake.asks("acme/widgets"); asked != 0 {
 		t.Fatalf("acme/widgets' pull requests were asked for %d times, want none: the stored head row answers", asked)
+	}
+}
+
+// What a superseded result costs: nothing. A check with two results — the newer at the head of a
+// pull request Dispatch holds, the older at a commit it holds none for — is the state a push past
+// a recorded head leaves behind. The older result reads `older` whatever GitHub says, since its
+// commit is behind, so the read asks GitHub nothing for it however often the tab refetches
+// (api/results_currency.go, readThroughHead's newest-result rule).
+func TestASupersededResultsReadAsksGitHubNothing(t *testing.T) {
+	handler, database, served, fake := readThroughGitHub(t, "acme/widgets")
+	issue := issueInRepository(t, handler, "RESP", "acme/widgets", "Pushed past")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	// The older result, recorded while GitHub named no pull request for its commit, so nothing is
+	// stored for that commit.
+	superseded := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit, nil)))
+	// The push: the pull request's head moves, Dispatch holds that row, and the next result of the
+	// same check is recorded there.
+	writeHead(t, database, "acme/widgets", 97, newHeadCommit, "open", issue.Key)
+	newest := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key, resultBody("k1", "pass", newHeadCommit, nil)))
+
+	// GitHub names that pull request for the superseded commit too, carrying the head it has now,
+	// which is what it answers for a commit a later push replaced: a call that was spent would
+	// write the row at the head the newer result already sits at and leave this result exactly
+	// where it was. The cache, rewound to its zero value, holds no read off.
+	fake.answers(func(repo, _ string) string {
+		return fmt.Sprintf(`[{"number":97,"title":%q,"body":"","html_url":"https://github.com/%s/pull/97",
+			"state":"open","merged":false,"updated_at":"2026-11-05T07:15:08Z",
+			"head":{"ref":"legion/x","sha":%q,"repo":{"full_name":%q}},"base":{"ref":"main"}}]`,
+			issue.Key+" the work", repo, newHeadCommit, repo)
+	})
+	served.commitPulls = delivery.CommitPullReads{}
+	spent := fake.asks("acme/widgets")
+
+	read := readResults(t, handler, issue.Key)
+	if got := currencyOf(t, read, "k1", superseded.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("the result a later push left behind = %q, want older", got)
+	}
+	if got := currencyOf(t, read, "k1", newest.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("the newest result, at the head Dispatch holds, = %q, want current", got)
+	}
+	if asked := fake.asks("acme/widgets") - spent; asked != 0 {
+		t.Fatalf("the read asked GitHub for the superseded commit's pull requests %d times, want none", asked)
+	}
+}
+
+// What a child's result on its parent's tab costs: nothing. Its commit heads the child's own pull
+// request, attributed to the child, so Dispatch has been told that commit's pull request and
+// asking GitHub again teaches it nothing — the result reads `older` there by the currency rule
+// itself, whatever GitHub answers (R4, api/results_currency.go, readThroughHead).
+func TestAChildsResultOnTheParentsTabAsksGitHubNothing(t *testing.T) {
+	handler, database, served, fake := readThroughGitHub(t, "acme/widgets")
+	parent := issueInRepository(t, handler, "RESN", "acme/widgets", "Parent")
+	uploadDocument(t, handler, "/api/v1/issues/"+parent.Key, "verification.md", siblingChecks)
+	child := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
+		map[string]any{"project": "RESN", "title": "Child", "parent": parent.Key, "force": true}, "alice"))
+	// The child's own pull request: open at the commit and attributed to the child.
+	writeHead(t, database, "acme/widgets", 98, headCommit, "open", child.Key)
+
+	recorded := decodeBody[recordedResult](t, recordResult(t, handler, child.Key, resultBody("k1", "pass", headCommit, nil)))
+	// GitHub would name that pull request again, so a call that was spent would show as an ask;
+	// and the cache, rewound to its zero value, holds no read off.
+	fake.answers(openPullAt(98, child.Key))
+	served.commitPulls = delivery.CommitPullReads{}
+	spent := fake.asks("acme/widgets")
+
+	if got := currencyOf(t, readResults(t, handler, parent.Key), "k1", recorded.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("the child's result at the child's own head = %q, want older", got)
+	}
+	if asked := fake.asks("acme/widgets") - spent; asked != 0 {
+		t.Fatalf("the read asked GitHub for the child's commit's pull requests %d times, want none", asked)
 	}
 }

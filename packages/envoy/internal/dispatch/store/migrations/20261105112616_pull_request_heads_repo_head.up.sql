@@ -1,0 +1,28 @@
+-- 20261105112616_pull_request_heads_repo_head.up.sql
+--
+-- The index behind the question the results read asks before it reads GitHub about a commit: is
+-- any stored pull request's head this commit of this repository (delivery.HeadStoredAt)?
+--
+-- A `before_merge` result whose commit heads no row attributed to the check's own issue is read
+-- through GitHub once every delivery.CommitPullReadStaleAfter, which is how a result recorded
+-- before its pull request opened stops reading `older` (INFRA-1240). That read can repair nothing
+-- for a commit Dispatch already holds a pull request for, whatever issue that row is attributed
+-- to: the reconcile re-reads an open row every five minutes and offers a merged one once per
+-- attribution rule (ListStalePullRequestHeads), so asking GitHub again from a read teaches
+-- nothing. So the read asks this first, and a child's result on its parent's tab — whose commit
+-- heads the child's own pull request, attributed to the child — costs no GitHub call at all
+-- (api/results_currency.go, currencyReader.readThroughHead).
+--
+-- No index served that lookup. pull_request_heads_issue_head (20261102122300) is keyed
+-- (issue_key, head_sha) and partial on `issue_key is not null`, which answers the currency read
+-- and no lookup by repository and head commit; the primary key is (repo, number). Without this
+-- index every results read of such a commit would scan the table.
+--
+-- A pure addition: nothing existing is read, refused or rewritten, and the release before this
+-- one neither reads nor writes it — an index decides a plan, never an answer — so it rolls beside
+-- this one (cmd/dispatch/README.md, "Database migrations"), and rolling back past it is an image
+-- rollback alone. `create index` takes SHARE on pull_request_heads while it builds, holding that
+-- table's writes — pull request events being recorded — for one read of a table that holds a row
+-- per pull request Dispatch has seen an event for: thousands of rows, not millions. The census
+-- answers 0.
+create index pull_request_heads_repo_head on pull_request_heads (repo, head_sha);

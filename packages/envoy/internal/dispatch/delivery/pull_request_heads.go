@@ -186,6 +186,31 @@ func HeadAttributedTo(ctx context.Context, pool *store.Pool, issueKey, sha strin
 	return found, nil
 }
 
+// HeadStoredAt reports whether sha is the head of any pull request stored for repoFull, whatever
+// its state and whatever issue it is attributed to: whether Dispatch has been told of a pull
+// request at that commit at all. It is a weaker question than HeadAttributedTo's and it is asked
+// for another purpose — the results read asks it before it reads GitHub for a commit, since a
+// commit some row already heads is one Dispatch's own passes keep and a read from there repairs
+// nothing (api/results_currency.go, currencyReader.readThroughHead).
+//
+// repoFull is the canonical name of the repository (refs.CanonicalRepo), which is the one name
+// any row is written under (upsertHeadUnderCanonicalName). The read is one index lookup on
+// pull_request_heads_repo_head (migration 20261105112616): pull_request_heads_issue_head is
+// partial on `issue_key is not null` and keyed on the issue, so it serves no lookup by
+// repository and head commit.
+func HeadStoredAt(ctx context.Context, pool *store.Pool, repoFull, sha string) (bool, error) {
+	var found bool
+	if err := pool.QueryRow(ctx, `
+		select exists (
+			select 1 from pull_request_heads
+			where repo = $1 and head_sha = $2
+		)
+	`, repoFull, sha).Scan(&found); err != nil {
+		return false, fmt.Errorf("read the stored pull request heads of %s at %s: %w", repoFull, sha, err)
+	}
+	return found, nil
+}
+
 // PullRequestHeadStaleAfter is how long an open pull request's row may go unread before the
 // reconcile reads it again, and PullRequestHeadBatch how many it reads in one pass.
 const (
