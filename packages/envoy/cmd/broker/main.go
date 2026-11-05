@@ -453,7 +453,7 @@ func main() {
 	}
 	sweeper := &requests.Sweeper{
 		Enrollments: enr, Machine: reqMachine, MachineLogins: mach, OAuth: oauthStore,
-		Interval: sweep, Wake: waker,
+		Interval: sweep, SessionCarry: time.Duration(cfg.SessionCarrySeconds) * time.Second, Wake: waker,
 	}
 	go sweeper.Run(ctx)
 	// The client check, beside the sweeper and on the same context: at boot and every hour

@@ -498,7 +498,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 		return Enrollment{}, false, err
 	}
 	if !live {
-		if _, _, err := endLapsed(ctx, tx, existing.ID.String()); err != nil {
+		if _, err := endLapsed(ctx, tx, existing.ID.String()); err != nil {
 			return Enrollment{}, false, err
 		}
 		return Enrollment{}, true, tx.Commit(ctx)
@@ -510,37 +510,115 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 	return in, false, nil
 }
 
+// endMode says what an end does to what its enrollment still holds, and every caller states which
+// it is, because the two kinds of end are about different things: an end of the box is not an end
+// of the session that ran on it, and an end a person made is an end of both.
+type endMode int
+
+const (
+	// endMayCarry leaves a session's grants and pending requests where they are, the enrollment
+	// dormant, when it holds any and names a session. These are the ends a move makes: the lease
+	// lapsing (EndLapsed), recoverConflict's end of the lapsed row holding the slot a fresh
+	// enrollment wants, and the launcher's own revoke (Revoke) — the helper's when a session's
+	// process ends, and the daemon's when it lets a role's process go
+	// (packages/daemon/internal/supervise/secrets.go, RevokeEnrollment). A box is replaced far
+	// more often than the session it runs, so none of these says the session is over.
+	endMayCarry endMode = iota
+	// endTerminal revokes the grants and cancels the pending requests, as every end did before
+	// the carry. These are the ends that mean every secret this enrollment reached: a
+	// machine-login revoke (endCredential, reached from RevokeCredential, RevokeOwnCredential and
+	// RevokeReusedCredential), a person's revoke of their sign-in on a box (RevokePersonSignIn,
+	// which ends that sign-in's credential the same way), and the carry sweep itself
+	// (EndCarried), which is the end a dormant enrollment is waiting for. An operator's or an
+	// approver's revoke of a grant is terminal too and never reaches here: it revokes the grant
+	// itself (requests.Machine).
+	endTerminal
+)
+
+// endedEnrollment is what one end did to what its enrollment held: how many live grants it
+// revoked, how many pending requests it cancelled, and whether it left both where they were
+// instead, the enrollment dormant.
+type endedEnrollment struct {
+	GrantsRevoked     int64
+	RequestsCancelled int
+	Dormant           bool
+}
+
 // endEnrollment ends enrollment id inside tx: it is marked revoked, every live grant under it is
 // revoked, and every request still pending under it is cancelled — an approval must never land
 // on a session that has ended — with its audit row and its record's cancelled event
 // (store.EndPendingRequests, so no approver's pending list keeps showing it), and one kind row
 // for the enrollment. It reports how many grants it revoked and requests it cancelled. The caller
 // holds the enrollment row's lock.
-func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string) (grantsRevoked int64, requestsCancelled int, err error) {
-	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1`, id); err != nil {
-		return 0, 0, err
+//
+// One end does none of that. An enrollment that names a session (session_id), holds a live grant
+// or a pending request, and is ended by an end of its box rather than by a person (endMayCarry),
+// is marked revoked and dormant_since, and what it holds stays where it is for the next
+// enrollment of that session name under the same principal to take. Ending the box's enrollment
+// is how a session moves: a helper restarts, a machine is rebuilt, a person signs in on a second
+// box, a Legion pod is replaced, and in each of those the box's enrollment ends while the session
+// goes on and asks the broker for the same secret again. Both kinds carry, a session's and a
+// pod's: a pod's enrollment is always ended before its successor enrols — by the daemon's
+// launcher revoke when it lets the role's process go, or by EndLapsed one lease after the pod
+// stopped renewing — so a pod carry that waited for a live predecessor would find nothing.
+//
+// A dormant enrollment proves nothing from the moment it goes dormant, because its key died with
+// its box: revoked_at is set, and Lookup, Get, Renew, SessionID, recoverConflict, liveCredentials
+// and requests.Machine's own grant read all answer on exactly that. What it holds is reachable
+// only through the next enrollment of its session name, and is revoked by EndCarried once
+// BROKER_SESSION_CARRY_SECONDS has passed with no such enrollment.
+func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string, mode endMode) (endedEnrollment, error) {
+	var dormant bool
+	if mode == endMayCarry {
+		if err := tx.QueryRow(ctx, `select coalesce(e.session_id,'') <> '' and (
+				exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
+				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending'))
+			from enrollments e where e.id=$1`, id).Scan(&dormant); err != nil {
+			return endedEnrollment{}, err
+		}
+	}
+	if dormant {
+		if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now(), dormant_since=now() where id=$1`, id); err != nil {
+			return endedEnrollment{}, err
+		}
+		// The end's own audit row, with the one fact that makes it different: nothing under it was
+		// revoked. An operator reading the trail of a session that moved sees which end left the
+		// session's grants standing and when the window on them started.
+		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3,
+			jsonb_build_object('reason',$4::text,'dormant',true))`, kind, id, actor, reason); err != nil {
+			return endedEnrollment{}, err
+		}
+		return endedEnrollment{Dormant: true}, nil
+	}
+	// coalesce keeps the time the enrollment ended where a dormant end already wrote it: EndCarried
+	// and a person's revoke each reach a row that ended hours ago, and what they finish is that
+	// end, not a second one now. dormant_since returns to null because the row now holds nothing
+	// any session could take.
+	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=coalesce(revoked_at, now()), dormant_since=null where id=$1`, id); err != nil {
+		return endedEnrollment{}, err
 	}
 	tag, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where enrollment_id=$1 and revoked_at is null`, id, actor)
 	if err != nil {
-		return 0, 0, err
+		return endedEnrollment{}, err
 	}
 	detail := "the requesting enrollment ended: " + reason
 	cancelled, err := store.EndPendingRequests(ctx, tx, store.RequestsOfEnrollment, id, store.RequestEnd{
 		State: "cancelled", Actor: actor, DecidedBy: &actor, Detail: detail, AuditDetail: map[string]any{"reason": detail},
 	})
 	if err != nil {
-		return 0, 0, err
+		return endedEnrollment{}, err
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3, jsonb_build_object('reason',$4::text))`, kind, id, actor, reason); err != nil {
-		return 0, 0, err
+		return endedEnrollment{}, err
 	}
-	return tag.RowsAffected(), len(cancelled), nil
+	return endedEnrollment{GrantsRevoked: tag.RowsAffected(), RequestsCancelled: len(cancelled)}, nil
 }
 
 // endLapsed ends an enrollment whose lease lapsed: endEnrollment with actor broker and an
-// enrollment.expired audit row, for recoverConflict and the sweep alike.
-func endLapsed(ctx context.Context, tx pgx.Tx, id string) (grantsRevoked int64, requestsCancelled int, err error) {
-	return endEnrollment(ctx, tx, id, "broker", "enrollment.expired", "its lease lapsed")
+// enrollment.expired audit row, for recoverConflict and the sweep alike. A lapse is an end of the
+// box (endMayCarry), since a renewer that stopped is what a replaced box looks like from here.
+func endLapsed(ctx context.Context, tx pgx.Tx, id string) (endedEnrollment, error) {
+	return endEnrollment(ctx, tx, id, "broker", "enrollment.expired", "its lease lapsed", endMayCarry)
 }
 
 // LapsedEnrollment is one enrollment EndLapsed ended.
@@ -552,6 +630,10 @@ type LapsedEnrollment struct {
 	LeaseExpires      time.Time
 	GrantsRevoked     int64
 	RequestsCancelled int
+	// Dormant says the lapse left this enrollment's grants and pending requests where they were,
+	// for the next enrollment of its session name to take (endEnrollment): the session is on
+	// another box, or about to be, and GrantsRevoked and RequestsCancelled are both 0.
+	Dormant bool
 }
 
 // lapsedBatch is how many lapsed enrollments EndLapsed ends in one transaction.
@@ -561,7 +643,10 @@ const lapsedBatch = 100
 // is gone, a box whose launcher stopped renewing, a machine session whose helper died. Each is ended
 // as Revoke ends one (endEnrollment, actor "broker", an enrollment.expired audit row), so its
 // grants are revoked and its pending requests cancelled and dropped from the approver's list,
-// rather than waiting there for their own expiry with an approval that could grant nothing.
+// rather than waiting there for their own expiry with an approval that could grant nothing. The
+// one lapse that revokes nothing is the lapse of an enrollment holding a named session's grants
+// or pending requests, which goes dormant instead and is ended by EndCarried: a renewer that
+// stopped is what a replaced box looks like from here, and the session is on another box by then.
 //
 // Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(), and
 // not a lease that ran out while no broker was serving (enrollment_lease_live, migration 0019),
@@ -604,10 +689,87 @@ func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error
 		return nil, err
 	}
 	for i := range batch {
-		batch[i].GrantsRevoked, batch[i].RequestsCancelled, err = endLapsed(ctx, tx, batch[i].ID)
+		ended, err := endLapsed(ctx, tx, batch[i].ID)
 		if err != nil {
 			return nil, err
 		}
+		batch[i].GrantsRevoked, batch[i].RequestsCancelled, batch[i].Dormant = ended.GrantsRevoked, ended.RequestsCancelled, ended.Dormant
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return batch, nil
+}
+
+// DormantEnrollment is one dormant enrollment EndCarried ended for good.
+type DormantEnrollment struct {
+	ID                string
+	Kind              string
+	RuntimeID         string
+	Slot              string
+	SessionID         string
+	DormantSince      time.Time
+	GrantsRevoked     int64
+	RequestsCancelled int
+}
+
+// carriedBatch is how many dormant enrollments EndCarried ends in one transaction.
+const carriedBatch = 100
+
+// EndCarried ends, for good, every dormant enrollment that has been dormant for carry or longer:
+// it revokes the grants and cancels the pending requests that were left for the session to take
+// (endEnrollment's terminal path, actor "broker"), with an enrollment.carry_expired audit row
+// naming why. carry is BROKER_SESSION_CARRY_SECONDS, which requests.Sweeper holds; 0 ends every
+// dormant enrollment the next sweep finds, which is how a deployment turns the carry off.
+//
+// Dormant is dormant_since is not null: an ended enrollment still holding what the next
+// enrollment of its session name may take (endEnrollment). The column returns to null the moment
+// the row holds nothing more for anyone, here or in the adoption, so nothing is ended twice and
+// a sweep that finds nothing changes nothing. An enrollment is dormant only after it ended, so
+// nothing a live session could still use is ever taken here: what passes is the window a person's
+// approval waits in, not a lease.
+//
+// It follows EndLapsed's shape, for the same reasons: batches of carriedBatch, each one
+// transaction, rows a concurrent writer has locked skipped for the next sweep, and what it ended
+// returned so the sweeper can log each one.
+func (s *Service) EndCarried(ctx context.Context, carry time.Duration) ([]DormantEnrollment, error) {
+	var ended []DormantEnrollment
+	for {
+		batch, err := s.endCarriedBatch(ctx, carry)
+		ended = append(ended, batch...)
+		if err != nil || len(batch) < carriedBatch {
+			return ended, err
+		}
+	}
+}
+
+func (s *Service) endCarriedBatch(ctx context.Context, carry time.Duration) ([]DormantEnrollment, error) {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `select id, kind, runtime_id, slot, coalesce(session_id,''), dormant_since from enrollments
+		where dormant_since is not null and dormant_since <= now() - make_interval(secs => $1)
+		order by dormant_since limit $2 for update skip locked`, carry.Seconds(), carriedBatch)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (DormantEnrollment, error) {
+		var e DormantEnrollment
+		err := row.Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Slot, &e.SessionID, &e.DormantSince)
+		return e, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range batch {
+		ended, err := endEnrollment(ctx, tx, batch[i].ID, "broker", "enrollment.carry_expired",
+			"no enrollment of its session took what it held before the carry window passed", endTerminal)
+		if err != nil {
+			return nil, err
+		}
+		batch[i].GrantsRevoked, batch[i].RequestsCancelled = ended.GrantsRevoked, ended.RequestsCancelled
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -820,7 +982,15 @@ func machineCredential(cred Credential) bool {
 }
 
 // Revoke ends the enrollment — revoking every live grant and cancelling every pending request
-// under it — in one transaction. cred must be authorized for the target enrollment's own kind and
+// under it — in one transaction. The one exception is the carry: an enrollment naming a session
+// that still holds a live grant or a pending request goes dormant instead, holding both for that
+// session's next enrollment (endEnrollment, endMayCarry). This is a launcher ending its own
+// enrollment, which happens on every move: the helper revokes when a session's process ends, and
+// the daemon revokes when it lets a role's process go
+// (packages/daemon/internal/supervise/secrets.go, RevokeEnrollment), while the session itself
+// comes up again on the next box.
+//
+// cred must be authorized for the target enrollment's own kind and
 // operator — the same trust boundary Create enforces — checked before anything else, so a
 // wrong-operator or wrong-kind caller can never revoke an enrollment it doesn't own, whether that
 // enrollment is live, already revoked, or (were its id guessed rather than read back) merely
@@ -870,7 +1040,7 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	if revokedAt != nil {
 		return ErrNotLive
 	}
-	if _, _, err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher"); err != nil {
+	if _, err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher", endMayCarry); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -951,7 +1121,8 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 // RevokeCredential ends launcher credential id on the word of person, expired or not: from then on
 // no launcher proof signed with it authenticates (AuthenticateLauncher), and every enrollment it
 // made that has not ended — a person's machine sessions and boxes, or every pod a service's login
-// enrolled, which outlive the credential's expiry — is ended as Revoke ends one (endEnrollment, an
+// enrolled, which outlive the credential's expiry — and every dormant one it made, holding a
+// moved session's grants, is ended terminally (endEnrollment, an
 // enrollment.revoked audit row), revoking each one's grants and cancelling its pending requests,
 // all in one transaction with one launcher_credential.revoked audit row. person may revoke a
 // service's login whoever approved it, a service's token login (which no person approved, and whose
@@ -1150,6 +1321,14 @@ func (s *Service) RevokePersonSignIn(ctx context.Context, id, person, actor stri
 // endCredential revokes launcher credential id in tx, whose row the caller holds: it sets
 // revoked_at, ends its OAuth tokens, ends every enrollment it made that has not ended
 // (endEnrollment, reason), and writes one launcher_credential.revoked audit row, each as actor.
+//
+// A person revoking a machine login, or their sign-in on a box, means every secret that login
+// reached, so each of its enrollments ends terminally: the grants are revoked and the pending
+// requests cancelled, with no carry (endTerminal). The dormant enrollments it made end here too,
+// which is why the read below takes them beside the live ones: a dormant row has revoked_at set
+// and still holds its session's grants, and leaving them would let the next enrollment of that
+// session name, on a box the person has not revoked, adopt a grant the person has just taken
+// back.
 func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *string, actor, reason string) error {
 	if _, err := tx.Exec(ctx, `update launcher_credentials set revoked_at=now() where id=$1`, id); err != nil {
 		return err
@@ -1158,7 +1337,7 @@ func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *str
 	if err := oauthstore.EndCredential(ctx, tx, id); err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `select id from enrollments where launcher_credential_id=$1 and revoked_at is null order by id for update`, id)
+	rows, err := tx.Query(ctx, `select id from enrollments where launcher_credential_id=$1 and (revoked_at is null or dormant_since is not null) order by id for update`, id)
 	if err != nil {
 		return err
 	}
@@ -1167,7 +1346,7 @@ func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *str
 		return err
 	}
 	for _, enrollment := range ended {
-		if _, _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", reason); err != nil {
+		if _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", reason, endTerminal); err != nil {
 			return err
 		}
 	}

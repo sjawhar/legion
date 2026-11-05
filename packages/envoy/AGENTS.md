@@ -5066,7 +5066,13 @@ Needs `BROKER_EXCHANGE_GITHUB_ISSUER` and `BROKER_EXCHANGE_GITHUB_AUDIENCE`;
 unset, no workflow exchanges), `BROKER_ACCESS_TOKEN_SECONDS` (default 900, min 1, max 3600
 — how long an access token the OAuth provider issues lasts, a machine login's and an exchanged one's alike:
 it trades how often every caller renews against how long a revoked credential's last token stays spendable), `BROKER_ENVOY_URL` (optional;
-turns on best-effort wake notifications to the requesting session through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600), `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (default and max 2592000, 30 days
+turns on best-effort wake notifications to the requesting session through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600), `BROKER_SESSION_CARRY_SECONDS` (default 43200, min 0, max 86400
+— how long what a session holds, its grants and its pending requests, waits on the enrollment of a box the session has left, for the next enrollment of that session name under the same principal to take it:
+an enrollment that ends while it holds a live grant or a pending request, and that names a session, is marked revoked and dormant instead of having them revoked and cancelled (`enroll.endEnrollment`), and the sweep ends it for good once this long has passed since it went dormant, with an `enrollment.carry_expired` audit row (`enroll.Service.EndCarried`).
+A person's own ends stay terminal and take the grants with them: a machine-login revoke, a sign-in revoke, and an operator's or approver's revoke of the grant itself.
+12 hours is `requests.DefaultGrantLifetime`, the life the broker already gives a grant whose request named none, and it is what an overnight approval takes — a request filed in the morning, the box replaced an hour later, the approval granted later that day;
+0 turns the carry off, so the next sweep ends every dormant enrollment it finds, as every end did before the carry;
+and the maximum is one day, because the approval behind a dormant grant was given for one day's work and the person who approved yesterday has not approved today), `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (default and max 2592000, 30 days
 — how long a machine login lasts without a refresh:
 an approval mints its credential for this long, and each refresh of its device login moves its expiry to this long from then;
 past it the machine logs in again, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60
@@ -5529,6 +5535,8 @@ a launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials`
 `internal/broker/requests.Sweeper` is the one thing that moves state without a human:
 every `BROKER_SWEEP_SECONDS` tick it first ends every enrollment whose lease has lapsed (`enroll.Service.EndLapsed`:
 a gone pod, a box whose launcher stopped renewing, a machine session whose helper died), as a revoke ends one, so its grants are revoked and its pending requests cancelled and dropped from the approver's list, with an `enrollment.expired` audit row and one log line each;
+the one lapse that revokes nothing is a lapse that names a session and still holds a live grant or a pending request, which is marked dormant instead and waits `BROKER_SESSION_CARRY_SECONDS` for the next enrollment of that session name to take what it holds (`enroll.endEnrollment`), as does the launcher's own revoke of such an enrollment;
+then it ends, for good, every dormant enrollment whose window has passed (`enroll.Service.EndCarried`), revoking its grants and cancelling its pending requests with an `enrollment.carry_expired` audit row and a log line of its own;
 then it expires overdue pending `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending machine logins.
 It reads fresh from Postgres every time, so a restart resumes exactly where the rows are.
 Lapsed means what proof lookup means by not live (`enrollment_lease_live`, below, is false), so a session that keeps renewing is never ended, and rows a concurrent renew or revoke holds are left to the next tick.

@@ -1,0 +1,37 @@
+-- packages/envoy/internal/broker/store/migrations/0027_session_carry.up.sql
+-- What a session's grants and pending requests follow when the box under the session is replaced:
+-- the session's name under one principal. A helper restarts, a machine is rebuilt, a person signs
+-- in on a second box, a Legion pod is replaced: each of those enrols the same session name again,
+-- under a row of its own, and until now the grant a person approved stayed with the row the old
+-- box made and was revoked when that row ended.
+--
+-- carry_principal is the identity this enrollment belongs to: the fleet's Google account for a
+-- machine's own session, the person for a sign-in's, the service account for a pod's. It is the
+-- half of the pair that keeps one session name from reaching another principal's grant, and it is
+-- written when the enrollment is created, never changed afterwards. Null on every row this
+-- migration finds, and a null carries nothing: an enrollment the broker recorded no principal for
+-- is adopted by nobody.
+--
+-- dormant_since is when an ended enrollment was left holding what it held. An enrollment that ends
+-- while a live grant or a pending request hangs off it, and that names a session, is marked
+-- revoked and dormant instead of having its grants revoked and its requests cancelled
+-- (enroll.endEnrollment): the session is on another box by then, or is about to be, and what it
+-- holds is the session's rather than the box's. The row is dead for every proof from that moment,
+-- since revoked_at is set and every live-enrollment predicate reads it. The column returns to null
+-- once the row holds nothing for anyone: the carry sweep sets it back when
+-- BROKER_SESSION_CARRY_SECONDS has passed with no successor, revoking the grants and cancelling
+-- the requests then (enroll.Service.EndCarried), as does the next enrollment of the same name under
+-- the same principal when it adopts them. So "dormant_since is not null" is exactly "this ended row
+-- still holds something a session may take".
+--
+-- The index is deliberately not unique. A unique partial index would refuse to apply on a
+-- production broker that already holds two live enrollments sharing a session id, which is a shape
+-- the broker allowed until now and a migration must not refuse to run against. Uniqueness buys
+-- nothing here either: the adoption moves what every predecessor of the pair holds, under one
+-- lock, rather than assuming there is one.
+--
+-- Both columns are additive and nullable, so this rewrites no row and is safe on a fresh or an
+-- already-migrated database.
+alter table enrollments add column if not exists carry_principal text;
+alter table enrollments add column if not exists dormant_since timestamptz;
+create index if not exists enrollments_carry on enrollments (carry_principal, session_id);
