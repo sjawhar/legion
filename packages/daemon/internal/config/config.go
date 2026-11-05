@@ -165,7 +165,10 @@ type Config struct {
 	MaxFixAttempts  int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
-	// admission's rule (admit.Admission.wakeController and its callers).
+	// admission's rule (admit.Admission.wakeController and its callers). The same tick runs the
+	// workflow's status repair (workflow.Engine.correctStatuses), so this period is also how long
+	// an issue's Dispatch status can stand wrong before the daemon puts it back: an operator who
+	// raises it to quiet the controller slows that repair by as much.
 	ControllerWakeInterval time.Duration
 	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
 	// the file says the daemon does.

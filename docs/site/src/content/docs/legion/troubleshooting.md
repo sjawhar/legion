@@ -801,6 +801,11 @@ The daemon owns a running tree's status. A status an agent session writes on a r
 back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, the
 controller's `set_status`, or `legion status` from an operator's shell, is what takes a tree out.
 
+A person's move between the workflow's own statuses on a running issue does not stick either. The
+daemon's status repair runs at each boot and then every `controller_wake_interval_seconds` (an
+hour by default), and writes back the status of the phase the issue stands in. `backlog` or
+`icebox` takes the tree out of the workflow, and the repair leaves it there.
+
 When the daemon's own status writes to Dispatch are failing, `legion state` says so on its
 `pending Dispatch status writes` line:
 

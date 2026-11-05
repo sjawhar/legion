@@ -152,7 +152,9 @@ func TestParkChildParksTheRecordWithoutWaitingForItsDispatchEvent(t *testing.T) 
 }
 
 // rerun_child starts the child's next run in the record within its own request, as the todo move's
-// event would, without waiting for that event; the write's echo, once it arrives, changes nothing.
+// event would, without waiting for that event: the rerun writes todo to Dispatch, and the child's
+// entry into planning writes in_progress, the status of that phase, over it. The write's echo,
+// once it arrives, changes nothing.
 func TestRerunChildStartsTheNextRunWithoutWaitingForItsDispatchEvent(t *testing.T) {
 	h, handlers, statuses := statusHarness(t)
 	architect := newLiveClaim(t, h, statusRoot, claim.RoleArchitect)
@@ -170,8 +172,8 @@ func TestRerunChildStartsTheNextRunWithoutWaitingForItsDispatchEvent(t *testing.
 		t.Fatalf("Dispatch writes = %#v, want %#v", statuses.writes, want)
 	}
 	rerun := recordedChild(t, h, statusChild)
-	if rerun == nil || rerun.Phase != phase.Planning || rerun.Status != "todo" || rerun.LastDispatchSeq != 6 || rerun.Generation != 2 {
-		t.Fatalf("the child's record once rerun_child answered = %#v, want its next run (generation 2) planning at its write's sequence 6", rerun)
+	if rerun == nil || rerun.Phase != phase.Planning || rerun.Status != "in_progress" || rerun.LastDispatchSeq != 6 || rerun.Generation != 2 {
+		t.Fatalf("the child's record once rerun_child answered = %#v, want its next run (generation 2) planning, in_progress as planning's status, at its write's sequence 6", rerun)
 	}
 	if got := superviseRows(t, h, "start", claim.RolePlanner); got != planners+1 {
 		t.Fatalf("planner start rows = %d, want the rerun to start the planner once more than the %d before it", got, planners)

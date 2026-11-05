@@ -275,13 +275,16 @@ func TestWaveReleaseRecordsABacklogChildFromItsOwnWrite(t *testing.T) {
 		t.Fatalf("Dispatch writes = %#v, want %#v", statuses.writes, wantWrites)
 	}
 	wantPhase := map[string]phase.Phase{blocked: phase.Admitted, free: phase.Planning}
+	// The held child keeps the todo the release wrote, since admitted has no status of its own;
+	// the free child's entry into planning writes in_progress over it.
+	wantStatus := map[string]string{blocked: "todo", free: "in_progress"}
 	before := map[string]record.Issue{}
 	rowsBefore := map[string]map[string]int{}
 	for _, key := range []string{blocked, free} {
 		recorded := recordedChild(t, h, key)
-		if recorded == nil || recorded.Tree != releaseRoot || recorded.Phase != wantPhase[key] || recorded.Generation != 1 || recorded.LastDispatchSeq != 8 || recorded.Status != "todo" {
-			t.Fatalf("the record of %s as the release answered = %#v, want it in %s's tree at %s, generation 1, at the write's sequence 8",
-				key, recorded, releaseRoot, wantPhase[key])
+		if recorded == nil || recorded.Tree != releaseRoot || recorded.Phase != wantPhase[key] || recorded.Generation != 1 || recorded.LastDispatchSeq != 8 || recorded.Status != wantStatus[key] {
+			t.Fatalf("the record of %s as the release answered = %#v, want it in %s's tree at %s, status %s, generation 1, at the write's sequence 8",
+				key, recorded, releaseRoot, wantPhase[key], wantStatus[key])
 		}
 		before[key], rowsBefore[key] = *recorded, outboxRows(t, h, key)
 	}
@@ -312,12 +315,13 @@ func TestWaveReleaseReentersAParkedChildFromItsOwnWrite(t *testing.T) {
 		name    string
 		waits   []string
 		phase   phase.Phase
+		status  string
 		started []string
 		held    []HeldChild
 	}{
-		{name: "waiting on an unfinished issue", waits: []string{"LEGION-300"}, phase: phase.Admitted, started: []string{},
+		{name: "waiting on an unfinished issue", waits: []string{"LEGION-300"}, phase: phase.Admitted, status: "todo", started: []string{},
 			held: []HeldChild{{Issue: "LEGION-210", BlockedBy: []string{"LEGION-300"}}}},
-		{name: "waiting on nothing", phase: phase.Planning, started: []string{"LEGION-210"}, held: []HeldChild{}},
+		{name: "waiting on nothing", phase: phase.Planning, status: "in_progress", started: []string{"LEGION-210"}, held: []HeldChild{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, statuses := releaseHarness(t, true)
@@ -335,8 +339,8 @@ func TestWaveReleaseReentersAParkedChildFromItsOwnWrite(t *testing.T) {
 				t.Fatalf("release answered %#v, want %#v", response, want)
 			}
 			recorded := recordedChild(t, h, child)
-			if recorded == nil || recorded.Phase != tc.phase || recorded.Generation != 2 || recorded.Status != "todo" || recorded.LastDispatchSeq != 8 {
-				t.Fatalf("the record of %s as the release answered = %#v, want its next run, generation 2, at %s, at the write's sequence 8", child, recorded, tc.phase)
+			if recorded == nil || recorded.Phase != tc.phase || recorded.Generation != 2 || recorded.Status != tc.status || recorded.LastDispatchSeq != 8 {
+				t.Fatalf("the record of %s as the release answered = %#v, want its next run, generation 2, at %s, status %s, at the write's sequence 8", child, recorded, tc.phase, tc.status)
 			}
 			rows := outboxRows(t, h, child)
 

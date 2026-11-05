@@ -323,7 +323,11 @@ type Issue struct {
 	Key        string      `json:"key"`
 	Generation uint64      `json:"generation"`
 	Phase      phase.Phase `json:"phase"`
-	// Status is the last Dispatch status the daemon observed for the issue.
+	// Status is the status the daemon means the issue to have and writes to Dispatch
+	// (record.Issue.Status). It is not the status Dispatch shows: that is
+	// record.Issue.DispatchStatus, which this state does not carry. The two differ while a status
+	// write is queued, and go on differing where one was lost until the status repair puts it
+	// back, so a reader who wants the status Dispatch shows must read Dispatch.
 	Status string `json:"status"`
 	// Repo is the repository (owner/name) the issue targets and DefaultBranch that repository's
 	// default branch, both taken when the daemon first recorded the issue and never changed after.
