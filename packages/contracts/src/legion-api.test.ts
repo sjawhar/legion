@@ -239,6 +239,34 @@ test("a worker role this build does not know leaves the rest of the state readab
   expect<unknown>(parsed?.auditor).toEqual(workers.planner);
 });
 
+/** Whether `value` is a zod schema this walk can read. */
+function isSchema(value: unknown): value is z.ZodType {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "def" in value &&
+    "safeParse" in value &&
+    typeof value.safeParse === "function"
+  );
+}
+
+/** The module's exported schemas of one side of the wire, keyed by export name: the answer side
+ * is every exported schema whose name ends in `Response`, the request side every one whose name
+ * does not. The roster is derived rather than listed so that a schema a later change adds is
+ * held by the cases that walk it without anyone adding a row — a list somebody must remember to
+ * extend is the very defect this issue is about, and a merge has already brought a schema no
+ * list named. The exports that are no schema at all (`LEGION_PHASES` and the other frozen
+ * lists) are left out by `isSchema`, so the suffix alone is not trusted. */
+function exportedSchemas(side: "answer" | "request"): Record<string, z.ZodType> {
+  const roster: Record<string, z.ZodType> = {};
+  for (const [name, value] of Object.entries(legionApi)) {
+    if (isSchema(value) && name.endsWith("Response") === (side === "answer")) {
+      roster[name] = value;
+    }
+  }
+  return roster;
+}
+
 /** What zod 4.3.6 marks an object node with, read rather than built: a stripping object has no
  * `catchall`, a refusing one a `never`, a loose one an `unknown`. */
 type ObjectMark = "strips" | "refuses" | "loose";
@@ -251,8 +279,8 @@ function objectMark(node: z.ZodObject): ObjectMark {
   return catchall === "never" ? "refuses" : "loose";
 }
 
-/** The node kinds the answer schemas are built from that hold no object below them. A kind
- * outside this list and the walk's own branches throws: a `z.tuple`, a `z.intersection`, a
+/** The node kinds the schemas of either side are built from that hold no object below them. A
+ * kind outside this list and the walk's own branches throws: a `z.tuple`, a `z.intersection`, a
  * `.pipe()` or a `z.lazy()` added later would otherwise take its whole subtree out of the census
  * in silence. */
 const CENSUS_LEAF_KINDS: Record<string, true> = {
@@ -321,10 +349,11 @@ function objectCensus(roots: Record<string, z.ZodType>): Record<ObjectMark, stri
 
 // The whole answer side strips, not only what a golden passes through: a body reaches the eight
 // or so objects its own route carries, so a partial edit that left one nested view refusing would
-// pass every other case here. The census walks the thirteen answer schemas and every node below
-// them and reads zod's own mark on each object, and it names the paths beside the counts, so a
-// node that appeared or vanished is named rather than counted. A new answer schema is added here
-// as well as to the fixture map above, or the census walks around it.
+// pass every other case here. The census walks every answer schema the module exports — the
+// roster is derived, so a schema a later change adds is walked without anyone adding a row — and
+// every node below them, and reads zod's own mark on each object. What it holds is the shape:
+// nothing refuses, and `settings` alone is loose. The roster and the number of nodes walked are
+// printed rather than pinned, since a count goes stale at every addition.
 test("every answer-side object strips a key it does not name", () => {
   // The mark first, on three nodes built here: were a zod release to stop setting `catchall`,
   // every node would read as stripping and the census below would pass proving nothing.
@@ -334,85 +363,21 @@ test("every answer-side object strips a key it does not name", () => {
     loose: objectMark(z.looseObject({})),
   }).toEqual({ strict: "refuses", stripping: "strips", loose: "loose" });
 
-  const found = objectCensus({
-    LegionStateResponse,
-    LegionRegisterResponse,
-    LegionControllerRegisterResponse,
-    LegionControllerSecretResponse,
-    LegionControllerCredentialResponse,
-    LegionOperatorClaimResponse,
-    LegionOperatorClaimsResponse,
-    LegionGrantResponse,
-    LegionHandoffCompleteResponse,
-    LegionWaveReleaseResponse,
-    LegionEmptyResponse,
-    LegionErrorResponse,
-    LegionReleaseRecordsResponse,
-  });
+  const roster = exportedSchemas("answer");
+  const found = objectCensus(roster);
+  const names = Object.keys(roster).sort();
+  const nodes = found.strips.length + found.loose.length + found.refuses.length;
+  console.log(
+    `answer roster (${names.length} schemas, ${nodes} object nodes): ${names.join(", ")}`
+  );
 
+  // A predicate that matched nothing would leave every assertion below holding vacuously.
+  expect(names.length).toBeGreaterThan(0);
   expect(found.refuses).toEqual([]);
   // `settings` is the one loose block (contract 35). A pending status write's `payload` is a
   // record, not an object, and is no node of this census.
   expect(found.loose).toEqual(["LegionStateResponse.settings"]);
-  expect(found.strips).toEqual([
-    "LegionControllerCredentialResponse",
-    "LegionControllerCredentialResponse.owners{}",
-    "LegionControllerRegisterResponse",
-    "LegionControllerSecretResponse",
-    "LegionEmptyResponse",
-    "LegionErrorResponse",
-    "LegionGrantResponse",
-    "LegionHandoffCompleteResponse",
-    "LegionOperatorClaimResponse",
-    "LegionOperatorClaimResponse.budgets",
-    "LegionOperatorClaimResponse.pending",
-    "LegionOperatorClaimsResponse",
-    "LegionRegisterResponse",
-    "LegionReleaseRecordsResponse",
-    "LegionReleaseRecordsResponse.holds[]",
-    "LegionReleaseRecordsResponse.releases[]",
-    "LegionReleaseRecordsResponse.resumes[]",
-    "LegionStateResponse",
-    "LegionStateResponse.admission",
-    "LegionStateResponse.admission.blocked[]",
-    "LegionStateResponse.agentSecretsLogin",
-    "LegionStateResponse.capabilities[]",
-    "LegionStateResponse.consumers[]",
-    "LegionStateResponse.controllerLocator",
-    "LegionStateResponse.daemon",
-    "LegionStateResponse.heldOutboxRows[]",
-    "LegionStateResponse.issues{}",
-    "LegionStateResponse.issues{}.architect",
-    "LegionStateResponse.issues{}.architect.capabilities",
-    "LegionStateResponse.issues{}.architect.capabilities.open[]",
-    "LegionStateResponse.issues{}.architect.locator|0",
-    "LegionStateResponse.issues{}.architect.locator|0.tmux",
-    "LegionStateResponse.issues{}.architect.locator|1",
-    "LegionStateResponse.issues{}.architect.locator|1.sandbox",
-    "LegionStateResponse.issues{}.check",
-    "LegionStateResponse.issues{}.check.lastWake",
-    "LegionStateResponse.issues{}.designGate",
-    "LegionStateResponse.issues{}.pullRequest",
-    "LegionStateResponse.issues{}.slot",
-    "LegionStateResponse.issues{}.waitingOn|0",
-    "LegionStateResponse.issues{}.waitingOn|1",
-    "LegionStateResponse.issues{}.workers{}",
-    "LegionStateResponse.issues{}.workers{}.handoffRecord",
-    "LegionStateResponse.pendingStatusWrites[]",
-    "LegionStateResponse.repositories",
-    "LegionStateResponse.repositories.mapped[]",
-    "LegionStateResponse.repositories.mapped[].cache",
-    "LegionStateResponse.repositories.refused[]",
-    "LegionStateResponse.repositories.withoutWebhookApp[]",
-    "LegionStateResponse.strandedClaims[]",
-    "LegionWaveReleaseResponse",
-  ]);
-  expect({
-    strips: found.strips.length,
-    loose: found.loose.length,
-    refuses: found.refuses.length,
-    nodes: found.strips.length + found.loose.length + found.refuses.length,
-  }).toEqual({ strips: 51, loose: 1, refuses: 0, nodes: 52 });
+  expect(found.strips.length).toBeGreaterThan(0);
 });
 
 test("state accepts optional fields emitted by later workflow slices", () => {
@@ -668,14 +633,35 @@ test("a backward move may name its issue", () => {
   expect(LegionPhaseBackwardRequest.safeParse({ ...move, issue: "" }).success).toBeFalse();
 });
 
-test("every request the plugin sends has a strict schema", () => {
+// Check c4: every schema the module exports whose name does not end in `Response` is a body the
+// plugin sends or a part of one, and each refuses a body carrying a key it does not name — at its
+// own level and at every object below it. The roster is derived from the module's exports, so a
+// request shape a later change adds is held to this without anyone adding a row, and the walk
+// reaches each nested object, the capability report's `rows` among them, rather than a row of the
+// case below standing in for one.
+test("every request-side object refuses a key it does not name", () => {
+  const roster = exportedSchemas("request");
+  const found = objectCensus(roster);
+  const names = Object.keys(roster).sort();
+  const nodes = found.strips.length + found.loose.length + found.refuses.length;
+  console.log(
+    `request roster (${names.length} schemas, ${nodes} object nodes): ${names.join(", ")}`
+  );
+
+  // A predicate that matched nothing would leave every assertion below holding vacuously.
+  expect(names.length).toBeGreaterThan(0);
+  expect(found.strips).toEqual([]);
+  expect(found.loose).toEqual([]);
+  expect(found.refuses.length).toBeGreaterThan(0);
+});
+
+// What only a real body can prove, route by route: the body each route sends parses, and a body
+// missing a required field is refused. That a body carrying a key no schema names is refused is
+// held at every depth by the census above, for every request schema the module exports.
+test("every request the plugin sends parses and names its required fields", () => {
   const ready = fixtureBody("ready.json");
   const readyForUpdate = fixtureBody("ready-for-update.json");
   const report = LegionCapabilityReport.parse(ready.capabilities);
-  const loosenedReport = {
-    ...report,
-    rows: report.rows.map((row) => ({ ...row, unexpected: true })),
-  };
   const activity = {
     at: "2026-11-05T05:10:00Z",
     backgroundWork: { running: true, kinds: ["subagent"] },
@@ -687,12 +673,8 @@ test("every request the plugin sends has a strict schema", () => {
     secret: "U3VwZXJ2aXNlZEJ5TGVnaW9u",
     activity,
   };
-  // A route, a body it must accept, and — where the row guards a nested object — that body with
-  // one key no schema names inside the nested object; a row without one has the key added at the
-  // top level.
-  const requests: ReadonlyArray<
-    readonly [string, z.ZodType, Record<string, unknown>, Record<string, unknown>?]
-  > = [
+  // A route and a body it must accept, whose first key is a field the schema requires.
+  const requests: ReadonlyArray<readonly [string, z.ZodType, Record<string, unknown>]> = [
     [
       "grant",
       LegionGrantRequest,
@@ -759,30 +741,8 @@ test("every request the plugin sends has a strict schema", () => {
     ["ready", LegionReadyRequest, ready],
     ["ready for update", LegionReadyForUpdateRequest, readyForUpdate],
     ["capability report", LegionCapabilityReport, report],
-    // The unknown key inside the report's rows: the nested object a partial edit of the request
-    // side would have loosened unseen.
-    ["capability report row", LegionCapabilityReport, report, loosenedReport],
-    // The claim wire's activity report and the window a pod reads its release records over,
-    // with the report's own two nested objects covered by rows of their own.
+    // The claim wire's activity report and the window a pod reads its release records over.
     ["activity", LegionActivityRequest, activityRequest],
-    [
-      "activity background work",
-      LegionActivityRequest,
-      activityRequest,
-      {
-        ...activityRequest,
-        activity: {
-          ...activity,
-          backgroundWork: { ...activity.backgroundWork, unexpected: true },
-        },
-      },
-    ],
-    [
-      "activity phase",
-      LegionActivityRequest,
-      activityRequest,
-      { ...activityRequest, activity: { ...activity, phase: { nextReminderAt: null, extra: 1 } } },
-    ],
     ["activity report", LegionSessionActivity, activity],
     [
       "release records",
@@ -795,12 +755,8 @@ test("every request the plugin sends has a strict schema", () => {
     ],
   ];
 
-  for (const [name, schema, request, loosened] of requests) {
+  for (const [name, schema, request] of requests) {
     expect(schema.safeParse(request).success, `${name} accepts its route request`).toBeTrue();
-    expect(
-      schema.safeParse(loosened ?? { ...request, unexpected: true }).success,
-      `${name} refuses an added field`
-    ).toBeFalse();
     const [required] = Object.keys(request);
     const missing = { ...request };
     delete missing[required ?? ""];
@@ -1283,17 +1239,6 @@ const operatorSchemas: Record<string, true> = {
   LegionOperatorClaimResponse: true,
   LegionOperatorClaimsResponse: true,
 };
-
-/** Whether `value` is a zod schema this walk can read. */
-function isSchema(value: unknown): value is z.ZodType {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "def" in value &&
-    "safeParse" in value &&
-    typeof value.safeParse === "function"
-  );
-}
 
 /** Every key `schema` can carry, at any depth, through objects, arrays, unions, records, optional
  * and nullable wrappers, pipes and lazy references. Zod holds each of those on its definition
