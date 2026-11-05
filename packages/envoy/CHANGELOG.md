@@ -1,5 +1,60 @@
 # Changelog
 
+## [29.7.0] - 2026-11-05
+
+### Added
+
+- Four settings a test process can set under `DISPATCH_TEST_HOOKS=1`, so an end-to-end run no
+  longer waits out constants a person never sees:
+  `DISPATCH_TEST_MARK_WAIT` (how long a mark the browser says it wrote is waited for, default 1s),
+  `DISPATCH_TEST_UNRECORDED_MARK_TTL` (how long a mark no comment, ask or suggestion records is
+  kept before the settlement sweep expires it, default 1m),
+  `DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW` (how long a sender keeps trying a listener that is
+  being replaced before a send to a session that is gone settles failed, default 12s), and
+  `DISPATCH_TEST_EMBEDDER_OFF=1`
+  (build no embedder at all, whatever `DISPATCH_EMBEDDER` and the AWS SDK's own variables would
+  have built: meaning search answers keyword-only and says so, and the embedding queue does
+  nothing). Each is refused without the test hooks, and the three durations are refused unless
+  they are positive.
+- The listener reports on `notifications.legion.wake` the two wakes only it sees — a message
+  published to a role topic nobody holds, and a message to the agent subject of a session that
+  is not there — and publishes a `listener_ready` heartbeat every five minutes. A Legion daemon
+  releases no idle issue pod unless it has seen one of those heartbeats, so the listener and the
+  daemon roll in either order.
+- The listener publishes each GitHub envelope of a renamed repository a second time under its former name, for every pair `ENVOY_GITHUB_REPOSITORY_RENAMES` configures as `<former owner>/<name>=<current owner>/<name>`, so a session that subscribed before the rename keeps receiving the repository's events. The copy differs from the envelope it copies in its topic and in nothing else, so a client subscribed under both names drops the repeat by `event_id` and sees one event. Dispatch's GitHub intake ignores a message whose subject names a repository other than the one its payload names, so one event is handled once however many names it is published under. The mapping is one-way, and a value the listener cannot read refuses its start naming the variable.
+
+### Changed
+
+- A settlement reads the room's tree from its replica, and a write forks its room
+  with `Doc.Clone` (sjawhar/ygo v1.55.1-sami.1), so neither one encodes the
+  room's state and decodes it into a document of its own any more. In the load
+  test's replay of the Verified Linux agents' writes, the median of three runs
+  allocated 90.2 GB in the window before and 73.9 GB after, and Dispatch's CPU
+  fell from 1,223 to 1,111 seconds (-9.1%). The replica's lock is held longer
+  during a write fork: about 95 ms against 32 ms on a 200 KiB document.
+- `GET /api/v1/issues/{key}` reads the database in two pgx batches, one round trip each on one
+  pooled connection once that connection has prepared their statements, instead of one
+  statement at a time: 6 statements, plus one per artifact, plus 2 when the issue has documents
+  and 2 when it has open asks. An issue with no artifact and no open ask takes one round trip,
+  and a key no issue carries keeps the connection's prepared statements. The answer is
+  unchanged byte for byte. Every route that lists an issue's
+  artifacts (`loadArtifacts`), and `GET /api/v1/projects/{key}/artifacts`, now read their
+  versions, latest reviews and open approval requests in one batch instead of one statement per
+  artifact and two more; an issue's or a document's asks, the Inbox and an event page read their
+  asks' identity events, backlink counts and part ids in one batch instead of three statements.
+  A document edit's last six reads that validated its tree for themselves - the move, the
+  heading anchor, the two table deletes and the two table mark reads - read the tree the edit
+  already validated, so a batch validates each of its trees once; every answer and every refusal
+  is unchanged. In
+  the load test's route mix, the median of three runs each, the issue route's p50 latency fell
+  from 50.1 ms to 19.0 ms (browser) and its share of Dispatch's CPU from 1.88% to 0.52%. The
+  markdown renderer writes U+0000 in its own pass after its merge decisions.
+  `pmdoc.StripAnchorMarks` is a copy of the renderer's own written tree, and `sortMarks` is
+  pmdoc's one mark sort. Rendered output does not change.
+- A read-only GitHub App narrowing (`--github-read-only`, the API's `read_only`) now also asks for `actions: read`, so a read-only token reads a repository's Actions runs, jobs and job logs, as the Legion daemon's own read-only token does.
+
+  An installation that has not been granted Actions keeps working: GitHub answers 422 to a permission its installation does not hold, so the broker asks once more without `actions` and releases contents, metadata and pull requests read, logging one WARN that names the App and the installation. Only a refusal that stands is `NARROWING_REFUSED`.
+
 ## [29.6.0] - 2026-11-04
 
 ### Changed

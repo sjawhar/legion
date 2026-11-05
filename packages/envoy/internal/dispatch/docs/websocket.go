@@ -1017,7 +1017,7 @@ func (s *Service) classifyDrained(room string, instance *roomInstance, logged cr
 		// a credit. A published live write carries none; its commit recorded its blocks'
 		// authors (Ledger.recordSettlementCredit).
 		class.credit = s.creditContentChange(room, logged.Origin, &instance.hold, attributed)
-	} else if !published {
+	} else {
 		class.roomCredit = s.unchangedCredit(room, logged.Origin, &instance.hold)
 	}
 	// A published write's update was stored by the transaction that wrote it, before the room
@@ -1097,10 +1097,7 @@ func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]st
 // one. A service repair's origin, the one serviceTransact registered: the service made that
 // commit, and a browser that was only connected while it happened is not credited for it. A
 // published live write's *liveWriteOrigin: Ledger.Commit credited that write when its transaction
-// committed, and it is not credited again - a case only creditContentChange reaches, since
-// classifyDrained takes no shadow credit for a published update at all (it calls unchangedCredit
-// for an unpublished update alone), so naming it here leaves unchangedCredit's answer on every
-// reachable path the answer it gave before. A catch-up's *remoteUpdateOrigin: another process
+// committed, and it is not credited again. A catch-up's *remoteUpdateOrigin: another process
 // stored that update, and its append recorded the authors that process credited it to, so none
 // of this room's peers may be named for it on either path. And no origin at all: every commit a
 // loaded room makes names an origin - a browser's update names the peer ygo applied it for (its
@@ -1108,15 +1105,15 @@ func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]st
 // Server.Apply makes for the call (applyOriginSentinel), which serviceTransact registers as a
 // service origin, a repair names its own *identityClosureOrigin (applySuppressed), a published
 // live write its *liveWriteOrigin and a catch-up its *remoteUpdateOrigin. The room's own load
-// decodes the stored history with no origin, before OnLoadDocument opens the update log and
-// registers this observer (ygo's loadRoomDoc), so no observer ever sees it. A nil origin here can
-// therefore only be ygo's own cleanup transaction, which a document commits for itself after a
-// remote delete leaves a text's formatting markers covering no text (reearth/ygo #284): nobody
-// typed it, so neither credit path may name anyone for it. On the replica's recover path, where
-// every update it could not place counts as a content change, crediting it would hand every
-// connected browser an edit none of them made (INFRA-644); on the shadow path, a cleanup the room
-// measured as no change is stored as a change wherever an open write's shadow measures one
-// (storedClasses), which would store those browsers as its authors.
+// decodes the stored history with no origin (bootstrapLoadedState), earlier in the load hook
+// that goes on to open the update log and register this observer, so no observer ever sees it. A
+// nil origin here can therefore only be ygo's own cleanup transaction, which a document commits
+// for itself after a remote delete leaves a text's formatting markers covering no text
+// (reearth/ygo #284): nobody typed it, so neither credit path may name anyone for it. On the
+// replica's recover path, where every update it could not place counts as a content change,
+// crediting it would hand every connected browser an edit none of them made (INFRA-644); on the
+// shadow path, a cleanup the room measured as no change is stored as a change wherever an open
+// write's shadow measures one (storedClasses), which would store those browsers as its authors.
 func (s *Service) originCreditsNoOne(origin any) bool {
 	if origin == nil {
 		return true
@@ -1161,9 +1158,10 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold, a
 // live write is open, whose shadow may measure the update a change once the write is stored before
 // it. It is not in F and takes no credit sequence: no version lists an update recorded as no
 // change, and its append writes these authors only when it stores the update as a change. It
-// weighs the origin by the same rule that path does (originCreditsNoOne), so a service repair and
-// a commit with no origin at all - ygo's own cleanup, which nobody typed - carry no authors for a
-// shadow to store them with either. Nil too while no write is open.
+// weighs the origin by the same rule that path does (originCreditsNoOne), so a service repair, a
+// published live write Ledger.Commit credited already and a commit with no origin at all - ygo's
+// own cleanup, which nobody typed - carry no authors for a shadow to store them with either. Nil
+// too while no write is open.
 func (s *Service) unchangedCredit(room string, origin any, hold *roomHold) *UpdateCredit {
 	if s.originCreditsNoOne(origin) {
 		return nil
