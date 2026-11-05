@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -65,9 +66,8 @@ func linkTargets(decision model.Decision) []string {
 	return targets
 }
 
-// decisionsFixture is one issue whose spec holds two linkable blocks and whose decisions.md holds
-// an agent decision linking both, a person's decision linking an answered ask and one of them, an
-// unsure decision, and a replaced one.
+// decisionsFixture converts the original legacy four-choice document through the real
+// converter into spec decision nodes, retaining the original ask row and its verbatim answer.
 type decisionsFixture struct {
 	handler   http.Handler
 	database  *store.Store
@@ -79,7 +79,7 @@ type decisionsFixture struct {
 
 const (
 	tableDecision   = "Store notices in a table"
-	nameDecision    = "Use the name the person gave"
+	nameDecision    = "Which name do we use?"
 	cacheDecision   = "Keep the cache warm"
 	fileDecision    = "Store notices in a file"
 	tableParagraph  = "Chosen for the simplest storage."
@@ -101,6 +101,12 @@ func newDecisionsFixture(t *testing.T) decisionsFixture {
 	askID := decodeBody[struct {
 		ID string `json:"id"`
 	}](t, created).ID
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+		"selected": []string{}, "text": "Use the name the person gave.", "expected_edited_at": nil,
+	}, "alice")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("answer the decision: %d %s", answered.Code, answered.Body.String())
+	}
 	spec := "dispatch://" + issue.Key + "/spec"
 	markdown := fmt.Sprintf(`## %s
 
@@ -119,8 +125,20 @@ Unsure: a measurement of the hit rate would change this.
 ### %s
 
 Replaced by the table above.
-`, tableDecision, tableParagraph, spec, spec, nameDecision, issue.Key, askID, spec, cacheDecision, fileDecision)
-	decisions := uploadIssueDocument(t, handler, issue.Key, "decisions.md", markdown)
+`, tableDecision, tableParagraph, spec, spec, "Use the name the person gave", issue.Key, askID, spec, cacheDecision, fileDecision)
+	legacy := uploadIssueDocument(t, handler, issue.Key, "decisions.md", markdown)
+	if content, err := deps.Docs.Text(context.Background(), legacy.ID); err != nil || !strings.Contains(content, tableDecision) {
+		t.Fatalf("legacy fixture source = %q, err=%v", content, err)
+	}
+	var conversion bytes.Buffer
+	result, err := deps.Docs.(*docs.Service).ConvertDecisionDocuments(context.Background(), true, &conversion)
+	if err != nil {
+		t.Fatalf("convert fixture: %v\n%s", err, conversion.String())
+	}
+	if result.Moved != 3 || result.Dropped != 1 || result.Restored != 1 {
+		t.Fatalf("conversion: %#v\n%s", result, conversion.String())
+	}
+	decisions := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
 	return decisionsFixture{handler: handler, database: database, deps: deps, issue: issue, decisions: decisions, askID: askID}
 }
 
@@ -135,17 +153,17 @@ func specVersionCount(t *testing.T, database *store.Store, artifactID string) in
 	return count
 }
 
-// The view reads decisions.md field by field: each `##` section in document order, the `###`
-// sections under `## Replaced` marked replaced, a decision that mentions an ask the person's, a
-// paragraph that starts `Unsure:` marking its decision unsure, and every link to a spec block.
-// Right after the decisions are written no link is stale, and writing decisions.md wrote the spec
-// no version of its own.
+// The view reads the spec's decision nodes field by field, in document order: the legacy
+// fixture's `##` sections become decision nodes, its `## Replaced` sections replaced ones, the
+// section that mentions an ask the person's answered ask node itself, a paragraph that starts
+// `Unsure:` marks its node unsure, and every `shaped` relation is a link to a spec block. Right
+// after the conversion no link is stale, and reading the view writes the spec no version.
 func TestIssueDecisionsReadsEachDecisionOfTheDocument(t *testing.T) {
 	fixture := newDecisionsFixture(t)
 	specVersions := specVersionCount(t, fixture.database, fixture.issue.PrimaryArtifactID)
 
 	view := readIssueDecisions(t, fixture.handler, fixture.issue.Key)
-	want := "dispatch://" + fixture.issue.Key + "/artifact/" + fixture.decisions.Slug
+	want := "dispatch://" + fixture.issue.Key + "/spec"
 	if view.Document == nil || *view.Document != want {
 		t.Fatalf("document = %v, want %q", view.Document, want)
 	}
@@ -168,8 +186,8 @@ func TestIssueDecisionsReadsEachDecisionOfTheDocument(t *testing.T) {
 	if table.Ref != want+"#b-"+table.BlockID {
 		t.Fatalf("ref = %q, want %q", table.Ref, want+"#b-"+table.BlockID)
 	}
-	if table.ChangedVersion != 1 || table.ChangedAt == nil {
-		t.Fatalf("changed_version = %d, changed_at = %v, want 1 and the version's time", table.ChangedVersion, table.ChangedAt)
+	if table.ChangedVersion != specVersions || table.ChangedAt == nil {
+		t.Fatalf("changed_version = %d, changed_at = %v, want the spec's conversion version %d", table.ChangedVersion, table.ChangedAt, specVersions)
 	}
 	if got := fmt.Sprint(linkTargets(table)); got != "[hold-it ship_it]" && got != "[ship_it hold-it]" {
 		t.Fatalf("the agent decision's links = %v, want both spec blocks", linkTargets(table))
@@ -205,7 +223,7 @@ func TestIssueDecisionsReadsEachDecisionOfTheDocument(t *testing.T) {
 		}
 	}
 	if got := specVersionCount(t, fixture.database, fixture.issue.PrimaryArtifactID); got != specVersions {
-		t.Fatalf("the spec has %d versions, want %d: writing decisions.md writes the spec none", got, specVersions)
+		t.Fatalf("the spec has %d versions, want %d: reading decisions writes the spec none", got, specVersions)
 	}
 }
 
@@ -216,13 +234,14 @@ func TestDecisionLinksGoStaleWithTheDecisionAndClearWithTheirBlock(t *testing.T)
 	fixture := newDecisionsFixture(t)
 	handler, key := fixture.handler, fixture.issue.Key
 
-	// A link added to an existing decision: the paragraph that adds it is new, so the decision
-	// changed in the version that wrote it, which is the version the new pair was created in.
-	added := "Also shapes dispatch://" + key + "/spec#b-ship%5Fit."
-	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
-		{"op": "insert", "markdown": added, "before": "## " + cacheDecision},
-	})
+	// A newly introduced relation is not stale, and it belongs to the actual ask node.
 	name := decisionNamed(t, readIssueDecisions(t, handler, key), nameDecision)
+	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{{
+		"op": "retype", "block": name.BlockID, "type": "ask", "attributes": map[string]any{
+			"shaped": []string{"dispatch://" + key + "/spec#b-hold-it", "dispatch://" + key + "/spec#b-ship%5Fit"},
+		},
+	}})
+	name = decisionNamed(t, readIssueDecisions(t, handler, key), nameDecision)
 	for _, link := range name.Links {
 		if link.To.BlockID == "ship_it" && link.Stale {
 			t.Fatalf("the link a version added is out of date: %#v", link)
@@ -247,48 +266,34 @@ func TestDecisionLinksGoStaleWithTheDecisionAndClearWithTheirBlock(t *testing.T)
 	}
 }
 
-// A `#` heading after a decision ends it, as the block walk ends it, so text under that heading
-// is no part of the decision and changing it marks nothing; and a heading the document carries
-// twice - a decision made again after a replaced one of the same name - still names each of its
-// decisions, so the live one's links go out of date with its own text.
-func TestTheVersionCutReadsTheSameDecisionsAsTheBlockWalk(t *testing.T) {
+// Untyped headings are prose, not decisions. A typed node's stable identity, not its title's
+// occurrence among headings, binds its history even beside a replaced choice with the same title.
+func TestDecisionVersionsFollowNodesNotHeadingSections(t *testing.T) {
 	fixture := newDecisionsFixture(t)
 	handler, key := fixture.handler, fixture.issue.Key
-
-	// A `#` heading and a paragraph written after the agent decision, before the next one.
-	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
-		{"op": "insert", "markdown": "# Notes\n\nA note.", "before": "## " + nameDecision},
-	})
-	table := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
-	if strings.Contains(table.Text, "A note.") {
-		t.Fatalf("the `#` heading did not end the decision: %q", table.Text)
+	before := readIssueDecisions(t, handler, key)
+	editSpec(t, handler, key, []map[string]any{{"op": "insert", "after": "end", "markdown": "## Not a decision\n\nA note."}})
+	after := readIssueDecisions(t, handler, key)
+	if len(after.Decisions) != len(before.Decisions) {
+		t.Fatalf("untyped heading created a decision: %s", mustJSON(t, after))
 	}
-	if stale := staleTargets(table); len(stale) != 0 {
-		t.Fatalf("a `#` heading written after the decision marks %v out of date", stale)
+	table := decisionNamed(t, after, tableDecision)
+	if strings.Contains(table.Text, "A note.") || len(staleTargets(table)) != 0 {
+		t.Fatalf("outside prose changed a node: %#v", table)
 	}
-	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
-		{"op": "replace", "find": "A note.", "with": "A changed note."},
-	})
-	if table = decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision); len(staleTargets(table)) != 0 {
-		t.Fatalf("text under the `#` heading marks %v out of date", staleTargets(table))
+	editSpec(t, handler, key, []map[string]any{{"op": "insert", "after": "end", "markdown": ":::decision{#replaced-table title=\"" + tableDecision + "\" replaced=\"true\"}\nThe file store we tried first.\n:::"}})
+	typed := readIssueDecisions(t, handler, key)
+	if len(typed.Decisions) != len(before.Decisions)+1 {
+		t.Fatalf("typed node not listed: %s", mustJSON(t, typed))
 	}
-
-	// The same heading under `## Replaced`: the document now carries it twice, and the live
-	// decision's own change still marks the blocks it links.
-	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
-		{"op": "insert", "markdown": "### " + tableDecision + "\n\nThe file store we tried first.", "after": "## Replaced"},
-	})
-	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
-		{"op": "replace", "find": tableParagraph, "with": changedTableSay},
-	})
-	view := readIssueDecisions(t, handler, key)
-	live := view.Decisions[0]
-	if live.Heading != tableDecision || live.Replaced {
-		t.Fatalf("the document's first decision = %#v, want the live %q", live, tableDecision)
+	replaced := typed.Decisions[len(typed.Decisions)-1]
+	if !replaced.Replaced || replaced.ChangedVersion != specVersionCount(t, fixture.database, fixture.decisions.ID) {
+		t.Fatalf("typed version binding: %#v", replaced)
 	}
-	if got := len(staleTargets(live)); got != 2 {
-		t.Fatalf("beside a replaced decision of its own heading the live one marks %v out of date, want both spec blocks",
-			staleTargets(live))
+	editSpec(t, handler, key, []map[string]any{{"op": "replace", "find": tableParagraph, "with": changedTableSay}})
+	live := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
+	if live.BlockID != table.BlockID || live.Replaced || len(staleTargets(live)) != 2 {
+		t.Fatalf("same-title node changed live history: %#v", live)
 	}
 }
 
@@ -374,90 +379,27 @@ func keepBlock(t *testing.T, handler http.Handler, artifactID, blockID, sum stri
 	return decodeBody[model.DecisionKeep](t, response)
 }
 
-// A kept decision whose text changes without its changed version moving waits for review again,
-// and the spec blocks it linked are out of date. The version is the greatest of the blocks the
-// decision holds now, so a block taken out of it, and one moved from it into another decision,
-// leave both decisions' versions where they were while their text changed: the text, not the
-// version, is what Keep records and what the out-of-date rule reads.
-func TestAKeptDecisionWaitsForReviewAgainWhenABlockLeavesOrJoinsIt(t *testing.T) {
+// Prose outside a node and a move of the whole node do not change its words or Keep. An edit
+// inside it does, and its shaped relations stay on that node rather than following moved prose.
+func TestKeptDecisionIdentitySurvivesOutsideEditsAndNodeMoves(t *testing.T) {
 	fixture := newDecisionsFixture(t)
 	handler, key, id := fixture.handler, fixture.issue.Key, fixture.decisions.ID
-
-	// A paragraph written into the agent decision: its text changed after it linked both spec
-	// blocks, so both are out of date, and a Keep agrees with the text as it now stands.
-	const measured = "Measured against the file store."
-	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
-		{"op": "insert", "markdown": measured, "before": "## " + nameDecision},
-	})
 	table := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
-	if got := fmt.Sprint(staleTargets(table)); got != "[hold-it ship_it]" && got != "[ship_it hold-it]" {
-		t.Fatalf("after a block joined it the decision marks %v out of date, want both spec blocks",
-			staleTargets(table))
-	}
 	keepBlock(t, handler, id, table.BlockID, table.TextSHA256)
-	if kept := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision); kept.WaitingReview {
-		t.Fatalf("after the Keep the decision = %#v, want it waiting for no review", kept)
+	editSpec(t, handler, key, []map[string]any{{"op": "insert", "after": "end", "markdown": "Unrelated context."}})
+	editSpec(t, handler, key, []map[string]any{{"op": "move", "block": table.BlockID, "before": "Ship it."}})
+	moved := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
+	if moved.BlockID != table.BlockID || moved.TextSHA256 != table.TextSHA256 || moved.ChangedVersion != table.ChangedVersion || moved.WaitingReview || len(moved.Links) != 2 {
+		t.Fatalf("node move/outside edit changed decision: %#v", moved)
 	}
-
-	// The paragraph taken out again: the decision's text is the text it linked those blocks
-	// with, so neither is out of date any more, while the Keep, which agreed with the
-	// paragraph, no longer holds - and the decision's changed version moved for neither.
-	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
-		{"op": "delete", "find": measured},
-	})
-	removed := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
-	if strings.Contains(removed.Text, measured) {
-		t.Fatalf("the paragraph is still in the decision: %q", removed.Text)
+	editSpec(t, handler, key, []map[string]any{{"op": "replace", "find": tableParagraph, "with": changedTableSay}})
+	changed := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
+	if changed.ChangedVersion <= moved.ChangedVersion || changed.TextSHA256 == moved.TextSHA256 || !changed.WaitingReview || len(staleTargets(changed)) != 2 {
+		t.Fatalf("inside edit did not change decision: %#v", changed)
 	}
-	if removed.Kept == nil || removed.Kept.ChangedVersion < removed.ChangedVersion {
-		t.Fatalf("the removal moved the decision's changed version: kept = %#v, decision = %#v",
-			removed.Kept, removed)
-	}
-	if !removed.WaitingReview {
-		t.Fatalf("after a block left it the decision = %#v, want it waiting for review", removed)
-	}
-	if stale := staleTargets(removed); len(stale) != 0 {
-		t.Fatalf("the decision's text is what it linked those blocks with, and it marks %v", stale)
-	}
-
-	// Both decisions kept as they now stand, then the agent decision's paragraph moved into the
-	// unsure one: no block of either changed, so neither changed version moves.
-	view := readIssueDecisions(t, handler, key)
-	table = decisionNamed(t, view, tableDecision)
-	cache := decisionNamed(t, view, cacheDecision)
-	keepBlock(t, handler, id, table.BlockID, table.TextSHA256)
-	keepBlock(t, handler, id, cache.BlockID, cache.TextSHA256)
-	blocks := blockIDsByText(t, handler, id)
-	paragraph := blocks[tableParagraph+" Shapes dispatch://"+key+"/spec#b-ship%5Fit and dispatch://"+key+"/spec#b-hold-it."]
-	if paragraph == "" {
-		t.Fatalf("the decision's paragraph has no block id; blocks = %v", blocks)
-	}
-	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
-		{"op": "move", "block": paragraph, "before": "## Replaced"},
-	})
-	moved := readIssueDecisions(t, handler, key)
-	left := decisionNamed(t, moved, tableDecision)
-	joined := decisionNamed(t, moved, cacheDecision)
-	if strings.Contains(left.Text, tableParagraph) || !strings.Contains(joined.Text, tableParagraph) {
-		t.Fatalf("the move left the paragraph where it was: %q and %q", left.Text, joined.Text)
-	}
-	for _, decision := range []model.Decision{left, joined} {
-		if decision.Kept == nil || decision.Kept.ChangedVersion < decision.ChangedVersion {
-			t.Fatalf("the move moved %q's changed version: kept = %#v, decision = %#v",
-				decision.Heading, decision.Kept, decision)
-		}
-		if !decision.WaitingReview {
-			t.Fatalf("after the move %q = %#v, want it waiting for review", decision.Heading, decision)
-		}
-	}
-	// The links moved with the paragraph, and both spec blocks are out of date under the
-	// decision that holds them now: the decision they joined changed when they arrived.
-	if got := fmt.Sprint(staleTargets(joined)); got != "[hold-it ship_it]" && got != "[ship_it hold-it]" {
-		t.Fatalf("the decision the paragraph joined marks %v out of date, want both spec blocks",
-			staleTargets(joined))
-	}
-	if len(left.Links) != 0 {
-		t.Fatalf("the decision the paragraph left still holds %v", linkTargets(left))
+	stale := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+id+"/blocks/"+table.BlockID+"/keep", map[string]any{"text_sha256": table.TextSHA256}, "alice")
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "DECISION_CHANGED") {
+		t.Fatalf("stale Keep: %d %s", stale.Code, stale.Body.String())
 	}
 }
 
@@ -505,14 +447,14 @@ func TestDocumentReadRecordsEachPersonsLastReadVersion(t *testing.T) {
 	}
 }
 
-// A decisions.md whose links the block index wrote at its first indexing marks nothing out of
-// date, in both cases of a first indexing: the document's first version, written while it has no
-// block rows, and the backfill over a document no block-aware build indexed.
+// A spec whose decision links the block index wrote at its first indexing marks nothing out of
+// date, in both cases of a first indexing: the version the conversion wrote, and the backfill
+// over a document no block-aware build indexed.
 func TestAFirstIndexingMarksNothingOutOfDate(t *testing.T) {
 	fixture := newDecisionsFixture(t)
 	handler, database, key := fixture.handler, fixture.database, fixture.issue.Key
 
-	// The document's first version, written while it had no block rows: the fixture's own upload.
+	// The version the conversion wrote, read as indexed by the fixture's own write.
 	for _, decision := range readIssueDecisions(t, handler, key).Decisions {
 		if stale := staleTargets(decision); len(stale) != 0 {
 			t.Fatalf("the first version's %q marks %v out of date", decision.Heading, stale)
@@ -550,7 +492,7 @@ func TestAFirstIndexingMarksNothingOutOfDate(t *testing.T) {
 }
 
 // The open questions are the issue's open asks whose block is in its spec, oldest first, and an
-// issue with no decisions.md answers them with a null document and no decisions. The two asks are
+// issue whose spec holds no decision node answers them with a null document and no decisions. The two asks are
 // written in two versions, so one is older than the other: two that one settlement writes share
 // their created_at and the order between them is their ids'.
 func TestIssueDecisionsListTheSpecsOpenQuestions(t *testing.T) {
@@ -559,7 +501,7 @@ func TestIssueDecisionsListTheSpecsOpenQuestions(t *testing.T) {
 	issue := createSpecIssue(t, handler, "CORE", ":::ask{#decide_first}\nWhich store?\n:::\n\nA paragraph.\n")
 	view, _ := waitForOpenQuestions(t, handler, issue.Key, 1)
 	if view.Document != nil || len(view.Decisions) != 0 {
-		t.Fatalf("an issue with no decisions.md = %#v, want a null document and no decisions", view)
+		t.Fatalf("an issue with no decision nodes = %#v, want a null document and no decisions", view)
 	}
 
 	editSpec(t, handler, issue.Key, []map[string]any{
