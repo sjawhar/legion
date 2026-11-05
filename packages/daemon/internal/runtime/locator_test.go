@@ -101,9 +101,9 @@ func TestLocatorRoundTripsByteForByte(t *testing.T) {
 	}
 }
 
-// The backend member the runtime did not write is absent from the bytes, not `null`: the state
-// the plugin reads parses strictly, and a `"sandbox":null` on a tmux locator is a member it has
-// no schema for.
+// The backend member the runtime did not write is absent from the bytes, not `null`: the plugin's
+// locator schema names no `sandbox` on a tmux locator, so a `"sandbox":null` there is a key its
+// parse drops in silence, and the bytes would claim a member no reader of the state can see.
 func TestTheUnusedBackendMemberIsAbsent(t *testing.T) {
 	encoded, err := json.Marshal(tmuxLocator())
 	if err != nil {

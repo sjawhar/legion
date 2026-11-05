@@ -57,14 +57,18 @@ func signInClientSecretFile(t *testing.T) string {
 	return path
 }
 
+// testMachineLoginURL is the page a person types a machine login's code into, as every broker
+// these tests start that serves the device grant names it (BROKER_MACHINE_LOGIN_URL). It is not
+// in productionEnv: the setting is optional, and the rows that need the device grant ask for it
+// by name, so the broker every other row starts is the one that serves none.
+const testMachineLoginURL = "https://dispatch.example/credentials/machine"
+
 // productionEnv is the configuration every broker needs besides its addresses and database: the
-// namespace it serves, the key every secret there is on, the page a machine login's code is
-// typed on, and the four settings a person signs in to its approval page with, which it refuses
-// to start without.
+// namespace it serves, the key every secret there is on, and the four settings a person signs
+// in to its approval page with, which it refuses to start without.
 func productionEnv(t *testing.T) []string {
 	t.Helper()
 	return []string{
-		"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
 		"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
 		"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
 		"BROKER_SIGNIN_ISSUER=" + testSignInIssuer,

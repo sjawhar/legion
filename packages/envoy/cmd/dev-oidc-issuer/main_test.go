@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -158,8 +159,13 @@ const (
 	testClientSecret   = "dev-client-secret"
 	brokerClientID     = "broker-dev"
 	brokerClientSecret = "broker-dev-client-secret"
-	testRedirect       = "http://127.0.0.1:1/auth/callback"
-	testDomain         = "d.example"
+	deviceClientID     = "listener-dev"
+	deviceClientSecret = "listener-dev-client-secret"
+	// deviceCodeGrant is RFC 8628's grant type, which x/oauth2 spells in a package its users
+	// cannot import.
+	deviceCodeGrant = "urn:ietf:params:oauth:grant-type:device_code"
+	testRedirect    = "http://127.0.0.1:1/auth/callback"
+	testDomain      = "d.example"
 )
 
 // noRedirects hands back each redirect rather than following it, so a test reads where the
@@ -247,11 +253,10 @@ func authorize(t *testing.T, authURL, state string) string {
 	return query.Get("code")
 }
 
-// exchangeCode posts code to the token endpoint as clientID authenticating with secret, and
-// answers the status and body.
-func exchangeCode(t *testing.T, endpoint, clientID, code, secret string) (int, []byte) {
+// postAs posts form to endpoint as clientID authenticating with secret, and answers the status
+// and the body.
+func postAs(t *testing.T, endpoint, clientID, secret string, form url.Values) (int, []byte) {
 	t.Helper()
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {testRedirect}}
 	request, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err)
@@ -265,6 +270,13 @@ func exchangeCode(t *testing.T, endpoint, clientID, code, secret string) (int, [
 	defer response.Body.Close()
 	body, _ := io.ReadAll(response.Body)
 	return response.StatusCode, body
+}
+
+// exchangeCode posts code to the token endpoint as clientID authenticating with secret, and
+// answers the status and body.
+func exchangeCode(t *testing.T, endpoint, clientID, code, secret string) (int, []byte) {
+	t.Helper()
+	return postAs(t, endpoint, clientID, secret, url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {testRedirect}})
 }
 
 // idTokenClaims is the payload of the compact JWT raw, whose signature the caller has verified.
@@ -452,10 +464,11 @@ func TestOneIssuerServesTwoClients(t *testing.T) {
 	}
 }
 
-// TestRunRefusesACodeFlowItCannotServe pins the usage refusals of --code-flow and --sign-in-as,
-// each exit 2 naming what is wrong before any issuer runs: a value with no secret file, a secret
-// file that cannot be read or holds only whitespace, one client id named twice, --sign-in-as with
-// no code flow to sign in at, and a --sign-in-as that is not an email address.
+// TestRunRefusesACodeFlowItCannotServe pins the usage refusals of --code-flow, --device-flow and
+// --sign-in-as, each exit 2 naming what is wrong before any issuer runs: a value with no secret
+// file, a secret file that cannot be read or holds only whitespace, one client id named twice by
+// either flag or once by each, --sign-in-as with no flow to sign in at, and a --sign-in-as that
+// is not an email address.
 func TestRunRefusesACodeFlowItCannotServe(t *testing.T) {
 	secret := secretFile(t, testClientSecret)
 	for _, tc := range []struct {
@@ -469,10 +482,220 @@ func TestRunRefusesACodeFlowItCannotServe(t *testing.T) {
 		{[]string{"--sign-in-as", "alice@d.example"}, "--sign-in-as needs --code-flow"},
 		{[]string{"--code-flow", testClientID + "=" + secret, "--sign-in-as", "alice"}, `--sign-in-as "alice" is not an email address`},
 		{[]string{"--code-flow", testClientID + "=" + secret, "--sign-in-group", "dispatch-members"}, "--sign-in-group needs --sign-in-as"},
+		{[]string{"--device-flow", testClientID + "=" + secret, "--device-flow", testClientID + "=" + secret}, "--device-flow names client " + testClientID + " twice"},
+		{[]string{"--code-flow", testClientID + "=" + secret, "--device-flow", testClientID + "=" + secret}, "--device-flow names client " + testClientID + ", which --code-flow serves"},
 	} {
 		var stderr lockedBuffer
 		if code := run(context.Background(), tc.args, &stderr); code != exitUsageError || !strings.Contains(stderr.String(), tc.says) {
 			t.Errorf("%q: exit %d, stderr %q; want %d saying %q", tc.args, code, stderr.String(), exitUsageError, tc.says)
 		}
+	}
+}
+
+// deviceAuthorization is the answer a device authorization request gets (RFC 8628 section 3.2).
+type deviceAuthorization struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int    `json:"expires_in"`
+	Interval                int    `json:"interval"`
+}
+
+// deviceEndpoint reads the issuer's discovery document and answers the device authorization
+// endpoint it names, failing the test unless it is the issuer's own and the document names the
+// device code grant among the grants it supports.
+func deviceEndpoint(t *testing.T, issuerURL string) string {
+	t.Helper()
+	response, err := http.Get(issuerURL + "/.well-known/openid-configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var discovery struct {
+		DeviceAuthorizationEndpoint string   `json:"device_authorization_endpoint"`
+		GrantTypesSupported         []string `json:"grant_types_supported"`
+	}
+	err = json.NewDecoder(response.Body).Decode(&discovery)
+	response.Body.Close()
+	if err != nil || discovery.DeviceAuthorizationEndpoint != issuerURL+"/device_authorization" || !slices.Contains(discovery.GrantTypesSupported, deviceCodeGrant) {
+		t.Fatalf("discovery = %+v (%v), want the device authorization endpoint at %s and %s among the grant types", discovery, err, issuerURL, deviceCodeGrant)
+	}
+	return discovery.DeviceAuthorizationEndpoint
+}
+
+// deviceAuthorize asks endpoint for a device authorization as clientID, which sends no secret
+// because a device keeps none, and answers the status and the body.
+func deviceAuthorize(t *testing.T, endpoint, clientID string) (int, []byte) {
+	t.Helper()
+	response, err := http.PostForm(endpoint, url.Values{"client_id": {clientID}, "scope": {"openid email"}})
+	if err != nil {
+		t.Fatalf("POST %s: %v", endpoint, err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	return response.StatusCode, body
+}
+
+// pollDevice polls the token endpoint with deviceCode as clientID authenticating with secret,
+// the way a device waiting on a person does, and answers the status and the body.
+func pollDevice(t *testing.T, endpoint, clientID, deviceCode, secret string) (int, []byte) {
+	t.Helper()
+	return postAs(t, endpoint, clientID, secret, url.Values{"grant_type": {deviceCodeGrant}, "device_code": {deviceCode}})
+}
+
+// approveDeviceCode asks the issuer's loopback control route to approve userCode, as the person
+// who read it off the device types it in, and answers the status and the body.
+func approveDeviceCode(t *testing.T, issuerURL, userCode string) (int, string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"user_code": userCode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.Post(issuerURL+"/_dev/approve-device-code", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /_dev/approve-device-code: %v", err)
+	}
+	defer response.Body.Close()
+	answer, _ := io.ReadAll(response.Body)
+	return response.StatusCode, string(answer)
+}
+
+// TestTheDeviceFlowSignsInOnceTheUserCodeIsApproved drives the command through --device-flow, the
+// whole RFC 8628 exchange over HTTP against the running process: discovery names the device
+// authorization endpoint and the grant; a device authorization answers the two codes and where
+// to type one in; the poll before anyone approves is authorization_pending; the approval at
+// /_dev/approve-device-code signs in --sign-in-as's person, whom the next poll's ID token names
+// for this client; and a person queued at /_dev/sign-in-as is the next approval's. A device code
+// the issuer never issued, one redeemed already and a user code nothing waits on are each
+// refused.
+func TestTheDeviceFlowSignsInOnceTheUserCodeIsApproved(t *testing.T) {
+	ctx := context.Background()
+	// The trailing newline is the file's, not the secret's.
+	issuerURL := startRun(t, "--device-flow", deviceClientID+"="+secretFile(t, deviceClientSecret+"\n"), "--sign-in-as", "Alice@D.example")
+	_, tokenEndpoint := discoveryEndpoints(t, issuerURL)
+	endpoint := deviceEndpoint(t, issuerURL)
+	verifier, err := oidc.New(ctx, issuerURL, deviceClientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ask := func() deviceAuthorization {
+		t.Helper()
+		status, body := deviceAuthorize(t, endpoint, deviceClientID)
+		var authorization deviceAuthorization
+		if err := json.Unmarshal(body, &authorization); status != http.StatusOK || err != nil {
+			t.Fatalf("the device authorization: status %d, body %s (%v), want 200 with the codes", status, body, err)
+		}
+		return authorization
+	}
+	signedIn := func(deviceCode string) map[string]any {
+		t.Helper()
+		status, body := pollDevice(t, tokenEndpoint, deviceClientID, deviceCode, deviceClientSecret)
+		var tokens struct {
+			IDToken      string `json:"id_token"`
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := json.Unmarshal(body, &tokens); status != http.StatusOK || err != nil || tokens.AccessToken == "" || tokens.RefreshToken == "" {
+			t.Fatalf("the poll after the approval: status %d, body %s (%v), want 200 with an ID token, an access token and a refresh token", status, body, err)
+		}
+		if _, err := verifier.Verify(ctx, tokens.IDToken); err != nil {
+			t.Fatalf("the device grant's ID token does not verify against the issuer that signed it: %v", err)
+		}
+		return idTokenClaims(t, tokens.IDToken)
+	}
+
+	authorization := ask()
+	if authorization.DeviceCode == "" || len(authorization.UserCode) < 8 || authorization.ExpiresIn <= 0 || authorization.Interval <= 0 ||
+		authorization.VerificationURI == "" || authorization.VerificationURIComplete != authorization.VerificationURI+"?user_code="+url.QueryEscape(authorization.UserCode) {
+		t.Fatalf("the device authorization %+v, want a device code, a typable user code, both verification URIs, a life and a poll interval", authorization)
+	}
+	if status, body := pollDevice(t, tokenEndpoint, deviceClientID, authorization.DeviceCode, deviceClientSecret); status != http.StatusBadRequest || !strings.Contains(string(body), "authorization_pending") {
+		t.Fatalf("the poll before anyone approved: status %d, body %s, want 400 authorization_pending", status, body)
+	}
+	// The person types the code in as they read it off the device, case and all.
+	if status, body := approveDeviceCode(t, issuerURL, strings.ToLower(authorization.UserCode)); status != http.StatusNoContent {
+		t.Fatalf("POST /_dev/approve-device-code: status %d, body %s, want 204", status, body)
+	}
+	if status, body := approveDeviceCode(t, issuerURL, authorization.UserCode); status != http.StatusBadRequest || !strings.Contains(body, "approved already") {
+		t.Errorf("approving the same user code twice: status %d, body %s, want 400 saying it was approved already", status, body)
+	}
+	if claims := signedIn(authorization.DeviceCode); claims["aud"] != deviceClientID || claims["email"] != "alice@d.example" || claims["hd"] != testDomain {
+		t.Errorf("the ID token: aud %#v, email %#v, hd %#v, want %q, alice@d.example and %s", claims["aud"], claims["email"], claims["hd"], deviceClientID, testDomain)
+	}
+
+	if status, body := pollDevice(t, tokenEndpoint, deviceClientID, authorization.DeviceCode, deviceClientSecret); status != http.StatusBadRequest || !strings.Contains(string(body), "invalid_grant") {
+		t.Errorf("the poll with a device code redeemed already: status %d, body %s, want 400 invalid_grant", status, body)
+	}
+	if status, body := pollDevice(t, tokenEndpoint, deviceClientID, "no-such-device-code", deviceClientSecret); status != http.StatusBadRequest || !strings.Contains(string(body), "invalid_grant") {
+		t.Errorf("the poll with a device code the issuer never issued: status %d, body %s, want 400 invalid_grant", status, body)
+	}
+	if status, body := approveDeviceCode(t, issuerURL, "ZZZZ-ZZZZ"); status != http.StatusBadRequest || !strings.Contains(body, "ZZZZ-ZZZZ") {
+		t.Errorf("approving a user code nothing is waiting on: status %d, body %s, want 400 naming ZZZZ-ZZZZ", status, body)
+	}
+
+	queued, err := json.Marshal(map[string]any{"sub": "bob-account", "email": "bob@d.example", "email_verified": true, "hd": testDomain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.Post(issuerURL+"/_dev/sign-in-as", "application/json", bytes.NewReader(queued))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /_dev/sign-in-as: status %d, want 204", response.StatusCode)
+	}
+	next := ask()
+	if status, body := approveDeviceCode(t, issuerURL, next.UserCode); status != http.StatusNoContent {
+		t.Fatalf("approving the second device authorization: status %d, body %s, want 204", status, body)
+	}
+	if claims := signedIn(next.DeviceCode); claims["email"] != "bob@d.example" {
+		t.Errorf("the second ID token's email is %#v, want bob@d.example, the person queued at /_dev/sign-in-as", claims["email"])
+	}
+}
+
+// TestTheDeviceGrantIsAbsentWithoutTheFlag runs the command with --code-flow alone: its client
+// signs a browser in, and the device authorization endpoint refuses that client invalid_client,
+// as Google refuses a client not registered for limited-input devices. The approval control is
+// not mounted at all.
+func TestTheDeviceGrantIsAbsentWithoutTheFlag(t *testing.T) {
+	issuerURL := startRun(t, "--code-flow", testClientID+"="+secretFile(t, testClientSecret), "--sign-in-as", "alice@d.example")
+	if status, body := deviceAuthorize(t, issuerURL+"/device_authorization", testClientID); status != http.StatusUnauthorized || !strings.Contains(string(body), "invalid_client") {
+		t.Errorf("a device authorization for a code-flow client: status %d, body %s, want 401 invalid_client", status, body)
+	}
+	if status, body := approveDeviceCode(t, issuerURL, "ABCD-EFGH"); status != http.StatusNotFound {
+		t.Errorf("POST /_dev/approve-device-code without --device-flow: status %d, body %s, want 404, the route unmounted", status, body)
+	}
+}
+
+// TestTheDeviceApprovalControlRefusesACallerOffLoopback sends /_dev/approve-device-code a request
+// from an address that is not loopback: it is refused 403, as the sign-in control is, and
+// approves nothing.
+func TestTheDeviceApprovalControlRefusesACallerOffLoopback(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableDeviceFlow(issuer.PublishKey(t, "signing-key"), deviceClientID, deviceClientSecret)
+	issuer.SignInByDefault(map[string]any{"sub": "alice", "email": "alice@d.example"})
+	response, err := http.PostForm(issuer.URL()+"/device_authorization", url.Values{"client_id": {deviceClientID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authorization deviceAuthorization
+	err = json.NewDecoder(response.Body).Decode(&authorization)
+	response.Body.Close()
+	if err != nil || authorization.UserCode == "" {
+		t.Fatalf("the device authorization answered %+v (%v), want a user code", authorization, err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/_dev/approve-device-code", strings.NewReader(`{"user_code":"`+authorization.UserCode+`"}`))
+	request.RemoteAddr = "192.0.2.1:40000"
+	recorder := httptest.NewRecorder()
+	approveDeviceCodeHandler(issuer).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("POST /_dev/approve-device-code from %s: status %d, want 403", request.RemoteAddr, recorder.Code)
+	}
+	status, body := postAs(t, issuer.URL()+"/token", deviceClientID, deviceClientSecret,
+		url.Values{"grant_type": {deviceCodeGrant}, "device_code": {authorization.DeviceCode}})
+	if status != http.StatusBadRequest || !strings.Contains(string(body), "authorization_pending") {
+		t.Fatalf("the poll after a refused approval: status %d, body %s, want 400 authorization_pending", status, body)
 	}
 }

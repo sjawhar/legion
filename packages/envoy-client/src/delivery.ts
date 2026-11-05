@@ -30,6 +30,7 @@ import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine } from "./dispatch-command";
+import type { ActiveDispatchConfig } from "./dispatch-config";
 import { DispatchClient } from "./dispatch-http";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 import { pictureAddresses } from "./dispatch-pictures";
@@ -120,7 +121,7 @@ function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): 
  * never in the body, which the route decodes strictly.
  */
 export async function postDeliveryReply(
-  config: { readonly url: string; readonly token: string },
+  config: Pick<ActiveDispatchConfig, "url" | "credential">,
   sessionId: string,
   delivery: DispatchDelivery,
   result: {
@@ -130,7 +131,8 @@ export async function postDeliveryReply(
   }
 ): Promise<void> {
   const { followUp, ...reply } = result;
-  await new DispatchClient(config.url, config.token).deliveryReply(
+  const client = new DispatchClient(config.url, config.credential);
+  await client.deliveryReply(
     delivery.resource,
     delivery.id,
     {

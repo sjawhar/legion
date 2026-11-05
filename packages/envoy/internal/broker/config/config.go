@@ -35,10 +35,12 @@ import (
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
-// GoogleOIDCIssuer is the issuer of every Google identity token, the one a VM's metadata server
-// has Google sign. Google has one, so no variable names it: BROKER_GOOGLE_OIDC_AUDIENCE configures
-// only the audience.
-const GoogleOIDCIssuer = "https://accounts.google.com"
+// DefaultGoogleOIDCIssuer is the issuer of every Google identity token, the one a machine's
+// metadata server has Google sign, and what BROKER_GOOGLE_OIDC_ISSUER is when the environment
+// names none. The variable exists because a dev stack has no Google: cmd/dev-oidc-issuer stands
+// in for it on a loopback port, so the broker and its machines can be driven end to end on one
+// machine (scripts/dev-stack.sh). A deployment leaves it unset and gets Google.
+const DefaultGoogleOIDCIssuer = "https://accounts.google.com"
 
 type Config struct {
 	// BROKER_LISTEN_ADDR: the host:port the broker listens on.
@@ -67,18 +69,39 @@ type Config struct {
 	// AGENT_SECRETS_URL must be exactly this.
 	PublicURL string
 	// BROKER_MACHINE_LOGIN_URL: the absolute http(s) URL of the page where a person types a
-	// machine login's code (Dispatch's /credentials/machine). Required. The device grant's
-	// verification_uri names it, so a machine shows its person where to go.
+	// machine login's code (Dispatch's /credentials/machine). Optional. The device grant's
+	// verification_uri names it, so a machine shows its person where to go, and with no page to
+	// show there is no device grant: the broker composes none of its handlers, POST
+	// /v1/oauth/device_authorization is not mounted at all (404), and the authorization server
+	// metadata leaves the device code out of grant_types_supported. Everything else the OAuth
+	// provider serves — the token endpoint, the RFC 8693 exchange, introspection and revocation
+	// — is served either way. Unset is the deployment where machines hold a cloud identity and
+	// no person ever types a code.
 	MachineLoginURL string
-	// BROKER_API_ACCOUNTS: the Kubernetes service accounts that call the broker's named-caller
-	// routes — the approval routes Dispatch's server calls on a person's behalf, and the
-	// introspection route a resource server reads one of the broker's access tokens back through —
-	// whitespace-separated <caller>=<service account> entries, such as
-	// dispatch=system:serviceaccount:example-ns:example-dispatch. Each caller presents its own
-	// projected token, for BROKER_K8S_OIDC_AUDIENCE, on those routes, verified against
-	// BROKER_K8S_OIDC_ISSUER as every other ServiceAccount token the broker takes is, so this
-	// needs that pair. A token that lives longer than an hour from its issue is refused, as a
-	// service's login token is. The caller's name decides what the account may do, and the broker
+	// BROKER_API_ACCOUNTS: the accounts that call the broker's named-caller routes — the
+	// approval routes Dispatch's server calls on a person's behalf, and the introspection route
+	// a resource server reads one of the broker's access tokens back through —
+	// whitespace-separated <caller>=<account> entries. An account is a Kubernetes service
+	// account, written as the subject a projected token carries
+	// (dispatch=system:serviceaccount:example-ns:example-dispatch), or a Google service
+	// account, written as google: and the account's address
+	// (listener=google:example-listener@example-project.iam.gserviceaccount.com). The two kinds
+	// are told apart by the entry's own text and never by guessing at its shape: a Kubernetes
+	// subject names its kind already, and the google: tag names the other, so a mistyped
+	// address is refused as the kind it was written as rather than read as the other.
+	//
+	// A Kubernetes caller presents its own projected token, for BROKER_K8S_OIDC_AUDIENCE,
+	// verified against BROKER_K8S_OIDC_ISSUER as every other ServiceAccount token the broker
+	// takes is, and is looked up by the token's sub; so a Kubernetes entry needs that pair. A
+	// Google caller presents its machine's own Google identity token, for
+	// BROKER_GOOGLE_OIDC_AUDIENCE — the audience every machine of the deployment already holds
+	// one for — verified against BROKER_GOOGLE_OIDC_ISSUER, and is looked up by the token's
+	// email; so a Google entry needs BROKER_GOOGLE_OIDC_AUDIENCE. Either token is refused if it
+	// lives longer than an hour from its issue, as a service's login token is. A project's
+	// default Google accounts and Google-managed service agents are refused here as they are in
+	// BROKER_VM_SERVICES, since a token from one proves nothing about which machine is asking.
+	//
+	// The caller's name decides what the account may do, and the broker
 	// knows two: dispatch reaches every one of those routes, the ten Dispatch's server relays a
 	// person's decisions and reads through as well as introspection, and listener reaches
 	// introspection alone, since the Envoy listener reads a token back and relays no decision. A
@@ -87,9 +110,11 @@ type Config struct {
 	// edit to the broker's own table (api.AccountFor). A listed caller reaching a route its name
 	// does not carry is 403 ACCOUNT_LACKS_POWER, which is a different fact from an account that
 	// is not listed at all (403 ACCOUNT_NOT_LISTED). A namespace's default account is refused, as
-	// is an account given twice, since each account names one caller. Keyed by account, each
-	// answering its caller and that caller's powers. Unset, no caller reaches those routes.
-	APIAccounts map[string]api.Account
+	// is an account given twice, since each account names one caller. APIAccounts is keyed by
+	// ServiceAccount subject and GoogleAPIAccounts by Google account address, each answering its
+	// caller and that caller's powers. Unset, no caller reaches those routes.
+	APIAccounts       map[string]api.Account
+	GoogleAPIAccounts map[string]api.Account
 	// BROKER_SIGNIN_ISSUER, BROKER_SIGNIN_CLIENT_ID, BROKER_SIGNIN_CLIENT_SECRET_FILE,
 	// BROKER_SIGNIN_DOMAIN, BROKER_SIGNIN_SESSION_SECONDS: the broker's own OpenID Connect client,
 	// through which a person signs in to the broker's approval page to approve a secret request:
@@ -102,6 +127,22 @@ type Config struct {
 	// naming the ones missing, since nobody could approve a secret request on a page nobody can
 	// sign in to.
 	SignIn approval.SignIn
+	// BROKER_SIGNIN_DEVICE_AUDIENCE: the audience a person's own Google identity token must
+	// carry to be traded at the RFC 8693 token exchange, where such a token is a subject token
+	// (urn:envoy:params:oauth:token-type:person-google-identity) and the machine the person
+	// signed in on presents its own as the actor token
+	// (urn:envoy:params:oauth:token-type:machine-google-identity). It is the OAuth client id of
+	// the device-flow client `agent-secrets login` runs Google's device authorization grant as,
+	// since Google puts the client's id in an ID token's aud. Its issuer is
+	// BROKER_GOOGLE_OIDC_ISSUER, Google's own unless a dev stack says otherwise, and the person
+	// it names is held to BROKER_SIGNIN_DOMAIN through the hd claim, exactly as a person
+	// signing in to the broker's own approval page is. Needs BROKER_GOOGLE_OIDC_AUDIENCE, whose
+	// machines are the boxes a person may sign in on. Unset, the broker accepts no person's
+	// sign-in and registers neither token type, so a caller presenting either is refused by
+	// name. It is not one of the four SignInSettings, which are required together: those are
+	// what a person approves a secret request through and no broker serves without them, where
+	// this one is optional, as the whole Google exchange is.
+	SignInDeviceAudience string
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -178,36 +219,54 @@ type Config struct {
 	K8sOIDCIssuer string
 	// BROKER_K8S_OIDC_AUDIENCE: the audience a pod's projected service-account token must carry.
 	K8sOIDCAudience string
-	// BROKER_GOOGLE_OIDC_AUDIENCE: the audience a Google VM identity token must carry. Its issuer
-	// is always https://accounts.google.com, so no variable names it. Needs BROKER_VM_SERVICES, since
-	// an audience no VM service is listed for could accept no token. Unset, the broker accepts no VM
-	// identity token, and BROKER_VM_SERVICES, BROKER_VM_PROJECTS and BROKER_VM_INSTANCES are refused.
+	// BROKER_GOOGLE_OIDC_ISSUER: the issuer of the Google identity tokens machines present,
+	// https://accounts.google.com when unset, which is where every real one comes from. It is a
+	// variable because a dev stack has no Google: cmd/dev-oidc-issuer stands in for it on a
+	// loopback port, so a broker, its machines and Dispatch can be driven end to end on one
+	// machine with no cloud. Read only where BROKER_GOOGLE_OIDC_AUDIENCE is set, which is what
+	// turns Google identity tokens on at all.
+	GoogleOIDCIssuer string
+	// BROKER_GOOGLE_OIDC_AUDIENCE: the audience a machine's Google identity token must carry,
+	// at the RFC 8693 token exchange, where such a token is a
+	// subject token (urn:envoy:params:oauth:token-type:google-identity). Its issuer is
+	// BROKER_GOOGLE_OIDC_ISSUER, Google's own unless a dev stack says otherwise. Needs
+	// BROKER_VM_SERVICES, since an audience no VM service is listed for could accept no token.
+	// Unset, the broker accepts no Google identity token, and BROKER_VM_SERVICES,
+	// BROKER_VM_PROJECTS, BROKER_VM_INSTANCES and BROKER_VM_EXCHANGE_ACCOUNTS are refused.
 	GoogleOIDCAudience string
 	// BROKER_VM_SERVICES: the VM services, whitespace-separated name=<service account email>
 	// entries, such as example-service=example-fleet@example-project.iam.gserviceaccount.com. A name
 	// is lowercase letters, digits and hyphens, at most 64, not shared; the account is a user-managed
 	// Google service account (<account id>@<project id>.iam.gserviceaccount.com, in lowercase, as a
-	// token carries it) that the service's VMs run as, so every VM of that account is one identity. A
+	// token carries it) that the service's machines run as, so every machine of that account is one
+	// identity. A
 	// service may be named for several accounts, one entry each, but each account is given once and
 	// proves exactly one service. A project's default service accounts (Compute Engine's and App
 	// Engine's) and Google-managed service agents are refused: a project's workloads run as the first
 	// by default and Google's own services as the second, so neither proves which VMs are the
-	// service's. Every account needs an entry in BROKER_VM_PROJECTS and in BROKER_VM_INSTANCES. Keyed
+	// service's. An account may be pinned to one Compute Engine project and one instance-name
+	// pattern (BROKER_VM_PROJECTS and BROKER_VM_INSTANCES), or to neither, in which case its
+	// machines are taken wherever they run. Keyed
 	// by account, each answering its service. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, no VM service
 	// is listed.
 	VMServicesByAccount map[string]string
-	// BROKER_VM_PROJECTS: the Google project each VM service's VMs run in, whitespace-separated
-	// <service account email>=<project id> entries, one per account BROKER_VM_SERVICES lists and none
-	// for any other account. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty,
-	// so any account BROKER_VM_SERVICES lists is refused for having no project.
-	VMProjects map[string]string
-	// BROKER_VM_INSTANCES: the names each VM service's VMs may have, whitespace-separated
-	// <service account email>=<instance-name glob> entries, one per account BROKER_VM_SERVICES lists
-	// and none for any other account. The glob is Go's path.Match syntax (*, ?, and [...] classes,
-	// negated with ^) over the characters of an instance name, such as example-vm-*. Keyed by
-	// account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty, so any account
-	// BROKER_VM_SERVICES lists is refused for having no instance-name glob.
-	VMInstancePatterns map[string]string
+	// BROKER_VM_EXCHANGE_ACCOUNTS: the person and the Dispatch project each fleet writes for,
+	// whitespace-separated <service account email>=<project>=<person>[=<session>] entries, the
+	// grammar BROKER_EXCHANGE_ACCOUNTS uses for a pod, such as
+	// example-fleet@example-project.iam.gserviceaccount.com=EXAMPLE=ada@example.com. A token the
+	// exchange mints for a machine of that account may write that one project, acts for that
+	// person, and writes under the session the entry fixes; an entry that fixes none requires the
+	// machine to name its own session. The session is everything after the third "=", so it alone
+	// may carry one. Each account is named at most once and must be one BROKER_VM_SERVICES lists.
+	// An account BROKER_VM_SERVICES lists and this setting does not gets a token that names its
+	// service and no person at all, which a resource server holds to what a service may do. Needs
+	// BROKER_GOOGLE_OIDC_AUDIENCE. Unset, every listed account's machines get such a token.
+	//
+	// The entries this answers are the whole of what the exchange decides a machine's token on:
+	// each one carries its account's service (BROKER_VM_SERVICES), the pins (BROKER_VM_PROJECTS
+	// and BROKER_VM_INSTANCES) and, where this setting names them, the person, the project and
+	// the session.
+	ExchangeGoogleAccounts []exchange.GoogleEntry
 	// BROKER_EXCHANGE_K8S_AUDIENCE: the audience a pod's projected service-account token must
 	// carry to be exchanged (RFC 8693) for a Dispatch access token. Its issuer is the one cluster
 	// the broker is told about, BROKER_K8S_OIDC_ISSUER, which this needs; the audience is its own
@@ -471,6 +530,67 @@ func vmAccountRefusal(setting, text, account string) error {
 	return nil
 }
 
+// googleAPIAccountTag opens the account of a BROKER_API_ACCOUNTS entry whose caller presents a
+// Google identity token. A Kubernetes entry already names its own kind — every such subject
+// begins system:serviceaccount: — so tagging this one leaves every entry written today
+// unchanged and still lets a reader, and the parser, tell the two kinds apart by the entry's
+// own text rather than by whether an address happens to look like an email.
+const googleAPIAccountTag = "google:"
+
+// apiAccountEntry is one <caller>=<account> entry of BROKER_API_ACCOUNTS: the caller's name, the
+// account as the broker looks it up (a ServiceAccount subject, or a Google account address with
+// its tag removed), which kind it is, and the entry's text as the setting gave it.
+type apiAccountEntry struct {
+	caller, account string
+	google          bool
+	text            string
+}
+
+// parseAPIAccounts reads setting's whitespace-separated <caller>=<account> entries, in order. An
+// account written google:<address> is a Google service account, looked up by the email its
+// identity token carries; any other is a Kubernetes service account, looked up by the subject
+// its projected token carries. It refuses, naming the entry: one of neither form; a namespace's
+// default account, as parseServiceAccounts does; a Google account vmAccountRefusal refuses,
+// which is the rule BROKER_VM_SERVICES already holds every Google account to; and an account
+// given twice, since each account calls as one caller. Whether the caller's name is one this
+// broker knows is its own table's to answer (api.AccountFor).
+func parseAPIAccounts(setting, value string) ([]apiAccountEntry, error) {
+	var entries []apiAccountEntry
+	seen := map[string]string{}
+	for _, text := range strings.Fields(value) {
+		caller, account, ok := strings.Cut(text, "=")
+		if !ok || !record.ValidService(caller) {
+			return nil, apiAccountForm(setting, text)
+		}
+		entry := apiAccountEntry{caller: caller, account: account, text: text}
+		switch address, tagged := strings.CutPrefix(account, googleAPIAccountTag); {
+		case tagged:
+			if err := vmAccountRefusal(setting, text, address); err != nil {
+				return nil, err
+			}
+			entry.account, entry.google = address, true
+		case !serviceAccountPattern.MatchString(account):
+			return nil, apiAccountForm(setting, text)
+		case isDefaultServiceAccount(account):
+			return nil, fmt.Errorf("%s names a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it and can get a token for the broker's audience, so it proves nothing; name a dedicated account", setting, text)
+		}
+		if other, twice := seen[entry.account]; twice {
+			if other == caller {
+				return nil, fmt.Errorf("%s names the account %s twice for %q; each account calls as one caller, so name it once", setting, entry.account, caller)
+			}
+			return nil, fmt.Errorf("%s names the account %s for both %q and %q; each account calls as one caller, so name it once", setting, entry.account, other, caller)
+		}
+		seen[entry.account] = caller
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// apiAccountForm is the refusal of a BROKER_API_ACCOUNTS entry of neither form, which names both.
+func apiAccountForm(setting, text string) error {
+	return fmt.Errorf("%s must be <caller>=system:serviceaccount:<namespace>:<name> or <caller>=%s<service account email> entries, each caller lowercase letters, digits and hyphens, at most 64, got %q", setting, googleAPIAccountTag, text)
+}
+
 // vmServiceAccountEntry is one <service>=<service account email> entry of BROKER_VM_SERVICES,
 // with its text as the setting gave it.
 type vmServiceAccountEntry struct{ service, account, text string }
@@ -594,6 +714,38 @@ func parseExchangeAccounts(setting, value string) ([]exchange.AccountEntry, erro
 		entries = append(entries, exchange.AccountEntry{Account: fields[0], Project: fields[1], Person: fields[2], Session: fields[3]})
 	}
 	return entries, nil
+}
+
+// vmExchangeGrant is one BROKER_VM_EXCHANGE_ACCOUNTS entry: the account it names, the Dispatch
+// project its tokens write, the person they act for, the session name it fixes, if any, and its
+// text as the setting gave it.
+type vmExchangeGrant struct{ account, project, person, session, text string }
+
+// parseVMExchangeGrants reads setting's whitespace-separated
+// <service account email>=<project>=<person>[=<session>] entries, the grants
+// BROKER_VM_EXCHANGE_ACCOUNTS gives the accounts BROKER_VM_SERVICES lists, in order. It refuses,
+// naming the entry: one not of that form or with a blank field; an account vmAccountRefusal
+// refuses; and an account named twice, since one account writes as one identity. Whether the
+// account is listed at all is the caller's to refuse, as it is for a project or an instance
+// pattern (vmAccountMap), and exchange.NewSet is the second gate.
+func parseVMExchangeGrants(setting, value string) ([]vmExchangeGrant, error) {
+	var grants []vmExchangeGrant
+	seen := map[string]bool{}
+	for _, text := range strings.Fields(value) {
+		fields, ok := exchangeFields(text, 4)
+		if !ok || fields[0] == "" || fields[1] == "" || fields[2] == "" {
+			return nil, fmt.Errorf("%s must be <service account email>=<project>=<person>[=<session>] entries, the session everything after the third =, got %q", setting, text)
+		}
+		if err := vmAccountRefusal(setting, text, fields[0]); err != nil {
+			return nil, err
+		}
+		if seen[fields[0]] {
+			return nil, fmt.Errorf("%s names the service account %s twice; one account writes as one identity, so name it once", setting, fields[0])
+		}
+		seen[fields[0]] = true
+		grants = append(grants, vmExchangeGrant{account: fields[0], project: fields[1], person: fields[2], session: fields[3], text: text})
+	}
+	return grants, nil
 }
 
 // parseExchangeWorkflows reads setting's whitespace-separated
@@ -728,13 +880,14 @@ func Load(getenv func(string) string) (Config, error) {
 		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
 		DatabaseURL:        getenv("BROKER_DATABASE_URL"),
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
-		MachineLoginURL:    getenv("BROKER_MACHINE_LOGIN_URL"),
+		MachineLoginURL:    strings.TrimSpace(getenv("BROKER_MACHINE_LOGIN_URL")),
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		AzureTokenFile:     orDefault(getenv("BROKER_AZURE_TOKEN_FILE"), secrets.DefaultAzureTokenFile),
 		AzureLoginSecret:   getenv("BROKER_AZURE_LOGIN_SECRET"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
 		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
+		GoogleOIDCIssuer:   orDefault(strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_ISSUER")), DefaultGoogleOIDCIssuer),
 		GoogleOIDCAudience: strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_AUDIENCE")),
 		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
@@ -759,7 +912,6 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.SecretsKMSKey = getenv(keyVar)
 	for _, req := range []struct{ name, value string }{
 		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
-		{"BROKER_MACHINE_LOGIN_URL", cfg.MachineLoginURL},
 		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix}, {keyVar, cfg.SecretsKMSKey},
 	} {
 		if strings.TrimSpace(req.value) == "" {
@@ -773,8 +925,13 @@ func Load(getenv func(string) string) (Config, error) {
 	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
 		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", redact.URL(cfg.PublicURL))
 	}
-	if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", redact.URL(cfg.MachineLoginURL))
+	// Optional, and still held to its form when it is given: a page the broker cannot build an
+	// absolute URL for is a verification_uri no machine could follow, which is worse than the
+	// device grant the broker simply does not serve when the setting is unset.
+	if cfg.MachineLoginURL != "" {
+		if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", redact.URL(cfg.MachineLoginURL))
+		}
 	}
 	switch cfg.SecretsStore {
 	case secrets.StoreAWS:
@@ -815,10 +972,11 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.ServiceLogins[entry.subject] = entry.service
 	}
+	cfg.SignInDeviceAudience = strings.TrimSpace(getenv("BROKER_SIGNIN_DEVICE_AUDIENCE"))
 	if cfg.GoogleOIDCAudience == "" {
-		for _, setting := range []string{"BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+		for _, setting := range []string{"BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES", "BROKER_VM_EXCHANGE_ACCOUNTS", "BROKER_SIGNIN_DEVICE_AUDIENCE"} {
 			if strings.TrimSpace(getenv(setting)) != "" {
-				return Config{}, fmt.Errorf("%s needs BROKER_GOOGLE_OIDC_AUDIENCE, whose VM identity tokens it configures", setting)
+				return Config{}, fmt.Errorf("%s needs BROKER_GOOGLE_OIDC_AUDIENCE, whose Google identity tokens it configures", setting)
 			}
 		}
 	}
@@ -843,19 +1001,52 @@ func Load(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if cfg.VMProjects, err = vmAccountMap("BROKER_VM_PROJECTS", projects, cfg.VMServicesByAccount); err != nil {
+	// BROKER_VM_PROJECTS and BROKER_VM_INSTANCES are locals of Load: the entry each one pins
+	// (ExchangeGoogleAccounts' CloudProject and Instance, built below) is the only thing that
+	// reads them, and no field of Config holds them. What each one means is documented in
+	// cmd/broker/main.go, because broker-refgen takes a setting's description from a Config
+	// field's own comment or from a comment in cmd/broker, and these two have no field.
+	vmProjects, err := vmAccountMap("BROKER_VM_PROJECTS", projects, cfg.VMServicesByAccount)
+	if err != nil {
 		return Config{}, err
 	}
-	if cfg.VMInstancePatterns, err = vmAccountMap("BROKER_VM_INSTANCES", instances, cfg.VMServicesByAccount); err != nil {
+	vmInstancePatterns, err := vmAccountMap("BROKER_VM_INSTANCES", instances, cfg.VMServicesByAccount)
+	if err != nil {
 		return Config{}, err
+	}
+	grants, err := parseVMExchangeGrants("BROKER_VM_EXCHANGE_ACCOUNTS", getenv("BROKER_VM_EXCHANGE_ACCOUNTS"))
+	if err != nil {
+		return Config{}, err
+	}
+	granted := map[string]vmExchangeGrant{}
+	for _, grant := range grants {
+		if _, listed := cfg.VMServicesByAccount[grant.account]; !listed {
+			return Config{}, fmt.Errorf("BROKER_VM_EXCHANGE_ACCOUNTS names %s, got %q, but BROKER_VM_SERVICES does not list it; a person and a project are given to a listed VM account", grant.account, grant.text)
+		}
+		granted[grant.account] = grant
 	}
 	for _, entry := range vmServices {
-		if _, found := cfg.VMProjects[entry.account]; !found {
-			return Config{}, fmt.Errorf("BROKER_VM_SERVICES names %s, got %q, but BROKER_VM_PROJECTS does not: every VM service needs one project", entry.account, entry.text)
+		// Each pin is optional and the two go together: an account pinned to a project but no
+		// instance name, or the other way round, says nothing clear about which machines it
+		// means, so it is refused here rather than read as either "every instance of that
+		// project" or "that name in any project".
+		project, pinnedProject := vmProjects[entry.account]
+		instance, pinnedInstance := vmInstancePatterns[entry.account]
+		if pinnedProject != pinnedInstance {
+			named, missing := "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"
+			if pinnedInstance {
+				named, missing = missing, named
+			}
+			return Config{}, fmt.Errorf("%s names %s but %s does not, got %q: an account is pinned to a Compute Engine project and an instance-name pattern together, or to neither, so that which machines it takes is clear", named, entry.account, missing, entry.text)
 		}
-		if _, found := cfg.VMInstancePatterns[entry.account]; !found {
-			return Config{}, fmt.Errorf("BROKER_VM_SERVICES names %s, got %q, but BROKER_VM_INSTANCES does not: every VM service needs one instance-name pattern", entry.account, entry.text)
+		machine := exchange.GoogleEntry{
+			Account: entry.account, Service: entry.service,
+			CloudProject: project, Instance: instance,
 		}
+		if grant, found := granted[entry.account]; found {
+			machine.Project, machine.Person, machine.Session = grant.project, grant.person, grant.session
+		}
+		cfg.ExchangeGoogleAccounts = append(cfg.ExchangeGoogleAccounts, machine)
 	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {
@@ -865,7 +1056,7 @@ func Load(getenv func(string) string) (Config, error) {
 	if len(cfg.ServiceLogins) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its accounts log in with")
 	}
-	callers, err := parseServiceAccounts("BROKER_API_ACCOUNTS", getenv("BROKER_API_ACCOUNTS"))
+	callers, err := parseAPIAccounts("BROKER_API_ACCOUNTS", getenv("BROKER_API_ACCOUNTS"))
 	if err != nil {
 		return Config{}, err
 	}
@@ -873,17 +1064,30 @@ func Load(getenv func(string) string) (Config, error) {
 		// A caller's name is an authority and not a label — it decides which of the broker's
 		// named-caller routes that account reaches — so a name the broker's own table does not
 		// know is refused here, rather than listed as a caller that reaches nothing.
-		account, known := api.AccountFor(entry.service)
+		account, known := api.AccountFor(entry.caller)
 		if !known {
-			return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS names the caller %q, which this broker does not know, got %q: its callers are %s", entry.service, entry.text, strings.Join(api.KnownCallers(), ", "))
+			return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS names the caller %q, which this broker does not know, got %q: its callers are %s", entry.caller, entry.text, strings.Join(api.KnownCallers(), ", "))
+		}
+		if entry.google {
+			if cfg.GoogleAPIAccounts == nil {
+				cfg.GoogleAPIAccounts = map[string]api.Account{}
+			}
+			cfg.GoogleAPIAccounts[entry.account] = account
+			continue
 		}
 		if cfg.APIAccounts == nil {
 			cfg.APIAccounts = map[string]api.Account{}
 		}
-		cfg.APIAccounts[entry.subject] = account
+		cfg.APIAccounts[entry.account] = account
 	}
+	// Each kind of entry needs the issuer whose tokens its callers present, and only that one: a
+	// deployment whose callers are all Google accounts is told about no cluster, and one whose
+	// callers are all Kubernetes accounts needs no Google audience.
 	if len(cfg.APIAccounts) > 0 && cfg.K8sOIDCIssuer == "" {
-		return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its callers present")
+		return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS names a Kubernetes service account, which needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its callers present")
+	}
+	if len(cfg.GoogleAPIAccounts) > 0 && cfg.GoogleOIDCAudience == "" {
+		return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS names a Google service account, which needs BROKER_GOOGLE_OIDC_AUDIENCE, the audience its caller's Google identity token must carry")
 	}
 	githubIssuer, githubAudience, err := oidc.ConfigFromEnv(getenv, "BROKER_EXCHANGE_GITHUB_ISSUER", "BROKER_EXCHANGE_GITHUB_AUDIENCE")
 	if err != nil {

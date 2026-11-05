@@ -358,6 +358,24 @@ function parseRoles(value: string): AppRole[] | undefined {
   return roles.filter(known);
 }
 
+/** How long a write below may wait to reach the pipe: the bound the drain of a token command's
+ * streams carries (the five seconds in runTokenCommand), for the same reason. A caller that has
+ * stopped reading, or an escaped descendant holding the pipe, can leave the write's callback to
+ * come late or never, and a lost tail beats a proof that never returns. */
+const writeLimitMs = 5000;
+
+/** Writes `text` to `stream` and resolves when the write has reached the pipe, or sooner when it
+ * fails or the bound passes. Every exit below is explicit, and an explicit exit discards whatever
+ * of this process's output is still buffered: a token command's relayed stderr can leave a
+ * megabyte of it in front of the line that matters, so each exit waits for its own write first. */
+async function writeFully(stream: NodeJS.WriteStream, text: string): Promise<void> {
+  const written = Promise.withResolvers<void>();
+  const bound = setTimeout(() => written.resolve(), writeLimitMs);
+  stream.write(text, () => written.resolve());
+  await written.promise;
+  clearTimeout(bound);
+}
+
 if (import.meta.main) {
   const args = process.argv.slice(2);
   let roles: AppRole[] | undefined = [...appRoles];
@@ -367,7 +385,8 @@ if (import.meta.main) {
   }
   const [configPath, api = "https://api.github.com"] = args;
   if (roles === undefined || configPath === undefined || configPath === "") {
-    process.stderr.write(
+    await writeFully(
+      process.stderr,
       "usage: bun scripts/e2e/lib/app-logins.ts [--roles <role>[,<role>]] <legion.yaml> [<GitHub API URL>]\n"
     );
     process.exit(2);
@@ -375,10 +394,14 @@ if (import.meta.main) {
   // Exit explicitly: a stream reader a token command's escaped descendant still feeds would keep
   // the event loop, and so the run, alive past the drain bound.
   try {
-    process.stdout.write(`${JSON.stringify(await appLogins(configPath, api, roles))}\n`);
+    await writeFully(
+      process.stdout,
+      `${JSON.stringify(await appLogins(configPath, api, roles))}\n`
+    );
     process.exit(0);
   } catch (error) {
-    process.stderr.write(`app-logins: ${error instanceof Error ? error.message : String(error)}\n`);
+    const message = error instanceof Error ? error.message : String(error);
+    await writeFully(process.stderr, `app-logins: ${message}\n`);
     process.exit(1);
   }
 }

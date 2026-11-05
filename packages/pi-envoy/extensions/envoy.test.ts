@@ -15023,19 +15023,29 @@ console.log(JSON.stringify(args));
     const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
     const fixture = createPi();
     const context = sessionContext("ses_whoami");
+    // The machine is this host unless a machine id is configured for it (`machineID`), and a
+    // Legion pod configures one, so the variable is taken off for this test rather than letting
+    // whichever machine runs the suite decide what it asserts (INFRA-1026).
+    const configured = process.env["ENVOY_MACHINE_ID"];
+    delete process.env["ENVOY_MACHINE_ID"];
 
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, context);
-    const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
-    if (whoami === undefined) throw new Error("envoy_whoami was not registered");
+    try {
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
+      if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-    const result = await whoami.execute("", {}, undefined, undefined, context);
+      const result = await whoami.execute("", {}, undefined, undefined, context);
 
-    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
-      session_id: "ses_whoami",
-      machine_id: hostname(),
-      dir: "/tmp/envoy-omp-test",
-    });
+      expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+        session_id: "ses_whoami",
+        machine_id: hostname(),
+        dir: "/tmp/envoy-omp-test",
+      });
+    } finally {
+      if (configured === undefined) delete process.env["ENVOY_MACHINE_ID"];
+      else process.env["ENVOY_MACHINE_ID"] = configured;
+    }
   });
 
   test("registers /whoami and copies the current session ID to the clipboard", async () => {
