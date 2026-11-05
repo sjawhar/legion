@@ -2101,7 +2101,7 @@ func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 	}
 	m.clearUpdate()
 	m.claim.PluginRelaunchFor = m.deps.PluginContract
-	return m.replaceProcess(ctx, "the process on another plugin contract is replaced now that its worker has pushed its work")
+	return m.replaceProcess(ctx, "the process on another plugin contract is replaced now that its worker has pushed its work", false)
 }
 
 // leaveRound is the round going from this claim with no process this machine replaces: the ask

@@ -74,6 +74,10 @@ type Delivery struct {
 	// task is sent behind interruptedTask from then on (message). The task text stays as the
 	// workflow wrote it.
 	Interrupted bool
+	// OutOfMemory says the end that cut a turn of this task off was its pod running out of memory
+	// (runtime.Observation.OutOfMemory), so the task is sent behind outOfMemoryTask as well as
+	// behind interruptedTask from then on (message). The task text stays as the workflow wrote it.
+	OutOfMemory bool
 	// Kept is what the task names of the decisions a person made while nobody in the root's tree
 	// could hear them, as the row that queued the task recorded them (record.KeptDecisions, encoded
 	// JSON). It is opaque here — this package knows nothing of the record — and is carried and
@@ -94,12 +98,17 @@ func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState
 }
 
 // message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
-// died in a turn of it.
+// died in a turn of it, and behind outOfMemoryTask between the two when that death was the pod
+// running out of memory — the agent reads that its turn was interrupted, then why, then the task.
 func (d Delivery) message() string {
-	if d.Interrupted {
-		return interruptedTask + d.Task
+	message := d.Task
+	if d.OutOfMemory {
+		message = outOfMemoryTask + message
 	}
-	return d.Task
+	if d.Interrupted {
+		message = interruptedTask + message
+	}
+	return message
 }
 
 // HashBootToken is the one hash a boot token is stored and looked up by. A launch mints the token
@@ -643,20 +652,34 @@ const interruptedTask = "Your previous turn on this task was interrupted when yo
 	"Before repeating anything, check what that turn already did in your workspace and on the " +
 	"issue's branch, then continue the task.\n\n"
 
+// outOfMemoryTask follows interruptedTask on a task whose turn ended when its pod ran out of
+// memory. The agent cannot see why the kubelet ended its container, and the heavy work that
+// filled the pod is the thing it must stop doing there, so it is told what happened and where
+// the rule about work a pod does not run is written.
+const outOfMemoryTask = "Your pod ran out of memory. Kubernetes ended the container that runs " +
+	"every role of this issue, with the reason OOMKilled, and that end is what stopped your turn. " +
+	"The work that filled the pod can be another role's, not yours. An issue pod runs no heavy " +
+	"build and no whole test suite, so read skill://legion-worker/references/tools.md before you " +
+	"run such work again, and send it to CI on the pull request or where your deployment's " +
+	"instructions say.\n\n"
+
 // interrupted takes back the pending task whose turn the claim's process can no longer finish — it
 // died, or a forced stop is about to end it — so the relaunched agent's ready sends it again: Oh My
 // Pi does not resume the turn itself. why names which, for the line it logs. The turn ran,
 // so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
 // the new process's shim has no record of, marked Interrupted, so it is sent behind
-// interruptedTask. It is neither retired nor its run marked served, since the turn never
-// finished. A task with no turn running is left as it is: the relaunch sends it as it was.
+// interruptedTask. outOfMemory says that end was the pod running out of memory, which adds
+// outOfMemoryTask to what is sent; it is written on every call, true or false, so a second
+// interruption of the same task for another reason takes back a note that no longer describes it.
+// The task is neither retired nor its run marked served, since the turn never finished. A task
+// with no turn running is left as it is: the relaunch sends it as it was.
 //
 // The taken-back task becomes the claim's only once its write has landed. A write that fails
 // leaves the task confirmed in memory as in the store, and the process is still recorded, so the
 // sweep finds it gone again and this takes the task back then — where a task taken back in memory
 // alone would be skipped by that death, relaunched from a store still holding it confirmed, and
 // retired as served by a restart.
-func (m *Machine) interrupted(ctx context.Context, why string) error {
+func (m *Machine) interrupted(ctx context.Context, why string, outOfMemory bool) error {
 	p := m.claim.Pending
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
@@ -665,6 +688,7 @@ func (m *Machine) interrupted(ctx context.Context, why string) error {
 	m.awaitingResult = ""
 	next := *p
 	next.ID, next.ConfirmedAt, next.Interrupted = rotateTaskID(p.ID), time.Time{}, true
+	next.OutOfMemory = outOfMemory
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
 		return err
 	}

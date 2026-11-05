@@ -33,7 +33,7 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.plugin_contract, c.plugin_relaunch_for, c.delivered_rows,
 	c.update_round, c.update_reasons, c.update_opened_at, c.update_tasked_at, c.update_signalled_at,
 	c.update_head, c.update_told_at, c.update_left_round,
-	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted,
+	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.out_of_memory,
 	d.kept_decisions
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -289,15 +289,15 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, kept_decisions)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, coalesce($12::jsonb, '{}'::jsonb))
+		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, out_of_memory, kept_decisions)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '{}'::jsonb))
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
 		assignment = excluded.assignment, queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
-		interrupted = excluded.interrupted, kept_decisions = excluded.kept_decisions`,
+		interrupted = excluded.interrupted, out_of_memory = excluded.out_of_memory, kept_decisions = excluded.kept_decisions`,
 		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.Assignment, d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
-		instant(d.ConfirmedAt), d.Interrupted, keptDecisions(d.Kept),
+		instant(d.ConfirmedAt), d.Interrupted, d.OutOfMemory, keptDecisions(d.Kept),
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -363,7 +363,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		enrollmentID, enrollmentIC  *string
 		queuedAt, delivered         *time.Time
 		confirmed                   *time.Time
-		interrupted                 *bool
+		interrupted, outOfMemory    *bool
 		updateOpened, updateTasked  *time.Time
 		updateSignalled, updateTold *time.Time
 		kept                        []byte
@@ -375,7 +375,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		&c.PluginContract, &c.PluginRelaunchFor, &c.DeliveredRows,
 		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
 		&c.UpdateHead, &updateTold, &c.UpdateLeftRound,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &kept)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &outOfMemory, &kept)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -415,6 +415,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			MarkedBy:    *markedBy,
 			ConfirmedAt: orZero(confirmed),
 			Interrupted: orFalse(interrupted),
+			OutOfMemory: orFalse(outOfMemory),
 			Kept:        keptDecisions(kept),
 		}
 	}

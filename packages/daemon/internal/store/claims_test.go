@@ -127,9 +127,11 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 	sameClaim(t, onlyClaim(t, store), want)
 }
 
-// A task is queued uninterrupted, and a death marks it interrupted by writing the same delivery
-// again: the mark only ever reaches the store through the upsert's update. It has to survive that
-// write, or a restart re-sends the task without the sentence saying its turn was interrupted.
+// A task is queued uninterrupted, and a death marks it interrupted — and, when its pod ran out of
+// memory, marks that too — by writing the same delivery again: both marks only ever reach the
+// store through the upsert's update. They have to survive that write, or a restart re-sends the
+// task without the sentence saying its turn was interrupted and without the note saying the pod
+// ran out of memory.
 func TestARePutDeliveryCarriesItsInterruption(t *testing.T) {
 	ctx := context.Background()
 	store := migratedStore(t)
@@ -142,13 +144,13 @@ func TestARePutDeliveryCarriesItsInterruption(t *testing.T) {
 		t.Fatalf("queue the delivery: %v", err)
 	}
 	interrupted := queued
-	interrupted.ID, interrupted.Interrupted = "delivery-2", true
+	interrupted.ID, interrupted.Interrupted, interrupted.OutOfMemory = "delivery-2", true, true
 	if err := store.PutDelivery(ctx, c.Token, interrupted); err != nil {
 		t.Fatalf("mark it interrupted: %v", err)
 	}
 
-	if got := onlyClaim(t, store).Pending; got == nil || got.ID != "delivery-2" || !got.Interrupted {
-		t.Fatalf("delivery read back = %+v, want the re-put delivery, interrupted", got)
+	if got := onlyClaim(t, store).Pending; got == nil || got.ID != "delivery-2" || !got.Interrupted || !got.OutOfMemory {
+		t.Fatalf("delivery read back = %+v, want the re-put delivery, interrupted and out of memory", got)
 	}
 }
 
