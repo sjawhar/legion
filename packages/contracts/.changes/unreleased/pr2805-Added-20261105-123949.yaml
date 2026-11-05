@@ -1,0 +1,5 @@
+kind: Added
+body: 'The Legion daemon state carries `wakesWaiting`, every wake its pacing holds until its turn: the claim, its issue and role, the kind of wake (`launch`, `plugin-task` or `catch-up`) and the moment it runs. Daemon API contract 49.'
+time: 2026-11-05T12:39:49.516338302Z
+custom:
+    Issue: pr2805
