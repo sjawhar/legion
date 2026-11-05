@@ -79,20 +79,16 @@ export interface ModelFallback {
   readonly maybeRestore: (ctx: ModelFallbackContext) => Promise<void>;
 }
 
-/** The session's own fallback, as the claim check found it on the branch. */
-interface OwnFallback {
-  /** The `model_change` entry the host's walk wrote. */
-  readonly entryId: string;
-  /** The `model_change` before it, when the branch holds one. */
-  readonly previousEntryId: string | undefined;
-}
-
-/** The newest `model_change` on the branch and the one before it. The entry before is read by
- * every caller of `newestModelChange`: it says which model a fallback left, and whether a new
- * step continues the walk a live arming began. */
+/** The newest `model_change` on the branch, the one before it, and the one the walk ending there
+ * started from. The entry before says which model a fallback left, and whether a new step
+ * continues the walk a live arming began. */
 interface NewestChange {
   readonly entry: ModelChangeEntry;
   readonly previous: ModelChangeEntry | undefined;
+  /** The newest entry before `entry` that is no step of a fallback walk, or undefined when the
+   * branch holds none: the model the session was on before this walk down the chain, which is
+   * what an arming returns to (`restoreTarget`). */
+  readonly walkedFrom: ModelChangeEntry | undefined;
 }
 
 /** A `model_change` as `getBranch()` hands it back (`ModelChangeEntry`, `src/pi-types.ts`). The
@@ -110,6 +106,15 @@ function isModelChange(entry: unknown): entry is ModelChangeEntry {
   );
 }
 
+/** A step of a walk down the chain, as against every other `model_change`. Before a walk of the
+ * session's own the host appends an entry naming the new model with `role: "fallback"` and
+ * `resolvedModelIsFallback: true`; its own restore appends `role: "fallback"` with
+ * `resolvedModelIsFallback: false`, and the operator's `/model`, the plugin's own `setModel` and
+ * an advisor's failover are none of the three. */
+function isLiveFallback(entry: ModelChangeEntry): boolean {
+  return entry.role === "fallback" && entry.resolvedModelIsFallback === true;
+}
+
 /** The index of the newest `model_change` before `end`, or -1 when the branch holds none. */
 function modelChangeBefore(branch: readonly unknown[], end: number): number {
   for (let index = Math.min(end, branch.length) - 1; index >= 0; index -= 1) {
@@ -122,8 +127,8 @@ function sameModel(a: HostModel | undefined, b: HostModel | undefined): boolean 
   return a !== undefined && b !== undefined && a.provider === b.provider && a.id === b.id;
 }
 
-/** The newest `model_change` the branch holds with the one before it, or undefined when it holds
- * none this build reads. */
+/** The newest `model_change` the branch holds with the entries around it, or undefined when it
+ * holds none this build reads. */
 function newestModelChange(ctx: ModelFallbackContext): NewestChange | undefined {
   const branch = ctx.sessionManager.getBranch?.() ?? [];
   const at = modelChangeBefore(branch, branch.length);
@@ -132,7 +137,26 @@ function newestModelChange(ctx: ModelFallbackContext): NewestChange | undefined 
   if (!isModelChange(entry)) return undefined;
   const beforeAt = modelChangeBefore(branch, at);
   const before = beforeAt < 0 ? undefined : branch[beforeAt];
-  return { entry, previous: isModelChange(before) ? before : undefined };
+  return {
+    entry,
+    previous: isModelChange(before) ? before : undefined,
+    walkedFrom: walkedFrom(branch, at),
+  };
+}
+
+/** The model the walk ending at `at` started from, as the branch records it: the steps of one
+ * walk are the run of fallback entries before `at`, so the entry this answers is the newest one
+ * before them that is no step of a walk — the operator's `/model`, the host's own restore, the
+ * model the session was given to begin with. */
+function walkedFrom(branch: readonly unknown[], at: number): ModelChangeEntry | undefined {
+  let index = modelChangeBefore(branch, at);
+  while (index >= 0) {
+    const entry = branch[index];
+    if (!isModelChange(entry)) return undefined;
+    if (!isLiveFallback(entry)) return entry;
+    index = modelChangeBefore(branch, index);
+  }
+  return undefined;
 }
 
 /** When the branch says an entry was written, or undefined when this build cannot read it: the
@@ -185,14 +209,14 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
   const ownFallback = (
     event: RetryFallbackAppliedEvent,
     ctx: ModelFallbackContext
-  ): OwnFallback | undefined => {
+  ): NewestChange | undefined => {
     const resolve = ctx.models?.resolve;
     if (resolve === undefined) return undefined;
     const change = newestModelChange(ctx);
     if (change === undefined) return undefined;
     const { entry, previous } = change;
     if (entry.model === undefined) return undefined;
-    if (entry.role !== "fallback" || entry.resolvedModelIsFallback !== true) return undefined;
+    if (!isLiveFallback(entry)) return undefined;
     if (claimed.has(entry.id)) return undefined;
     if (!sameModel(resolve(event.to), resolve(entry.model))) return undefined;
     const beforeModel = previous?.model === undefined ? undefined : resolve(previous.model);
@@ -201,7 +225,7 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
     if (beforeModel !== undefined && fromModel !== undefined && !sameModel(beforeModel, fromModel))
       return undefined;
     claimed.add(entry.id);
-    return { entryId: entry.id, previousEntryId: previous?.id };
+    return change;
   };
 
   /**
@@ -225,22 +249,30 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
   };
 
   /**
-   * The selector a new arming returns to: the live arming's own when this step continues the walk
-   * that arming began, and the model the session is leaving when the step starts a fresh walk.
+   * The selector a new arming returns to: the model the session was on before the first step of
+   * the walk this step belongs to, never one the chain handed it in the middle.
    *
-   * A step continues a walk when the `model_change` it arms on follows the arming's own entry:
-   * nothing moved the session's model in between, so this is the same chain walked one step
-   * further down and the model to come back to is still the one the session started on — the
-   * rule the reference extension states (sjawhar/dotfiles `omp/extensions/fallback-event.ts`).
-   * A walk after any other model change — the operator's `/model`, the host's own restore,
-   * another session — finds a different entry there and arms on the model it is leaving.
+   * Two records say what that model is, and the live arming is read first. A step continues a
+   * walk when the `model_change` it arms on follows the arming's own entry: nothing moved the
+   * session's model in between, so this is the same chain walked one step further down and the
+   * model to come back to is the one that arming already names — the rule the reference
+   * extension states (sjawhar/dotfiles `omp/extensions/fallback-event.ts`). This is also the
+   * only record left when the walk began on a model no `model_change` names, a session's first.
+   *
+   * The branch says it for every walk this process holds no arming for: a relaunch into a walk
+   * an older build left, a host walk `ownFallback` did not claim. Its steps are the run of
+   * fallback entries before this one (`walkedFrom`), and the entry before them names the model
+   * the walk started on. A walk after any other model change — the operator's `/model`, the
+   * host's own restore — finds that change there and arms on the model it is leaving, which is
+   * the same one.
    *
    * The cooldown keys its doubling level by this selector, so a continued walk raises the level
    * of the model the session will return to rather than one in the middle of the chain.
    */
-  const restoreTarget = (previousEntryId: string | undefined, leaving: string): string => {
+  const restoreTarget = (change: NewestChange, leaving: string): string => {
     const arming = state.arming;
-    return arming !== undefined && previousEntryId === arming.entryId ? arming.restoreTo : leaving;
+    if (arming !== undefined && change.previous?.id === arming.entryId) return arming.restoreTo;
+    return change.walkedFrom?.model ?? leaving;
   };
 
   /**
@@ -291,7 +323,7 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
     save(
       step({
         kind: "fallback-applied",
-        restoreTo: restoreTarget(change.previous?.id, selector),
+        restoreTo: restoreTarget(change, selector),
         entryId: change.entry.id,
         cause: "refusal",
         now: deps.now(),
@@ -407,9 +439,14 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
         // and the session comes back when the wait from that moment is over.
         const change = newestModelChange(ctx);
         if (change === undefined) return;
-        const { entry, previous } = change;
-        if (entry.role !== "fallback" || entry.resolvedModelIsFallback !== true) return;
-        if (previous?.model === undefined) {
+        const { entry, walkedFrom } = change;
+        if (!isLiveFallback(entry)) return;
+        // Where that walk started, which `restoreTarget` reads for a live one: the branch is the
+        // whole record here, since a session with no arming of its own holds no other. A walk of
+        // two steps or more is why this is not the change before the entry: that one names a
+        // model the chain handed the session in the middle of the same walk, and the role's own
+        // model is the one before every step of it.
+        if (walkedFrom?.model === undefined) {
           deps.log.warn(
             "legion: this session runs on a fallback model and its branch does not say which model it came from",
             { model: entry.model }
@@ -425,7 +462,7 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
         save(
           step({
             kind: "fallback-applied",
-            restoreTo: previous.model,
+            restoreTo: walkedFrom.model,
             entryId: entry.id,
             cause: "refusal",
             now: changedAt(entry) ?? deps.now(),
@@ -442,7 +479,7 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
         if (event.role === "fireworks-fast") return;
         const own = ownFallback(event, ctx);
         if (own === undefined) return;
-        appliedThisTurn = { entryId: own.entryId, reasoned: event.reason !== undefined };
+        appliedThisTurn = { entryId: own.entry.id, reasoned: event.reason !== undefined };
         // What the host walked for, in the provider's own words: it names the reason as
         // `Request failed: ` and the error text of the message that failed
         // (`session/turn-recovery.ts` at the pinned tag `v18.16.0-sami.20261104-021732`), so
@@ -468,8 +505,8 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
           step({
             kind: "fallback-applied",
             cause: refusal?.kind === "content-filter" ? "refusal" : "other",
-            restoreTo: restoreTarget(own.previousEntryId, event.from),
-            entryId: own.entryId,
+            restoreTo: restoreTarget(own, event.from),
+            entryId: own.entry.id,
             now: deps.now(),
           })
         );

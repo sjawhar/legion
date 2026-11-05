@@ -5826,4 +5826,61 @@ describe("the model fallback", () => {
     expect(pane.entries).toEqual([]);
     expect(pane.models.set).toEqual([]);
   });
+
+  // The seed reads the branch of whatever session the pane is on, so the claim check gates it
+  // too (dispatch://INFRA-956 R4): a person's own session that sits on a host fallback is no
+  // Legion role's, and an entry of this plugin's in its transcript is one nothing there asked
+  // for.
+  test("a person's own session on a fallback takes no arming of this plugin's", async () => {
+    const fixture = createPi({ bindEnvoy: false });
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+    fixture.models.current = SONNET;
+    const base = sessionContext("ses_person");
+    const person: SessionContext = {
+      ...base,
+      sessionManager: {
+        ...base.sessionManager,
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...fixture.models.changes],
+      },
+      models: {
+        list: () => [],
+        current: () => hostModel(fixture.models.current),
+        resolve: (spec) => hostModel(spec),
+      },
+      modelRegistry: {
+        find: () => undefined,
+        hasProvider: () => true,
+        isSelectorSuppressed: () => false,
+      },
+    };
+
+    await sessionStart({}, person);
+    await fixture.handlers.get("context")?.({ messages: [] }, person);
+
+    expect(fixture.entries).toEqual([]);
+    expect(fixture.models.set).toEqual([]);
+  });
+
+  test("a session change onto a session no claim is on takes no arming either", async () => {
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
+    pane.models.current = SONNET;
+    // Whatever left the pane on a session of its own — a `/new`, a tree navigation — the claim
+    // stays on the session it was registered for, and this branch is somebody else's.
+    const landed: SessionContext = {
+      ...pane.context,
+      sessionManager: {
+        ...pane.context.sessionManager,
+        getSessionId: () => "ses_unclaimed",
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...pane.models.changes],
+      },
+    };
+
+    await pane.handlers.get("session_switch")?.({ reason: "switch" }, landed);
+    await pane.handlers.get("context")?.({ messages: [] }, landed);
+
+    expect(armings(pane)).toEqual([]);
+    expect(pane.models.set).toEqual([]);
+  });
 });

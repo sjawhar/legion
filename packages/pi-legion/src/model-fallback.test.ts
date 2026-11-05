@@ -543,6 +543,32 @@ describe("a session this runner finds already on a fallback", () => {
     expect(pane.setModelCalls).toEqual([OPUS]);
   });
 
+  // The reviewer's round-4 case (dispatch://INFRA-956 R4): two steps of one walk, neither of them
+  // this plugin's, so the branch is the only record of where that walk started. The middle of the
+  // chain is a model the session was handed by a refusal, and coming back to it is coming back to
+  // no model of the role's.
+  test("two steps down one walk comes back to the model that walk started on", async () => {
+    const pane = fixture();
+    pane.modelChange(OPUS);
+    pane.hostFallback(SONNET);
+    const entry = pane.hostFallback(GPT);
+    const walkedAt = pane.live.now;
+
+    pane.runner.restore(undefined, pane.ctx);
+
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: entry,
+      dueAt: walkedAt + HOUR,
+      cause: "refusal",
+    });
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+
+    pane.live.now += HOUR;
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([OPUS]);
+  });
+
   test("keeps the levels a record carried and arms on top of them", () => {
     const pane = fixture();
     pane.modelChange(OPUS);

@@ -236,6 +236,20 @@ export default function legionExtension(pi: PiApi): void {
     log: logger,
   });
 
+  // The fallback state of whatever session the pane is on: the record this plugin saved
+  // (`restoreFallbackCooldown`), and the fallback the branch itself may already sit on. Read
+  // once the claim is registered at session_start, and again after every session change, and
+  // only for a session that claim is on: the restore's own save appends an entry to that
+  // session's transcript, and a person's own session, or a subagent's, that happens to sit on a
+  // host fallback is no Legion role's to arm or to write into.
+  const restoreModelFallback = (context: SessionContext): void => {
+    if (!legionClaimSession(context)) return;
+    modelFallback.restore(
+      restoreFallbackCooldown(context.sessionManager.getBranch?.() ?? []),
+      context
+    );
+  };
+
   /**
    * INFRA-945: what this pane is doing, which the daemon reads to decide whether its issue pod
    * may be released. A report is sent at every settle, change or no change — the daemon releases
@@ -371,11 +385,9 @@ export default function legionExtension(pi: PiApi): void {
     // an Envoy notice rather than a new assignment, and must find the phase still open. The
     // transcript is this host's store for that record; the runner is handed the record alone.
     phaseReminder.restore(restorePhaseStallEntry(branch));
-    // The same for a session that fell back down the model chain before the relaunch: it comes
-    // back with the due time of its return and how often each model's wait has doubled, and a
-    // session sitting on a fallback no record of this plugin's holds is armed from the branch's
-    // own `model_change` (src/model-fallback.ts).
-    modelFallback.restore(restoreFallbackCooldown(branch), context);
+    // The model fallback's own restore waits for the claim below: its save writes an entry into
+    // the session's transcript, and a session no Legion claim is on is nobody's role to move or
+    // to write into.
     const session = classifySession(process.env);
     if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the
@@ -424,6 +436,10 @@ export default function legionExtension(pi: PiApi): void {
         }
       }, SESSION_ACTIVITY_PERIOD_MS);
     }
+    // The claim is registered, so this session is a Legion role's: a worker the daemon
+    // relaunched into a session that fell back down the model chain comes back with the due time
+    // of its return and how often each model's wait has doubled (src/model-fallback.ts).
+    restoreModelFallback(context);
     registerLegionTool();
     await activateLegionTool();
   });
@@ -503,15 +519,14 @@ export default function legionExtension(pi: PiApi): void {
     // and the new one is where the next is armed.
     paneContext = context;
     phaseReminder.sessionChanged();
-    // The model fallback follows the pane the same way: the arming, the doubling levels and the
-    // fallback this session may already be sitting on are the new branch's own, read as
-    // session_start reads them.
-    modelFallback.restore(
-      restoreFallbackCooldown(context.sessionManager.getBranch?.() ?? []),
-      context
-    );
     if (classifySession(process.env).kind === "controller") await titleSession(context);
     await controllerSession.reclaimAfterSessionChange(context);
+    // The model fallback follows the pane the same way: the arming, the doubling levels and the
+    // fallback this session may already be sitting on are the new branch's own, read as
+    // session_start reads them. After the re-claim, which is what says whether the session the
+    // pane was left on is a Legion role's at all: the controller's claim moves to it, and a
+    // phase worker's stays on the session it was registered for.
+    restoreModelFallback(context);
   };
   pi.on("session_switch", (_event, context) => afterSessionChange(context));
   pi.on("session_branch", (_event, context) => afterSessionChange(context));
