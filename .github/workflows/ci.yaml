@@ -2819,10 +2819,11 @@ jobs:
         # No apt in this step at all. Playwright's `chromium` entry in its ubuntu24.04-x64 table
         # adds no package this GitHub ubuntu-24.04 image lacks, so `--with-deps` installed only
         # Playwright's `tools` list: the CJK, Thai and Cyrillic font packages and xvfb. Measured
-        # at the merge base, that was `0 upgraded, 9 newly installed`, `Need to get 21.1 MB of
-        # archives`, plus 10.5 MB of package indexes in `apt-get update`. All of that is gone,
-        # and with it this step's removal of the runner image's chrome-stable apt source, which
-        # it carried only because that source's index intermittently failed `apt-get update`.
+        # at the merge base in job 127214381394, that was `0 upgraded, 9 newly installed`, `Need
+        # to get 21.1 MB of archives`, plus 12.8 MB of package indexes in `apt-get update`. All
+        # of that is gone, and with it this step's removal of the runner image's chrome-stable
+        # apt source, which it carried only because that source's index intermittently failed
+        # `apt-get update`.
         #
         # The fonts are not needed: this job's two specs, signin.multiprocess.e2e.ts and
         # two-builds.multiprocess.e2e.ts, run headless Chromium and compare no screenshot
