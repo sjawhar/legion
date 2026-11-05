@@ -341,6 +341,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     activity: activeTab === "activity",
     artifacts: activeTab === "artifacts",
     children: activeTab === "children",
+    collaborators: activeTab === "collaborators",
     conversation: activeTab === "conversation",
     decisions: activeTab === "decisions",
     plan: activeTab === "plan",
