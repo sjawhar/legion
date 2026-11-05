@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -400,7 +401,13 @@ func messageEvent(message model.Message, eventType string, actor model.Actor, pa
 	return model.Event{Type: eventType, Actor: actor, Payload: payload}
 }
 
+// validateCreateMessage holds a send to what a message may carry and leaves input ready to store:
+// the body with line feeds alone, and the target as validateMessageDelivery resolved it. A body is
+// markdown a reader is shown, so it reaches the store the way text written into a document reaches
+// it (pmdoc.LineFeeds), and every surface that reads it back - the message row, its event, its
+// delivery and the tree the display read makes of it - sees one line ending.
 func validateCreateMessage(input *createMessageInput) (string, error) {
+	input.Body = pmdoc.LineFeeds(input.Body)
 	if strings.TrimSpace(input.Body) == "" {
 		return "", errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
 	}

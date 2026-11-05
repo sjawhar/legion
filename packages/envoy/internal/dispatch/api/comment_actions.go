@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
@@ -141,6 +142,12 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// An edit stores line feeds alone, as a comment's creation does (createCommentFor): the
+	// display read ends a line at a carriage return too, but a body that holds one draws
+	// differently in every other reader of the stored text. The carried offsets below are the
+	// dashboard editor's, and a ProseMirror document holds no carriage return, so no offset this
+	// normalisation shortens is one a caller sent.
+	input.Body = pmdoc.LineFeeds(input.Body)
 	if strings.TrimSpace(input.Body) == "" {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return

@@ -870,6 +870,366 @@
     }
   },
   {
+    "name": "unknown-directive-crlf",
+    "markdown": "A line before it.\r\n\r\n:::mystery{foo=\"bar\"}\r\nSome *content* here.\r\n\r\n- an item\r\n:::\r\n\r\nAfter them.\r\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "A line before it."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": ":::mystery{foo=\"bar\"}"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Some "
+            },
+            {
+              "type": "text",
+              "text": "content",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " here."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "an item"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": ":::"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After them."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "A line before it."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": ":::mystery{foo=\"bar\"}"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Some "
+            },
+            {
+              "type": "text",
+              "text": "content",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " here."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "an item"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": ":::"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After them."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown-directive-lone-cr",
+    "markdown": "A line before it.\r\r:::mystery{foo=\"bar\"}\rSome *content* here.\r\r- an item\r:::\r\rAfter them.\r",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "A line before it."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": ":::mystery{foo=\"bar\"}"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Some "
+            },
+            {
+              "type": "text",
+              "text": "content",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " here."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "an item"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": ":::"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After them."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "A line before it."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": ":::mystery{foo=\"bar\"}"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Some "
+            },
+            {
+              "type": "text",
+              "text": "content",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " here."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "an item"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": ":::"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After them."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
     "name": "unknown-directive",
     "markdown": ":::mystery{foo=\"bar\"}\nSome *content* here.\n\n- an item\n:::\n\n:::mystery\nA directive written with no attributes.\n:::\n\nAfter them.\n",
     "latest": {

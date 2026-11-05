@@ -555,6 +555,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
+	// A comment's body and its suggestion are markdown a reader is shown, so both reach the store
+	// the way text written into a document reaches it (pmdoc.LineFeeds): the row, the event, the
+	// mention delivery and the tree the display read makes of the body all see one line ending.
+	input.Body = pmdoc.LineFeeds(input.Body)
 	if input.Suggestion != nil {
 		input.Suggestion.ReplaceWith = pmdoc.LineFeeds(input.Suggestion.ReplaceWith)
 	}

@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A stored text reaches the display read with line feeds alone, so a reader is shown the lines a browser draws. `pmdoc.ReadForDisplay` writes each CR LF and each lone carriage return as a line feed before it reads a line, as CommonMark and the browser''s reader do: a body sent from a Windows client drew `:::a` and its content and closing fence as one run-on paragraph, since the stray carriage return on the opening line was enough for the directive to be refused, and a body written with lone carriage returns drew as one paragraph with no break at all, where the browser drew three. A message''s body and a comment''s body are also stored with line feeds alone now (`validateCreateMessage`, `createCommentFor`), as every document write already stored its text; a body stored before this keeps its own carriage returns, which the display read now draws line by line.'
+time: 2026-11-05T06:45:00.000000000Z
+custom:
+    Issue: pr2712

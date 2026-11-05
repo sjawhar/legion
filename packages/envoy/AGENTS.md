@@ -1595,8 +1595,13 @@ a replace's `with`, an insert's markdown whether it becomes blocks or table rows
 in a suggestion's `replace_with` when it is created and when it is accepted;
 in the attributes written onto a typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its ask block carries;
 and in a block ask's edited question and options.
+A message's body and a comment's body are written the same way where they are stored (`validateCreateMessage` in `api/messages.go`, `createCommentFor` in `api/comment_create.go`, `editComment` in `api/comment_actions.go`), so a body stored since sjawhar/legion#2712 holds no carriage return;
+the block ids an edit carries are the browser editor's own offsets, and a ProseMirror document holds no carriage return, so that normalisation shortens no offset a caller sent.
 The browser editor's own updates cannot carry a carriage return.
-No stored document holds one, and `pmdoc` handles line feeds alone.
+No stored document holds one.
+A body stored before that keeps the carriage returns it was sent with, and the display read draws it line by line: `pmdoc.ReadForDisplay` writes the text it is given with line feeds alone before it splits a line of it, since CR LF and a lone carriage return each end a line for the browser's reader (micromark's rule, proof-editor's `typed-block-drawing.ts`).
+A read that ended a line at the line feed alone showed those lines run together: goldmark left the stray carriage return on the line, which was enough for an unknown directive's opener to be refused, and left a lone carriage return inside a text node, which HTML draws as no break at all.
+So `pmdoc` handles line feeds alone, below every write above and below that read.
 Caller text never holds a U+0000, which the API refuses (`NUL_CHARACTER`, below);
 a browser's update can put one in the live document, and text Dispatch takes from the tree carries it as U+FFFD, which is what CommonMark reads one as (`pmdoc`'s `nulAsReplacement`):
 the rendering a version stores and every read serves, a block's id among it, an anchor's quote (`FindMark`), an ask block's question and options and a heading's text (`pmdoc.TextContent`), and the text a quote is matched against, so a quote, a `# Title` quote or a `heading:` anchor copied from `GET /text` finds it.
