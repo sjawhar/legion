@@ -198,6 +198,69 @@
       id="first-screen"
       class="dispatch-markdown prose prose-sm prose-slate break-words dark:prose-invert max-w-none"
     ><!--first-screen--></div>
+    <!--
+      The chunks a document address needs, downloaded beside the entry chunk rather than behind
+      it.
+
+      The entry chunk holds the router shell and nothing a route draws (dispatch://INFRA-341,
+      R11): the page that opens a document is a chunk of its own, and so are the pieces that
+      page statically imports. Each used to be asked for only once the entry had downloaded,
+      compiled and evaluated - the entry's own `import()` for the open page's chunk runs at the
+      end of that one main-thread task - which on a phone at 4x CPU throttling put every byte of
+      them a second behind the page's first byte. A split that moved those bytes into a request
+      made that late would buy nothing, so the build writes them here and the browser fetches
+      them while it is still fetching the entry.
+
+      Here, after the first screen and beside the entry's own script tag, rather than in the
+      head: a `modulepreload` downloads and compiles, and from the head it did both in front of
+      the blocks the server drew, which put the reader's first paint about 150 ms later on a
+      phone at 4x CPU throttling. By this point those blocks are parsed, and these requests go
+      out with the entry's own rather than ahead of it.
+
+      `window.__dispatchAddressChunks` is written by the build (`DOCUMENT_ADDRESS_MODULES` and
+      `documentAddressChunks` in web/vite.config.ts): one list per address shape, each the
+      page's chunk and every chunk it statically imports, by their hashed names, minus the entry
+      chunk, which the script tag below already fetches. Only what the page needs to draw is in
+      it: the decision card every Markdown body draws is not, because no `ask` shell exists
+      until a body has been parsed and painted, and its chunk brings half a megabyte of the
+      Inbox's ask card with it. It stays empty in `vite dev`, where there is no bundle and every
+      module is served on demand.
+
+      A preload only downloads; the page still reaches each chunk by the `import()` it always
+      did, so nothing here changes what the page shows, in what order, or who may see it. A
+      preload that fails to download is a failure of this build's assets like any other, and the
+      recovery script in the head reloads the page on it (it already reads `rel="modulepreload"`).
+    -->
+    <script>
+      window.__dispatchAddressChunks = {};
+    </script>
+    <script>
+      (() => {
+        var chunks = window.__dispatchAddressChunks;
+        var pathname = window.location.pathname;
+        // The two addresses that open a document, as the router parses them
+        // (`parseIssuePath` and `parseProjectPath` in src/features/refs/routes.ts): every issue
+        // address, whose Spec tab is a document and whose artifact addresses are documents, and
+        // a project document's own page.
+        var needed = /^\/issues\/[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*(\/|$)/.test(pathname)
+          ? chunks.issue
+          : /^\/projects\/[^/]+\/documents\/[^/]+$/.test(pathname)
+            ? chunks.document
+            : undefined;
+        if (needed === undefined) {
+          return;
+        }
+        for (var index = 0; index < needed.length; index += 1) {
+          var link = document.createElement("link");
+          link.rel = "modulepreload";
+          // The entry's own script tag carries `crossorigin`, and a preload that does not match
+          // it is a second fetch rather than the same one.
+          link.crossOrigin = "anonymous";
+          link.href = needed[index];
+          document.head.appendChild(link);
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

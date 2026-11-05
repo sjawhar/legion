@@ -28,10 +28,13 @@ const parts: readonly { readonly name: string; readonly module: string }[] = [
   { module: "../issue/CreateIssueDialog", name: "CreateIssueDialog" },
   { module: "../refs/RefPreview", name: "RefPreviewHost" },
   { module: "../refs/agent-registry", name: "AgentRegistryPoller" },
+  { module: "../search/SearchPalette", name: "SearchPalette" },
 ];
 
-/** Every module `app.tsx` imports statically, as it writes the specifier. */
-const staticImports = [...app.matchAll(/^import\s[^;]*?from "([^"]+)";$/gms)].map(
+/** Every module `app.tsx` imports statically and keeps at runtime, as it writes the specifier.
+ *  A type-only import is dropped: the build erases it, so it reaches no chunk - which is how
+ *  `app.tsx` names the palette's `PaletteMode` while taking the palette itself from here. */
+const staticImports = [...app.matchAll(/^import\s(?!type\s)[^;]*?from "([^"]+)";$/gms)].map(
   ([, specifier]) => specifier as string
 );
 
@@ -62,11 +65,24 @@ describe("the shell's deferred parts", () => {
   });
 
   test("the margin is loaded beside its own component, so the shell never pulls it in", () => {
-    // The fifth part the entry chunk does without. It is not in `deferred-shell.ts` because the
+    // The sixth part the entry chunk does without. It is not in `deferred-shell.ts` because the
     // rule for what the margin draws is the margin's own (`features/margin/MarginColumn.tsx`).
     expect(staticImports).toContain("./features/margin/MarginColumn");
     const column = source("../features/margin/MarginColumn.tsx");
     expect(column).toContain('lazy(() => import("./Margin")');
+  });
+
+  test("the decision card every body draws is loaded beside the card, not with the shell", () => {
+    // The seventh. The shell provides one card for every Markdown body on the page, and
+    // importing it took the whole Inbox ask card - 49 modules - into the entry chunk.
+    expect(staticImports).toContain("./features/doc/DeferredAskCard");
+    expect(staticImports).not.toContain("./features/doc/AskBlockCard");
+    const deferred = source("../features/doc/DeferredAskCard.tsx");
+    expect(deferred).toContain('lazy(() =>\n  import("./AskBlockCard")');
+    // A card from the first render, so every `ask` shell is drawn as it is today and only the
+    // card inside it waits for the chunk (`useRenderedMarkdown` draws no shell without one).
+    expect(app).toContain("<TextAskCard.Provider value={DeferredAskCard}>");
+    expect(deferred).toContain("<Suspense fallback={null}>");
   });
 
   test("the reference trigger every page renders is apart from the card's host", () => {

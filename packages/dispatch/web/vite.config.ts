@@ -93,9 +93,110 @@ function thirdPartyNoticesFile(): { page: Plugin; worker: () => Plugin } {
 
 const notices = thirdPartyNoticesFile();
 
+/**
+ * The modules a document address needs before the page can draw it, each named by the module
+ * whose chunk holds it: the page that opens a document, and the parts of it that stand under
+ * their own `Suspense`. Each is reached by an `import()` of the entry chunk, so without the
+ * preload below its bytes are asked for only once the entry has downloaded, compiled and
+ * evaluated - a second serial wait on a phone, which is the wait splitting the entry was meant
+ * to remove (dispatch://INFRA-341, R11).
+ *
+ * Only what the page needs to draw belongs here. The decision card every Markdown body draws
+ * (`features/doc/DeferredAskCard.tsx`) does not: no `ask` shell exists until a body has been
+ * parsed and painted, and its chunk statically imports the Inbox's ask card, half a megabyte
+ * the reader would download and compile in front of the first screen.
+ */
+const DOCUMENT_ADDRESS_MODULES = {
+  document: ["src/features/document/DocumentPage.tsx"],
+  issue: [
+    "src/features/issue/IssuePage.tsx",
+    // The page's own parts, each a commit of its own now (`IssuePage.tsx`).
+    "src/features/issue/IssueHeader.tsx",
+    "src/features/issue/IssueTabs.tsx",
+    "src/features/issue/SpecRequirements.tsx",
+    "src/features/artifacts/ArtifactDetails.tsx",
+  ],
+} as const;
+
+/** The line of `index.html` the build writes those chunks into, matched whole so a rename of
+ *  either side is a failed build rather than a page that quietly preloads nothing. */
+const ADDRESS_CHUNKS_SOURCE = "window.__dispatchAddressChunks = {};";
+
+/**
+ * Writes into `index.html` the chunks each document address needs, for the inline script there
+ * to preload: for each module of `DOCUMENT_ADDRESS_MODULES`, the chunk that holds it and every
+ * chunk that one statically imports, since the browser evaluates a chunk only once all of them
+ * have arrived.
+ *
+ * Build only. In `vite dev` nothing is bundled and the placeholder stands, which preloads
+ * nothing and leaves the page to fetch each module as it imports it.
+ */
+function documentAddressChunks(): Plugin {
+  return {
+    name: "dispatch-document-address-chunks",
+    apply: "build",
+    transformIndexHtml: {
+      order: "post",
+      handler(html, context) {
+        const bundle = context.bundle;
+        if (bundle === undefined) {
+          throw new Error("the build gave transformIndexHtml no bundle to read chunks from");
+        }
+        const withImports = (fileName: string, into: Set<string>): void => {
+          if (into.has(fileName)) return;
+          into.add(fileName);
+          const chunk = bundle[fileName];
+          if (chunk?.type !== "chunk") return;
+          for (const imported of chunk.imports) withImports(imported, into);
+        };
+        // The page's own script tag already fetches the entry chunk, and every lazy chunk
+        // imports from it, so a preload of it would be a second link to bytes already on their
+        // way.
+        const alreadyFetched = new Set(
+          Object.values(bundle)
+            .filter((chunk) => chunk.type === "chunk" && chunk.isEntry)
+            .map((chunk) => chunk.fileName)
+        );
+        const chunks = Object.fromEntries(
+          Object.entries(DOCUMENT_ADDRESS_MODULES).map(([address, modules]) => {
+            const files = new Set<string>();
+            for (const module of modules) {
+              const holder = Object.values(bundle).find(
+                (chunk) =>
+                  chunk.type === "chunk" &&
+                  Object.keys(chunk.modules).some((id) => id.endsWith(`/${module}`))
+              );
+              if (holder === undefined) {
+                throw new Error(
+                  `${module} is in no chunk of this build: a document address cannot preload it`
+                );
+              }
+              withImports(holder.fileName, files);
+            }
+            return [
+              address,
+              [...files].filter((file) => !alreadyFetched.has(file)).map((file) => `/${file}`),
+            ];
+          })
+        );
+        if (!html.includes(ADDRESS_CHUNKS_SOURCE)) {
+          throw new Error(
+            `web/index.html no longer holds "${ADDRESS_CHUNKS_SOURCE}", so this build has ` +
+              "nowhere to write the chunks a document address preloads"
+          );
+        }
+        return html.replace(
+          ADDRESS_CHUNKS_SOURCE,
+          `window.__dispatchAddressChunks = ${JSON.stringify(chunks)};`
+        );
+      },
+    },
+  };
+}
+
 export default defineConfig({
   root: "web",
-  plugins: [react(), tailwindcss(), notices.page],
+  plugins: [react(), tailwindcss(), notices.page, documentAddressChunks()],
   // The Mermaid worker (features/refs/mermaid-render.worker.ts) is created with
   // `{ type: "module" }`, so it is bundled as an ES module.
   worker: { format: "es", plugins: () => [notices.worker()] },

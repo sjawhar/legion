@@ -1,13 +1,25 @@
-import type { ReactNode } from "react";
+import { lazy, type ReactNode, Suspense } from "react";
 import { Link } from "react-router-dom";
 
 import type { Artifact } from "../../api/types";
 import { dangerText, linkHoverText, linkText } from "../../theme/classes";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { buildIssuePath, type DispatchRoute } from "../refs/routes";
-import { ArtifactDetails } from "./ArtifactDetails";
 import { ArtifactBlobView, ArtifactHeader } from "./ArtifactHeader";
 import { ArtifactsTab } from "./ArtifactsTab";
+
+/**
+ * The artifact's details - its name, who wrote it, its versions - which stand under the document
+ * rather than over it.
+ *
+ * In a chunk and a `Suspense` boundary of its own, so the document's own part of the issue page
+ * commits without them and they land in a commit after it (`IssuePage.tsx`,
+ * dispatch://INFRA-341 R11). Nothing above them moves when they do, and the chunk is downloaded
+ * from the address beside the page's own (`DOCUMENT_ADDRESS_MODULES` in `web/vite.config.ts`).
+ */
+const ArtifactDetails = lazy(() =>
+  import("./ArtifactDetails").then((module) => ({ default: module.ArtifactDetails }))
+);
 
 export function ArtifactRoutePanel({
   active,
@@ -76,7 +88,9 @@ export function ArtifactRoutePanel({
                   <ArtifactBlobView artifact={artifact} version={artifactRoute.version} />
                 )}
               </ArtifactHeader>
-              <ArtifactDetails artifact={artifact} />
+              <Suspense fallback={null}>
+                <ArtifactDetails artifact={artifact} />
+              </Suspense>
             </div>
           )
         ) : null

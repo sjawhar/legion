@@ -17,10 +17,11 @@ import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
-import { TextAskBlockCard } from "./features/doc/AskBlockCard";
+import { DeferredAskCard } from "./features/doc/DeferredAskCard";
 import { openDocumentEarly } from "./features/doc/open-document-early";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { InboxList, importInbox } from "./features/inbox/InboxList";
+import { IssueHeaderSkeleton, IssueTabsSkeleton } from "./features/issue/issue-page-skeleton";
 import { MarginColumn } from "./features/margin/MarginColumn";
 import { MarginProvider } from "./features/margin/margin-context";
 import { DEFAULT_MARGIN_WIDTH } from "./features/margin/margin-width";
@@ -39,12 +40,13 @@ import {
   routeProjectOf,
 } from "./features/refs/routes";
 import { useRepliesCount } from "./features/replies/useRepliesCount";
-import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
+import type { PaletteMode } from "./features/search/SearchPalette";
 import {
   AgentRegistryPoller,
   CreateIssueDialog,
   InboxDrawer,
   RefPreviewHost,
+  SearchPalette,
 } from "./features/shell/deferred-shell";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
@@ -80,9 +82,6 @@ import { type Write, writesOf } from "./features/writes/write-store";
 import {
   backdrop50,
   badgeBlocking,
-  borderDefault,
-  borderStrong,
-  borderTransparent,
   calloutDangerBg,
   calloutDangerBorder,
   calloutWarningBorder,
@@ -109,7 +108,6 @@ import {
   statusConnecting,
   textMutedOnSurface,
   textSecondaryOnSurface,
-  textTransparent,
 } from "./theme/classes";
 
 const importIssuePage = () => import("./features/issue/IssuePage");
@@ -199,39 +197,8 @@ const SettingsPage = lazy(() =>
 function IssuePageFallback(): ReactNode {
   return (
     <div aria-busy="true">
-      <header className={`mb-6 border-b pb-6 ${borderDefault}`}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className={`text-sm font-semibold ${linkText}`}>
-            <span
-              className={`inline-block h-4 w-16 animate-pulse rounded align-middle ${skeletonBg}`}
-            />
-          </p>
-          <button
-            className={`rounded-lg border px-3 py-2 text-sm font-medium ${textTransparent} ${borderStrong}`}
-            disabled
-            type="button"
-          >
-            Pin issue
-          </button>
-        </div>
-        <h1
-          className={`mt-2 w-full rounded-lg border px-2 py-1 text-2xl font-semibold ${borderTransparent}`}
-        >
-          <span
-            className={`inline-block h-7 w-2/3 animate-pulse rounded align-middle ${skeletonBg}`}
-          />
-        </h1>
-      </header>
-      <div className={`mb-4 flex gap-2 border-b ${borderDefault}`} role="tablist">
-        {["Spec", "Conversation", "Children", "Artifacts", "Activity"].map((label) => (
-          <span
-            className={`animate-pulse rounded px-3 py-2 text-sm ${textTransparent} ${skeletonBg}`}
-            key={label}
-          >
-            {label}
-          </span>
-        ))}
-      </div>
+      <IssueHeaderSkeleton />
+      <IssueTabsSkeleton />
       <div className="space-y-3">
         {[0, 1, 2, 3].map((row) => (
           <div className={`h-4 w-full animate-pulse rounded ${skeletonBg}`} key={row} />
@@ -917,7 +884,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             width={marginWidth}
           />
         </ErrorBoundary>
-        <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
+        {/* Mounted on every route, closed: it keeps the last `/` search and the row a close is
+            about to run, so unmounting it when nothing is open would lose both. Closed it draws
+            nothing, so the frames before its chunk arrives look exactly as the frames after. */}
+        <Suspense fallback={null}>
+          <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
+        </Suspense>
         {inboxDrawerOpen ? (
           <Suspense fallback={null}>
             <InboxDrawer onClose={() => setInboxDrawerOpen(false)} />
@@ -963,14 +935,15 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   }, [login, queryClient]);
   useEventFeed();
   // Every Markdown body the shell renders - routes, the margin, the inbox drawer, previews and
-  // dialogs - draws a decision block in its text as the read-only card (`TextAskCard`).
+  // dialogs - draws a decision block in its text as the read-only card (`TextAskCard`), which is
+  // fetched after the first paint (`features/doc/DeferredAskCard.tsx`).
   return (
     <KeymapProvider>
       <Suspense fallback={null}>
         <AgentRegistryPoller />
       </Suspense>
       <OpenDocumentEarly />
-      <TextAskCard.Provider value={TextAskBlockCard}>
+      <TextAskCard.Provider value={DeferredAskCard}>
         <AppShell user={user} />
       </TextAskCard.Provider>
     </KeymapProvider>

@@ -27,7 +27,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
-import { Timestamp } from "../refs/Timestamp";
+import { relativeTimeLabel, Timestamp, useRelativeTimeTick } from "../refs/Timestamp";
 import type { TextEditRange } from "./block-spans";
 import type { AcceptedMention } from "./composer-model";
 import { mentionText, survivingMentions } from "./send-request";
@@ -319,6 +319,12 @@ export function MentionField({
   >(undefined);
   const listboxId = useId();
   const open = autocomplete !== undefined;
+  // The detail line below ends in that session's last-seen time, drawn as the `<Timestamp>`
+  // every other relative time on the page is, and the whole line is also that line's `title`:
+  // it is cut to the row's width, and a pointer reader hovers it for what was cut. The title is
+  // a string, so it is built here rather than rendered, and this subscribes to the one tick
+  // `<Timestamp>` follows so the two say the same thing for as long as the list is open.
+  useRelativeTimeTick(open);
   const filteredOptions = useMemo(() => {
     if (autocomplete === undefined || options === undefined) return [];
     const query = autocomplete.query.toLocaleLowerCase();
@@ -525,6 +531,13 @@ export function MentionField({
         >
           {filteredOptions.map((option, index) => {
             const isRole = option.target.startsWith("role:");
+            // What the detail line reads, for its `title`: the same relative time the
+            // `<Timestamp>` in it draws, and what is left of the line once it is cut.
+            const lastSeen =
+              relativeTimeLabel(new Date(option.lastSeen), Date.now()) ?? option.lastSeen;
+            const detail = isRole
+              ? `${option.holder} · ${option.dir} · ${lastSeen}`
+              : `${option.dir} · ${lastSeen}`;
             // Each suggestion is one option that inserts the mention; a listbox owns only
             // options, so the agent in it is drawn by `AgentName` without a link (exclusion E2):
             // a session option's name, and a role option's holder.
@@ -561,7 +574,7 @@ export function MentionField({
                 </span>
                 <TruncatedText
                   className={`self-stretch text-xs ${textMutedOnSurface}`}
-                  title={isRole ? `${option.holder} · ${option.dir}` : option.dir}
+                  title={detail}
                 >
                   {isRole ? (
                     <>

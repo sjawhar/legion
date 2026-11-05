@@ -5,12 +5,14 @@ import { lazy } from "react";
  *
  * A reader who opens `/issues/<KEY>/artifacts/<slug>` waits for the entry chunk to download,
  * compile and evaluate before anything of theirs runs - one main-thread task of about a second
- * on a phone at 4x CPU throttling (dispatch://INFRA-341, R11). None of the four below is on the
+ * on a phone at 4x CPU throttling (dispatch://INFRA-341, R11). None of the five below is on the
  * screen when the document's first block is, so none of them belongs in that task: the Inbox
  * drawer and the create-issue dialog open only when the reader asks for them, the agent registry
- * poller renders nothing at all, and the reference preview is a card that only a hover or a
- * keyboard focus opens. The margin, the fifth part the entry chunk does without, is loaded
- * beside its own component instead (`features/margin/MarginColumn.tsx`).
+ * poller renders nothing at all, the reference preview is a card that only a hover or a keyboard
+ * focus opens, and the search palette draws nothing until a key opens it. The margin, the sixth
+ * part the entry chunk does without, is loaded beside its own component instead
+ * (`features/margin/MarginColumn.tsx`), and so is the decision card every Markdown body draws
+ * (`features/doc/DeferredAskCard.tsx`).
  *
  * Each still appears exactly when it appears today. The shell wraps each in the `Suspense` shape
  * `InboxList` and the `Routes` already use (`app.tsx`), with a `null` fallback: its chunk is
@@ -41,4 +43,11 @@ export const RefPreviewHost = lazy(() =>
  *  page waits for it: a reader it would have named is named from the cache until it lands. */
 export const AgentRegistryPoller = lazy(() =>
   import("../refs/agent-registry").then((module) => ({ default: module.AgentRegistryPoller }))
+);
+
+/** The search palette, mounted closed on every route: it keeps the last `/` search and the row a
+ *  close is about to run, so the shell mounts it from the start and it draws nothing until a key
+ *  opens it. `app.tsx` takes its `PaletteMode` as a type, which the build erases. */
+export const SearchPalette = lazy(() =>
+  import("../search/SearchPalette").then((module) => ({ default: module.SearchPalette }))
 );

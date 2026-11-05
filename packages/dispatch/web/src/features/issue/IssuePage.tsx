@@ -1,4 +1,13 @@
-import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
@@ -33,14 +42,40 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { VerificationTab } from "../verification/VerificationTab";
 import { ChildrenTab } from "./ChildrenTab";
 import { DecisionsPanel } from "./DecisionsPanel";
-import { IssueHeader } from "./IssueHeader";
-import { IssueTabs } from "./IssueTabs";
+import { IssueHeaderSkeleton, IssueTabsSkeleton } from "./issue-page-skeleton";
 import { stateForIssue } from "./pins";
-import { SpecRequirements } from "./SpecRequirements";
 import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
 import { useIssuePriority } from "./useIssuePriority";
 import { type ItemLanding, type ItemRoute, isItemRoute, useItemLanding } from "./useItemLanding";
+
+/**
+ * The parts of the issue page that are not the document, each in a chunk of its own behind a
+ * `Suspense` boundary of its own.
+ *
+ * The page used to mount in one commit - the header, the tab strip and the document surface
+ * together - and a commit cannot be interrupted, so that one commit held the main thread for
+ * about 0.7 s on a phone at 4x CPU throttling; rendering the page inside a transition makes its
+ * render interruptible and leaves that commit whole (dispatch://INFRA-341, R11). Each boundary
+ * here makes one commit of its own instead: the document's part commits first, with the two
+ * boxes the reader already has in front of them (`issue-page-skeleton.tsx`), and the header, the
+ * tabs and each side list land after it, one commit each.
+ *
+ * The chunks are downloaded beside the page's own, from the address
+ * (`DOCUMENT_ADDRESS_MODULES` in `web/vite.config.ts`), so the reader waits for no request here
+ * - only for the microtask each boundary resolves in. What appears, and when, is unchanged: the
+ * header and tabs replace the skeleton the reader was already reading, and a side list draws
+ * under the document it belongs to, where nothing above it moves as it lands.
+ */
+const IssueHeader = lazy(() =>
+  import("./IssueHeader").then((module) => ({ default: module.IssueHeader }))
+);
+const IssueTabs = lazy(() =>
+  import("./IssueTabs").then((module) => ({ default: module.IssueTabs }))
+);
+const SpecRequirements = lazy(() =>
+  import("./SpecRequirements").then((module) => ({ default: module.SpecRequirements }))
+);
 
 export function IssuePage(): ReactNode {
   const { pathname, search } = useLocation();
@@ -418,40 +453,44 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
 
   return (
     <section>
-      <IssueHeader
-        documentArtifact={primaryArtifact}
-        isClosed={isClosed}
-        issue={issue.data}
-        priorityWrite={priorityWrite}
-        state={issueState}
-      />
-      <IssueTabs
-        activeTab={activeTab}
-        artifactCount={issue.data.artifacts.length}
-        issueKey={issueKey}
-        onBeforeTabChange={(current) => {
-          panelScroll.current[current] = window.scrollY;
-        }}
-        toolbar={
-          activeTab === "spec" && specToolbar !== undefined ? (
-            <SpecToolbar
-              isClosed={isClosed}
-              onShowDiffChange={setSpecShowDiff}
-              onVersionChange={(version) => {
-                setSpecShowDiff(false);
-                selectDocumentVersion(primaryArtifact, version);
-              }}
-              reference={documentRoute(
-                primaryArtifact,
-                isPrimaryArtifactRoute ? artifactRoute?.version : undefined
-              )}
-              showDiff={specShowDiff}
-              toolbar={specToolbar}
-              version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
-            />
-          ) : undefined
-        }
-      />
+      <Suspense fallback={<IssueHeaderSkeleton />}>
+        <IssueHeader
+          documentArtifact={primaryArtifact}
+          isClosed={isClosed}
+          issue={issue.data}
+          priorityWrite={priorityWrite}
+          state={issueState}
+        />
+      </Suspense>
+      <Suspense fallback={<IssueTabsSkeleton />}>
+        <IssueTabs
+          activeTab={activeTab}
+          artifactCount={issue.data.artifacts.length}
+          issueKey={issueKey}
+          onBeforeTabChange={(current) => {
+            panelScroll.current[current] = window.scrollY;
+          }}
+          toolbar={
+            activeTab === "spec" && specToolbar !== undefined ? (
+              <SpecToolbar
+                isClosed={isClosed}
+                onShowDiffChange={setSpecShowDiff}
+                onVersionChange={(version) => {
+                  setSpecShowDiff(false);
+                  selectDocumentVersion(primaryArtifact, version);
+                }}
+                reference={documentRoute(
+                  primaryArtifact,
+                  isPrimaryArtifactRoute ? artifactRoute?.version : undefined
+                )}
+                showDiff={specShowDiff}
+                toolbar={specToolbar}
+                version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+              />
+            ) : undefined
+          }
+        />
+      </Suspense>
       <div
         aria-hidden={activeTab !== "spec"}
         aria-labelledby="issue-spec-tab"
@@ -476,7 +515,9 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
               showDiff={specShowDiff}
               version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
             />
-            <SpecRequirements issueKey={issueKey} />
+            <Suspense fallback={null}>
+              <SpecRequirements issueKey={issueKey} />
+            </Suspense>
           </div>
         ) : null}
       </div>

@@ -57,6 +57,24 @@ export function relativeTimeLabel(at: Date, now: number): string | undefined {
   }
 }
 
+/**
+ * Re-renders the caller on the one tick every `<Timestamp>` follows, so a surface that draws a
+ * relative time as text of its own - a `title` over a line a `<Timestamp>` is part of
+ * (`MentionField.tsx`) - says what the line says for as long as it is on the screen.
+ *
+ * `enabled` is false where that text is not drawn, so a surface subscribes only while it shows
+ * one.
+ */
+export function useRelativeTimeTick(enabled = true): void {
+  const [, forceUpdate] = useState(0);
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    return subscribe(() => forceUpdate((count) => count + 1));
+  }, [enabled]);
+}
+
 export interface TimestampProps {
   at: string;
   className?: string;
@@ -65,8 +83,7 @@ export interface TimestampProps {
 /** Renders a relative time ("4 minutes ago") that keeps itself current, with the absolute
  * value available on hover (`title`) and to assistive tech (`datetime`). */
 export function Timestamp({ at, className }: TimestampProps): ReactNode {
-  const [, forceUpdate] = useState(0);
-  useEffect(() => subscribe(() => forceUpdate((count) => count + 1)), []);
+  useRelativeTimeTick();
 
   const date = new Date(at);
   if (Number.isNaN(date.getTime())) {
