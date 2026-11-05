@@ -15,3 +15,11 @@ body: |-
   read routes, starts and stops unit sessions beside one driver session, counts the
   notifications each class was owed against what it got, and judges the step on a pass rule that
   adds notification loss and Cloud SQL's CPU and voids a step its own generator starved.
+  One step drives two populations at once, which is what puts the loop's load on top of
+  production's own rather than in place of it: `loadgen run` takes `-seed` and `-loop-seed`
+  together, with `-events` and `-requests` the step's totals and `-baseline-events` and
+  `-baseline-requests` the portion drawn from `seed.json` with production's write mix, the
+  remainder being the loop's with `-loop-event-mix` and the loop's own read routes.
+  Each population plans from its own seed and is refused for the kinds its own seed cannot
+  serve, `summary.json` reports each beside the combined figures the pass rule reads, and the
+  VM driver seeds both, embeds both under one gate and sends both at every factor.
