@@ -4240,9 +4240,7 @@ export async function executeDispatchTool(
       const project = stringArg(args, "project");
       const title = optionalString(args, "title");
       const text = optionalString(args, "text");
-      const excludeIssues = Array.isArray(args.exclude_issues)
-        ? (args.exclude_issues as string[])
-        : undefined;
+      const excludeIssues = optionalStringArray(args, "exclude_issues");
       const keywordsOnly = optionalBoolean(args, "keywords_only");
       const suggestions = await client.related(project, {
         ...(title === undefined ? {} : { title }),

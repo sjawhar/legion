@@ -71,7 +71,10 @@ Ask the architect of each tree the counts name to fold what can ride in an open 
   release that carries this file, so every child filed before then has no verdict comment to
   find and is not evidence of a skipped check: read the release's own publication time from its
   tag and leave out every child created at or before it. Without that, the first run of this
-  pass nudges nearly every tree that has children.
+  pass nudges nearly every tree that has children. Until a release carries this file, there is
+  no such tag to read: when `git tag --contains <the commit that added this file>` names no
+  release, the cutoff is the time of your run, so every child that exists counts as filed
+  before the rule and no tree is nudged for a missing verdict yet.
 
 Each nudge is one `dispatch comment` on the tree's root, naming what you counted and asking the
 architect to fold what can ride in an open pull request of the tree. End the comment with
