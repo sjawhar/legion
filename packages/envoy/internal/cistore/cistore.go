@@ -407,8 +407,9 @@ type Writer struct {
 // client, since the handle's watches go through the connection's own jetstream handle
 // (bus.WrapKeyValue).
 //
-// The store behind a writer touches no cached state (only applyWatched and casState write the
-// cache, and a writer calls neither), so a writer holds nothing per head and grows with nothing.
+// The store behind a writer touches no cached state (only the watcher's hooks, ciCache, and
+// casState write the cache, and a writer reaches neither), so a writer holds nothing per head and
+// grows with nothing.
 // It never calls Rewatch either, so the channel nextRewatch hands its KV calls never closes and a
 // write of its own is never given up on for a rewatch (kvCall); it is given up on only when its
 // caller's context ends. The handle stays usable across a reconnect, since nats.go reconnects the
@@ -424,7 +425,7 @@ func OpenWriter(conn *nats.Conn, js nats.JetStreamContext, logger *logging.Logge
 		logger:    logger,
 	}
 	// One handle for the store's life: nothing moves it, since a writer has no watcher to
-	// rewatch. The cache maps stay nil, since nothing a writer calls reads or writes them.
+	// rewatch. The cache stays its zero value, since nothing a writer calls reads or writes it.
 	s.kv = func() bus.KeyValue { return kv }
 	return &Writer{store: s}, nil
 }
