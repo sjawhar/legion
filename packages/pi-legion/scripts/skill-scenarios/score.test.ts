@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { checkouts, specWork, TestHandoff } from "./score";
+import { checkouts, specWork, statesDesign, TestHandoff } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
 // profile's gateway key command runs past its budget) says nothing about the skill under test: the
@@ -3990,6 +3990,27 @@ test("asked and grew: a run that writes the spec before it asks fails, however s
   // Asking first and answering first is the pass, which `spec-writing-head-1` already shows.
   expect(scoresOf("spec-writing-head-1").asked).toBe("true");
   expect(scoresOf("spec-writing-head-1").grew).toBe("true");
+});
+
+// The review of 2026-11-05 measured several ways past the first definition, which looked for
+// three literal heading strings in the version's text. Four of the six rows below are refused by
+// that definition and held by `statesDesign`, which reads the text's own structure: the two
+// spaces, the design under `## Summary`, the empty sections and the fenced example. The other
+// two, the closing hash and the plain no-design spec, both definitions agree on, and they are
+// here as guards rather than as evidence.
+test("statesDesign: a design is found by what the version holds, not by three literal headings", () => {
+  const design = "**R1.** The broker answers in 100 ms. From: dispatch://ACME-1/ask/1\n";
+  // Spacing and a closing hash are the author's, not the test's: `##  Requirements` is a
+  // Requirements section, and the old `text.includes("## Requirements")` missed it.
+  expect(statesDesign(`##  Requirements\n\nThe broker answers in 100 ms.\n`)).toBe(true);
+  expect(statesDesign(`## Design ##\n\nOne table, keyed by run.\n`)).toBe(true);
+  // A design written out before the conventional headings arrive is still a design.
+  expect(statesDesign(`## Summary\n\n${design}`)).toBe(true);
+  // An empty section states nothing: the old definition failed a run for writing the headings.
+  expect(statesDesign(`## Requirements\n\n## Design\n\n## Acceptance\n`)).toBe(false);
+  expect(statesDesign(`## Summary\n\nNotices are lost today.\n\n## Problem\n\nThey are.\n`)).toBe(false);
+  // A heading or a requirement inside a fenced example belongs to the example.
+  expect(statesDesign("## Summary\n\n```md\n## Design\n\nOne table.\n```\n")).toBe(false);
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {

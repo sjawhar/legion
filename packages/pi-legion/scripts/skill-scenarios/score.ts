@@ -2724,9 +2724,39 @@ const indented = (text: string, depth = 6) =>
  *     questions.json's `dominated`, `settled` and kinds; numbers.json's `names_number`;
  *     preamble.json's passages by kind; proposal.json's verdicts. Each row whose id is in
  *     seeded.json is left out. */
-/** The headings a spec states a design under: the parts a person's answers shape. A version that
- *  holds one has stated a design. */
-const DESIGN_HEADINGS = ["## Design", "## Acceptance", "## Requirements"];
+/** The `##` headings whose sections hold a design, compared without case or inner spacing. */
+const DESIGN_HEADINGS = ["requirements", "design", "acceptance"];
+
+/** Whether this version of a spec states a design, which is what the conversation rule holds back
+ *  until the person has answered.
+ *
+ *  Read from the text's own structure, never from three literal heading strings: a spec written
+ *  under `##  Requirements` with two spaces states a design as plainly as one written under
+ *  `## Requirements`, and a `## Design` heading with nothing under it states none (both measured
+ *  on this scorer by the review of 2026-11-05). So a version states a design when either holds:
+ *
+ *  - it carries a `**R<n>.**` requirement or `**A<n>.**` check paragraph, the outline's own design
+ *    content, wherever in the document it sits - which also catches a design written out under
+ *    `## Summary` before the conventional headings arrive;
+ *  - a heading whose title is Requirements, Design or Acceptance has text of its own under it,
+ *    read with the heading pattern `outlineProblems` uses, so spacing and a trailing `#` change
+ *    nothing.
+ *
+ *  Fenced code is blanked first, so a heading or a marked paragraph inside an example counts for
+ *  neither. */
+export function statesDesign(spec: string): boolean {
+  const text = withoutFences(spec);
+  if (marked(text).some((paragraph) => /^[RA]\d/.test(paragraph.mark))) return true;
+  const headings = [...text.matchAll(/^(#{1,6})[ \t]+(.+?)[ \t#]*$/gm)];
+  for (const [index, heading] of headings.entries()) {
+    const title = (heading[2] ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!DESIGN_HEADINGS.includes(title)) continue;
+    const start = (heading.index ?? 0) + heading[0].length;
+    const end = headings[index + 1]?.index ?? text.length;
+    if (text.slice(start, end).trim() !== "") return true;
+  }
+  return false;
+}
 
 /** Whether the run held the conversation before it wrote the design (`skill://dispatch-writing-specs`,
  *  "The conversation"), read from what Dispatch recorded rather than from the transcript's prose.
@@ -2760,32 +2790,34 @@ export function conversationOrder(
       grew: false,
       notes: ["conversation: the session wrote no spec version"],
     };
-  const firstAsk = asks
-    .map((ask) => ask.created_at ?? "")
-    .filter((at) => at !== "")
-    .toSorted()[0];
+  // Every comparison below is between instants, never between the strings Dispatch wrote: with a
+  // variable-width fraction ".5Z" is before ".51Z" and sorts after it, which the review of
+  // 2026-11-05 reproduced both ways round on this function.
+  const earliest = (times: (string | null | undefined)[]): bigint | undefined =>
+    times
+      .filter((at): at is string => typeof at === "string" && at !== "")
+      .map((at) => parseInstant(at))
+      .filter((at): at is bigint => at !== undefined)
+      .reduce<bigint | undefined>((best, at) => (best === undefined || at < best ? at : best), undefined);
+  const firstAsk = earliest(asks.map((ask) => ask.created_at));
+  const firstAnswer = earliest(asks.map((ask) => ask.answer?.at));
   const design = versions.find((version) => {
     const file = path.join(runDir, "spec-versions", `${version.version}.md`);
-    if (!existsSync(file)) return false;
-    const text = readFileSync(file, "utf8");
-    return DESIGN_HEADINGS.some((heading) => text.includes(heading));
+    return existsSync(file) && statesDesign(readFileSync(file, "utf8"));
   });
-  const asked =
-    design === undefined || (firstAsk !== undefined && firstAsk < (design.created_at ?? ""));
-  const answers = asks
-    .map((ask) => ask.answer?.at ?? "")
-    .filter((at) => at !== "")
-    .toSorted();
-  const grew =
-    design === undefined || (answers[0] !== undefined && answers[0] < (design.created_at ?? ""));
+  // A design whose own time is unreadable decides nothing, as a version that states no design
+  // does not: both leave the run passing, since nothing provably came before anything.
+  const designAt = design === undefined ? undefined : earliest([design.created_at]);
+  const asked = designAt === undefined || (firstAsk !== undefined && firstAsk < designAt);
+  const grew = designAt === undefined || (firstAnswer !== undefined && firstAnswer < designAt);
   const notes: string[] = [];
   if (!asked && design !== undefined)
     notes.push(
-      `conversation: version ${design.version} (${design.created_at ?? "?"}) states a design, and the run had asked the person nothing by then (${firstAsk ?? "no question"})`
+      `conversation: version ${design.version} (${design.created_at ?? "?"}) states a design, and the run had asked the person nothing by then (${asks.find((ask) => ask.created_at)?.created_at ?? "no question"})`
     );
   if (!grew && design !== undefined)
     notes.push(
-      `conversation: version ${design.version} (${design.created_at ?? "?"}) states a design, and the person had answered nothing by then (${answers[0] ?? "no answer"})`
+      `conversation: version ${design.version} (${design.created_at ?? "?"}) states a design, and the person had answered nothing by then (${asks.find((ask) => ask.answer?.at)?.answer?.at ?? "no answer"})`
     );
   return { asked, grew, notes };
 }

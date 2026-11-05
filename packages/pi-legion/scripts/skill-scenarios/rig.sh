@@ -1262,11 +1262,14 @@ cmd_judge_omp() {
   key_file=$(judge_keys "$P" "$agent" "$keys") || exit 1
   route=(-v "$keys:/opt/key:ro")
   [ -z "$key_file" ] || route+=(-v "$key_file:$key_file:ro")
-  if [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != key-file ]; then
-    host=$(sed -n 's#^ *"\{0,1\}baseUrl"\{0,1\}: *"\{0,1\}https\{0,1\}://\([^/:"]*\).*#\1#p' "$agent/models.yml" | head -1)
-    ip=$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}') || ip=
-    [ -z "$ip" ] || [ "$ip" = "$host" ] || route+=(--add-host "$host:$ip")
-  fi
+  # The judge's container resolves the model endpoint's hostname itself, and a tailnet name the
+  # host resolves is often not resolvable inside Docker, so the host's answer is passed in. This
+  # once skipped the key-file route, which reached Anthropic's own public name and needed none;
+  # since that route takes LEGION_E2E_MODEL_BASE_URL it can name a gateway like any other, and a
+  # route left out here would let the scenario agents reach it while its judges could not.
+  host=$(sed -n 's#^ *"\{0,1\}baseUrl"\{0,1\}: *"\{0,1\}https\{0,1\}://\([^/:"]*\).*#\1#p' "$agent/models.yml" | head -1)
+  ip=$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}') || ip=
+  [ -z "$ip" ] || [ "$ip" = "$host" ] || route+=(--add-host "$host:$ip")
   printf 'model %s\nthinking %s\n' "$judge_model" "$judge_thinking" >"$dir/judge-model.txt"
   mkdir -p "$dir/sessions"
   : >>"$dir/$output"

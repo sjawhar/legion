@@ -28,17 +28,17 @@ Part | Content
 `Decisions` | One line naming `decisions.md`
 `Acceptance` | `**A1.**` on, each naming the requirements it tests
 
-Another agent can build and check the work from the spec alone; a small change gets a few sentences per part, no matrix.
+Another agent can build and check the work from the spec alone; a small change gets a few sentences per part.
 
 ## Rules for the text
 
 For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
-- Write about the current design, never the person or how people reached it, and never quote people or upload their words.
+- Write about the current design, never the person or how people reached it, and never quote or upload their words.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
-- A sentence that cites a gate passing (test, review, check, proof) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
+- A sentence citing a gate that passed (test, review, check, proof) says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
 - Keep only text that helps a reader understand, decide, build, check.
 - Explain each name a new reader may not know, and what each issue you name does for them.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
@@ -46,13 +46,13 @@ For each spec, ask, comment and message:
 ## Questions
 
 - Name the concrete case and its numbers, then the choice in those terms, never "Which option?".
-- A choice inside what the person asked for, or one their messages favour, is yours: decide it.
+- A choice inside what the person asked for, or one their messages favour, is yours.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
 - Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options, answerable on a phone.
 
 ## Each version
 
-1. After a person's answer, comment or edit, reread the problem and rewrite what the answer touches, deleting what it contradicts: an answer is integrated, never appended. Never narrate an edit: versions and comments hold the history.
+1. After a person's answer, comment or edit, reread the problem and rewrite what the answer touches, deleting what it contradicts: an answer is integrated, never appended. Answer each comment in its own thread. Never narrate an edit: versions and comments hold the history.
 2. Before each spec write, paste the whole spec, never a path, into a fresh subagent: it lists gaps, conflicts, uncheckable requirements, unclear text and needless questions. Fix or record each.
 3. Before each approval request, `wait` for a read-only fact check: `task(agent="scout")`.
 4. Name each version with `dispatch doc-edit --summary`.
