@@ -149,13 +149,19 @@ func TestABootStatusWriteDoesNotLandOverAPersonsMoveWithinTheWorkflow(t *testing
 }
 
 // seedPlanningRoot records key as a tree of its own that the older daemon left planning while
-// Dispatch still shows it todo: the state the boot corrects.
+// Dispatch still shows it todo: the state the boot corrects. The root holds the admission slot
+// its planning says it has, because the boot corrects an issue only while its tree runs: a root
+// in a phase with no slot is a root waiting for one, carrying the phase a hand-over left it, and
+// the correction leaves it alone so that `todo` keeps it in the waiting line (correctStatuses).
 func seedPlanningRoot(t *testing.T, pool *pgxpool.Pool, records record.Store, key string) {
 	t.Helper()
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.PutIssue(context.Background(), tx, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main",
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main",
 			GitHubRepo: "acme/widgets", Tree: key, Project: "LEGION", Title: key, Phase: phase.Planning, Generation: 1,
-			Status: "todo", DispatchStatus: "todo", HandedOver: true, Rank: "U"})
+			Status: "todo", DispatchStatus: "todo", HandedOver: true, Rank: "U"}); err != nil {
+			return err
+		}
+		return records.PutSlot(context.Background(), tx, record.Slot{Issue: key, Index: 0, AdmittedAt: time.Now()})
 	}); err != nil {
 		t.Fatalf("seed the planning root: %v", err)
 	}
