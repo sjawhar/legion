@@ -399,10 +399,18 @@ type gauge struct {
 	read  bool
 }
 
-func (g *gauge) set(bytes float64) {
+// set is a reading of this moment from a reader that knows of nothing higher, so the reading
+// itself is the most the series is known to have held since the last scrape.
+func (g *gauge) set(bytes float64) { g.observe(bytes, bytes) }
+
+// observe is a reading of this moment and the most the reader knows the series to have held
+// since the last scrape, which a cgroup's memory.peak answers for and a reading of a moment
+// cannot. Both are taken in one call because a reader that set them in two left the peak
+// standing as the reading of this moment in between (Registry.SetResidentPeakBytes).
+func (g *gauge) observe(bytes, peak float64) {
 	g.value = bytes
-	if !g.read || bytes > g.peak {
-		g.peak = bytes
+	if high := max(bytes, peak); !g.read || high > g.peak {
+		g.peak = high
 	}
 	g.read = true
 }
@@ -605,6 +613,50 @@ func (r *Registry) SetResidentBytes(key Series, bytes int64) {
 	defer r.mu.Unlock()
 	if series := r.workOf(key); series != nil {
 		series.resident.set(float64(bytes))
+	}
+}
+
+// SetResidentPeakBytes is the resident memory one owner's work of one kind holds now and the
+// most a reader knows it to have held since the last scrape, which is more than the reading of
+// this moment where a cgroup's memory.peak says so (podCollector.chargeCgroupMemory).
+//
+// The two are set in one call because they are one reading. Set in two, a scrape that arrived
+// between them served the peak as the memory the pair holds now and reset the peak to it, so
+// the window after it counted that peak a second time (INFRA-1208, the review of pull request
+// 2786).
+func (r *Registry) SetResidentPeakBytes(key Series, bytes, peak int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if series := r.workOf(key); series != nil {
+		series.resident.observe(float64(bytes), float64(peak))
+	}
+}
+
+// ZeroMemoryExcept sets the memory of every pair this registry holds to zero, except the pairs
+// this map names: the ones a walk has just found a process of. A pair whose processes have all
+// ended holds no memory, and a collector that went on serving the last reading it took served
+// the memory of a build that ended a minute ago as memory held now, so the per-kind parts
+// stopped summing to the pod's totals until the hour window dropped the pair
+// (INFRA-1208, the review of pull request 2786).
+//
+// What it does not touch is the pair's activity, its CPU counter or its peak. The pair stays in
+// the output for its hour with the counter it stopped at, which is what Prometheus reads a
+// counter that stops as, and the peak stands until the next scrape reads it and resets it
+// (resetPeaks). A reading nothing has ever taken is left unread rather than made a zero, as
+// every other series the sampler has no reading for is.
+func (r *Registry) ZeroMemoryExcept(live map[Series]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key, series := range r.work {
+		if live[key] {
+			continue
+		}
+		if series.anonymous.read {
+			series.anonymous.set(0)
+		}
+		if series.resident.read {
+			series.resident.set(0)
+		}
 	}
 }
 

@@ -59,8 +59,17 @@ func scrape(t *testing.T, r *Registry) exposition {
 	if err := r.Write(&out); err != nil {
 		t.Fatalf("the exposition could not be written: %v", err)
 	}
+	return readExposition(t, out.String())
+}
+
+// readExposition reads one scrape's bytes back. It is scrape's own reading, apart from it for
+// the one test that takes its scrapes somewhere else: a goroutine scraping while a pass runs
+// cannot fail a test from where it writes them, so it keeps the bytes and the test reads them
+// afterwards (TestAScrapeBetweenTwoReadingsOfOnePassServesNeitherAsTheOther).
+func readExposition(t *testing.T, text string) exposition {
+	t.Helper()
 	read := exposition{
-		text:   out.String(),
+		text:   text,
 		types:  map[string]string{},
 		helps:  map[string]string{},
 		values: map[string]float64{},

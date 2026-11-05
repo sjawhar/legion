@@ -133,6 +133,10 @@ type Walk struct {
 	// add to its own and publish.
 	failed func(ReadSource, error)
 	last   map[int]*reading
+	// walked is whether a pass of this walk has run. The first pass charges nothing at all:
+	// what /proc holds for a process this walk has never watched is work of before the
+	// sampler, and nothing in it says which kind of work it was (Next, sight).
+	walked bool
 }
 
 // reading is what the walk remembers of one process between two passes: enough to tell a rise
@@ -144,10 +148,10 @@ type reading struct {
 	// the one recorded is another process wearing an old number, not the one that was read.
 	start uint64
 	// own and reaped are utime + stime and cutime + cstime as the last pass read them, in
-	// ticks. Both are zero for a process no pass has read, which is what makes its first pass
-	// charge the lifetime /proc already reports (dispatch://INFRA-1208/spec#b-a-rates: the
-	// counters are seeded from what /proc holds, so a restarted sampler is continuous rather
-	// than stepped).
+	// ticks. Both are what /proc already held for a process the walk's first pass found, so
+	// that pass charges none of a lifetime it never watched, and zero for a process that
+	// appeared since, whose whole lifetime is CPU spent between two passes of this walk
+	// (Next, "across a restart").
 	own, reaped uint64
 	// charged is the ticks every pass has charged for the processes below this one, alive and
 	// dead alike: each process's own rise and each remainder a reap left, recorded against
@@ -216,6 +220,22 @@ func NewWalk(root string, reader *procread.Reader, attribution Attribution, fail
 //
 // A role's harness is KindAgent from the pass that first sees it all the same: that is read from
 // the Comm of its stat, which the walk already reads (agentPrograms).
+//
+// Across a restart a walk charges only what it has watched. The first pass of a walk's life
+// records what /proc already holds for every process it finds — the process's own utime + stime
+// and the cutime + cstime of everything it has reaped — as CPU already charged, so that pass
+// charges nothing and every counter of the sampler starts at zero. A restart is then a counter
+// reset, which Prometheus reads correctly, and the pod's own CPU total is read from its cgroup
+// and keeps its history whatever the sampler did.
+//
+// Charging those two counters instead put a role's history under the wrong kind. A fresh walk
+// holds no reading of any child, so a harness's whole reaped lifetime looked like the CPU of a
+// child no read saw and went to KindTool at once (chargeReaped, unseenChildWork): every build
+// and test the role had reaped before the restart — the 64 MiB exit, a crash, an OOM kill —
+// moved into `tool` in one pass. A live process's own lifetime went the same way, to the kind
+// of its nearest ancestor, since the pass that first sees a process reads no command line for
+// it. Neither counter says which kind the work was, so neither is charged (INFRA-1208, the
+// review of pull request 2786).
 func (w *Walk) Next() (Pass, error) {
 	pids, err := procread.PIDs(w.root)
 	if err != nil {
@@ -313,11 +333,21 @@ func (w *Walk) forget(stats map[int]procread.Stat) map[int][]*reading {
 // attribution policy, which it shows a process again on the pass after that one and never again:
 // the first sighting is the stat the pass has just read, and the second is the policy's chance to
 // read what only a process that lived longer than one pass is worth reading (Attribution.Seen).
+//
+// On the first pass of a walk's life a new reading holds the counters /proc answered with rather
+// than zero, so that pass charges nothing of a lifetime the walk never watched; on every pass
+// after it a new reading starts at zero, since a process that appeared since the last pass spent
+// its whole lifetime between two passes of this walk (Next, "across a restart").
 func (w *Walk) sight(live []int, stats map[int]procread.Stat) {
 	for _, pid := range live {
 		entry, held := w.last[pid]
 		if !held {
-			entry = &reading{pid: pid, start: stats[pid].StartTicks}
+			stat := stats[pid]
+			entry = &reading{pid: pid, start: stat.StartTicks}
+			if !w.walked {
+				entry.own = stat.UserTicks + stat.SystemTicks
+				entry.reaped = stat.ChildUserTicks + stat.ChildSystemTicks
+			}
 			w.last[pid] = entry
 		}
 		if entry.sightings >= 2 {
@@ -326,6 +356,7 @@ func (w *Walk) sight(live []int, stats map[int]procread.Stat) {
 		entry.sightings++
 		w.attribution.Seen(pid, stats[pid], entry.sightings == 1)
 	}
+	w.walked = true
 }
 
 // climb is the one bounded walk up the process tree this package makes: from a process through

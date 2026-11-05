@@ -298,6 +298,11 @@ func (c *nodeCollector) learn(uid types.UID, dir string) {
 // kubelet, the container runtime, a pod of an excluded namespace — is read and charged to
 // nobody, since only its stat says whether the pid is still the process the last pass read.
 //
+// A kind this pass found no process of is set to zero, as an issue pod's pair is: a pod whose
+// build has ended holds no build memory now, whatever the last reading of it was, and its
+// series stay in the output at zero until the hour window drops them
+// (Registry.ZeroMemoryExcept).
+//
 // The pass itself is the walk's, which is the one an issue pod makes: this hands it the pod set
 // of this pass and takes the owners and kinds it answers with. The owner of a node's pass is a
 // pod uid, which is what publish turns back into the labels the pod's series carry.
@@ -313,11 +318,15 @@ func (c *nodeCollector) readProcesses(pods map[types.UID]nodePod) {
 			c.opts.Registry.AddCPUSeconds(c.opts.Registry.GradeKind(pod, work.Kind), spent)
 		})
 	}
+	live := make(map[Series]bool, len(pass.ResidentBytes))
 	for work, bytes := range pass.ResidentBytes {
 		c.publish(types.UID(work.Owner), func(pod GradePod) {
-			c.opts.Registry.SetResidentBytes(c.opts.Registry.GradeKind(pod, work.Kind), bytes)
+			key := c.opts.Registry.GradeKind(pod, work.Kind)
+			live[key] = true
+			c.opts.Registry.SetResidentBytes(key, bytes)
 		})
 	}
+	c.opts.Registry.ZeroMemoryExcept(live)
 }
 
 // publish hands the registry one pod's reading, under the lock the pod set is kept by and only

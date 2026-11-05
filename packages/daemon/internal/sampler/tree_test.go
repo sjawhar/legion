@@ -331,8 +331,14 @@ func promptTree() []fakeProcess {
 // stays at zero.
 func TestAHarnessPromptNamingAToolchainIsNoBuild(t *testing.T) {
 	root := t.TempDir()
+	walk := newWalk(t, root, Rules{})
+	// The first pass of a walk's life charges nothing, so the tree it finds has spent
+	// nothing yet and the pass after it charges the whole of each counter as the rise it is
+	// (Walk.Next).
+	writeProc(t, root, sighted(promptTree())...)
+	next(t, walk, rolesOf())
 	writeProc(t, root, promptTree()...)
-	pass := next(t, newWalk(t, root, Rules{}), rolesOf())
+	pass := next(t, walk, rolesOf())
 
 	for _, test := range []struct {
 		pid  int
@@ -398,8 +404,13 @@ func TestAShellCopiedToAnotherNameUnderTheHarnessIsATool(t *testing.T) {
 	tree := append(promptTree(),
 		fakeProcess{pid: 30, parent: 12, own: 1940, args: []string{"./burn", "-c", "while :; do :; done"}},
 	)
+	walk := newWalk(t, root, Rules{})
+	// The first pass of a walk's life charges nothing, so the burn loop's seconds are the
+	// rise the pass after it charges (Walk.Next).
+	writeProc(t, root, sighted(tree)...)
+	next(t, walk, rolesOf())
 	writeProc(t, root, tree...)
-	pass := next(t, newWalk(t, root, Rules{}), rolesOf())
+	pass := next(t, walk, rolesOf())
 
 	if got, want := workOf(t, pass, 30), (Work{"implementer", KindTool}); got != want {
 		t.Errorf("the burn loop is %v, want %v", got, want)
@@ -528,10 +539,11 @@ func TestAPassReportsTheLargestResidentMemoryFirst(t *testing.T) {
 	}
 }
 
-// A process the walk has not read before contributes the whole CPU /proc already reports for it,
-// so a sampler that started after the pod did carries what ran before it rather than stepping its
-// counters (dispatch://INFRA-1208/spec#b-a-rates). Every pass after that charges the rise alone.
-func TestTheFirstPassChargesTheLifetimeAndTheNextChargesTheRise(t *testing.T) {
+// The first pass of a walk's life charges nothing at all, and every pass after it charges the
+// rise alone: the CPU /proc already holds for a process is work this walk never watched, and
+// nothing in those two counters says which kind of work it was (Walk.Next). So every counter of
+// a sampler starts at zero and a restart is a counter reset, which Prometheus reads correctly.
+func TestTheFirstPassChargesNothingAndTheNextChargesTheRise(t *testing.T) {
 	root := t.TempDir()
 	tree := []fakeProcess{
 		{pid: 1, args: []string{"legion", "launcher"}, own: 100},
@@ -542,14 +554,20 @@ func TestTheFirstPassChargesTheLifetimeAndTheNextChargesTheRise(t *testing.T) {
 	writeProc(t, root, tree...)
 	walk := newWalk(t, root, Rules{})
 
-	// The role-init and the harness are the role's own machinery wherever they stand, which
-	// the stat the pass has already read says; the `go` has no command line read yet and
-	// carries the kind of the nearest ancestor that has one, which under a harness is tool.
+	// Every process of the tree is reported, with the role and the kind the pass gives it,
+	// and the six seconds they had spent before this walk began are charged to nobody.
 	first := next(t, walk, rolesOf())
-	wantCPU(t, first, Work{RoleShared, KindShared}, 1)
-	wantCPU(t, first, Work{"implementer", KindAgent}, 2)
-	wantCPU(t, first, Work{"implementer", KindTool}, 3)
-	wantCPU(t, first, Work{"implementer", KindBuild}, 0)
+	if len(first.Processes) != len(tree) {
+		t.Errorf("the first pass reported %d processes, want the %d of the tree", len(first.Processes), len(tree))
+	}
+	for _, work := range []Work{
+		{RoleShared, KindShared},
+		{"implementer", KindAgent},
+		{"implementer", KindTool},
+		{"implementer", KindBuild},
+	} {
+		wantCPU(t, first, work, 0)
+	}
 
 	tree[0].own, tree[1].own, tree[3].own = 110, 205, 600
 	writeProc(t, root, tree...)
@@ -557,6 +575,74 @@ func TestTheFirstPassChargesTheLifetimeAndTheNextChargesTheRise(t *testing.T) {
 	wantCPU(t, second, Work{RoleShared, KindShared}, 0.10)
 	wantCPU(t, second, Work{"implementer", KindAgent}, 0.05)
 	wantCPU(t, second, Work{"implementer", KindBuild}, 3)
+}
+
+// A sampler that restarts charges no part of the role's history to the wrong kind. The pod runs
+// on while the sampler is replaced — the 64 MiB exit, a crash, an OOM kill — and the walk of the
+// new sampler meets a `/proc` holding every second the role has spent: the harness's reaped
+// cutime + cstime, which is every build and test it has ever waited for, and the own CPU of
+// whatever is running now.
+//
+// A fresh walk holds no reading of any child, so charging the harness's reaped rise made all of
+// it look like the CPU of a child no read saw and sent it to `tool` in one pass, while a live
+// build's own lifetime went to the kind of its nearest ancestor, which under a harness is `tool`
+// as well: the role below had spent 2.00 on a build and 3.00 on a test with `tool` at zero, and
+// the first pass of the new walk charged the whole 5.00 to `tool` (INFRA-1208, the review of
+// pull request 2786). Neither counter says which kind the work was, so the first pass of the
+// new walk charges neither, and what the role spends after the restart is charged where it
+// belongs.
+func TestARestartChargesNoneOfTheRolesHistoryToAnotherKind(t *testing.T) {
+	root := t.TempDir()
+	above := harnessTree()
+	build := fakeProcess{pid: 50, parent: 12, args: []string{"go", "build", "./..."}, own: 200}
+	ended := fakeProcess{pid: 51, parent: 12, args: []string{"go", "test", "./..."}, own: 300}
+
+	// The sampler before the restart watched both commands and charged every second of them
+	// where it belonged.
+	walk := newWalk(t, root, Rules{})
+	writeProc(t, root, sighted(append(slices.Clone(above), build, ended))...)
+	next(t, walk, rolesOf())
+	writeProc(t, root, append(slices.Clone(above), build, ended)...)
+	watched := next(t, walk, rolesOf())
+	wantCPU(t, watched, Work{"implementer", KindBuild}, 2)
+	wantCPU(t, watched, Work{"implementer", KindTest}, 3)
+	wantCPU(t, watched, Work{"implementer", KindTool}, 0)
+
+	// The test run ends and the harness reaps its three seconds, which the walk has charged
+	// already; the build runs on.
+	above[2].reaped = 300
+	writeProc(t, root, append(slices.Clone(above), build)...)
+	reaped := next(t, walk, rolesOf())
+	wantCPU(t, reaped, Work{"implementer", KindTool}, 0)
+	wantCPU(t, reaped, Work{"implementer", KindTest}, 0)
+
+	// The sampler is replaced: a walk of its own over the same /proc, where the harness still
+	// reports the three seconds it reaped and the build its own two.
+	restarted := newWalk(t, root, Rules{})
+	after := next(t, restarted, rolesOf())
+	for _, work := range []Work{
+		{"implementer", KindTool},
+		{"implementer", KindBuild},
+		{"implementer", KindTest},
+		{"implementer", KindAgent},
+		{RoleShared, KindShared},
+	} {
+		wantCPU(t, after, work, 0)
+	}
+
+	// What the role spends after the restart is charged to the kind the new walk reads, and
+	// the harness's next reap answers for the build the new walk did watch.
+	build.own = 500
+	writeProc(t, root, append(slices.Clone(above), build)...)
+	spent := next(t, restarted, rolesOf())
+	wantCPU(t, spent, Work{"implementer", KindBuild}, 3)
+	wantCPU(t, spent, Work{"implementer", KindTool}, 0)
+
+	above[2].reaped = 800
+	writeProc(t, root, above...)
+	last := next(t, restarted, rolesOf())
+	wantCPU(t, last, Work{"implementer", KindBuild}, 0)
+	wantCPU(t, last, Work{"implementer", KindTool}, 0)
 }
 
 // A pid the kernel handed to another process is another process: its starting moment differs from

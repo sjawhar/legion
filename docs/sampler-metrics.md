@@ -117,6 +117,9 @@ A window whose allowance is spent still runs one walk and one volume read before
 so every process's `stat` is read at least once each ten seconds and no series the sampler serves goes staler than that.
 `legion_sampler_smaps_deferred` is how many processes a window carried into the next one, so a window that reached none of them says so there, and the next window takes the carried processes up first.
 
+Each window ends on its own ten-second tick, whether or not the sampler read any `smaps` in it, and the next window's allowance begins there.
+The allowance is the whole sampler's and not the `smaps` pass's, so the cgroup profile below, which reads no `smaps` at all, budgets its walk and its totals against a window that ends on the same tick.
+
 The floor is a reading rate that never gives way, and one walk of a pod running hundreds of build processes can cost more than the 250 ms itself.
 A window that goes over its allowance that way takes what it overspent out of the next window, up to one whole allowance,
 since the cap is over a minute and not over one window of it:
@@ -189,6 +192,12 @@ An issue pod's sampler reads a process's command line on the second pass that fi
 a process the sampler has not read a command line for carries the kind of its nearest ancestor that has one, and takes its own from the pass that reads it.
 So the first two seconds of a command the agent started are charged to whatever started it, and a command that lived less than one pass is charged there whole.
 
+A walk charges only the CPU it watched.
+The first pass of a sampler's life records what `/proc` already holds for every process it finds — each process's own CPU and the CPU of everything it has reaped — as CPU already charged, so every `_cpu_seconds_total` of a role and kind pair starts at zero and rises with what the pod spends from then on.
+A restart of the sampler is therefore a counter reset, which Prometheus reads correctly, and `legion_sampler_restarts_total` is where a reader sees that one happened.
+Charging those counters instead would move the role's history to the wrong kind: nothing in them says which kind of work earned the seconds, and a role's reaped lifetime — every build and test its agent ever waited for — went to `tool` in one pass.
+The pod's own `legion_sampler_pod_cpu_seconds_total` comes from its cgroup and keeps its history across a restart.
+
 ## The peak, and what a second reader does to it
 
 A `_peak_bytes` series is the most its reading held since the last scrape, and writing the exposition resets every peak to the reading beside it.
@@ -205,6 +214,11 @@ A role and kind pair is served while a process of that pair ran within the last 
 An hour after the last of its processes ran, the pair's series leave the output.
 Prometheus reads a counter that stops and later returns correctly, so nothing is lost by this and the series set stays small.
 The same window applies to a grade pod's kinds in node mode.
+
+A pair whose processes have all ended holds no memory.
+Each walk sets the memory of every pair it found no process of to zero, resident and anonymous alike, so the per-kind parts go on summing to the pod's totals, while the pair's CPU counter stands where it stopped and its series stay in the output for the rest of the hour.
+The same holds for a grade pod's kinds in node mode.
+The cgroup profile is the exception named below: there a command's last reading stands until the pair is dropped, because the cgroup is what is read and the launcher is asked to keep it one pass longer.
 
 The sampler serves at most 200 series for one pod, and in node mode at most 200 for each grade pod.
 When the set is over the cap, it drops in this order:

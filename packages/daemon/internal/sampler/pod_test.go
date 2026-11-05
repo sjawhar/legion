@@ -319,6 +319,62 @@ func TestTheProcProfileServesThePodItRead(t *testing.T) {
 	wantValue(t, e, 0, smapsDeferred)
 }
 
+// A pair whose processes have all ended holds no memory, and the walk that finds none of them
+// says so: every pair the registry holds that a pass did not find goes to zero, resident and
+// anonymous alike.
+//
+// The sampler serves the memory a pair holds now, and the last reading of a build that ended a
+// minute ago is not that. With every process of the role gone from this fixture the sampler went
+// on serving implementer/build 614,400 bytes of resident memory until the hour window dropped
+// the pair, so the per-kind parts stopped summing to the pod's totals for the whole of that hour
+// (INFRA-1208, the review of pull request 2786).
+//
+// What stays is the pair: its CPU counter stands where it stopped, which is how Prometheus reads
+// a counter that stops, and its series stay in the output for the hour.
+func TestAPairWhoseProcessesHaveEndedHoldsNoMemory(t *testing.T) {
+	f := newPodFixture(t)
+	f.writeProcesses(743092, 56, sighted(podTree())...)
+	f.writeV1Totals(1<<28, 1_000_000_000)
+	f.writeSmaps(14, 2048)
+	f.writeSmaps(15, 1024)
+	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	page := float64(os.Getpagesize())
+
+	// Two windows of a settled pod: the second is the one that has read every command line,
+	// so the build pair holds the resident memory of its two processes and the anonymous
+	// memory the smaps pass read for them.
+	c := f.collector()
+	c.pass(0)
+	f.writeProcesses(743092, 56, podTree()...)
+	c.pass(10)
+	e := f.scrape()
+	wantValue(t, e, 150*page, memoryResidentBytes, build...)
+	wantValue(t, e, 3072*1024, memoryAnonymousBytes, build...)
+	wantValue(t, e, 0.15, cpuSecondsTotal, build...)
+
+	// The role's generation ends: the launcher, the sampler and the test Postgres are what
+	// is left of the pod.
+	left := []fakeProcess{}
+	for _, process := range podTree() {
+		if process.pid <= 3 {
+			left = append(left, process)
+		}
+	}
+	f.writeProcesses(743092, 56, left...)
+	f.writeRoles(map[string]int{})
+	c.pass(20)
+
+	e = f.scrape()
+	wantValue(t, e, 0, memoryResidentBytes, build...)
+	wantValue(t, e, 0, memoryAnonymousBytes, build...)
+	// The pair is still served, with the CPU it was charged while it ran: the hour window
+	// and nothing else takes a pair out of the output.
+	wantValue(t, e, 0.15, cpuSecondsTotal, build...)
+	// The pod's own processes are still read, so a pair that is still running keeps its
+	// memory: only the pairs the pass found none of are zeroed.
+	wantValue(t, e, 500*page, memoryResidentBytes, podProject, podIssue, RoleShared, string(KindShared))
+}
+
 // A pod with no cgroup filesystem to read serves no pod totals at all. The collector is given the
 // layout its root holds, and a root holding none answers procread.ErrNoLayout for both halves of
 // the totals: those series are left out rather than served as a zero, as every other series the
@@ -495,6 +551,138 @@ func TestACgroupKeptForOneMoreReadReportsTheFinalNumbers(t *testing.T) {
 	}
 }
 
+// The sampler's own allowance begins again every ten seconds in both profiles. The window was
+// closed in the smaps pass alone and the cgroup profile reads no smaps, so once the sampler had
+// spent the 250 ms of its first window, windowLeft stayed at or below zero for the rest of its
+// life: the walk ran only at the ten-second floor, the memory totals only every four seconds,
+// and both deferral counters rose for ever — walk_deferred 116 and totals_deferred 72 over 300
+// ticks, against 28 and 0 in the /proc profile (INFRA-1208, the review of pull request 2786).
+//
+// So the window closes on its own tick in both (closeWindow), and a profile that spent its first
+// window's allowance and nothing after it defers nothing after that window.
+func TestTheCgroupProfileClosesItsWindowAndStopsDeferring(t *testing.T) {
+	f := newPodFixture(t)
+	f.writeProcesses(2097152, 524288, podTree()...)
+	f.usePodCgroup(1<<30, 9_000_000)
+
+	// The pass that first sees the pod's processes reads no command line of any of them, so
+	// the command cgroup below is read by the pass that knows what the processes in it are
+	// doing, which under a spent allowance is the walk the floor forces at the tenth tick.
+	c := f.collector()
+	c.pass(0)
+	f.writeCommandGroup(commandGroup{
+		name: "implementer-7", microseconds: 2_000_000,
+		current: 100 << 20, peak: 100 << 20, anon: 80 << 20, pids: []int{14, 15},
+	})
+	// The sampler spends 500 ms of its own CPU inside its first window, which is two
+	// windows' allowance, and nothing at all after that.
+	chargeSelf(t, f, 50, 500)
+	for tick := int64(1); tick < 4*c.smapsEvery; tick++ {
+		c.pass(tick)
+		if tick == c.smapsEvery-1 {
+			e := f.scrape()
+			// Four of the five walk ticks of the spent window waited and two of its
+			// five totals ticks: the floors ran the rest.
+			wantValue(t, e, 4, walkDeferred)
+			wantValue(t, e, 2, totalsDeferred)
+		}
+	}
+
+	// Nothing waited over the three windows after it. The tick that closes a window is still
+	// measured against the window that is ending, so the memory totals of the tenth tick are
+	// the one reading deferred beyond the first window.
+	e := f.scrape()
+	wantValue(t, e, 4, walkDeferred)
+	wantValue(t, e, 3, totalsDeferred)
+	// The cgroup profile went on reading: the command's own numbers are served, under the
+	// kind the walk that read its processes gave it.
+	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	wantValue(t, e, 2, cpuSecondsTotal, build...)
+	wantValue(t, e, 100<<20, memoryResidentBytes, build...)
+}
+
+// A scrape that arrives in the middle of a pass serves each reading as itself: the memory a
+// pair holds now is never the peak beside it. The cgroup profile knows both at once — a
+// command's memory.current and its memory.peak — and handed them over in two calls, so a scrape
+// between the two served memory_resident_bytes as the peak and reset the peak to it, and the
+// window after that counted the same peak a second time (INFRA-1208, the review of pull request
+// 2786). They are one call now (Registry.SetResidentPeakBytes).
+//
+// The scrape is put inside the pass rather than raced against it. The registry calls its clock
+// while it holds its own lock, so a clock that waits there holds the lock with it: the scraping
+// goroutine queues up behind every reading the pass writes and is answered before the next one.
+func TestAScrapeBetweenTwoReadingsOfOnePassServesNeitherAsTheOther(t *testing.T) {
+	f := newPodFixture(t)
+	f.registry = NewPodRegistry(podProject, podIssue, func() time.Time {
+		// Held under the registry's own lock, which is what gives the scrape below its
+		// place between two readings of the pass.
+		time.Sleep(2 * time.Millisecond)
+		return f.clock.now()
+	})
+	f.writeProcesses(2097152, 524288, podTree()...)
+	f.usePodCgroup(1<<30, 9_000_000)
+
+	c := f.collector()
+	c.pass(0)
+	f.writeCommandGroup(commandGroup{
+		name: "implementer-7", microseconds: 2_000_000,
+		current: 100 << 20, peak: 150 << 20, anon: 80 << 20, pids: []int{14, 15},
+	})
+
+	// A reader of its own, scraping as fast as the registry answers for the whole of the
+	// pass that reads the command cgroup.
+	stop, done := make(chan struct{}), make(chan struct{})
+	var scrapes []string
+	var failed error
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			var out strings.Builder
+			if err := f.registry.Write(&out); err != nil {
+				failed = err
+				return
+			}
+			scrapes = append(scrapes, out.String())
+		}
+	}()
+	c.pass(2)
+	close(stop)
+	<-done
+	if failed != nil {
+		t.Fatalf("a scrape could not be written: %v", failed)
+	}
+
+	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	read, peaks := 0, 0
+	for _, text := range scrapes {
+		e := readExposition(t, text)
+		if !e.has(memoryResidentBytes, build...) {
+			continue
+		}
+		read++
+		if got := e.value(t, memoryResidentBytes, build...); got > 100<<20 {
+			t.Fatalf("a scrape served %g bytes as the memory the build holds now, want the %d its memory.current holds and never the %d of its peak:\n%s",
+				got, 100<<20, 150<<20, text)
+		}
+		if e.value(t, memoryResidentPeakBytes, build...) == 150<<20 {
+			peaks++
+		}
+	}
+	// The reader has to have read the pair for any of that to mean anything, and the peak
+	// has to have reached it: it is served as the peak and never as the reading.
+	if read == 0 {
+		t.Fatalf("no scrape of the %d taken during the pass served the build pair at all", len(scrapes))
+	}
+	if peaks == 0 {
+		t.Errorf("no scrape of the %d served the cgroup's own memory.peak as the pair's peak", len(scrapes))
+	}
+}
+
 // A volume several roles mount is one volume: it is read once, at the first path that can be
 // read, and served under one set of labels. Reading each mount would report the same filesystem
 // as many times as it is mounted.
@@ -567,7 +755,9 @@ func TestAVolumeIsServedOnceItPassesAMebibyteAndKeepsItsSeries(t *testing.T) {
 func TestEveryReadErrorIsCountedUnderItsSourceAndThePassGoesOn(t *testing.T) {
 	f := newPodFixture(t)
 	tree := append(podTree(), fakeProcess{pid: 99, parent: 1, args: []string{"sleep"}, unparsable: true})
-	f.writeProcesses(743092, 56, tree...)
+	// The first pass of a walk's life charges nothing, so the tree it finds has spent nothing
+	// yet and the walk at tick 2 charges the whole of it as the rise it is (Walk.Next).
+	f.writeProcesses(743092, 56, sighted(tree)...)
 	// A cgroup file holding something that is no number — the memory one, where the CPU
 	// beside it is there to be read — a roles file that is not there, and a volume mounted
 	// nowhere this sampler can see.
@@ -583,12 +773,18 @@ func TestEveryReadErrorIsCountedUnderItsSourceAndThePassGoesOn(t *testing.T) {
 	for _, pass := range []struct {
 		tick                 int64
 		proc, cgroup, volume float64
-		why                  string
+		// shared is what the pod's processes have been charged by the end of this pass,
+		// under the pair a pod with no roles file has.
+		shared float64
+		why    string
 	}{
-		{0, 2, 1, 1, "the roles file and the unparsable process are both /proc"},
-		{1, 2, 1, 1, "a tick between two memory totals reads the pod's CPU alone, which is there"},
-		{2, 4, 2, 2, "the next walk reads the roles file and the volume again, and the totals tick the memory"},
+		{0, 2, 1, 1, 0, "the roles file and the unparsable process are both /proc"},
+		{1, 2, 1, 1, 0, "a tick between two memory totals reads the pod's CPU alone, which is there"},
+		{2, 4, 2, 2, 0.30, "the next walk reads the roles file and the volume again, and the totals tick the memory"},
 	} {
+		if pass.tick == 2 {
+			f.writeProcesses(743092, 56, tree...)
+		}
 		c.pass(pass.tick)
 		e := f.scrape()
 		wantValue(t, e, pass.proc, readErrorsTotal, string(SourceProc))
@@ -599,12 +795,13 @@ func TestEveryReadErrorIsCountedUnderItsSourceAndThePassGoesOn(t *testing.T) {
 		}
 		// The loop reads on: what could be read is still served. With no roles file to
 		// read, every process stands in no role's subtree, which is role shared — the
-		// walk's own answer for a generation the launcher has not named — and the whole
-		// pod's 45 ticks are charged there, since no process has had its command line
-		// read on the pass that first saw it.
+		// walk's own answer for a generation the launcher has not named.
 		wantValue(t, e, 743092*1024, podProcessMemoryBytes, podProject, podIssue)
-		wantValue(t, e, 0.45, cpuSecondsTotal, podProject, podIssue, RoleShared, string(KindShared))
+		wantValue(t, e, pass.shared, cpuSecondsTotal, podProject, podIssue, RoleShared, string(KindShared))
 	}
+	// The other 15 of the pod's 45 ticks are the build in that subtree, which the walk that
+	// read its command line charged there: a build nobody's role owns is still a build.
+	wantValue(t, f.scrape(), 0.15, cpuSecondsTotal, podProject, podIssue, RoleShared, string(KindBuild))
 	if len(f.log) == 0 {
 		t.Error("nothing was logged about the reads that failed")
 	}

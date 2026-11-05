@@ -432,9 +432,10 @@ func ticksPer(interval, tick time.Duration) int64 {
 // every budget here is measured against: the pass takes that reading once and makes every
 // decision below from it, rather than reading the same file again for each.
 //
-// The smaps window closes on its own tick whether or not that tick deferred anything, since a
-// window that never closes is a window whose allowance never begins again. A window with
-// nothing left to spend reads no process there and says so (readSmaps).
+// The window closes on its own tick in both profiles, whether or not that tick read any smaps
+// and whether or not it deferred anything, since a window that never closes is a window whose
+// allowance never begins again (closeWindow). A window with nothing left to spend reads no
+// process there and says so (readSmaps).
 func (c *podCollector) pass(tick int64) {
 	spent, measured := readSelf(c.reader, c.pageSize, c.opts.Registry, c.failed)
 	left := c.windowLeft(spent, measured)
@@ -447,16 +448,21 @@ func (c *podCollector) pass(tick int64) {
 		c.readVolumes()
 		c.chargeWalk(spent, measured)
 	}
-	// The cgroup profile reads each command cgroup's memory.stat for its anonymous memory, so
-	// the costly per-process read belongs to the /proc profile alone.
-	if !c.cgroups && tick%c.smapsEvery == 0 {
-		c.readSmaps()
+	if tick%c.smapsEvery == 0 {
+		// The cgroup profile reads each command cgroup's memory.stat for its anonymous
+		// memory, so the costly per-process read belongs to the /proc profile alone. The
+		// window is the whole sampler's and closes in both.
+		if !c.cgroups {
+			c.readSmaps()
+		}
+		c.closeWindow()
 	}
 }
 
-// windowLeft is what this window has left of the sampler's own allowance, which is 3% of one
-// CPU (dispatch://INFRA-1208/spec#a3) measured from /proc/self/stat as every budget here is,
-// taken against the reading this pass began with.
+// windowLeft is what this window has left of the sampler's own allowance, which is windowShare
+// of one CPU over the window — 250 ms of every ten seconds, 2.5%, five sixths of the 3% cap
+// (windowAllowance) — measured from /proc/self/stat as every budget here is, taken against the
+// reading this pass began with.
 //
 // A sampler that cannot read its own CPU measures nothing and defers nothing: the walk is the
 // reading the pod's series are made of, and a budget that cannot be measured is no reason to
@@ -649,6 +655,11 @@ func readSelf(reader *procread.Reader, pageSize int64, registry *Registry, faile
 // because the cgroup profile reads a command's kind from the processes in its cgroup and only the
 // walk knows what a process is doing.
 //
+// Every pair the pass found a process of is given the memory those processes hold, and every
+// other pair the registry holds is set to zero: a pair whose processes have all ended holds no
+// memory now, and the last reading of it is not what it holds. Its CPU counter and its place in
+// the hour window are left where they are (Registry.ZeroMemoryExcept).
+//
 // The roles file is handed to the walk's attribution rather than to the walk, since which role
 // owns a process is the one thing an issue pod's pass decides that a node's does not.
 func (c *podCollector) readProcesses() {
@@ -667,9 +678,13 @@ func (c *podCollector) readProcesses() {
 	for work, spent := range pass.CPUSeconds {
 		c.opts.Registry.AddCPUSeconds(c.series(work), spent)
 	}
+	live := make(map[Series]bool, len(pass.ResidentBytes))
 	for work, bytes := range pass.ResidentBytes {
-		c.opts.Registry.SetResidentBytes(c.series(work), bytes)
+		key := c.series(work)
+		live[key] = true
+		c.opts.Registry.SetResidentBytes(key, bytes)
 	}
+	c.opts.Registry.ZeroMemoryExcept(live)
 }
 
 // series is the key one pair of this pod's work is served under: its role and its kind, beside
@@ -770,8 +785,8 @@ func (c *podCollector) volumeUsed(volume Volume) (int64, error) {
 // The budget is the sampler's own CPU and never a share of the wall clock: /proc/self/stat is
 // what the pod is charged for, and a sampler that was descheduled for 300 ms spent none of it.
 //
-// The window closes here, with the reading this pass ends on: what the next window measures its
-// own work against is the CPU the sampler had spent when it stopped reading.
+// The window itself closes after this pass, and in the cgroup profile, which reads no smaps, on
+// its own tick with no pass at all: the allowance is the whole sampler's (closeWindow).
 func (c *podCollector) readSmaps() {
 	order := c.smapsOrder()
 	began, measured := c.selfCPUSeconds()
@@ -802,7 +817,9 @@ func (c *podCollector) readSmaps() {
 	}
 	// Only the pairs this window reached are set: a pair no process of which was read keeps the
 	// value of the window that last read one, which is a reading of its memory from ten or
-	// twenty seconds ago rather than a zero it never held.
+	// twenty seconds ago rather than a zero it never held. A pair with no process at all is
+	// another matter: the walk sets that one to zero on the pass that finds none of it
+	// (readProcesses).
 	for work, bytes := range anonymous {
 		c.opts.Registry.SetAnonymousBytes(c.series(work), bytes)
 	}
@@ -811,6 +828,21 @@ func (c *podCollector) readSmaps() {
 		c.carried = append(c.carried, process.PID)
 	}
 	c.opts.Registry.SetSmapsDeferred(len(c.carried))
+}
+
+// closeWindow ends this window and opens the next: what the next window measures its own work
+// against is the CPU the sampler had spent when this one stopped reading, less whatever this
+// window spent over its allowance (nextWindowCPU).
+//
+// It runs on the window's own tick in both profiles. The window is the whole sampler's
+// allowance and not the smaps pass's, and the cgroup profile reads no smaps at all: closing it
+// in readSmaps alone left that profile with a window that never ended, so once the sampler had
+// spent the 250 ms of its first window, windowLeft stayed at or below zero for the rest of its
+// life — the walk and the cgroup pass ran at the ten-second floor, the memory totals at four
+// seconds, and both deferral counters rose for ever (INFRA-1208, the review of pull request
+// 2786: walk_deferred 116 and totals_deferred 72 over 300 ticks, against 28 and 0 in the /proc
+// profile).
+func (c *podCollector) closeWindow() {
 	spent, measured := c.selfCPUSeconds()
 	c.windowCPU, c.windowMeasured = c.nextWindowCPU(spent, measured), measured
 }
@@ -983,13 +1015,12 @@ func (c *podCollector) chargeCgroupMemory(now time.Time) {
 		anonymous[reading.work] += reading.group.AnonBytes
 	}
 	for work, bytes := range resident {
-		// The peak goes in first and the reading of this moment second: the registry keeps
-		// the most it was handed since the last scrape beside the last value handed to it,
-		// so this serves the memory the pair holds now and the most it held in between.
-		if high := peak[work]; high > bytes {
-			c.opts.Registry.SetResidentBytes(c.series(work), high)
-		}
-		c.opts.Registry.SetResidentBytes(c.series(work), bytes)
+		// The reading of this moment and the most the pair is known to have held since
+		// the last scrape are handed over together, under one lock: set in two calls, a
+		// scrape that arrived between them served the peak as the memory the pair holds
+		// now and reset the peak to it, so the window after it counted that peak again
+		// (Registry.SetResidentPeakBytes).
+		c.opts.Registry.SetResidentPeakBytes(c.series(work), bytes, peak[work])
 	}
 	for work, bytes := range anonymous {
 		c.opts.Registry.SetAnonymousBytes(c.series(work), bytes)

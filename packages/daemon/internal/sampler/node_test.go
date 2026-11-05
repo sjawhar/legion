@@ -138,6 +138,24 @@ func (f *nodeFixture) writeProcesses(processes ...nodeProc) {
 	f.writeSmaps(samplerPID, nodeSelfAnonymousKB, 0o644)
 }
 
+// settle drives the two passes a node's numbers are read from, with these processes. The first
+// pass of a walk's life records what /proc already holds as already charged and charges nothing
+// of it (Walk.Next), so the processes are written with every counter at zero for that pass and
+// as the test wrote them for the pass after it, which charges the whole of each counter as the
+// rise it is. The resident pages stand in both, since memory is a reading of a moment and not a
+// rise.
+func (f *nodeFixture) settle(c *nodeCollector, processes ...nodeProc) {
+	f.t.Helper()
+	sighting := slices.Clone(processes)
+	for i := range sighting {
+		sighting[i].own, sighting[i].reaped = 0, 0
+	}
+	f.writeProcesses(sighting...)
+	c.pass(0)
+	f.writeProcesses(processes...)
+	c.pass(2)
+}
+
 // writeSmaps is one process's smaps holding this much anonymous memory. The grade pods' own are
 // written unreadable: on a node the sampler may not read another user's smaps, and a test whose
 // fixture allowed it would prove nothing about a sampler that never asks.
@@ -364,22 +382,22 @@ func TestAPodTakesTheQueueAndTheOwnerOfItsJobWhereItsOwnLabelsCarryNone(t *testi
 	f.addPod(ownedBy(nodePodObject("grade-run-7-ab12", buildPodUID, nil), "grade-run-7"))
 	f.addPod(ownedBy(nodePodObject("grade-run-8-cd34", testPodUID,
 		map[string]string{queueLabel: "pod-queue", ownerLabel: "the-pod"}), "grade-run-8"))
-	f.writeProcesses(
-		nodeProc{
+	processes := []nodeProc{
+		{
 			fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 50, pages: 300,
 				args: []string{"go", "build", "./..."}},
 			cgroup: container(systemdPod(buildPodUID, "burstable"), "aa11"),
 		},
-		nodeProc{
+		{
 			fakeProcess: fakeProcess{pid: 200, parent: 1, start: 1000, own: 25, pages: 100,
 				args: []string{"pytest", "-q"}},
 			cgroup: container(cgroupfsPod(testPodUID, "besteffort"), "bb22"),
 		},
-	)
+	}
 
 	c := f.collector(f.options())
 	f.list(c)
-	c.pass(0)
+	f.settle(c, processes...)
 
 	e := f.scrape()
 	wantValue(t, e, 0.5, gradeCPUSecondsTotal,
@@ -497,24 +515,24 @@ func TestAProcessIsReadIntoItsPodUnderBothCgroupDrivers(t *testing.T) {
 	f.addPod(nodePodObject("grade-systemd", buildPodUID, map[string]string{ownerLabel: "alice"}))
 	f.addPod(nodePodObject("grade-cgroupfs", testPodUID, map[string]string{ownerLabel: "bob"}))
 	systemd, cgroupfs := systemdPod(buildPodUID, "burstable"), cgroupfsPod(testPodUID, "besteffort")
-	f.writeProcesses(
-		nodeProc{
+	processes := []nodeProc{
+		{
 			fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 50, pages: 300,
 				args: []string{"go", "build", "./..."}},
 			cgroup: container(systemd, "aa11"),
 		},
-		nodeProc{
+		{
 			fakeProcess: fakeProcess{pid: 200, parent: 1, start: 1000, own: 25, pages: 100,
 				args: []string{"go", "build", "./..."}},
 			cgroup: container(cgroupfs, "bb22"),
 		},
-	)
+	}
 	f.writePodCgroup(systemd, 1<<30, 2_000_000)
 	f.writePodCgroup(cgroupfs, 2<<30, 4_000_000)
 
 	c := f.collector(f.options())
 	f.list(c)
-	c.pass(0)
+	f.settle(c, processes...)
 
 	e := f.scrape()
 	page := int64(os.Getpagesize())
@@ -535,22 +553,22 @@ func TestAPodsWorkIsBuildTestOrOther(t *testing.T) {
 	f := newNodeFixture(t)
 	f.addPod(nodePodObject("grade-run-7-ab12", buildPodUID, map[string]string{ownerLabel: "alice"}))
 	pod := container(systemdPod(buildPodUID, "burstable"), "aa11")
-	f.writeProcesses(
-		nodeProc{fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 1, pages: 10,
+	processes := []nodeProc{
+		{fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 1, pages: 10,
 			args: []string{"/sbin/docker-init", "--"}}, cgroup: pod},
-		nodeProc{fakeProcess: fakeProcess{pid: 101, parent: 100, start: 1000, own: 20, pages: 100,
+		{fakeProcess: fakeProcess{pid: 101, parent: 100, start: 1000, own: 20, pages: 100,
 			args: []string{"go", "build", "./..."}}, cgroup: pod},
-		nodeProc{fakeProcess: fakeProcess{pid: 102, parent: 101, start: 1000, own: 30, pages: 200,
+		{fakeProcess: fakeProcess{pid: 102, parent: 101, start: 1000, own: 30, pages: 200,
 			args: []string{"/usr/lib/go/pkg/tool/linux_amd64/compile", "-o", "a.out"}}, cgroup: pod},
-		nodeProc{fakeProcess: fakeProcess{pid: 103, parent: 100, start: 1000, own: 40, pages: 300,
+		{fakeProcess: fakeProcess{pid: 103, parent: 100, start: 1000, own: 40, pages: 300,
 			args: []string{"pytest", "-q"}}, cgroup: pod},
-		nodeProc{fakeProcess: fakeProcess{pid: 104, parent: 100, start: 1000, own: 5, pages: 50,
+		{fakeProcess: fakeProcess{pid: 104, parent: 100, start: 1000, own: 5, pages: 50,
 			args: []string{"bash", "-lc", "sleep 60"}}, cgroup: pod},
-	)
+	}
 
 	c := f.collector(f.options())
 	f.list(c)
-	c.pass(0)
+	f.settle(c, processes...)
 
 	e := f.scrape()
 	labels := func(kind Kind) []string {
@@ -565,6 +583,42 @@ func TestAPodsWorkIsBuildTestOrOther(t *testing.T) {
 	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(KindBuild)...)
 	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(KindTest)...)
 	wantValue(t, e, float64(60*page), gradeMemoryResidentBytes, labels(KindOther)...)
+}
+
+// A kind a pass of the node found no process of holds no memory, as an issue pod's pair does: a
+// pod whose build has ended holds no build memory now, whatever the last reading of it was, and
+// a sampler that went on serving that reading reported memory the node had long since given back
+// (INFRA-1208, the review of pull request 2786). The kind's CPU counter stands where it stopped
+// and its series stay in the output until the hour window drops them.
+func TestAGradePodsEndedWorkHoldsNoMemory(t *testing.T) {
+	f := newNodeFixture(t)
+	f.addPod(nodePodObject("grade-run-7-ab12", buildPodUID, map[string]string{ownerLabel: "alice"}))
+	pod := container(systemdPod(buildPodUID, "burstable"), "aa11")
+	shell := nodeProc{fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 5, pages: 50,
+		args: []string{"bash", "-lc", "sleep 60"}}, cgroup: pod}
+	build := nodeProc{fakeProcess: fakeProcess{pid: 101, parent: 100, start: 1000, own: 50, pages: 300,
+		args: []string{"go", "build", "./..."}}, cgroup: pod}
+	labels := func(kind Kind) []string {
+		return []string{"grade-run-7-ab12", gradeNamespace, string(kind), "", "alice"}
+	}
+	page := int64(os.Getpagesize())
+
+	c := f.collector(f.options())
+	f.list(c)
+	f.settle(c, shell, build)
+	e := f.scrape()
+	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(KindBuild)...)
+	wantValue(t, e, 0.5, gradeCPUSecondsTotal, labels(KindBuild)...)
+
+	// The build ends and the shell that started it runs on: the pod holds the shell's pages
+	// and none of the build's.
+	f.writeProcesses(shell)
+	c.pass(4)
+
+	e = f.scrape()
+	wantValue(t, e, 0, gradeMemoryResidentBytes, labels(KindBuild)...)
+	wantValue(t, e, 0.5, gradeCPUSecondsTotal, labels(KindBuild)...)
+	wantValue(t, e, float64(50*page), gradeMemoryResidentBytes, labels(KindOther)...)
 }
 
 // Node mode reads no grade pod's smaps. Another user's is refused without rights the read-only
@@ -633,20 +687,19 @@ func useAnonymousReader(t *testing.T) *[]int {
 func TestNodeModeReadsACommandLineOnlyForAPodsOwnProcesses(t *testing.T) {
 	f := newNodeFixture(t)
 	f.addPod(nodePodObject("grade-run-7-ab12", buildPodUID, map[string]string{ownerLabel: "alice"}))
-	f.writeProcesses(
-		nodeProc{fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 50, pages: 300,
+	processes := []nodeProc{
+		{fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 50, pages: 300,
 			args: []string{"go", "build", "./..."}},
 			cgroup: container(systemdPod(buildPodUID, "burstable"), "aa11")},
-		nodeProc{fakeProcess: fakeProcess{pid: 200, parent: 1, start: 1000, own: 25, pages: 100,
+		{fakeProcess: fakeProcess{pid: 200, parent: 1, start: 1000, own: 25, pages: 100,
 			args: []string{"/usr/bin/containerd"}},
 			cgroup: "/system.slice/containerd.service"},
-	)
+	}
 	read := cmdlineReads(t)
 
 	c := f.collector(f.options())
 	f.list(c)
-	c.pass(0)
-	c.pass(2)
+	f.settle(c, processes...)
 
 	if want := []int{100}; !slices.Equal(*read, want) {
 		t.Errorf("the passes read a command line for %v, want the %v of this node's own pods", *read, want)
