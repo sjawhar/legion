@@ -22,9 +22,12 @@
 #       production address the deployment file names is refused from every machine. Exit 1 on
 #       any difference.
 #   vm.sh seed --config FILE [--run ID] [--embed-timeout 8h] [--workers 8]
-#       loop-seed-plan, loop-seed-write (on the load machine), loop-seed-check, loop-seed-export
-#       and seed-finish with the embedding gate (-url), each phase's wall clock and the gate's
-#       coverage progress recorded in <run>/seed.json; then the template database.
+#       Both seeds a step draws on: loop-seed-plan, loop-seed-write (on the load machine),
+#       loop-seed-check and loop-seed-export, then the baseline population's own seed (`loadgen
+#       seed` on the load machine, into <remote_work>/seed.json), then seed-finish with the
+#       embedding gate (-url), whose one wait covers the items of both seeds; each phase's wall
+#       clock and the gate's coverage progress recorded in <run>/seed.json; then the template
+#       database.
 #   vm.sh reset --config FILE [--run ID]
 #       The whole reset of decision D6, in order, its duration recorded.
 #   vm.sh step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]
@@ -58,8 +61,8 @@
 # any number of machines, each with the address the others reach it at and its Compute instance
 # name. Two of them have a role this script's own work depends on, and the file names both:
 #
-#   the load machine, .load_vm: loadgen is installed there, `loop-seed-write` and every
-#   `loadgen run` run there, the stub embedder serves from there, <paths.remote_work> is there,
+#   the load machine, .load_vm: loadgen is installed there, both seed writers -- loop-seed-write
+#   and seed -- and every `loadgen run` run there, the stub embedder serves from there,
 #   and the near end of a step's profiling tunnel listens there;
 #   the machine Dispatch runs on, which .containers.dispatch names, so the file says it once and
 #   cannot say it twice over: it is the far end of that tunnel, the machine a step fetches its
@@ -125,13 +128,13 @@
 # (put_file) where it belongs on another machine.
 #
 # Which file is written where follows the machine the command runs on. The commands that run on
-# the load machine -- loop-seed-write, loadgen run and the stub embedder -- read theirs from the
-# run's own directory there (remote_secret, endpoints, stub_embed_start): the agent token, the
-# listener token, the Postgres URL with its password and the embedder's api-key. The seed phases
-# that run on this pod -- loop-seed-check, loop-seed-export and seed-finish -- read theirs from
-# the run's directory here (local_secret), and each is removed when the seed ends, as the
-# passfile is removed with the psql call that read it. `down` removes the load machine's, so a
-# deployment that is turned off leaves no token and no password on a disk that outlives it.
+# the load machine -- loop-seed-write, seed, loadgen run and the stub embedder -- read theirs
+# from the run's own directory there (remote_secret, endpoints, stub_embed_start): the agent
+# token, the listener token, the Postgres URL with its password and the embedder's api-key. The
+# seed phases that run on this pod -- loop-seed-check, loop-seed-export and seed-finish -- read
+# theirs from the run's directory here (local_secret), and each is removed when the seed ends,
+# as the passfile is removed with the psql call that read it. `down` removes the load machine's,
+# so a deployment that is turned off leaves no token and no password on a disk that outlives it.
 #
 # Dispatch's identity is DISPATCH_IDENTITY=header:X-Dispatch-User with
 # DISPATCH_IDENTITY_HEADER_TRUSTED=1 and a shared agent token, as stack.sh's start_dispatch sets
@@ -167,27 +170,42 @@
 # token_url, sqladmin, compute, iamcredentials and oslogin (the Google endpoints, for a test
 # server), and the whole of load (below).
 #
-# The load a step sends, from R5. The baseline is dispatch://INFRA-598's 1x, which every step
-# carries as it is; the loop's own rates are multiplied by the step's factor, so a step at factor
-# F sends baseline.events + loop.writes x F events a second, baseline.requests + loop.reads x F
-# requests a second, baseline.sessions flat sessions and loop.unit_starts x F unit starts a
-# second. load's defaults, each from R5: {"baseline": {"events": 4, "requests": 60, "sessions":
-# 400, "event_mix": "production-2026-10-26", "route_mix": ""}, "loop": {"writes": 3.5, "reads":
-# 38.5, "unit_starts": 1.75, "event_mix": "spec-loop-2026-11-03", "route_mix":
-# "routes-spec-loop-2026-11-03.txt"}, "unit_life": "5m", "driver_topics": 614,
-# "receipt_deadline": "1s", "session_delivery": "consumer"}. A step at factor 0 is the baseline
-# alone and takes the baseline's mixes; every step above it takes the loop's. The sessions take
-# their messages through the listener's relay of their consumers, which is the delivery R5 names
-# ("each listener uses the consumer delivery the Envoy plugin uses").
+# The load a step sends, from R5 and R7. A step drives two populations at once, because the
+# question this issue asks is whether production Dispatch carries the spec loop's load on top of
+# production's own usual traffic:
 #
-# A route_mix is a file, and `loadgen run` reads it on the machine it runs on. The deployment
-# file names it by a bare name, which is read from this package's own directory here -- the one
-# holding routes-spec-loop-2026-11-03.txt -- or by an absolute path, which is taken as given; a
-# step puts that file in <remote_work> on the load machine and gives loadgen run the copy
-# (push_route_mix). Nothing else carries it there, so a setting that names no file on this pod
-# is refused with the deployment file's other values, before a container or a step is touched
+#   the baseline population, dispatch://INFRA-598's 1x, which every step carries as it is: its
+#   writes are drawn from seed.json's issues with the baseline's mix (production-2026-10-26:
+#   comment, anchored, reply, edit and upload) and its reads from the production routes `loadgen
+#   run` holds embedded;
+#   the loop population, whose rates are multiplied by the step's factor: its writes are drawn
+#   from the loop seed's proposals with the loop's mix (spec-loop-2026-11-03) and its reads from
+#   the loop's own route mix.
+#
+# So a step at factor F offers baseline.events + loop.writes x F events a second, of which
+# baseline.events are production's own, baseline.requests + loop.reads x F requests a second, of
+# which baseline.requests are production's own, baseline.sessions flat sessions and
+# loop.unit_starts x F unit starts a second. Every step names both seeds, both event mixes and
+# both portions, factor 0 included: a step at factor 0 is the baseline alone because the loop's
+# share of its rates is 0, not because it sends the loop nothing to draw from, and `loadgen run`
+# counts the two populations apart and together, so the report shows production's own writes
+# beside the loop's at every factor. load's defaults, each from R5: {"baseline": {"events": 4,
+# "requests": 60, "sessions": 400, "event_mix": "production-2026-10-26"}, "loop": {"writes":
+# 3.5, "reads": 38.5, "unit_starts": 1.75, "event_mix": "spec-loop-2026-11-03", "route_mix":
+# "routes-spec-loop-2026-11-03.txt"}, "unit_life": "5m", "driver_topics": 614,
+# "receipt_deadline": "1s", "session_delivery": "consumer"}. The sessions take their messages
+# through the listener's relay of their consumers, which is the delivery R5 names ("each
+# listener uses the consumer delivery the Envoy plugin uses").
+#
+# The loop's route_mix is a file, and `loadgen run` reads it on the machine it runs on. The
+# deployment file names it by a bare name, which is read from this package's own directory here
+# -- the one holding routes-spec-loop-2026-11-03.txt -- or by an absolute path, which is taken as
+# given; a step puts that file in <remote_work> on the load machine and gives loadgen run the
+# copy (push_route_mix). Nothing else carries it there, so a setting that names no file on this
+# pod is refused with the deployment file's other values, before a container or a step is touched
 # (check_route_mixes): a step started without its mix dies at its first second with its whole
-# window booked.
+# window booked. The baseline population has no route mix of this file's: -route-mix is the
+# loop's reads alone.
 #
 # The run directory is ${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>: state.json
 # (mode 600, the deployment file's values that the run was started with), the run's OS Login
@@ -519,18 +537,15 @@ route_mix_path() {
   esac
 }
 
-# route_mix_value WHICH: the route mix the deployment file gives the baseline or the loop, as
-# the file names it. Empty is no mix at all, which leaves loadgen its own committed default.
-route_mix_value() {
-  case $1 in
-    loop) load_value loop.route_mix routes-spec-loop-2026-11-03.txt ;;
-    *) load_value baseline.route_mix "" ;;
-  esac
-}
+# loop_route_mix: the route mix the deployment file gives the loop population, as the file names
+# it. Empty is no mix at all, which leaves loadgen its own committed default. The baseline
+# population has none of its own: its reads are production's, which `loadgen run` holds embedded
+# (routes-2026-10-26-1719Z.txt), and -route-mix carries the loop's reads alone.
+loop_route_mix() { load_value loop.route_mix routes-spec-loop-2026-11-03.txt; }
 
-# check_route_mixes: every route mix the deployment file names is a readable file here, refused
-# by name with the deployment's other values, before a container or a step is touched. A route
-# mix is a file, and `loadgen run` reads the one -route-mix names on the machine it runs on
+# check_route_mixes: the route mix the deployment file names is a readable file here, refused by
+# name with the deployment's other values, before a container or a step is touched. A route mix
+# is a file, and `loadgen run` reads the one -route-mix names on the machine it runs on
 # (routes.go loadRouteMix): a step puts it on the load machine first (push_route_mix), and a
 # setting that names no file on this pod is one no step can be given. Refusing it here is the
 # point of the check -- an hour-long step that starts without its mix dies at its first second
@@ -538,18 +553,16 @@ route_mix_value() {
 # name, which is a path element there, so that name is held to the shape every value that
 # reaches a command line is held to.
 check_route_mixes() {
-  local which value path name
-  for which in baseline loop; do
-    value=$(route_mix_value "$which")
-    [ -n "$value" ] || continue
-    path=$(route_mix_path "$value")
-    if [ ! -f "$path" ] || [ ! -r "$path" ]; then
-      die "the deployment file $CONFIG gives load.$which.route_mix as '$value', which is no readable file on this pod: $path. A route mix is read by the loadgen that runs on the $LOAD_VM VM, out of the copy a step puts there from this file, so a step would read no route mix and end at its first second. Name a file of $PACKAGE_DIR, or an absolute path on this pod."
-    fi
-    name=${path##*/}
-    valid name "$name" ||
-      die "the deployment file $CONFIG gives load.$which.route_mix as '$value', whose file name '$name' is the name a step writes the copy on the $LOAD_VM VM under: it holds letters, digits, '.', '_' and '-', and at most 63 of them"
-  done
+  local value path name
+  value=$(loop_route_mix)
+  [ -n "$value" ] || return 0
+  path=$(route_mix_path "$value")
+  if [ ! -f "$path" ] || [ ! -r "$path" ]; then
+    die "the deployment file $CONFIG gives load.loop.route_mix as '$value', which is no readable file on this pod: $path. A route mix is read by the loadgen that runs on the $LOAD_VM VM, out of the copy a step puts there from this file, so a step would read no route mix and end at its first second. Name a file of $PACKAGE_DIR, or an absolute path on this pod."
+  fi
+  name=${path##*/}
+  valid name "$name" ||
+    die "the deployment file $CONFIG gives load.loop.route_mix as '$value', whose file name '$name' is the name a step writes the copy on the $LOAD_VM VM under: it holds letters, digits, '.', '_' and '-', and at most 63 of them"
 }
 
 # container_vm ROLE: the machine ROLE runs on, as check_placement read it.
@@ -574,6 +587,11 @@ nats_store() { cfg_valid path .paths.nats_store "$(remote_root)/nats"; }
 cert_path() { cfg_valid path .paths.cert "$(remote_root)/stub-embed.pem"; }
 remote_loadgen() { cfg_valid path .paths.remote_loadgen "$(remote_root)/loadgen"; }
 remote_work() { cfg_valid path .paths.remote_work "$(remote_root)/work"; }
+
+# production_seed: the baseline population's own seed on the load machine, beside the loop seed.
+# `loadgen seed` writes it there (cmd_seed's production-seed phase) and every `loadgen run`
+# reads it there as -seed, since loadgen opens both seeds on the machine it runs on.
+production_seed() { printf '%s/seed.json\n' "$(remote_work)"; }
 
 # pg_url DATABASE: the direct Postgres URL of one database on the instance, its password in it.
 # It is what loadgen reads out of its -pg-file, and it reaches no command line (endpoints for
@@ -1522,6 +1540,12 @@ cmd_seed() {
   seed_phase check loadgen_local loop-seed-check -plan "$plan" -pg-file "$pg_file"
   seed_phase export loadgen_local loop-seed-export -plan "$plan" -pg-file "$pg_file" -out "$seed"
   seed_phase push-seed put_file "$LOAD_VM" "$seed" "$work/loopseed.seed.json"
+  # The baseline population's own seed, beside the loop's: a step draws production's share of
+  # its writes from seed.json's issues and the loop's share from loopseed.seed.json, so the
+  # deployment holds both. It runs before the gate below, so the one wait covers the items of
+  # both seeds: the coverage report the gate reads counts every searchable row of the
+  # deployment, by kind, and not one seed's (seedfinish.go's searchCoveragePath).
+  seed_phase production-seed seed_production "$work" "$workers"
   # The embedding gate: seed-finish with -url also waits for meaning search to embed the seed,
   # and -embed-progress records the coverage's progress while it waits (R4's "the seed is
   # complete, its embeddings included").
@@ -1551,6 +1575,47 @@ seed_template() {
   done
   psql_at postgres "alter database $(cfg .cloudsql.database dispatch) rename to $1" >/dev/null ||
     die "renaming the seeded database to $1 failed"
+}
+
+# seed_production WORK WORKERS: the baseline population's seed -- `loadgen seed`: 4 projects,
+# 1,000 issues, 8 comments an issue with every second one anchored -- written against the
+# deployment and left in WORK/seed.json on the load machine, beside the loop seed. It runs on
+# that machine, as loop-seed-write does, because `loadgen run` opens -seed where it runs and
+# because the credentials it needs are already there in files of mode 600 (endpoints), so none
+# of them reaches a command line.
+#
+# It is idempotent, as the phases around it are: a seed.json already on that machine with the
+# deployment's own shape is left as it is. Writing it again would make a second thousand issues
+# that no session is routed to, and the hour it takes is an hour of the deployment's 72.
+seed_production() {
+  # path is assigned on a line of its own: the words of a `local` are expanded before the
+  # builtin runs, so a $work in it would read the caller's variable and not this one's.
+  local work=$1 workers=$2 path sessions
+  path=$work/seed.json
+  sessions=$(load_value baseline.sessions 400)
+  valid number "$sessions" ||
+    die "the deployment file $CONFIG gives .load.baseline.sessions as '$sessions', which is not a number"
+  if production_seed_shape "$path" "$sessions"; then
+    note "seed: the $LOAD_VM VM holds $path with the deployment's own shape already; it is not written again"
+    return 0
+  fi
+  on_vm_for 86400 "$LOAD_VM" "$(remote_loadgen)" seed -out "$path" -workers "$workers" "${ENDPOINTS[@]}"
+}
+
+# production_seed_shape PATH SESSIONS: the load machine's PATH is a seed.json of the shape a
+# step reads. That is the shape `loadgen run` holds it to -- projects, and issues each with a
+# key and the route the seed gave it (seed.go readSeed) -- with at least SESSIONS issues, since
+# session i works on issue i modulo the issues the seed holds (run.go newStep) and a seed
+# smaller than the step's own session count is a smaller deployment than the baseline's. A file
+# that is not there, that is not readable JSON, or that holds any less, is no seed to keep.
+production_seed_shape() {
+  local path=$1 sessions=$2 json
+  json=$(on_vm "$LOAD_VM" cat -- "$path" 2>/dev/null) || return 1
+  jq -e --argjson sessions "$sessions" '
+    (.projects | type == "array" and length > 0)
+    and (.issues | type == "array" and length >= $sessions)
+    and all(.issues[]; (.key | type == "string" and length > 0) and (.route | type == "string" and length > 0))
+  ' >/dev/null 2>&1 <<<"$json"
 }
 
 # ---- reset ------------------------------------------------------------------------------------------
@@ -1657,16 +1722,31 @@ sampler_targets() {
 
 # sampler_start: loadgen vm-sample over every machine of the deployment, appending to the run's
 # cgroup.jsonl, its pid in SAMPLER_PID.
+#
+# The binary is started here rather than through loadgen_local, because loadgen_local is a shell
+# function and a function backgrounded with & runs in a subshell of its own: $! is that
+# subshell's pid and not the sampler's. The TERM sampler_stop sent then ended the subshell, wait
+# returned at once, the step reported a clean stop -- and the sampler itself was orphaned and
+# went on reading every machine and appending to the same cgroup.jsonl. Four of them were found
+# alive on this pod after four steps, so a later step's window held rows several samplers wrote
+# at once and loadgen cgroup-merge read duplicated per-container CPU for it, which is where the
+# report's per-step CPU rows come from (dispatch://INFRA-988). A simple command with an
+# assignment before it is execed by the very process & forked, so SAMPLER_PID is now the
+# sampler's own pid: the TERM reaches the binary and wait reaps it.
 sampler_start() {
+  local bin
   sampler_targets
   ssh_cmd
-  loadgen_local vm-sample -out "$CGROUP_JSONL" -ssh "${SSH[*]}" "${SAMPLER_TARGETS[@]}" \
+  bin=$(loadgen_bin)
+  LOADTEST_ROOT=$RUN_DIR "$bin" vm-sample -out "$CGROUP_JSONL" -ssh "${SSH[*]}" "${SAMPLER_TARGETS[@]}" \
     >>"$RUN_DIR/logs/vm-sample.log" 2>&1 &
   SAMPLER_PID=$!
   note "the sampler reads $((${#SAMPLER_TARGETS[@]} / 2)) machines of this deployment into $CGROUP_JSONL (pid $SAMPLER_PID)"
 }
 
-# sampler_stop: the sampler ended, which it does on SIGTERM.
+# sampler_stop: the sampler ended, which it does on SIGTERM, and reaped. SAMPLER_PID is the
+# binary's own pid (sampler_start), so the signal reaches the process that reads the machines
+# and wait returns when that process is gone rather than when a subshell above it is.
 sampler_stop() {
   [ -n "${SAMPLER_PID:-}" ] || return 0
   kill -TERM "$SAMPLER_PID" 2>/dev/null || true
@@ -1814,9 +1894,15 @@ step_cleanup() {
 # load_value FILTER DEFAULT: one number or word of the deployment file's load object.
 load_value() { cfg ".load.$1" "$2"; }
 
-# step_rates FACTOR: the step's offered rates, into EVENTS, REQUESTS, SESSIONS, UNIT_STARTS. The
-# baseline is carried as it is at every factor and the loop's own rates are multiplied by the
-# factor (R5), so factor 0 is the baseline alone.
+# step_rates FACTOR: the step's offered rates, into EVENTS, REQUESTS, SESSIONS and UNIT_STARTS,
+# with the baseline population's own portion of the first two into BASELINE_EVENTS and
+# BASELINE_REQUESTS. The baseline is carried as it is at every factor and the loop's own rates
+# are multiplied by the factor (R5, R7), so a step at factor F offers production's own traffic
+# plus F times the loop's, and factor 0 is the baseline alone. EVENTS and REQUESTS are the
+# step's totals, which is what `loadgen run` takes: of each total the baseline's portion is
+# drawn from seed.json with the baseline's mix and the remainder is the loop's, drawn from the
+# loop seed with the loop's. A portion is never above its total, since both rates of the loop
+# are numbers of this file and no number of it is negative (valid number).
 step_rates() {
   local f=$1 be br bs lw lr lu
   be=$(load_value baseline.events 4) br=$(load_value baseline.requests 60) bs=$(load_value baseline.sessions 400)
@@ -1827,25 +1913,26 @@ step_rates() {
     valid number "${v#*=}" ||
       die "the deployment file $CONFIG gives .load.${v%%=*} as '${v#*=}', which is not a number"
   done
+  BASELINE_EVENTS=$be
+  BASELINE_REQUESTS=$br
   EVENTS=$(awk -v b="$be" -v l="$lw" -v f="$f" 'BEGIN { printf "%g", b + l * f }')
   REQUESTS=$(awk -v b="$br" -v l="$lr" -v f="$f" 'BEGIN { printf "%g", b + l * f }')
   SESSIONS=$bs
   UNIT_STARTS=$(awk -v l="$lu" -v f="$f" 'BEGIN { printf "%g", l * f }')
 }
 
-# step_mixes FACTOR: the step's -event-mix and -route-mix, into EVENT_MIX and ROUTE_MIX. A step at
-# factor 0 is the baseline alone and takes the baseline's mixes; every step above it takes the
-# loop's, which carry the loop's three write kinds and seven read routes. ROUTE_MIX is the mix
-# as the deployment file names it; what loadgen is given is the copy on the load machine
-# (push_route_mix).
+# step_mixes: the step's three mixes, into EVENT_MIX, LOOP_EVENT_MIX and ROUTE_MIX. Every step
+# sends both populations, so every step names both event mixes and chooses between neither:
+# EVENT_MIX is the baseline population's, production's own five write kinds on seed.json's
+# issues, and LOOP_EVENT_MIX the loop population's, its three kinds on the loop seed's
+# proposals. A step at factor 0 names them both too, and sends the loop nothing because its
+# loop rates are 0. ROUTE_MIX is the loop population's reads, as the deployment file names the
+# file; what loadgen is given is the copy on the load machine (push_route_mix). The baseline's
+# reads need no mix here: they are the production routes loadgen holds embedded.
 step_mixes() {
-  if awk -v f="$1" 'BEGIN { exit !(f > 0) }'; then
-    EVENT_MIX=$(load_value loop.event_mix spec-loop-2026-11-03)
-    ROUTE_MIX=$(route_mix_value loop)
-  else
-    EVENT_MIX=$(load_value baseline.event_mix production-2026-10-26)
-    ROUTE_MIX=$(route_mix_value baseline)
-  fi
+  EVENT_MIX=$(load_value baseline.event_mix production-2026-10-26)
+  LOOP_EVENT_MIX=$(load_value loop.event_mix spec-loop-2026-11-03)
+  ROUTE_MIX=$(loop_route_mix)
 }
 
 # push_route_mix VALUE WORK: the route-mix file VALUE names, put in WORK on the load machine,
@@ -1919,9 +2006,9 @@ run_step() {
   fi
   work=$(remote_work) remote=$(remote_loadgen)
   step_rates "$factor"
-  step_mixes "$factor"
+  step_mixes
   mkdir -p -- "$dir" "$RUN_DIR/logs"
-  note "step $name: factor $factor, $EVENTS events/s, $REQUESTS requests/s, $SESSIONS sessions, $UNIT_STARTS unit starts/s, window $duration after $warmup"
+  note "step $name: factor $factor, $EVENTS events/s ($BASELINE_EVENTS of them production's own), $REQUESTS requests/s ($BASELINE_REQUESTS production's own), $SESSIONS sessions, $UNIT_STARTS unit starts/s, window $duration after $warmup"
   # The mix the requests are drawn from is read on the load machine, so it goes there before
   # the load does; check_route_mixes has already proven this pod holds the file.
   ROUTE_MIX_REMOTE=""
@@ -1942,15 +2029,21 @@ run_step() {
     die "step $name is refused: $TUNNEL_REFUSAL Without the profiling tunnel loadgen's sampler reads no goroutines, no pool acquire waiters and no heap while the step runs, so pass criterion (e), Dispatch's pool acquire waiters p50 = 0, is FAIL for want of a measurement and the step measures nothing. Its directory is removed, so the step runs again under its own name once the tunnel can be opened."
   fi
   sampler_start
+  # Both populations, in one step: -events and -requests are the step's totals, of which
+  # -baseline-events and -baseline-requests are drawn from the production seed (-seed) with the
+  # baseline's mix, and the rest from the loop seed (-loop-seed) with the loop's
+  # (-loop-event-mix). A step at factor 0 carries both all the same; its loop portion is 0.
   local args=(
     run -name "$name" -out "$work/steps/$name"
+    -seed "$(production_seed)"
+    -baseline-events "$BASELINE_EVENTS" -baseline-requests "$BASELINE_REQUESTS"
     -loop-seed "$work/loopseed.seed.json" -loop-factor "$factor"
     -generator-role "vm-$(vm_host "$LOAD_VM")"
     -events "$EVENTS" -requests "$REQUESTS" -sessions "$SESSIONS"
     -unit-starts "$UNIT_STARTS" -unit-life "$(load_value unit_life 5m)"
     -loop-listeners "$(loop_listener_urls)" -driver-topics "$(load_value driver_topics 614)"
     -receipt-deadline "$(load_value receipt_deadline 1s)"
-    -event-mix "$EVENT_MIX"
+    -event-mix "$EVENT_MIX" -loop-event-mix "$LOOP_EVENT_MIX"
     -duration "$duration" -warmup "$warmup" -grace 20s
     -session-delivery "$(load_value session_delivery consumer)"
   )

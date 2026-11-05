@@ -38,20 +38,24 @@
 # a credential; (f) reset runs decision D6's steps in order -- the Dispatch and listener
 # containers stopped, the database dropped and made again from the template, NATS restarted on
 # an emptied JetStream store, the four load listeners and the Dispatch listener, then Dispatch,
-# then /healthz -- and records its duration; (g) step passes the loop's flags to loadgen run
-# (-loop-seed, -loop-factor, -generator-role, -unit-starts, -unit-life, -loop-listeners,
-# -driver-topics, -receipt-deadline and -event-mix), with the rates the factor gives, gives
-# -route-mix a file it has itself put on the load machine and that holds the loop's routes
-# there, read off the step's own argument rather than off the deployment file's setting,
-# fetches the profile from Dispatch's own machine and runs cgroup-merge, cloudsql-cpu and
-# tables, and is refused -- naming the setting and the path it resolved to, with no load sent --
-# when the route_mix names no file on this pod;
-# (h) a step at factor 0 is the baseline alone, at the baseline's own rates and mixes; (i) series
+# then /healthz -- and records its duration; (g) step passes both populations' flags to loadgen
+# run (-seed and -loop-seed, the portions -baseline-events and -baseline-requests inside the
+# totals -events and -requests, -loop-factor, -generator-role, -unit-starts, -unit-life,
+# -loop-listeners, -driver-topics, -receipt-deadline, -event-mix and -loop-event-mix), with the
+# rates the factor gives, gives -route-mix a file it has itself put on the load machine and that
+# holds the loop's routes there, read off the step's own argument rather than off the deployment
+# file's setting, fetches the profile from Dispatch's own machine and runs cgroup-merge,
+# cloudsql-cpu and tables, and is refused -- naming the setting and the path it resolved to,
+# with no load sent -- when the route_mix names no file on this pod;
+# (h) a step at factor 0 carries both seeds and both mixes just as a loop step does, its loop
+# portion 0, and no step names a baseline portion above its own total; (i) series
 # runs the baseline, 1x and 2x at the long duration after the long warm-up, stops the grid at the
 # first failing step, and then follows refine.txt until it is empty; (j) a step whose VM stopped
 # while it ran is discarded -- its directory removed, the VM named, no failure recorded -- and
 # so is one whose VM is already stopped, and series stops on it; (k) seed runs the plan, the
-# write on the load machine, the check, the export and seed-finish with the embedding gate, and
+# write on the load machine, the check, the export, the production seed on the load machine
+# before the embedding gate -- which it writes again for a machine that holds none of the
+# deployment's shape and leaves alone for one that does -- and seed-finish with that gate, and
 # records each phase's wall clock and the gate's progress; (l) down stops every container and
 # leaves the machines and the instance alone; (m) step opens the profiling tunnel on the load
 # machine and proves it with a read of /debug/pprof/goroutine?debug=1 through it before loadgen
@@ -103,7 +107,9 @@
 # whoever reads it: a mounted path by the container's own user, an environment file by docker as
 # root alone. And (w) reset empties a JetStream store that the NATS container has written in --
 # a directory inside the store that the ssh user cannot remove -- with sudo, and leaves the
-# store there, empty, and the ssh user's own at the mode up leaves it at.
+# store there, empty, and the ssh user's own at the mode up leaves it at; and (x) a step ends
+# the sampler it started, so no vm-sample of the run is left reading the machines and appending
+# to its cgroup.jsonl once the step is over.
 set -euo pipefail
 # Nothing here is read from this test's own standard input, and the fake ssh reads a pipe it is
 # given as ssh does, so the suite runs with /dev/null under it: whatever the caller's standard
@@ -438,6 +444,14 @@ for credflag in key-file pg-file token-file listener-token-file; do
     "$(cat "$credpath" 2>/dev/null || echo unreadable)" >>"$FAKE_DIR/credentials.log"
 done
 case $cmd in
+  seed)
+    # The baseline population's own seed, as `loadgen seed` writes it: the four projects and
+    # 1,000 issues, each with a key and the route the seed gave it. That is the shape vm.sh
+    # holds a seed already on the load machine to, and the shape `loadgen run` reads.
+    printf '%s\n' "$*" >>"$FAKE_DIR/seed.log"
+    jq -n '{projects: ["LGA", "LGB", "LGC", "LGD"],
+      issues: [range(1000) | {key: "LGA-\(. + 1)", route: "session:ses-lg-\(.)"}]}' >"$(flag out)"
+    ;;
   loop-seed-plan) printf '{"proposals": 891}\n' >"$(flag out)" ;;
   loop-seed-write)
     printf '%s\n' "$*" >>"$FAKE_DIR/loop-seed-write.log"
@@ -1024,6 +1038,23 @@ pass "reset refuses an instance that holds no template database"
 
 # ---- (g) and (h) step -----------------------------------------------------------------------------
 
+# run_flag FLAG LINE: the value `loadgen run` was given for FLAG on LINE, empty when it was
+# given none. A flag is read by its own name rather than as a substring of the line, so neither
+# a value that is a prefix of another's nor a flag whose name is one (-events and
+# -baseline-events) can stand in for the one a case asks about.
+run_flag() { awk -v want="-$1" '{ for (i = 1; i < NF; i++) if ($i == want) print $(i + 1) }' <<<"$2"; }
+
+# check_run_flags WHAT LINE: every "flag<tab>value" row of standard input read back off LINE,
+# WHAT naming the step in a failure.
+check_run_flags() {
+  local what=$1 line=$2 flag want got
+  while IFS=$'\t' read -r flag want; do
+    [ -n "$flag" ] || continue
+    got=$(run_flag "$flag" "$line")
+    [ "$got" = "$want" ] || fail "$what's loadgen run gives -$flag as '$got', not '$want': $line"
+  done
+}
+
 reset_fake
 run_vm up --config "$config"
 ((RC == 0)) || fail "up failed before the step case"
@@ -1038,7 +1069,7 @@ line=$(tail -n1 "$fake/loadgen-run.log")
 # configured with but whether the path it named holds the mix over there. Nothing put a route
 # mix on a machine before this issue, and every loop step died at its first second reading one
 # (dispatch://INFRA-988).
-mix=$(awk '{ for (i = 1; i < NF; i++) if ($i == "-route-mix") print $(i + 1) }' <<<"$line")
+mix=$(run_flag route-mix "$line")
 [ -n "$mix" ] || fail "step's loadgen run names no -route-mix: $line"
 grep -q "^ssh	$gen_target	sh -c .* sh $mix 600$" "$fake/actions.log" ||
   fail "nothing put $mix on the load machine, so the step named a file loadgen cannot read there"
@@ -1047,24 +1078,32 @@ grep -qE '^[0-9]+(\.[0-9]+)? +loop +agent +GET +/' "$mix" ||
   fail "the file the step named as its route mix holds none of the loop's routes: $mix"
 pass "the route mix a loop step names is a file the step put on the load machine, and it holds the loop's routes there"
 
-for want in \
-  "-loop-seed $remote/work/loopseed.seed.json" \
-  "-loop-factor 2" \
-  "-generator-role vm-10.138.0.22" \
-  "-unit-starts 3.5" \
-  "-unit-life 5m" \
-  "-loop-listeners http://10.138.0.22:9021,http://10.138.0.22:9022,http://10.138.0.22:9023,http://10.138.0.22:9024" \
-  "-driver-topics 614" \
-  "-receipt-deadline 1s" \
-  "-event-mix spec-loop-2026-11-03" \
-  "-events 11" \
-  "-requests 137" \
-  "-sessions 400" \
-  "-duration 10m" \
-  "-allow-foreign"; do
-  [[ $line == *"$want"* ]] || fail "step's loadgen run has no '$want': $line"
-done
-pass "step runs loadgen run with the loop's flags and the rates its factor gives"
+# Both populations' flags, each read back by its own name. A step sends production's own
+# traffic and the loop's at once (R7): -events and -requests are the step's totals, of which
+# -baseline-events and -baseline-requests are drawn from the production seed with the
+# baseline's mix and the rest from the loop seed with the loop's.
+check_run_flags 2x "$line" <<EOF
+seed	$remote/work/seed.json
+loop-seed	$remote/work/loopseed.seed.json
+loop-factor	2
+generator-role	vm-10.138.0.22
+events	11
+baseline-events	4
+requests	137
+baseline-requests	60
+sessions	400
+unit-starts	3.5
+unit-life	5m
+loop-listeners	http://10.138.0.22:9021,http://10.138.0.22:9022,http://10.138.0.22:9023,http://10.138.0.22:9024
+driver-topics	614
+receipt-deadline	1s
+event-mix	production-2026-10-26
+loop-event-mix	spec-loop-2026-11-03
+duration	10m
+EOF
+[[ " $line " == *" -allow-foreign "* ]] || fail "step's loadgen run has no '-allow-foreign': $line"
+loop_line=$line
+pass "step runs loadgen run with both seeds, both event mixes, and the totals and baseline portions its factor gives"
 
 step=$(run_dir)/steps/2x
 [ -f "$step/cpu.pprof" ] || fail "step fetched no CPU profile"
@@ -1090,11 +1129,41 @@ pass "step samples every machine, fetches the profile from Dispatch's machine an
 run_vm step --config "$config" baseline 0 --duration 2m
 ((RC == 0)) || fail "the baseline step failed: see the output above"
 line=$(tail -n1 "$fake/loadgen-run.log")
-for want in "-loop-factor 0" "-unit-starts 0" "-events 4" "-requests 60" "-event-mix production-2026-10-26"; do
-  [[ $line == *"$want"* ]] || fail "the baseline step's loadgen run has no '$want': $line"
+# A step at factor 0 is the baseline alone because the loop's share of its rates is 0, not
+# because it is given no loop seed: it names both seeds, both event mixes and the loop's route
+# mix exactly as every step above it does, so the one difference between it and a loop step is
+# the load itself.
+check_run_flags 'the baseline step' "$line" <<EOF
+seed	$remote/work/seed.json
+loop-seed	$remote/work/loopseed.seed.json
+loop-factor	0
+unit-starts	0
+events	4
+baseline-events	4
+requests	60
+baseline-requests	60
+sessions	400
+event-mix	production-2026-10-26
+loop-event-mix	spec-loop-2026-11-03
+route-mix	$remote/work/routes-spec-loop-2026-11-03.txt
+EOF
+pass "a step at factor 0 carries both seeds and both mixes, and the whole of its load is production's own"
+
+# The negative control of both cases above: the baseline's portion is part of the step's total
+# and never above it, at any factor. `loadgen run` refuses a portion above its total by name,
+# before its first connection, and a step that asked for one would book its whole window and
+# die in its first second.
+for probe in "2x:$loop_line" "baseline:$line"; do
+  for pair in events:baseline-events requests:baseline-requests; do
+    total=$(run_flag "${pair%%:*}" "${probe#*:}")
+    portion=$(run_flag "${pair##*:}" "${probe#*:}")
+    [ -n "$total" ] && [ -n "$portion" ] ||
+      fail "the ${probe%%:*} step names no -${pair%%:*} or no -${pair##*:}: ${probe#*:}"
+    awk -v p="$portion" -v t="$total" 'BEGIN { exit !(p <= t) }' ||
+      fail "the ${probe%%:*} step's -${pair##*:} $portion is above its -${pair%%:*} $total, which loadgen refuses"
+  done
 done
-[[ $line == *"-route-mix"* ]] && fail "the baseline step named a route mix; it takes loadgen's committed one: $line"
-pass "a step at factor 0 is the baseline alone, at the baseline's own rates and mixes"
+pass "the baseline portion a step names is part of its total at every factor, never above it"
 
 # The negative control of the case above: a route_mix this pod holds no file for is refused
 # where the deployment file's other values are read, before the reset and before any load. The
@@ -1115,6 +1184,32 @@ grep -q 'no route mix' "$tmp/out" ||
   fail "a step whose route mix is missing sent its load all the same"
 [ ! -e "$(run_dir)/steps/9x" ] || fail "a step refused for its route mix left a directory"
 pass "a route_mix naming a file this pod does not hold refuses the step before any load, naming the setting and the path"
+
+# ---- (x) a step ends the sampler it started --------------------------------------------------
+
+# dispatch://INFRA-988, found by driving this script against the deployment: four
+# `loadgen vm-sample` processes, one per step, alive long after their steps had ended and still
+# appending to the run's cgroup.jsonl. sampler_start backgrounded a shell function, so $! held
+# the subshell's pid and not the sampler's: the TERM sampler_stop sent ended that subshell,
+# `wait` returned at once, and the step reported a clean stop while the binary read on. A later
+# step's window then holds the rows of several samplers at once and `loadgen cgroup-merge`
+# reads duplicated per-container CPU for it -- the numbers the report's per-step CPU rows are
+# made of. Nothing in a step's own output says any of this, so the case reads the process table.
+
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the sampler case"
+seeded_run
+run_vm step --config "$config" sampler 1 --duration 10m
+((RC == 0)) || fail "the sampler case's step failed: see the output above"
+# This run's own sampler, by the file it appends to: the run directory is this case's and no
+# other, so what this names is the sampler the step above started. pgrep answers 1 when it
+# matches nothing, which is the answer this case wants and which pipefail would otherwise end
+# the suite on before any case could read it.
+sampler_left=$(pgrep -af -- "vm-sample -out $(run_dir)/cgroup.jsonl" | tr '\n' ';' || true)
+[ -z "$sampler_left" ] ||
+  fail "the step left its sampler running: $sampler_left. It goes on reading every machine and appending to the run's cgroup.jsonl, so a later step's window holds the rows of several samplers and cgroup-merge reads duplicated per-container CPU for it"
+pass "a step ends the sampler it started, leaving no vm-sample of the run behind"
 
 # ---- (i) series -----------------------------------------------------------------------------------
 
@@ -1185,9 +1280,9 @@ run_vm seed --config "$config" --embed-timeout 8h
 record=$(run_dir)/seed.json
 [ -f "$record" ] || fail "seed wrote no $record"
 phases=$(jq -r '.phases[].phase' "$record" | tr '\n' ' ')
-[ "$phases" = "plan push-plan write pull-meta check export push-seed finish template " ] ||
+[ "$phases" = "plan push-plan write pull-meta check export push-seed production-seed finish template " ] ||
   fail "seed's phases are '$phases'"
-jq -e '[.phases[] | select(.seconds >= 0 and (.started | length) > 0)] | length == 9' "$record" >/dev/null ||
+jq -e '[.phases[] | select(.seconds >= 0 and (.started | length) > 0)] | length == 10' "$record" >/dev/null ||
   fail "seed did not record each phase's wall clock: $(jq -c .phases "$record")"
 jq -e '.embed_progress.lacking == 0' "$record" >/dev/null ||
   fail "seed recorded no coverage progress: $(jq -c . "$record")"
@@ -1204,6 +1299,44 @@ run_vm seed --config "$config"
 ((RC != 0)) || fail "seed ran twice over one run"
 grep -q 'is seeded already' "$tmp/out" || fail "a second seed does not say why it is refused"
 pass "seed refuses a run that is seeded already"
+
+# Both seeds, and the one gate over both. A step draws production's share of its writes from
+# seed.json's issues and the loop's from loopseed.seed.json, so the deployment must hold both,
+# and both must be embedded before the first step: the coverage report the gate waits on counts
+# every searchable row of the deployment, by kind, so the items of the seed written before it
+# are items that gate waits for.
+production_seed=$remote/work/seed.json
+[ -f "$production_seed" ] ||
+  fail "seed left no production seed beside the loop's on the load machine: $production_seed"
+jq -e '(.projects | length) > 0 and (.issues | length) >= 400' "$production_seed" >/dev/null ||
+  fail "the seed.json the seed put on the load machine is not the shape a step reads: $(head -c 200 -- "$production_seed")"
+grep -q "ssh	$gen_target	$remote/app/loadgen seed -out $production_seed" "$fake/actions.log" ||
+  fail "the production seed was not written by the loadgen on the load machine"
+seed_at=$(line_at "loadgen	seed -out")
+gate_at=$(line_at "loadgen	seed-finish")
+[ -n "$seed_at" ] && [ -n "$gate_at" ] && ((seed_at < gate_at)) ||
+  fail "the production seed was written at line ${seed_at:-none} of the actions and the embedding gate ran at ${gate_at:-none}: the gate must cover both seeds"
+pass "seed writes the production seed on the load machine beside the loop's, before the embedding gate"
+
+# The phase is idempotent, as the phases around it are: a seed.json already on the load machine
+# with the deployment's own shape is left where it is, because writing it again would make a
+# second thousand issues no session is routed to and spend an hour of the deployment's 72 doing
+# it. One the machine lacks is written.
+seeds_before=$(grep -c . "$fake/seed.log")
+((seeds_before == 1)) || fail "the seed above ran loadgen seed $seeds_before times, not once"
+run_fn eval 'endpoints; seed_production "$(remote_work)" 8'
+((RC == 0)) || fail "the production seed phase failed over a seed the load machine holds: $(cat "$tmp/out")"
+grep -q 'is not written again' "$tmp/out" ||
+  fail "the phase does not say that it left the machine's own seed as it is: $(cat "$tmp/out")"
+[ "$(grep -c . "$fake/seed.log")" = "$seeds_before" ] ||
+  fail "the phase wrote the production seed a second time over one the machine already held"
+rm -f -- "$production_seed"
+run_fn eval 'endpoints; seed_production "$(remote_work)" 8'
+((RC == 0)) || fail "the production seed phase failed on a load machine holding no seed: $(cat "$tmp/out")"
+[ "$(grep -c . "$fake/seed.log")" = "$((seeds_before + 1))" ] ||
+  fail "the phase did not write the production seed the load machine lacks"
+[ -f "$production_seed" ] || fail "the phase left no seed.json on the load machine"
+pass "the production seed phase leaves a seed of the deployment's own shape as it is, and writes one the machine lacks"
 
 # ---- (l) collect and down ---------------------------------------------------------------------------
 

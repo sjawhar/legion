@@ -85,8 +85,7 @@
       "events": 4,
       "requests": 60,
       "sessions": 400,
-      "event_mix": "production-2026-10-26",
-      "route_mix": ""
+      "event_mix": "production-2026-10-26"
     },
     "loop": {
       "writes": 3.5,

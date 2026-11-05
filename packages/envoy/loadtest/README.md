@@ -946,6 +946,48 @@ loop's own seed (`-loop-seed`), and the refusal names the kind and what the seed
 | `report-2026-10-27` | `comment=50,anchored=30,edit=20` | The root report's mix, so that its 1x row can be compared. |
 | `spec-loop-2026-11-03` | `verdict=106,requirement=48,status=50` | The Verified Linux spec loop's own writes over a driver day, as the issue's plan counts them: 106 verdicts and 48 requirement lines for every 50 status changes. It is the mix of a step driven against the loop's own seed, which is the only seed these three kinds read. |
 
+### Two populations in one step
+
+A step measures whether Dispatch carries the Verified Linux spec loop **on top of production's
+own traffic**, so one `loadgen run` drives two populations at once: production's own, drawn from
+`seed.json`, and the loop's, drawn from the loop seed. Give it both seeds:
+
+```bash
+packages/envoy/loadtest/stack.sh loadgen run -name step-6x -out "$LOADTEST_ROOT/runs/step-6x" \
+  -seed "$LOADTEST_ROOT/seed.json" -loop-seed "$LOADTEST_ROOT/loopseed.seed.json" \
+  -events 25 -requests 291 -baseline-events 4 -baseline-requests 60 -sessions 400 \
+  -event-mix production-2026-10-26 -loop-event-mix spec-loop-2026-11-03 \
+  -route-mix packages/envoy/loadtest/routes-spec-loop-2026-11-03.txt
+```
+
+| Flag | What it is |
+| --- | --- |
+| `-events`, `-requests` | The step's **totals**, both populations together. |
+| `-baseline-events`, `-baseline-requests` | The portion of each total production's own population sends, from `seed.json`. The loop sends the remainder. Both are required with `-seed` and `-loop-seed` together, and refused without them. |
+| `-event-mix` | The baseline population's write mix (default `production-2026-10-26`). A step whose only population is the loop's names that population's mix with this flag, as a loop step always has. |
+| `-loop-event-mix` | The loop population's write mix (default `spec-loop-2026-11-03`). It applies only with `-loop-seed`. |
+| `-route-mix` | The loop population's read mix. The baseline population reads the production routes loadgen holds embedded (`routes-2026-10-26-1719Z.txt`), which no flag names. |
+
+Each population is read and refused on its own, before the first connection: `-event-mix`
+against `seed.json` and `-loop-event-mix` against the loop seed, each refusal naming the kind and
+what that seed lacks, and each population's read mix against its own seed. A kind one seed cannot
+serve is never drawn from the other. A baseline portion above its total is refused by name
+(`-baseline-events 40 is more than -events 4`).
+
+Both populations share the step's sessions, its window, its marker counter and its in-flight cap.
+Each session follows the issues it watches in **each** population, so it takes the writes of
+both. The baseline draws its writes and reads on PRNG streams 1 and 2 and the loop on 4 and 5
+(the loop sessions' starts are stream 3), so a step given one seed draws on 1 and 2 whichever
+seed it is: one `-rng-seed` gives it the very schedule it always has.
+
+`summary.json` counts the two together in `events` and `requests`, which is what the pass rule
+reads (`loadgen curves`), and each apart in `populations`: per population its `name` (`baseline`
+or `loop`), its `seed`, its `event_mix` and `route_mix`, its own `events_per_s` and
+`requests_per_s` targets, and its own `events` and `requests` objects. The two add up to the
+step's own. `TABLES.md` renders them as *Each population of a two-population step*, one row per
+population. A step given one seed carries no `populations` key and behaves exactly as it did
+before.
+
 ### The documents a step writes versions to (`plan-docs`)
 
 Two of the five kinds write a document version: `edit` and `upload`. Which documents they hit is
@@ -2789,7 +2831,7 @@ directory is `${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>`, on th
 | --- | --- |
 | `up --config FILE [--run ID] [--loadgen PATH]` | Starts every container of the specification below by image digest, each on the machine the file puts it on, with its CPU and memory limits and nothing silently defaulted, installs `loadgen` and the stub embedder on the load machine, makes the database `cloudsql.database` names when the instance does not hold it yet, and waits until Dispatch answers `/healthz`. It makes the run directory and names the run. |
 | `check --config FILE [--run ID]` | The read-back: every container's CPU, memory and image, Dispatch's network mode, the instance's own settings from the Cloud SQL Admin API, every machine's run-time limit from the Compute API, every endpoint setting of every container, and that each production address the file names is refused from every machine. One markdown table of expected beside found, and exit 1 on any difference. |
-| `seed --config FILE [--run ID] [--embed-timeout 8h] [--workers 8]` | `loop-seed-plan`, `loop-seed-write` on the load machine, `loop-seed-check`, `loop-seed-export` and `seed-finish` with the embedding gate, each phase's wall clock and the gate's coverage progress in `<run>/seed.json`; then the template database. |
+| `seed --config FILE [--run ID] [--embed-timeout 8h] [--workers 8]` | Both seeds a step draws on: `loop-seed-plan`, `loop-seed-write` on the load machine, `loop-seed-check`, `loop-seed-export`, then the baseline population's own seed (`loadgen seed` on the load machine, into `paths.remote_work`/`seed.json`), then `seed-finish` with the embedding gate, whose one wait covers the items of both seeds; each phase's wall clock and the gate's coverage progress in `<run>/seed.json`; then the template database. A phase is idempotent: a `seed.json` already on the load machine with the deployment's own shape — projects, and at least `load.baseline.sessions` issues, each with a key and its route — is left as it is rather than written a second time. |
 | `reset --config FILE [--run ID]` | The whole reset (below), its duration recorded. |
 | `step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]` | One step: the reset, the VM sampler, the profiling tunnel (below), `loadgen run` at FACTOR, the profiles fetched from the machine Dispatch runs on, then `cgroup-merge`, `cloudsql-cpu` and `tables`. |
 | `series --config FILE [--run ID] [--duration 10m] [--long 60m] [--long-warmup 5m]` | The baseline, 1x and 2x at `--long` after a `--long-warmup` warm-up, then the grid 3, 4, 6, 8, 12, 16 and 20 at `--duration`, stopping at the first failing step, then the refinement `loadgen curves` asks for until `refine.txt` is empty. |
@@ -2824,8 +2866,9 @@ a deployment of two just as well.
 
 Two machines have a role the script's own work depends on, and the file names both:
 
-- **the load machine**, `load_vm`: `loadgen` is installed there, `loop-seed-write` and every
-  `loadgen run` run there, the stub embedder serves from there, `paths.remote_work` is there, and
+- **the load machine**, `load_vm`: `loadgen` is installed there, both seed writers — `seed` and
+  `loop-seed-write` — and every `loadgen run` run there, the stub embedder serves from there,
+  `paths.remote_work` is there (both seeds among its files), and
   the near end of a step's profiling tunnel listens there;
 - **the machine Dispatch runs on**, which `containers.dispatch` names, so the file says it once
   and cannot say it twice over: it is the far end of that tunnel, the machine a step fetches its
@@ -2884,7 +2927,7 @@ of every process, so a credential of the deployment is not one:
 - **The credentials of the commands that run on the load machine** — the Dispatch agent token,
   the listener token, the Postgres URL with its password and the embedder's api-key — go in
   files of mode 600 under the run's own directory there, `<paths.remote_work>/runs/<run id>`,
-  written the same way; `loop-seed-write` and `loadgen run` are given `-token-file`,
+  written the same way; `seed`, `loop-seed-write` and `loadgen run` are given `-token-file`,
   `-listener-token-file` and `-pg-file`, and the stub embedder `-key-file` (The guard, above).
   The endpoint flags that are addresses alone stay on the command line.
 - **The profiling tunnel's identity** — the run's own OS Login private key — goes in a file of
@@ -2951,26 +2994,36 @@ script does. What the example cannot carry is why each key is there, which is be
   of this file and not of the script.
 - `production_addresses` are the addresses the deployment may never reach; `check` proves each one
   refuses a connection from every machine.
-- `load` holds what a step sends. The baseline is INFRA-598's 1x, which every step carries as it
-  is, and the loop's own rates are multiplied by the step's factor: a step at factor F sends
-  `baseline.events + loop.writes × F` events a second, `baseline.requests + loop.reads × F`
-  requests a second, `baseline.sessions` flat sessions and `loop.unit_starts × F` unit starts a
-  second. Its defaults are `{"baseline": {"events": 4, "requests": 60, "sessions": 400,
-  "event_mix": "production-2026-10-26", "route_mix": ""}, "loop": {"writes": 3.5, "reads": 38.5,
-  "unit_starts": 1.75, "event_mix": "spec-loop-2026-11-03", "route_mix":
+- `load` holds what a step sends. A step drives two populations at once, because the question
+  INFRA-988 asks is whether production Dispatch carries the spec loop's load on top of
+  production's own usual traffic. The baseline population is INFRA-598's 1x, which every step
+  carries as it is: its writes are drawn from `seed.json`'s issues with `baseline.event_mix` and
+  its reads from the production routes `loadgen run` holds embedded. The loop population's rates
+  are multiplied by the step's factor: its writes are drawn from `loopseed.seed.json`'s
+  proposals with `loop.event_mix` and its reads from `loop.route_mix`. So a step at factor F
+  sends `baseline.events + loop.writes × F` events a second, of which `baseline.events` are
+  production's own, `baseline.requests + loop.reads × F` requests a second, of which
+  `baseline.requests` are production's own, `baseline.sessions` flat sessions and
+  `loop.unit_starts × F` unit starts a second. Its defaults are `{"baseline": {"events": 4,
+  "requests": 60, "sessions": 400, "event_mix": "production-2026-10-26"}, "loop": {"writes":
+  3.5, "reads": 38.5, "unit_starts": 1.75, "event_mix": "spec-loop-2026-11-03", "route_mix":
   "routes-spec-loop-2026-11-03.txt"}, "unit_life": "5m", "driver_topics": 614,
-  "receipt_deadline": "1s", "session_delivery": "consumer"}`. A step at factor 0 is the baseline
-  alone and takes the baseline's mixes; every step above it takes the loop's.
-- A `route_mix` is a file, and the step reads it where the load runs. A bare name, such as the
-  loop's own `routes-spec-loop-2026-11-03.txt`, is read from `packages/envoy/loadtest`, the
+  "receipt_deadline": "1s", "session_delivery": "consumer"}`. Every step names both seeds, both
+  event mixes and both portions, factor 0 included: a step at factor 0 is the baseline alone
+  because the loop's share of its rates is 0, and `loadgen run` counts the two populations apart
+  and together, so the report shows production's own writes beside the loop's at every factor.
+- `loop.route_mix` is a file, and the step reads it where the load runs. A bare name, such as
+  the loop's own `routes-spec-loop-2026-11-03.txt`, is read from `packages/envoy/loadtest`, the
   directory holding the committed mixes; a value that starts with `/` is a path on the pod that
   drives the run, taken as given. The step puts that file in `paths.remote_work` on the load
   machine, once per run, and gives `loadgen run` `-route-mix <that copy>`, because `loadgen`
   opens the file on the machine it runs on. A `route_mix` that names no file on the driving pod
   is refused with the deployment file's other values, before a container or a step is touched:
-  an hour-long step that starts without its mix dies in its first second. An empty `route_mix`,
-  which is the baseline's default, names no file and leaves `loadgen` its own committed
-  `routes-2026-10-26-1719Z.txt`.
+  an hour-long step that starts without its mix dies in its first second. An empty `route_mix`
+  names no file and leaves the loop's reads to `loadgen`'s own committed
+  `routes-2026-10-26-1719Z.txt`. The baseline population has no `route_mix` of its own:
+  `-route-mix` carries the loop's reads alone, and production's reads are the routes `loadgen`
+  holds embedded.
 - `paths.stateful_dir` is the directory under `/mnt/stateful_partition` that `up` bind-mounts at
   `remote_root`, on every machine, at every run. The machines run Container-Optimized OS, where
   `/var` is mounted `noexec`, so a `loadgen` copied under `/var/lib/...` cannot be executed and
