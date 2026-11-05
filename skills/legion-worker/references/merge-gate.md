@@ -131,9 +131,9 @@ posted without a completion leaves the issue in reviewing until you finish.
   as its `Reason:` line and counts a review round. The acceptance comment names each check with
   its result. An issue with no Verification document, or with none holding a `before_merge`
   check, reaches the architect as a gap the tester and the reviewer named and neither refused, so
-  the architect's acceptance is its only gate: that comment names the gap and decides there,
-  accepting the issue or sending it back with checks the architect writes, which closes no design
-  gate while dispatch://INFRA-175 has not shipped. The architect also reads the reviewer's own
+  the architect's acceptance is its only gate: that comment names the gap and decides there how
+  each delivered item is proven at this head, never whether one stays unmet; checks it writes
+  close no design gate (dispatch://INFRA-175). The architect also reads the reviewer's own
   prose commits here with the rest, and that read is no new round. It does not accept while the
   issue holds a finding ask no controller has taken (`findings.md`, "When no controller takes
   it"). Approval is gated by the `before_merge` checks of the issue's own Verification document

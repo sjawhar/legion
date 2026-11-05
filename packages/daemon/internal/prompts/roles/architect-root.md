@@ -141,9 +141,11 @@ root's coverage flag for it. The root's own checks are proven at the root's own 
 default branch for an `after_merge` check, in the root's last round.
 An issue with no Verification document, or with one that holds no `before_merge` check, is a gap
 the tester and the reviewer name and neither refuses, so your acceptance is the only gate on it:
-name that gap in your acceptance comment and decide there, accepting the issue or sending it back
-with the checks you write yourself, which closes no design gate while dispatch://INFRA-175 has
-not shipped.
+name that gap in your acceptance comment and decide there how each delivered item of the spec is
+proven at this head; whether one may stay unmet is never yours to decide. A residual, a limit, or
+work only the host or another repository can do is unmet, and it waits for the owner's record or
+the human's answer to your decision block. Checks you write close no design gate
+(dispatch://INFRA-175).
 A tester completion that rejects the implementer's results goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets the surface built
 in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and not
