@@ -2427,15 +2427,113 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
+      # This step installs the system packages itself instead of through `playwright install
+      # --with-deps`, which installs Playwright's whole ubuntu24.04-x64 list. The pinned list
+      # below is that list less four media packages - gstreamer1.0-libav,
+      # gstreamer1.0-plugins-bad, gstreamer1.0-plugins-good and libavcodec60 - which is what
+      # makes this step small enough to bound. Measured on this
+      # image: Playwright's whole list resolves to 181 packages and 114 MB; without those four it
+      # is 60 packages and 51.4 MB. The four carry 121 of the 181 packages and 62.8 of the
+      # 114.2 MB, through the ffmpeg stack and the GStreamer plugin trees.
+      #
+      # Each is safe to drop because they are plugins and codecs loaded at playback, not
+      # libraries the browsers link: Playwright's own source says of gstreamer1.0-libav that its
+      # one library libgstlibav.so is the library required for playing h.264. No spec or source
+      # file under packages/dispatch holds `<video`, `.mp4`, `.webm`, `new Audio` or
+      # `playsinline`, so no row plays media. The libraries WebKit links stay in the list:
+      # libgstreamer-plugins-bad1.0-0, libgstreamer-plugins-base1.0-0, libgstreamer1.0-0,
+      # libgstreamer-gl1.0-0, libflite1 and libgtk-4-1 among them. A row that later needs media
+      # reinstalls that package by name. That the browsers still launch is what the suite's
+      # webkit, webkit-iphone and firefox-download-navigation projects prove, which the
+      # "Browser-test dispatch dashboard" step below runs.
+      #
+      # On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`,
+      # `firefox` and `webkit` entries of the ubuntu24.04-x64 table in playwright-core's
+      # lib/coreBundle.js, less those four. Deriving it at run time by subtracting one apt
+      # closure from the other does not work and must not be written: the two closures share 35
+      # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
+      # to launch.
+      #
+      # The 8-minute budget is two bounded attempts of `apt-get update` at 60 s, two of the
+      # download at 90 s, about 60 s of unpack and about 90 s for the browser download: 450 s in
+      # all, rounded up. Healthy today is a 38 s median and a 102 s 95th percentile for the step.
       - name: Install Playwright Chromium, WebKit and Firefox
-        # The runner image preconfigures Google's chrome-stable apt source, whose
-        # index intermittently fails `apt-get update` with a hash-sum mismatch and
-        # takes `--with-deps` down with it. Chrome is already installed there; the
-        # source only serves upgrades, so drop it before installing our deps.
+        # The runner image preconfigures Google's chrome-stable apt source, whose index
+        # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
+        # down with it. Chrome is already installed there; the source only serves upgrades, so
+        # drop it before installing our deps.
+        timeout-minutes: 8
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium webkit firefox
+          packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
+          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-plugins-base libasound2t64
+          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavif16 libcairo-gobject2
+          libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0 libevent-2.1-7t64
+          libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0 libgles2 libglib2.0-0t64
+          libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0 libgstreamer-plugins-base1.0-0
+          libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0 libharfbuzz0b libhyphen0
+          libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4 libnss3 libopus0 libpango-1.0-0
+          libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9 libwayland-client0 libwayland-egl1
+          libwayland-server0 libwebp7 libwebpdemux2 libwoff1 libx11-6 libx11-xcb1 libx264-164
+          libxcb-shm0 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6
+          libxkbcommon0 libxml2 libxrandr2 libxrender1 libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          # One retry, then the step fails by its own name rather than leaving the job's budget
+          # to cancel the browser step after it. The first argument is what the log calls the
+          # phase: a mirror that answers the second time costs one more bound, and one that
+          # never answers ends the step here.
+          twice() {
+            local what=$1
+            shift
+            "$@" && return 0
+            echo "::warning::$what failed or timed out; one more attempt"
+            "$@" && return 0
+            echo "::error::$what failed twice; the apt mirror is the suspect"
+            return 1
+          }
+          # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
+          # sudo holding it. $packages is left unquoted on purpose, to split into words.
+          twice "apt-get update" sudo timeout 60 apt-get update
+          # Download only, so an attempt the timeout kills holds no dpkg lock and the retry is
+          # free to start. It prints what it fetched, which is this step's own byte record.
+          twice "the package download" sudo timeout 90 apt-get install -y --no-install-recommends -d $packages
+          # Unbounded and unretried: the archive is on disk now, so this takes no network.
+          sudo apt-get install -y --no-install-recommends $packages
+          # The browsers alone. Named, because with no argument Playwright resolves its own
+          # default set rather than this job's three.
+          bunx playwright install chromium webkit firefox
+          # Has the pinned list fallen behind Playwright? install-deps --dry-run simulates its
+          # whole ubuntu24.04-x64 list against what is now installed, prints what is missing and
+          # exits 1 when anything is, which must not end the step.
+          dry_run=$(bunx playwright install-deps --dry-run chromium webkit firefox 2>&1 || true)
+          echo "$dry_run"
+          missing=$(printf '%s\n' "$dry_run" | awk '
+            /^Missing system dependencies \([0-9]+\):$/ { reading = 1; next }
+            reading && /^  [^ ]/ { print $1; next }
+            reading { reading = 0 }' | sed '/^$/d' | sort -u)
+          # What that missing set is expected to be: the closure of the four media packages the
+          # list drops. A simulation needs no root. Both sides are read after the install, in
+          # this step, so the comparison cannot go stale.
+          dropped=$(apt-get install -s --no-install-recommends gstreamer1.0-libav \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-good libavcodec60 |
+            awk '$1 == "Inst" { print $2 }' | sed '/^$/d' | sort -u)
+          unexpected=$(comm -23 <(printf '%s\n' "$missing") <(printf '%s\n' "$dropped"))
+          if [ -n "$unexpected" ]; then
+            echo "::error::Playwright now needs system packages this step's list does not hold:" \
+              "$(printf '%s ' $unexpected)"
+            exit 1
+          fi
+          echo "The pinned list is current: every package Playwright reports missing is in the" \
+            "closure of the four media packages this step drops."
         working-directory: packages/dispatch
+      # Beside the install, not at the end of the job: it keeps what the install just downloaded,
+      # so a job that installs the browsers and then fails a row does not throw the install away.
+      # Only on a push to main whose steps have succeeded so far: no other run writes an Actions
+      # cache entry.
+      - if: github.event_name == 'push' && success() && steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
       - name: Wait for the S3-compatible server
         # The readiness wait of the step that started the container, after the install the
         # container came up during. An anonymous PUT makes the bucket; each lane makes its own
@@ -2563,13 +2661,6 @@ jobs:
           path: |
             packages/dispatch/e2e/test-results
             ${{ runner.temp }}/dispatch-e2e-run-*/lane-*/log/*.log
-      # The browsers above. Last, and only on a push to main whose job succeeded: no other run
-      # writes an Actions cache entry.
-      - if: github.event_name == 'push' && success() && steps.playwright-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
 
       - name: Report ci-ok when this is the run's last job
         if: always()
