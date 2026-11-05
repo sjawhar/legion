@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -259,14 +260,17 @@ func TestTheEditorsCarriedIDsSurviveMoveRewordAndSplit(t *testing.T) {
 	requireCommentBlocks(t, database, comment.ID, "stale", "b1@1 b3@1 b2@6 b4@7", 7)
 }
 
-// A body the document parser refuses, one holding block HTML, is stored exactly as sent and
-// splits at blank lines into blocks of type text; adding block HTML elsewhere in a comment keeps
-// an unchanged paragraph's id and changed revision.
-func TestABodyWithBlockHTMLReadsBackByteForByte(t *testing.T) {
+// A body the document parser refuses, one holding block HTML, is stored as sent apart from its
+// line endings, which a write stores as line feeds
+// (TestAMessageAndACommentBodyAreStoredWithLineFeeds), and splits at blank lines into blocks of
+// type text; adding block HTML elsewhere in a comment keeps an unchanged paragraph's id and
+// changed revision.
+func TestABodyWithBlockHTMLReadsBackAsItIsStored(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Block HTML", "before")
-	body := "Intro paragraph.\r\n\r\n<div align=\"center\">\n  raw <b>html</b>\n</div>\n\n\tClosing."
-	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": body}, "alice")
+	sent := "Intro paragraph.\r\n\r\n<div align=\"center\">\n  raw <b>html</b>\n</div>\n\n\tClosing."
+	body := pmdoc.LineFeeds(sent)
+	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": sent}, "alice")
 	if read := readThreadComment(t, handler, comment.ID); read.Body != body {
 		t.Fatalf("read body = %q, want %q byte for byte", read.Body, body)
 	}
