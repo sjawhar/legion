@@ -423,9 +423,11 @@ type IssueStatus struct {
 }
 
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a
-// synthetic fact every `controller_wake_interval_seconds` and never decoded from an event.
-// Admission is the only handler that acts on it; when it wakes the controller is admission's rule
-// (admit.Admission.wakeController and its callers).
+// synthetic fact every `controller_wake_interval_seconds` and never decoded from an event. Three
+// handlers act on it, in the order the daemon wires them (the workflow runtime's openWorkflow):
+// blockers.Mirror writes what the tick's own Dispatch read saw, the workflow engine runs its
+// status repair (workflow.Engine.correctStatuses), and admission decides whether to wake the
+// controller (admit.Admission.wakeController and its callers).
 type ControllerTick struct {
 	// Observed is what the turn's own re-read of Dispatch saw: the issues anything is currently
 	// waiting on, as Dispatch answers for them now (workflowRuntime.tickController reads them

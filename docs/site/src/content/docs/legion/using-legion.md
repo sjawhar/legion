@@ -161,7 +161,11 @@ resumes.
 
 A status written by an agent session on a running issue is set back by the daemon, and the
 architect is told who wrote it; only a person's move in the dashboard, the controller's
-`set_status`, or an operator's `legion status`, takes a running tree out.
+`set_status`, or an operator's `legion status`, takes a running tree out. A move of your own
+between the workflow's own statuses — `in_progress`, `testing`, `needs_review`, `retro` — on a
+running issue does not stay either: the daemon's status repair writes back the status of the phase
+the issue stands in, at each boot and then every `controller_wake_interval_seconds` (an hour by
+default). `backlog` or `icebox` is how you stop the work.
 
 ## What each status means
 
@@ -170,7 +174,7 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 | `triage` | whoever files the issue | New. A person's `legion` label is queued by the daemon: the issue moves to `todo` itself. A label a session set goes to the controller, which decides whether to admit it now, park it, or leave it to you. |
 | `icebox` | a person or the controller | Parked for the long term. Legion does not run it. |
 | `backlog` | a person or the controller | Should not run now: it waits on a decision or a deploy. Legion does not run it. |
-| `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child in `todo` runs under its tree. |
+| `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child shows `todo` only until its first phase: the move into planning sets it to `in_progress`. |
 | `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |

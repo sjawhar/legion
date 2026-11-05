@@ -436,7 +436,10 @@ What each part is for:
   an update round runs before the controller is told it is not finishing, decimals allowed),
   `review_round_cap` (3), `max_fix_attempts` (3), `controller_wake_interval_seconds` (3600), and
   the supervision budgets `launch_failure_limit` (3), `prompt_failure_limit` (3) and
-  `prompt_retire_limit` (2).
+  `prompt_retire_limit` (2). `controller_wake_interval_seconds` also sets the period of the
+  daemon's status repair, which puts back the Dispatch status of every issue it works whose status
+  is not the status of the phase that issue stands in, so raising it to quiet the controller slows
+  that repair with it.
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
