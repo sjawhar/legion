@@ -33,6 +33,7 @@ import {
   RECEIPT_TIMEOUT_CAUSE,
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
+import { INLINE_CONTENT_TYPES } from "../src/dispatch-text-rules";
 import {
   ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,
@@ -282,6 +283,15 @@ const DispatchLoginChanged = ${JSON.stringify(DISPATCH_LOGIN_CHANGED)}
 // Generated from DISPATCH_SIGN_IN_REQUIRED in packages/contracts so the server's refusal and
 // every client's reading of it cannot drift apart.
 const DispatchSignInRequired = ${JSON.stringify(DISPATCH_SIGN_IN_REQUIRED)}
+
+// InlineContentTypes are the content types a browser draws where the reader is, rather than
+// handing the reader a download: a stored type in this set is served Content-Disposition: inline,
+// every other one attachment. Membership is one lookup: _, inline := InlineContentTypes[mime].
+// Generated from INLINE_CONTENT_TYPES in packages/contracts, which the dashboard renderer reads
+// too, so what the server serves inline and what a page draws in place cannot drift apart.
+var InlineContentTypes = map[string]struct{}{
+${INLINE_CONTENT_TYPES.map((type) => `\t${JSON.stringify(type)}: {},`).join("\n")}
+}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

@@ -1,11 +1,13 @@
 /**
- * Five rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
+ * Six rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
  * session id an agent's conversation is addressed by, how many UTF-8 bytes a string holds, the
- * most bytes a reference's target id may hold, the caption a picture line carries, and which
- * uploads are pictures. The Go server holds the same session-id rule (`text.IsSessionID`) and
- * target bound (`text.MaxTargetBytes`), both pinned against the TypeScript readers by
- * `DISPATCH_TEXT_REFERENCES`, and classifies an upload as a picture by the same four types, read
- * from its bytes.
+ * most bytes a reference's target id may hold, the caption a picture line carries, which uploads
+ * are pictures, and which content types a browser draws in the page rather than hands over as a
+ * download. The Go server holds the same session-id rule (`text.IsSessionID`) and target bound
+ * (`text.MaxTargetBytes`), both pinned against the TypeScript readers by
+ * `DISPATCH_TEXT_REFERENCES`, classifies an upload as a picture by the same four types, read from
+ * its bytes, and serves the inline types from the same list (`contracts.InlineContentTypes`,
+ * generated from the one below).
  */
 
 /**
@@ -85,4 +87,45 @@ const PICTURE_TYPES: Readonly<Record<string, true>> = {
 /** Whether a stated MIME type (no parameters) is one of the picture types. */
 export function isPictureType(mime: string): mime is PictureType {
   return PICTURE_TYPES[mime] === true;
+}
+
+/**
+ * The content types a browser draws where it is read, rather than handing the reader a download:
+ * the four picture types and the two video containers every browser Dispatch supports plays. A
+ * request for an upload of one of these is answered `Content-Disposition: inline`, and a
+ * reference to one is drawn in the page instead of a link. Go's twin is
+ * `contracts.InlineContentTypes`, generated from this list.
+ */
+export const INLINE_CONTENT_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "video/mp4",
+  "video/webm",
+] as const;
+
+export type InlineContentType = (typeof INLINE_CONTENT_TYPES)[number];
+
+const inlineContentTypes: ReadonlySet<string> = new Set(INLINE_CONTENT_TYPES);
+
+/** Whether a stated MIME type (no parameters) is one a browser draws inline. */
+export function isInlineContentType(mime: string): mime is InlineContentType {
+  return inlineContentTypes.has(mime);
+}
+
+/**
+ * The inline content types a browser plays rather than shows: what a renderer asks for, since it
+ * draws a video in a player with controls and a picture in an image. Every one of them is an
+ * INLINE_CONTENT_TYPES member; what is inline and not a video is a picture.
+ */
+export const VIDEO_CONTENT_TYPES = ["video/mp4", "video/webm"] as const;
+
+export type VideoContentType = (typeof VIDEO_CONTENT_TYPES)[number];
+
+const videoContentTypes: ReadonlySet<string> = new Set(VIDEO_CONTENT_TYPES);
+
+/** Whether a stated MIME type (no parameters) is one of the video types. */
+export function isVideoContentType(mime: string): mime is VideoContentType {
+  return videoContentTypes.has(mime);
 }
