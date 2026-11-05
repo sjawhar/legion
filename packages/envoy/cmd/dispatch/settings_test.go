@@ -1162,6 +1162,31 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("not an integer: err = %v, want a refusal naming DISPATCH_APP_ID", err)
 			}
 		},
+		"DISPATCH_REVIEWER_APP_ID": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.ReviewerAppID != "" {
+				t.Errorf("unset: ReviewerAppID = %q, want empty, which records no verdict check", boot.ReviewerAppID)
+			}
+			boot := resolveWith(t, map[string]string{"DISPATCH_REVIEWER_APP_ID": " 5341243 "})
+			if boot.ReviewerAppID != "5341243" {
+				t.Errorf("ReviewerAppID = %q, want %q", boot.ReviewerAppID, "5341243")
+			}
+			for _, value := range []string{"x", "0", "-1", "5341243x", "5 341 243"} {
+				refusedWith(t, map[string]string{"DISPATCH_REVIEWER_APP_ID": value}, "DISPATCH_REVIEWER_APP_ID")
+			}
+			// Its reader: the pass main starts, which compares a verdict check's app.id against
+			// this id. The pass this builds runs nothing, so the rate limits it would read make
+			// an empty database every database it needs, as the sweeper's own case above does.
+			_, url := testnats.Start(t)
+			_, pemText := githubapptest.Key(t)
+			reconciler, err := ciReconciler(startDispatchStream(t, []string{url}, nil), &store.Store{},
+				&auth.AppConfig{ClientID: "Iv1.reviewer", PEM: pemText}, "", boot.ReviewerAppID)
+			if err != nil || reconciler == nil {
+				t.Fatalf("build the CI reconcile pass: %+v, %v", reconciler, err)
+			}
+			if reconciler.ReviewerAppID != "5341243" {
+				t.Errorf("the pass's ReviewerAppID = %q, want %q", reconciler.ReviewerAppID, "5341243")
+			}
+		},
 		"DISPATCH_APP_SLUG": func(t *testing.T) {
 			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_SLUG": "table-slug"}), t.TempDir())
 			if err != nil || app.Slug != "table-slug" {
@@ -1744,6 +1769,24 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Error("DISPATCH_TEST_RECONCILE_AT_START=true: ReconcileAtStart true, want only 1 to set it")
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_RECONCILE_AT_START": "1"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_CI_RECONCILE_INTERVAL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.CIReconcileInterval != 0 {
+				t.Errorf("DISPATCH_TEST_CI_RECONCILE_INTERVAL unset: CIReconcileInterval = %v, want 0 (cireconcile.Interval's five minutes)", boot.CIReconcileInterval)
+			}
+			const quick = 2 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                 "1",
+				"DISPATCH_TEST_CI_RECONCILE_INTERVAL": quick.String(),
+			})
+			if boot.CIReconcileInterval != quick {
+				t.Errorf("DISPATCH_TEST_CI_RECONCILE_INTERVAL: CIReconcileInterval = %v, want %v", boot.CIReconcileInterval, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_CI_RECONCILE_INTERVAL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_CI_RECONCILE_INTERVAL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_CI_RECONCILE_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {

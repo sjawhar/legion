@@ -1062,6 +1062,25 @@ type supervision struct {
 	reportMu     sync.Mutex
 	reportedGaps []string
 	reports      map[claim.Token]capabilities.Report
+	// podUpdateMu guards podUpdateOpenedAt and podUpdateOpened, the whole of what the update-round
+	// sweep keeps between ticks (reconcilePodUpdates): when this daemon last opened a pod round,
+	// and the rounds it has opened whose claims have not recorded one yet, by issue. The two pace
+	// the sweep's openings under `pod_update_rounds_per_minute` and `pod_update_max_open_rounds`;
+	// nothing of either is in the store, because neither decides a round, and a daemon that has
+	// just booted opens its first round at its first sweep. The sweep is one goroutine, and the
+	// mutex is what makes that a fact of this code rather than of its caller.
+	podUpdateMu       sync.Mutex
+	podUpdateOpenedAt time.Time
+	podUpdateOpened   map[string]string
+	// podUpdateRoundsMu guards podUpdateRounds, what the last sweep decided under those two limits
+	// as the operator's claim listing serves it (api.PodUpdateRounds, podUpdateRoundsView): the
+	// issues that held an open round and the issues each limit held back. It is the sweep's own
+	// word and no claim carries it — an issue a limit held back is posted nothing at all — and it
+	// is kept in the shape the route answers, so nothing between the sweep and the wire translates
+	// it. A mutex of its own, because the API's reader is another goroutine than the sweep and
+	// neither waits on what the other is doing.
+	podUpdateRoundsMu sync.Mutex
+	podUpdateRounds   api.PodUpdateRounds
 	// reportStore persists each report as it arrives (store.Store), so a restart renders the
 	// sessions it re-adopts without waiting for them to report again.
 	reportStore capabilityReportStore
@@ -1655,6 +1674,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		ConsumerLag:        consumerLag,
 		CallerPod:          callerPodOf(s.runtime),
 		Supervisor:         s.supervisor,
+		PodUpdateRounds:    s.podUpdateRoundsView,
 		BootTokens:         s.tokens,
 		Project:            p.project,
 		DispatchProject:    cfg.Project,

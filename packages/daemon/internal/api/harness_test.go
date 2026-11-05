@@ -202,6 +202,10 @@ type harness struct {
 	// context was the agent's request's or one that outlives its connection.
 	reported           *[]capabilities.Report
 	reportedContextErr *[]error
+	// podUpdateRounds is what Options.PodUpdateRounds answers, which a test writes before it lists
+	// the claims: the sweep that fills it in production is the daemon's, which this package has
+	// none of.
+	podUpdateRounds *PodUpdateRounds
 	// handoffs is the Dispatch a completion route's harness reads handoff records from
 	// (newHandoffHarness), which writeHandoff fills; nil for a harness serving no completion.
 	handoffs *statusRecorder
@@ -261,11 +265,13 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	}
 	readied := &[]supervise.Claim{}
 	reported, reportedContextErr := &[]capabilities.Report{}, &[]error{}
+	rounds := &PodUpdateRounds{}
 	h := &harness{
 		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup,
 		readied:            readied,
 		reported:           reported,
 		reportedContextErr: reportedContextErr,
+		podUpdateRounds:    rounds,
 	}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
@@ -273,6 +279,7 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 		PluginRelaunchable: relaunchable,
 		ClaimReady:         func(c supervise.Claim) { *readied = append(*readied, c) },
 		PromptAgents:       testPromptAgents,
+		PodUpdateRounds:    func() PodUpdateRounds { return *rounds },
 		CapabilityReported: func(ctx context.Context, _ supervise.Claim, report capabilities.Report) {
 			*reported = append(*reported, report)
 			*reportedContextErr = append(*reportedContextErr, ctx.Err())
