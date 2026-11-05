@@ -336,23 +336,23 @@ def go_notices_runs():
 # The steps of envoy-go, envoy-smoke and listener-server-change whose go commands are not in the
 # simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
-UNIT_TEST_SCRIPT = """\
-mkdir -p "$RUNNER_TEMP/go-test-json"
+UNIT_TEST_SCRIPT = r"""mkdir -p "$RUNNER_TEMP/go-test-json"
 waits="$RUNNER_TEMP/go-test-json/postgres-waits.txt"
-while :; do
-  for port in 5432 5433; do
-    PGPASSWORD=ci psql -h localhost -p "$port" -U postgres -At -F'|' -c \\
-      "select now(), $port, backend_type, state, coalesce(wait_event_type, ''), coalesce(wait_event, ''), left(coalesce(query, ''), 120) from pg_stat_activity where pid <> pg_backend_pid()" \\
-      >> "$waits" 2>/dev/null || true
-  done
-  sleep 1
-done &
-sampler=$!
-trap 'kill "$sampler" 2>/dev/null || true' EXIT
+# One long-lived connection a server, re-running its query every five seconds through
+# psql's own \watch. A psql per sample per server was the first shape and it cost the
+# run dearly: two processes and two connections a second on a four-core runner under
+# full load is work the tests then do not get (run 42039747360).
+for port in 5432 5433; do
+  PGPASSWORD=ci psql -h localhost -p "$port" -U postgres -At -F'|' -c \
+    "select now(), $port, backend_type, state, coalesce(wait_event_type, ''), coalesce(wait_event, ''), left(coalesce(query, ''), 120) from pg_stat_activity where pid <> pg_backend_pid() \watch 5" \
+    >> "$waits" 2>/dev/null &
+done
+samplers="$(jobs -p)"
+trap 'kill $samplers 2>/dev/null || true' EXIT
 go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
   xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
 rest=$!
-DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \\
+DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \
   go test -json -count=1 -parallel 12 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
 routes=$!
 rest_status=0

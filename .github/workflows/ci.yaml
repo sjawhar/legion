@@ -917,6 +917,7 @@ jobs:
               # internal/dispatch/text, so the natslive run compiles that package and the check
               # counts its testdata among what this job reads.
               - 'packages/envoy/internal/dispatch/text/testdata/**'
+              - 'packages/envoy/internal/pgclone/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               # The image pull before its tests, of the consts in testnats/nats.go and
@@ -1089,6 +1090,7 @@ jobs:
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/kvwatch/kvwatchtest/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
+              - 'packages/envoy/internal/pgclone/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
@@ -2903,16 +2905,17 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/go-test-json"
           waits="$RUNNER_TEMP/go-test-json/postgres-waits.txt"
-          while :; do
-            for port in 5432 5433; do
-              PGPASSWORD=ci psql -h localhost -p "$port" -U postgres -At -F'|' -c \
-                "select now(), $port, backend_type, state, coalesce(wait_event_type, ''), coalesce(wait_event, ''), left(coalesce(query, ''), 120) from pg_stat_activity where pid <> pg_backend_pid()" \
-                >> "$waits" 2>/dev/null || true
-            done
-            sleep 1
-          done &
-          sampler=$!
-          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          # One long-lived connection a server, re-running its query every five seconds through
+          # psql's own \watch. A psql per sample per server was the first shape and it cost the
+          # run dearly: two processes and two connections a second on a four-core runner under
+          # full load is work the tests then do not get (run 42039747360).
+          for port in 5432 5433; do
+            PGPASSWORD=ci psql -h localhost -p "$port" -U postgres -At -F'|' -c \
+              "select now(), $port, backend_type, state, coalesce(wait_event_type, ''), coalesce(wait_event, ''), left(coalesce(query, ''), 120) from pg_stat_activity where pid <> pg_backend_pid() \watch 5" \
+              >> "$waits" 2>/dev/null &
+          done
+          samplers="$(jobs -p)"
+          trap 'kill $samplers 2>/dev/null || true' EXIT
           go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
             xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
           rest=$!
