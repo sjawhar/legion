@@ -1052,7 +1052,7 @@ Any of the four providers' filters (Anthropic's, OpenAI's, Google's and Amazon B
 The refusal that lands after the model has already sent text is one of them: Oh My Pi does not walk its chain for that one, because the turn cannot be replayed, so the plugin walks it (`packages/pi-legion/src/model-fallback.ts`).
 Each further refusal of the same model doubles that wait, to at most eight hours, and a clean turn on the model puts it back to one hour.
 The two waits are a pane's and a pod's environment, `LEGION_REFUSAL_COOLDOWN_MS` (3600000, one hour) and `LEGION_REFUSAL_COOLDOWN_MAX_MS` (28800000, eight hours):
-the daemon passes each to the worker it launches while its own environment holds it, and a worker told neither runs on those two numbers (`refusalCooldownVariables`, `internal/daemon/specs.go`).
+the daemon passes each to the worker it launches while its own environment holds it, and to its own controller, which the same fallback serves; a role told neither runs on those two numbers (`refusalCooldownVariables`, `internal/daemon/specs.go`).
 The plugin writes each arming into the session's own transcript, so a worker the daemon relaunches on that session waits out the time that was left rather than coming back early.
 
 Every deployment sets `retry.fallbackRevertPolicy: never` beside its `retry.fallbackChains`, wherever it keeps them (the operator's `overlay.yml`, or a `role_config_files` overlay of its own).

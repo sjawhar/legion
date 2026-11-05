@@ -536,6 +536,37 @@ func TestSpawnSpecCarriesThePassthroughVariablesTheDaemonHolds(t *testing.T) {
 	}
 }
 
+// The daemon's own controller (`controller: daemon`) carries the two refusal cooldowns the daemon
+// holds and no stall limit: the model fallback those two bound serves its session as it serves a
+// worker's (dispatch://INFRA-956 R1), and the reminder the stall limits bound is a phase worker's
+// end-of-turn reminder, which the controller, working no phase, never runs.
+func TestTheControllersLaunchCarriesTheRefusalCooldownsAndNoStallLimit(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	cooldowns := map[string]string{
+		"LEGION_REFUSAL_COOLDOWN_MS":     "5000",
+		"LEGION_REFUSAL_COOLDOWN_MAX_MS": "60000",
+	}
+	for name, value := range cooldowns {
+		t.Setenv(name, value)
+	}
+	for _, name := range stallLimitVariables {
+		t.Setenv(name, "45000")
+	}
+	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, repositories: noRepositoriesView}
+	c := supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController}
+
+	spec, err := s.SpawnSpec(context.Background(), c)
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	if !maps.Equal(spec.Env, cooldowns) {
+		t.Errorf("the controller's Env = %v, want the two refusal cooldowns alone, %v", spec.Env, cooldowns)
+	}
+}
+
 // A Claude Code claim gets no stale-plugin install, whatever its recorded contract: that install
 // is the two npm plugins, and a Claude worker's plugin is the worker image's, so a plugin-contract
 // change for such a role is answered by a new image. The relaunch itself is unchanged — the

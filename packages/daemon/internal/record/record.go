@@ -1213,8 +1213,10 @@ type Store interface {
 	ControllerRegistered(ctx context.Context, tx pgx.Tx, project string) (bool, error)
 	// ControllerNoticePending says whether the outbox of the Dispatch project key project still
 	// holds an unpublished controller notice of kind, so a wake is never queued behind an
-	// identical one.
-	ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error)
+	// identical one. Issue "" reads every issue of the project, which is what a wake about the
+	// project alone asks; an issue narrows the read to that issue's own rows, for a kind whose
+	// notice stands per issue (NoticePerIssue).
+	ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind, issue string) (bool, error)
 
 	// DisarmPending says whether outbox still holds an unfinished auto_merge_disable row of issue:
 	// a finished row is deleted, so any row of the kind is one still to run or retrying.

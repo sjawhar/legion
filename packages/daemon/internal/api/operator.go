@@ -430,12 +430,20 @@ func forgettable(state supervise.ClaimState) bool {
 // claim in turn, with `legion claims retry --failed` — once the cause is gone.
 //
 // --fresh-session (RetryRequest) is the other half of that retry, and it is the claim's own: a
-// phase worker forgets the session it recorded (supervise's RequestForgetSession) before the
-// phase is started, so the start that relaunches it spawns a fresh agent and gives it the phase's
-// task, and every other claim forgets it inside the retry the machine makes
-// (supervise's operatorRetry). That is what a session the provider refuses needs — resuming it is
-// refused again, turn after turn — and the one thing no route could do before without naming the
-// session by hand.
+// phase worker forgets the session it recorded (supervise's RequestForgetSession), so the start
+// that relaunches it spawns a fresh agent and gives it the phase's task, and every other claim
+// forgets it inside the retry the machine makes (supervise's operatorRetry). That is what a
+// session the provider refuses needs — resuming it is refused again, turn after turn — and the
+// one thing no route could do before without naming the session by hand.
+//
+// A phase worker forgets it once the restart is accepted and not before: a refused retry — the
+// workflow's own refusal, an issue the retry leaves held because its tree lingers, a read that
+// failed — relaunches nothing, so the session it was going to resume is still the operator's to
+// resume or to name, and a forget before the fact would have erased it for a retry that did
+// nothing. The machine is handed the forget in this request, while the start the fact queued is
+// an outbox row a lane runs after the fact commits, so the forget reaches a claim the workflow
+// has not launched yet; a refusal the machine gives it is still the operator's answer, and
+// nothing of the retry is undone by it, the phase having already been restarted.
 func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 	token := claim.Token(r.PathValue("token"))
 	m, ok := s.supervisor.Machine(token)
@@ -468,9 +476,6 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	working := workedPhase(*recorded)
-	if req.FreshSession && !s.forgetRecordedSession(w, r, m, token, c.Session) {
-		return
-	}
 	fact := intake.Fact(intake.RestartPhase{Issue: c.Issue, Role: c.Role})
 	if recorded.Phase == phase.Held {
 		fact = intake.RetryOrEscalate{Issue: c.Issue, Decision: intake.RetryDecision}
@@ -493,6 +498,9 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	if after != nil && after.Phase == phase.Held {
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("%s is still held after the retry of its phase %s, so nothing relaunched %s: its tree lingers, and a lingering tree's members stay where they stood", c.Issue, working, token)))
+		return
+	}
+	if req.FreshSession && !s.forgetRecordedSession(w, r, m, token, c.Session) {
 		return
 	}
 	s.log.Info("api: the operator retried a phase", "claim", token, "issue", c.Issue, "phase", working, "freshSession", req.FreshSession)
@@ -519,7 +527,7 @@ func workedPhase(issue record.Issue) phase.Phase {
 // forgetRecordedSession has the claim drop the session it recorded, for a retry that asked for a
 // new one, and reports whether it did: a machine that refuses it — a claim running the session,
 // which no retry of this route reaches, or one that recorded another session since the route read
-// it — is the operator's answer, and nothing is started after it.
+// it — is the operator's answer, given in place of the retry's own.
 func (s *server) forgetRecordedSession(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token, session string) bool {
 	ctx, decided := s.decision(r, token)
 	defer decided()

@@ -394,12 +394,23 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 // issue (blocked), the turn that posts the day's report. Every other kind is queued as the
 // caller built it, so a kind that says something of its own — the role and the reason of
 // TellController's — carries it here.
+//
+// Which notices count as the same one is the kind's own rule (record.NoticePerIssue): a kind that
+// speaks for the project is one wake per project, which is what the slot wakes and the tick want,
+// and a kind that speaks for one claim is one wake per issue. The second is the provider-errors
+// notice: in an outage every claim's turns fail, each claim owes a notice of its own, and the
+// machine tells at exactly the sixth turn in a row, so a notice dropped because another issue's
+// still waited would never be sent.
 func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, notice record.ControllerNotice, issue string, dueAt time.Time) error {
 	registered, err := a.store.ControllerRegistered(ctx, tx, a.project)
 	if err != nil || !registered {
 		return err
 	}
-	pending, err := a.store.ControllerNoticePending(ctx, tx, a.project, notice.Kind)
+	of := ""
+	if record.NoticePerIssue(notice.Kind) {
+		of = issue
+	}
+	pending, err := a.store.ControllerNoticePending(ctx, tx, a.project, notice.Kind, of)
 	if err != nil || pending {
 		return err
 	}
@@ -418,8 +429,8 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, notice record
 // fact: the supervisor, whose machine decides inside its own lock (supervise's
 // Deps.ProviderErrorRunReached, wired in internal/daemon, which opens the transaction). It is
 // wakeController and nothing else: a controller that is not registered is told nothing, and a
-// notice of the same kind already waiting in the outbox stops this one, so a run of the same
-// cause is one wake.
+// notice the same wake already waits to send stops this one, so a run of the same cause on the
+// same issue is one wake and a second issue's run is a wake of its own (record.NoticePerIssue).
 func (a *Admission) TellController(ctx context.Context, tx pgx.Tx, notice record.ControllerNotice, issue string) error {
 	return a.wakeController(ctx, tx, notice, issue, a.now())
 }

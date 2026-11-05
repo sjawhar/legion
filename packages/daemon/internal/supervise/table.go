@@ -1933,7 +1933,8 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 // A claim that already holds a phase task is answered ErrDeliveryPending, which is a wait rather
 // than a fault: the update task must never displace the work in flight. The refusal is swallowed,
 // UpdateTaskedAt is left as it was, and the next tick asks again — which lands as soon as that
-// turn is over.
+// turn is over. A task a provider error took back is no work in flight, and the question replaces
+// it instead of waiting behind it (queue, askForUpdate).
 //
 // The claim is written only where this post changed it: a round the claim was not in, reasons
 // that have grown, or a task this post actually sent. The sweep posts to every claim of every
@@ -2063,6 +2064,11 @@ func (m *Machine) dropUpdateTask(ctx context.Context) error {
 // work that died with that pod, and no process the claim runs after it holds any of that work,
 // so the ask would cost one turn and teach the round nothing. It is asked nothing however often
 // it is started again, and a suspension does not bring it back into the round.
+//
+// A claim whose task a provider error took back is asked at once: queue replaces such a task with
+// this question rather than refusing the question behind it, so the round never waits out a
+// ladder whose steps reach ten minutes and whose run of errors has no end of its own
+// (dispatch://INFRA-956 R2, queue's own words).
 func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time.Time) error {
 	if m.claim.UpdateSignalledAt != nil || m.claim.LeftPodRound(m.claim.UpdateRound) {
 		return nil
@@ -2084,12 +2090,12 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 	task := RequestDeliver{Claim: m.claim.Token, ID: updateTaskID(open.Round), Task: open.Task}
 	if err := m.queue(ctx, task); err != nil {
 		if errors.Is(err, ErrDeliveryPending) {
-			// The claim holds a task of its own, so the update task waits for that turn to end.
-			// The held one is sent here rather than left: a round that replaced another cleared
-			// the answer that was holding it back (clearUpdate), and nothing else would send it
-			// until the next periodic observation, with the new round's own ask waiting behind
-			// it. sendPending hands nothing to a claim in a turn, so the ordinary case costs
-			// nothing.
+			// The claim holds a task of its own that nothing took back, so the update task waits
+			// for that turn to end. The held one is sent here rather than left: a round that
+			// replaced another cleared the answer that was holding it back (clearUpdate), and
+			// nothing else would send it until the next periodic observation, with the new
+			// round's own ask waiting behind it. sendPending hands nothing to a claim in a turn,
+			// so the ordinary case costs nothing.
 			m.log.Info("supervise: the claim holds a task of its own, so the update task waits for that turn to end",
 				"round", open.Round, "delivery", pendingID(m.claim.Pending))
 			return m.sendPending(ctx)

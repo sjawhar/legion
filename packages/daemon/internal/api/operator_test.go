@@ -723,10 +723,10 @@ func TestTheOperatorsRetryOfAStoppedPhaseWorkerRestartsItsPhase(t *testing.T) {
 	}
 }
 
-// --fresh-session has the claim leave its recorded session behind before the phase is started, so
-// the start spawns a new agent and gives it the phase's task: what a session the provider refuses
-// needs, since resuming it would be refused again.
-func TestTheOperatorsFreshSessionRetryForgetsTheSessionBeforeTheRestart(t *testing.T) {
+// --fresh-session has the claim leave its recorded session behind once the phase's restart is
+// accepted, so the start spawns a new agent and gives it the phase's task: what a session the
+// provider refuses needs, since resuming it would be refused again.
+func TestTheOperatorsFreshSessionRetryForgetsTheSessionOnceTheRestartIsAccepted(t *testing.T) {
 	facts := &phaseRestarter{}
 	h, workerToken := stoppedImplementer(t, facts)
 
@@ -741,6 +741,21 @@ func TestTheOperatorsFreshSessionRetryForgetsTheSessionBeforeTheRestart(t *testi
 	}
 	if applied := facts.recorded(); len(applied) != 1 {
 		t.Fatalf("the fresh-session retry applied %#v, want the phase's restart alone", applied)
+	}
+}
+
+// A refused retry relaunches nothing, so it leaves the session where it stood: an issue the retry
+// leaves held because its tree lingers is answered 409, and the session the operator may still
+// want to resume or to name is the claim's own until a retry is accepted.
+func TestTheOperatorsRefusedFreshSessionRetryLeavesTheSession(t *testing.T) {
+	facts := &heldRetrier{lingers: true}
+	h, workerToken := stoppedImplementer(t, facts)
+	heldIssue(t, h, phase.Implementing)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", RetryRequest{FreshSession: true}), http.StatusConflict,
+		"LEGION-209 is still held after the retry of its phase implementing, so nothing relaunched "+string(workerToken)+": its tree lingers, and a lingering tree's members stay where they stood")
+	if after := h.stored(workerToken); after.Session != "ses_implementer" {
+		t.Errorf("the refused fresh-session retry left session %q on the claim, want the recorded one kept", after.Session)
 	}
 }
 

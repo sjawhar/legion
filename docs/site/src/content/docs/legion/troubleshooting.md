@@ -410,7 +410,9 @@ the session has already stepped down to the next model of its fallback chain, so
 goes to another model
 ([Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged));
 a 429, a 5xx, and an error that neither the error's own fields nor the agent's report settles
-within two minutes are sent again too.
+within two minutes are sent again too. A newer task for that claim replaces the one the error took
+back and is sent at once, and an update round's question goes before it, so neither waits out a
+ladder that reaches ten minutes a step.
 
 **One provider error does hold the issue**, for its architect: one the provider marked not
 retryable *and* that the agent's own report of the turn called a `provider-error`. A malformed
@@ -423,7 +425,8 @@ is told once, as `provider-errors on <KEY>`, with the run, the model and the cau
 (`supervise: a run of turns that ended in a provider error; the controller is told`). Nothing is
 held and nothing is stopped by that count: the task is still kept and still sent again. The run
 goes back to zero at the first turn of that claim that ends with no provider error, and only then
-can another notice go.
+can another notice go. The notice is the issue's own, so in a provider outage every claim that
+reaches six is told, each on its own issue.
 
 When an agent's budget runs out (launches that failed, deaths with work outstanding, prompts it
 never took a turn on) the daemon stops relaunching it and holds the issue. The daemon logs JSON
@@ -484,7 +487,9 @@ claim, which is retired rather than failed, so name that one with `--claim`.
 
 `legion claims retry --claim <token> --fresh-session` is the whole recovery for a claim whose
 session a provider keeps refusing: it forgets the session that claim recorded and starts the claim
-in a new session with its phase's task, so no `legion claims forget-session` comes before it. What a
+in a new session with its phase's task, so no `legion claims forget-session` comes before it. It
+forgets that session only once the restart is accepted, so a retry the daemon refuses leaves the
+recorded session on the claim and the same command works once the refusal's cause is gone. What a
 refusal does on its own, before any of this, is in the paragraphs above and in
 [Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged).
 

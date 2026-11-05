@@ -1,7 +1,6 @@
 package supervise
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -324,31 +323,57 @@ func TestAnEarlierTurnsReportInsideTheWaitSettlesNothing(t *testing.T) {
 	}
 }
 
-// The wait is the task's own, fenced on the delivery id the arming recorded. A task that replaced
-// it is held by nothing — and the task the provider error took back is never sent again, because
-// its issue left the phase it was queued for.
-func TestANewerTaskQueuedWhileTheLadderWaitsGoesAtOnce(t *testing.T) {
-	at := phase.Implementing
-	h := workingClaim(t, func(d *Deps) {
-		d.PhaseHolds = func(_ context.Context, _ string, p phase.Phase, _ uint64) (bool, error) { return p == at, nil }
-	})
+// R2: a newer daemon task for the claim replaces the task a provider error took back, and goes at
+// once. Nothing works the owed task, the ladder's next step can be ten minutes away and a run of
+// errors has no end of its own, so a task that waited behind it would wait that long. What the
+// ladder counted is the owed delivery's own and goes with it, so the task that replaces it starts
+// its own ladder at the first step; the claim's run of provider-error turns is the claim's and
+// stays.
+func TestANewerTaskQueuedWhileTheLadderWaitsReplacesTheOwedTask(t *testing.T) {
+	h := workingClaim(t)
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
+	owed := h.pending()
+	if owed.ProviderErrorRetries != 1 || owed.ProviderErrorNote == "" {
+		t.Fatalf("the owed task is %+v, want one send counted against it and the sentence it would go behind", owed)
+	}
+
+	h.must(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 8, Assignment: "A2"})
+
+	sent := h.wantPrompts(2)[1]
+	if sent.Message != "test the change" || sent.DeliveryID == owed.ID {
+		t.Fatalf("sent %+v, want the newer task at once under an id of its own", sent)
+	}
+	if p := h.pending(); p.ProviderErrorRetries != 0 || p.ProviderErrorNote != "" {
+		t.Errorf("the task that replaced the owed one is %+v, want a ladder of its own from the first step", p)
+	}
+	if _, armed := h.m.timers[TimerPromptRetry]; armed {
+		t.Error("the ladder's wait is still armed for a task the claim no longer holds")
+	}
+	if run := h.claim().ProviderErrorRun; run != 1 {
+		t.Errorf("the claim's run of provider-error turns is %d, want 1: the run is the claim's, not the task's", run)
+	}
+}
+
+// R2's other half: an update round's question goes before the task a provider error took back.
+// The round is the daemon replacing this claim's pod, and a question refused behind the owed task
+// (ErrDeliveryPending) would wait out a ladder whose steps reach ten minutes, so in a run of
+// errors the round would never get in.
+func TestAnUpdateRoundsQuestionGoesBeforeTheOwedTask(t *testing.T) {
+	h := workingClaim(t)
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
 	owed := h.pending().ID
 
-	// The issue moves to testing while the ladder waits: the owed task is the implementer's, and
-	// the ladder's own firing drops it rather than sending it.
-	at = phase.Testing
-	h.advance(30 * time.Second)
-	h.wantPrompts(1)
-	if p := h.claim().Pending; p != nil {
-		t.Fatalf("pending %+v, want the task of a phase the issue has left dropped", *p)
-	}
-
-	h.must(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 7, Assignment: "A1"})
+	h.openUpdate(testRound, testReasons)
 
 	sent := h.wantPrompts(2)[1]
-	if sent.Message != "test the change" || sent.DeliveryID == owed {
-		t.Fatalf("sent %+v, want the newer task at once under an id of its own", sent)
+	if !asksRound(sent.DeliveryID, testRound) {
+		t.Fatalf("sent %+v, want the round's question before the owed task", sent)
+	}
+	if p := h.pending(); !asksRound(p.ID, testRound) {
+		t.Fatalf("pending %+v, want the round's question, not the task %s the provider error took back", p, owed)
+	}
+	if _, armed := h.m.timers[TimerPromptRetry]; armed {
+		t.Error("the ladder's wait is still armed for a task the question replaced")
 	}
 }
 

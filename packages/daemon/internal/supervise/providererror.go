@@ -129,7 +129,7 @@ func (m *Machine) decideProviderError(ctx context.Context) error {
 // the delivery counts one more send, carries the sentence the re-sent prompt is given
 // (Delivery.ProviderErrorNote), and is written with the claim's run of provider-error turns in
 // one transaction. Its timer's firing is what sends it (promptRetryDue); until then sendPending
-// holds it, and a newer task queued meanwhile is not held at all.
+// holds it, and a newer task queued meanwhile replaces it rather than waiting behind it (queue).
 func (m *Machine) providerErrorClears(ctx context.Context) error {
 	e := *m.providerError
 	cause := m.providerErrorCause(e)
@@ -247,8 +247,8 @@ func (m *Machine) tellControllerOfProviderErrors(e providerError) {
 }
 
 // waitsForProviderError is whether either wait a provider error arms is armed for the delivery of
-// this id. sendPending holds such a task; a newer task queued meanwhile is one no wait names, and
-// it goes at once.
+// this id. sendPending holds such a task, and queue replaces it with a newer one; a task that
+// replaced it is one no wait names, and it goes at once.
 func (m *Machine) waitsForProviderError(delivery string) bool {
 	for _, kind := range []TimerKind{TimerPromptRetry, TimerTurnOutcome} {
 		if a, armed := m.timers[kind]; armed && a.deliveryID == delivery {

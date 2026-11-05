@@ -167,6 +167,23 @@ func pendingID(p *Delivery) string {
 // because its root had no architect to hear it never wedges the claim: the start of the root's
 // next run, retrying on its backoff, is what releases it, and the refusal that start is answered
 // with is over once the architect's turn on the held task has ended and the delivery retired.
+//
+// One pending task is replaced rather than refused: the task a provider error took back, while
+// either wait that error armed stands (waitsForProviderError). Nothing is working it, the next
+// step of the ladder can be ten minutes away, and a run of errors has no end of its own, so a
+// refusal would keep every newer task of the claim — an update round's question among them —
+// behind a task the claim owes for as long as the provider keeps failing (dispatch://INFRA-956
+// R2: a newer task replaces the owed one, and an update round's question goes before it). The
+// replacement is a drop like any other: retirePending ends both waits with the task, and the
+// question a restart armed for that task is answered in the same step
+// (answerAskFirstAfterDrop), so the task queued behind it is never taken for the running turn's.
+//
+// What the ladder counted belongs to the delivery it counted for, and goes with it: the attempt
+// count and the sentence the next prompt would have carried are the delivery's own fields
+// (ProviderErrorRetries, ProviderErrorNote), so the task that replaces it starts its own ladder
+// at the first step. The claim's run of provider-error turns is the claim's and stays
+// (Claim.ProviderErrorRun): the provider failed this claim's turns whichever task they worked,
+// and only a turn that ends with no error puts that run back to zero.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	id, task := request.ID, request.Task
 	delivered := request.Row > 0 && slices.Contains(m.claim.DeliveredRows, request.Row)
@@ -174,10 +191,20 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 		if (id != "" && pending.ID == id && pending.Task == task) || delivered {
 			return nil
 		}
-		if err := m.sendPending(ctx); err != nil {
+		if !m.waitsForProviderError(pending.ID) {
+			if err := m.sendPending(ctx); err != nil {
+				return err
+			}
+			return &RefusedError{State: m.claim.State, Request: "deliver", Err: ErrDeliveryPending}
+		}
+		m.log.Info("supervise: a newer task replaces the one a provider error took back",
+			"owed", pending.ID, "attempt", pending.ProviderErrorRetries, "delivery", id)
+		if err := m.retirePending(ctx); err != nil {
 			return err
 		}
-		return &RefusedError{State: m.claim.State, Request: "deliver", Err: ErrDeliveryPending}
+		if err := m.answerAskFirstAfterDrop(ctx); err != nil {
+			return err
+		}
 	}
 	if delivered {
 		m.log.Info("supervise: the row's task was already given; not queued again", "row", request.Row, "delivery", id)
@@ -259,8 +286,8 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		return nil
 	}
 	// The two waits a provider error arms are the delivery's own, so each is fenced on the id the
-	// arming recorded (waitsForProviderError): a newer task queued meanwhile is a task no wait is
-	// armed for, and it goes at once.
+	// arming recorded (waitsForProviderError): a newer task replaces the one the wait is for
+	// (queue), so it is a task no wait is armed for, and it goes at once.
 	if m.waitsForProviderError(p.ID) {
 		return nil
 	}
