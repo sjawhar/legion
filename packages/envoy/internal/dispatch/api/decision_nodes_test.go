@@ -61,6 +61,10 @@ func TestTypedDecisionNodesOwnTheirShapedEdgesAndKeep(t *testing.T) {
 	if decision.Kind != "agent" || !decision.WaitingReview || len(decision.Links) != 1 || decision.Links[0].To.BlockID != "ship_it" {
 		t.Fatalf("node: %s", mustJSON(t, decision))
 	}
+	// Without the block's own words a reader draws its uuid, so the link carries them.
+	if !strings.Contains(decision.Links[0].To.Text, "Ship it.") {
+		t.Fatalf("the shaped block's words: %q", decision.Links[0].To.Text)
+	}
 	var shaped, person int
 	err := database.Pool.QueryRow(t.Context(), `select count(*) filter (where kind='shaped' and to_kind='block'), count(*) filter (where kind='decided_by' and to_kind='person' and to_id='alice') from graph_edges where from_kind='block' and from_id=$1`, issue.Key+"/spec#store").Scan(&shaped, &person)
 	if err != nil || shaped != 1 || person != 1 {

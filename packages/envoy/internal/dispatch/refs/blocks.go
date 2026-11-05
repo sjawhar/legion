@@ -428,10 +428,16 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 			// A block deleted between the two reads: its links drop out as they would have.
 			continue
 		}
+		fromNode, toNode := from.GraphNode, to.GraphNode
+		// A reader draws the block a link names, and a node with no words leaves it drawing the
+		// node's uuid. resolveNodes already read the text; carry its head on the node so no reader
+		// makes a second read per link for it.
+		fromNode.Text = text.HeadRunes(from.text, excerptRunes)
+		toNode.Text = text.HeadRunes(to.text, excerptRunes)
 		result = append(result, model.BlockLink{
 			Kind:           link.kind,
-			From:           from.GraphNode,
-			To:             to.GraphNode,
+			From:           fromNode,
+			To:             toNode,
 			CreatedAt:      link.createdAt,
 			CreatedVersion: link.createdVersion,
 		})

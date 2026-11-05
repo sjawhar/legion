@@ -2376,6 +2376,8 @@ export interface DecisionKeep {
 // DecisionLink is a shaped relation from a decision node to a block of the issue's spec,
 // dated in the source document. stale means the decision changed after writing the relation
 // and the passage has not caught up. to.pin retains the passage's version-bound words.
+// to.text is the head of the linked block's own words, cut at 240 runes, so a reader draws the
+// passage and never the node's uuid; it is absent only for a block that has no words.
 export interface DecisionLink {
   readonly from_block: string;
   readonly to: GraphNode;
