@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A pull request whose title or body names another repository''s issue before its own is attributed to its own issue again: Dispatch now takes the first issue its ranked sources name that resolves to the repository the pull request is in, so that issue''s before-merge check results read current at its own pull request''s head instead of older.'
+time: 2026-11-05T05:14:57.916802521Z
+custom:
+    Issue: pr2798

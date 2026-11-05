@@ -1,0 +1,5 @@
+kind: Fixed
+body: Dispatch re-reads its pull-request heads whether or not delivery settings exist, so a check result recorded at a head a later push replaced reads older without waiting for another result to be recorded.
+time: 2026-11-05T05:15:06.077142142Z
+custom:
+    Issue: pr2798
