@@ -383,8 +383,17 @@ export function sessionSettingsView(
   };
 }
 
+/**
+ * A part the stream writes for a block it does not render: the block's kind in brackets, which
+ * is what `conversationParts` (`@legion/pi-shared/agent-stream`) puts there for a picture
+ * (`[image]`) and for any other kind a later build meets. It is the stream naming what the
+ * message carried, not a word the person wrote.
+ */
+const PLACEHOLDER_PART = /^\[[A-Za-z][\w-]*\]$/;
+
 /** One streamed user message a person's Dispatch message became: the Dispatch message it says it
- *  delivered, and what it says, its text parts joined as the session sent them. */
+ *  delivered, and what the person wrote, its text parts joined as the session sent them with the
+ *  placeholders left out. */
 export interface DispatchTurn {
   readonly dispatchMessageId: string;
   readonly text: string;
@@ -399,7 +408,10 @@ export interface DispatchTurn {
  * any client, so a tag counts only as the publisher's contract puts it, a string on a user
  * message; any other is ignored rather than taking the message with it, since a message shown
  * twice beats one lost. The text is read from the frame's own parts, which on a user message are
- * text alone (`isRenderableFrame`).
+ * text alone (`isRenderableFrame`). A placeholder part is not read as something the person
+ * wrote: a message carrying a picture reaches the session as the person's text and the picture
+ * beside it, and the picture makes the row say more than the stored body, never something else,
+ * so that stored copy gives way too (INFRA-1026).
  */
 export function dispatchTurns(state: AgentConversation): Map<string, DispatchTurn> {
   const turns = new Map<string, DispatchTurn>();
@@ -407,7 +419,11 @@ export function dispatchTurns(state: AgentConversation): Map<string, DispatchTur
     if (message.role === "user" && typeof message.dispatchMessageId === "string") {
       turns.set(message.id, {
         dispatchMessageId: message.dispatchMessageId,
-        text: message.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"),
+        text: message.parts
+          .flatMap((part) =>
+            part.type === "text" && !PLACEHOLDER_PART.test(part.text) ? [part.text] : []
+          )
+          .join("\n"),
       });
     }
   }

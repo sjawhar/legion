@@ -129,8 +129,9 @@ export interface ClaudeAgentStream {
   /**
    * The effort a person's pick put in force. Claude Code reports an effort only on a request's
    * own `turn.step`, so until the session's next turn its report is the level before the pick;
-   * the pick itself is what set the effort the mod puts on every later request, so from the
-   * moment it lands the settings frame says so, and the next step reports the same value.
+   * the pick itself is what set the effort the mod puts on every later request, whatever model
+   * runs it (`../hooks/mod`, `effortNow`), so from the moment it lands the settings frame says
+   * so and keeps saying so until another pick changes it.
    */
   readonly pickedEffort: (effort: ModEffort) => void
   /** Forget the conversation's timestamps and the effort read off it: the session id moved, and
@@ -138,9 +139,8 @@ export interface ClaudeAgentStream {
   readonly reset: () => void
 }
 
-/** The text a row's content holds, blocks flattened: a tool result is shown as text alone, and a
- *  person's prompt reaches the view as one part. A block with no text of its own is named rather
- *  than dropped, as the publisher names one. */
+/** The text a row's content holds, blocks flattened: a tool result is shown as text alone. A
+ *  block with no text of its own is named rather than dropped, as the publisher names one. */
 function flatten(value: unknown): string {
   if (typeof value === "string") return value
   if (!Array.isArray(value)) return ""
@@ -265,7 +265,8 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
   /** The last timestamp handed to a step, so the next one is strictly past it. */
   let allocated = 0
   let observed: ObservedEffort | undefined
-  /** The effort a pick put in force, until a step of the session reports one itself. */
+  /** The effort the last pick put in force, which is the effort the mod puts on every later
+   *  request until another pick changes it. */
   let picked: ModEffort | undefined
 
   /** The timestamp this step keeps for every snapshot of it. */
@@ -291,9 +292,10 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
 
   /** One `turn.step` snapshot as the assistant message of that step. */
   const recordStep = (subject: string, event: Extract<ModEvent, { kind: "step" }>): void => {
-    // The step's own report is the newer fact: a pick before it set this very effort.
+    // The step reports the effort its own request carried. A pick is not forgotten here: the
+    // mod goes on putting it on every later request, whatever model runs, so it stays the level
+    // in force until another pick changes it.
     observed = { model: event.model, effort: event.effort }
-    picked = undefined
     const content: ClaudeStreamPart[] = []
     let hiddenThinkingShown = false
     for (const part of event.parts) {
@@ -341,12 +343,17 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       // Measured on 2.1.310: a submit with `asUser` carries `asUser: true` on the row's origin
       // and one without it carries no such field, which is what tells the two apart.
       if (origin.kind === "plugin" && origin.asUser !== true) return
-      const prompt: ClaudeStreamPart = { text: flatten(message.content), type: "text" }
-      if (!shows(prompt)) return
+      // Each block crosses as the part it is, as it does by every other door: the person's text
+      // stays a part of its own and a picture becomes the `[image]` part the publisher names it
+      // (`conversationParts` in `@legion/pi-shared/agent-stream`). Flattened into one
+      // "Look at this\n[image]" part the row says what no stored message says, and the Agents
+      // page shows the person's message twice (INFRA-1026).
+      const content = message.content.map(partOf)
+      if (!content.some(shows)) return
       record(
         subject,
         {
-          content: [prompt],
+          content,
           role: "user",
           tag: uuid,
           timestamp: now(),
@@ -421,11 +428,11 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
         reported: true,
         // Claude Code reports the effort on each request's `turn.step` and nowhere else, so a
         // pick is the only other thing that knows one: it set the effort the mod puts on every
-        // later request, and it is newer than every step before it, so it is what the header
-        // shows until a step reports the same value back. Before this session's first request
-        // and before any pick there is a selector and no level to show; a step that named no
-        // effort is a model with no thinking to adjust. A step of another model is no answer
-        // about this one.
+        // later request whatever model runs it, so from the moment it lands it is the level in
+        // force, and it stays so until another pick changes it - a step of a model picked after
+        // it carries that very effort. Before this session's first request and before any pick
+        // there is a selector and no level to show; a step that named no effort is a model with
+        // no thinking to adjust. A step of another model is no answer about this one.
         thinking:
           picked !== undefined
             ? { level: String(picked), levels: CLAUDE_EFFORT_LEVELS }

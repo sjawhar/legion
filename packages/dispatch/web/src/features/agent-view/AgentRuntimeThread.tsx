@@ -89,7 +89,9 @@ export function AgentRuntimeThread({
     // naming whoever wrote it. An untagged one is returned unchanged and its stored copy is never
     // taken, so it shows twice (`packages/pi-envoy/AGENTS.md` says which turns go untagged). Any
     // bus client can publish a tag, so only a person's stored message can be one, and only a
-    // streamed message saying exactly what that person sent replaces its stored copy.
+    // streamed message saying exactly what that person wrote - beside what the stream names in a
+    // placeholder part, such as a picture's `[image]` - replaces its stored copy
+    // (`dispatchTurns`).
     const byID = new Map(
       storedMessages
         .filter((message) => message.author.kind === "user")
