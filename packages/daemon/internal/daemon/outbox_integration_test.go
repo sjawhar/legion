@@ -3,13 +3,10 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -209,30 +207,8 @@ func outboxRows(t *testing.T, pool *pgxpool.Pool) int {
 
 func isolatedOutboxPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	base, err := url.Parse(testDSN(t))
-	if err != nil {
-		t.Fatalf("parse test DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("connect test admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_outbox_test_" + outboxSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-	databaseURL := *base
-	databaseURL.Path = "/" + name
-	st, err := legionstore.Open(context.Background(), databaseURL.String())
+	dsn := testpg.Database(t, "legion_outbox_test")
+	st, err := legionstore.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open isolated store: %v", err)
 	}
@@ -241,21 +217,12 @@ func isolatedOutboxPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("migrate isolated store: %v", err)
 	}
 	st.Close()
-	pool, err := pgxpool.New(context.Background(), databaseURL.String())
+	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open isolated pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
-}
-
-func outboxSuffix(t *testing.T) string {
-	t.Helper()
-	var bytes [8]byte
-	if _, err := rand.Read(bytes[:]); err != nil {
-		t.Fatalf("random database suffix: %v", err)
-	}
-	return hex.EncodeToString(bytes[:])
 }
 
 type blockingDispatch struct {

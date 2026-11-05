@@ -2,12 +2,8 @@ package store
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,7 +12,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -25,54 +20,14 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
-// testDSN is the devbox and CI Postgres the store tests run against. Without it
-// there is nothing to test: the store has no in-memory mode by design.
-func testDSN(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
-			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
-			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/store/")
-	}
-	return dsn
-}
-
 // emptyStore opens a store on a database of its own, so "an empty database" in a
 // test means one, and tests never see each other's rows.
 func emptyStore(t *testing.T) *Store {
 	t.Helper()
 	ctx := context.Background()
-
-	base, err := url.Parse(testDSN(t))
+	store, err := Open(ctx, testpg.Database(t, "legion_store_test"))
 	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("connect to the admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	name := "legion_store_test_" + randomSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-
-	testURL := *base
-	testURL.Path = "/" + name
-	store, err := Open(ctx, testURL.String())
-	if err != nil {
-		t.Fatalf("open %s: %v", name, err)
+		t.Fatalf("open the test database: %v", err)
 	}
 	t.Cleanup(store.Close)
 	return store
@@ -86,15 +41,6 @@ func migratedStore(t *testing.T) *Store {
 		t.Fatalf("migrate: %v", err)
 	}
 	return store
-}
-
-func randomSuffix(t *testing.T) string {
-	t.Helper()
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		t.Fatalf("random suffix: %v", err)
-	}
-	return hex.EncodeToString(b[:])
 }
 
 func TestOpenNamesTheUnreachableAddressAndNotThePassword(t *testing.T) {

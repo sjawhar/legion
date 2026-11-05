@@ -2,14 +2,12 @@ package daemon
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"reflect"
 	"slices"
@@ -27,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -900,30 +899,7 @@ func registerLaunch(t *testing.T, d *daemon, launch runtime.SpawnSpec) (string, 
 // them. The admission slot index, unique across the whole database, is a second reason.
 func blockersDatabase(t *testing.T) string {
 	t.Helper()
-	base, err := url.Parse(testDSN(t))
-	if err != nil {
-		t.Fatalf("parse the test DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("connect the test admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_blockers_test_" + outboxSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-	daemonURL := *base
-	daemonURL.Path = "/" + name
-	return daemonURL.String()
+	return testpg.Database(t, "legion_blockers_test")
 }
 
 // blockersGitHub is GitHub's REST API as this daemon's boot and its outbox call it: a repository's

@@ -2,15 +2,10 @@ package sandbox
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
-	"net/url"
-	"os"
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
@@ -21,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/wait"
 )
@@ -29,41 +25,10 @@ import (
 // issue's close, which SuspendIssue runs under its pod's launch turn.
 func migratedStore(t *testing.T) *store.Store {
 	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to authorize the issue's close against")
-	}
 	ctx := context.Background()
-	base, err := url.Parse(dsn)
+	st, err := store.Open(ctx, testpg.Database(t, "legion_sandbox_test"))
 	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("connect to the admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := "legion_sandbox_test_" + hex.EncodeToString(suffix[:])
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-	testURL := *base
-	testURL.Path = "/" + name
-	st, err := store.Open(ctx, testURL.String())
-	if err != nil {
-		t.Fatalf("open %s: %v", name, err)
+		t.Fatalf("open the test database: %v", err)
 	}
 	t.Cleanup(st.Close)
 	if _, err := st.Migrate(ctx); err != nil {

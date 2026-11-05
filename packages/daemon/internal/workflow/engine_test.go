@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -27,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -1053,34 +1053,8 @@ func sameStrings(got, want []string) bool {
 
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so workflow tests need no database")
-	}
-	base, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(t.Context(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin connection: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_workflow_test_" + randomSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(t.Context(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create test database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop test database: %v", err)
-		}
-	})
-	testURL := *base
-	testURL.Path = "/" + name
-	st, err := legionstore.Open(t.Context(), testURL.String())
+	dsn := testpg.Database(t, "legion_workflow_test")
+	st, err := legionstore.Open(t.Context(), dsn)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1089,7 +1063,7 @@ func migratedPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("migrate test store: %v", err)
 	}
 	st.Close()
-	pool, err := pgxpool.New(t.Context(), testURL.String())
+	pool, err := pgxpool.New(t.Context(), dsn)
 	if err != nil {
 		t.Fatalf("open test pool: %v", err)
 	}
