@@ -107,6 +107,10 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			for _, requirement := range append([]string{
 				"This Go daemon advances phases",
 				"re-read your issue record with the `legion` tool's `read_record`",
+				// Every role is told not to retry a `legion` call its plugin refused because the
+				// daemon answered a shape it does not read (INFRA-1048): the phrase pinned is the
+				// plugin's own refusal text, which survives a rewording of the clauses around it.
+				"the daemon API contract does not describe",
 			}, tc.contains...) {
 				if !strings.Contains(text.String(), requirement) {
 					t.Errorf("the composed %s prompt omits %q", tc.name, requirement)
