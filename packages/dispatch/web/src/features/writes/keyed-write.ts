@@ -14,6 +14,7 @@ import {
   type WriteRequest,
 } from "../../api/client";
 import { onReachable, type Reachable, routeOf } from "../../api/reachability";
+import { keyMintedAt } from "../../lib/send-key";
 
 /**
  * How long a write may go unanswered before the page says so: past it the write is late, still
@@ -46,6 +47,20 @@ export const MAX_BACKOFF_MS = 30_000;
 export function sameKeyRetryNote(made: string): string {
   const hours = IDEMPOTENCY_KEY_TTL_MS / 3_600_000;
   return `Retry asks again under the same key, so it is ${made} at most once if you retry within ${hours} hours of the first try. After that Dispatch no longer knows the key: a Retry is a new write and may be ${made} twice.`;
+}
+
+/**
+ * Whether Dispatch has forgotten `key` by `now`: the key was minted `IDEMPOTENCY_KEY_TTL_MS` ago
+ * or longer, so a request under it is a new write to Dispatch rather than a repeat of the first.
+ *
+ * False for a key that carries no mint time (`keyMintedAt`) - every key minted before the release
+ * that mints v7 keys. Those keys keep today's behaviour: Dispatch forgets them, and the page
+ * cycles them within one key lifetime of a deploy, where calling them spent would mint a new key
+ * for a write Dispatch may already have done - the duplicate this check exists to prevent.
+ */
+export function keyExpired(key: string, now: number): boolean {
+  const minted = keyMintedAt(key);
+  return minted !== undefined && now - minted >= IDEMPOTENCY_KEY_TTL_MS;
 }
 
 /** A write that stopped trying before Dispatch confirmed it: the reader pressed Stop trying. Not
