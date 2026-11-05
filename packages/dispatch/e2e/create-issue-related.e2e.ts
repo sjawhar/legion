@@ -73,12 +73,16 @@ test("a title checked before an issue was filed is checked again, not answered f
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
+    // The dialog waits out `RELATED_DEBOUNCE_MS` before it checks a title; that is a page timer,
+    // so the page's own clock is what spends it.
+    await page.clock.install();
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
 
     const draft = "Astrolabe drift spoils the mooring calibration";
     const first = await openCreateDialog(page);
     await first.title.fill(draft);
+    await page.clock.runFor(RELATED_DEBOUNCE_MS);
     await expect(first.related.getByText(/searched .*and found nothing\.$/u)).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(first.dialog).toHaveCount(0);
@@ -94,6 +98,7 @@ test("a title checked before an issue was filed is checked again, not answered f
 
     const second = await openCreateDialog(page);
     await second.title.fill(draft);
+    await page.clock.runFor(RELATED_DEBOUNCE_MS);
     await expect(second.related.getByRole("link", { name: `${filed.key} ${draft}` })).toBeVisible();
   } finally {
     await context.close();
@@ -169,11 +174,15 @@ test("a title whose rare words match an existing issue lists it with its link", 
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
+    // The dialog waits out `RELATED_DEBOUNCE_MS` before it checks a title; that is a page timer,
+    // so the page's own clock is what spends it.
+    await page.clock.install();
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
     const { related, title } = await openCreateDialog(page);
 
     await title.fill("Astrolabe drift during mooring");
+    await page.clock.runFor(RELATED_DEBOUNCE_MS);
     const hit = related.getByRole("link", { name: `${seeded.astrolabe} ${astrolabeTitle}` });
     await expect(hit).toBeVisible();
     await expect(hit).toHaveAttribute("href", `/issues/${seeded.astrolabe}`);
@@ -187,6 +196,7 @@ test("a title whose rare words match an existing issue lists it with its link", 
     // The control: a title sharing no rare word with anything in the project says so, in words
     // that cannot be read as a check that never ran.
     await title.fill("Repaint the tender's bollards");
+    await page.clock.runFor(RELATED_DEBOUNCE_MS);
     await expect(related.getByText(/searched .*and found nothing\.$/u)).toBeVisible();
     await expect(related.getByRole("link")).toHaveCount(0);
   } finally {

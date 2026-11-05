@@ -798,13 +798,17 @@ test.describe("agents page", () => {
         if (request.method() !== "POST" || !/\/(comments|messages)$/.test(path)) return;
         sends.push({ ...keyedWrite(request), ok: response.ok(), path });
       });
+      // Typed, not filled: the composer tracks its mention and delivery as the keys arrive, and
+      // a `fill` of the same text sends neither (measured).
       const send = async (text: string) => {
         const before = sends.length;
         await field.click();
         await page.keyboard.press("End");
         await page.keyboard.type(text);
         await page.keyboard.press("Control+Enter");
-        await expect.poll(() => sends.length).toBe(before + 1);
+        await expect
+          .poll(() => sends.length, { intervals: [50, 50, 100, 200, 500] })
+          .toBe(before + 1);
       };
 
       await page.keyboard.press("j");

@@ -104,6 +104,15 @@ const NotificationTopicPrefix = "notifications."
 // on ExceptionTopicPrefix followed by its original topic.
 const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
 
+// LegionWakeTopic is the one topic the listener reports a wake of a released Legion issue pod
+// on: a message published to a role topic with no live holder, a message sent to the agent
+// subject of a session that is gone, and the listener's own `listener_ready`. It is a new leaf
+// under notifications.legion.>, which the stream already carries, so it is retained with no
+// stream change and no new grant. Only the listener sees these, and it does not know which
+// daemon owns a session: every Legion daemon consumes the topic on a durable of its own and acts
+// only on a released claim of its own project.
+const LegionWakeTopic = NotificationTopicPrefix + "legion.wake"
+
 // DispatchDeliveryDurable is the stream's durable consumer Dispatch's delivery intake binds, over
 // every GitHub notification (internal/dispatch/delivery).
 const DispatchDeliveryDurable = "delivery-events"

@@ -58,6 +58,19 @@ notifications.github.<owner>.<repo>.job.<run_id>.completed    a finished Actions
 A dot in an owner, repository, or ref name is written `_` in the subject, so `acme/site.io` is
 `notifications.github.acme.site_io`. A redelivered webhook is recognised and stored once.
 
+When a repository has been renamed, the listener publishes each of its events a second time under
+the former name, for every pair `ENVOY_GITHUB_REPOSITORY_RENAMES` configures as
+`<former owner>/<name>=<current owner>/<name>`. The copy differs from the first publish only in
+its topic: the same `event_id`, the same `dedupe_key`, the same payload. A client drops the copy
+by `event_id`, so a session subscribed under both names sees the event once. It goes one way
+only: the events of the current name are published under the former name, never the reverse.
+
+The current name of a pair is matched without case, but the former name is written into the
+subject exactly as the value spells it, so spell it as GitHub spelled that repository, capitals
+included: a NATS subject is compared with case, and another spelling sends every copy to a
+subject nothing subscribes to. The listener names each pair's copy subject prefix in its
+start-up log.
+
 ## How Slack mentions arrive, and how an agent replies
 
 A Slack app sends its events to the listener's public route `/webhook/slack`, which the listener
@@ -66,8 +79,15 @@ example `https://envoy.internal.example/webhook/slack`, and subscribe it to the 
 event (its `app_mentions:read` scope). The listener answers Slack's `url_verification` challenge,
 and checks every other delivery's signature against `ENVOY_SLACK_SIGNING_SECRET`, the app's
 signing secret, answering `401` to one that does not match. The repository's
-`deploy/slack/legion-app-manifest.yaml` creates such an app: the `app_mentions:read` and
-`chat:write` bot scopes and the `app_mention` bot event.
+`deploy/slack/legion-app-manifest.yaml` creates such an app: the `app_mentions:read`,
+`chat:write`, `channels:history` and `groups:history` bot scopes and the `app_mention` bot event.
+
+The two history scopes are what a thread read needs: Slack's `conversations.replies`, which the
+Legion controller calls to read the thread of a mention posted inside one, needs
+`channels:history` in a public channel and `groups:history` in a private one, and answers
+`missing_scope` without them. An app made from an earlier version of the manifest, which listed
+only `app_mentions:read` and `chat:write`, does not hold them: an operator adds them to the app's
+bot scopes and reinstalls the app to the workspace.
 
 A mention of the app is published under the Slack team's and channel's ids, and a mention inside a
 thread a second time under the thread's root, its timestamp's dot written `_`:

@@ -23,6 +23,7 @@ import {
   selectEditorText,
 } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
@@ -268,8 +269,9 @@ test("a reader asks back from a decision block: the question threads under the b
       path: testInfo.outputPath(`askback-reply-${testInfo.project.name}.png`),
     });
 
-    // The Inbox row for the same ask carries the reply.
-    await page.goto("/");
+    // The Inbox row for the same ask carries the reply. Reached in the app: the row is drawn
+    // from the same loaded client, and a second document load would prove nothing more.
+    await navigateInApp(page, "/");
     const row = page.getByTestId(`ask-${blockAsk.id}`);
     await expect(row).toBeVisible();
     await expect(row.getByTestId(`thread-${blockAsk.id}`)).toContainText(questionLead);
@@ -442,6 +444,8 @@ const DECISION_SPEC = [
   "Closing paragraph after the last decision.\n",
 ].join("\n");
 
+// SLOW(>=2s): four cold loads of the issue document - two widths at two colour schemes - each
+// with its own screenshot, over a spec seeded with three decisions, an answer and a reply.
 test("decision blocks read as urgency-accented cards in the document and its version view", async ({
   browser,
 }, testInfo) => {
