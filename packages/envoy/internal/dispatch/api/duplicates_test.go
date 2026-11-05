@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -289,5 +291,52 @@ func TestCreateIssueDuplicateOrdersCandidatesByScore(t *testing.T) {
 		if rank[keys[index-1]] > rank[keys[index]] {
 			t.Fatalf("candidates = %v, want them ordered %q, %q, %q", keys, whole.Key, half.Key, sliver.Key)
 		}
+	}
+}
+
+// pickRelatedTerms drops a lexeme more than a tenth of the project holds, and never fewer than
+// relatedCommonFloor of its items (`commonAbove`). So in a project whose items have made the
+// words of a title common, a title yields no picked term at all and the gate judges nothing: an
+// exact copy of an open issue, spec for spec, is created.
+//
+// dispatch://INFRA-1160/artifact/verification-md's check k4 names INFRA-432 against INFRA-431 —
+// two open issues with one title and no spec at all — as a pair the rule must refuse. It is
+// refused in TestNearCopyRefusalReplay only while the replay lets the project's term statistics
+// lag ten creates behind (DISPATCH_NEARCOPY_REFRESH_EVERY=10). Production refreshes them every
+// SearchTermStatsInterval, ten minutes, against about one INFRA create every twenty, so the
+// statistics a create meets there are current; replayed that way the pair scores 0.000 and is
+// created.
+func TestCreateIssueDuplicateRefusesACopiedTitleWhoseWordsAreCommon(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createDuplicateTestProject(t, handler, "COMMON")
+	// Twelve issues holding the three words of the title below, so each word's document
+	// frequency passes relatedCommonFloor and the picker drops it as a common word.
+	for index := range 12 {
+		requireCreatedIssue(t, createIssueRequest(t, handler, map[string]any{
+			"project": "COMMON",
+			"title":   fmt.Sprintf("Astrolabe reseat note %s", string(rune('a'+index))),
+			"spec":    "The astrolabe is reseated and its gimbal recalibrated.",
+			"force":   true,
+		}))
+	}
+	original := requireCreatedIssue(t, createIssueRequest(t, handler, map[string]any{
+		"project": "COMMON", "title": "Astrolabe gimbal reseated", "force": true,
+	}))
+	// The statistics as a create meets them in production: current, not ten creates behind.
+	if _, err := refreshSearchTermStats(context.Background(), database.Pool, "COMMON"); err != nil {
+		t.Fatalf("refresh the term statistics: %v", err)
+	}
+
+	copied := createIssueRequest(t, handler, map[string]any{
+		"project": "COMMON", "title": "Astrolabe gimbal reseated",
+	})
+
+	body := requireDuplicateRefusal(t, copied)
+	keys := make([]string, 0, len(body.Candidates))
+	for _, candidate := range body.Candidates {
+		keys = append(keys, candidate.Key)
+	}
+	if len(keys) == 0 || keys[0] != original.Key {
+		t.Fatalf("candidates = %v, want %q first", keys, original.Key)
 	}
 }
