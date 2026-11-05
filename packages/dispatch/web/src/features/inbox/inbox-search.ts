@@ -21,9 +21,9 @@ import { askIssueKey } from "./ask-name";
  * registry read lands at its own time and only where a card draws one, so matching on it would
  * make one row match a word at one width and not at another.
  */
-export function inboxSearchHaystack(ask: InboxRow): string {
+function inboxSearchHaystack(ask: InboxRow): string {
   const issueKey = askIssueKey(ask);
-  const parts: (string | undefined)[] = [issueKey ?? undefined, ask.issue?.title];
+  const parts: (string | null | undefined)[] = [issueKey, ask.issue?.title];
   // The requirement is the name of the document a row stands on *where it has no issue*, which
   // is how `askOwner` (`ask-name.ts`) draws the row's owner too. The server sets `document` on
   // issue-owned rows as well (`packages/envoy/internal/dispatch/api/inbox.go` fills it whenever

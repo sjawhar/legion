@@ -524,12 +524,18 @@ export function Inbox({
   const searchRef = useRef<HTMLInputElement>(null);
   // What the box narrows by: the address's text, cut as the box itself cuts what it writes, and
   // split into words once per render rather than once per row. An address that arrived with a
-  // longer `?q=` is left as it is and filtered by the cut text, the same text the box shows.
+  // longer `?q=` is left as it is: the list is filtered by the cut text, while the box shows
+  // what the address holds.
   const words = searchWords(capSearchQuery(filter.q ?? ""));
   const typeQuery = (typed: string) => {
     // One cut, here rather than a `maxLength` on the box as well: what the box writes and what
     // the list filters by are then the one rule, and the cut stays provable from a browser.
     const next = capSearchQuery(typed);
+    // A keypress on a box already at the cap produces the text the filter holds, and writing it
+    // would replace the history entry and re-render every row for nothing. React restores a
+    // controlled input's DOM value when the state does not move, so the cap still holds in the
+    // box.
+    if (next === (filter.q ?? "")) return;
     if (onQueryChange) {
       onQueryChange(next);
     } else {
@@ -713,9 +719,23 @@ export function Inbox({
   const step = (delta: 1 | -1) => roveFocus(rows(), rowAround(document.activeElement), delta);
   const focusInPane = () => paneRef.current?.contains(document.activeElement) === true;
   const focusInList = () => listRef.current?.contains(document.activeElement) === true;
+  /** The row a recorded origin names: null where nothing was recorded, and null where the row
+   *  it names has since left the list. One lookup, for the two ways back into the list below. */
+  const originRow = (origin: string | null): HTMLElement | null =>
+    origin === null
+      ? null
+      : (listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`) ?? null);
   /** The row `l` was pressed on, which is the row Escape returns the focus to. Null for every
-   *  other way into the column, which keeps returning to the selected row as it always has. */
+   *  other way into the column, and cleared again on every way the focus leaves the column for
+   *  a row, so Escape then returns to the row the column is showing as it always has. */
   const paneReturn = useRef<string | null>(null);
+  /** The pointer's way into the selection, and one of the ways the focus leaves the column for a
+   *  row: the record `l` made is dropped here, so Escape from the column lands on the row the
+   *  column is showing rather than on a row the reader has since clicked away from. */
+  const selectRow = (askId: string) => {
+    paneReturn.current = null;
+    paneSelection.select(askId);
+  };
   /** One step of the reader's, in whichever mode the Inbox is in: the selection the column
    *  follows, or the focus roving the rows. Chosen once, so no binding below asks again. */
   const stepInMode = paneShown ? paneSelection.step : step;
@@ -877,11 +897,7 @@ export function Inbox({
         if (paneShown && focusInPane()) {
           const origin = paneReturn.current;
           paneReturn.current = null;
-          const row =
-            origin === null
-              ? null
-              : listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`);
-          (row ?? paneSelection.selectedRow())?.focus();
+          (originRow(origin) ?? paneSelection.selectedRow())?.focus();
           return;
         }
         const row = rowAround(document.activeElement);
@@ -957,15 +973,10 @@ export function Inbox({
       keys: "Escape",
       label: "Back to the list from the bulk snooze picker",
       run: () => {
-        const origin = pickerOrigin.current;
-        const row =
-          origin === null
-            ? null
-            : listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`);
         // With every marked row gone there is no row to return to, so the bar itself is the
         // level out: it holds the count and the way to clear it. It is reached through its own
         // ref, because the empty state a pick can leave behind renders it outside the list.
-        (row ?? rows()[0] ?? bulkBarRef.current)?.focus();
+        (originRow(pickerOrigin.current) ?? rows()[0] ?? bulkBarRef.current)?.focus();
       },
       when: () => document.activeElement?.matches(BULK_PICKER_SELECTOR) === true,
     },
@@ -1107,7 +1118,7 @@ export function Inbox({
   const searchBox = (
     <input
       aria-label="Search asks"
-      className={`min-h-11 min-w-0 flex-1 basis-64 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)} ${focusVisibleRing}`}
+      className={`min-h-11 min-w-0 flex-1 basis-64 rounded-lg border px-3 py-2 text-sm outline-none focus-visible:ring-2 ${inputClasses(true)} ${focusVisibleRing}`}
       onChange={(event) => typeQuery(event.target.value)}
       placeholder="Issue, title, question or author"
       ref={searchRef}
@@ -1271,7 +1282,7 @@ export function Inbox({
                     marked={marked.has(ask.id)}
                     onMark={onMark}
                     onRelease={ask.id === held?.ask.id ? release : undefined}
-                    onSelect={paneSelection.select}
+                    onSelect={selectRow}
                     ordinal={ordinals.get(ask.id)}
                     ownerKey={group.owner.key}
                     section={section}

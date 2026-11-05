@@ -356,45 +356,42 @@ function ApprovalBody({
         <MarkdownBody markdown={ask.question} />
       </div>
     );
-    const skeleton = <LoadingSkeleton label={`Opening ${approval.name}`} />;
-    if (
+    /** Whether the document below the question is still opening: every read `VersionView` needs
+     *  has to have landed before the column can draw it. */
+    const opening =
       !settled ||
       artifact === undefined ||
       user === undefined ||
       latestVersion === undefined ||
-      (approvedVersion !== undefined && baselineQuery.isPending)
-    ) {
-      // The question stands while the skeleton does: it is the pane's alone to draw, and waits
-      // on none of the document's reads.
-      return (
-        <>
-          {question}
-          {skeleton}
-        </>
-      );
-    }
+      (approvedVersion !== undefined && baselineQuery.isPending);
+    // The question stands while the skeleton does: it is the pane's alone to draw, and waits
+    // on none of the document's reads.
     return (
       <>
         {question}
-        <VersionView
-          artifactId={artifact.id}
-          // The pane draws no ask row over a stored version: the blocks of the version carry
-          // what was decided in them, and a column the reader flips through with `j` reads no
-          // list of the document's asks to name their askers.
-          asks={[]}
-          blockSchema={blockSchema}
-          changeBaseline={changeBaseline}
-          createdAt={
-            artifact.versions.find((version) => version.number === latestVersion)?.created_at
-          }
-          highlight={undefined}
-          owner={
-            artifact.issue_key === null
-              ? { project: artifact.project, slug: artifact.slug }
-              : undefined
-          }
-          version={latestVersion}
-        />
+        {opening ? (
+          <LoadingSkeleton label={`Opening ${approval.name}`} />
+        ) : (
+          <VersionView
+            artifactId={artifact.id}
+            // The pane draws no ask row over a stored version: the blocks of the version carry
+            // what was decided in them, and a column the reader flips through with `j` reads no
+            // list of the document's asks to name their askers.
+            asks={[]}
+            blockSchema={blockSchema}
+            changeBaseline={changeBaseline}
+            createdAt={
+              artifact.versions.find((version) => version.number === latestVersion)?.created_at
+            }
+            highlight={undefined}
+            owner={
+              artifact.issue_key === null
+                ? { project: artifact.project, slug: artifact.slug }
+                : undefined
+            }
+            version={latestVersion}
+          />
+        )}
       </>
     );
   };
