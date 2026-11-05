@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
+import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
 import {
   createIssue,
   createProject,
@@ -719,6 +720,9 @@ test("a default assignee the page has not read yet is never shown as Unassigned"
       }
       return route.fallback();
     });
+    // The refused read below is retried twice, `QUERY_RETRY_DELAY_MS` apart, before the page
+    // calls it failed: page timers, which the page's own clock fires.
+    await page.clock.install();
     await page.goto("/settings");
     const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
     await expect(core).toBeVisible();
@@ -734,7 +738,16 @@ test("a default assignee the page has not read yet is never shown as Unassigned"
     const loadError = page
       .getByRole("alert")
       .filter({ hasText: "Couldn't load the default assignees." });
-    await expect(loadError).toBeVisible();
+    // Each refusal arms the next retry, so the jump repeats until the page gives the read up.
+    await expect
+      .poll(
+        async () => {
+          await page.clock.runFor(QUERY_RETRY_DELAY_MS + 50);
+          return loadError.count();
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(1);
     await expect(core).toBeDisabled();
     await expect(core).not.toHaveValue("");
     await expect(core).toHaveText("Unavailable");
