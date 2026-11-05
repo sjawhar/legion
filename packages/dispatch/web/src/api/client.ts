@@ -765,8 +765,9 @@ export class DispatchApiClient {
    * person who pressed it. A JSON body goes as JSON and a multipart form as itself, through the
    * upload transport; `bounds.sent` is told the request as it goes out. Answers what Dispatch
    * answered (nothing for an empty body), as the request's builder names it (`WriteRequest`), or
-   * rejects with its refusal; a 2xx whose body is not JSON rejects with `UnreadableAnswerError`,
-   * and a replay of an answer Dispatch did not keep with `AnswerNotKeptError`.
+   * rejects with its refusal; a 2xx whose body is not JSON rejects with `UnreadableAnswerError`, a
+   * 2xx whose body stops part way with `NetworkError`, and a replay of an answer Dispatch did not
+   * keep with `AnswerNotKeptError`.
    */
   send<T>(
     request: WriteRequest<T>,
@@ -790,7 +791,14 @@ export class DispatchApiClient {
     };
     sent?.(request);
     const read = async (response: Response): Promise<T> => {
-      const text = await response.text();
+      let text: string;
+      try {
+        text = await response.text();
+      } catch (error) {
+        // The connection dropped as the answer's body came down: the page knows nothing of what
+        // Dispatch did, as for one that never answered, so the write is made again under its key.
+        throw new NetworkError(path, error);
+      }
       let answer: unknown;
       try {
         answer = text === "" ? undefined : JSON.parse(text);

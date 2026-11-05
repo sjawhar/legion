@@ -18,6 +18,7 @@ import {
   type UploadImplementation,
 } from "../api/client";
 import { QUERY_RETRY_DELAY_MS, queryRetryDelay } from "../api/query-client";
+import { FIRST_BACKOFF_MS, writeUnderKey } from "../features/writes/keyed-write";
 
 interface RecordedRequest {
   body?: BodyInit | null;
@@ -91,6 +92,11 @@ async function onFakeClock(body: () => Promise<void>): Promise<void> {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
   }
+}
+
+/** Lets every promise a write chained run as far as it goes without the clock moving. */
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
 }
 
 // A read Dispatch never answers would leave its page loading for good: every GET gives up at the
@@ -434,6 +440,47 @@ test("a write's failures are classified by kind", async () => {
   ).toMatchObject({
     code: "KEY_IN_FLIGHT",
     retryAfterMs: 2_000,
+  });
+});
+
+// W28. An answer whose body stops part way down says nothing of what Dispatch did, as a
+// connection that never answered says nothing: it is a `NetworkError`, which the write waits out
+// and asks again under its own key. Refused instead, its Retry would mint a new key and Dispatch
+// would make the person's write a second time.
+test("a 2xx whose body read fails is a NetworkError, retried under its key", async () => {
+  // A browser errors the body of a response whose connection dropped under it.
+  const cutOff = () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start: (body) => body.error(new TypeError("network error")),
+      }),
+      { status: 201 }
+    );
+
+  const dropped = createApiClient(async () => cutOff());
+  expect(
+    await outcome(dropped.createIssue({ project: "CORE", title: "x" }, keyed("k")))
+  ).toBeInstanceOf(NetworkError);
+
+  // And the write's policy admits it: `retryAfter` gives a `NetworkError` a wait rather than
+  // `undefined`, so the write waits its first backoff and asks again under the same key.
+  await onFakeClock(async () => {
+    let attempts = 0;
+    const api = createApiClient(async () => {
+      attempts += 1;
+      return attempts === 1 ? cutOff() : Response.json({ key: "CORE-1" }, { status: 201 });
+    });
+
+    const made = writeUnderKey(
+      (bounds) => api.createIssue({ project: "CORE", title: "x" }, bounds),
+      "k"
+    );
+    await settle();
+    expect(attempts).toBe(1);
+    jest.advanceTimersByTime(FIRST_BACKOFF_MS);
+
+    expect(await made).toMatchObject({ key: "CORE-1" });
+    expect(attempts).toBe(2);
   });
 });
 
