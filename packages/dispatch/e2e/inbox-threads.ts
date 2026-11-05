@@ -277,13 +277,23 @@ export async function seedBulkAgentThreads({
   `);
 }
 
+/** The prefix each kind of thread row is addressed by, which is where that spelling lives. */
+const THREAD_ROW_PREFIX = { agent: "agent:", reply: "reply:" } as const;
+
 /** The `?item=` a thread row is addressed by, which is also its `data-inbox-row`. */
 export function replyRowId(threadId: string): string {
-  return `reply:${threadId}`;
+  return `${THREAD_ROW_PREFIX.reply}${threadId}`;
 }
 
 export function agentRowId(messageId: string): string {
-  return `agent:${messageId}`;
+  return `${THREAD_ROW_PREFIX.agent}${messageId}`;
+}
+
+/** Whether a row the Inbox list holds is one of the reader's own threads rather than an ask.
+ *  The list holds both (`web/src/features/inbox/list-row.ts`); an ask row's id is the bare ask
+ *  id, under no prefix at all. */
+export function isThreadRow(rowId: string): boolean {
+  return Object.values(THREAD_ROW_PREFIX).some((prefix) => rowId.startsWith(prefix));
 }
 
 /**

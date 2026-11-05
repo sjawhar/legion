@@ -65,16 +65,11 @@ const inboxReadAgentRest = `
 // to either moves the list and this button together.
 const inboxReadAgentThreads = myAgentHead + myAgentUnread + myAgentRoots + inboxReadAgentRest
 
-// The three lock statements of this transaction, in the order it takes them: the owner rows of
-// the threads it marks `for share` - its documents, then its issues, the ascending owner-key
-// order eventOwnerKey builds and LockOwners sorts by ("artifact:" + id before "issue:" + key, as
-// strings) - and then the caller's own user_threads rows `for no key update`, in ascending
-// thread_id order, which the update below re-locks rather than taking in the order its plan
-// scans them. Each list is ordered before it is locked, so the locks are taken in the sorted
-// order rather than whatever order the scan returns. The projects come last, from LockOwners.
-//
-// Why that order, and the cycles it rules out: markInboxReadThreads, which is where the Inbox's
-// read-mark lock order is written down.
+// The lock statements of this transaction, which it takes in the order markInboxReadThreads
+// writes down: the owner rows of the threads it marks `for share`, then the caller's own
+// user_threads rows `for no key update`. Each list is ordered before it is locked, so the locks
+// are taken in the sorted order rather than whatever order the scan returns, and the update
+// below re-locks the rows rather than taking them in the order its own plan reaches them.
 const (
 	inboxReadLockDocuments = `select 1 from artifacts where id = any($1::uuid[]) order by id for share`
 	inboxReadLockIssues    = `select 1 from issues where key = any($1::text[]) order by key for share`
@@ -308,13 +303,17 @@ func (s *server) markInboxRead(w http.ResponseWriter, r *http.Request) {
 // (api/replies.go), the lock statements above, the race tests and packages/envoy/AGENTS.md
 // point here rather than saying it again.
 //
-// The order is owner, then the caller's rows, then the project its events name:
+// The order is owner, then the caller's rows, then the agent replies it prunes, then the project
+// its events name:
 //
 //  1. the owner row of every thread it marks, `for share`, documents then issues, in ascending
 //     owner-key order (lockInboxReadOwners, inboxReadLockDocuments);
 //  2. the caller's user_threads rows, `for no key update`, in ascending thread_id order
 //     (inboxReadLockThreads), which the update that follows re-locks;
-//  3. the project of every row that update moved, through LockOwners, in sorted key order and
+//  3. the caller's dead user_agent_reply_read rows, `for no key update`, in ascending reply_id
+//     order, which the same statement deletes (pruneAgentReplies, api/state.go); the other
+//     writer of that table, putUserAgentState, takes them in that order too;
+//  4. the project of every row that update moved, through LockOwners, in sorted key order and
 //     before the first append.
 //
 // PUT /api/v1/me/threads/{id}/read takes that same order over its one thread, and the two need
@@ -572,13 +571,11 @@ func (s *server) markInboxReadAgentReplies(
 	}
 	touched := slices.Sorted(maps.Keys(sessions))
 	if len(touched) > 0 {
-		// The dead rows are taken in one order before the delete reaches them, as putUserAgentState
-		// takes them: nothing this request writes is ever dead (the insert above skips what the
-		// mark covers), so this clears only what an older write left behind, and two writers that
-		// crossed here would otherwise each hold a row the other waits on.
-		if _, err := tx.Exec(ctx, pruneAgentRepliesLock, login, touched); err != nil {
-			return nil, 0, fmt.Errorf("take the agent replies the read marks cover: %w", err)
-		}
+		// The dead rows are taken in one order before the delete reaches them, as
+		// putUserAgentState takes them: nothing this request writes is ever dead (the insert
+		// above skips what the mark covers), so this clears only what an older write left
+		// behind, and two writers that crossed here would otherwise each hold a row the other
+		// waits on.
 		if _, err := tx.Exec(ctx, pruneAgentReplies, login, touched); err != nil {
 			return nil, 0, fmt.Errorf("prune the agent replies the read marks cover: %w", err)
 		}

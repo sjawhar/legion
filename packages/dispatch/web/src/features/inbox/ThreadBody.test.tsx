@@ -11,11 +11,10 @@ import type {
   IssueDetails,
   Message,
   MessageRead,
-  MyReplyAgentRow,
   MyReplyRow,
   MyReplyThreadRow,
 } from "../../api/types";
-import { agentRow as sharedAgentRow } from "../threads/replies-fixture";
+import { plannerAgentRow } from "../threads/replies-fixture";
 import { ThreadRowCard } from "./ThreadRowCard";
 
 /** Every API mock a test installed, restored after it. */
@@ -58,24 +57,6 @@ function message(id: string, body: string, overrides: Partial<Message> = {}): Me
     target: "session:planner",
     ...overrides,
   };
-}
-
-/** An Agent row: the shared fixture's row under this file's own session and reply. */
-function agentRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
-  return sharedAgentRow("message-1", {
-    ref: "/agents/planner/live",
-    reply: {
-      author: { id: "planner", kind: "session" },
-      created_at: "2026-10-12T01:00:00Z",
-      first_line: "Looked at it.",
-      id: "reply-1",
-      kind: "reply",
-    },
-    session: { id: "planner", name: "Planner" },
-    subject: "Have a look at the build",
-    unread_reply_ids: ["reply-1"],
-    ...overrides,
-  });
 }
 
 function commentRow(overrides: Partial<MyReplyThreadRow> = {}): MyReplyThreadRow {
@@ -148,7 +129,7 @@ test("an Agent row's card draws the message, the session's reply and the compose
       ],
     } satisfies MessageRead,
   ]);
-  renderCard(agentRow());
+  renderCard(plannerAgentRow());
 
   const body = await screen.findByTestId("inbox-thread-agent");
   // Every message is drawn whole, by the one markdown renderer, which warms asynchronously.
@@ -194,7 +175,7 @@ test("a reply the session took as a user turn says so and links the live view", 
       ],
     } satisfies MessageRead,
   ]);
-  renderCard(agentRow({ unread_reply_ids: [] }));
+  renderCard(plannerAgentRow({ unread_reply_ids: [] }));
 
   const note = await screen.findByTestId("agent-reply-accepted");
   expect(note.textContent).toBe("Taken as a turn of the live conversation.");
@@ -215,7 +196,7 @@ test("a session the live list no longer holds says so and offers no composer", a
       ],
     } satisfies MessageRead,
   ]);
-  renderCard(agentRow());
+  renderCard(plannerAgentRow());
 
   const ended = await screen.findByTestId("agent-session-ended");
   expect(ended.textContent).toBe("Not in the live session list — it may have ended.");
@@ -229,7 +210,7 @@ test("a listed session that advertises no delivery mode warns above its composer
   spy("listAgentMessages", [
     { message: message("message-1", "Have a look"), replies: [] } satisfies MessageRead,
   ]);
-  renderCard(agentRow({ unread_reply_ids: [] }));
+  renderCard(plannerAgentRow({ unread_reply_ids: [] }));
 
   await screen.findByTestId("inbox-thread-agent");
   await waitFor(() => expect(screen.getByText("Takes no messages")).toBeTruthy());

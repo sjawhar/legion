@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { type FakeSession, setLiveSessions } from "./agents";
 import {
@@ -23,6 +23,7 @@ import {
 import { cliSession, runDispatch } from "./dispatch-cli";
 import { setPendingCredentialRequests } from "./fake-broker-helpers";
 import { askCard, inboxRow, READING_PANE_WIDTH } from "./inbox-pane";
+import { agentRowId, isThreadRow, replyRowId } from "./inbox-threads";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -112,27 +113,20 @@ function printedAsks(printed: CommandSection): string[] {
   return printed.rows.map((row) => (row.split(" · ").at(-1) ?? "").split("/").at(-1) ?? "").sort();
 }
 
-/** Whether a row the Inbox list holds is one of the reader's own threads rather than an ask.
- *  The list holds both (`features/inbox/list-row.ts`), and that file is where the spelling of a
- *  row's id lives: a thread row's is `reply:<thread id>` or `agent:<thread id>`, an ask row's
- *  the bare ask id. */
-function isThreadRow(rowId: string): boolean {
-  return rowId.startsWith("reply:") || rowId.startsWith("agent:");
+/** The ids of the rows a locator holds, in the order the page draws them. */
+function rowIds(rows: Locator): Promise<string[]> {
+  return rows.evaluateAll((found) => found.map((row) => row.getAttribute("data-inbox-row") ?? ""));
 }
 
 /** Every row of the Inbox list, by id: the reader's asks and their own threads together. */
 function listedRows(page: Page): Promise<string[]> {
-  return page
-    .locator("[data-inbox-row]")
-    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-inbox-row") ?? ""));
+  return rowIds(page.locator("[data-inbox-row]"));
 }
 
 /** The asks the page has in one band, sorted the same way; the threads the band also holds are
  *  the command's `Unread threads` and not its ask bands. */
 async function bandAsks(page: Page, band: "human" | "agent" | "later"): Promise<string[]> {
-  const ids = await page
-    .locator(`[data-inbox-row][data-inbox-section="${band}"]`)
-    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-inbox-row") ?? ""));
+  const ids = await rowIds(page.locator(`[data-inbox-row][data-inbox-section="${band}"]`));
   return ids.filter((id) => !isThreadRow(id)).sort();
 }
 
@@ -538,7 +532,7 @@ test("dispatch inbox lists the reader's unread threads, the page's own thread ro
     // And the same two on the page, which lists a thread row beside the asks under the id the
     // server's row is named by. Polled, because the page reads its threads of its own accord.
     const threadRows = listed.rows
-      .map((row) => `${row.kind === "agent" ? "agent" : "reply"}:${row.thread_id}`)
+      .map((row) => (row.kind === "agent" ? agentRowId(row.thread_id) : replyRowId(row.thread_id)))
       .sort();
     await page.goto("/");
     await expect

@@ -53,6 +53,26 @@ export function agentRow(
   };
 }
 
+/** The Agent row the Inbox's own tests draw: the row above as a message the reader sent the
+ *  planner session, answered by that session, with the one reply they have not read
+ *  (`reply-1`). */
+export function plannerAgentRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
+  return agentRow("message-1", {
+    ref: "/agents/planner/live",
+    reply: {
+      author: { id: "planner", kind: "session" },
+      created_at: "2026-10-12T01:00:00Z",
+      first_line: "Looked at it.",
+      id: "reply-1",
+      kind: "reply",
+    },
+    session: { id: "planner", name: "Planner" },
+    subject: "Have a look at the build",
+    unread_reply_ids: ["reply-1"],
+    ...overrides,
+  });
+}
+
 /** Seeds the signed-in viewer (alice) and `owner`'s unread threads, so every thread mounted on
  *  that owner reads them from the cache rather than a request. */
 export function seedUnread(

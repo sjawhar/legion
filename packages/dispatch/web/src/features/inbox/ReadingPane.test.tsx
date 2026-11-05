@@ -13,7 +13,6 @@ import type {
   AskSnooze,
   InboxRow,
   IssueDetails,
-  MyReplyAgentRow,
   MyReplyRow,
   MyReplyThreadRow,
   Version,
@@ -23,7 +22,7 @@ import type { CreateEditor, EditorHandle } from "../doc/editor";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
 import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
-import { agentRow as sharedAgentRow } from "../threads/replies-fixture";
+import { plannerAgentRow } from "../threads/replies-fixture";
 import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 import { ReadingPane } from "./ReadingPane";
 
@@ -648,20 +647,6 @@ function threadRow(overrides: Partial<MyReplyThreadRow>): MyReplyThreadRow {
   };
 }
 
-/** An Agent row, the other shape the column draws: a message the reader sent a session, with
- *  that session's reply - the shared fixture's row under this file's own session and reply. */
-function agentThreadRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
-  const { reply, subject } = threadRow({});
-  return sharedAgentRow("message-1", {
-    ref: "/agents/planner/live",
-    reply,
-    session: { id: "planner", name: "Planner" },
-    subject,
-    unread_reply_ids: ["reply-1"],
-    ...overrides,
-  });
-}
-
 /** The anchor a comment thread in a project document carries. */
 function anchor(overrides: Partial<Anchor> = {}): Anchor {
   return {
@@ -747,7 +732,7 @@ test("an issue message conversation reads the issue's messages", async () => {
 test("an Agent row shows the session's name and reads that session's messages", async () => {
   const listAgentMessages = spyOn(api, "listAgentMessages").mockResolvedValue([]);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
-  const { view } = renderThread(agentThreadRow());
+  const { view } = renderThread(plannerAgentRow());
   try {
     expect((await paneBody()).getAttribute("data-inbox-pane-body")).toBe("agent");
     const pane = screen.getByTestId("inbox-pane");

@@ -7,8 +7,8 @@ import { MemoryRouter } from "react-router-dom";
 import { answerInboxReads } from "../../__tests__/send-answers";
 import { ApiError } from "../../api/client";
 import { inboxThreadsQuery, myRepliesCountQuery, whoAmIQuery } from "../../api/queries";
-import type { MyRepliesResponse, MyReplyAgentRow, MyReplyRow } from "../../api/types";
-import { replyRow, agentRow as sharedAgentRow } from "../threads/replies-fixture";
+import type { MyRepliesResponse, MyReplyRow } from "../../api/types";
+import { plannerAgentRow, replyRow } from "../threads/replies-fixture";
 import { InboxBar, type InboxFilters } from "./InboxBar";
 import type { InboxListRow } from "./list-row";
 import { MARK_ALL_REFUSED_TEXT, markAllReadBody, marksThread, useMarkAllRead } from "./mark-all";
@@ -20,15 +20,6 @@ const AS_OF = "2026-10-12T02:00:00Z";
 
 function threadsRead(rows: readonly MyReplyRow[]): MyRepliesResponse {
   return { as_of: AS_OF, limit: 0, offset: 0, rows: [...rows], total: rows.length };
-}
-
-function agentRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
-  return sharedAgentRow("message-1", {
-    ref: "/agents/planner/live",
-    session: { id: "planner", name: "Planner" },
-    unread_reply_ids: ["reply-1"],
-    ...overrides,
-  });
 }
 
 function noop(): void {}
@@ -136,8 +127,8 @@ test("a thread written in since the read mark, or already read, is not one this 
   expect(marksThread({ ...row, unread: false }, body)).toBe(false);
   // An Agent row carries no project, no priority and no urgency, so a filter naming a value for
   // one of them leaves it out and a filter naming `none` keeps it.
-  expect(marksThread(agentRow(), markAllReadBody({ project: ["CORE"] }, AS_OF))).toBe(false);
-  expect(marksThread(agentRow(), markAllReadBody({ project: ["none"] }, AS_OF))).toBe(true);
+  expect(marksThread(plannerAgentRow(), markAllReadBody({ project: ["CORE"] }, AS_OF))).toBe(false);
+  expect(marksThread(plannerAgentRow(), markAllReadBody({ project: ["none"] }, AS_OF))).toBe(true);
 });
 
 test("the button shows only while the list holds an unread Reply or Agent row", () => {

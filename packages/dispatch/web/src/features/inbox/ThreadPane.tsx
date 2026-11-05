@@ -144,9 +144,9 @@ export function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
   }
   const anchor = thread.anchor;
   const blockId = anchor?.block_id;
+  const inDocument = thread.kind === "comment" && thread.document !== undefined;
   if (
-    thread.kind === "comment" &&
-    thread.document !== undefined &&
+    inDocument &&
     anchor !== undefined &&
     !anchor.orphaned &&
     blockId !== null &&
@@ -169,7 +169,6 @@ export function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
   }
   // A thread in a document whose anchor cannot be placed - orphaned, or naming no block - is the
   // document body falling back to the thread alone, with its quote.
-  const inDocument = thread.kind === "comment" && thread.document !== undefined;
   return (
     <ThreadBodyPane
       body={inDocument ? "document" : "issue"}

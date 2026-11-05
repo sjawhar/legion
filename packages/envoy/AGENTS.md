@@ -2598,9 +2598,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   a thread written in since stays unread, and one already read past the mark keeps its later mark.
   An Agent row carries no issue, no document, no project and no priority, so any narrowing to one of those leaves it out;
   no thread of either kind carries an urgency - only an ask the Inbox lists in Waiting on you does - so a request that names urgencies without `none` marks nothing at all.
-  The transaction takes the owner row of every thread it marks `for share` first - its documents, then its issues, the ascending owner-key order `LockOwners` sorts by - then the caller's `user_threads` rows `for no key update` in `thread_id` order, which its own update re-locks, and then the project of each row it moved, to append its event.
-  Owner, rows, project is the order `PUT /api/v1/me/threads/{id}/read` takes too, and taking the rows in one order is what keeps two presses of this button, whose plans scan them in two orders, off each other.
-  Which cycles that order rules out - against the one-thread route, against a second press, and against an ordinary writer, which the owner lock orders instead - is written once, on `markInboxReadThreads` (`api/inbox_read.go`).
+  It takes the read-mark lock order `PUT /api/v1/me/threads/{id}/read` takes, over every thread it marks rather than one, and prunes the agent-reply rows its sessions' own marks now cover: that order, and which cycles it rules out, is written once, on `markInboxReadThreads` (`api/inbox_read.go`).
   Every statement runs under a ten-second `statement_timeout`, because that transaction holds those owner rows and a statement that hangs holds every comment, answer and issue message on them behind it.
   It appends one `user_thread_state.updated` per project it marked in, naming no thread (`{login}`, the payload's `thread_id` being optional for exactly this), and one `user_agent_state.updated` per session whose replies it wrote, as `putUserAgentState` appends one.
   A request that moved nothing appends none and answers `{"marked": 0}`.

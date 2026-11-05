@@ -3590,6 +3590,34 @@ function dispatchAnswered(error: unknown, status: number): error is DispatchServ
   return error instanceof DispatchServiceError && error.fromDispatch && error.status === status;
 }
 
+/** A read of the Inbox the command can do without, settled into its answer or its failure: the
+ *  two reads it cannot do without throw first, and a rejection caught only after that would be
+ *  an unhandled one. */
+function settleSideRead<T>(read: Promise<T>): Promise<{ answer: T } | { error: unknown }> {
+  return read.then(
+    (answer) => ({ answer }),
+    (error: unknown) => ({ error })
+  );
+}
+
+/** The answer of one such read, or nothing and a warning naming the band the caller loses: the
+ *  asks are the greater part of the Inbox, so one failed read does not cost the caller the rest
+ *  of it. A refusal for want of a scope is the exception: the credential itself is wrong, and
+ *  reporting that as a missing section would hide it. */
+function sideRead<T>(
+  settled: { answer: T } | { error: unknown },
+  what: string,
+  warnings: string[]
+): T | undefined {
+  if (!("error" in settled)) return settled.answer;
+  const error = settled.error;
+  if (dispatchAnswered(error, 403) && error.code === "OAUTH_SCOPE_REQUIRED") {
+    throw refusalWithCode(error);
+  }
+  warnings.push(`dispatch: warning: ${what} could not be read: ${inboxReadRefusal(error)}`);
+  return undefined;
+}
+
 /**
  * Whether a write that failed with `error` may have taken effect anyway. Only an answer sent
  * before the write could apply proves it did not: Dispatch's own refusal (a 4xx), or a gateway's
@@ -3817,14 +3845,8 @@ export async function executeDispatchTool(
     // the slow one, since Dispatch relays it to the secrets broker. The two side reads have
     // their rejections caught at the start so that a refusal of the other two, which throws
     // first, leaves no unhandled one.
-    const pending = client.credentialPending().then(
-      (answer) => ({ answer }),
-      (error: unknown) => ({ error })
-    );
-    const unread = client.myReplies().then(
-      (answer) => ({ answer }),
-      (error: unknown) => ({ error })
-    );
+    const pending = settleSideRead(client.credentialPending());
+    const unread = settleSideRead(client.myReplies());
     let identity: WhoamiResponse;
     let rows: InboxRow[];
     try {
@@ -3836,41 +3858,13 @@ export async function executeDispatchTool(
       throw refusalWithCode(error);
     }
     const viewer = whoamiPerson(identity);
-    const settled = await pending;
-    let requests: readonly CredentialPendingRow[] = [];
     const warnings: string[] = [];
-    if ("error" in settled) {
-      const error = settled.error;
-      // The asks are the greater part of the Inbox, so one failed read of the broker's list does
-      // not cost the caller the rest of it. A refusal for want of a scope is the exception: the
-      // credential itself is wrong, and reporting that as a missing section would hide it.
-      if (dispatchAnswered(error, 403) && error.code === "OAUTH_SCOPE_REQUIRED") {
-        throw refusalWithCode(error);
-      }
-      warnings.push(
-        `dispatch: warning: credential requests could not be read: ${inboxReadRefusal(error)}`
-      );
-    } else {
-      // A Dispatch with no secrets broker answers null, which is an ordinary deployment: it has
-      // no credential requests, so it lists and counts none.
-      requests = settled.answer?.pending ?? [];
-    }
-    const settledUnread = await unread;
-    let threads: readonly MyReplyRow[] = [];
-    if ("error" in settledUnread) {
-      const error = settledUnread.error;
-      // Same rule as the broker's list: a failed read of the threads costs the caller that band
-      // and nothing else, except a refusal for want of the `person` scope, which is the
-      // credential being wrong rather than one section being missing.
-      if (dispatchAnswered(error, 403) && error.code === "OAUTH_SCOPE_REQUIRED") {
-        throw refusalWithCode(error);
-      }
-      warnings.push(
-        `dispatch: warning: unread threads could not be read: ${inboxReadRefusal(error)}`
-      );
-    } else {
-      threads = settledUnread.answer.rows;
-    }
+    // A Dispatch with no secrets broker answers null, which is an ordinary deployment: it has
+    // no credential requests, so it lists and counts none.
+    const requests: readonly CredentialPendingRow[] =
+      sideRead(await pending, "credential requests", warnings)?.pending ?? [];
+    const threads: readonly MyReplyRow[] =
+      sideRead(await unread, "unread threads", warnings)?.rows ?? [];
     return {
       text: formatInboxSummary(rows, threads, requests, Date.now()),
       details: {

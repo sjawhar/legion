@@ -30,11 +30,10 @@ import type {
   Message,
   MessageRead,
   MyRepliesResponse,
-  MyReplyAgentRow,
   MyReplyRow,
 } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
-import { replyRow, agentRow as sharedAgentRow } from "../threads/replies-fixture";
+import { plannerAgentRow, replyRow } from "../threads/replies-fixture";
 import { Inbox } from "./Inbox";
 import { ThreadRowCard } from "./ThreadRowCard";
 
@@ -262,22 +261,6 @@ function message(id: string, body: string, overrides: Partial<Message> = {}): Me
   };
 }
 
-function agentRow(): MyReplyAgentRow {
-  return sharedAgentRow("message-1", {
-    ref: "/agents/planner/live",
-    reply: {
-      author: { id: "planner", kind: "session" },
-      created_at: NEWEST,
-      first_line: "Looked at it.",
-      id: "reply-1",
-      kind: "reply",
-    },
-    session: { id: "planner", name: "Planner" },
-    subject: "Have a look at the build",
-    unread_reply_ids: ["reply-1"],
-  });
-}
-
 test("an Agent thread is read by reply id, and moves no session read mark", async () => {
   const viewport = installIntersectionObserver();
   const state = answerAgentStates().mockResolvedValue({ unread_replies: 0 });
@@ -303,7 +286,7 @@ test("an Agent thread is read by reply id, and moves no session read mark", asyn
   render(
     <MemoryRouter>
       <QueryClientProvider client={client}>
-        <ThreadRowCard thread={agentRow()} />
+        <ThreadRowCard thread={plannerAgentRow()} />
       </QueryClientProvider>
     </MemoryRouter>
   );

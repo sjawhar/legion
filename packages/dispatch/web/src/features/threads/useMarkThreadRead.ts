@@ -82,7 +82,8 @@ export function useMarkThreadRead({
   writes,
 }: MarkThreadReadOptions): ThreadRead {
   const queryClient = useQueryClient();
-  // The routes are human-only; any other principal never asks, so never cycles on a 403.
+  // The routes need the `person` scope, which a signed-in browser holds; any other principal
+  // never asks, so never cycles on a 403.
   const human = useIsHuman();
   const watching = enabled && human && owner !== undefined && newestShownAt !== undefined;
   const unreadSet = useQuery({ ...myRepliesOwnerQuery(owner ?? NO_OWNER), enabled: watching });

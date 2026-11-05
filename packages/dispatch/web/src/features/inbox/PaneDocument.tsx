@@ -184,7 +184,7 @@ export interface DocumentAtBlock {
  * opened at: a question written as a decision block, and a comment thread anchored in a project
  * document, are the same placement problem, and this is the one answer to it.
  */
-export function useDocumentAtBlock({
+function useDocumentAtBlock({
   artifactId,
   blockId,
   issueKey,
@@ -321,7 +321,7 @@ export function useDocumentAtBlock({
 }
 
 /** The live document in the column, with whatever its host draws under one of its blocks. */
-export function PaneDocument({
+function PaneDocument({
   anchoredThread,
   artifact,
   document,

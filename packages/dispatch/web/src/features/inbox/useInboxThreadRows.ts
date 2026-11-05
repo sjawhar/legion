@@ -48,7 +48,8 @@ export function useInboxThreadRows({
   viewOpened: boolean;
 }): InboxThreadRows {
   // The reader's own threads, in one unpaged read: Unread by default, every one of them with
-  // the switch on. Human-only, as the route is.
+  // the switch on. The route needs the `person` scope, which a signed-in browser holds, so the
+  // list only asks once the sign-in read says the principal is a user.
   const human = useIsHuman();
   const threads = useQuery({ ...inboxThreadsQuery(state), enabled: human });
   // The count the switch's other side carries. With the switch on, the unpaged read above
