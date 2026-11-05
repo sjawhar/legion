@@ -337,9 +337,9 @@ posted without a completion leaves the issue in reviewing until you finish.
   The check is bounded by the project's `production_check_hours` (336, 14 days, by default) from
   the close; the wake at that bound is the last look, so told in its task
   (`the bound: production did not carry the merge within <N days>`). A `pass` or `fail` there
-  closes the check as any look's would; a `pending` closes it as not run, written first on the
-  pull request, in the check's line and a comment: the check did not run because production did
-  not carry the merge within the bound.
+  closes the check as any look's would, and a requirement still unobserved there is that `fail`;
+  only production not carrying the merge ends it `pending`, closing the check as not run,
+  written first on the pull request and the check's line.
 - **The record lives on the pull request and in the result.** Dispatch refuses a message, a
   comment or an ask on a closed issue (`ISSUE_CLOSED`) and takes only a result for an
   `after_merge` or `default_branch` check, so the deployment instructions' "on the pull request

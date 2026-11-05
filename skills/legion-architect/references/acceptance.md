@@ -111,13 +111,16 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 5. The merge lands under the repository's rules and closes the issue; a root's close waits until
    the rest of its tree has left the workflow.
 
-A refused or failed READY arrives while the merger holds `merging`, so the merger makes the move;
-you tell it which (`envoy_publish` to its role topic). These targets are the merger's, not yours:
-from `accepting` you send an issue back only to `implementing` or `testing`.
+A person's request after your sign-off is a requirement of this issue, filed nowhere else: in
+`retro` or `merging` the role holding the phase makes the `request_backward_move`; in
+`awaiting_merge` the implementer pushes, which withdraws the READY.
+A refused or failed READY arrives while the merger holds `merging`, so the merger makes the move
+and you tell it which; from `accepting` you send an issue back only to `implementing` or
+`testing`.
 
-- The merger reports a failed verification: handle it as the `pr-blocked` row of
-  `skill://legion-architect/references/wake-routing.md` says. Tell the merger to move the issue
-  back with `request_backward_move`, naming what failed; never bypass.
+- A failed verification the merger reports: handle it as the `pr-blocked` row of
+  `skill://legion-architect/references/wake-routing.md` says, telling the merger to move the
+  issue back with `request_backward_move`, naming what failed; never bypass.
 - `READY_UNREVIEWED_CHANGE`, or a merger task with no approved head (`READY_NOT_APPROVED`): the
   merger moves it back to `reviewing`, the reason naming the code and what it found, so the
   reviewer runs a new round.
@@ -128,8 +131,7 @@ What returns the tree to review is a changed diff: a commit above the approved h
 anything outside `docs/solutions/`, other than the handoff import's removal of `.legion/` files, or
 a conflict-resolution merge whose fingerprint (the unchanged-diff check,
 `skill://legion-worker/references/conflicts-and-rewrites.md`) differs from the approved head's.
-A merge forced by a GitHub-reported conflict whose fingerprint is unchanged does
-not, and neither does a commit that changes only `docs/solutions/`.
+A conflict merge whose fingerprint is unchanged does not.
 
 Make a conflict-resolution merge only when GitHub reports `CONFLICTING`
 (`gh pr view <n> --json mergeable,mergeStateStatus`). Outside `awaiting_merge` the daemon records
@@ -143,14 +145,12 @@ a conflict and moves nothing, so the moment you see it:
   `the head conflicts with <base>`.
 
 The daemon then runs the phases from `implementing`: the implementer merges the bookmark forward
-with the destination (`jj new legion/<KEY> <destination>`, the forward-merge procedure in
-`skill://legion-worker/references/conflicts-and-rewrites.md`; never a rebase, which rewrites every
-descendant of the fork point, including another tree's stacked branch), pushes it with
-`jj git push` (a genuine fast-forward and a code push like any other) and posts the
-before and after fingerprints; the tester re-runs the bare gates only and the class search of
-every earlier round's findings at the new head; the reviewer approves the
-new head by SHA, or continues its round if it had not approved; the daemon carries the issue
-through your acceptance and retro to the merger's new READY.
+with the destination and pushes it (the procedure in
+`skill://legion-worker/references/conflicts-and-rewrites.md`), posting the before and after
+fingerprints; the tester re-runs the bare gates only and the class search of every earlier
+round's findings at the new head; the reviewer approves the new head by SHA, or continues its
+round if it had not approved; the daemon carries the issue through your acceptance and retro to
+the merger's new READY.
 
 ## A review thread GitHub will not resolve
 
