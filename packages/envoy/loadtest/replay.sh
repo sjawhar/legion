@@ -216,7 +216,7 @@ cmd_replay_seed() {
   note "vacuum analyze"
   sql "$REPLAY_DB" 'vacuum analyze' >/dev/null
   local migration
-  migration=$(sql "$REPLAY_DB" 'select max(version) from schema_migrations')
+  migration=$(sql "$REPLAY_DB" 'select max(version) from public.schema_migrations')
   [ "$migration" = "$REPLAY_MIGRATION" ] ||
     die "database $REPLAY_DB is at migration '$migration', not $REPLAY_MIGRATION; refusing to dump it"
 
@@ -394,7 +394,7 @@ restore_replay_seed() {
   }
   rm -f -- "$dump"
   local seconds=$((SECONDS - started)) migration
-  migration=$(sql "$REPLAY_SEED_DB" 'select max(version) from schema_migrations')
+  migration=$(sql "$REPLAY_SEED_DB" 'select max(version) from public.schema_migrations')
   [ "$migration" = "$(jq -r .seed.migration "$manifest")" ] ||
     die "the restored replay seed is at migration $migration, the manifest says $(jq -r .seed.migration "$manifest")"
   jq -n --arg sha "$want" --argjson migration "$migration" --argjson seconds "$seconds" \
@@ -542,7 +542,7 @@ cmd_replay_prepare() {
   note "vacuum analyze $db"
   sql "$db" 'vacuum analyze' >/dev/null
   local migration_after at
-  migration_after=$(sql "$db" 'select max(version) from schema_migrations')
+  migration_after=$(sql "$db" 'select max(version) from public.schema_migrations')
   at=$(now_ns)
   jq -n --arg key "$BUILD_KEY" --arg commit "$BUILD_COMMIT" \
     --arg binary_sha "$(jq -r .dispatch_binary_sha256 "$BIN/envoy-dispatch.json")" --arg seed "$seed_sha" \
@@ -590,7 +590,7 @@ cmd_reset_replay() {
   local checksum owed migration
   checksum=$(loadgen replay-checksum -db dispatch) || die "loadgen replay-checksum -db dispatch failed"
   owed=$(block_index_owed dispatch)
-  migration=$(sql dispatch 'select max(version) from schema_migrations')
+  migration=$(sql dispatch 'select max(version) from public.schema_migrations')
   touch_prepared "$rec"
   jq -n --arg template "$db" --arg key "$BUILD_KEY" --arg seed "$seed_sha" --argjson checksum "$checksum" \
     --argjson migration "$migration" --slurpfile prepared "$rec" --argjson owed "$owed" \

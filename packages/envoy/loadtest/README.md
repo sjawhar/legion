@@ -66,12 +66,12 @@ same step before and after its change, and compares the two rows.
 | `replay-2026-10-26.json` | The replay manifest (The replay, below): the bundle's and the seed dump's parts, each a file artifact of the replay's issue (`LOADTEST_REPLAY_ISSUE`; the manifest names no issue) with its slug, version, bytes and sha256 |
 | `replay_seed_plan.go` | What the replay seed sends, decided from the bundle alone: issue numbers and placeholders (`-keys-file`), which comments are recreated and in what order, the sentences an anchor may fall back to, approval and issue-field mappings |
 | `replay_anchor.go` | The rest of the seed's pure decisions: `chooseAnchor`, where an anchor lands (its logged quote, else a sentence of its logged block or of the nearest surviving one), which the replay source calls as `substituteAnchor`; and `planHistory`, the size of every synthetic version so each changes as many bytes as production's, built from a padding paragraph and a removed run of sections |
-| `replay_seed.go` | `loadgen replay-seed`: recreates a bundle's state through Dispatch's API, mapping every logged id to its local one in `loadtest.replay_ids` and each anchor's rule in `loadtest.replay_anchors` as it goes, so a killed seed resumes; `-ops-log` writes one CSV row per write with Dispatch's CPU ticks around it |
+| `replay_seed.go` | `loadgen replay-seed`: recreates a bundle's state through Dispatch's API, mapping every logged id to its local one in `public.loadtest_replay_ids` and each anchor's rule in `public.loadtest_replay_anchors` as it goes, so a killed seed resumes; `-ops-log` writes one CSV row per write with Dispatch's CPU ticks around it |
 | `replay_seed_asks.go` | The seed's step 4 and step 5: an issue's asks (each one's thread, its answer and the version the answer landed at) and then its fields and claim |
-| `replay_seed_ids.go` | `loadtest.replay_ids`, the cached logged-to-local id map the seed writes as it goes and a resumed seed reads |
+| `replay_seed_ids.go` | `public.loadtest_replay_ids`, the cached logged-to-local id map the seed writes as it goes and a resumed seed reads |
 | `replay_check.go` | `loadgen replay-check-seed` (each seeded document's version, version size changes, open anchored items, text and anchors against the bundle, the open-anchored-root distribution of the window's written documents, and `-out`, the results file stack.sh keeps), `replay-checksum` (row counts and an md5 of the versions and comment bodies) and `replay-logical-dump` (a seed with every uuid and timestamp masked, for `cmp`) |
 | `replay_plan.go` | The replay request source's plan (`loadgen run -source replay`, The replay below): the pure plan of a bundle's window (transactions, issue sampling, each logged write's CLI requests, read actions) and `loadgen replay-plan` |
-| `replay_run.go` | The replay's sending (`loadgen run -source replay`): the setup taken from the bundle before the step, id resolution through `loadtest.replay_ids` and the run's own responses, one connection and one 60 s deadline per action |
+| `replay_run.go` | The replay's sending (`loadgen run -source replay`): the setup taken from the bundle before the step, id resolution through `public.loadtest_replay_ids` and the run's own responses, one connection and one 60 s deadline per action |
 | `replay_edit.go` | The replay's edit ops: from the logged diff (`replace` of changed words, `insert` of an added paragraph) or substitutes, each one Dispatch 35efd326's edit route accepts on the client's text (The replay below); `TestReplayEditsBundle` (with `LOADTEST_REPLAY_BUNDLE`) replays every edit `replay-plan` plans at rate 1 against a model of those rules |
 | `replay_record.go` | The replay's per-run record: `summary.json` `replay` (Dispatch's CPU over the window from `/proc`, cores at the full rate, idle-corrected, drain, writes, saturation) and `meta.json` `replay` |
 | `replay-seed-len16.patch` | The allocation-free `len16` that `stack.sh replay-seed` applies to Dispatch at 35efd326 for the seed, with its tests (The replay, below) |
@@ -651,17 +651,17 @@ with 64 fresh rows and counts it (`summary.json` `loop.new_parts`, `loop.cap_exc
 
 **`loop-seed-write` resumes, one object at a time.** Every created object is recorded in
 `public.loadtest_loop_ids` — the plan that minted it, its kind, its logical path and its local id
-— the moment it exists, as `replay-seed` records a logged id in `loadtest.replay_ids`. A second
-run of the same plan against the same database reads that map whole at the start and skips every
-write whose path it already holds, so a run over a plan the map holds any part of writes exactly
-the objects the map lacks: a proposal written half way through has the rest of it written, down
-to one reply of one thread. Every write also carries an idempotency key minted from the plan's
-identity and that same path, so a retry of a write whose answer was lost adds no second object
-either. Only a failure of the id map itself stops a run, since without it a resume would write
-everything again. A refusal is data, not a failure: a 413, a 400 `CAP_EXCEEDED` or any other
-non-2xx answer is counted by route and error code, and every object it left unwritable that the
-map does not already hold is counted as skipped — so what a run reports as skipped is what the
-plan still lacks, and the run goes on.
+— the moment it exists, as `replay-seed` records a logged id in `public.loadtest_replay_ids`. A
+second run of the same plan against the same database reads that map whole at the start and skips
+every write whose path it already holds, so a run over a plan the map holds any part of writes
+exactly the objects the map lacks: a proposal written half way through has the rest of it
+written, down to one reply of one thread. Every write also carries an idempotency key minted
+from the plan's identity and that same path, so a retry of a write whose answer was lost adds
+no second object either. Only a failure of the id map itself stops a run, since without it a
+resume would write everything again. A refusal is data, not a failure: a 413, a 400
+`CAP_EXCEEDED` or any other non-2xx answer is counted by route and error code, and every object
+it left unwritable that the map does not already hold is counted as skipped — so what a run
+reports as skipped is what the plan still lacks, and the run goes on.
 
 **The map is a table of `public`, and every statement of this package names the schema of every
 Dispatch table it reads.** Postgres's default `search_path` is `"$user", public`, so a schema
@@ -669,8 +669,9 @@ named as the database's login is stands in front of `public` for every unqualifi
 `create schema` of this tool's under a login called `loadtest` made such a schema on the
 deployment; Dispatch's own `create table if not exists` then built a second, empty copy of its
 whole schema there at the next restart and served it, while the seed sat in `public`
-(dispatch://INFRA-988). This tool now creates no schema at all — `public.loadtest_loop_ids` and
-`public.loadtest_event_commits` are its two tables — and names `public.` in every statement, so
+(dispatch://INFRA-988). This tool now creates no schema at all — `public.loadtest_loop_ids`,
+`public.loadtest_event_commits`, `public.loadtest_replay_ids` and
+`public.loadtest_replay_anchors` are its four tables — and names `public.` in every statement, so
 a login called anything at all reads the same tables.
 
 On the local stack of a 2-vCPU pod at this checkout, the rehearsal of 10 proposals wrote 6,214
@@ -1069,9 +1070,9 @@ before the live-socket release (`--dispatch-commit`) therefore reports `dashboar
 LINUX's real write log of 2026-10-26 22:55:00Z-23:34:00Z, re-sent at the log's offsets from
 22:55:00 as the dispatch CLI 10.25.1 sends each write, with read actions before each
 write at a stated assumption (no read was logged). It runs against a stack whose Dispatch database
-holds the restored replay seed (`stack.sh replay-seed`'s dump), whose `loadtest.replay_ids` maps
-every logged comment, artifact, ask and issue to its local id; `loadgen run` reads that table once,
-over the stack's Postgres URL, before the window.
+holds the restored replay seed (`stack.sh replay-seed`'s dump), whose
+`public.loadtest_replay_ids` maps every logged comment, artifact, ask and issue to its local id;
+`loadgen run` reads that table once, over the stack's Postgres URL, before the window.
 
 ```bash
 # One replay step (setup, start, replay-get, replay-prepare, reset --replay, loadgen run, tables).
@@ -1104,8 +1105,8 @@ specs, 385 block maps and a roster of 452 sessions. No document version lacks a 
 state through Dispatch's API with Dispatch at 35efd326, production's commit on 2026-10-26
 (migration 0114). The dump is at a migration no newer than main's, so every later commit migrates
 it forward in `replay-prepare`. Every issue is recreated at its number, and every logged id is
-mapped to its local one in `loadtest.replay_ids` as it goes, so a killed seed resumes
-(`--resume`). Each anchor's rule is recorded in `loadtest.replay_anchors`. What it writes:
+mapped to its local one in `public.loadtest_replay_ids` as it goes, so a killed seed resumes
+(`--resume`). Each anchor's rule is recorded in `public.loadtest_replay_anchors`. What it writes:
 
 - **History at real sizes** (`planHistory`). A document gets production's version count, and
   version n changes as many bytes as production's version n did. Each version before the restore
@@ -1384,8 +1385,8 @@ width dropped, while 8a911ecc renders the same row with the pipe escaped outside
 refuses the older form (`400 INVALID_MARKDOWN`, "a table row holding 7 cells where its table has
 5"). Planned against the bundle's text, every upload of that document is refused by that build and
 by no other, which measures the two renderings instead of the build. So, after
-`loadtest.replay_ids` is read and before the window opens, the run reads each document the plan
-modelled (`GET /artifacts/{id}/text`, the agent bearer) and, for every text the build serves
+`public.loadtest_replay_ids` is read and before the window opens, the run reads each document the
+plan modelled (`GET /artifacts/{id}/text`, the agent bearer) and, for every text the build serves
 otherwise than the bundle holds it, plans again from the build's text. Where the build serves the
 bundle's text, every document included, nothing is replanned and the plan is byte for byte the one
 `loadgen replay-plan` prints. Both the reads and the replan happen before the window starts
@@ -1419,8 +1420,8 @@ write's latency then counts from its scheduled time, so a slow Dispatch still sh
 saturation (`doc_order_waits`, `doc_order_wait_s`). Each request is one record of
 the Requests table, named `<method> <pattern> [<kind>]`. Replay writes carry no marker, so the
 delivery columns stay empty. A logged id resolves to the response of the run's own action that
-created it (waited for) or to `loadtest.replay_ids`; an action naming an object that neither has
-(a reply to a comment whose creation failed, say) is not sent and is counted in
+created it (waited for) or to `public.loadtest_replay_ids`; an action naming an object that
+neither has (a reply to a comment whose creation failed, say) is not sent and is counted in
 `skipped_missing_dep` by kind. The roster replaces the `ses-lg` sessions: the bundle's roster ids
 the listener accepts as a session key (the NATS KV key alphabet; an actor id such as
 `legion-daemon:LINUX` is no session id and is skipped, `roster_skipped`), then synthetic ids up to
@@ -2480,9 +2481,9 @@ The documents are the ones the step writes most:
 - A replay: the artifacts with the most agent writes in the bundle's `window.jsonl` over the
   replay's sub-window (`artifact.version` events that the replay sends: not a person's, which a
   browser made, and not a named version with no diff), among the documents of the bundle's
-  `state.json`, mapped to the copy's ids through `loadtest.replay_ids` (kind `artifact`) of the
-  reset database. Ties go by the logged id. A document the window creates has no copy id when the
-  replay starts and is not typed into.
+  `state.json`, mapped to the copy's ids through `public.loadtest_replay_ids` (kind `artifact`)
+  of the reset database. Ties go by the logged id. A document the window creates has no copy id
+  when the replay starts and is not typed into.
 - A load step: the K documents `loadgen plan-docs` names (The load, above: `plan-docs`), those
   that the step's own in-window edits and uploads plan the most versions for, most first, ties by
   artifact id. `cluster.sh` runs it with the step's own flags, the ones it then gives `loadgen

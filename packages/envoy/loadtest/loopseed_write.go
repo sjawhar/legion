@@ -7,7 +7,7 @@ package main
 // review index.
 //
 // Every created object is recorded in public.loadtest_loop_ids under the plan's identity the
-// moment it exists, as replay-seed records a logged id in loadtest.replay_ids
+// moment it exists, as replay-seed records a logged id in public.loadtest_replay_ids
 // (replay_seed_ids.go), so a second run of the same plan against the same database creates
 // nothing again: the map is read whole at the start and every write whose logical path it
 // already holds is skipped. Every write

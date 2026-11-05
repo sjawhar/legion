@@ -1,9 +1,10 @@
 package main
 
 // loadgen replay-seed: recreates a replay bundle's state (replay_bundle.go) on a load-test stack
-// through Dispatch's API, as replay_seed_plan.go decides it. Every logged id is mapped to the local
-// one in loadtest.replay_ids the moment the local object exists, so a killed seed resumes where it
-// stopped. It logs keys, ids, statuses, Dispatch's error codes, sizes and counts, never a text.
+// through Dispatch's API, as replay_seed_plan.go decides it. Every logged id is mapped to the
+// local one in public.loadtest_replay_ids the moment the local object exists, so a killed seed
+// resumes where it stopped. It logs keys, ids, statuses, Dispatch's error codes, sizes and
+// counts, never a text.
 
 import (
 	"context"
@@ -29,16 +30,25 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// replayIDsDDL is the logged-to-local id map a seed writes as it goes and a resumed seed reads.
-const replayIDsDDL = `create schema if not exists loadtest;
-create table if not exists loadtest.replay_ids (
+// replayIDsDDL is the logged-to-local id map a seed writes as it goes and a resumed seed reads,
+// with the anchors replay-check-seed reads beside it.
+//
+// Both are tables of public, the schema Dispatch's own tables live in, and not of a schema of
+// this tool's own. A schema this tool created could be named as the database's login is - one
+// deployment's login is loadtest - and Postgres's default search_path is "$user", public, so that
+// schema would stand in front of public for every unqualified statement the server itself runs
+// afterwards, Dispatch's own create table if not exists among them: that is how one deployment
+// came to hold a second, empty copy of Dispatch's schema (dispatch://INFRA-988). A tool that
+// creates no schema at all can shadow none, and public is there before this tool connects, so
+// nothing of these two tables has to be created outside it.
+const replayIDsDDL = `create table if not exists public.loadtest_replay_ids (
   kind text not null, logged_id text not null, local_id text not null,
   primary key (kind, logged_id));
-create table if not exists loadtest.replay_anchors (
+create table if not exists public.loadtest_replay_anchors (
   kind text not null, logged_id text not null, local_id text not null, logged_doc text not null,
   branch text not null, block_id text not null, span_start int not null, span_end int not null,
-  primary key (kind, logged_id));
-alter table loadtest.replay_anchors add column if not exists quote_at int not null default -1`
+  quote_at int not null default -1,
+  primary key (kind, logged_id))`
 
 // quoteAt is the byte offset in the text at At of the anchor's quote when the choice pinned an
 // occurrence of a repeated quote, -1 otherwise (the check then needs the quote to be unique).
@@ -49,7 +59,7 @@ func quoteAt(c anchorChoice) int {
 	return -1
 }
 
-// replay_ids kinds.
+// public.loadtest_replay_ids kinds.
 const (
 	idIssue           = "issue"
 	idArtifact        = "artifact"
@@ -174,7 +184,7 @@ func (e *seedError) Error() string {
 
 func (s *replaySeeder) run(ctx context.Context, plans []seedIssuePlan) error {
 	if _, err := s.pool.Exec(ctx, replayIDsDDL); err != nil {
-		return fmt.Errorf("create loadtest.replay_ids: %w", err)
+		return fmt.Errorf("create public.loadtest_replay_ids: %w", err)
 	}
 	ids, err := loadIDStore(ctx, s.pool)
 	if err != nil {
@@ -1224,9 +1234,9 @@ func (s *replaySeeder) choose(d *issueDoc, logged string, a *replayAnchor, skipL
 }
 
 // recordAnchor keeps the branch and the chosen block's span of a seeded anchor in
-// loadtest.replay_anchors, where replay-check-seed reads them.
+// public.loadtest_replay_anchors, where replay-check-seed reads them.
 func (s *replaySeeder) recordAnchor(ctx context.Context, kind, logged, local string, d *issueDoc, c anchorChoice) error {
-	_, err := s.pool.Exec(ctx, `insert into loadtest.replay_anchors (kind, logged_id, local_id, logged_doc, branch, block_id, span_start, span_end, quote_at)
+	_, err := s.pool.Exec(ctx, `insert into public.loadtest_replay_anchors (kind, logged_id, local_id, logged_doc, branch, block_id, span_start, span_end, quote_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict (kind, logged_id) do update set local_id = excluded.local_id,
 		logged_doc = excluded.logged_doc, branch = excluded.branch, block_id = excluded.block_id,
 		span_start = excluded.span_start, span_end = excluded.span_end, quote_at = excluded.quote_at`,

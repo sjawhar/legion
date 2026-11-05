@@ -193,29 +193,16 @@ type sizeAnchorCheck struct {
 // checkSizesAndAnchors compares each seeded document's version size changes (Dispatch's
 // coalesce(size, octet_length(markdown))) with production's (VersionSizes): equal, or equal with
 // the sign flipped (counted, not a mismatch), else a mismatch; and checks every anchored item the
-// seed should have placed: its branch is recorded in loadtest.replay_anchors and its stored quote
-// lies, once, inside the span of the text at At its rule chose. An answer version's expected
-// change counts its answers' answered_at as the seed's answer wrote it: Dispatch writes the time
-// of the answer with its trailing zeros trimmed, so its length is not production's (the same
-// attribute the text comparison masks). A resolve version needs no such count: a resolve writes
-// only state="resolved" into its block, no time.
+// seed should have placed: its branch is recorded in public.loadtest_replay_anchors and its
+// stored quote lies, once, inside the span of the text at At its rule chose. An answer version's
+// expected change counts its answers' answered_at as the seed's answer wrote it: Dispatch writes
+// the time of the answer with its trailing zeros trimmed, so its length is not production's (the
+// same attribute the text comparison masks). A resolve version needs no such count: a resolve
+// writes only state="resolved" into its block, no time.
 func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []seedIssuePlan, ids map[[2]string]string) (sizeAnchorCheck, error) {
 	r := sizeAnchorCheck{Rules: map[string]int{}}
-	type anchorRow struct {
-		branch              string
-		start, end, quoteAt int
-	}
-	rows, err := conn.Query(ctx, `select kind, logged_id, branch, span_start, span_end, quote_at from loadtest.replay_anchors`)
+	recorded, err := readReplayAnchors(ctx, conn)
 	if err != nil {
-		return r, fmt.Errorf("read loadtest.replay_anchors: %w", err)
-	}
-	recorded := map[[2]string]anchorRow{}
-	var kind, logged, branch string
-	var start, end, at int
-	if _, err := pgx.ForEachRow(rows, []any{&kind, &logged, &branch, &start, &end, &at}, func() error {
-		recorded[[2]string{kind, logged}] = anchorRow{branch, start, end, at}
-		return nil
-	}); err != nil {
 		return r, err
 	}
 	for _, p := range plans {
@@ -293,9 +280,9 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 			r.Anchors++
 			r.Rules[row.branch]++
 			local := ids[[2]string{kind, logged}]
-			table := "comments"
+			table := "public.comments"
 			if kind == idAsk {
-				table = "asks"
+				table = "public.asks"
 			}
 			var quote, doc string
 			if err := conn.QueryRow(ctx, `select coalesce(anchor->>'quote', ''), coalesce(anchor->>'artifact_id', '') from `+table+` where id::text = $1`, local).Scan(&quote, &doc); err != nil {
@@ -352,19 +339,47 @@ type seedCheck struct {
 	Distribution                    []openRootsDistribution
 }
 
-// readReplayIDs reads loadtest.replay_ids from any connection or pool (as openAnchored takes a
-// QueryRow), so the seed and the check have one reader.
-func readReplayIDs(ctx context.Context, q interface {
+// replayRowQuerier is what the replay's own two tables are read from: a pool or a connection (as
+// openAnchored takes a QueryRow).
+type replayRowQuerier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
-}) (map[[2]string]string, error) {
-	rows, err := q.Query(ctx, `select kind, logged_id, local_id from loadtest.replay_ids`)
+}
+
+// readReplayIDs reads public.loadtest_replay_ids, so the seed and the check have one reader.
+func readReplayIDs(ctx context.Context, q replayRowQuerier) (map[[2]string]string, error) {
+	rows, err := q.Query(ctx, `select kind, logged_id, local_id from public.loadtest_replay_ids`)
 	if err != nil {
-		return nil, fmt.Errorf("read loadtest.replay_ids: %w", err)
+		return nil, fmt.Errorf("read public.loadtest_replay_ids: %w", err)
 	}
 	out := map[[2]string]string{}
 	var k, l, v string
 	_, err = pgx.ForEachRow(rows, []any{&k, &l, &v}, func() error {
 		out[[2]string{k, l}] = v
+		return nil
+	})
+	return out, err
+}
+
+// anchorRow is one row of public.loadtest_replay_anchors as the check reads it: the branch
+// chooseAnchor took and the span its rule chose, with the pinned occurrence's byte offset
+// (quote_at, -1 when the quote has to be unique).
+type anchorRow struct {
+	branch              string
+	start, end, quoteAt int
+}
+
+// readReplayAnchors reads public.loadtest_replay_anchors, which the seed records an anchor's rule
+// in (replay_seed.go recordAnchor), by kind and logged id.
+func readReplayAnchors(ctx context.Context, q replayRowQuerier) (map[[2]string]anchorRow, error) {
+	rows, err := q.Query(ctx, `select kind, logged_id, branch, span_start, span_end, quote_at from public.loadtest_replay_anchors`)
+	if err != nil {
+		return nil, fmt.Errorf("read public.loadtest_replay_anchors: %w", err)
+	}
+	out := map[[2]string]anchorRow{}
+	var kind, logged, branch string
+	var start, end, at int
+	_, err = pgx.ForEachRow(rows, []any{&kind, &logged, &branch, &start, &end, &at}, func() error {
+		out[[2]string{kind, logged}] = anchorRow{branch, start, end, at}
 		return nil
 	})
 	return out, err

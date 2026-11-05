@@ -1,9 +1,10 @@
 package main
 
 // Sending a replay plan (loadgen run -source replay): the setup loadgen run takes from the bundle
-// before the step (replaySetup), the step that sends it, id resolution through loadtest.replay_ids
-// and the run's own responses, and one connection and one 60 s deadline per action. The plan it
-// sends is pure and lives in replay_plan.go; nothing here changes it apart from readBaseTexts.
+// before the step (replaySetup), the step that sends it, id resolution through
+// public.loadtest_replay_ids and the run's own responses, and one connection and one 60 s deadline
+// per action. The plan it sends is pure and lives in replay_plan.go; nothing here changes it apart
+// from readBaseTexts.
 //
 // Nothing here logs a body, title, quote or document text: routes are templates, failures are
 // statuses, counts are counts.
@@ -182,7 +183,7 @@ func replayTurns(actions []*replayAction) map[*replayAction]*replayTurn {
 // replayRun is one run's replay state.
 type replayRun struct {
 	setup   *replaySetup
-	ids     map[[2]string]string // loadtest.replay_ids
+	ids     map[[2]string]string // public.loadtest_replay_ids
 	futures map[replayRef]*replayFuture
 	pid     int
 	pprof   string
@@ -214,10 +215,10 @@ type replayRun struct {
 	endRead       chan struct{}
 }
 
-// prepareReplay reads loadtest.replay_ids over the stack's Postgres URL, matches the client's copy
-// of each document to the build under test (readBaseTexts) and records the run's inputs: the seed
-// dump, Dispatch's GOMAXPROCS and build. It runs before the window opens, so its reads and any
-// replan cost the measurement nothing.
+// prepareReplay reads public.loadtest_replay_ids over the stack's Postgres URL, matches the
+// client's copy of each document to the build under test (readBaseTexts) and records the run's
+// inputs: the seed dump, Dispatch's GOMAXPROCS and build. It runs before the window opens, so its
+// reads and any replan cost the measurement nothing.
 func (st *step) prepareReplay(ctx context.Context, a *api) error {
 	rs := st.cfg.replay
 	rr := &replayRun{setup: rs, futures: map[replayRef]*replayFuture{}, pid: st.cfg.ep.pids["dispatch"], pprof: st.cfg.ep.pprof, pg: st.cfg.ep.pg,
@@ -230,7 +231,7 @@ func (st *step) prepareReplay(ctx context.Context, a *api) error {
 	rr.ids, err = readReplayIDs(ctx, conn)
 	conn.Close(context.Background())
 	if err != nil {
-		return fmt.Errorf("replay: read loadtest.replay_ids (is the replay seed restored?): %w", err)
+		return fmt.Errorf("replay: read public.loadtest_replay_ids (is the replay seed restored?): %w", err)
 	}
 	if err := rr.readBaseTexts(ctx, a); err != nil {
 		return err
@@ -399,7 +400,7 @@ func (rr *replayRun) readCPU() cpuReading {
 }
 
 // resolve is the local id of a logged object: the response of the run's own action that created
-// it (waited for), else loadtest.replay_ids.
+// it (waited for), else public.loadtest_replay_ids.
 func (rr *replayRun) resolve(ctx context.Context, ref replayRef) (string, bool) {
 	if f, ok := rr.futures[ref]; ok {
 		select {

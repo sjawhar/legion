@@ -601,7 +601,7 @@ func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]repl
 }
 
 // localNow is the local id of a logged object once the run is over: the response of the run's
-// own action that created it, else loadtest.replay_ids.
+// own action that created it, else public.loadtest_replay_ids.
 func (rr *replayRun) localNow(ref replayRef) (string, bool) {
 	if f, ok := rr.futures[ref]; ok {
 		select {

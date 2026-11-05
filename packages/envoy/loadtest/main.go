@@ -57,7 +57,7 @@ commands:
   replay-verify-bundle
                    check every file of a bundle against bundle.meta.json's sha256; print counts
   replay-seed      recreate a replay bundle's state on the stack through Dispatch's API, resumably
-                   (loadtest.replay_ids maps each logged id to the local one)
+                   (public.loadtest_replay_ids maps each logged id to the local one)
   replay-check-seed
                    compare a replay seed's documents with the bundle; exit 1 on a difference
   replay-checksum  print row counts and an md5 of every version's markdown and comment body
