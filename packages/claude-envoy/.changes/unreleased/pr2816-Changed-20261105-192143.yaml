@@ -1,0 +1,5 @@
+kind: Changed
+body: Claude Code installs this plugin from the `claude-plugin` branch, which `.claude-plugin/marketplace.json` names as a `git-subdir` source, instead of from `main`'s own tree. The rebuild workflow builds `main` after each merge as before and force-updates that branch with the result, so `main` takes no commit from it and a merge queue entry is no longer rebuilt behind it. The version Claude Code computes is still the commit it installed from, so `claude plugin update claude-envoy@legion-plugins` still reaches every new build.
+time: 2026-11-05T19:21:43.069206255Z
+custom:
+    Issue: pr2816
