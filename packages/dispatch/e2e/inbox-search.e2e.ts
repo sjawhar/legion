@@ -824,8 +824,8 @@ test.describe("inbox search", () => {
       await expect(selectedRow(page)).toHaveCount(0);
       await expect(answer).toHaveValue(typed);
 
-      // Escape out of the box lands on the list's first row, and `l` from there records it.
-      await inboxSearchBox(page).focus();
+      // Escape out of the box lands on the list's first row, and `l` from there records it. The
+      // fill left the focus in the box, so the key needs no focus call of its own.
       await page.keyboard.press("Escape");
       const landedId = await rows(page).first().getAttribute("data-inbox-row");
       const landed = inboxRow(page, landedId ?? "");
@@ -834,7 +834,10 @@ test.describe("inbox search", () => {
       await expect(paneScroller(page)).toBeFocused();
 
       // And Escape hands the focus back to that row, with the answer still waiting in the
-      // column above it.
+      // column above it. The list still holds no selected row at this moment, which is what
+      // makes the recorded row the only way out: a column whose selection had come back would
+      // prove nothing about the held one.
+      await expect(selectedRow(page)).toHaveCount(0);
       await page.keyboard.press("Escape");
       await expect(landed).toBeFocused();
       await expect(answer).toHaveValue(typed);

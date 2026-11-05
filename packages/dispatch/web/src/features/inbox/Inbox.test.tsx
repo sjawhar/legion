@@ -3027,6 +3027,137 @@ test("the record l made is dropped the moment the focus leaves the column, by an
   }
 });
 
+test("a window or tab blur keeps the record: the reader has not left the column", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+
+    // The column is showing ask-b while the focus is on ask-a, so the row `l` records is not
+    // the row the column is showing and the two ways back are told apart.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // The window or the tab loses the focus: the blur names no target, and nothing inside the
+    // document moved, so the scroller still holds the focus. The reader is still in the column,
+    // and back on the tab Escape owes them the row they came from, not the selected one.
+    fireEvent.blur(scroller(), { relatedTarget: null });
+    expect(document.activeElement).toBe(scroller());
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-a"));
+    expect(selectedIds()).toEqual(["ask-b"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("a second l from inside the column leaves the record on the row the reader came from", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // Pressed again from inside the column - a reader scrolling with the arrows and reaching
+    // for the key again - `l` only focuses the scroller it is already on. The row it recorded
+    // the first time stands: it is the row the reader came from, and writing the selected row
+    // over it would send Escape to a row they never pressed the key on.
+    fireEvent.keyDown(scroller(), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-a"));
+    expect(selectedIds()).toEqual(["ask-b"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("a step out of a column held open over a hidden row drops the record, where no blur fires", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+    inboxIssue("ask-c", "CORE-3", "Which owner?"),
+  ];
+  let served: InboxRow[] = rows;
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { queryClient, unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
+    // Typed and unsent, so the column keeps ask-a once the server withdraws its row: a column
+    // with no selected row beside it, which is where a step hands the focus to nothing.
+    fireEvent.change(within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer"), {
+      target: { value: "Whichever the mirror already holds." },
+    });
+    served = rows.filter((row) => row.id !== "ask-a");
+    await act(async () => {
+      queryClient.setQueryData<AskRead>(["ask-thread", "ask-a"], retracted(rows[0]));
+      await queryClient.refetchQueries({ queryKey: ["inbox"] });
+    });
+    await waitFor(() => expect(rowIds()).toEqual(["ask-b", "ask-c"]));
+    expect(selectedIds()).toEqual([]);
+
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+    shortRow("ask-c").focus();
+    fireEvent.keyDown(shortRow("ask-c"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // `j` steps the selection from the place the hidden row held, and has no selected row to
+    // hand the focus back to: the scroller keeps it, so no blur fires and the step itself is
+    // the only thing that can drop the record. The reader has stepped off the question they
+    // pressed `l` on, so Escape owes them the row the column is showing now.
+    fireEvent.keyDown(scroller(), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(document.activeElement).toBe(scroller());
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-b"));
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 test("Enter pressed inside the column belongs to the control holding it, and still leaves the list for the answer box", async () => {
   const narrow = widenToReadingPane();
   const rows = [

@@ -725,25 +725,58 @@ export function Inbox({
     origin === null
       ? null
       : (listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`) ?? null);
-  /** The row `l` was pressed on, which is the row Escape returns the focus to. Null for every
-   *  other way into the column, and cleared again the moment the focus leaves the column, so
-   *  Escape then returns to the row the column is showing as it always has. */
+  /** The row `l` was pressed on: the row Escape returns the focus to from inside the column,
+   *  which is another row than the selected one whenever `j` moved the selection while the
+   *  focus stayed in the list. Null for every other way into the column, where Escape returns
+   *  to the row the column is showing, as it always has.
+   *
+   *  Three review rounds have each found another way for this one ref to go stale, so the
+   *  whole contract is written down here, as the list a branch that touches the column is to
+   *  be checked against:
+   *
+   *  - One writer: `read-pane`'s `run`, and only the press that carries the focus in from
+   *    outside the column. A press from inside moves the focus to the scroller and leaves the
+   *    record alone, so a second `l` never overwrites the row the reader came from with the
+   *    row the column is showing.
+   *  - One reader: `paneWayBack` below, which both halves of Escape, its `when` and its `run`,
+   *    ask, so neither can disagree with the other about where the key goes.
+   *  - Dropped wherever the focus leaves the column inside the document: `forgetPaneReturn`,
+   *    the wrapper's `onBlur`, which covers every route out at once - `f` to the search box,
+   *    Escape to the row, a Tab onto a row's checkbox, a click into the list, and the row a
+   *    step out of the column focuses on its way.
+   *  - Dropped by a step out of the column that moves no focus: `move`, for the two steps no
+   *    blur fires for - a column held open over a hidden row has no selected row to take the
+   *    focus, and a step that unmounts the scroller leaves the focus nowhere.
+   *  - Kept through a window or tab blur, which reaches the handler naming no target while the
+   *    reader has not moved at all and is still in the column.
+   *  - Nothing else drops it: it is this component's ref, so it ends with the Inbox itself. */
   const paneReturn = useRef<string | null>(null);
-  /** That clearing, as one rule over every way the focus leaves the column: `f`, Escape out of
-   *  the search box, a Tab or Shift+Tab onto a row's checkbox, a click into the list, and the
-   *  step `j`/`k` takes back to the selected row. React's `onBlur` bubbles from the column's
-   *  descendants, and `relatedTarget` is where the focus went - null where it went nowhere,
-   *  which is outside the column too - so the record is dropped exactly while the reader is no
-   *  longer in there, rather than in the three bindings that used to clear it by hand and left
-   *  every other way out holding a stale row. `l` focuses the scroller from a row outside this
-   *  wrapper, so no blur of it fires and the record `l` has just made stands; Escape's own run
-   *  reads the record before it focuses the row, so the blur that follows drops nothing it
-   *  still needs. */
+  /** The drop the focus leaving the column makes, as one rule over every route out: React's
+   *  `onBlur` bubbles from the column's descendants, so the record is dropped exactly while the
+   *  reader is no longer in there, rather than in the three bindings that used to clear it by
+   *  hand and left every other way out holding a stale row. `l` focuses the scroller from a row
+   *  outside this wrapper, so no blur of it fires and the record `l` has just made stands;
+   *  Escape's own run reads the record before it focuses the row, so the blur that follows
+   *  drops nothing it still needs.
+   *
+   *  Where the focus went is `relatedTarget`, and `document.activeElement` where the event
+   *  names none, because those two nulls mean opposite things. A window or tab blur moves no
+   *  focus at all: the scroller still holds it, the reader is still in the column, and back on
+   *  the tab Escape owes them the row they came from - in a column held open over a hidden row
+   *  it is the only row it has to return to. A focus that went nowhere, the node holding it
+   *  having unmounted, leaves `document.activeElement` on `document.body`, which is outside
+   *  this wrapper, so that one clears the record as it must. */
   const forgetPaneReturn = (event: FocusEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.contains(event.relatedTarget)) {
+    if (!event.currentTarget.contains(event.relatedTarget ?? document.activeElement)) {
       paneReturn.current = null;
     }
   };
+  /** The row Escape returns the focus to from inside the column: the row `l` recorded, else the
+   *  row the column is showing, and null where the list holds neither. The one reader of the
+   *  record - the binding's `when` tests it against null, its `run` focuses it, and there is no
+   *  second spelling of the way back for the two of them to disagree over. */
+  const paneWayBack = (): HTMLElement | null =>
+    originRow(paneReturn.current) ?? paneSelection.selectedRow();
   /** One step of the reader's, in whichever mode the Inbox is in: the selection the column
    *  follows, or the focus roving the rows. Chosen once, so no binding below asks again. */
   const stepInMode = paneShown ? paneSelection.step : step;
@@ -755,6 +788,11 @@ export function Inbox({
    *  nothing. The reader then stands exactly where a click and then `j` leaves them today. */
   const move = (delta: 1 | -1) => {
     if (paneShown && focusInPane()) {
+      // The record goes with the step out of the column. The row taking the focus blurs the
+      // scroller, and that blur drops it in the ordinary case; this covers the step that moves
+      // no focus for the blur to fire on - a column held open over a hidden row has no selected
+      // row to focus, and a step that unmounts the scroller focuses nothing either.
+      paneReturn.current = null;
       paneSelection.selectedRow()?.focus();
     }
     stepInMode(delta);
@@ -899,9 +937,11 @@ export function Inbox({
         // From the reading column, Escape is the way back to the row the reader came from: `l`
         // recorded that row, which is not the selected one whenever `j` moved the selection
         // without moving the focus. Every other way in records nothing and returns, as it
-        // always has, to the row the column is showing.
+        // always has, to the row the column is showing. `paneWayBack` is both of those, and the
+        // `when` below asks it the same question, so the key never fires on a way back the run
+        // then cannot find.
         if (paneShown && focusInPane()) {
-          (originRow(paneReturn.current) ?? paneSelection.selectedRow())?.focus();
+          paneWayBack()?.focus();
           return;
         }
         const row = rowAround(document.activeElement);
@@ -919,9 +959,7 @@ export function Inbox({
       // held open over a hidden row would match no binding and do nothing.
       when: () =>
         rowAround(document.activeElement) !== null ||
-        (paneShown &&
-          focusInPane() &&
-          (paneSelection.selectedRow() !== null || originRow(paneReturn.current) !== null)),
+        (paneShown && focusInPane() && paneWayBack() !== null),
     },
     {
       // The column is the other half of the page, and `l` is the step into it: the scroller
@@ -934,8 +972,15 @@ export function Inbox({
         // The row the reader came from, for Escape: the one holding the focus, or the selected
         // one where the focus is on nothing - `document.body`, where a reader who has pressed
         // no key yet stands - or on something that is not a row.
-        paneReturn.current =
-          focusedRow()?.dataset.inboxRow ?? paneSelection.selectedRow()?.dataset.inboxRow ?? null;
+        //
+        // Only the press that carries the focus in records anything. Pressed again from inside
+        // the column the key moves the focus back to the scroller and leaves the record alone:
+        // a second `l` would otherwise write the selected row, or null, over the row the reader
+        // actually came from, which is the row Escape owes them.
+        if (!focusInPane()) {
+          paneReturn.current =
+            focusedRow()?.dataset.inboxRow ?? paneSelection.selectedRow()?.dataset.inboxRow ?? null;
+        }
         paneScroller()?.focus();
       },
       // One test for all three cases the key does nothing in: below 1280 px and in the drawer
