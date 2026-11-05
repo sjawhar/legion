@@ -43,9 +43,8 @@ export function BulkBar({
   all: boolean;
   /** How many open asks the selection holds, which is what **Snooze** would defer. */
   askCount: number;
-  /** The bar's own element. The Inbox renders it in two places - beside the bands, and in the
-   *  empty state a press can leave behind - so the keymap reaches it through this rather than by
-   *  searching the list, which the empty state is not inside. */
+  /** The bar's own element, which the keymap reaches through this: Escape from the picker
+   *  focuses the bar itself when a press has left no row to return to. */
   barRef: RefObject<HTMLFieldSetElement | null>;
   onClear: () => void;
   onDismiss: () => void;

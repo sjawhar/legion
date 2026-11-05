@@ -149,6 +149,24 @@ The filter is part of the page's address: one `?assignee=` value per person, eac
 word `unassigned`, so a link carries the list you are looking at. `?assignee=everyone` is the
 cleared filter, and an address with no `assignee` is your own asks.
 
+Beside the filter is a **Search asks** box. Type into it and the list keeps the asks that hold
+every word you typed, wherever each word sits: in the issue key, in the issue's title, in the
+question itself, or in who asked it — a person's login, and for an agent the session it wrote
+from, the title that session started under and the person who runs it. An ask on a project
+document, which belongs to no issue, matches the document's name too. Capitals make no
+difference. The `f` key puts the focus in the box from anywhere on the page, and `Escape` there
+puts it back on the selected row, or on the first row when no row is selected.
+
+The box narrows the list the Inbox already holds, as the **Assignee** filter does: nothing is
+asked of the server again, so the sections, their counts and the keys that walk the list all
+follow what you typed. An ask the text hides drops out of the count of ticked asks and out of the
+snooze that acts on them, and keeps its tick for when it comes back. The credential requests above
+the list and the **Blocked on you** summary are not narrowed. When no ask holds every word, the
+list reads **Nothing matches this text**.
+
+The text is part of the address too, as `?q=`, so a link carries what you searched for as well as
+whose asks you were looking at.
+
 While the filter names anybody but you alone, the **Waiting on you** band reads **Waiting on a
 person** instead, since those asks wait on whoever holds them.
 
@@ -364,8 +382,10 @@ so a reply you were drafting is still there when you close the drawer.
 
 The drawer carries the same **Filter** and **View**, with choices of its own. It opens on your
 own work, and what you pick there changes the drawer alone: the address of the page underneath
-never moves. The two settings that are yours rather than the list's — the thread order and the
-bands you folded — are shared with the page, since they belong to your browser.
+never moves. The **Search asks** box is the drawer's own in the same way: the drawer keeps what
+you type there, and it narrows the drawer alone. The two settings that are yours rather than the
+list's — the thread order and the bands you folded — are shared with the page, since they
+belong to your browser.
 
 `Escape` closes the drawer before it closes anything else behind it, and returns focus to the
 button that opened it. Clicking outside the drawer closes it too. The button isn't offered on the

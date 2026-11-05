@@ -14,12 +14,14 @@ import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type { AskApproval, InboxRow } from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
+import { borderDefault } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import { CHANGED_BLOCK_CLASS } from "../doc/change-marks";
 import { DocumentRuntime } from "../doc/runtime";
 import { loadBlockSchema } from "../doc/schema";
 import { scrollElementToTop } from "../doc/scroll-block";
 import { VersionView } from "../doc/VersionView";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { AskCard } from "./AskCard";
 import { isDecisionAsk } from "./ask-decision";
 import type { InboxListRow } from "./list-row";
@@ -144,7 +146,7 @@ function ApprovalBody({
   onSnoozeLive,
   viewer,
 }: PaneFlowProps & { approval: AskApproval; artifactId: string }): ReactNode {
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLElement>(null);
   const content = useRef<HTMLDivElement>(null);
   /** Where "Next change" stands in the marked blocks, and the question it stands in: another
    *  question is read from its first marked block, not from where the last one was left. */
@@ -204,39 +206,56 @@ function ApprovalBody({
   }, [askId]);
 
   const body = (): ReactNode => {
+    // The card the column falls back to draws the whole question itself, and the question
+    // belongs on screen once: a block above that card would say it twice.
     if (failed) {
       return <QuestionCard ask={ask} onAnswered={onAnswered} />;
     }
-    const skeleton = <LoadingSkeleton label={`Opening ${approval.name}`} />;
-    if (
+    /** The question the request itself asks, which is the requester's own words about the
+     *  document below it. `AskCard`'s renderer draws it, so a message with a list or a link
+     *  reads as it was written, and a rule tells it from the document's first paragraph. */
+    const question = (
+      <div className={`mb-3 border-b pb-3 ${borderDefault}`} data-testid="pane-approval-question">
+        <MarkdownBody markdown={ask.question} />
+      </div>
+    );
+    /** Whether the document below the question is still opening: every read `VersionView` needs
+     *  has to have landed before the column can draw it. */
+    const opening =
       !settled ||
       artifact === undefined ||
       user === undefined ||
       latestVersion === undefined ||
-      (approvedVersion !== undefined && baselineQuery.isPending)
-    ) {
-      return skeleton;
-    }
+      (approvedVersion !== undefined && baselineQuery.isPending);
+    // The question stands while the skeleton does: it is the pane's alone to draw, and waits
+    // on none of the document's reads.
     return (
-      <VersionView
-        artifactId={artifact.id}
-        // The pane draws no ask row over a stored version: the blocks of the version carry what
-        // was decided in them, and a column the reader flips through with `j` reads no list of
-        // the document's asks to name their askers.
-        asks={[]}
-        blockSchema={blockSchema}
-        changeBaseline={changeBaseline}
-        createdAt={
-          artifact.versions.find((version) => version.number === latestVersion)?.created_at
-        }
-        highlight={undefined}
-        owner={
-          artifact.issue_key === null
-            ? { project: artifact.project, slug: artifact.slug }
-            : undefined
-        }
-        version={latestVersion}
-      />
+      <>
+        {question}
+        {opening ? (
+          <LoadingSkeleton label={`Opening ${approval.name}`} />
+        ) : (
+          <VersionView
+            artifactId={artifact.id}
+            // The pane draws no ask row over a stored version: the blocks of the version carry
+            // what was decided in them, and a column the reader flips through with `j` reads no
+            // list of the document's asks to name their askers.
+            asks={[]}
+            blockSchema={blockSchema}
+            changeBaseline={changeBaseline}
+            createdAt={
+              artifact.versions.find((version) => version.number === latestVersion)?.created_at
+            }
+            highlight={undefined}
+            owner={
+              artifact.issue_key === null
+                ? { project: artifact.project, slug: artifact.slug }
+                : undefined
+            }
+            version={latestVersion}
+          />
+        )}
+      </>
     );
   };
 

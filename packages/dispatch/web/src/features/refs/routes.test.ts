@@ -1017,6 +1017,24 @@ test("the inbox drops filter values, sorts and groupings it does not know", () =
   expect(parseInboxSearch("?project=+,CORE")).toEqual({ filters: { project: ["CORE"] } });
 });
 
+// The Inbox's search text rides in the address like its other filters: `usePaneSelection`
+// rebuilds the whole query string on every selection change, so anything not in the route is
+// lost on the next `j`.
+test("the inbox's search text round-trips in the address and is absent when empty", () => {
+  expect(buildInboxPath({ q: "two words" })).toBe("/?q=two+words");
+  expect(parseInboxSearch("?q=two+words")).toEqual({ q: "two words" });
+  expect(parseInboxSearch("?q=")).toEqual({});
+  // Nothing trims it: a reader mid-word has a trailing space, and it is part of what they typed.
+  expect(parseInboxSearch("?q=two+")).toEqual({ q: "two " });
+  const route = {
+    agent: "s1",
+    assignees: ["ana@example.com"],
+    item: "ask-3",
+    q: "two words",
+  };
+  expect(parseInboxSearch(buildInboxPath(route).slice(1))).toEqual(route);
+});
+
 // The shell reserves its right gutter from this, and `features/margin/Margin.tsx` renders from
 // it, so the two cannot disagree: an 80 px gutter beside a rail that is not there is exactly
 // what two separate answers produced.

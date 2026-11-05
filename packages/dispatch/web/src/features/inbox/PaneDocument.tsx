@@ -15,7 +15,7 @@ import { api } from "../../api/client";
 import { issueQuery, whoAmIQuery } from "../../api/queries";
 import type { Artifact, AuthenticatedUser } from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
-import { quoteAccentBorder } from "../../theme/classes";
+import { focusVisibleRing, quoteAccentBorder } from "../../theme/classes";
 import { liveTextQueryOptions, ProofDocument, type ProofDocumentProps } from "../doc/ProofDocument";
 import { BLOCK_ID_ATTRIBUTE, scrollBlockToTop } from "../doc/scroll-block";
 import { holdSection, type SectionHold } from "./pane-placement";
@@ -119,7 +119,7 @@ export function PaneFrame({
   head: ReactNode;
   /** What the column is of: a question, or a thread of the reader's own. */
   label?: string;
-  scroller?: RefObject<HTMLDivElement | null>;
+  scroller?: RefObject<HTMLElement | null>;
   sectionBar?: SectionBar;
 }): ReactNode {
   return (
@@ -130,7 +130,21 @@ export function PaneFrame({
       id="inbox-pane"
     >
       {head}
-      <div className="min-h-0 flex-1 overflow-y-auto" ref={scroller}>
+      {/* The one scroller every flow draws in is a focus stop of its own, so a reader who has
+          read the head can hand the keyboard to the document. Nothing here scrolls it: the
+          browser scrolls whichever focusable element holds the focus on the arrow keys, Page
+          Up, Page Down, Space, Home and End, so this writes no scrolling code. A labelled
+          `<section>` is `role="region"`, and its name is neither a superset nor a subset of
+          the enclosing section's name, since Playwright matches an accessible name by
+          substring: each of the two names matches only itself. */}
+      <section
+        aria-label="Question body"
+        className={`min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-2 ${focusVisibleRing}`}
+        data-testid="inbox-pane-scroller"
+        ref={scroller}
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: A region is not interactive, and this one is deliberately in the tab order: it is the column's one focus stop, and the keyboard reaches the document through it.
+        tabIndex={0}
+      >
         {/* The bar is drawn beside the editor rather than inside it: a class Dispatch writes into
             editor DOM is read back as a document edit. */}
         <div className="relative">
@@ -145,7 +159,7 @@ export function PaneFrame({
             {children}
           </div>
         </div>
-      </div>
+      </section>
     </section>
   );
 }

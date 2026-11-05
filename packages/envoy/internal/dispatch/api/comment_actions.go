@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -145,8 +144,8 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
 	}
-	if length := len16(input.Body); length > contracts.DispatchBodyMax {
-		capExceeded(w, "body", length, contracts.DispatchBodyMax)
+	if err := blockBoundError(itemblocks.Check("body", input.Body)); err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
 	var carried *refs.CarriedEdit
@@ -415,6 +414,9 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		if summary == "" {
 			summary = fmt.Sprintf("Accepted suggestion: %q → %q", comment.Anchor.Quote, comment.Suggestion.ReplaceWith)
 		}
+		// The version's name rides the artifact.version event, so it takes the part an event
+		// carries: a comment body is bounded block by block and can be far longer than that.
+		summary, _ = model.EventBody(summary)
 		named, err := s.deps.Docs.NamedVersion(documentCtx, comment.Anchor.ArtifactID, summary, actor)
 		if err != nil {
 			s.writeHandlerError(w, err)

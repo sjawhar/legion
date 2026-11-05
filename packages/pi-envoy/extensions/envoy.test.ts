@@ -949,8 +949,13 @@ async function onTestClock<T>(pending: () => Promise<T>): Promise<T> {
   }
 }
 
+/** A server's answer, typed as Dispatch and the listener type theirs: a client reads a body as
+ *  JSON only where the answer says it is JSON (`DispatchClient`'s `#response`). */
 function response(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200 });
+  return new Response(JSON.stringify(body), {
+    headers: { "Content-Type": "application/json" },
+    status: 200,
+  });
 }
 
 /** A listener that serves replay over a stream holding nothing: every subject's cursor starts. */
@@ -19451,3 +19456,174 @@ for (const listenerGrant of ["current", "before-session-consumers"] as const) {
     }
   );
 }
+
+// A comment, message or broadcast body is bounded block by block, so one event carries its
+// first part alone and says so with `body_truncated`; an event the bus refused whole reaches
+// the session as a stand-in with no body at all (`payload_omitted`). A host that prompted its
+// agent with either would hand it less than the comment says, so the session reads the whole
+// body through its own Dispatch before it prompts; with no Dispatch, or a read that fails, it
+// keeps what the event carried and the note that says so.
+describe("a body an event carried only in part", () => {
+  const CUT_COMMENT = "44444444-4444-4444-8444-444444444444";
+  const CARRIED = "The first paragraph.";
+  const WHOLE = `${CARRIED}\n\nThe second paragraph, past where the event stopped.`;
+
+  /** The payload the event carries: the comment row with its body cut (`body_truncated`), or,
+   *  for `omitted`, the stand-in a bus refusal leaves behind - the row's short top-level fields
+   *  and `payload_omitted`, with no body at all. */
+  function commentPayload(omitted: boolean): Record<string, unknown> {
+    const named = {
+      id: CUT_COMMENT,
+      issue_key: "INFRA-370",
+      author: { kind: "user", id: "alice" },
+      created_at: "2026-11-02T00:00:00Z",
+    };
+    return omitted
+      ? { ...named, payload_omitted: true }
+      : {
+          ...named,
+          artifact_id: null,
+          body: CARRIED,
+          body_truncated: true,
+          anchor: null,
+          reply_to: null,
+          ask_id: null,
+          turn: null,
+          resolved: false,
+          resolved_by: null,
+          resolved_at: null,
+          edited_at: null,
+          suggestion: null,
+          mentions: [],
+          deliveries: [],
+          artifact_name: "",
+        };
+  }
+
+  function cutCommentEnvelope(topic: string, omitted: boolean): string {
+    return JSON.stringify({
+      event_id: "dispatch-cut-1",
+      source: "dispatch",
+      source_event_id: "1",
+      topic,
+      dedupe_key: "dispatch-cut-1",
+      issued_at: 1,
+      payload_summary: "INFRA-370 comment created",
+      payload: JSON.stringify({
+        id: 1,
+        seq: 1,
+        issue_key: "INFRA-370",
+        type: "comment.created",
+        actor: { kind: "user", id: "alice" },
+        notify: true,
+        quiet: false,
+        created_at: "2026-11-02T00:00:00Z",
+        payload: commentPayload(omitted),
+      }),
+      trace_id: "dispatch-cut-1",
+    });
+  }
+
+  /** Boots a session subscribed to INFRA-370's topic, pushes the comment event - cut, or the
+   *  stand-in when `omitted` - and answers the comment read with `read`. Returns the card its
+   *  agent was prompted with. */
+  async function cardForCutComment(
+    name: string,
+    read: (path: string) => Response | undefined,
+    omitted = false
+  ): Promise<string> {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    globalThis.fetch = async (input, init) => {
+      const answer = read(new URL(input.toString()).pathname);
+      return answer ?? responseWithRegistration(input, init, []);
+    };
+    const { default: envoyExtension } = await import(`./envoy.ts?${name}`);
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext(`ses_${name}`));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const topic = dispatchIssueSubject("INFRA-370", ">");
+    await subscribeTool.execute("", { topics: [topic] });
+    const control = natsState.controls.get(topic);
+    if (control === undefined) throw new Error("the issue topic was not subscribed");
+
+    control.push(cutCommentEnvelope(topic, omitted));
+    const deadline = Date.now() + 5_000;
+    while (fixture.deliveries.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const card = fixture.deliveries[0]?.content;
+    if (card === undefined) throw new Error("no card was delivered for the cut comment");
+    return card;
+  }
+
+  test("is prompted with the body the comment route answers", async () => {
+    const reads: string[] = [];
+    const card = await cardForCutComment("cut-comment-read", (path) => {
+      if (path !== `/api/v1/comments/${CUT_COMMENT}`) return undefined;
+      reads.push(path);
+      return response({
+        comment: { id: CUT_COMMENT, issue_key: "INFRA-370", body: WHOLE },
+        replies: [],
+      });
+    });
+
+    expect(reads).toEqual([`/api/v1/comments/${CUT_COMMENT}`]);
+    // Byte for byte: the body the route answered, written as the card writes a text holding
+    // blank lines (one quoted scalar), and no note, because nothing is missing.
+    expect(card).toContain(`body: ${JSON.stringify(WHOLE)}`);
+    expect(card).not.toContain("first part only");
+  });
+
+  test("keeps the part it carried, and the note, when that read fails", async () => {
+    const card = await cardForCutComment("cut-comment-read-fails", (path) =>
+      path === `/api/v1/comments/${CUT_COMMENT}`
+        ? new Response(JSON.stringify({ code: "INTERNAL", error: "down" }), { status: 500 })
+        : undefined
+    );
+
+    expect(card).toContain(CARRIED);
+    expect(card).not.toContain("The second paragraph");
+    expect(card).toContain(
+      `the body is its first part only; read it whole with GET /api/v1/comments/${CUT_COMMENT}`
+    );
+  });
+
+  test("is prompted with that body for a stand-in the bus left with no body at all", async () => {
+    const reads: string[] = [];
+    const card = await cardForCutComment(
+      "omitted-comment-read",
+      (path) => {
+        if (path !== `/api/v1/comments/${CUT_COMMENT}`) return undefined;
+        reads.push(path);
+        return response({
+          comment: { id: CUT_COMMENT, issue_key: "INFRA-370", body: WHOLE },
+          replies: [],
+        });
+      },
+      true
+    );
+
+    expect(reads).toEqual([`/api/v1/comments/${CUT_COMMENT}`]);
+    expect(card).toContain(`body: ${JSON.stringify(WHOLE)}`);
+    expect(card).not.toContain("too large for the bus");
+  });
+
+  test("gives the note for a stand-in whose read fails, having no body to keep", async () => {
+    const card = await cardForCutComment(
+      "omitted-comment-read-fails",
+      (path) =>
+        path === `/api/v1/comments/${CUT_COMMENT}`
+          ? new Response(JSON.stringify({ code: "INTERNAL", error: "down" }), { status: 500 })
+          : undefined,
+      true
+    );
+
+    expect(card).not.toContain("The second paragraph");
+    expect(card).toContain(
+      `this event carries no body: it was too large for the bus; read it whole with GET /api/v1/comments/${CUT_COMMENT}`
+    );
+  });
+});
