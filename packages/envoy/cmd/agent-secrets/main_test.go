@@ -504,7 +504,11 @@ func TestExecFormReleasesALineEndingUntouchedAndSaysSo(t *testing.T) {
 				t.Fatalf("the child printed no digest at all")
 			}
 			if fields[0] != want {
-				t.Fatalf("child sha256 = %s, want %s: the value must reach it as stored, line ending and all", fields[0], want)
+				// The token is not printed: a regression that puts the value where the digest
+				// belongs would print it. Its own digest tells two failures apart and discloses
+				// nothing.
+				got := sha256.Sum256([]byte(fields[0]))
+				t.Fatalf("what the child printed first is not the value's digest %s; sha256 of what it did print: %s", want, hex.EncodeToString(got[:]))
 			}
 			lines := strings.SplitAfter(stderr, "\n")
 			if len(lines) < 2 || !strings.HasPrefix(lines[0], "agent-secrets: GRANT_ME from ") {
@@ -944,8 +948,8 @@ func TestReleasedValuesReachTheChildExactlyAsStored(t *testing.T) {
 // where it is read — a caller that sends it unstripped gets a rejected HTTP header, and the error
 // reporting that can quote the whole secret (dispatch://INFRA-1042). The exec form says so on
 // standard error before the command runs, naming each such secret in a stable order and never any
-// part of a value, and says nothing when no value ends in one. The failures below print that
-// line, which is the thing under test and holds no value, and never the values themselves.
+// part of a value, and says nothing when no value ends in one. No failure below prints what was
+// written or any value: the one worth catching is a line that holds a value.
 func TestWarnTrailingNewlineNamesEverySecretThatEndsInALineEnding(t *testing.T) {
 	for name, tc := range map[string]struct {
 		values map[string]string
@@ -964,17 +968,25 @@ func TestWarnTrailingNewlineNamesEverySecretThatEndsInALineEnding(t *testing.T) 
 			var stderr strings.Builder
 			warnTrailingNewline(&stderr, tc.values)
 			said := stderr.String()
+			// No failure below prints what was written. The line is meant to hold no value, so
+			// the failure that matters most here is the one where it holds one, and printing it
+			// then is the disclosure this whole change is about. Each failure says what was
+			// wrong, with a digest where two outputs must be told apart.
+			digest := func(s string) string {
+				sum := sha256.Sum256([]byte(s))
+				return hex.EncodeToString(sum[:])
+			}
 			if tc.quiet {
 				if said != "" {
-					t.Fatalf("stderr = %q, want nothing", said)
+					t.Fatalf("it wrote %d bytes (sha256 %s), want nothing at all", len(said), digest(said))
 				}
 				return
 			}
 			if !strings.HasPrefix(said, "agent-secrets: "+strings.Join(tc.want, ", ")+" end in a line ending") {
-				t.Fatalf("stderr = %q, want it to name exactly %v in order", said, tc.want)
+				t.Fatalf("the line does not open by naming exactly %v in order (sha256 %s)", tc.want, digest(said))
 			}
 			if strings.Count(said, "\n") != 1 || !strings.HasSuffix(said, "\n") {
-				t.Fatalf("stderr = %q, want exactly one line", said)
+				t.Fatalf("it wrote %d newlines, want exactly one and it last", strings.Count(said, "\n"))
 			}
 			// The line is independent of the bodies: the same names with the same endings and
 			// wholly different values say exactly the same thing, which no substring check of a
@@ -987,7 +999,7 @@ func TestWarnTrailingNewlineNamesEverySecretThatEndsInALineEnding(t *testing.T) 
 			}
 			warnTrailingNewline(&other, changed)
 			if other.String() != said {
-				t.Fatalf("the line changed with the values:\n%q\n%q", said, other.String())
+				t.Fatalf("the line changed with the values: sha256 %s became %s", digest(said), digest(other.String()))
 			}
 		})
 	}
