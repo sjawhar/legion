@@ -74,9 +74,6 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if err := e.correctStatuses(ctx, tx, issues); err != nil {
-		return intake.Result{}, err
-	}
 	byKey := make(map[string]record.Issue, len(issues))
 	for _, issue := range issues {
 		byKey[issue.Key] = issue
@@ -84,6 +81,9 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 	slotted := make(map[string]bool, len(slots))
 	for _, slot := range slots {
 		slotted[slot.Issue] = true
+	}
+	if err := e.correctStatuses(ctx, tx, issues, byKey, slotted); err != nil {
+		return intake.Result{}, err
 	}
 	for _, issue := range issues {
 		role := RoleFor(issue.Phase)
@@ -145,10 +145,22 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 // takes it instead (the daemon's status row). An issue outside the workflow, one waiting before
 // its first phase, and one held or waiting on a person keep what they show: those phases have no
 // status of their own.
-func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record.Issue) error {
+//
+// An issue is corrected only while its tree runs: its root holds an admission slot and does not
+// linger. A root waiting for a slot can carry a workflow phase of its own - a re-admission leaves
+// the phase a hand-over carried (admit's readmit) - and only a `todo` root is in the waiting line
+// (record.line), so writing its phase's status over that `todo` would take it out of the line and
+// no slot would ever reach it. A lingering tree is the same: it runs nothing, and its statuses are
+// the close's to write.
+func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record.Issue, byKey map[string]record.Issue,
+	slotted map[string]bool) error {
 	for _, issue := range issues {
 		want := PhaseStatus(issue.Phase)
 		if issue.Project != e.cfg.Project || !InWorkflow(issue) || want == "" || want == issue.Status {
+			continue
+		}
+		root, ok := byKey[issue.Tree]
+		if !ok || !slotted[root.Key] || root.Lingers() {
 			continue
 		}
 		if err := e.status(ctx, tx, issue, want); err != nil {
