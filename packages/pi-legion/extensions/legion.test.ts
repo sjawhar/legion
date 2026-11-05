@@ -1641,6 +1641,7 @@ describe("Legion OMP extension", () => {
         pendingStatusWrites: [],
         heldOutboxRows: [],
         strandedClaims: [],
+        wakesWaiting: [],
         capabilities: [],
         repositories: {
           owners: ["acme"],

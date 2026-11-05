@@ -431,6 +431,7 @@ const MOVED_ON = {
   pendingStatusWrites: [],
   heldOutboxRows: [],
   strandedClaims: [],
+  wakesWaiting: [],
   capabilities: [],
   repositories: {
     owners: ["acme"],
