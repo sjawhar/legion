@@ -40,13 +40,16 @@ const REPORT = {
 };
 
 /** A runtime over a stub daemon answering the golden fixtures, recording each route it is sent
- * and each body it is posted. */
-function runtime(claim: ClaimCapability = implementer) {
+ * and each body it is posted. `state` is what `GET /legion/v1/state` answers. */
+function runtime(
+  claim: ClaimCapability = implementer,
+  state: Record<string, unknown> = daemonFixture("state.json")
+) {
   const routes: string[] = [];
   const posted: Record<string, unknown>[] = [];
   const lookups: string[] = [];
   const answers: Record<string, Record<string, unknown>> = {
-    "/legion/v1/state": daemonFixture("state.json"),
+    "/legion/v1/state": state,
     "/legion/v1/grants": daemonFixture("grant.json"),
     "/legion/v1/handoff/complete": daemonFixture("handoff-complete.json"),
   };
@@ -166,6 +169,60 @@ test("handoff_complete reads the issue's phase, finds the record and commit for 
     ready: false,
     ...REPORT,
   });
+});
+
+/** `state.json` with a key no schema names at four depths: the top level, one issue, one worker's
+ * claim — the path the 2026-11-03 incident took, where one key of a daemon a contract ahead
+ * failed every `legion` call — and the locator below that claim. */
+function stateWithKeysNoSchemaNames(): Record<string, unknown> {
+  const state = daemonFixture("state.json");
+  const issues = state.issues as Record<string, Record<string, unknown>>;
+  const issue = issues["LEGION-208"];
+  const workers = issue.workers as Record<string, Record<string, unknown>>;
+  const worker = workers.implementer;
+  const claim = worker.claim as Record<string, unknown>;
+  return {
+    ...state,
+    workerAdmission: { queue: ["LEGION-211"] },
+    issues: {
+      ...issues,
+      "LEGION-208": {
+        ...issue,
+        escalation: { reason: "a field this build's contract has no name for" },
+        workers: {
+          ...workers,
+          implementer: {
+            ...worker,
+            claim: {
+              ...claim,
+              lease: { holder: "daemon" },
+              locator: { ...(claim.locator as Record<string, unknown>), zone: "us-east-1a" },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+test("a state carrying keys no schema names at four depths is read, and read_record and handoff_complete hand none of them on", async () => {
+  const golden = daemonFixture("state.json") as { issues: Record<string, unknown> };
+  const { ops, routes } = runtime(implementer, stateWithKeysNoSchemaNames());
+
+  // Awaited rather than `.resolves`, so a refusal of a key the reader must ignore is reported
+  // with the path it named.
+  expect(await executePhaseOp(ops, { op: "read_record", issue: "LEGION-208" })).toEqual({
+    record: golden.issues["LEGION-208"],
+  });
+  expect(
+    await executePhaseOp(ops, { op: "handoff_complete", summary: "Done.", verdict: "pass" })
+  ).toEqual(daemonFixture("handoff-complete.json"));
+  expect(routes).toEqual([
+    "/legion/v1/state",
+    "/legion/v1/state",
+    "/legion/v1/grants",
+    "/legion/v1/handoff/complete",
+  ]);
 });
 
 test("a root architect's handoff_complete is refused as unavailable before its own fields are checked, after any field it never takes", async () => {
