@@ -1,0 +1,16 @@
+kind: Changed
+body: |-
+    A role-routed event Dispatch's outbox holds because its holder stopped answering is counted
+    and logged as the wait it is. It has a counter of its own,
+    `envoy_dispatch_outbox_role_forwards_held_total`, labelled with the state its holder was in
+    (`unresponsive`, `undated` for a holder nothing dates, `unresolved` for a read that did not
+    answer), where it used to be a `holder` reason of
+    `envoy_dispatch_outbox_publish_failures_total`, and its event's back-off is logged at INFO
+    (`dispatch outbox: event waits for its role's holder`, naming the holder and its state)
+    rather than at ERROR. Nothing was sent and nothing failed: the holder keeps its claim and the
+    event is retried until that session answers, so an operator can alert on publish failures
+    without being paged for an agent that stopped typing. An event that reaches the dead-letter
+    threshold still logs at ERROR, and an event held by one holder while another destination
+    really failed is still a failure.
+custom:
+    Issue: pr2596

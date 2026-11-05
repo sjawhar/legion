@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -20,11 +21,13 @@ import (
 // documents the size of the load harness's large specs, and judge each transaction as the API's
 // xid window tests judge a route's.
 //
-// Two background transactions of the plan's scope have no test here. The block-index backfill
-// (ReconcileBlockIndex) keeps D6 at base on this fixture - its largest gap is about 3 ms and its
-// gaps a fraction of its statements, even with hundreds of references - so a test of it could not
-// be red now. RestoreDecidedWordings does no document work under its xid (only refs.ReplaceCounted
-// on short questions), and reaching it needs the reworded state an earlier release leaves.
+// Two background transactions of the plan's scope have no test here. The block-index backfill's
+// owed arms (ReconcileBlockIndex) keep D6 at base on this fixture - their largest gap is about
+// 3 ms and their gaps a fraction of their statements, even with hundreds of references - so a
+// test of them could not be red now; the tick's window arm, which writes in transactions of its
+// own, is judged below. RestoreDecidedWordings does no document work under its xid (only
+// refs.ReplaceCounted on short questions), and reaching it needs the reworded state an earlier
+// release leaves.
 
 // xidService is a document service on a traced pool of a fresh database, settling after an hour so
 // only the settlement a test runs itself settles.
@@ -349,6 +352,75 @@ func TestXidWindowReconcileTaskProgress(t *testing.T) {
 	}
 	if drifted != 0 {
 		t.Fatalf("XID RIG PROBLEM (not a finding about the code): %d issues still have no count of their spec's latest version", drifted)
+	}
+	storetest.AssertXidWindows(t, report)
+}
+
+// The block-index tick's window arm gives windows to the owners whose blocks carry none: a
+// document in a transaction of its own, which reads the document the server serves before it
+// takes the owner row (windowDocument), and a comment in one of its own, which reads the body
+// its blocks were split from under the owner's lock and takes no row lock (windowItem). Either
+// way the whole write is the one statement that writes the windows, so the window is that
+// statement and the commit after it.
+func TestXidWindowBlockIndexWindowArm(t *testing.T) {
+	service, database, tracer := xidService(t)
+	ctx := context.Background()
+	spec, _ := storetest.XidSpec("DOC", 1)
+	document := createIssueDocument(t, database, 1, spec)
+	// The live text, which the index and the window arm both read: a document whose room holds
+	// none is indexed with no block, and a block index with no block owes no window.
+	seedServiceText(t, service, document, spec)
+	if _, err := database.Pool.Exec(ctx, `
+		insert into comments (issue_key, author, body) values ('DOC-1', '{"kind":"user","id":"alice"}', $1)
+	`, spec); err != nil {
+		t.Fatalf("write the comment: %v", err)
+	}
+	// Ticks until nothing is owed index the blocks of both and write their windows; dropping
+	// those rows leaves each owed its windows and nothing else, which is what the arm repairs.
+	for range 5 {
+		tick, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAheadDocuments{})
+		if err != nil {
+			t.Fatalf("index the blocks of the document and the comment: %v", err)
+		}
+		if tick.Documents == 0 && tick.ItemBlocks == 0 {
+			break
+		}
+	}
+	if _, err := database.Pool.Exec(ctx, `delete from embedding_window_states; delete from embeddings`); err != nil {
+		t.Fatalf("drop the windows: %v", err)
+	}
+	owedDocuments, err := refs.DocumentsOwedWindows(ctx, database.Pool, "", 10)
+	if err != nil {
+		t.Fatalf("list the documents owed their windows: %v", err)
+	}
+	owedComments, err := refs.ItemsOwedWindows(ctx, database.Pool, refs.ItemComment, "", 10)
+	if err != nil {
+		t.Fatalf("list the comments owed their windows: %v", err)
+	}
+	if len(owedDocuments) != 1 || len(owedComments) != 1 {
+		t.Fatalf("XID RIG PROBLEM (not a finding about the code): %d documents and %d comments are owed their windows, want one of each",
+			len(owedDocuments), len(owedComments))
+	}
+	t.Logf("xid fixture: a document and a comment of %d bytes whose blocks hold no window", len(spec))
+
+	var tick BlockIndexTick
+	report := tracer.Measure(t, database.Pool, func() {
+		var err error
+		tick, err = service.ReconcileBlockIndex(storetest.MarkXid(ctx), BlockIndexCursors{}, liveAheadDocuments{})
+		if err != nil {
+			t.Errorf("window the owners whose blocks hold none: %v", err)
+		}
+	})
+	if tick.Windows != 2 {
+		t.Fatalf("XID RIG PROBLEM (not a finding about the code): the tick windowed %d owners, want the document and the comment", tick.Windows)
+	}
+	var windows int
+	if err := database.Pool.QueryRow(ctx,
+		`select count(*) from embeddings where split_part(id, '#', 1) = $1`, document).Scan(&windows); err != nil {
+		t.Fatalf("count the document's windows: %v", err)
+	}
+	if windows == 0 {
+		t.Fatalf("XID RIG PROBLEM (not a finding about the code): the arm left the document with no window")
 	}
 	storetest.AssertXidWindows(t, report)
 }

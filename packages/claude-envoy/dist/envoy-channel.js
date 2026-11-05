@@ -36253,6 +36253,7 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS = 20 * 60 * 1000;
 var MAX_ISSUE_BLOCKERS = 20;
 var ISSUE_TITLE_MAX = 1000;
 var PROJECT_NAME_MAX = 80;
@@ -36427,6 +36428,8 @@ var CommentEventPayloadSchema = object({
   project_key: string2().optional(),
   artifact_slug: string2().optional(),
   body: string2().optional(),
+  body_truncated: boolean2().optional(),
+  payload_omitted: boolean2().optional(),
   reply_to: string2().nullish(),
   ask_id: string2().nullish(),
   ask_question: string2().optional(),
@@ -36452,6 +36455,8 @@ var CommentEventPayloadSchema = object({
 var MessageEventPayloadSchema = object({
   id: string2().optional(),
   body: string2().optional(),
+  body_truncated: boolean2().optional(),
+  payload_omitted: boolean2().optional(),
   target: string2().nullish(),
   in_reply_to: string2().nullish(),
   reply_body: string2().optional(),
@@ -36578,14 +36583,37 @@ var AGENT_STREAM_LIMITS = {
   commandDescriptionChars: 200
 };
 // ../contracts/src/claim-holds.ts
-function claimHolds(claim, titles) {
+var HOLDING_OF = {
+  gone: "lapsed",
+  live: "holds",
+  unknown: "unknown",
+  unresponsive: "unresponsive"
+};
+function claimHolds(claim, titles, liveness = {}) {
   if (claim.actor.kind !== "session") {
     return "holds";
+  }
+  const state = liveness.holder_state;
+  if (state != null) {
+    return HOLDING_OF[state];
   }
   if (titles === undefined) {
     return "unknown";
   }
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
+}
+function claimTakeableAt(liveness, lastSeen = undefined) {
+  if (liveness.takeable_at != null) {
+    return liveness.takeable_at;
+  }
+  if (liveness.holder_state !== "unresponsive") {
+    return null;
+  }
+  const seen = liveness.last_seen == null ? lastSeen : Date.parse(liveness.last_seen);
+  if (seen === undefined || !Number.isFinite(seen) || seen <= 0) {
+    return null;
+  }
+  return new Date(seen + ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS).toISOString();
 }
 // ../contracts/src/dispatch-href.ts
 function hasControlCharacter(value) {
@@ -36774,12 +36802,14 @@ function componentsArgument(z) {
   }).describe("Attach the issue to architecture components. Attach the root before decomposing it; children inherit unless they choose.");
 }
 var SPEC_WRITING_POINTER = "Write a spec as skill://dispatch-writing-specs says.";
-function imagesArgument(z, owner, cap) {
-  return z.array(z.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward ${cap}.`).optional();
+function imagesArgument(z, owner) {
+  return z.array(z.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward the bound Dispatch holds the text to, which it names in its refusal.`).optional();
 }
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
-var ASK_QUESTION_MAX = 2000;
-var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_BLOCK_UNITS = 32000;
+var DISPATCH_ITEM_BLOCKS = 32768;
+var BODY_BLOCK_RULE = `Each block (a paragraph, list, quote, table or code block) holds at most ${DISPATCH_BLOCK_UNITS} ` + `characters and a body at most ${DISPATCH_ITEM_BLOCKS} blocks; Dispatch refuses a longer one and ` + "names it, and `dispatch limits` prints the bounds.";
+var ASK_BOUND_RULE = "Dispatch bounds an ask's question and its options together, refuses a longer one and names " + "the bound, and `dispatch limits` prints it. An ask is short and asks one thing; its reasoning " + "goes in the document, not in the question.";
 var DISPATCH_HANDOFF_BODY_MAX = 262144;
 var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
@@ -36798,16 +36828,12 @@ function handoffProblem(value) {
     return HANDOFF_PHASE_RULE;
   if (typeof body !== "string")
     return;
-  const bytes = new TextEncoder().encode(body).length;
-  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
-    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
-  }
   if (!isJsonObjectText(body)) {
     return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
   }
   return;
 }
-var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object.`;
 var handoffValidation = {
   check: (value) => handoffProblem(value) === undefined,
   message: HANDOFF_RULE,
@@ -36830,7 +36856,12 @@ var ISSUE_STATUSES = [
   "retro",
   "done"
 ];
-var ISSUE_ROUTE_STATUSES = ["live", "no_holder", "unknown"];
+var ISSUE_ROUTE_STATUSES = [
+  "live",
+  "holder_unresponsive",
+  "no_holder",
+  "unknown"
+];
 var DOC_EDIT_OPS = [
   "replace",
   "delete",
@@ -36872,7 +36903,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
-      reason: z.string({ max: DISPATCH_BODY_MAX }).describe(`Required with status done, and only with it: why the issue is closing, at most ${DISPATCH_BODY_MAX} characters. Posted on the issue as a message before it closes.`).optional(),
+      reason: z.string().describe(`Required with status done, and only with it: why the issue is closing. Posted on the issue as a message before it closes. ${BODY_BLOCK_RULE}`).optional(),
       title: z.string({ min: 1, max: ISSUE_TITLE_MAX }).describe("Replacement title, at most 1,000 characters.").optional(),
       labels: z.array(z.string({ min: 1, max: 40 }), { max: 20 }).describe("Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label.").optional(),
       priority: z.number({ int: true, min: 0, max: 3 }).nullable().optional().describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
@@ -36918,13 +36949,13 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. ${ASK_BOUND_RULE} The lines images appends count ` + `toward that bound, and an ask has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z.string().describe("Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link.").optional(),
-      question: z.string({ max: ASK_QUESTION_MAX }).describe(`${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
+      question: z.string().describe(`${ASK_QUESTION_CONTRACT} ${ASK_BOUND_RULE}`),
       options: z.array(z.object({
         label: z.string().describe("Selectable option label."),
         description: z.string().optional().describe("What this option costs.")
@@ -36936,7 +36967,7 @@ var dispatchToolSpecs = [
         quote: z.string().describe("Exact text the decision concerns."),
         occurrence: z.number({ int: true, min: 0 }).describe("Zero-based occurrence of the quote.").optional()
       }).describe("Optional document location for the question.").optional(),
-      images: imagesArgument(z, "the issue (or the project document's project)", `the ${ASK_QUESTION_MAX}-character question limit`)
+      images: imagesArgument(z, "the issue (or the project document's project)")
     }),
     validation: documentOwnerValidation(true)
   },
@@ -36959,7 +36990,7 @@ var dispatchToolSpecs = [
     description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " Previous text remains in the event log. Only the asking session can edit it; answered or " + "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " + "in the document too, changing only the fields you name - pass urgency alone and the " + "question's wording, formatting, links and comment anchors are untouched - so the edit " + "writes a document version and closes a spec's design gate until that version is approved; " + "text the block cannot carry back unchanged is refused, naming the field - an option label " + 'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z) => ({
       ask: z.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z.string({ max: ASK_QUESTION_MAX }).optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`),
+      question: z.string().optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question. ${ASK_BOUND_RULE}`),
       options: z.array(z.object({
         label: z.string().describe("Selectable option label."),
         description: z.string().optional().describe("What this option costs.")
@@ -37011,7 +37042,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. ${BODY_BLOCK_RULE} The lines images appends count toward it. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37019,11 +37050,11 @@ var dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
+      body: z.string().describe(`Review comment. ${BODY_BLOCK_RULE}`),
       reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
-      images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
+      images: imagesArgument(z, "the issue (or the project document's project)")
     }),
     validation: commentValidation
   },
@@ -37035,7 +37066,7 @@ var dispatchToolSpecs = [
       quote: "old wording",
       replace_with: "new wording"
     },
-    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. Optional explanation is at most ${DISPATCH_BODY_MAX} characters. ${OWNER_REFERENCE}`,
+    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. ${BODY_BLOCK_RULE} ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37043,7 +37074,7 @@ var dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Exact document text to replace."),
       replace_with: z.string().describe("Replacement text; a CR LF or a lone carriage return in it is written as a line feed."),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Optional rationale, at most ${DISPATCH_BODY_MAX} characters.`).optional(),
+      body: z.string().describe(`Optional rationale. ${BODY_BLOCK_RULE}`).optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional()
     }),
     validation: documentOwnerValidation(true, true)
@@ -37051,12 +37082,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. " + "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " + "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " + "arrives as a user message: answer in the conversation, with no dispatch message. " + `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. " + "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " + "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " + "arrives as a user message: answer in the conversation, with no dispatch message. " + `${BODY_BLOCK_RULE} The lines images appends count toward it. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
+      body: z.string().describe(`Update text. ${BODY_BLOCK_RULE}`),
       in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
-      images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
+      images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)")
     }),
     validation: messageValidation
   },
@@ -37255,7 +37286,7 @@ var dispatchToolSpecs = [
       label: z.string().describe("Optional label filter.").optional(),
       priority: z.array(z.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
-      route_status: z.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
+      route_status: z.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. holder_unresponsive: that session has missed its " + "heartbeats without ending, so the route still reaches it and its messages wait. " + "no_holder: nobody running holds the role, or the session is gone, right now. " + "unknown: the Envoy listener did not answer.").optional(),
       limit: z.number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT }).describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`).optional(),
       offset: z.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional(),
       all: z.boolean().describe("Take every matching issue in one unpaged read, so no row is missed or repeated while " + "the list changes. Refused with limit or offset.").optional()
@@ -37315,6 +37346,13 @@ var dispatchToolSpecs = [
     name: "dispatch_whoami",
     example: {},
     description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token and under a broker token that names a service and no person. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or the fleet a broker token naming no person belongs to, or null. A broker token that names a service may read and is refused every write with SIGN_IN_REQUIRED, which names the command a person signs in on that machine with. project is the one project key your credential may write, or null when it names none.",
+    arguments: () => ({}),
+    strict: true
+  },
+  {
+    name: "dispatch_limits",
+    example: {},
+    description: "The bounds this Dispatch server holds a write to, read from the server itself: how long one block of a body may be and how many blocks a body may hold, how many options an ask may have and how long an ask's question and options are together, how long a body an event carries whole may be, and how many bytes a request, a document and a handoff body may hold. Dispatch refuses a text over a bound and names the block or the field it passed; no tool and no command cuts or refuses your text before the server reads it, so these numbers are what decides whether a write is taken.",
     arguments: () => ({}),
     strict: true
   },
@@ -41760,6 +41798,9 @@ class DispatchClient {
   async whoami() {
     return this.#json("GET", ["api", "v1", "whoami"]);
   }
+  async limits() {
+    return this.#json("GET", ["api", "v1", "limits"]);
+  }
   async inbox(assignee) {
     return this.#json("GET", ["api", "v1", "inbox"], undefined, { assignee });
   }
@@ -42724,6 +42765,40 @@ function eventPictures(event) {
   }
   return typeof text === "string" ? pictureAddresses(text) : [];
 }
+function carriedItem(event) {
+  const resource = event.type.startsWith("comment.") || event.type.startsWith("suggestion.") ? "comment" : event.type.startsWith("message.") ? "message" : undefined;
+  if (resource === undefined || !isObject3(event.payload))
+    return;
+  const id = event.payload["id"];
+  if (typeof id !== "string" || id === "")
+    return;
+  return { resource, id, issueKey: event.issue_key };
+}
+function bodyWasCut(payload) {
+  return isObject3(payload) && (payload["body_truncated"] === true || payload["payload_omitted"] === true);
+}
+function wholeItemRoute(item) {
+  return `GET /api/v1/${item.resource === "comment" ? "comments" : "messages"}/${item.id}`;
+}
+function carriedBodyNote(event) {
+  if (!bodyWasCut(event.payload))
+    return;
+  const what = isObject3(event.payload) && event.payload["payload_omitted"] === true ? "this event carries no body: it was too large for the bus" : "the body is its first part only";
+  const item = carriedItem(event);
+  return item === undefined ? what : `${what}; read it whole with ${wholeItemRoute(item)}`;
+}
+async function wholeCarriedBody(client, item, session) {
+  try {
+    if (item.resource === "comment") {
+      const read = await client.getComment(item.id);
+      return [read.comment, ...read.replies].find((comment) => comment.id === item.id)?.body;
+    }
+    const read = item.issueKey === null ? session === undefined ? undefined : await client.getMessageThread(item.id, session) : await client.getMessage(item.issueKey, item.id);
+    return read === undefined ? undefined : [read.message, ...read.replies].find((message) => message.id === item.id)?.body;
+  } catch {
+    return;
+  }
+}
 function senderLabel(envelope) {
   const sender = envelope.source_session ?? envelope.source ?? "unknown";
   return envelope.sender?.title === undefined ? sender : `${sender} (${envelope.sender.title})`;
@@ -42929,7 +43004,13 @@ function dispatchReplyRef(event, topic, inReplyTo, comment) {
 function isObject3(value) {
   return typeof value === "object" && value !== null;
 }
-function parseDispatchFrame(rawPayload) {
+function withWholeBody(event, body) {
+  if (body === undefined || !isObject3(event.payload) || !bodyWasCut(event.payload))
+    return event;
+  const { body_truncated: _cut, payload_omitted: _omitted, ...carried } = event.payload;
+  return { ...event, payload: { ...carried, body } };
+}
+function parseDispatchFrame(rawPayload, wholeBody) {
   let value;
   try {
     value = JSON.parse(rawPayload);
@@ -42941,7 +43022,7 @@ function parseDispatchFrame(rawPayload) {
     if (targeted.success) {
       const wireFrame = value;
       return {
-        event: targeted.data.event,
+        event: withWholeBody(targeted.data.event, wholeBody),
         notify: wireFrame.event.notify,
         quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery
@@ -42975,7 +43056,7 @@ function parseDispatchFrame(rawPayload) {
     return { raw: value };
   const wireEvent = value;
   return {
-    event: parsed.data,
+    event: withWholeBody(parsed.data, wholeBody),
     notify: wireEvent.notify,
     quiet: wireEvent.quiet,
     delivery: undefined
@@ -42987,7 +43068,7 @@ function inboundTimestamp(milliseconds) {
   const date = new Date(Math.floor(milliseconds / 1000) * 1000);
   return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString().replace(".000Z", "Z");
 }
-function renderInbound(raw, sessionID, subject) {
+function renderInbound(raw, sessionID, subject, wholeBody) {
   let value;
   try {
     value = JSON.parse(raw);
@@ -43023,6 +43104,8 @@ function renderInbound(raw, sessionID, subject) {
   let rejectedDelivery;
   let malformedDelivery = false;
   let pictures = [];
+  let bodyNote;
+  let cutItem;
   let inReplyTo = envelope.in_reply_to;
   let askAuthor;
   let trailer = "";
@@ -43032,7 +43115,7 @@ function renderInbound(raw, sessionID, subject) {
     if (envelope.payload === undefined) {
       dispatchIssue = "payload";
     } else {
-      const frame = parseDispatchFrame(envelope.payload);
+      const frame = parseDispatchFrame(envelope.payload, wholeBody);
       if ("event" in frame) {
         const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
         if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
@@ -43093,6 +43176,7 @@ function renderInbound(raw, sessionID, subject) {
               replyFields: {},
               issueKey: frame.event.issue_key,
               body: message.data.body,
+              ...message.data.body_truncated === true ? { bodyTruncated: true } : {},
               ...typeof message.data.broadcast_id === "string" ? { broadcastId: message.data.broadcast_id } : {}
             };
             dispatchReply = {
@@ -43115,7 +43199,8 @@ function renderInbound(raw, sessionID, subject) {
               replyPath: dispatchReplyPath("comment", requested.data.comment_id),
               replyFields: { target: requested.data.target },
               issueKey: frame.event.issue_key,
-              body: comment.data.body
+              body: comment.data.body,
+              ...comment.data.body_truncated === true ? { bodyTruncated: true } : {}
             };
           }
         }
@@ -43130,6 +43215,9 @@ function renderInbound(raw, sessionID, subject) {
           ...compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }
         };
         dispatchActor = frame.event.actor;
+        bodyNote = carriedBodyNote(frame.event);
+        if (bodyWasCut(frame.event.payload))
+          cutItem = carriedItem(frame.event);
         pictures = eventPictures(frame.event);
         if (frame.event.type === "artifact.human_edited") {
           const edit = ArtifactHumanEditedEventPayloadSchema.safeParse(frame.event.payload);
@@ -43195,6 +43283,7 @@ function renderInbound(raw, sessionID, subject) {
       ...summaryIsHead ? {} : { summary: payloadSummary },
       ...message === undefined ? {} : { message }
     },
+    ...bodyNote === undefined ? {} : { body_note: bodyNote },
     ...foreignSession === undefined ? {} : {
       note: `body names session ${foreignSession}; the sender is ${envelope.source_session ?? "unknown"}`
     },
@@ -43210,7 +43299,8 @@ ${trailer}`,
     ...delivery === undefined ? {} : { delivery },
     ...rejectedDelivery === undefined ? {} : { rejectedDelivery },
     ...malformedDelivery ? { malformedDelivery: true } : {},
-    ...pictures.length === 0 ? {} : { pictures }
+    ...pictures.length === 0 ? {} : { pictures },
+    ...cutItem === undefined ? {} : { cutItem }
   };
 }
 
@@ -43782,6 +43872,13 @@ var DEFAULT_HEARTBEAT_MS = 90000;
 var MIN_PASS_DEADLINE_MS = 30000;
 var MIN_INTERVAL_MS = 25;
 var MAX_INTERVAL_MS = 2147483647;
+var REGISTRATION_SETTLE_MS = 5000;
+var SHUTDOWN_SETTLE_MS = 250;
+var HEARTBEAT_RETRY_MIN_MS = 20000;
+var HEARTBEAT_RETRY_MAX_MS = 40000;
+function heartbeatRetryDelayMs(draw = Math.random) {
+  return Math.round(HEARTBEAT_RETRY_MIN_MS + draw() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS));
+}
 function namedInterval(raw) {
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
@@ -43904,6 +44001,9 @@ var DEFAULT_TIMEOUT_MS = 5000;
 var RETRY_DELAY_MS = 250;
 var REPLAY_TIMEOUT_MS = 1e4;
 var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
+var SessionStateSchema = _enum2(["live", "unresponsive", "gone"]);
+var UNRESPONSIVE_RULE = "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a " + "message sent to it is stored until it answers. Start no replacement for it and take no claim " + `from it until it is gone, or until ${ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS / 60000} minutes ` + "have passed since its last_seen, the time of its last registration.";
+var WireStateSchema = SessionStateSchema.default("live");
 var InterestWireSchema = object({
   session_id: string2(),
   machine_id: string2(),
@@ -43933,6 +44033,7 @@ var SessionWireSchema = object({
   capabilities: array(string2()).optional(),
   self_subscribed: boolean2(),
   last_seen: number2().int().optional(),
+  state: WireStateSchema,
   plugin: string2().optional(),
   plugin_version: string2().optional()
 });
@@ -43940,7 +44041,9 @@ var RoleWireSchema = object({
   role: string2(),
   holder: string2(),
   host: string2().optional(),
-  last_seen: number2().int()
+  last_seen: number2().int(),
+  state: WireStateSchema,
+  holder_state: SessionStateSchema.optional()
 });
 var RoleHeldWireSchema = object({
   error: string2(),
@@ -43950,11 +44053,21 @@ var RoleHeldWireSchema = object({
 var ErrorWireSchema = object({
   error: string2(),
   code: string2().optional(),
-  expected: array(string2()).optional()
+  expected: array(string2()).optional(),
+  state: SessionStateSchema.optional(),
+  holder: string2().optional(),
+  holder_state: SessionStateSchema.optional(),
+  last_seen: number2().int().optional(),
+  claim_released: boolean2().optional(),
+  unresponsive: array(string2()).optional()
 });
 var EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: string2().optional(),
   holder: string2().optional(),
+  holder_state: SessionStateSchema.optional(),
+  recipient_state: SessionStateSchema.optional(),
+  last_seen: number2().int().optional(),
+  unresponsive: array(string2()).optional(),
   duplicate: boolean2().optional()
 });
 var PublishResponseSchema = EnvelopeResponseSchema.extend({
@@ -44006,6 +44119,9 @@ function mergeInterestSources(registryTopics, liveTopics) {
   }
   return interests;
 }
+function holderStateOf(role) {
+  return role.holder_state ?? role.state;
+}
 function newClientInstanceID() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -44026,12 +44142,36 @@ function expandSubscriptionTopics(topics) {
   }
   return [...expanded];
 }
+function refusalStateText(parsed) {
+  const sentences = [];
+  const state = parsed.holder_state ?? parsed.state;
+  if (state !== undefined) {
+    const who = parsed.holder === undefined ? "That session" : `Holder ${parsed.holder}`;
+    const seen = parsed.last_seen === undefined || parsed.last_seen <= 0 ? "" : `, last seen ${new Date(parsed.last_seen).toISOString()}`;
+    sentences.push(`${who} is ${state}${seen}.`);
+  }
+  const stored = parsed.unresponsive ?? [];
+  if (stored.length > 0) {
+    const one = stored.length === 1;
+    sentences.push(`Envoy stored the message for ${stored.join(", ")}.`, `${one ? "That session" : "Those sessions"} stopped answering, so ${one ? "it" : "they"} did not fail this send.`);
+  }
+  if (sentences.length === 0)
+    return "";
+  if (state === "unresponsive" || stored.length > 0)
+    sentences.push(UNRESPONSIVE_RULE);
+  return ` ${sentences.join(" ")}`;
+}
 
 class EnvoyApiError extends Error {
   details;
   name = "EnvoyApiError";
   expected;
   code;
+  holder;
+  sessionState;
+  lastSeen;
+  claimReleased;
+  unresponsive;
   constructor(details) {
     let parsed;
     try {
@@ -44039,10 +44179,15 @@ class EnvoyApiError extends Error {
       if (result.success)
         parsed = result.data;
     } catch {}
-    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
+    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}${refusalStateText(parsed)}`);
     this.details = details;
     this.expected = parsed?.expected;
     this.code = parsed?.code;
+    this.holder = parsed?.holder;
+    this.sessionState = parsed?.holder_state ?? parsed?.state;
+    this.lastSeen = parsed?.last_seen;
+    this.claimReleased = parsed?.claim_released;
+    this.unresponsive = parsed?.unresponsive;
   }
 }
 var mintedDedupeKey2 = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
@@ -44198,6 +44343,8 @@ function createEnvoyClient(config) {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,
         confirmed: response.recipient !== undefined,
+        recipientState: response.recipient_state ?? "live",
+        ...response.last_seen === undefined || response.last_seen <= 0 ? {} : { lastSeen: response.last_seen },
         duplicate: response.duplicate === true
       };
     },
@@ -44216,6 +44363,8 @@ function createEnvoyClient(config) {
       return {
         envelope: response,
         ...response.holder === undefined ? {} : { holder: response.holder },
+        ...response.holder_state === undefined ? {} : { holderState: response.holder_state },
+        unresponsive: response.unresponsive ?? [],
         ...response.kept === undefined ? {} : { kept: response.kept },
         ...response.kept_reason === undefined ? {} : { keptReason: response.kept_reason }
       };
@@ -44259,6 +44408,8 @@ function createEnvoyClient(config) {
         search.set("dir", input.directory);
       if (input.title !== undefined)
         search.set("title", input.title);
+      if (input.include !== undefined)
+        search.set("include", input.include);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
@@ -46028,150 +46179,6 @@ async function resolveOrigin(env, exec, cwd) {
 
 // ../envoy-client/src/dispatch-picture-tools.ts
 import { basename, resolve as resolvePath } from "path";
-
-// ../envoy-client/src/tool-input-errors.ts
-class ToolInputError extends Error {
-  tool;
-  problems;
-  constructor(tool, problems) {
-    const count = problems.length;
-    const cli = isDispatchTool(tool);
-    const help = cli ? [
-      `Allowed flags: ${commandFlags(tool).join(", ")}`,
-      `Example: ${commandLine(tool, exampleFor(tool))}`
-    ] : [];
-    super([
-      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
-      ...problems.map((problem) => `- ${problem}`),
-      ...help.map((line) => `- ${line}`)
-    ].join(`
-`));
-    this.name = "ToolInputError";
-    this.tool = tool;
-    this.problems = problems;
-  }
-}
-function isDispatchTool(tool) {
-  return dispatchToolSpecs.some((spec) => spec.name === tool);
-}
-function exampleFor(tool) {
-  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
-  return { ...spec?.example };
-}
-function unwrap(schema) {
-  let current = schema;
-  while (current !== undefined) {
-    const def = current.def;
-    if (!("innerType" in def) || !(def.type === "optional" || def.type === "nullable" || def.type === "default"))
-      break;
-    current = def.innerType;
-  }
-  return current;
-}
-function shapeOf(schema) {
-  const unwrapped = unwrap(schema);
-  if (unwrapped === undefined)
-    return;
-  const def = unwrapped.def;
-  return def.type === "object" && "shape" in def ? def.shape : undefined;
-}
-function schemaAt(schema, path) {
-  let current = schema;
-  for (const key of path) {
-    const unwrapped = unwrap(current);
-    if (unwrapped === undefined)
-      return;
-    const def = unwrapped.def;
-    if (def.type === "object" && "shape" in def) {
-      current = shapeOf(unwrapped)?.[String(key)];
-    } else if (def.type === "array" && "element" in def) {
-      current = def.element;
-    } else {
-      return;
-    }
-  }
-  return unwrap(current);
-}
-function describeInput(value) {
-  if (value === null)
-    return "null";
-  if (Array.isArray(value))
-    return "an array";
-  switch (typeof value) {
-    case "number":
-    case "boolean":
-      return String(value);
-    case "string":
-      return "a string";
-    case "object":
-      return "an object";
-    default:
-      return typeof value;
-  }
-}
-function describeExpected(expected, schema) {
-  switch (expected) {
-    case "int":
-      return "an integer";
-    case "object": {
-      const shape = shapeOf(schema);
-      const keys = shape === undefined ? [] : Object.entries(shape).map(([key, field]) => `${key}${field.def.type === "optional" ? "?" : ""}`);
-      return keys.length === 0 ? "an object" : `an object {${keys.join(", ")}}`;
-    }
-    case "array":
-      return "an array";
-    default:
-      return `a ${expected}`;
-  }
-}
-function pathText(path, cliTool) {
-  const [head, ...rest] = path.map(String);
-  if (cliTool === undefined || head === undefined)
-    return path.map(String).join(".");
-  let flag = fieldFlag(cliTool, head);
-  let index = 0;
-  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
-    flag += `[${rest[index]}]`;
-  }
-  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
-  return tail === "" ? flag : `${flag} ${tail}`;
-}
-function formatZodIssues(issues, schema, tool) {
-  const cliTool = isDispatchTool(tool) ? tool : undefined;
-  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
-  return issues.flatMap((issue) => {
-    const path = pathText(issue.path, cliTool);
-    switch (issue.code) {
-      case "invalid_type":
-        return issue.input === undefined ? [`${path} is required (${issue.expected})`] : [
-          `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`
-        ];
-      case "unrecognized_keys": {
-        if (cliTool !== undefined && issue.path.length === 0) {
-          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
-        }
-        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
-        const where = path === "" ? "" : ` in ${path}`;
-        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
-      }
-      case "invalid_value":
-        return [
-          `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`
-        ];
-      case "too_big":
-        if (issue.origin === "array" && Array.isArray(issue.input)) {
-          return [`${path} has ${issue.input.length} items; the limit is ${issue.maximum}`];
-        }
-        return [`${path} ${issue.message}`];
-      case "custom":
-        return [issue.message];
-      default:
-        return [path === "" ? issue.message : `${path}: ${issue.message}`];
-    }
-  });
-}
-
-// ../envoy-client/src/dispatch-picture-tools.ts
 var PICTURE_TYPE_NAMES = "a PNG, JPEG, GIF or WebP";
 async function localPictures(images, cwd, problems) {
   if (!Array.isArray(images))
@@ -46211,21 +46218,9 @@ async function localPicture(path, cwd) {
   }
   return { path, name: basename(absolute), file: Bun.file(absolute, { type }) };
 }
-function uploadSlug(name) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return slug === "" ? "artifact" : slug;
-}
-async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
+async function textWithPictures(text, pictures, owner, upload, actor) {
   if (pictures.length === 0)
     return text;
-  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
-  const fix = `${limit.shorten} or send fewer pictures`;
-  const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
-  if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [
-      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
-    ]);
-  }
   const lines = [];
   const addresses = [];
   for (const picture of pictures) {
@@ -46242,11 +46237,7 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
     addresses.push(address);
     lines.push(pictureLine(picture.name, address));
   }
-  const posted = withPictureLines(text, lines);
-  if (posted.length > limit.cap) {
-    throw new Error(`${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` + `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`);
-  }
-  return posted;
+  return withPictureLines(text, lines);
 }
 var AGENT_ARTIFACT_REF = new RegExp(`^dispatch://agent/(${SESSION_ID_PATTERN})/artifact/([^/@]+)(?:@v(\\d+))?$`, "u");
 function parseAgentArtifactRef(ref) {
@@ -46301,6 +46292,23 @@ function eventTexts(event) {
       texts = [];
   }
   return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
+}
+async function eventTextsWhole(client, events) {
+  const reads = new Map;
+  const whole = await Promise.all(events.map(async (event) => {
+    const item = bodyWasCut(event.payload) ? carriedItem(event) : undefined;
+    if (item === undefined)
+      return eventTexts(event);
+    const key = `${item.resource}:${item.id}`;
+    let read = reads.get(key);
+    if (read === undefined) {
+      read = wholeCarriedBody(client, item);
+      reads.set(key, read);
+    }
+    const body = await read;
+    return body === undefined ? eventTexts(event) : [{ text: body, at: event.created_at }];
+  }));
+  return whole.flat();
 }
 function shownPictureLine(index, address, name, mimeType, bytes) {
   return `- image ${index}: ${address} (${name}, ${mimeType}, ${bytes.toLocaleString("en-US")} bytes)`;
@@ -46917,6 +46925,148 @@ async function sessionAnswersSettled(session) {
   await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
 }
 
+// ../envoy-client/src/tool-input-errors.ts
+class ToolInputError extends Error {
+  tool;
+  problems;
+  constructor(tool, problems) {
+    const count = problems.length;
+    const cli = isDispatchTool(tool);
+    const help = cli ? [
+      `Allowed flags: ${commandFlags(tool).join(", ")}`,
+      `Example: ${commandLine(tool, exampleFor(tool))}`
+    ] : [];
+    super([
+      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
+      ...problems.map((problem) => `- ${problem}`),
+      ...help.map((line) => `- ${line}`)
+    ].join(`
+`));
+    this.name = "ToolInputError";
+    this.tool = tool;
+    this.problems = problems;
+  }
+}
+function isDispatchTool(tool) {
+  return dispatchToolSpecs.some((spec) => spec.name === tool);
+}
+function exampleFor(tool) {
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
+  return { ...spec?.example };
+}
+function unwrap(schema) {
+  let current = schema;
+  while (current !== undefined) {
+    const def = current.def;
+    if (!("innerType" in def) || !(def.type === "optional" || def.type === "nullable" || def.type === "default"))
+      break;
+    current = def.innerType;
+  }
+  return current;
+}
+function shapeOf(schema) {
+  const unwrapped = unwrap(schema);
+  if (unwrapped === undefined)
+    return;
+  const def = unwrapped.def;
+  return def.type === "object" && "shape" in def ? def.shape : undefined;
+}
+function schemaAt(schema, path) {
+  let current = schema;
+  for (const key of path) {
+    const unwrapped = unwrap(current);
+    if (unwrapped === undefined)
+      return;
+    const def = unwrapped.def;
+    if (def.type === "object" && "shape" in def) {
+      current = shapeOf(unwrapped)?.[String(key)];
+    } else if (def.type === "array" && "element" in def) {
+      current = def.element;
+    } else {
+      return;
+    }
+  }
+  return unwrap(current);
+}
+function describeInput(value) {
+  if (value === null)
+    return "null";
+  if (Array.isArray(value))
+    return "an array";
+  switch (typeof value) {
+    case "number":
+    case "boolean":
+      return String(value);
+    case "string":
+      return "a string";
+    case "object":
+      return "an object";
+    default:
+      return typeof value;
+  }
+}
+function describeExpected(expected, schema) {
+  switch (expected) {
+    case "int":
+      return "an integer";
+    case "object": {
+      const shape = shapeOf(schema);
+      const keys = shape === undefined ? [] : Object.entries(shape).map(([key, field]) => `${key}${field.def.type === "optional" ? "?" : ""}`);
+      return keys.length === 0 ? "an object" : `an object {${keys.join(", ")}}`;
+    }
+    case "array":
+      return "an array";
+    default:
+      return `a ${expected}`;
+  }
+}
+function pathText(path, cliTool) {
+  const [head, ...rest] = path.map(String);
+  if (cliTool === undefined || head === undefined)
+    return path.map(String).join(".");
+  let flag = fieldFlag(cliTool, head);
+  let index = 0;
+  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
+    flag += `[${rest[index]}]`;
+  }
+  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
+  return tail === "" ? flag : `${flag} ${tail}`;
+}
+function formatZodIssues(issues, schema, tool) {
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
+  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
+  return issues.flatMap((issue) => {
+    const path = pathText(issue.path, cliTool);
+    switch (issue.code) {
+      case "invalid_type":
+        return issue.input === undefined ? [`${path} is required (${issue.expected})`] : [
+          `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`
+        ];
+      case "unrecognized_keys": {
+        if (cliTool !== undefined && issue.path.length === 0) {
+          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
+        }
+        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
+        const where = path === "" ? "" : ` in ${path}`;
+        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
+      }
+      case "invalid_value":
+        return [
+          `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`
+        ];
+      case "too_big":
+        if (issue.origin === "array" && Array.isArray(issue.input)) {
+          return [`${path} has ${issue.input.length} items; the limit is ${issue.maximum}`];
+        }
+        return [`${path} ${issue.message}`];
+      case "custom":
+        return [issue.message];
+      default:
+        return [path === "" ? issue.message : `${path}: ${issue.message}`];
+    }
+  });
+}
+
 // ../envoy-client/src/dispatch-execute.ts
 function documentTopic(artifact) {
   return documentTopicOf(artifact.project, artifact.slug);
@@ -47045,6 +47195,7 @@ var issueFreeTools = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_limits: true,
   dispatch_inbox: true,
   dispatch_architecture_sync: true
 };
@@ -47160,16 +47311,12 @@ function askUrgency(args) {
   const value = args.urgency;
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
-function questionWithRef(question, ref) {
+function askQuestionWithRef(args) {
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
   return ref === undefined || question.includes(ref) ? question : `${question}
 
 Ref: ${ref}`;
-}
-function askQuestionWithRef(args) {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
-}
-function askQuestionProblem(withRef) {
-  return withRef.length > ASK_QUESTION_MAX ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref` : undefined;
 }
 var pictureSendingTools = {
   dispatch_ask: true,
@@ -47363,16 +47510,6 @@ function itemReplyTo(args, field) {
 function argumentProblems(tool, args) {
   const problems = [];
   switch (tool) {
-    case "dispatch_ask": {
-      const question = optionalString(args, "question");
-      const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
-        const problem = askQuestionProblem(questionWithRef(question, ref));
-        if (problem !== undefined)
-          problems.push(problem);
-      }
-      break;
-    }
     case "dispatch_edit_ask":
     case "dispatch_resolve_ask":
     case "dispatch_follow": {
@@ -47963,21 +48100,49 @@ function componentsLine(components) {
       return "Components: unassigned";
   }
 }
-function claimText(claim, titles) {
-  const holding = claimHolds(claim, titles);
-  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : "";
+function claimText(claim, agents, read = {}) {
+  const titles = agents?.titles;
+  const liveness = holderLiveness(claim, agents, read);
+  const holding = claimHolds(claim, titles, liveness);
+  const takeableAt = claimTakeableAt(liveness);
+  const unresponsive = liveness.holder_state === "unresponsive" && liveness.last_seen != null ? ` \xB7 unresponsive since ${liveness.last_seen}${takeableAt === null ? "" : `, takeable at ${takeableAt}`}` : " \xB7 unresponsive";
+  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : holding === "unresponsive" ? unresponsive : "";
   return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
-async function liveSessionTitles(client, needed) {
+function holderLiveness(claim, agents, read) {
+  if (claim.actor.kind !== "session")
+    return read;
+  const row = agents?.liveness.get(claim.actor.id);
+  if (row === undefined)
+    return read;
+  const holderState = read.holder_state ?? row.holder_state;
+  const lastSeen = read.last_seen ?? row.last_seen;
+  const takeableAt = read.takeable_at ?? row.takeable_at;
+  return {
+    ...holderState === undefined ? {} : { holder_state: holderState },
+    ...lastSeen === undefined ? {} : { last_seen: lastSeen },
+    ...takeableAt === undefined ? {} : { takeable_at: takeableAt }
+  };
+}
+async function liveAgents(client, needed) {
   if (!needed) {
     return;
   }
   try {
     const agents = await client.listAgents();
-    return new Map(agents.map((agent) => [agent.session_id, agent.title]));
+    return {
+      titles: new Map(agents.map((agent) => [agent.session_id, agent.title])),
+      liveness: new Map(agents.map((agent) => [agent.session_id, agentLiveness(agent)]))
+    };
   } catch {
     return;
   }
+}
+function agentLiveness(agent) {
+  return {
+    ...agent.state === undefined ? {} : { holder_state: agent.state },
+    ...agent.last_seen > 0 ? { last_seen: new Date(agent.last_seen).toISOString() } : {}
+  };
 }
 function holdsSession(claim) {
   return claim?.actor.kind === "session";
@@ -47991,8 +48156,9 @@ function routeText(issue, titles) {
   const holder = issue.route_holder ?? null;
   const reach = {
     live: routeHeldBySession(issue) && holder !== null ? ` (held by ${titles?.get(holder) ?? holder})` : "",
+    holder_unresponsive: issue.route.startsWith("role:") ? ` (its holder${holder === null ? "" : ` ${titles?.get(holder) ?? holder}`} is unresponsive: messages wait for it)` : " (that session is unresponsive: messages wait for it)",
     no_holder: issue.route.startsWith("role:") ? " (nobody holds it right now)" : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
+    unknown: issue.route_status_reason === "refilling" ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)" : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
   };
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
@@ -48050,7 +48216,7 @@ function refuseUnsavedRepository(verb, issue, repo) {
   const lost = repo === "" ? "the repository was not cleared" : `${repo} was not saved`;
   throw new Error(`Dispatch ${verb} ${issue.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`);
 }
-function issueSummary(issue, events, references, graph, linkBase, coverage, titles) {
+function issueSummary(issue, events, references, graph, linkBase, coverage, agents) {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
@@ -48071,11 +48237,11 @@ function issueSummary(issue, events, references, graph, linkBase, coverage, titl
     `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, agents, issue)}`,
     ...issue.priority === null ? [] : [`Priority: P${issue.priority}`],
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
-    `Route: ${routeText(issue, titles)}`,
+    `Route: ${routeText(issue, agents?.titles)}`,
     repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
@@ -48894,6 +49060,25 @@ async function executeDispatchTool(input) {
       details: { session, owner, service, project }
     };
   }
+  if (input.tool === "dispatch_limits") {
+    const limits = await dispatchClient().limits();
+    const count = (value) => value.toLocaleString("en-US");
+    return {
+      text: [
+        `One block of a body - a paragraph, list, quote, table or code block: ${count(limits.block_units)} characters (UTF-16 units).`,
+        `Blocks in one body: ${count(limits.item_blocks)}.`,
+        `An ask's question and its options together: ${count(limits.ask_units)} characters (UTF-16 units).`,
+        `Options on one ask: ${count(limits.ask_options)}.`,
+        `The body an event carries whole: ${count(limits.event_body_units)} characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.`,
+        `One request: ${count(limits.request_bytes)} bytes.`,
+        `One markdown document: ${count(limits.document_bytes)} bytes.`,
+        `One handoff body: ${count(limits.handoff_bytes)} bytes.`,
+        "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one."
+      ].join(`
+`),
+      details: { ...limits }
+    };
+  }
   if (input.tool === "dispatch_inbox") {
     const client = dispatchClient();
     const pending = client.credentialPending().then((answer) => ({ answer }), (error) => ({ error }));
@@ -48944,18 +49129,18 @@ async function executeDispatchTool(input) {
       throw new Error("issue is required");
     return owner.issue;
   };
-  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
+  const postWithPictures = (text, owner, upload) => textWithPictures(text, pictures, owner, (picture) => upload(picture).catch((error) => {
     if (!(error instanceof DispatchWriteLandedError))
       throw error;
     throw new Error(`${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error });
   }), actor);
-  const writePictures = (resolved, text, limit) => {
+  const writePictures = (resolved, text) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return postWithPictures(text, limit, project, (upload) => client.projectArtifact(project, upload));
+      return postWithPictures(text, project, (upload) => client.projectArtifact(project, upload));
     }
     const issueKey = issue();
-    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
+    return postWithPictures(text, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   const hostSession = input.sessionId?.trim();
   const shown = hostSession ? shownPictures(hostSession) : undefined;
@@ -49259,10 +49444,11 @@ async function executeDispatchTool(input) {
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress
       }));
-      const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
+      const agents = await liveAgents(client, rows.some((row) => holdsSession(row.claim)));
       const isPartial = offset !== 0 || rows.length !== total;
       const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : pageSummaryText(offset, rows.length, total);
       return {
@@ -49270,7 +49456,7 @@ async function executeDispatchTool(input) {
           `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
           ...rows.map((row) => {
             const progress = progressText(row.progress, " \xB7 ");
-            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
+            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, agents)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
           })
         ].join(`
 `),
@@ -49365,13 +49551,7 @@ async function executeDispatchTool(input) {
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
-      const withRef = askQuestionWithRef(args);
-      const refAppended = withRef !== stringArg(args, "question");
-      const question = await writePictures(resolved, withRef, {
-        cap: ASK_QUESTION_MAX,
-        text: refAppended ? "question plus ref" : "question",
-        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question"
-      });
+      const question = await writePictures(resolved, askQuestionWithRef(args));
       const askInput = {
         question,
         ...Array.isArray(options) ? { options } : {},
@@ -49435,11 +49615,7 @@ async function executeDispatchTool(input) {
       }
       const replyToBlock = replyTo?.block ?? replyToAskTarget?.block;
       const requestedTurn = optionalString(args, "turn");
-      const body = await writePictures(resolved, stringArg(args, "body"), {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      });
+      const body = await writePictures(resolved, stringArg(args, "body"));
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
@@ -49509,11 +49685,6 @@ async function executeDispatchTool(input) {
       const target = messageInReplyTo(args);
       const inReplyTo = target?.id;
       const written = stringArg(args, "body");
-      const bodyLimit = {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      };
       if (owner === null && inReplyTo !== undefined) {
         let body = written;
         if (pictures.length > 0) {
@@ -49521,7 +49692,7 @@ async function executeDispatchTool(input) {
           if (!sessionId) {
             throw new Error("host session id is required to send pictures in a direct-message reply");
           }
-          body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
+          body = await postWithPictures(written, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
         }
         const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor }, { followUp: true });
         if (reply.duplicate === true && reply.body === body) {
@@ -49550,7 +49721,7 @@ async function executeDispatchTool(input) {
         };
       }
       const issueKey = issue();
-      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) => client.artifact(issueKey, upload));
+      const body = await postWithPictures(written, issueKey, (upload) => client.artifact(issueKey, upload));
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
@@ -50053,7 +50224,7 @@ ${handoff.body}`,
       };
       if (ownerArguments.ref?.kind === "log") {
         const read = await client.read(issueKey, readEvents);
-        const pictures = await picturesOf(read.events.flatMap(eventTexts));
+        const pictures = await picturesOf(await eventTextsWhole(client, read.events));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join(`
 `),
@@ -50071,18 +50242,18 @@ ${handoff.body}`,
       const readPromise = client.read(issueKey, readEvents);
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
-      const [references, graph, titles, pictures, coverage] = await Promise.all([
+      const [references, graph, agents, pictures, coverage] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+        liveAgents(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-          ...read.events.flatMap(eventTexts)
+          ...await eventTextsWhole(client, read.events)
         ]),
         issueCoverageOrReason(client, read.issue.key)
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, titles),
+        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, agents),
         details: { issue: read.issue.key },
         ...showImages(pictures),
         ...repositoryFieldsWarnings(read.issue)
@@ -50808,6 +50979,7 @@ function allowedAPIURL(value) {
 }
 
 // ../envoy-client/src/tool-contract.ts
+var SESSION_STATE_GUIDE = "A session is live, unresponsive or gone, by how long ago it last registered: live within 5 " + "minutes, unresponsive after that and within an hour, gone past the hour or with no record at " + `all. ${UNRESPONSIVE_RULE} A session named with no state is live.`;
 var DELIVERY_CONTRACT = "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
 var STORED_DELIVERY = "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " + "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " + "once from the durable consumer its listener relays to it, also one that was away or restarted. " + "Team and other ad-hoc topics are live only.";
 var TOPIC_GUIDE = "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " + "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " + "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " + "the recommended default remains github.<owner>.<repo>.pr.<n>.>. <owner> and <repo> are one token " + "each, with every dot in the name written _ (sjawhar/.github is github.sjawhar._github; " + "acme/site.io is github.acme.site_io), and a topic spelled with the dot receives nothing. " + "Default PR subscription: " + "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " + "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " + "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one settlement event per commit whose checks settle, the head or not, naming its sha: " + 'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' + "when new runs appear for the same commit). Other GitHub: issue.<n>, issue.<n>.comment, " + "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " + "runs without an associated PR); slack.<team>.<channel>.message|mention and " + "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " + "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
@@ -50877,7 +51049,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. The confirmation names the recipient's state. A message to an unresponsive session is stored and reaches it when it answers again, so an unresponsive recipient is not a failed send and no reason to send to someone else instead. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
     arguments: (schema) => ({
       session_id: schema.string().describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
       ...messageArguments(schema),
@@ -50887,7 +51059,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs. Second, no session holds the role, or its holder's claim has lapsed. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs, which tells you to reach the agent some other way. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included. ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs. Second, no session holds the role. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs. A holder that stopped answering keeps its role but was not sent the message, and nothing waits for it, so publish the message again once that holder's holder_state reads live, and start no replacement for that session. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then. A named session is not a failed delivery to the other sessions. A session that is only unresponsive is named as no failure at all. The listener stores that session's copy, asks it for no receipt, and names the session under unresponsive. The accepted publish and the error both name it there. That session takes the message when it answers again. A session that holds its own NATS connection receives such a live topic directly, yours included. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -50899,7 +51071,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_role_get",
-    description: "Get the live holder of a named Envoy role.",
+    description: `Get the holder of a named Envoy role, with its holder_state and the holder's last_seen. A holder that is only unresponsive still holds the role: nothing a lookup does releases its claim, and only a gone holder leaves the role unheld. ${SESSION_STATE_GUIDE}`,
     arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.getRole
   },
@@ -50911,7 +51083,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_sessions",
-    description: "List all live sessions registered with Envoy. Filter by optional machine, directory, or title.",
+    description: "List the Envoy sessions that are live or unresponsive; a gone session is listed by neither. " + "Filter by optional machine, directory, or title. Each row carries its state and its " + `last_seen, the epoch milliseconds of its last registration. ${SESSION_STATE_GUIDE}`,
     arguments: (schema) => ({
       machine: schema.string().optional(),
       dir: schema.string().optional(),
@@ -50934,14 +51106,23 @@ function sendConfirmationText(result) {
   if (result.duplicate) {
     return `sent to ${result.recipient} once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy`;
   }
-  return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+  const since = result.lastSeen === undefined ? "" : ` since ${new Date(result.lastSeen).toISOString()}`;
+  const state = result.recipientState === "unresponsive" ? `unresponsive${since}, so it is stored until that session answers; ${UNRESPONSIVE_RULE}` : result.recipientState;
+  return `sent ${result.envelope.event_id} to ${result.recipient} (${state})${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
 }
 function publishConfirmationText(result) {
-  const published = `published ${result.envelope.event_id}`;
+  const sentences = [`published ${result.envelope.event_id}.`];
   if (result.kept === true) {
-    return `${published}; kept for the role: no session holds it yet, and the message waits for the session that claims it next`;
+    sentences.push("Envoy kept it for the role: no session holds it yet, and the message waits for the session that claims it next.");
+  } else if (result.holder !== undefined) {
+    const state = result.holderState === undefined ? "" : ` (${result.holderState})`;
+    sentences.push(`Its role holder is ${result.holder}${state}.`);
   }
-  return result.holder === undefined ? published : `${published}; holder ${result.holder}`;
+  if (result.unresponsive.length > 0) {
+    const one = result.unresponsive.length === 1;
+    sentences.push(`Envoy stored it for ${result.unresponsive.join(", ")}.`, `${one ? "That session" : "Those sessions"} stopped answering, so ${one ? "it has" : "they have"} not taken it yet.`, UNRESPONSIVE_RULE);
+  }
+  return sentences.join(" ");
 }
 function sessionsOnMachine(sessions, machine) {
   if (machine === undefined || machine === "")
@@ -56530,6 +56711,28 @@ async function startChannelSession(options) {
     });
     return result;
   };
+  let registrationInFlight;
+  const settleMs = options.registrationSettleMs ?? REGISTRATION_SETTLE_MS;
+  const shutdownSettleMs = Math.min(settleMs, SHUTDOWN_SETTLE_MS);
+  const settledOrGivenUp = async (settling, ms = settleMs) => {
+    const { promise, resolve } = Promise.withResolvers();
+    const timer = setTimeout(resolve, ms);
+    try {
+      await Promise.race([settling.catch(() => {
+        return;
+      }), promise]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const deregister = async (sessionID, settleFor = settleMs) => {
+    if (registrationInFlight !== undefined)
+      await settledOrGivenUp(registrationInFlight, settleFor);
+    await options.client.unregisterSession({
+      sessionID,
+      clientInstanceID: options.clientInstanceID
+    });
+  };
   const dedupe = createDeliveryDedupe();
   let replayBound;
   const showReplayed = async (frame) => {
@@ -56782,7 +56985,7 @@ async function startChannelSession(options) {
     const topics = registeredTopics();
     const asking = relay?.sessionID === identity.id ? relay : undefined;
     asking?.delivery.setFollowed(topics);
-    const result = await options.client.subscribe({
+    const registering = options.client.subscribe({
       sessionID,
       directory: identity.directory,
       topics,
@@ -56795,6 +56998,17 @@ async function startChannelSession(options) {
       plugin: { name, version: options.pluginVersion },
       ...asking === undefined ? {} : { delivery: asking.delivery.registration() }
     });
+    const settled = registering.then(() => {
+      return;
+    }, () => {
+      return;
+    });
+    registrationInFlight = settled;
+    settled.then(() => {
+      if (registrationInFlight === settled)
+        registrationInFlight = undefined;
+    });
+    const result = await registering;
     takeDeliveryAnswer(sessionID, topics, asking, result);
   };
   const restoreRole = async (previousSessionID = identity.id) => {
@@ -56896,10 +57110,7 @@ async function startChannelSession(options) {
     forwarder.follow(nextSubject);
     try {
       await withTimeout(options.connection.flush(), options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS, "flushing NATS");
-      await options.client.unregisterSession({
-        sessionID: previous,
-        clientInstanceID: options.clientInstanceID
-      });
+      await deregister(previous);
     } catch (error) {
       forwarder.unfollow([nextSubject]);
       throw error;
@@ -56948,7 +57159,20 @@ async function startChannelSession(options) {
   let heartbeatRequested = false;
   let outageReported = false;
   let registrationFailed = false;
-  const heartbeat = async () => {
+  let retryArmed = false;
+  let dropRetry;
+  const scheduleRetry = options.scheduleRetry ?? ((run, delayMs) => {
+    const timer = setTimeout(run, delayMs);
+    return () => {
+      clearTimeout(timer);
+    };
+  });
+  const clearRetry = () => {
+    retryArmed = false;
+    dropRetry?.();
+    dropRetry = undefined;
+  };
+  const heartbeat = async (fromRetry = false) => {
     if (shuttingDown || heartbeatInFlight)
       return;
     heartbeatInFlight = true;
@@ -56967,13 +57191,15 @@ async function startChannelSession(options) {
       });
       registrationFailed = false;
       outageReported = false;
+      clearRetry();
     } catch (error) {
+      const retryIn = fromRetry ? undefined : armRetry();
       if (outageReported)
         return;
       outageReported = true;
-      process.stderr.write(`envoy-channel: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat
+      const retrying = retryIn === undefined ? "retrying at the next heartbeat" : `retrying once in ${Math.round(retryIn / 1000)} s, then every heartbeat`;
+      process.stderr.write(`envoy-channel: registry heartbeat failed (${messageFor(error)}); ${retrying}
 `);
-      requestHeartbeat();
     } finally {
       heartbeatInFlight = false;
       triggerReplay();
@@ -56982,6 +57208,20 @@ async function startChannelSession(options) {
         heartbeat();
       }
     }
+  };
+  const armRetry = () => {
+    if (retryArmed || shuttingDown)
+      return;
+    retryArmed = true;
+    const delayMs = heartbeatRetryDelayMs();
+    dropRetry = scheduleRetry(() => {
+      if (!retryArmed)
+        return;
+      retryArmed = false;
+      dropRetry = undefined;
+      heartbeat(true);
+    }, delayMs);
+    return delayMs;
   };
   const requestHeartbeat = () => {
     if (heartbeatInFlight)
@@ -57097,14 +57337,14 @@ async function startChannelSession(options) {
         return;
       shuttingDown = true;
       clearInterval(heartbeatTimer);
+      clearRetry();
       if (handoffFile !== undefined)
         unwatchFile(handoffFile, handoffFileChanged);
       closeRelay();
       await forwarder.close();
-      await serialized(() => options.client.unregisterSession({
-        sessionID: identity.id,
-        clientInstanceID: options.clientInstanceID
-      })).catch((error) => {
+      const settleBy = Date.now() + shutdownSettleMs;
+      await settledOrGivenUp(registryWrites, shutdownSettleMs);
+      await deregister(identity.id, Math.max(0, settleBy - Date.now())).catch((error) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
 `);
       });
@@ -57132,6 +57372,7 @@ async function executeEnvoyTool(runtime, name, input) {
         message: sendConfirmationText(result),
         event_id: result.envelope.event_id,
         recipient: result.recipient,
+        recipient_state: result.recipientState,
         confirmed: result.confirmed
       };
     }
@@ -57144,7 +57385,16 @@ async function executeEnvoyTool(runtime, name, input) {
         message: args.message,
         ...toMessageMetadata(args)
       });
-      return { message: publishConfirmationText(result), ...result };
+      return {
+        message: publishConfirmationText(result),
+        event_id: result.envelope.event_id,
+        topic: result.envelope.topic,
+        ...result.holder === undefined ? {} : { holder: result.holder },
+        ...result.holderState === undefined ? {} : { holder_state: result.holderState },
+        unresponsive: result.unresponsive,
+        ...result.kept === undefined ? {} : { kept: result.kept },
+        ...result.keptReason === undefined ? {} : { kept_reason: result.keptReason }
+      };
     }
     case EnvoyToolOperation.subscribe: {
       const args = parseArguments(spec, input);
@@ -57172,7 +57422,8 @@ async function executeEnvoyTool(runtime, name, input) {
       const args = parseArguments(spec, input);
       const sessions = await runtime.client.listSessions({
         ...args.dir === undefined ? {} : { directory: args.dir },
-        ...args.title === undefined ? {} : { title: args.title }
+        ...args.title === undefined ? {} : { title: args.title },
+        include: "unresponsive"
       });
       return sessionsOnMachine(sessions, args.machine);
     }
@@ -57186,7 +57437,8 @@ async function executeEnvoyTool(runtime, name, input) {
     }
     case EnvoyToolOperation.getRole: {
       const args = parseArguments(spec, input);
-      return runtime.client.getRole(args.role);
+      const role = await runtime.client.getRole(args.role);
+      return { ...role, holder_state: holderStateOf(role) };
     }
     case EnvoyToolOperation.inbox:
       parseArguments(spec, input);

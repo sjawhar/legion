@@ -520,22 +520,33 @@ func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree
 	})
 }
 
-// addressOfDocument is where document artifactID sits (refs.DocumentAddress): the address this
-// transaction recorded for an artifacts row it is creating (Ledger.RegisterPendingArtifact),
-// else the stored row's, read from its ref_key and issue_key columns. A stored row's address
-// carries no pending parent: a transaction that is not creating the document creates no issue
-// for it either.
+// addressOfDocument is where document artifactID sits and what it is called
+// (refs.DocumentAddress): the address this transaction recorded for an artifacts row it is
+// creating (Ledger.RegisterPendingArtifact), else the stored row's, read from its ref_key,
+// issue_key and name columns. A stored row's address carries no pending parent: a transaction
+// that is not creating the document creates no issue for it either.
 func addressOfDocument(ctx context.Context, tx pgx.Tx, artifactID string) (refs.DocumentAddress, error) {
 	if address, pending := pendingArtifact(ctx, artifactID); pending {
 		return address, nil
 	}
 	var address refs.DocumentAddress
 	if err := tx.QueryRow(ctx, `
-		select coalesce(ref_key, ''), coalesce(issue_key, '') from artifacts where id = $1
-	`, artifactID).Scan(&address.RefKey, &address.IssueKey); err != nil {
+		select coalesce(ref_key, ''), coalesce(issue_key, ''), name from artifacts where id = $1
+	`, artifactID).Scan(&address.RefKey, &address.IssueKey, &address.Name); err != nil {
 		return refs.DocumentAddress{}, fmt.Errorf("read the address of document %s: %w", artifactID, err)
 	}
 	return address, nil
+}
+
+// documentTitle is document artifactID's title, which the windows of its blocks embed
+// (refs.PlanBlocks): the name this transaction's queued insert gives an artifacts row it is
+// creating, else the stored row's (addressOfDocument).
+func documentTitle(ctx context.Context, tx pgx.Tx, artifactID string) (string, error) {
+	address, err := addressOfDocument(ctx, tx, artifactID)
+	if err != nil {
+		return "", err
+	}
+	return address.Name, nil
 }
 
 func mergeUpdates(updates [][]byte) ([]byte, error) {
@@ -564,7 +575,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	if err := pmdoc.AskContentError(tree); err != nil {
+	if err := validateWrittenAskBlocks(tree); err != nil {
 		return "", &ErrInvalidAskBlock{Reason: err}
 	}
 	canonical, offsets, err := renderTreeWithOffsets(tree)
@@ -639,16 +650,17 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
-		// A repair is a whole new document, held to the ask content rule for every ask, as
-		// RebuildDocument holds supplied markdown, and it keeps every open ask block.
+		// A repair is a whole new document, held to every ask's content rule and to the bound
+		// an ask's wording shares, as RebuildDocument holds supplied markdown, and it keeps
+		// every open ask block.
 		if repairing {
-			if err := pmdoc.AskContentError(target); err != nil {
+			if err := validateWrittenAskBlocks(target); err != nil {
 				return &ErrInvalidAskBlock{Reason: err}
 			}
 			if err := s.refuseDroppedAskBlocks(ctx, artifactID, target); err != nil {
 				return &ErrInvalidAskBlock{Reason: err}
 			}
-		} else if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
+		} else if err := refuseChangedAsks(current, target, readAskBlockStrictly, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		if canonical, err = renderTree(target); err != nil {

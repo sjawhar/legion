@@ -1,5 +1,14 @@
 # Changelog
 
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- The `dispatch` command carries no length bound of its own: a question, a body, an option, a
+  closing reason and a reply go to the server as written, and Dispatch's refusal, which names
+  the block or the field that passed the bound, is what the command prints. `dispatch limits`
+  is new and prints the bounds the server holds a write to, read from the server itself.
+
 ## [main@c82087d74996] - 2026-11-05
 
 ### Added

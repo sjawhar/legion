@@ -216,12 +216,16 @@ func askPartsSource(ask model.Ask, parts []itemblocks.Block, sum, serverURL stri
 		bodySum: sum,
 		madeBy:  makers,
 		ids: func(stored []itemblocks.Stored, next []itemblocks.Block, _, counter int) ([]string, int, error) {
-			ids, counter := itemblocks.Align(stored, next, counter, AskAnswerPart)
+			ids, counter := itemblocks.Align(stored, next, counter, []string{AskAnswerPart})
 			return ids, counter, nil
 		},
 		pairs: func(next []itemblocks.Block, ids []string) []blockPair {
 			return askPartPairs(next, ids, serverURL)
 		},
+		// The question is what gives an option and an answer their meaning: "eu, for latency"
+		// is found by a reader asking which region was chosen only through the question it
+		// answers, so every part of an ask is embedded under it.
+		windowContext: ask.Question,
 	}, nil
 }
 

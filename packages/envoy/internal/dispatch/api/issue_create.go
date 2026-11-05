@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -36,6 +37,11 @@ func parseIssuePriority(raw json.RawMessage) (priority *int, provided bool, err 
 	}
 	return &value, true, nil
 }
+
+// specArtifactName is the name every new issue's spec document is created with, which the
+// windows of its blocks embed (refs.DocumentAddress.Name). The row's insert runs after the
+// document work that indexes those blocks, so the name is a constant both can read.
+const specArtifactName = "spec.md"
 
 func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -168,7 +174,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Before the duplicate check, which reads the new title against every title in the project.
-	if length := len16(input.Title); length > contracts.IssueTitleMax {
+	if length := itemblocks.Units16(input.Title); length > contracts.IssueTitleMax {
 		capExceeded(w, "title", length, contracts.IssueTitleMax)
 		return
 	}
@@ -303,15 +309,16 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
-	// The spec's artifacts row is written in the write phase below, after the document work, so
-	// the address that row is given is recorded for the reads of this transaction that need it:
-	// the key its insert names - the issue's key and the 'spec' slug - and the issue itself,
-	// whose own row this transaction writes in the same phase, which is why the parent goes
-	// with it (refs.DocumentAddress). A block pointer of the seeded spec is held to that
-	// address (docs.addressOfDocument). parentKey is "" for a root issue, the null parent_key
-	// the insert below writes.
+	// The spec's artifacts row is written below, after the document work, so the address that
+	// row is given is recorded for the reads of this transaction that need it: the key its
+	// insert names - the issue's key and the 'spec' slug - the issue itself, whose own row this
+	// transaction writes in the same phase, which is why the parent goes with it, and the name
+	// it writes (refs.DocumentAddress). A block pointer of the seeded spec is held to that
+	// address, and the windows of its blocks embed that name (docs.addressOfDocument,
+	// docs.documentTitle). parentKey is "" for a root issue, the null parent_key the insert
+	// below writes.
 	ledger.RegisterPendingArtifact(artifactID, refs.DocumentAddress{
-		RefKey: key + "/spec", IssueKey: key, PendingParent: parentKey,
+		RefKey: key + "/spec", IssueKey: key, Name: specArtifactName, PendingParent: parentKey,
 	})
 	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, actor)
 	if err != nil {
@@ -435,8 +442,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := tx.Exec(r.Context(), `
 		insert into artifacts (id, issue_key, project_key, slug, name, kind, is_primary, created_by)
-		values ($1, $2, $3, 'spec', 'spec.md', 'doc', true, $4)
-	`, artifactID, key, input.Project, actorJSON); err != nil {
+		values ($1, $2, $3, 'spec', $5, 'doc', true, $4)
+	`, artifactID, key, input.Project, actorJSON, specArtifactName); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

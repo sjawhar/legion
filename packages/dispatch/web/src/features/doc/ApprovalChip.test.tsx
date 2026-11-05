@@ -189,6 +189,30 @@ test("Request changes requires a reason before it can submit, then posts it", as
   }
 });
 
+// A reason Dispatch refuses for its length is refused the same way every time, and the server's
+// words name the block and the bound: the dialog shows them in place of wording of its own.
+test("a refused reason shows the server's message", async () => {
+  const refusal =
+    "reason block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)";
+  const createArtifactReview = spyOn(api, "createArtifactReview").mockRejectedValue(
+    new ApiError(400, { code: "CAP_EXCEEDED", error: refusal })
+  );
+  const view = renderChip(artifact({ latest_version: 3, state: "awaiting" }), "header");
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+    const dialog = screen.getByRole("dialog", { name: "Request changes" });
+    fireEvent.change(within(dialog).getByLabelText("Reason"), {
+      target: { value: "x".repeat(32_001) },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Request changes" }));
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(refusal));
+  } finally {
+    createArtifactReview.mockRestore();
+    view.unmount();
+  }
+});
+
 // Dispatch made the review and lost its answer (`409 KEY_COMMITTED`): a landing, not a refusal.
 // The dialog closes with no refusal, the reviews are read again, and a second press is a fresh
 // open of the dialog rather than a second review of the reason already sent.

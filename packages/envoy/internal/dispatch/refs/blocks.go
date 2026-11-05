@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -76,6 +80,10 @@ type BlockIndexing struct {
 	pairs                                        []blockPair
 	moved                                        []Target
 	held                                         BlockIndex
+	// windows is the write of the windows the version's blocks are embedded in, planned here
+	// and queued last, after the row that records what the blocks stand at, whose state it
+	// stamps beside them (queueWindows).
+	windows windowWrite
 }
 
 // PlanBlocks plans version's block index of artifactID against index, what the document's block
@@ -95,7 +103,10 @@ type BlockIndexing struct {
 // A block whose text (markdown[From:To]) is unchanged keeps the version its text last changed in;
 // a new, changed or restored block takes this version, dated versionAt, and its excerpt is its
 // text cut to BlockExcerptRunes, the excerpt a document's mention has shown since migration 0092.
-// A block the version no longer holds is deleted.
+// A block the version no longer holds is deleted. title is the document's title, which the
+// windows of its blocks embed (planDocumentWindows): it is handed over rather than read here,
+// because this plan reads nothing and because a transaction creating the document has only
+// queued its artifacts row (docs.documentTitle).
 //
 // pointers are the version's `block[]` values (pmdoc.BlockPointers, which lists none of a typed
 // block repeating the id of a typed block before it): each whose block is a node is an edge of its
@@ -106,14 +117,14 @@ type BlockIndexing struct {
 // than its pointers do (a string attribute citing it too, say).
 func PlanBlocks(
 	index BlockIndex,
-	artifactID string,
+	artifactID, title string,
 	version int,
 	versionAt time.Time,
 	markdown string,
 	blocks []model.ArtifactBlock,
 	located []text.Located,
 	pointers []Pointer,
-) BlockIndexing {
+) (BlockIndexing, error) {
 	stored := maps.Clone(index.sums)
 	indexing := BlockIndexing{artifactID: artifactID, version: version, versionAt: versionAt, firstIndexing: len(stored) == 0}
 	nodes, long, longest := uniqueBlocks(blocks)
@@ -174,7 +185,11 @@ func PlanBlocks(
 		}
 	}
 	indexing.held = BlockIndex{sums: held, pairs: indexing.pairs}
-	return indexing
+	var err error
+	if indexing.windows, err = planDocumentWindows(artifactID, title, markdown, nodes); err != nil {
+		return BlockIndexing{}, err
+	}
+	return indexing, nil
 }
 
 // Moved is the targets of the links the indexing inserts or deletes, and of those whose block
@@ -204,8 +219,10 @@ func (b BlockIndexing) Held() BlockIndex {
 // document_blocks loses, and the blocks it changed, with their excerpts; the text each of those
 // blocks has at this version, recorded in document_block_texts, a deleted block's as no text,
 // after which the edges at it stop resolving until a version holds its id again; the links its
-// blocks hold; and the version recorded as indexed (document_indexed_versions) and as the version
-// the document's blocks stand at (document_block_versions).
+// blocks hold; the version recorded as indexed (document_indexed_versions) and as the version
+// the document's blocks stand at (document_block_versions); and last the windows those blocks
+// are embedded in, which stamp the state they are in beside them, read from the row the
+// statement before it wrote (planDocumentWindows).
 //
 // A pair (block, target) that survives keeps its created version, time and source event. A new
 // pair takes this version and versionAt, and the source event Stamp gives it. On the document's
@@ -250,6 +267,269 @@ func (b BlockIndexing) Queue(batch *store.WriteBatch) {
 		insert into document_block_versions (artifact_id, version) values ($1, $2)
 		on conflict (artifact_id) do update set version = excluded.version
 	`, artifactID, version)
+	b.windows.queue(batch)
+}
+
+// DocumentWindowKind is the embeddings kind of a window of a document's blocks, as
+// ItemKind.WindowKind is of a comment's, a message's or an ask's.
+const DocumentWindowKind = "document_block"
+
+// windowKinds is every kind an embeddings window row is written under. A statement naming them
+// as literals is one the planner can prove embeddings_window_owner's partial predicate for,
+// whatever a parameter holds (planWindows).
+const windowKinds = `('document_block', 'comment_block', 'message_block', 'ask_part')`
+
+// BlockEmbeddingStates is where meaning search stands on each block of the owner whose windows
+// are kind kind under ownerKey: model.BlockEmbedded for a block every window covering it holds
+// a vector of its current text for, model.BlockEmbeddingPending while one of them waits for its
+// vector. A block no window covers is in no entry of the map, which a reader of one block reads
+// as model.BlockNotEmbedded - a block the indexer puts in no window, and every block of an owner
+// whose windows are not written yet. The read names the window kinds as literals beside the
+// parameter, as every read and write of a window does (planWindows), so the planner can prove
+// embeddings_window_owner's partial predicate and reach the owner's rows through that index.
+//
+// It lives here, with the writes of the rows it reads, so the list of window kinds is held in
+// one place: this package's windowKinds, migration 20261102233625's index predicate and the
+// column the two of them name.
+func BlockEmbeddingStates(ctx context.Context, q Queryer, kind, ownerKey string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `
+		select covered.block_id, bool_and(e.embedded_hash is not distinct from e.content_hash)
+		from embeddings e cross join unnest(e.covers) as covered(block_id)
+		where e.kind = $1 and e.kind in `+windowKinds+`
+		  and split_part(e.id, '#', 1) = $2
+		group by covered.block_id
+	`, kind, ownerKey)
+	if err != nil {
+		return nil, fmt.Errorf("read the embedding state of the blocks of %s %s: %w", kind, ownerKey, err)
+	}
+	defer rows.Close()
+	states := map[string]string{}
+	for rows.Next() {
+		var blockID string
+		var current bool
+		if err := rows.Scan(&blockID, &current); err != nil {
+			return nil, fmt.Errorf("scan the embedding state of a block of %s %s: %w", kind, ownerKey, err)
+		}
+		states[blockID] = model.BlockEmbeddingPending
+		if current {
+			states[blockID] = model.BlockEmbedded
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the embedding state of the blocks of %s %s: %w", kind, ownerKey, err)
+	}
+	return states, nil
+}
+
+// WriteDocumentWindows writes the windows of document artifactID's blocks, as the version write
+// writes them (BlockIndexing.Queue), for the block-index tick's window arm: blocks are the
+// document's blocks in document order, each parent before its children, and markdown the text
+// they index into. The title the windows embed is read first, and the one statement that writes
+// them is sent as a batch of its own (store.RunWrite), so the transaction takes its transaction
+// id at that statement and holds it only to the commit.
+func WriteDocumentWindows(ctx context.Context, tx pgx.Tx, artifactID, markdown string, blocks []model.ArtifactBlock) error {
+	title, err := documentTitle(ctx, tx, artifactID)
+	if err != nil {
+		return err
+	}
+	nodes, _, _ := uniqueBlocks(blocks)
+	write, err := planDocumentWindows(artifactID, title, markdown, nodes)
+	if err != nil {
+		return err
+	}
+	return store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		write.queue(b)
+		return nil
+	})
+}
+
+// documentTitle is the name document artifactID's artifacts row holds, which the windows of its
+// blocks embed. A transaction creating the document has only queued that row, so a write there
+// hands over the title its insert writes instead (PlanBlocks, docs.documentTitle); this read is
+// for a caller whose document is stored.
+func documentTitle(ctx context.Context, q Queryer, artifactID string) (string, error) {
+	var title string
+	if err := q.QueryRow(ctx, `select name from artifacts where id = $1::uuid`, artifactID).Scan(&title); err != nil {
+		return "", fmt.Errorf("read the title of %s for its windows: %w", artifactID, err)
+	}
+	return title, nil
+}
+
+// planDocumentWindows plans the write of the windows of the document's blocks (nodes, as
+// uniqueBlocks keeps them), which stamps the state those blocks are in beside them, so the
+// window arm can tell these windows from ones an older build left behind. The owner key of a
+// document's windows is its artifact id, and the context of each is the document's own title
+// and the heading above the window (itemblocks.DocumentWindows). The state is read from
+// document_block_versions inside the statement, so an indexing whose earlier statement wrote
+// that row stamps the version it has just recorded.
+func planDocumentWindows(artifactID, title, markdown string, nodes []model.ArtifactBlock) (windowWrite, error) {
+	return planWindows(DocumentWindowKind, artifactID,
+		itemblocks.DocumentWindows(title, documentBlockTexts(markdown, nodes)), blockState{
+			query: `select ` + documentBlockState + ` as block_state
+			          from document_block_versions v where v.artifact_id = $5::uuid`,
+			args: []any{artifactID},
+		})
+}
+
+// documentBlockTexts is each block of nodes holding text of its own, in document order, with
+// that text (markdown[From:To]): a block inside another is left out, since the window of its
+// parent already holds its text and no window should embed one passage twice. nodes are in
+// document order, each parent before its children, so a block starting before the last kept one
+// ended is inside it.
+func documentBlockTexts(markdown string, nodes []model.ArtifactBlock) []itemblocks.WindowBlock {
+	blocks := make([]itemblocks.WindowBlock, 0, len(nodes))
+	end := 0
+	for _, node := range nodes {
+		if node.To <= node.From || node.From < end {
+			continue
+		}
+		end = node.To
+		blocks = append(blocks, itemblocks.WindowBlock{ID: node.ID, Type: node.Type, Text: markdown[node.From:node.To]})
+	}
+	return blocks
+}
+
+// blockState is how one write of an owner's windows (planWindows) tells that write what state
+// the blocks those windows cover are in: one query returning a single block_state column, which
+// the write runs as a common table expression and stamps beside the windows. An index that
+// settles the owner's own state row writes that row here, returning the state it has just
+// written (indexedItemState), so the index needs no statement of its own for it; a write that
+// settles no such row reads the state the row already holds (storedItemState, and the
+// document's own query above). The query numbers its parameters from $5 and passes their values
+// in args, since the window write holds $1 to $4.
+type blockState struct {
+	query string
+	args  []any
+}
+
+// windowWrite is the write of one owner's windows, planned where the windows are built - in the
+// read phase of the write that indexes those blocks - and queued on that write's batch
+// (BlockIndexing.Queue, ItemIndexing.Queue), or sent as a batch of its own by the block-index
+// tick's window arm (WriteDocumentWindows, WriteItemWindows). Everything the statement needs is
+// worked out when it is planned, so queueing it reads nothing and nothing is read between two
+// of a write phase's statements.
+type windowWrite struct {
+	kind, ownerKey string
+	// payload is the windows as the statement's jsonb_to_recordset reads them, and ids the
+	// embeddings id of each, which the delete of the rows the new set does not name takes.
+	payload []byte
+	ids     []string
+	state   blockState
+}
+
+// planWindows plans windows as the windows of owner ownerKey, of kind kind: each takes the id
+// "<owner key>#<its id suffix>" through embeddings_enqueue_window, which rewrites a row only
+// where the hash of its text moved, and the owner's rows of that kind the new set does not name
+// are deleted. Rewriting an owner's windows when none of them changed therefore leaves every
+// row's vector, attempts and wait as they stand, and an owner left with no block loses every
+// window it had.
+//
+// The whole write is one statement, so a document of fifty windows is one statement of the
+// batch its transaction sends, and an index whose state query settles its owner's state row
+// (indexedItemState) writes that row in this statement rather than in one of its own. The
+// windows go through jsonb_to_recordset in the top-level select; the state query, the stamp of
+// what it returns and the delete are common table expressions, and Postgres runs a
+// data-modifying one exactly once and to completion whether or not the select reads it. The
+// delete cannot race the enqueue: it names only ids the new set does not hold, and the enqueue
+// writes only ids it does.
+//
+// The delete names the kind twice, as the parameter and in the literal list of every window
+// kind, because a generic plan knows nothing of what the parameter holds: the literal list is
+// what lets the planner prove embeddings_window_owner's partial predicate and read the owner's
+// rows through that index.
+func planWindows(kind, ownerKey string, windows []itemblocks.Window, state blockState) (windowWrite, error) {
+	type row struct {
+		Suffix string   `json:"suffix"`
+		Text   string   `json:"text"`
+		Covers []string `json:"covers"`
+	}
+	rows := make([]row, len(windows))
+	ids := make([]string, len(windows))
+	for i, window := range windows {
+		rows[i] = row{Suffix: window.IDSuffix, Text: window.Text, Covers: window.Covers}
+		ids[i] = ownerKey + "#" + window.IDSuffix
+	}
+	payload, err := json.Marshal(rows)
+	if err != nil {
+		return windowWrite{}, fmt.Errorf("encode the windows of %s %s: %w", kind, ownerKey, err)
+	}
+	return windowWrite{kind: kind, ownerKey: ownerKey, payload: payload, ids: ids, state: state}, nil
+}
+
+// queue queues the planned write on a write phase's batch.
+func (w windowWrite) queue(b *store.WriteBatch) {
+	b.Queue(fmt.Sprintf("write the windows of %s %s", w.kind, w.ownerKey), `
+		with state as (
+			`+w.state.query+`
+		),
+		stamped as (
+			insert into embedding_window_states (kind, owner_key, block_state, written_at)
+			select $1::text, $2::text, state.block_state, now() from state
+			on conflict (kind, owner_key) do update
+			  set block_state = excluded.block_state, written_at = excluded.written_at
+		),
+		dropped as (
+			delete from embeddings
+			where kind = $1 and kind in `+windowKinds+`
+			  and split_part(id, '#', 1) = $2 and id <> all($4::text[])
+		)
+		select embeddings_enqueue_window($1, $2 || '#' || w.suffix, w.text, w.covers)
+		from jsonb_to_recordset($3::jsonb) as w (suffix text, text text, covers text[])
+	`, append([]any{w.kind, w.ownerKey, w.payload, w.ids}, w.state.args...)...)
+}
+
+// documentBlockState is the state of a document's blocks that its windows are stamped with
+// (planDocumentWindows) and read back against (DocumentsOwedWindows): the version they are
+// indexed at, over document_block_versions v. A document owed its first block index holds a
+// null version, which stamps and compares as the empty string, so windowing it once settles it
+// until the index that gives it a version writes its windows again. The state is read from
+// document_block_versions in the statement that writes the windows, so what is stamped is the
+// version the blocks those windows cover are indexed at.
+const documentBlockState = `coalesce(v.version::text, '')`
+
+// DocumentsOwedWindows lists at most limit documents whose blocks the index holds and whose
+// windows do not stand for those blocks, in artifact id order past after (empty: from the
+// start), for the block-index tick's window arm. A document written before meaning search moved
+// to windows has blocks and no window, and one whose version write failed after its blocks were
+// written has the same. One a build without this change re-indexed during the deploy is the
+// harder case: it keeps the windows of its old text, so holding a window says nothing. The read
+// therefore asks both whether the state its windows were written from
+// (embedding_window_states, migration 20261104010400) is the state its blocks are in now, and
+// whether it holds a window at all, so a window row lost by any other route is written again
+// too. The read walks document_block_versions, one row per document, and probes the other
+// three tables through their keys.
+func DocumentsOwedWindows(ctx context.Context, q Queryer, after string, limit int) ([]string, error) {
+	rows, err := q.Query(ctx, `
+		select v.artifact_id::text from document_block_versions v
+		where v.artifact_id > $1::uuid
+		  and exists (select 1 from document_blocks b where b.artifact_id = v.artifact_id)
+		  and (not exists (
+			select 1 from embedding_window_states w
+			where w.kind = '`+DocumentWindowKind+`' and w.owner_key = v.artifact_id::text
+			  and w.block_state = `+documentBlockState+`
+		  ) or not exists (
+			select 1 from embeddings e
+			where e.kind = '`+DocumentWindowKind+`' and split_part(e.id, '#', 1) = v.artifact_id::text
+		  ))
+		order by v.artifact_id limit $2
+	`, uuidAfter(after), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list the documents whose windows do not stand for their blocks: %w", err)
+	}
+	documents, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("list the documents whose windows do not stand for their blocks: %w", err)
+	}
+	return documents, nil
+}
+
+// uuidAfter is a keyset cursor over uuids: the id a batch starts after, or the nil uuid, which
+// is below every uuid a row holds, when a batch starts from the beginning.
+func uuidAfter(after string) string {
+	if after == "" {
+		return "00000000-0000-0000-0000-000000000000"
+	}
+	return after
 }
 
 // citedBlocks is, of the document's blocks named by ids, each that a source cites (a refs or a
@@ -548,18 +828,20 @@ func BlockChanges(ctx context.Context, q Queryer, artifactID string) (map[string
 	return changes, nil
 }
 
-// DocumentAddress is where a document sits: the reference key its blocks' node ids are built
-// from, the issue holding it, and the parent of an issue this transaction creates too. A write
-// hands the address over rather than a read of it taking the key and the issue from the
-// artifacts row, because a transaction creating the document has only queued that row: its own
-// reads cannot see it, while the caller knows what the queued insert will write. It is what a
-// read of the document's address answers before and after the write phase has run
-// (docs.addressOfDocument).
+// DocumentAddress is where a document sits and what it is called: the reference key its blocks'
+// node ids are built from, the issue holding it, the parent of an issue this transaction creates
+// too, and the title the windows of its blocks embed. A write hands the address over rather than
+// a read of it taking those from the artifacts row, because a transaction creating the document
+// has only queued that row: its own reads cannot see it, while the caller knows what the queued
+// insert will write. It is what a read of the document's address answers before and after the
+// write phase has run (docs.addressOfDocument).
 type DocumentAddress struct {
 	// RefKey is the document's reference key, its owner's key and its slug (migration 0071).
 	RefKey string
 	// IssueKey is the issue the document belongs to, "" for a project's or a session's document.
 	IssueKey string
+	// Name is the document's title, which the windows of its blocks embed (PlanBlocks).
+	Name string
 	// PendingParent is the parent of IssueKey when this transaction creates that issue's row
 	// too, "" when it does not or when the issue is a root. The ancestors walk starts there
 	// while the issues row is only queued: no read of this transaction can see that row, so the

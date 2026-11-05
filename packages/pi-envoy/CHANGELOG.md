@@ -1,5 +1,15 @@
 # Changelog
 
+## [16.10.0] - 2026-11-05
+
+### Changed
+
+- A session's reply to a person's typed input is posted whole, where it was cut at a length the
+  plugin carried. Dispatch holds it to the bounds the server owns, and a reply Dispatch refuses
+  is answered on the conversation with the server's own words
+  (`Your command ran, and Dispatch refused its output: …`), so a person who typed a command
+  whose output passes a bound reads why rather than nothing.
+
 ## [16.6.0] - 2026-11-05
 
 ### Added

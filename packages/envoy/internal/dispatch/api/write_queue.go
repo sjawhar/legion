@@ -101,9 +101,15 @@ func (s *server) queueEditedReferences(ctx context.Context, tx pgx.Tx, ledger *d
 // holds (refs.PlanItemIndex) and the reconciliation of the item's own references, resolves the
 // counted targets both move, and queues the index's statements and the reconciliation's, in that
 // order, in tx's write phase. A direct message (cites false) writes no mention, so its blocks
-// hold none either: its blocks alone are indexed, and it moves nothing.
-func (s *server) queueItemReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, body string, at time.Time, cites bool) (model.ReferenceChanges, error) {
-	changes, write, err := s.planItemWrite(ctx, tx, kind, itemID, body, at, cites, nil, nil)
+// hold none either: its blocks alone are indexed, and it moves nothing. The transaction has only
+// queued the item's insert, so the context its blocks' windows embed them under is read from the
+// issue it writes the item on (refs.IssueWindowContext) and handed over with it.
+func (s *server) queueItemReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, body string, issueKey *string, at time.Time, cites bool) (model.ReferenceChanges, error) {
+	windowContext, err := refs.IssueWindowContext(ctx, tx, issueKey)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	changes, write, err := s.planItemWrite(ctx, tx, kind, itemID, body, &windowContext, at, cites, nil, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -116,7 +122,7 @@ func (s *server) queueItemReferences(ctx context.Context, tx pgx.Tx, ledger *doc
 // the edit moves the head of its text, which each of its edges shows (refs.EditedTargets). A
 // carried id the index refuses returns its *itemblocks.CarriedError.
 func (s *server) queueEditedItemReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, previous, body string, at time.Time, carried *refs.CarriedEdit) (model.ReferenceChanges, error) {
-	changes, write, err := s.planItemWrite(ctx, tx, kind, itemID, body, at, true, carried, func(found []text.Ref) []refs.Target {
+	changes, write, err := s.planItemWrite(ctx, tx, kind, itemID, body, nil, at, true, carried, func(found []text.Ref) []refs.Target {
 		return refs.EditedTargets(previous, body, found)
 	})
 	if err != nil {
@@ -130,11 +136,17 @@ func (s *server) queueEditedItemReferences(ctx context.Context, tx pgx.Tx, ledge
 // edges stay; nil for a first write) move, and returns those counts with the step that writes
 // both, for the route to queue where it makes the write: on its ledger (queueItemReferences), or
 // on the batch of a transaction that runs its write phase itself (createStoredMessage).
+//
+// windowContext is what the windows of the item's blocks embed them under, for a transaction
+// whose insert of the item is queued, so the index's own read of the row carries none; nil for
+// a write of an item already stored, whose context that read carries
+// (refs.ItemIndex.WithWindowContext).
 func (s *server) planItemWrite(
 	ctx context.Context,
 	tx pgx.Tx,
 	kind refs.ItemKind,
 	itemID, body string,
+	windowContext *string,
 	at time.Time,
 	cites bool,
 	carried *refs.CarriedEdit,
@@ -143,6 +155,9 @@ func (s *server) planItemWrite(
 	index, err := refs.ReadItemIndex(ctx, tx, kind, itemID)
 	if err != nil {
 		return model.ReferenceChanges{}, nil, err
+	}
+	if windowContext != nil {
+		index = index.WithWindowContext(*windowContext)
 	}
 	if edited != nil {
 		// The update that sets edited_at is queued, so the read above does not show it.

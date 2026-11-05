@@ -404,12 +404,13 @@ func (s *server) queueNewArtifact(
 		return model.Artifact{}, err
 	}
 	// The document work that follows runs before the insert below, so the address that insert
-	// gives the row - its key and the issue holding it, none for a project's or a session's
-	// document - is recorded for the reads of this transaction that need it: a block pointer of
-	// a new document is held to the document's key and its issue (docs.addressOfDocument). The
+	// gives the row - its key, the issue holding it, none for a project's or a session's
+	// document, and its name - is recorded for the reads of this transaction that need it: a
+	// block pointer of a new document is held to the document's key and its issue, and the
+	// windows of its blocks embed its name (docs.addressOfDocument, docs.documentTitle). The
 	// issue already has its row, so the address names no pending parent (refs.DocumentAddress).
 	ledger.RegisterPendingArtifact(artifact.ID, refs.DocumentAddress{
-		RefKey: artifact.RefKey, IssueKey: deref(target.IssueKey),
+		RefKey: artifact.RefKey, IssueKey: deref(target.IssueKey), Name: name,
 	})
 	return artifact, queueExec(ledger, `
 		insert into artifacts (id, issue_key, project_key, session_id, slug, name, kind, is_primary, role, created_by, created_at)
@@ -801,6 +802,15 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The windows of a document's blocks are written under the artifact id; a block the live
+	// document holds and no window covers - a block inside another, whose text its parent's
+	// window already holds, and every block of a version the indexer has not windowed yet -
+	// reads as model.BlockNotEmbedded.
+	embedding, err := refs.BlockEmbeddingStates(r.Context(), s.deps.Store.Pool, refs.DocumentWindowKind, artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	for index := range blocks {
 		counts := references[blocks[index].ID]
 		for _, descendantID := range blocks[index].DescendantIDs {
@@ -809,6 +819,7 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 			counts.Asks += descendant.Asks
 		}
 		blocks[index].References = counts
+		blocks[index].Embedding = blockEmbedding(embedding, blocks[index].ID)
 	}
 	WriteJSON(w, http.StatusOK, blocks)
 }

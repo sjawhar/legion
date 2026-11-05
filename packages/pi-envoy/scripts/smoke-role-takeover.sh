@@ -642,8 +642,13 @@ row5_omp() {
 
   begin_row "A5 — a refused Oh My Pi process stays registered"
   expect_true "the refused session is registered" registered "$z"
-  expect_true "the session it was refused for first is registered" registered "$y"
-  evidence "${z} is in the listener's registry with no role"
+  # The session this process moved away from is gone at once, not left behind: dispatch://INFRA-392
+  # makes a session id a process leaves gone the moment it leaves it, so that no peer reads a dead
+  # id as live for the live window and as unresponsive for the gone horizon after that. A5's claim
+  # is that being refused a role does not take the process out of the registry, and the session it
+  # now holds is where that is read.
+  expect_true "the session it was refused for first is gone" unregistered "$y"
+  evidence "${z} is in the listener's registry with no role, and ${y}, which this process left, is gone"
   end_row
 
   begin_row "A5 — after the holder exits, the refused Oh My Pi process takes the role on its next session event"

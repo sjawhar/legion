@@ -43,11 +43,14 @@ func (r *seedRun) writeDocument(ctx context.Context, tx pgx.Tx, index int) error
 	}
 	projectKey := r.plan.projects[document.Project].Key
 	created := timeAt(index, len(r.plan.documents))
+	// The document's title, written with its row and embedded by the windows of its blocks
+	// (refs.PlanBlocks), which the indexing below plans.
+	name := r.plan.vocabulary.phrase(r.random, 4)
 	if _, err := tx.Exec(ctx, `
 		insert into artifacts (id, issue_key, project_key, slug, name, kind, is_primary, created_by, created_at, last_seq)
 		values ($1, $2, $3, $4, $5, 'doc', $6, $7::jsonb, $8, 0)
 	`, document.ID, issueKey, projectKey, document.Slug,
-		r.plan.vocabulary.phrase(r.random, 4), document.Primary, seedActor, created); err != nil {
+		name, document.Primary, seedActor, created); err != nil {
 		return fmt.Errorf("artifact row: %w", err)
 	}
 
@@ -99,7 +102,10 @@ func (r *seedRun) writeDocument(ctx context.Context, tx pgx.Tx, index int) error
 	if err != nil {
 		return fmt.Errorf("index blocks: %w", err)
 	}
-	indexing := refs.PlanBlocks(blockIndex, document.ID, document.Versions, versionAt, latest, blocks, located, nil)
+	indexing, err := refs.PlanBlocks(blockIndex, document.ID, name, document.Versions, versionAt, latest, blocks, located, nil)
+	if err != nil {
+		return fmt.Errorf("index blocks: %w", err)
+	}
 	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
 		indexing.Queue(b)
 		return nil

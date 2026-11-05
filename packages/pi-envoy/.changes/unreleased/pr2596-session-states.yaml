@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+    The Envoy tools render a session's `state` and `last_seen`, and the lists ask for unresponsive
+    sessions too, so a session that has missed its heartbeats is shown as unresponsive rather than
+    left out. A session that ends is `gone` at once instead of at the end of the live window: the
+    end path stops the heartbeat and waits for a registration already in flight before it deletes
+    the session, because without that wait the registration lands after the delete and brings the
+    row back. The wait is a quarter of a second at shutdown, where the host abandons the handler
+    after two seconds and a delete never sent would leave the row behind for an hour, and up to
+    five seconds elsewhere. A `/new`, a fork or a branch deletes the session id it leaves. An
+    `envoy_publish` answer names every session its message was only stored for, under
+    `unresponsive`, and for a role publish the holder and the state the listener resolved that
+    holder in (`holder_state`), with the rule for an unresponsive peer beside them: it has not
+    taken the message yet, and nothing is to be taken from it.
