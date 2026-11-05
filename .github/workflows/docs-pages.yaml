@@ -112,6 +112,7 @@ on:
       - 'packages/daemon/internal/runtime/tmux/*'
       - 'packages/daemon/internal/runtime/workerbin/*'
       - 'packages/daemon/internal/sampler/*'
+      - 'packages/daemon/internal/samplerwire/*'
       - 'packages/daemon/internal/sessionproxy/*'
       - 'packages/daemon/internal/shim/*'
       - 'packages/daemon/internal/shimwire/*'
