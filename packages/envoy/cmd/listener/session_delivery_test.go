@@ -687,6 +687,37 @@ func TestSessionConsumerRegistrationAskingForNoConsumerIsRefused(t *testing.T) {
 	rig.requireNothingWritten(t, "ses_no_ask")
 }
 
+// A session running a plugin older than consumer delivery receives nothing from this listener, and
+// whoever runs that build reads why in the session's own transcript: the refusal names the release
+// to upgrade to and the build the registration came from. A refusal that only said the field was
+// missing would leave an operator to find the version themselves.
+func TestSessionConsumerRefusalNamesTheUpgradeAndTheBuildItCameFrom(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_old_plugin","self_subscribed":true,"topics":[],
+		"plugin":"@sjawhar/pi-envoy","plugin_version":"14.0.0"}`)
+
+	refusal.requireRefused(t, http.StatusConflict, "not_requested")
+	for _, want := range []string{"@sjawhar/pi-envoy 14.1.0 or later", "@sjawhar/pi-envoy 14.0.0"} {
+		if !strings.Contains(refusal.Error, want) {
+			t.Fatalf("refusal %q names no %q", refusal.Error, want)
+		}
+	}
+}
+
+// A client that names no plugin at all - every build before those fields - is told so in the same
+// refusal, since nothing else in the answer says which session process it was.
+func TestSessionConsumerRefusalSaysWhenTheClientNamesNoPlugin(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_no_plugin","self_subscribed":true,"topics":[]}`)
+
+	refusal.requireRefused(t, http.StatusConflict, "not_requested")
+	if !strings.Contains(refusal.Error, "a client naming no plugin") {
+		t.Fatalf("refusal %q does not say the client named no plugin", refusal.Error)
+	}
+}
+
 func TestSessionConsumerUnsubscribeShrinksTheFilter(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	const sessionID = "ses_shrink"

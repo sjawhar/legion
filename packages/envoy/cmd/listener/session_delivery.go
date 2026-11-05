@@ -40,6 +40,18 @@ const (
 	deliveryReasonNotRequested = "not_requested"
 )
 
+// consumerPluginPackage and consumerPluginMinimumVersion name the upgrade a session whose client
+// asks for no consumer needs: @sjawhar/pi-envoy 14.1.0 is the release that first asked for the
+// session's durable consumer at every registration (packages/pi-envoy/CHANGELOG.md, 14.1.0,
+// "Consumer delivery"), and every release before it receives from a plain NATS subscription this
+// listener no longer feeds. The refusal below names them, since an operator reading it has to
+// know which build to replace; another client (claude-envoy, or one of a test's own) needs a build
+// that sends the field rather than that version.
+const (
+	consumerPluginPackage        = "@sjawhar/pi-envoy"
+	consumerPluginMinimumVersion = "14.1.0"
+)
+
 // sessionConsumerCallTimeout bounds the consumer calls a registration makes before it answers, and
 // those of one relay restart, timed from when it holds its turn and the session's lock
 // (sessionRelays.restart).
@@ -158,14 +170,16 @@ type sessionDelivery struct {
 	// deletes the consumer and creates it again when a message awaits an ack. An unsubscribe and a
 	// restart read the session's stored topics under the lock; a registration filters on the plan
 	// it is about to store and holds the lock from that filter through the plan's write
-	// (registerSession). So the filter the last of them writes is the stored set as it stood then,
-	// never a set read before another call wrote a newer one, and no call reads the row between a
-	// registration's filter and that registration's write: a restart that did would set the filter
-	// back to a row without the topic the registration is answered 200 for, and every message
-	// published on that topic until the session's next heartbeat would be skipped. A create landing
-	// between that delete and create would start the consumer at that registration's own position -
-	// its resume point, or else what the stream holds for the session - rather than at the floor the
-	// restart read. Under the lock a restart that read the floor and failed after its
+	// (registerSession). So no call reads the row between a registration's filter and that
+	// registration's write: a restart that did would set the filter back to a row without the topic
+	// the registration is answered 200 for, and every message published on that topic until the
+	// session's next heartbeat would be skipped. The lock does not order a registration's plan,
+	// which is read before the lock is taken (registerSession, api.go): a pass whose plan predates
+	// another registration's write stores a row that is not the plan it filtered on, and that pass
+	// plans and filters again, so the filter of the pass that answers is the row it wrote. A create
+	// landing between that delete and create would start the consumer at that registration's own
+	// position - its resume point, or else what the stream holds for the session - rather than at
+	// the floor the restart read. Under the lock a restart that read the floor and failed after its
 	// delete or create leaves that floor pending, and the next call that finds the consumer missing,
 	// a registration's create or the relay's retry, creates it there
 	// (bus.SessionConsumers.RestartAtFloor), so in this process no restart loses the session's
@@ -256,6 +270,23 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 // it took the session's lock hands back.
 func noUnlock() {}
 
+// clientNamed names the client a registration came from, for the refusal above: its plugin
+// package and build when it sent them (subscribeBody.Plugin, PluginVersion), and otherwise that it
+// named none, which every build before those fields is. An operator reading the refusal needs the
+// build to replace, and a session whose client names nothing at all is itself the finding.
+func clientNamed(body subscribeBody) string {
+	switch {
+	case body.Plugin != "" && body.PluginVersion != "":
+		return body.Plugin + " " + body.PluginVersion
+	case body.Plugin != "":
+		return body.Plugin + ", which names no version"
+	case body.PluginVersion != "":
+		return "a client naming version " + body.PluginVersion + " and no package"
+	default:
+		return "a client naming no plugin"
+	}
+}
+
 // consumerFor creates the session's consumer when the stream holds none and otherwise updates it
 // to the current filter, before the registration answers; it refuses a registration that asks for
 // none, or that this listener can give none. The consumer is created at the sequence after its
@@ -271,11 +302,13 @@ func noUnlock() {}
 func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal, func()) {
 	if body.Delivery == nil || !body.Delivery.Consumer {
 		// A registration with no delivery field at all is a plugin older than consumer delivery.
-		// It receives nothing either way, so it is told so rather than left registered and silent.
+		// It receives nothing either way, so it is told so rather than left registered and silent,
+		// and the refusal names the upgrade, since the session's own transcript is where whoever
+		// runs that build reads why its Envoy went quiet.
 		return sessionDeliveryOutcome{}, &deliveryRefusal{
 			status: http.StatusConflict,
-			Error: fmt.Sprintf("%s asked for no session consumer: a session receives only what its own consumer holds, so register with delivery.consumer true",
-				body.SessionID),
+			Error: fmt.Sprintf("%s asked for no session consumer: a session receives only what its own consumer holds, so register with delivery.consumer true; upgrade to %s %s or later, or to a build of this client that sends the field (this registration came from %s)",
+				body.SessionID, consumerPluginPackage, consumerPluginMinimumVersion, clientNamed(body)),
 			Reason: deliveryReasonNotRequested,
 		}, noUnlock
 	}

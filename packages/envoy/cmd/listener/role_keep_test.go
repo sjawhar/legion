@@ -186,8 +186,9 @@ func TestAPublishWithKeepFalseToAnUnheldRoleIsRefusedAndKeepsNothing(t *testing.
 }
 
 // startRawKeptStandIn is a session process that keeps every frame it is sent as the bytes it was
-// sent, and answers each with an empty receipt, so a test can judge a forwarded copy by the keys
-// it carries rather than by the fields this build decodes.
+// sent, so a test can judge a forwarded copy by the keys it carries rather than by the fields this
+// build decodes. It answers nothing: a forward is stored for the holder's consumer, and no sender
+// waits on the agent subject for an answer of the session's.
 func startRawKeptStandIn(t *testing.T, uri, sessionID string) <-chan []byte {
 	t.Helper()
 	conn := testnats.Connect(t, uri)
@@ -195,9 +196,6 @@ func startRawKeptStandIn(t *testing.T, uri, sessionID string) <-chan []byte {
 	frames := make(chan []byte, 16)
 	subscription, err := conn.Subscribe(contracts.AgentSubject(sessionID), func(message *natsgo.Msg) {
 		frames <- slices.Clone(message.Data)
-		if message.Reply != "" {
-			_ = message.Respond(nil)
-		}
 	})
 	if err != nil {
 		t.Fatalf("stand-in %s subscribe: %v", sessionID, err)

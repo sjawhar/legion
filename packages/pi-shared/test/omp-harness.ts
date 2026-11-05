@@ -86,28 +86,6 @@ export function serveStandin(
   return { requests, base: `http://127.0.0.1:${server.port}` };
 }
 
-/**
- * A NATS address that closes every connection as it opens, held for the case: the Envoy
- * extension takes it as a NATS server, so its Legion claim goes ahead, and its every connect fails,
- * so the session takes no inbound delivery. Returns the `nats://` URL.
- */
-export function refusingNats(cleanup: Cleanup): string {
-  const listener = Bun.listen({
-    hostname: "127.0.0.1",
-    port: 0,
-    socket: {
-      open(socket) {
-        socket.end();
-      },
-      data() {},
-    },
-  });
-  cleanup.push(async () => {
-    listener.stop(true);
-  });
-  return `nats://127.0.0.1:${listener.port}`;
-}
-
 /** The stream the stand-in listener's answers and relay frames name, one for every case here. */
 export const STANDIN_STREAM_ID = "standin-stream";
 

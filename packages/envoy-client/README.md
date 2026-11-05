@@ -55,7 +55,8 @@ before, or stored before the current epoch began, is `late`, and a host runs no 
 the sequence below which the session holds nothing unwritten; `snapshot` and `restore` carry it
 and the follow times across a restart, and the `persist` option is offered a snapshot whenever it
 changed, so a host writes only changes. A session with no resume point of its own has its first
-consumer created at the stream's end, so it is shown nothing published before it registered.
+consumer created at the first message the stream holds on its own agent subject, and at the
+stream's end only when it holds none, so a message stored for it before it registered reaches it.
 A registration answer that reports a gap
 or names another stream, and a frame that carries `Envoy-Gap`, call the host's `gap` once. `close`
 answers every unsettled frame, and every later one, `nak`.

@@ -293,9 +293,6 @@ const (
 	// idleRigDeliverSubjectPrefix and the session id are the session's relay subject, where the
 	// listener that owns the session publishes each message of its durable consumer.
 	idleRigDeliverSubjectPrefix = "notifications.envoy.deliver."
-	// idleRigAgentSubjectPrefix and the session id are the session's agent subject: its inbox,
-	// which a role-lane forward reaches as a core request waiting for a receipt.
-	idleRigAgentSubjectPrefix = "notifications.agent."
 	// idleRigStreamSeqHeader is a relay frame's stream sequence, in decimal.
 	idleRigStreamSeqHeader = "Envoy-Stream-Seq"
 	// idleRigRelayReceived is the answer that the frame decoded, before any work of the
@@ -506,22 +503,17 @@ func (p *idleRigRoleProcess) dial(bootToken string) error {
 	return nil
 }
 
-// openDelivery opens the session's own NATS connection and takes the two subjects a session is
+// openDelivery opens the session's own NATS connection and takes the one subject a session is
 // reached on, as a plugin in consumer mode does (packages/envoy's "Session consumers", and the
 // Go stand-ins of packages/envoy/cmd/listener's session_relay_test.go and
-// current_registration_test.go):
+// current_registration_test.go): its relay subject, notifications.envoy.deliver.<session id>,
+// where the listener that owns the session publishes each message of the session's durable
+// consumer. Every message the session is given arrives there, and that is where the rig records
+// it; a role-lane forward and an ad-hoc topic's forward are stored on the session's agent
+// subject, so each comes back as a frame of that consumer, and nothing of the session's is sent
+// to the agent subject itself.
 //
-//   - its relay subject, notifications.envoy.deliver.<session id>, where the listener that owns
-//     the session publishes each message of the session's durable consumer. Every message the
-//     session is given arrives here, and this is where the rig records it;
-//   - its agent subject, notifications.agent.<session id>, where a role-lane forward and an
-//     ad-hoc topic's forward arrive as core requests waiting for the holder's empty receipt.
-//     That receipt is what the publish route answers its sender 200 on. Nothing is recorded
-//     from it: the listener's forward is stored on the agent subject too, so the same message
-//     comes back as a frame of the session's own consumer, which is the one copy the session
-//     is given.
-//
-// Both are taken, and flushed to the server, before the session registers, so nothing the
+// It is taken, and flushed to the server, before the session registers, so nothing the
 // listener relays or forwards once it knows the session can arrive before this process listens.
 func (p *idleRigRoleProcess) openDelivery() error {
 	bus, err := nats.Connect(p.natsURLs, nats.Name("idle-rig-"+p.session), nats.MaxReconnects(-1))
@@ -531,9 +523,6 @@ func (p *idleRigRoleProcess) openDelivery() error {
 	p.bus = bus
 	if _, err := bus.Subscribe(idleRigDeliverSubjectPrefix+p.session, p.relayed); err != nil {
 		return fmt.Errorf("subscribe to the relay subject of %s: %w", p.session, err)
-	}
-	if _, err := bus.Subscribe(idleRigAgentSubjectPrefix+p.session, p.forwarded); err != nil {
-		return fmt.Errorf("subscribe to the agent subject of %s: %w", p.session, err)
 	}
 	if err := bus.Flush(); err != nil {
 		return fmt.Errorf("flush the subscriptions of %s: %w", p.session, err)
@@ -578,25 +567,6 @@ func (p *idleRigRoleProcess) relayed(msg *nats.Msg) {
 		}
 	}
 	p.reply(msg, idleRigRelayDone)
-}
-
-// forwarded answers the empty receipt a role-lane forward and an ad-hoc topic's forward wait for
-// on the session's agent subject, as every plugin answers one in either delivery mode. A frame
-// carrying no reply, and one whose envelope's topic is the agent subject itself (a send stored
-// through JetStream, whose reply subject is the server's own acknowledgement inbox), is left
-// alone: an empty answer there fails the publisher.
-func (p *idleRigRoleProcess) forwarded(msg *nats.Msg) {
-	var item idleRigEnvelope
-	if err := json.Unmarshal(msg.Data, &item); err != nil {
-		fmt.Fprintf(os.Stderr, "idle rig role process: decode a forward to %s: %v\n", p.session, err)
-		return
-	}
-	if msg.Reply == "" || item.Topic == idleRigAgentSubjectPrefix+p.session {
-		return
-	}
-	if err := msg.Respond(nil); err != nil {
-		fmt.Fprintf(os.Stderr, "idle rig role process: answer the receipt of a forward to %s: %v\n", p.session, err)
-	}
 }
 
 // firstSighting reports whether this process has not recorded the stream sequence yet, taking it
