@@ -180,7 +180,7 @@ func (w *Walk) Next(roles map[string]int) (Pass, error) {
 	stats := make(map[int]procread.Stat, len(pids))
 	live := make([]int, 0, len(pids))
 	for _, pid := range pids {
-		stat, err := w.reader.Stat(pid)
+		stat, err := readStat(w.reader, pid)
 		switch {
 		case unreadable(err):
 			continue

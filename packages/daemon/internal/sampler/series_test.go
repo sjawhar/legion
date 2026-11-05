@@ -1,6 +1,7 @@
 package sampler
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -560,7 +561,7 @@ func TestTheCapDropsTheOldestPairsFirstAndCountsThem(t *testing.T) {
 	registry.SetVolumeBytes("issue", "disk", RoleShared, 8<<20)
 
 	// Forty pairs of five series each, one minute apart, is 200 droppable series beside the
-	// seventeen the cap may never drop and the one volume.
+	// eighteen the cap may never drop and the one volume.
 	for i := range 40 {
 		pair := Pair{Role: "implement", Kind: Kind("k" + strconv.Itoa(100+i))}
 		registry.AddCPUSeconds(pair, 1)
@@ -570,13 +571,13 @@ func TestTheCapDropsTheOldestPairsFirstAndCountsThem(t *testing.T) {
 	}
 
 	read := scrape(t, registry)
-	// 218 series stand against a cap of 200, so the four oldest pairs go and the fifth
-	// stays: dropping a fifth pair would be 193, further under the cap than it has to be.
+	// 219 series stand against a cap of 200, so the four oldest pairs go and the fifth
+	// stays: dropping a fifth pair would be 194, further under the cap than it has to be.
 	if got := read.value(t, seriesDropped); got != 20 {
 		t.Errorf("the cap removed %v series, not the twenty of the four oldest pairs", got)
 	}
-	if served := len(read.series); served != 198 {
-		t.Errorf("%d series are served, not the 198 the cap leaves", served)
+	if served := len(read.series); served != 199 {
+		t.Errorf("%d series are served, not the 199 the cap leaves", served)
 	}
 	for i := range 4 {
 		kind := "k" + strconv.Itoa(100+i)
@@ -624,22 +625,22 @@ func TestTheCapDropsVolumesLastAndNeverTheTotals(t *testing.T) {
 		registry.SetVolumeBytes("volume-"+strconv.Itoa(100+i), "memory", RoleShared, 1<<20)
 	}
 
-	// Seventeen series the cap may never drop, three of the one pair and 190 volumes is 210.
-	// The pair goes first, whole, and then the seven volumes whose names come first.
+	// Eighteen series the cap may never drop, three of the one pair and 190 volumes is 211.
+	// The pair goes first, whole, and then the eight volumes whose names come first.
 	read := scrape(t, registry)
-	if got := read.value(t, seriesDropped); got != 10 {
-		t.Errorf("the cap removed %v series, not the three of the pair and the seven oldest volumes", got)
+	if got := read.value(t, seriesDropped); got != 11 {
+		t.Errorf("the cap removed %v series, not the three of the pair and the eight oldest volumes", got)
 	}
 	if read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(KindBuild)) {
 		t.Error("the pair is served while volumes were dropped, and every pair goes before the first volume")
 	}
-	for i := range 7 {
+	for i := range 8 {
 		name := "volume-" + strconv.Itoa(100+i)
 		if read.has(volumeUsedBytes, "INFRA", "INFRA-1208", name, "memory", RoleShared) {
 			t.Errorf("%s is served, and volumes are dropped by name", name)
 		}
 	}
-	for i := 7; i < 190; i++ {
+	for i := 8; i < 190; i++ {
 		name := "volume-" + strconv.Itoa(100+i)
 		if !read.has(volumeUsedBytes, "INFRA", "INFRA-1208", name, "memory", RoleShared) {
 			t.Errorf("%s is not served, and the cap had already come down to 200", name)
@@ -680,9 +681,9 @@ func TestTheCapIsPerGradePod(t *testing.T) {
 	if got := read.value(t, seriesDropped); got != 0 {
 		t.Errorf("the cap removed %v series from a node whose pods are each far under it", got)
 	}
-	// Forty pods of twelve series, and the sampler's own eleven.
-	if served := len(read.series); served != 491 {
-		t.Errorf("%d series are served, not the 491 of forty grade pods and the sampler itself", served)
+	// Forty pods of twelve series, and the sampler's own twelve.
+	if served := len(read.series); served != 492 {
+		t.Errorf("%d series are served, not the 492 of forty grade pods and the sampler itself", served)
 	}
 }
 
@@ -843,5 +844,37 @@ func TestAReadingOfTheOtherModeIsNotServed(t *testing.T) {
 func TestTheContentTypeIsTheTextFormats(t *testing.T) {
 	if ContentType != "text/plain; version=0.0.4; charset=utf-8" {
 		t.Errorf("the content type is %q, and a collector reads text/plain; version=0.0.4; charset=utf-8", ContentType)
+	}
+}
+
+// livePodRegistry is a registry as a live issue pod's is: the sampler's own series, the pod's
+// totals, the role and kind pairs of a pod running one role, and a volume — thirty series, the
+// width a scrape of this pod was measured at (INFRA-1208: 28 series, 5,113 bytes).
+func livePodRegistry() *Registry {
+	r := NewPodRegistry("INFRA", "INFRA-1208", nil)
+	fillSelf(r)
+	fillPod(r)
+	tool := Pair{Role: "implement", Kind: KindTool}
+	r.AddCPUSeconds(tool, 16458.18)
+	r.SetAnonymousBytes(tool, 142483456)
+	r.SetResidentBytes(tool, 187703296)
+	return r
+}
+
+// BenchmarkRegistryWrite is the exposition alone, which is one half of what a scrape costs the
+// sampler: one Write of a live pod's registry into io.Discard, where nothing is a socket and
+// nothing is a syscall. BenchmarkScrape is the other half, the same bytes down a connection.
+func BenchmarkRegistryWrite(b *testing.B) {
+	r := livePodRegistry()
+	var out strings.Builder
+	if err := r.Write(&out); err != nil {
+		b.Fatalf("the exposition could not be written: %v", err)
+	}
+	b.SetBytes(int64(out.Len()))
+	b.ResetTimer()
+	for b.Loop() {
+		if err := r.Write(io.Discard); err != nil {
+			b.Fatalf("the exposition could not be written: %v", err)
+		}
 	}
 }

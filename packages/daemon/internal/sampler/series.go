@@ -110,6 +110,7 @@ const (
 	restartsTotal
 	seriesDropped
 	smapsDeferred
+	totalsDeferred
 	walkDeferred
 	metricCount
 )
@@ -267,6 +268,10 @@ var metrics = [metricCount]metric{
 		name: "legion_sampler_smaps_deferred", typ: gaugeType, modes: bothModes,
 		help: "Processes the smaps budget carried into the next window",
 	},
+	totalsDeferred: {
+		name: "legion_sampler_totals_deferred", typ: gaugeType, modes: bothModes,
+		help: "Per-second totals reads the sampler's own cap has deferred",
+	},
 	walkDeferred: {
 		name: "legion_sampler_walk_deferred", typ: gaugeType, modes: bothModes,
 		help: "Walk passes the sampler's own cap has deferred",
@@ -384,10 +389,12 @@ type Registry struct {
 	self     selfSeries
 	errors   map[ReadSource]*counter
 	restarts counter
-	// deferred is the processes the last smaps window carried, and deferredWalks the walk
-	// passes the collector's own cap has deferred since it started.
-	deferred      float64
-	deferredWalks float64
+	// deferred is the processes the last smaps window carried, deferredWalks the walk passes
+	// the collector's own cap has deferred since it started, and deferredTotals the totals
+	// reads it has deferred, each a count that only rises.
+	deferred       float64
+	deferredWalks  float64
+	deferredTotals float64
 }
 
 // selfSeries is what the sampler reports about itself. Its memory has no peak of its own: the
@@ -644,6 +651,14 @@ func (r *Registry) SetSmapsDeferred(count int) {
 	r.deferred = float64(count)
 }
 
+// SetTotalsDeferred is how many of the per-second totals reads the sampler's own cap has
+// deferred, a count that only rises, as the walk's below.
+func (r *Registry) SetTotalsDeferred(count uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deferredTotals = float64(count)
+}
+
 // SetWalkDeferred is how many walk passes the sampler's own cap has deferred, a count that only
 // rises: the collector keeps it and hands over the whole of it, as it hands over the walk's
 // read errors.
@@ -693,6 +708,19 @@ type group struct {
 // It also applies the hour window, dropping a pair no process has run in for an hour, and the
 // 200-series cap, counting what the cap removed as legion_sampler_series_dropped.
 func (r *Registry) Write(w io.Writer) error {
+	_, err := w.Write(r.exposition())
+	return err
+}
+
+// exposition is the bytes Write writes, for the handler that serves them: it answers a whole
+// body so that the answer carries its length and goes down the connection as one write, rather
+// than as the chunks net/http frames a body of unknown length into. A scrape of this pod's
+// sampler is its syscalls and almost nothing else — 1.3 ms over a connection of its own, of
+// which rendering these bytes is 0.04 ms (INFRA-1208, measured 2026-11-05) — so the one thing
+// worth saving on the way out is a syscall.
+//
+// Everything the scrape decides happens here, whether or not the bytes ever reach a reader.
+func (r *Registry) exposition() []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -710,8 +738,7 @@ func (r *Registry) Write(w io.Writer) error {
 
 	body := render(fixed.samples)
 	r.resetPeaks()
-	_, err := w.Write(body)
-	return err
+	return body
 }
 
 // expire drops every pair of labels no process of which has run within the hour window. It is
@@ -788,6 +815,7 @@ func (r *Registry) addSelf(s *fixedSamples) {
 	s.droppedAt = len(s.samples)
 	s.add("", seriesDropped, 0)
 	s.add("", smapsDeferred, r.deferred)
+	s.add("", totalsDeferred, r.deferredTotals)
 	s.add("", walkDeferred, r.deferredWalks)
 }
 

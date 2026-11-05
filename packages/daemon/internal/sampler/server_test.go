@@ -493,3 +493,42 @@ func costTree(processes int) []fakeProcess {
 	}
 	return tree
 }
+
+// BenchmarkScrape is a whole scrape as the collector reading this port makes one: a request
+// over a loopback connection to the handler Run serves, answered with the bytes
+// BenchmarkRegistryWrite writes. Read beside that benchmark it says how much of a scrape is the
+// exposition and how much is the HTTP serving and the kernel under it, which on a gVisor pod is
+// where nearly all of it sits (INFRA-1208). The client is in this process too, so what it
+// reports is a round trip and not the server's half alone.
+func BenchmarkScrape(b *testing.B) {
+	s := &service{opts: Options{Log: func(string) {}}, registry: livePodRegistry()}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("the benchmark could not listen: %v", err)
+	}
+	server := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = server.Serve(listener) }()
+	b.Cleanup(func() { _ = server.Close() })
+	address := "http://" + listener.Addr().String() + "/metrics"
+	for _, connection := range []struct {
+		name  string
+		reuse bool
+	}{{"a connection of its own", false}, {"one connection kept", true}} {
+		b.Run(connection.name, func(b *testing.B) {
+			client := &http.Client{Transport: &http.Transport{DisableKeepAlives: !connection.reuse}}
+			defer client.CloseIdleConnections()
+			for b.Loop() {
+				response, err := client.Get(address)
+				if err != nil {
+					b.Fatalf("the scrape failed: %v", err)
+				}
+				n, err := io.Copy(io.Discard, response.Body)
+				response.Body.Close()
+				if err != nil {
+					b.Fatalf("the scrape's body could not be read: %v", err)
+				}
+				b.SetBytes(n)
+			}
+		})
+	}
+}

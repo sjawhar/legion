@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -236,11 +237,17 @@ func (s *service) collect(ctx context.Context) error {
 func (s *service) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		body := s.registry.exposition()
 		w.Header().Set("Content-Type", ContentType)
-		// The header is written with the first byte of the body, so a write that fails
-		// half way through cannot be answered with a status: the collector reading this
-		// port sees a broken answer, and the line below says why.
-		if err := s.registry.Write(w); err != nil {
+		// The length is set before the first byte, so net/http sends the body as one
+		// write of the whole of it rather than as the chunks it frames a body of unknown
+		// length into: under gVisor a scrape is its syscalls and almost nothing else
+		// (Registry.exposition).
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		// The header goes out with the first byte of the body, so a write that fails half
+		// way through cannot be answered with a status: the collector reading this port
+		// sees a broken answer, and the line below says why.
+		if _, err := w.Write(body); err != nil {
 			s.opts.Log("sampler: the exposition could not be written: " + err.Error())
 		}
 	})
