@@ -1130,6 +1130,11 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 		Origin:  supplied.Origin,
 		Owner:   authenticated.Owner,
 		Service: authenticated.Service,
+		// No SessionVerified: the id above is the caller's word, not the credential's. A
+		// personal token proves its owner and no session, so this pairing of owner and session
+		// is a claim, and a body that sent session_verified is dropped here with every other
+		// field this literal does not name (model.Actor.SessionVerified).
+		//
 		// No Credential: this actor is one a handler records and compares, and a stored actor
 		// was decoded from JSON, which carries none (model.Actor.Recorded). A layer that needs
 		// the request's own credential reads it from optionalActor (callerHoldsScope).

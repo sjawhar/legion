@@ -30,6 +30,11 @@ type personNodes struct {
 	Offset int          `json:"offset"`
 }
 
+const personAliasesQuery = `
+	select coalesce(bool_or(alias_kind = 'login'), false),
+	       coalesce(array_agg(alias) filter (where alias_kind = 'session'), '{}'::text[])
+	from person_aliases where person = $1 and alias_kind in ('login', 'session')`
+
 const personNodesQuery = `
 	with related as (
 		select from_kind, from_id, array_agg(distinct kind order by kind) as relations, min(created_at) as related_at from (
@@ -76,9 +81,20 @@ func (s *server) listPersonNodes(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	query := r.URL.Query()
+	if len(query["since"]) > 1 {
+		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "since must be one RFC3339 timestamp")
+		return
+	}
+	since, err := parseOptionalRFC3339(query, "since", time.Now().UTC().Add(-30*24*time.Hour))
+	if err != nil {
+		writeError(w, "INVALID_QUERY", http.StatusBadRequest, err.Error())
+		return
+	}
 	login := model.CanonicalLogin(r.PathValue("login"))
 	var exists bool
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select exists (select 1 from person_aliases where person = $1 and alias_kind = 'login')`, login).Scan(&exists); err != nil {
+	var sessions []string
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), personAliasesQuery, login).Scan(&exists, &sessions); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -86,7 +102,7 @@ func (s *server) listPersonNodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "PERSON_NOT_FOUND", http.StatusNotFound, "person not found")
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), personNodesQuery, login, limit, offset)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), personNodesQuery, login, limit, offset, since, sessions)
 	if err != nil {
 		s.writeHandlerError(w, fmt.Errorf("read person nodes: %w", err))
 		return

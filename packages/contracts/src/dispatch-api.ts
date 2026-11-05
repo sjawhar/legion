@@ -60,6 +60,12 @@ export type Actor =
        *  none, a browser cookie, a personal token and a broker token scoped to its person
        *  included. */
       readonly project?: string;
+      /** Set where the credential itself proved this session: an access token the secrets
+       *  broker issued, which the broker binds to one session. Every other bearer names its
+       *  session in the request body, so the id is the caller's word and this is absent. The
+       *  server sets it and never reads it from a body. A read that treats "this session is
+       *  that person's" as a fact takes only the actors carrying it. */
+      readonly session_verified?: boolean;
     }
   /** A server-owned writer, such as the architecture importer
    *  (`{kind: "system", id: "architecture-importer"}`). */
@@ -2383,7 +2389,9 @@ export type GraphEdgeKind =
   | (string & {});
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
-// session node has none. A component node's id is `<project>/<component id>`.
+// session node and a role node have none. A component node's id is `<project>/<component id>`.
+// A role node's id is the role token a delivery was published to; Dispatch records no fact of a
+// role, so it carries the same empty actor lists a session node does.
 //
 // Every node carries six facts: `made_by` and `made_at` (who made it and when), `changed_by`
 // and `changed_at` (who last changed its own text or fields and when; the maker when nothing
@@ -2410,6 +2418,7 @@ export interface GraphNode {
     | "comment"
     | "message"
     | "session"
+    | "role"
     | "person"
     | "role"
     | "component";

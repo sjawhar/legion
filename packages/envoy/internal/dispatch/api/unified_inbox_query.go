@@ -1,96 +1,110 @@
 package api
 
-import "github.com/sjawhar/envoy/internal/dispatch/refs"
+import (
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+)
 
-// The first three parameters keep unreadDirectRepliesCTE's identity convention:
-// canonical login, raw actor id, optional session (nil). Page parameters follow.
-// Candidates use the existing indexes; the graph proves delivery, never replaces
-// the indexes with an unrestricted traversal of comments, messages or events.
-const unifiedInboxCandidates = `with recursive ` + unreadDirectRepliesCTE + `,
- inbox_candidates as (
-  select 'ask'::text as cause, 'ask'::text as kind, a.id, a.id as thread_id,
-         a.created_at as at, a.question as body, a.author,
-         '/issues/' || i.key || '/asks/' || a.id::text as href,
-         a.question as subject, sn.snoozed_until
-  from issues i join asks a on a.issue_key = i.key
-  left join user_ask_snooze sn on sn.login = $1 and sn.ask_id = a.id
-  where i.assignee = $1 and i.closed_at is null and a.state = 'open'
-  union all
-  select 'thread_reply',
-         case when u.kind = 'message' then 'message'
-              when u.kind = 'ask' and u.last_reply_id = u.thread_id then 'ask'
-              else 'comment' end,
-         u.last_reply_id, u.thread_id, u.replied_at,
-         coalesce(rc.body, rm.body, concat_ws(' - ',
-           nullif(array_to_string(array(select jsonb_array_elements_text(
-             case when jsonb_typeof(a.answer->'selected') = 'array' then a.answer->'selected' else '[]'::jsonb end)), ', '), ''),
-           nullif(a.answer->>'text', '')), ''),
-         coalesce(rc.author, rm.author, jsonb_build_object('kind','user','id',a.answer->>'user')),
-         case when u.issue_key is not null then '/issues/' || u.issue_key || '/' ||
-           case u.kind when 'ask' then 'asks' when 'comment' then 'comments' else 'messages' end || '/' || u.thread_id::text
-           else '/projects/' || ar.project_key || '/documents/' || ar.slug || '?' || u.kind || '=' || u.thread_id::text end,
-         coalesce(a.question, root.body, mr.body, ''), null::timestamptz
-  from user_threads u
-  left join asks a on u.kind = 'ask' and a.id = u.thread_id
-  left join issues ai on u.kind = 'ask' and ai.key = u.issue_key
-  left join comments rc on u.kind <> 'message' and rc.id = u.last_reply_id
-  left join messages rm on u.kind = 'message' and rm.id = u.last_reply_id
-  left join comments root on u.kind = 'comment' and root.id = u.thread_id
-  left join messages mr on u.kind = 'message' and mr.id = u.thread_id
-  left join artifacts ar on ar.id = u.artifact_id
-  where u.login = $1 and u.unread
-    and not coalesce(a.state = 'open' and (u.issue_key is null or ai.closed_at is null), false)
-  union all
-  select 'direct_reply', 'message', d.reply_id, d.root_id, d.created_at,
-         m.body, m.author, '/agents/' || d.session_id || '/live', root.body, null::timestamptz
-  from unread_direct_replies d join messages m on m.id = d.reply_id
-  join messages root on root.id = d.root_id
- ), delivered as (
-  select c.* from inbox_candidates c
-  where exists (select 1 from ` + refs.PersonInboxEdgesSQL + ` g
-    where g.kind = 'delivered_to' and g.to_kind = 'person' and g.to_id = $1
-      and g.from_kind = c.kind and g.from_id = c.id::text)
+// Membership comes from the private inbox edges, minus read state. In particular,
+// no legacy membership predicate may hide a wrong edge from the comparison.
+// $1 is the canonical login; $2 is the raw actor id that keys Clear.
+const unifiedInboxDelivered = `
+ delivered as (
+  select g.cause, g.from_kind as kind, g.from_id as id, g.thread_id, g.session_id, g.created_at as at
+  from ` + refs.PersonInboxEdgesSQL + ` g
+  where g.kind = 'delivered_to' and g.to_kind = 'person' and g.to_id = $1
+    and (g.cause <> 'thread_reply' or not exists (
+      select 1 from user_threads u
+      where u.login = $1 and u.thread_id = g.thread_id::uuid and not u.unread))
+    and (g.cause <> 'direct_reply' or (
+      g.created_at > coalesce(greatest(
+          (select read_through from user_agent_read where login = $1 and session_id = g.session_id),
+          (select cleared_before from user_agent_state where login = $2 and session_id = g.session_id)
+        ), '-infinity'::timestamptz)
+      and not exists (
+        select 1 from user_agent_reply_read
+        where login = $1 and reply_id = g.from_id::uuid)))
  )`
 
-const unifiedInboxQuery = unifiedInboxCandidates + `,
- page as (select cause, kind, id::text, thread_id::text, at as created_at, body, author, href, subject, snoozed_until
-   from delivered order by at desc, cause, kind, id desc limit $4 offset $5)
+// Detail joins must not subtract membership: an edge to a missing source is still
+// unexpected. Page parameters follow the two identity parameters.
+const unifiedInboxQuery = `with` + unifiedInboxDelivered + `,
+ page as (
+  select cause, kind, id, thread_id, session_id, at
+  from delivered order by at desc, cause, kind, id desc limit $3 offset $4
+ ),
+ rendered as (
+  select p.cause, p.kind, p.id, p.thread_id, p.at as created_at,
+   coalesce(case p.cause
+     when 'ask' then ia.question
+     when 'direct_reply' then dm.body
+     else coalesce(tc.body, tm.body, concat_ws(' - ',
+       nullif(array_to_string(array(select jsonb_array_elements_text(
+         case when jsonb_typeof(ta.answer->'selected') = 'array' then ta.answer->'selected' else '[]'::jsonb end)), ', '), ''),
+       nullif(ta.answer->>'text', ''))) end, '') as body,
+   coalesce(case p.cause
+     when 'ask' then ia.author
+     when 'direct_reply' then dm.author
+     else coalesce(tc.author, tm.author, jsonb_build_object('kind','user','id',ta.answer->>'user')) end,
+     jsonb_build_object('kind','user','id','')) as author,
+   coalesce(case p.cause
+     when 'ask' then '/issues/' || ii.key || '/asks/' || p.id
+     when 'direct_reply' then '/agents/' || p.session_id || '/live'
+     else case when u.issue_key is not null
+       then '/issues/' || u.issue_key || '/' ||
+         case u.kind when 'ask' then 'asks' when 'comment' then 'comments' else 'messages' end ||
+         '/' || p.thread_id
+       else '/projects/' || ar.project_key || '/documents/' || ar.slug || '?' || u.kind || '=' || p.thread_id
+     end end, '') as href,
+   coalesce(case p.cause
+     when 'ask' then ia.question
+     when 'direct_reply' then droot.body
+     else coalesce(ta.question, tcroot.body, tmroot.body) end, '') as subject,
+   sn.snoozed_until
+  from page p
+  left join asks ia on p.cause = 'ask' and ia.id = p.id::uuid
+  left join issues ii on p.cause = 'ask' and ii.key = ia.issue_key
+  left join user_ask_snooze sn on p.cause = 'ask' and sn.login = $1 and sn.ask_id = p.id::uuid
+  left join user_threads u on p.cause = 'thread_reply' and u.login = $1 and u.thread_id = p.thread_id::uuid
+  left join asks ta on p.cause = 'thread_reply' and u.kind = 'ask' and ta.id = u.thread_id
+  left join comments tc on p.cause = 'thread_reply' and u.kind <> 'message' and tc.id = p.id::uuid
+  left join messages tm on p.cause = 'thread_reply' and u.kind = 'message' and tm.id = p.id::uuid
+  left join comments tcroot on p.cause = 'thread_reply' and u.kind = 'comment' and tcroot.id = p.thread_id::uuid
+  left join messages tmroot on p.cause = 'thread_reply' and u.kind = 'message' and tmroot.id = p.thread_id::uuid
+  left join artifacts ar on p.cause = 'thread_reply' and ar.id = u.artifact_id
+  left join messages dm on p.cause = 'direct_reply' and dm.id = p.id::uuid
+  left join messages droot on p.cause = 'direct_reply' and droot.id = p.thread_id::uuid
+ )
  select (select count(*)::int from delivered),
-   coalesce(jsonb_agg(to_jsonb(page) order by created_at desc, cause, kind, id desc), '[]'::jsonb) from page`
+   coalesce(jsonb_agg(to_jsonb(rendered) order by created_at desc, cause, kind, id desc), '[]'::jsonb)
+ from rendered`
 
-// The reference uses the existing route predicates and direct-reply definition,
-// not delivered or the new view. Compare membership before pagination.
-const legacyInboxMembershipQuery = `with recursive ` + unreadDirectRepliesCTE + `
- select 'ask'::text, 'ask'::text, a.id::text from asks a join issues i on i.key = a.issue_key
- where a.state = 'open' and i.closed_at is null and i.assignee = $1
- union all
- select 'thread_reply', case when u.kind='message' then 'message'
-   when u.kind='ask' and u.last_reply_id=u.thread_id then 'ask' else 'comment' end, u.last_reply_id::text
- from user_threads u
- left join asks a on u.kind = 'ask' and a.id = u.thread_id
- left join issues ai on u.kind = 'ask' and ai.key = u.issue_key
- where u.login = $1 and u.unread
-   and not coalesce(a.state = 'open' and (u.issue_key is null or ai.closed_at is null), false)
- union all
- select 'direct_reply', 'message', reply_id::text from unread_direct_replies`
+const unifiedInboxMembershipQuery = `with` + unifiedInboxDelivered + `
+ select cause, kind, id from delivered`
 
-// Public source identities are shared by the expansion page and count. Visibility is
-// decided before each source-kind limit, so private/deleted nodes cannot hide a page.
-const inboxMentionCommentSourcesSQL = `select 'comment' as kind, visible.id::text as id, visible.created_at
- from comments visible where visible.issue_key is not null or exists (
- select 1 from artifacts owner where owner.id=visible.artifact_id and owner.project_key is not null)`
-const inboxMentionMessageSourcesSQL = `select 'message' as kind, visible.id::text as id, visible.created_at
- from messages visible where visible.issue_key is not null`
-const inboxMentionBlockSourcesSQL = `select 'block' as kind, visible.node_id as id, visible.changed_at as created_at
- from document_blocks visible join artifacts owner on owner.id=visible.artifact_id
- where owner.issue_key is not null or owner.project_key is not null`
-const inboxMentionSourcesSQL = inboxMentionCommentSourcesSQL + ` union all ` + inboxMentionMessageSourcesSQL + ` union all ` + inboxMentionBlockSourcesSQL
+// Each reference query uses its route's own SQL and parameters, not a copy of
+// those predicates. The Inbox is narrowed to the dashboard's default viewer.
+const legacyInboxAsksQuery = `select 'ask'::text, 'ask'::text, a.id::text
+ from asks a` + inboxOwnerJoins + inboxOpenAskFilter
 
-const inboxMentionPageSuffixSQL = ` visible cross join lateral (
- select 1 from ` + refs.MentionEdgesSQL + ` g where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
- and g.from_kind=visible.kind and g.from_id=visible.id limit 1
- ) mention where not exists(select 1 from delivered d where d.kind=visible.kind and d.id::text=visible.id)
- order by visible.created_at desc, visible.id limit $4::int + $5::int`
-const inboxMentionPagesSQL = `(select visible.kind as from_kind,visible.id as from_id,visible.created_at from (` + inboxMentionCommentSourcesSQL + `)` + inboxMentionPageSuffixSQL + `)
- union all (select visible.kind,visible.id,visible.created_at from (` + inboxMentionMessageSourcesSQL + `)` + inboxMentionPageSuffixSQL + `)
- union all (select visible.kind,visible.id,visible.created_at from (` + inboxMentionBlockSourcesSQL + `)` + inboxMentionPageSuffixSQL + `)`
+const legacyInboxThreadsQuery = `select 'thread_reply'::text,
+ case when u.kind = 'message' then 'message'
+      when u.kind = 'ask' and u.last_reply_id = u.thread_id then 'ask'
+      else 'comment' end,
+ u.last_reply_id::text ` + myRepliesUnread
+
+const legacyInboxDirectRepliesQuery = `with recursive ` + unreadDirectRepliesCTE + `
+ select 'direct_reply'::text, 'message'::text, reply_id::text from unread_direct_replies`
+
+// Filter public mentions before LIMIT. Cast the input, not the uuid primary key;
+// block node ids are not uuids, so the cast must be safe on every union arm.
+var inboxMentionVisibleSQL = `(
+ (g.from_kind='comment' and exists(
+   select 1 from comments visible left join artifacts owner on owner.id=visible.artifact_id
+   where visible.id=` + store.CastableUUID("g.from_id") + ` and (visible.issue_key is not null or owner.project_key is not null)))
+ or (g.from_kind='message' and exists(
+   select 1 from messages visible where visible.id=` + store.CastableUUID("g.from_id") + ` and visible.issue_key is not null))
+ or (g.from_kind='block' and exists(
+   select 1 from document_blocks visible join artifacts owner on owner.id=visible.artifact_id
+   where visible.node_id=g.from_id and (owner.issue_key is not null or owner.project_key is not null)))
+)`

@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -38,25 +40,39 @@ type unifiedInboxPage struct {
 	Expansions []unifiedInboxItem `json:"expansions"`
 }
 
-// requireOwnInbox rejects identity selectors rather than treating a spelling of
-// another login as an ignored filter. There is no caller-supplied person id.
+// requireOwnInbox resolves the acting person and rejects identity selectors.
+// Keep the credential's raw person id for Clear, alongside the canonical login
+// unifiedInboxArgs derives for every other read-state table.
 func (s *server) requireOwnInbox(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
 	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return actor, false
 	}
+	original, _, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
+		return actor, false
+	}
+	actor.ID = original.ID
+	if original.Owner != nil {
+		actor.ID = *original.Owner
+	}
 	for key := range r.URL.Query() {
-		if key != "limit" && key != "offset" && key != "mentions" {
-			writeError(w, "OWN_INBOX_ONLY", http.StatusBadRequest, "this read is the signed-in person's own inbox; identity and assignee filters are not accepted")
+		if key != "limit" && key != "offset" && key != "mentions" && key != "session" {
+			writeError(w, "OWN_INBOX_ONLY", http.StatusBadRequest, "this read is the caller's own inbox; identity and assignee filters are not accepted")
 			return actor, false
 		}
 	}
 	return actor, true
 }
 
+func unifiedInboxArgs(actorID string) []any {
+	return []any{model.CanonicalLogin(actorID), actorID}
+}
+
 func readUnifiedInbox(ctx context.Context, q queryer, actorID string, limit, offset int) (unifiedInboxPage, error) {
 	page := unifiedInboxPage{Person: model.CanonicalLogin(actorID), Rows: []unifiedInboxItem{}, Expansions: []unifiedInboxItem{}, Limit: limit, Offset: offset}
-	args := append(unreadDirectRepliesArgs(actorID, nil), limit, offset)
+	args := append(unifiedInboxArgs(actorID), limit, offset)
 	var raw []byte
 	if err := q.QueryRow(ctx, unifiedInboxQuery, args...).Scan(&page.Total, &raw); err != nil {
 		return page, fmt.Errorf("read unified inbox: %w", err)
@@ -116,15 +132,21 @@ func (s *server) listUnifiedInbox(w http.ResponseWriter, r *http.Request) {
 // legacy membership census. Direct messages have no public issue/document node;
 // their replies remain on the independently scoped direct-conversation arm.
 func readInboxMentions(ctx context.Context, q queryer, actorID string, limit, offset int) ([]unifiedInboxItem, error) {
-	args := append(unreadDirectRepliesArgs(actorID, nil), limit, offset)
-	rows, err := q.Query(ctx, unifiedInboxCandidates+`, candidates as (`+inboxMentionPagesSQL+`), mentioned as (
-  select * from candidates order by created_at desc,from_kind,from_id limit $4 offset $5
+	args := append(unifiedInboxArgs(actorID), limit, offset)
+	rows, err := q.Query(ctx, `with`+unifiedInboxDelivered+`, mentioned as materialized (
+  select g.from_kind, g.from_id, max(g.created_at) as created_at
+  from `+refs.AllEdgesSQL+` g
+  where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
+    and `+inboxMentionVisibleSQL+`
+    and not exists(select 1 from delivered d where d.kind=g.from_kind and d.id=g.from_id)
+  group by g.from_kind,g.from_id
+  order by max(g.created_at) desc, g.from_kind, g.from_id limit $3 offset $4
  ) select x.from_kind,x.from_id,x.created_at,
    coalesce(c.body,m.body,b.excerpt,''), coalesce(c.author,m.author,'{"kind":"system","id":"document"}'::jsonb),
    coalesce(c.issue_key,m.issue_key,a.issue_key),a.project_key,a.slug,b.block_id,coalesce(a.is_primary,false)
  from mentioned x
- left join comments c on x.from_kind='comment' and c.id::text=x.from_id
- left join messages m on x.from_kind='message' and m.id::text=x.from_id and m.issue_key is not null
+ left join comments c on x.from_kind='comment' and c.id=`+store.CastableUUID("x.from_id")+`
+ left join messages m on x.from_kind='message' and m.id=`+store.CastableUUID("x.from_id")+` and m.issue_key is not null
  left join document_blocks b on x.from_kind='block' and b.node_id=x.from_id
  left join artifacts a on a.id=coalesce(c.artifact_id,b.artifact_id)
  where c.id is not null or m.id is not null or b.node_id is not null`, args...)

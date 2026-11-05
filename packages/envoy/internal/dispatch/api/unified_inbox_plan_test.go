@@ -47,7 +47,7 @@ func TestUnifiedInboxPlansAndP99OnRealisticVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	var raw []byte
-	args := append(unreadDirectRepliesArgs("alice", nil), 50, 0)
+	args := append(unifiedInboxArgs("alice"), 50, 0)
 	if err := database.Pool.QueryRow(ctx, `explain(analyze,buffers,format json) `+unifiedInboxQuery, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
@@ -123,19 +123,24 @@ func TestUnifiedInboxPlansAndP99OnRealisticVolume(t *testing.T) {
 	if newTimes[197] > oldTimes[197] {
 		t.Errorf("unified p99 %s exceeds today's %s", newTimes[197], oldTimes[197])
 	}
+	if _, err := database.Pool.Exec(ctx, `insert into people(email) select 'viewer-' || n from generate_series(3,100) n`); err != nil {
+		t.Fatal(err)
+	}
 	safe, err := events.NewHorizon(database.Pool).Safe(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	started := time.Now()
 	if err := observeInboxShadow(ctx, database.Pool, safe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := readInboxShadowReport(ctx, database.Pool)
+	duration := time.Since(started)
+	report, err := readInboxShadowReport(ctx, database.Pool, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.CheckedUsers != 2 || report.Mismatched != 0 || report.Errors != 0 {
+	if report.CheckedUsers != 100 || report.Mismatched != 0 || report.Errors != 0 {
 		t.Fatalf("volume shadow=%+v", report)
 	}
-	t.Logf("volume shadow: checked_users=%d mismatched=%d errors=%d missing=%v unexpected=%v", report.CheckedUsers, report.Mismatched, report.Errors, report.Missing, report.Unexpected)
+	t.Logf("synthetic sweep: people=%d comments=20020 messages=22002 events=100020 duration=%s mismatched=%d errors=%d missing=%v unexpected=%v", report.CheckedUsers, duration, report.Mismatched, report.Errors, report.Missing, report.Unexpected)
 }

@@ -1611,9 +1611,12 @@ A yes is kept for good, since a commit on the default branch never leaves it, an
 A new table, as above; its census answers `0`.
 
 Migration `20261104074751_person_graph` creates the derived views `person_aliases` and `graph_person_edges`, without altering `graph_edges` or any table.
-New named reads combine the edge views through `refs.AllEdgesSQL`, while old builds keep their existing results and query plans.
-The alias view uses `user_threads_login` for canonical person ids and stores no identity mapping of its own; session aliases require a stored actor's server-verified `owner`, and no record establishes a role alias.
-No row is scanned, rewritten or refused by the migration, no index is created, and its migration census answers `0`.
+The graph is both edge views together (`refs.AllEdgesSQL`), while old builds keep their existing results and query plans.
+The alias view uses `user_threads_login` for canonical person ids and stores no identity mapping of its own.
+A stored session actor's `owner` is always the credential's own, but its session id is the request body's on every bearer but a broker-issued token, so a session alias is taken only from an actor carrying `session_verified`, which the server sets where the credential itself proved the session.
+No record establishes a role alias, and the view mints none.
+Expression indexes on each scalar actor source and on people's canonical logins serve identity lookups; partial topic and time indexes serve recorded event deliveries.
+Index builds read the existing tables under `SHARE`, blocking writers while each index builds; the migration rewrites and refuses no row, and its census answers `0` while reporting those tables' sizes and locks.
 
 The inbox graph migration creates `graph_inbox_edges` and three observation-only tables without altering an existing table or view.
 No source row is rewritten, no index is created, and its migration census answers `0`.
@@ -2399,10 +2402,10 @@ Each item below names a path with its method and identity, then its purpose.
   it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`.
   Answers `204`, writing nothing for a thread the caller never wrote in.
 
-- `/api/v1/me/inbox?limit=&offset=&mentions=true` (GET; own-inbox: cookie or trusted header, human only)
+- `/api/v1/me/inbox?limit=&offset=&mentions=true` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   Opt-in graph read of the caller's default Inbox, unread Replies and unread direct/broadcast replies, newest first.
-  Joins `delivered_to -> person` to the existing read indexes; `user_threads` remains the thread index.
+  Reads the private current-membership `graph_inbox_edges` rows addressed `delivered_to -> person`, minus existing read state; `user_threads` remains the thread index.
   The response is `{person, rows, total, limit, offset, horizon, expansions}`; a row has `cause`, `kind`, `id`, `thread_id`, `created_at`, `body`, `author`, `href`, `subject` and `snoozed_until`.
   `limit` is 1–200 (default 50), `offset` is nonnegative, and an empty page retains `total`.
   Identity and assignee selectors are refused with `400 OWN_INBOX_ONLY`.
@@ -2410,24 +2413,28 @@ Each item below names a path with its method and identity, then its purpose.
   The snapshot is taken after observing the server's shared event Horizon, so every event at that horizon already has its synchronously derived node, and later committed writes remain visible.
   Existing Inbox, Replies and CLI reads do not change.
 
-- `/api/v1/me/inbox/shadow` (GET; own-inbox: cookie or trusted header, human only)
+- `/api/v1/me/inbox/shadow` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
-  Named production comparison read: refreshes the serialized pass and answers observation counts, not inbox content.
-  Every person who has signed in is checked, including inactive people, once a minute in the background too.
-  `mismatched`, `missing` and `unexpected` count legacy membership differences by `ask`, `thread_reply` and `direct_reply`; `errors` and `uncovered_users` prevent missing observations from looking green.
-  `users` identifies the people checked and their item/difference counts; `expansions.mention` is additional public mention membership and never a mismatch.
+  Read-only observation counts from the background comparison, not inbox content; GET never runs or writes a pass.
+  Every person who has signed in is checked, including inactive people, once a minute in the background.
+  The graph membership is compared independently with the existing routes' own SQL: the Inbox's default viewer filter, unread Replies and unread direct replies.
+  `mismatched`, `missing` and `unexpected` are global membership differences by `ask`, `thread_reply` and `direct_reply`; `errors` and `uncovered_users` prevent missing observations from looking green.
+  `users` contains only the caller's own row; every other count is a global total. `expansions.mention` is additional public mention membership and never a mismatch.
   `daily_mismatched` retains a bad observation after a later comparison returns to zero.
   `ready` requires three complete UTC days without differences or errors for every person, with full-day coverage, at least 720 samples per person-day and no gap longer than two minutes, plus a fresh clean current comparison.
-  This is a comparison gate, not an automatic cutover.
+  This gate covers asks and replies only, not pending credential requests, and does not cut over automatically.
+  Any cutover must retain the Credential requests section and its contribution to Needs you and the blocked-on-you banner.
+  The sweep exports `envoy_dispatch_inbox_shadow_duration_seconds` and `envoy_dispatch_inbox_shadow_failures_total` on `/metrics`.
   `/inbox/shadow` displays it and links to `/inbox/unified`, the opt-in view.
 
-- `/api/v1/people/{login}/nodes?limit=&offset=` (GET; cookie or trusted header (human only))
+- `/api/v1/people/{login}/nodes?limit=&offset=&since=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
-  List comments, messages and asks the person authored or their recorded session aliases received, through the complete derived graph, newest first by creation time, kind and id.
+  List comments, messages and asks the person authored or their proved session aliases received, through the derived person graph, newest first by creation time, kind and id.
+  Received nodes default to deliveries in the last 30 days; `since` is an optional RFC3339 lower bound on deliveries, not on authorship.
   `limit` is 1–200 (default 50), `offset` is nonnegative, and the page is `{person, rows, total, limit, offset}`.
   Each row has `kind`, `id`, `relations`, `title` (the first line), `created_at`, `ref` and `href`.
   A direct message has no `ref`; its `href` opens the targeted session's conversation.
-  Bearers receive `403 HUMAN_ONLY`, like the existing agent-conversation list; an unknown person is `404 PERSON_NOT_FOUND`.
+  A credential without the `person` scope is refused `403 OAUTH_SCOPE_REQUIRED` before the handler runs; an unknown person is `404 PERSON_NOT_FOUND`.
 
 - `/api/v1/agents` (GET; cookie, trusted header, or bearer)
 

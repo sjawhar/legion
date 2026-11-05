@@ -20,12 +20,12 @@ func TestPersonAliasesAndAuthoredEdgesUseStoredActors(t *testing.T) {
 		insert into people (email) values ('signed-in@example.com');
 		insert into comments (id, issue_key, author, body)
 		values ('00000000-0000-0000-0000-000000000001', 'CORE-1', '{"kind":"user","id":" ALICE "}', 'Person'),
-		       ('00000000-0000-0000-0000-000000000002', 'CORE-1', '{"kind":"session","id":"s-owned","owner":"Alice"}', 'Owned'),
+		       ('00000000-0000-0000-0000-000000000002', 'CORE-1', '{"kind":"session","id":"s-owned","owner":"Alice","session_verified":true}', 'Owned'),
 		       ('00000000-0000-0000-0000-000000000003', 'CORE-1', '{"kind":"session","id":"s-unowned"}', 'Unowned');
 		insert into asks (id, issue_key, author, question)
 		values ('00000000-0000-0000-0000-000000000004', 'CORE-1', '{"kind":"user","id":"Alice"}', 'Question?');
 		insert into messages (id, issue_key, author, body)
-		values ('00000000-0000-0000-0000-000000000005', 'CORE-1', '{"kind":"session","id":"s-owned","owner":"alice"}', 'Message');
+		values ('00000000-0000-0000-0000-000000000005', 'CORE-1', '{"kind":"session","id":"s-owned","owner":"alice","session_verified":true}', 'Message');
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestPersonAliasesIncludeEventClaimAndDocumentActorsWithoutInventingRoles(t 
 		values ('CORE-1', 'CORE', 1, 'Graph', '{"kind":"system","id":"seed"}', '{"kind":"user","id":" Claim "}', now(), 'role:reviewer', 'U');
 		insert into events (issue_key, seq, type, actor, notify, payload) values
 		('CORE-1', 1, 'issue.updated', '{"kind":"user","id":" Event "}', false, '{}'),
-		('CORE-1', 2, 'issue.updated', '{"kind":"session","id":"token-session","owner":" Owner "}', false, '{}');
+		('CORE-1', 2, 'issue.updated', '{"kind":"session","id":"token-session","owner":" Owner ","session_verified":true}', false, '{}');
 		with document as (
 			insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
 			values ('CORE-1', 'CORE', 'notes', 'notes.md', 'doc', '{"kind":"user","id":" Creator "}') returning id
