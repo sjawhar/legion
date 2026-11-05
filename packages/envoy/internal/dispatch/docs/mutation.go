@@ -33,6 +33,7 @@ type versionWrite struct {
 	authors          []model.Actor
 	capture          *authorCapture
 	docUpdateVersion *int64
+	priorMarkdown    string
 }
 
 // mergeInto copies src into *dst, allocating *dst if it is nil and src holds anything; a nil or
@@ -369,6 +370,11 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err := refuseBlockPointers(ctx, op.tx, artifactID, tree.Node(), weighedFrom, offsets); err != nil {
 		return err
 	}
+	if contentChanged {
+		if err := refuseAgentDecisionChanges(ctx, op.tx, artifactID, actor, tree.Node()); err != nil {
+			return err
+		}
+	}
 	// The tree before the write has served every use it has, so it is let go before the record's
 	// decode check (LEGION-504).
 	before, weighedFrom = pmdoc.ValidDocument{}, nil
@@ -497,16 +503,10 @@ func joinedSchemaError(err error, start func() error) error {
 	return producedSchemaError(err)
 }
 
-// refuseBlockPointers refuses tree, the tree a write to artifactID leaves (rendered as offsets),
-// when a `block[]` pointer it introduces over prior names a block the attribute may not name: one
-// no document holds, one of a type its targets do not allow, one of an issue that is neither the
-// document's own nor above it, or one outside the document where the attribute points only inside
-// it (pmdoc.CheckBlockPointers). Each target is read as the block index would hold it once the
-// write is indexed, with the writing document's issue and that issue's ancestors
-// (refs.BlockTargets), in the write's transaction. The refusal is pmdoc.ErrBlockPointer, which no
-// schema refusal path (joinedSchemaError) reclassifies. A browser's write (settlement) and the
-// reconciliation never come here: what a browser wrote is already stored, so it is never refused,
-// and a pointer of its at a block no document holds stays unresolved.
+// refuseBlockPointers checks introduced block and ask pointers against their actual targets and
+// the writing document's own issue or ancestors. Request writes check before persisting their
+// fork. Every version write, including browser settlement, checks again against the prior version
+// before indexing. Historical reconciliation does not rewrite or refuse old versions.
 func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree, prior *pmdoc.Node, offsets []pmdoc.BlockOffset) error {
 	return pmdoc.CheckBlockPointers(tree, prior, func(targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
 		return refs.BlockTargets(ctx, tx, artifactID, offsetBlocks(offsets), targets)
@@ -547,6 +547,9 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 		return "", err
 	}
 	if err := weighRendering("", canonical); err != nil {
+		return "", err
+	}
+	if err := refuseDecisionPersonClaim(tree, actor); err != nil {
 		return "", err
 	}
 	// A new document holds no pointer before this write, so every pointer it seeds is checked.
@@ -1160,8 +1163,9 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{}, ErrIssueClosed
 	}
 	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
-		authors: actorSlice(capture.authors),
-		capture: &capture,
+		authors:       actorSlice(capture.authors),
+		capture:       &capture,
+		priorMarkdown: latest.markdown,
 	})
 	if err != nil {
 		return VersionResult{}, err
@@ -1674,11 +1678,16 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	if !open {
 		return VersionResult{}, ErrIssueClosed
 	}
+	latest, err := latestVersion(ctx, tx, artifactID)
+	if err != nil {
+		return VersionResult{}, err
+	}
 	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
-		named:   true,
-		summary: new(summary),
-		authors: actorSlice(capture.authors),
-		capture: &capture,
+		named:         true,
+		summary:       new(summary),
+		authors:       actorSlice(capture.authors),
+		capture:       &capture,
+		priorMarkdown: latest.markdown,
 	})
 	if err != nil {
 		return VersionResult{}, err
@@ -1998,6 +2007,18 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	markdown, tree := rendered.markdown, rendered.tree
 	if write == nil {
 		return versionWriteResult{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
+	}
+	// Request guards run before their live fork is persisted. This final guard also covers
+	// browser settlement and standalone snapshots, whose rendered tree can include newer edits.
+	if err := refuseDecisionPersonClaim(tree, actor); err != nil {
+		return versionWriteResult{}, err
+	}
+	if err := refuseUnbackedAnsweredAttribution(ctx, tx, artifactID, tree); err != nil {
+		return versionWriteResult{}, err
+	}
+	prior, _ := pmdoc.ParseRendering(write.priorMarkdown)
+	if err := refuseBlockPointers(ctx, tx, artifactID, tree, prior, rendered.offsets); err != nil {
+		return versionWriteResult{}, err
 	}
 
 	encodedAuthors, err := json.Marshal(write.authors)

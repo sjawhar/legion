@@ -1150,7 +1150,7 @@ function readWithoutEvents(args: ToolArguments): string | undefined {
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
- * pages, the Decisions page (which names the issue's decisions.md), project document pages (with
+ * pages, the Decisions graph view (which names its issue), project document pages (with
  * their ?ask= / ?comment= deep links, which name the item whatever the fragment), the
  * `#b-<block id>` of a live document page or of an issue ask's, comment's or message's page,
  * which names that block, and the page of an upload an agent's conversation owns
@@ -1197,9 +1197,8 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
-    // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
-    // whatever its fragment.
-    if (page === "decisions") return `dispatch://${key}/artifact/decisions-md`;
+    // The Decisions graph view names its issue. Each result names its own source node.
+    if (page === "decisions") return `dispatch://${key}`;
     // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
     // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;

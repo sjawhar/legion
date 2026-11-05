@@ -58,12 +58,12 @@ export function useMarginOwner(): MarginOwner | undefined {
   }, [artifactId, issueKey, project, slug]);
 }
 export type MarginItemAction = CommentAction;
-/** One decision of the issue's `decisions.md` beside one block of the spec it shaped: a decision
- *  that links several blocks is one item at each. */
+/** One native decision node beside a spec passage it shaped. A node shaping several
+ * passages appears beside each one. */
 export interface DecisionMarginItem {
   readonly blockId: string;
   readonly decision: Decision;
-  /** `decision:<decision heading block>:<spec block>`. */
+  /** `decision:<decision block>:<spec block>`. */
   readonly id: string;
   readonly kind: "decision";
 }

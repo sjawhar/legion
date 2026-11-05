@@ -416,7 +416,7 @@ func TestTheFactsOfAnEdgesOtherEndAreTheNodesOwn(t *testing.T) {
 	}
 	requireSameNode(t, "the spec read's edges[].block", *atBlock, readNode(t, handler, blockRef))
 
-	decisions := uploadIssueDocument(t, handler, child.Key, "decisions.md", "Ship per "+blockRef+".\n")
+	decisions := uploadIssueDocument(t, handler, child.Key, "choices.md", "Ship per "+blockRef+".\n")
 	decisionsRef := "dispatch://" + child.Key + "/artifact/" + decisions.Slug
 	response := blockLinksRequest(t, handler, url.Values{"from": {decisionsRef}, "to": {specRef}})
 	succeeded(t, "GET /api/v1/block-links", response)
@@ -441,7 +441,7 @@ func TestTheFactsOfAnEdgesOtherEndAreTheNodesOwn(t *testing.T) {
 	requireSameNode(t, "block-links from", links.From, readNode(t, handler, decisionsRef))
 	requireSameNode(t, "block-links to", links.To, readNode(t, handler, specRef))
 	if len(links.Links) != 1 {
-		t.Fatalf("links from decisions.md to the spec = %#v, want one", links.Links)
+		t.Fatalf("links from choices.md to the spec = %#v, want one", links.Links)
 	}
 	for _, link := range links.Links {
 		requireSameNode(t, "block-links links[].from", link.From, readNode(t, handler, link.From.Ref))

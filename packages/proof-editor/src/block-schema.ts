@@ -78,6 +78,8 @@ function parseAttribute(typeName: string, name: string, attribute: BlockAttribut
   switch (attribute.kind) {
     case 'string':
     case 'actor':
+    case 'ask':
+    case 'person':
     case 'timestamp':
       return value;
     case 'bool':

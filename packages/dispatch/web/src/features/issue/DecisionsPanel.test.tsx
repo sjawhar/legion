@@ -24,10 +24,10 @@ const artifacts = [
     id: documentId,
     issue_key: "CORE-1",
     kind: "doc",
-    name: "decisions.md",
+    name: "choices.md",
     primary: false,
     project: "",
-    slug: "decisions-md",
+    slug: "choices-md",
   },
 ] as unknown as Artifact[];
 
@@ -39,9 +39,11 @@ function decision(fields: Partial<Decision> & Pick<Decision, "block_id" | "headi
     kept: null,
     kind: "agent",
     links: [],
-    ref: `dispatch://CORE-1/artifact/decisions-md#b-${fields.block_id}`,
+    ref: `dispatch://CORE-1/artifact/choices-md#b-${fields.block_id}`,
     replaced: false,
     text_sha256: `sum-${fields.block_id}`,
+    uncertainty: "",
+    uncertainty_reason: "",
     unsure: false,
     waiting_review: false,
     ...fields,
@@ -74,9 +76,9 @@ const table = decision({
 const named = decision({
   asks: [askId],
   block_id: "name",
-  heading: "Name them notices",
+  heading: "Which name?",
   kind: "person",
-  text: "## Name them notices\n\nThe person chose the name.",
+  text: "Which name?\n\nSelected: Notices\n\nName them notices.",
 });
 const file = decision({
   block_id: "file",
@@ -87,7 +89,7 @@ const file = decision({
 
 const view: IssueDecisions = {
   decisions: [table, named, file],
-  document: "dispatch://CORE-1/artifact/decisions-md",
+  document: "dispatch://CORE-1/artifact/choices-md",
   open_questions: [
     {
       block_id: "q1",
@@ -153,13 +155,43 @@ test("the panel sorts the view into its four lists, in order", async () => {
     expect(shaped).toEqual(["/issues/CORE-1/spec#b-p1", "/issues/CORE-1/spec#b-p%202"]);
 
     const mine = list("Your decisions");
-    expect(within(mine).getByText("Name them notices")).toBeDefined();
+    expect(within(mine).getByText("Which name?")).toBeDefined();
+    expect(within(mine).getByTestId("decision-answer").textContent).toBe(
+      "Selected: Notices\n\nName them notices."
+    );
     expect(
       within(mine).getByRole("link", { name: "The ask it answers" }).getAttribute("href")
     ).toBe(`/issues/CORE-1/asks/${askId}`);
     expect(within(mine).queryByRole("button", { name: "Keep" })).toBeNull();
 
     expect(within(list("Replaced")).getByText("Keep them in a file")).toBeDefined();
+  } finally {
+    read.mockRestore();
+  }
+});
+
+test("a decision an agent made alone shows how sure it is and what would change it", async () => {
+  const unsure = decision({
+    block_id: "store",
+    heading: "Store notices in a table",
+    text: "## Store notices in a table\n\nA table keeps them queryable.",
+    uncertainty: "medium",
+    uncertainty_reason: "A second writer would change it.",
+    unsure: true,
+    waiting_review: true,
+  });
+  const read = spyOn(api, "getIssueDecisions").mockResolvedValue({
+    decisions: [unsure],
+    document: "dispatch://CORE-1/artifact/choices-md",
+    open_questions: [],
+  });
+  try {
+    renderPanel();
+    const waiting = await screen.findByRole("region", { name: "Waiting for your review" });
+    expect(within(waiting).getByText("Unsure: medium")).toBeDefined();
+    expect(within(waiting).getByTestId("decision-uncertainty-reason").textContent).toBe(
+      "A second writer would change it."
+    );
   } finally {
     read.mockRestore();
   }
@@ -193,7 +225,7 @@ test("Keep records the decision and moves it from Waiting for your review to You
   }
 });
 
-test("Change opens the comment composer on decisions.md, quoting the decision's first paragraph, and posts it as the issue's comment", async () => {
+test("Change opens the comment composer on the decision's own document node and posts its quote on the issue", async () => {
   const read = spyOn(api, "getIssueDecisions").mockResolvedValue(view);
   const comment = spyOn(api, "createComment").mockResolvedValue({} as Comment);
   try {
@@ -221,5 +253,36 @@ test("Change opens the comment composer on decisions.md, quoting the decision's 
   } finally {
     read.mockRestore();
     comment.mockRestore();
+  }
+});
+
+test("resolved asks remain Closed questions without being called a person's answer", async () => {
+  const closed = decision({
+    block_id: "closed",
+    heading: "Which transport?",
+    kind: "agent",
+    replaced: true,
+    asks: [askId],
+    text: "Which transport?\n\n- A: Original.\n\nClosed: No need to choose.\n\nKeep <these> exact words.",
+  });
+  const read = spyOn(api, "getIssueDecisions").mockResolvedValue({
+    ...view,
+    decisions: [closed],
+    open_questions: [],
+  });
+  try {
+    renderPanel();
+    const replaced = await screen.findByRole("region", { name: "Replaced" });
+    expect(within(replaced).getByText("Closed question")).toBeDefined();
+    expect(within(replaced).queryByText("A person's decision")).toBeNull();
+    expect(within(replaced).getByTestId("decision-answer").textContent).toBe(
+      "- A: Original.\n\nClosed: No need to choose.\n\nKeep <these> exact words."
+    );
+    expect(
+      within(replaced).getByRole("link", { name: "The ask it answers" }).getAttribute("href")
+    ).toBe(`/issues/CORE-1/asks/${askId}`);
+    expect(within(replaced).queryByRole("button", { name: "Keep" })).toBeNull();
+  } finally {
+    read.mockRestore();
   }
 });

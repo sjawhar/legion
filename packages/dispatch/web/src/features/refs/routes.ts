@@ -86,16 +86,12 @@ export type IssueTab =
   | "activity"
   | "decisions";
 
-/** The slug of an issue's `decisions.md`, the document its Decisions tab is a view of. */
-export const DECISIONS_DOCUMENT_SLUG = "decisions-md";
-
 /** The issue tabs whose whole route is the tab itself: no block, no slug, no id. Each one is
  *  parsed from the segment of its own name, built as `<issue>/<kind>`, shown as `<KEY> <kind>`
  *  and is the tab of its own name, so the chains below hold the five in one arm rather than one
- *  apiece and a sixth tab is this list. The spec, the conversation and the decisions stay out of
- *  it: a spec route carries a block, the conversation is written `log` in a reference and
- *  `conversation` in a path, and the Decisions tab is a view of the issue's `decisions.md`, which
- *  a reference names as that document. */
+ * apiece and a sixth tab is this list. A spec route carries a block, the conversation is
+ * written `log` in a reference and `conversation` in a path, and the Decisions graph view
+ * names its owning issue rather than inventing a document. */
 const PLAIN_ISSUE_TABS = ["verification", "plan", "activity", "children", "artifacts"] as const;
 
 type PlainIssueTab = (typeof PLAIN_ISSUE_TABS)[number];
@@ -516,12 +512,11 @@ function pageRoutes(
   if (route === undefined || (isProjectRoute(route) && route.kind !== "document")) {
     return undefined;
   }
-  // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
-  // whatever its fragment, as the server's `text` and the agent client read the page.
+  // The Decisions graph view belongs to the issue; each decision links its own source node.
   if (route.kind === "decisions") {
     return {
       block: undefined,
-      page: { key: route.key, kind: "artifact", slug: DECISIONS_DOCUMENT_SLUG },
+      page: { key: route.key, kind: "issue" },
     };
   }
   if ("slug" in route && !artifactSlugOnlyPattern.test(route.slug)) {
@@ -616,7 +611,7 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
     return `${issue}/log`;
   }
   if (route.kind === "decisions") {
-    return `${issue}/artifact/${DECISIONS_DOCUMENT_SLUG}`;
+    return issue;
   }
   if (route.kind === "artifact") {
     return `${issue}/artifact/${encodeURIComponent(route.slug)}${

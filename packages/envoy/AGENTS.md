@@ -1301,22 +1301,26 @@ Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 21474
 `404 NOT_FOUND` `no version <N> of <document ref>`.
 `GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current, and a typed block's pointer only while its target has a type the pointer allows (`block_ref_listed`, below the typed block rules).
 
-An issue's decision records are its document `decisions.md` read over that block graph (`internal/dispatch/api/decisions.go`, migration `20261101162254`).
-Each decision is one `##` section of it: its heading block and every block after it up to the next heading of its level or higher, the heading naming the choice, the blocks giving the reason and the options weighed, and each spec block it shaped linked `dispatch://KEY/spec#b-<id>`, which the block index records as a link from the decision's own block to that spec block.
-The section headed exactly `## Replaced` holds replaced decisions as `###` sections, a paragraph that starts `Unsure:` marks a decision unsure, and a person's decision links its answered ask, which is what makes it theirs rather than the agent's.
-A decision's changed version and time are the greatest of its blocks' (`refs.BlockChanges`), and a spec block X linked from decision D by link L is out of date exactly when D's own text changed after it first linked X and X has not changed since D did, both read from the document's text at a version rather than from that changed version:
-D's text at L's `created_version` differs from its text now, and D's text at the version of this document that stood when X last changed differs from it too.
-The changed version cannot answer either, since it is the greatest of the blocks D holds now and so does not move when a block is removed from D or moved into or out of it, where the text changes and every remaining block keeps its version;
-a stored version holds no block id, so each version is cut into its decisions by the rule the block walk cuts the document that stands by (`decisionSums` beside `decisionSections`: a `##` heading outside `## Replaced` and a `###` under it opens a decision, a heading of its own level or higher closes it, `#` included, which opens none, and a deeper heading is text of the decision it stands in), and each decision is named across versions by its heading and how many decisions before it carry that heading, so a document that carries one heading twice - a decision made again beside the replaced one of its name - names each of them, while a renamed heading, and a version that carried fewer decisions of that heading, give that decision no sum there and read as text that differs from the text now, which it is.
-A new decision marks nothing, and neither does the block index's first pass over a document, which gives every block and every pair one version;
-a version this document does not hold and a spec block Dispatch records no change for leave a link as it is, and a spec block whose last change is older than the document's first version is out of date by the first half alone, since every change of the decision came after it.
-`GET /api/v1/issues/{key}/decisions` serves that view - the document's `dispatch://` address (null, with no decisions, when the issue has no `decisions.md`), the issue's open asks whose block is in its spec in the shape every ask read has, and each decision in document order with its links read through `refs.BlockLinks`, the read `GET /api/v1/block-links` already serves.
-`POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` `{text_sha256}` (the `person` scope: a person at a browser, or a credential of theirs that holds it) records that the caller agrees with the decision that heading block opens, as the text they read it at, as one `decision_keeps` row keyed on the block rather than on the person:
-the sum is the decision's own `text_sha256`, which the view serves beside its `text`, and a decision whose text changed since is `409 DECISION_CHANGED` with nothing written, as an answer to an ask reworded since is `409 ASK_EDITED` - a Keep over text nobody read is what Keep exists to prevent - while a body with no sum is `400 INVALID_KEEP`.
-Keep records that the decision has been reviewed and not who reviewed it, so a second person's Keep moves the row, and the row holds that sum beside the version the decision then stood at.
-The sum, not the version, is what the view's `waiting_review` compares - an agent's decision, not replaced, whose text no Keep holds as it stands - since a decision's changed version is the greatest of the blocks it holds now and so does not move when a block is removed from the decision or moved into or out of it, where the text changes and every remaining block keeps its version.
-The document Keep takes is its issue's `decisions.md` resolved as the view resolves it, by slug and then by filename; any other document, and any other block - one that is no decision heading, or a decision under `## Replaced` - is `404 TARGET_NOT_FOUND`.
-It appends `decision.kept` (`{artifact_id, block_id, changed_version}`) on the decision's issue, which wakes nobody (`events.Quiet`): a Keep asks its agent for nothing.
+An issue's decisions are the `decision` and `ask` nodes of its documents (`api/decision_nodes.go`), declared in block schema version 4.
+A person's answered ask is the decision itself: the query reads its question, options, selected labels and answer from that ask row, without an agent restatement.
+A `decision` block is an agent's choice, with `title`, `replaced`, `shaped` (`block[]`, scoped to the same issue's spec), `from_ask` (an ask of the same issue or an ancestor), `decided_by` (only the signed-in writer's own canonical login), `uncertainty` (`low`, `medium` or `high`) and `uncertainty_reason` (plain text: what would change the choice).
+A write that gives `uncertainty_reason` without `uncertainty`, or `uncertainty` on a block whose `decided_by` names a person, is refused by the schema (`pmdoc.validateDecisionUncertainty`): a person's answer is read from their ask row word for word, and an agent never qualifies it.
+The read returns `uncertainty` and `uncertainty_reason` as written, empty where the author recorded none, and `unsure` is true when the node carries a level or its text holds an `Unsure:` paragraph.
+The pointer indexer derives these relations into `block_refs`. Before indexing a version, the document service checks an answered ask's `answered_by` metadata against its authoritative row, including a same-owner copied source. An invalid ask keeps its question but loses answer metadata that no row backs.
+`GET /api/v1/issues/{key}/decisions` retains `{document, open_questions, decisions}`: open document asks oldest first, then decision nodes in document order, the primary document first and other documents by creation time.
+`document` names the first document holding a decision, or is null when none do; each decision's `ref` names its own node.
+Only a `shaped` relation supplies a spec link; prose mentions do not manufacture decisions or shaped relations.
+Each node's `changed_version` and `changed_at` come from its own block-index record.
+A link is stale when the decision's text changed after the relation was written and the shaped passage has not changed since, read from `document_block_texts` by stable node identity.
+The link's `to.pin` also retains the shaped passage's explicit target version, or its text when the relation was written, and says when the passage changed.
+`?artifact=<id>&version=N` reads the historical shaped passages of a document on this issue; a document on another issue is refused.
+The dashboard shows each shaping decision beside the passage itself; historical untyped blocks without stored ids match their recorded text, with every identical candidate shown and explicitly labelled rather than assigned an invented position.
+`GET /api/v1/issues/{key}/decisions-shadow` compares the typed source nodes with the graph projection and reports source/node counts, missing/extra references and the difference count.
+`POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` `{text_sha256}` (the `person` scope: a person at a browser, or a credential of theirs that holds it) records a person's agreement with the actual, current, unreplaced agent decision node in an issue document.
+The sum is the SHA-256 of the decision's served text; text changed since that read is `409 DECISION_CHANGED`, with nothing written, and a missing sum is `400 INVALID_KEEP`.
+Any block that is not such a decision node is `404 TARGET_NOT_FOUND`.
+The sum determines `waiting_review`, not the version; a second person's Keep updates the same `decision_keeps` row, and `decision.kept` wakes nobody.
+`envoy-dispatch convert-decisions` reports the legacy-document conversion without writing; `--apply` moves the choices into native nodes and retires each source while retaining its versions, reviews and resolved conversations (server README, "Converting legacy decisions").
 `GET` and `PUT /api/v1/me/documents/{id}/read` `{version}` are one person's last read version of a document (`user_document_reads`, keyed on `model.CanonicalLogin` as `user_ask_snooze` is), which the Spec tab marks each block changed since; they serve per-person state as `GET /api/v1/me/state` and `PUT /api/v1/me/issues/{key}/state` do, need the `person` scope as those two do, and announce nothing.
 
 A comment and a message are collections of blocks too (migrations 0142-0144, `itemblocks`, `refs/item_blocks.go`).
@@ -1802,13 +1806,14 @@ Parsing mints an omitted id, while live document reads and writes validate each 
 Schema changes are additive: add a type, add a defaulted attribute, add an enum choice, or widen a content rule.
 Tightening content, removing or renaming a type or attribute, or requiring a new attribute requires a document migration and version bump.
 
-The shipped types are `callout`, `ask`, and the three this release adds (`pmdoc/schema/blocks.json`, version 3), each holding `paragraph+`:
-`requirement`, one requirement of an issue's spec, with no attribute of its own;
+The shipped types are `callout`, `ask`, `decision`, `requirement`, `plan_task` and `check` (`pmdoc/schema/blocks.json`, version 4).
+Each carries the optional `block[]` attribute `from`, with `targets: ["ask"]`: document asks only; comments and messages: item 24.
+`requirement` is one requirement of an issue's spec;
 `plan_task`, one task of a plan, with the `block[]` attributes `serves` (the requirements it serves) and `needs` (the tasks of the same plan it needs first);
 and `check`, one thing that must be proved, with `serves`, the enum `surface` (`browser`, `cli`, `api`), the strings `run` and `negative_control`, and the enum `when` (`before_merge`, `after_merge`, `default_branch`, defaulted `before_merge`).
 A document holding them is an ordinary document: the role its name gave it (`verification`, `plan`) says which blocks a reader expects, and nothing refuses a `check` block in another document.
 
-A `block[]` attribute points at blocks; the shipped ones are a plan task's `serves` and `needs` and a check's `serves`.
+A `block[]` attribute points at blocks; the shipped ones include `from`, a decision or ask's `shaped`, a plan task's `serves` and `needs`, and a check's `serves`.
 Its value is the empty string (no pointers) or canonical block references joined by exactly one space, none leading or trailing, no other whitespace and none repeated (`pmdoc.ParseBlockPointerValue`, and the renderer joins them with one space);
 anything else is refused, never normalised.
 A canonical reference is one `text.FormatBlockRef` writes back byte for byte (`text.CanonicalBlockRef`):
@@ -1824,14 +1829,14 @@ not a list item or a table's row or cell); absent or empty, it points at any blo
 Its default is absent or `[]`.
 
 Three rules enforce `targets`.
-An agent's or API write is refused when a pointer it introduces names a block the attribute may not name (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers` from `applyLive`, `SeedText`, and `RebuildDocument` given markdown):
+An agent's or API write is refused when a pointer it introduces names a block the attribute may not name (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers`). Every immutable version checks the exact tree it indexes against the prior version, including browser settlement and standalone named versions.
 a pointer is introduced when the tree before the write holds no pointer with the same typed block id, typed block type, attribute and reference (a new pointer, a changed value, or a block retyped into a type declaring the attribute, whatever the type before declared under that name), and every pointer is when there is no such tree (a new document, a repair of a tree outside the schema, a rebuild whose latest version does not read back).
 `refs.BlockTargets` reads each target as the block index will hold it, with the writing document's own issue and that issue's ancestors (`refs.IssueAncestors`, the server's one recursive `child_of` walk, bounded by the same depth cap as every other issue walk):
-a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), any other from its current `document_blocks` rows, each with its document and that document's issue (one query for all of a write's introduced pointers).
+a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), any other from its current `document_blocks` rows. Ask pointers resolve their real owner from the ask row, not the reference's issue key.
 The write is refused when the pointer names a block no document holds, a block of a type the attribute's targets do not allow, a block of an issue that is neither the writing document's own issue nor an ancestor of it, a block of another document where a project holds the writing document and no issue does, or a block of another document under `needs`, which orders the tasks of one plan and so points only inside its own document.
 The refusal is `400 INVALID_OP` on `attributes` on the edit route and `400 INVALID_MARKDOWN` on every other;
 a pointer the write leaves unchanged is never refused.
-A browser's write and the block-index reconciliation are never refused, and store the pointer as any other.
+A browser's live update is stored before validation. Invalid introduced pointers cannot become a version or graph edge. Historical block-index reconciliation still indexes stored versions without changing them.
 Every block-aware read lists a pointer's edge only while its target has an allowed type:
 each `block_refs` row a pointer writes carries the attribute's targets as `to_types` (null:
 no limit), and the `graph_edges` block arm, `readEdgeRows`' document `?from=` arm and `refs.BlockLinks` list a row only while `block_ref_listed(to_types, to_id)` holds, true when no current `document_blocks` row of the target has a type outside `to_types` (migration 20261101144855).

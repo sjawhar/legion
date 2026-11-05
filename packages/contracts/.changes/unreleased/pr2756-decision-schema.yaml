@@ -1,0 +1,5 @@
+kind: Added
+body: Add schema-v4 decision blocks, typed ask and person relations, spec-scoped shaped links, and historical decision-passage metadata.
+time: 2026-11-04T10:40:00Z
+custom:
+  Issue: pr2756

@@ -27,7 +27,7 @@ import {
 } from "../../theme/classes";
 import { blockFragment } from "../refs/block-reference";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildIssuePath, DECISIONS_DOCUMENT_SLUG, documentItemPath } from "../refs/routes";
+import { buildIssuePath, documentItemPath, parseDispatchReference } from "../refs/routes";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 /** The paragraphs of a decision's markdown below its heading, each marked unsure or not. A
@@ -128,7 +128,7 @@ function ChangeComposer({
   const send = useKeyedWrite({
     inline: true,
     label: () => `Change to ${decision.heading}`,
-    // The decisions document belongs to an issue, and a comment on an issue's document is the
+    // The decision node's document belongs to an issue, and a comment on that document is the
     // issue's own write: the artifact route refuses it, naming the issue route (`send-request.ts`
     // follows the same rule for a thread's replies).
     write: (input: { body: string; quote: string }, bounds) =>
@@ -190,6 +190,20 @@ function ChangeComposer({
   );
 }
 
+function decisionDocument(
+  artifacts: readonly Artifact[],
+  decision: Decision
+): Artifact | undefined {
+  const route = parseDispatchReference(decision.ref);
+  return artifacts.find(
+    (artifact) =>
+      artifact.kind === "doc" &&
+      (route?.kind === "spec"
+        ? artifact.primary
+        : route?.kind === "artifact" && artifact.slug === route.slug)
+  );
+}
+
 function DecisionCard({
   actions,
   decision,
@@ -201,22 +215,54 @@ function DecisionCard({
   issueKey: string;
   spec: Artifact | undefined;
 }): ReactNode {
+  const closedQuestion = decision.replaced && decision.asks.length > 0;
   return (
     <li className={`space-y-2 rounded-lg border p-3 ${card}`} data-decision={decision.block_id}>
       <h3 className={`text-[15px] font-medium ${textPrimaryOnSurface}`}>{decision.heading}</h3>
-      {decisionParagraphs(decision.text).map((paragraph, index) =>
-        paragraph.unsure ? (
-          <div
-            className={`border-l-2 pl-2 ${decisionUnsureAccent}`}
-            data-testid="decision-unsure"
-            // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
-            key={index}
+      <p className={`text-xs ${textSecondaryOnSurface}`}>
+        {closedQuestion
+          ? "Closed question"
+          : decision.kind === "person"
+            ? "A person's decision"
+            : "Agent's decision"}
+        {decision.uncertainty === "" ? null : (
+          <span
+            className={`ml-2 font-semibold ${decisionUnsureAccent}`}
+            data-decision-uncertainty={decision.uncertainty}
           >
-            <MarkdownBody markdown={paragraph.markdown} />
-          </div>
-        ) : (
-          // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
-          <MarkdownBody key={index} markdown={paragraph.markdown} />
+            {`Unsure: ${decision.uncertainty}`}
+          </span>
+        )}
+      </p>
+      {decision.uncertainty_reason === "" ? null : (
+        <div
+          className={`border-l-2 pl-2 ${decisionUnsureAccent}`}
+          data-testid="decision-uncertainty-reason"
+        >
+          {decision.uncertainty_reason}
+        </div>
+      )}
+      {decision.kind === "person" || closedQuestion ? (
+        <div className="whitespace-pre-wrap" data-testid="decision-answer">
+          {decision.text.startsWith(decision.heading)
+            ? decision.text.slice(decision.heading.length).replace(/^\n\n/u, "")
+            : decision.text}
+        </div>
+      ) : (
+        decisionParagraphs(decision.text).map((paragraph, index) =>
+          paragraph.unsure ? (
+            <div
+              className={`border-l-2 pl-2 ${decisionUnsureAccent}`}
+              data-testid="decision-unsure"
+              // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
+              key={index}
+            >
+              <MarkdownBody markdown={paragraph.markdown} />
+            </div>
+          ) : (
+            // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
+            <MarkdownBody key={index} markdown={paragraph.markdown} />
+          )
         )
       )}
       {decision.asks.map((ask) => (
@@ -382,9 +428,6 @@ export function DecisionsPanel({
     );
   }
   const spec = artifacts.find((artifact) => artifact.primary && artifact.kind === "doc");
-  const documentId = artifacts.find(
-    (artifact) => artifact.slug === DECISIONS_DOCUMENT_SLUG && artifact.kind === "doc"
-  )?.id;
   const { decisions, open_questions: questions } = view.data;
   const waiting = decisions.filter((decision) => decision.waiting_review);
   // Yours: the ones a person decided, and the agent's that the reader kept — a Keep takes a
@@ -395,8 +438,10 @@ export function DecisionsPanel({
   const replaced = decisions.filter((decision) => decision.replaced);
   return (
     <div className="space-y-4">
-      {view.data.document === null ? (
-        <p className={`text-sm ${textMutedOnSurface}`}>This issue has no decisions.md yet.</p>
+      {decisions.length === 0 && questions.length === 0 ? (
+        <p className={`text-sm ${textMutedOnSurface}`}>
+          No decision nodes in this issue's documents.
+        </p>
       ) : null}
       <Section empty="No open questions." title="Open questions">
         {questions.map((ask) => (
@@ -407,32 +452,22 @@ export function DecisionsPanel({
         {waiting.map((decision) => (
           <WaitingDecision
             decision={decision}
-            documentId={documentId}
+            documentId={decisionDocument(artifacts, decision)?.id}
             isClosed={isClosed}
             issueKey={issueKey}
-            key={decision.block_id}
+            key={decision.ref}
             spec={spec}
           />
         ))}
       </Section>
       <Section empty="No decisions of yours." title="Your decisions">
         {mine.map((decision) => (
-          <DecisionCard
-            decision={decision}
-            issueKey={issueKey}
-            key={decision.block_id}
-            spec={spec}
-          />
+          <DecisionCard decision={decision} issueKey={issueKey} key={decision.ref} spec={spec} />
         ))}
       </Section>
       <Section empty="No replaced decisions." title="Replaced">
         {replaced.map((decision) => (
-          <DecisionCard
-            decision={decision}
-            issueKey={issueKey}
-            key={decision.block_id}
-            spec={spec}
-          />
+          <DecisionCard decision={decision} issueKey={issueKey} key={decision.ref} spec={spec} />
         ))}
       </Section>
     </div>

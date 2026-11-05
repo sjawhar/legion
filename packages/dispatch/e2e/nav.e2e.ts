@@ -125,14 +125,14 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
     );
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
 
-    // Decisions is the last tab, and Activity before it has its own route.
+    // Activity is the last tab and has its own route; Decisions is the first.
     await page.keyboard.press("End");
-    await expect(page.getByRole("tab", { name: "Decisions" })).toBeFocused();
-    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/decisions$`));
-    await page.keyboard.press("ArrowLeft");
     await expect(page.getByRole("tab", { name: "Activity" })).toBeFocused();
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/activity$`));
     await expect(page.getByRole("list", { name: "Issue activity" })).toBeVisible();
+    await page.keyboard.press("Home");
+    await expect(page.getByRole("tab", { name: "Decisions" })).toBeFocused();
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/decisions$`));
 
     // A read the server answers 404 is asked again twice, QUERY_RETRY_DELAY_MS apart
     // (web/src/api/query-client.ts), before the page says the issue is missing: the clock runs

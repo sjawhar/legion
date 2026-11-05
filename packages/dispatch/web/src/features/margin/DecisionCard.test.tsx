@@ -16,10 +16,12 @@ function item(decision: Partial<Decision>): DecisionMarginItem {
     kept: null,
     kind: "agent",
     links: [],
-    ref: "dispatch://CORE-1/artifact/decisions-md#b-d-1",
+    ref: "dispatch://CORE-1/spec#b-d-1",
     replaced: false,
     text: "A table keeps them through a restart.",
     text_sha256: "sum-d-1",
+    uncertainty: "",
+    uncertainty_reason: "",
     unsure: false,
     waiting_review: true,
     ...decision,
@@ -40,7 +42,7 @@ function renderCard(decision: Partial<Decision>, onSelect: (id: string) => void 
   );
 }
 
-test("a decision card names the decision, who made it, and opens it in decisions.md", async () => {
+test("a decision card names the decision, who made it, and opens its source node in the spec", async () => {
   const view = renderCard({});
   try {
     const card = screen.getByRole("article", { name: "Decision: Store notices in a table" });
@@ -49,7 +51,7 @@ test("a decision card names the decision, who made it, and opens it in decisions
     expect(screen.getByText("Agent's decision")).toBeDefined();
     expect(await screen.findByText("A table keeps them through a restart.")).toBeDefined();
     const link = screen.getByRole("link", { name: "Store notices in a table" });
-    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/decisions-md#b-d-1");
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/spec#b-d-1");
   } finally {
     view.unmount();
   }
@@ -62,6 +64,15 @@ test("an unsure decision is drawn in the unsure colour and says so; a person's s
     expect(card.getAttribute("data-decision-unsure")).toBe("true");
     expect(screen.getByText("Unsure")).toBeDefined();
     expect(screen.getByText("A person's decision")).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a decision an agent made alone names how sure it is", () => {
+  const view = renderCard({ uncertainty: "high", unsure: true });
+  try {
+    expect(screen.getByText("Unsure: high")).toBeDefined();
   } finally {
     view.unmount();
   }

@@ -17,9 +17,8 @@ import { buildReferencePath, parseDispatchReference } from "../refs/routes";
 import { regionOrigin } from "./ThreadList";
 import type { DecisionMarginItem, MarkPlacement } from "./useMarginItems";
 
-/** One decision beside a spec block it shaped: whose decision it is, whether its maker was
- *  unsure, its heading as a link to it in `decisions.md`, and the head of its text. Selecting the
- *  card lights up the block, as selecting an anchored comment lights up its text. */
+/** One decision beside a spec block it shaped: whose choice it is, its uncertainty, and the
+ * source node linked by its own reference. Selecting the card lights up the shaped block. */
 export function DecisionCard({
   hovered = false,
   item,
@@ -61,7 +60,9 @@ export function DecisionCard({
       <p className={`flex flex-wrap gap-x-2 text-xs ${textMutedOnSelectedCard}`}>
         <span>{decision.kind === "person" ? "A person's decision" : "Agent's decision"}</span>
         {decision.unsure ? (
-          <span className={`font-semibold ${decisionUnsureText}`}>Unsure</span>
+          <span className={`font-semibold ${decisionUnsureText}`}>
+            {decision.uncertainty === "" ? "Unsure" : `Unsure: ${decision.uncertainty}`}
+          </span>
         ) : null}
       </p>
       <h3 className={`mt-1 font-medium ${textPrimaryOnSurface}`}>

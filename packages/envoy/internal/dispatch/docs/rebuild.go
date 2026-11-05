@@ -109,6 +109,9 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
+	if err := refuseAgentDecisionChanges(ctx, tx, artifactID, actor, tree); err != nil {
+		return RebuildReport{}, VersionResult{}, err
+	}
 	// A closed issue's document shows its asks as the close left them, and the tree read from the
 	// latest version need not: settlement, which versions a document, runs on no closed issue, so
 	// that version can predate the close, and the close's live writes to the document either never
@@ -185,8 +188,9 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, err
 	}
 	written, err := s.writeVersionTx(ctx, tx, artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor, &versionWrite{
-		authors: actorSlice(capture.authors),
-		capture: &capture,
+		authors:       actorSlice(capture.authors),
+		capture:       &capture,
+		priorMarkdown: latest.markdown,
 	})
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err

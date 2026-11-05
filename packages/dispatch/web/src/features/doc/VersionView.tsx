@@ -1,16 +1,25 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
-import type { Ask, BlockSchema } from "../../api/types";
+import type { Ask, BlockSchema, Decision } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { watchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
 import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
+import { setDecisionNotes } from "./decision-notes";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
@@ -18,10 +27,13 @@ import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { DocumentRuntime } from "./runtime";
 import type { AskBlockHost } from "./typed-block-drawing";
 
+const NO_DECISIONS: readonly Decision[] = [];
+
 export interface VersionViewProps {
   artifactId: string;
   /** The document's block-indexed asks, so a historical decision block still names its asker. */
   asks: readonly Ask[];
+  decisions?: readonly Decision[];
   blockSchema: BlockSchema | undefined;
   /** The markdown of the version this one is marked against - the last approved one - with which
    *  the view draws what changed since it: the words each changed block gained, and each block
@@ -40,11 +52,37 @@ export function VersionView({
   blockSchema,
   changeBaseline,
   createdAt,
+  decisions = NO_DECISIONS,
   highlight,
   owner,
   version,
 }: VersionViewProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<EditorHandle | undefined>(undefined);
+  const decisionsRef = useRef(decisions);
+  decisionsRef.current = decisions;
+  const [notesError, setNotesError] = useState<string>();
+  const renderDecisionNotes = useCallback(
+    (editor: EditorHandle, nodes: readonly Decision[]) => {
+      setDecisionNotes(editor.view, artifactId, nodes, true);
+      if (nodes.length === 0) return;
+      void warmMarkdownRenderer()
+        .then(() => {
+          if (editorRef.current === editor && decisionsRef.current === nodes) {
+            setDecisionNotes(editor.view, artifactId, nodes, true);
+            setNotesError(undefined);
+          }
+        })
+        .catch((error: unknown) => {
+          if (editorRef.current === editor && decisionsRef.current === nodes)
+            setNotesError(error instanceof Error ? error.message : String(error));
+        });
+    },
+    [artifactId]
+  );
+  useEffect(() => {
+    if (editorRef.current !== undefined) renderDecisionNotes(editorRef.current, decisions);
+  }, [decisions, renderDecisionNotes]);
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
   const [highlightMissing, setHighlightMissing] = useState(false);
   const [renderError, setRenderError] = useState<string | undefined>(undefined);
@@ -119,6 +157,8 @@ export function VersionView({
       const embedded =
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);
+      editorRef.current = editor;
+      renderDecisionNotes(editor, decisionsRef.current);
       setHighlightMissing(highlighted !== undefined && embedded === undefined);
       if (embedded !== undefined && highlighted !== undefined) {
         editor.focusMark(highlighted.id);
@@ -146,6 +186,7 @@ export function VersionView({
 
     return () => {
       mounted = false;
+      editorRef.current = undefined;
       disposeRefocus();
       handle?.destroy();
       ydoc?.destroy();
@@ -157,6 +198,7 @@ export function VersionView({
     highlighted,
     markdown,
     queryClient,
+    renderDecisionNotes,
     userQuery.data,
   ]);
 
@@ -183,6 +225,9 @@ export function VersionView({
       ) : null}
       {renderError === undefined ? null : (
         <p role="alert">This version could not be rendered: {renderError}</p>
+      )}
+      {notesError === undefined ? null : (
+        <p role="alert">Could not load historical decision relationships: {notesError}</p>
       )}
       <article aria-label="Document" className="dispatch-doc" data-read-only="true">
         <div ref={root} />

@@ -41,10 +41,12 @@ function decision(blockId: string, links: DecisionLink[], replaced = false): Dec
     kept: null,
     kind: "agent",
     links,
-    ref: `dispatch://CORE-1/artifact/decisions-md#b-${blockId}`,
+    ref: `dispatch://CORE-1/spec#b-${blockId}`,
     replaced,
     text: "We decided.",
     text_sha256: `sum-${blockId}`,
+    uncertainty: "",
+    uncertainty_reason: "",
     unsure: false,
     waiting_review: true,
   };
@@ -55,7 +57,7 @@ const decisions: IssueDecisions = {
     decision("d-1", [link("p-plan", true), link("p-scope", false)]),
     decision("d-2", [link("p-plan", true), link("p-rollout", true)], true),
   ],
-  document: "dispatch://CORE-1/artifact/decisions-md",
+  document: "dispatch://CORE-1/spec",
   open_questions: [],
 };
 

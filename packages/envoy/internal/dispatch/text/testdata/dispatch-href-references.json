@@ -13,11 +13,11 @@
   },
   {
     "href": "/issues/CORE-1/decisions",
-    "ref": "dispatch://CORE-1/artifact/decisions-md"
+    "ref": "dispatch://CORE-1"
   },
   {
     "href": "/issues/CORE-1/decisions#b-ship-it",
-    "ref": "dispatch://CORE-1/artifact/decisions-md"
+    "ref": "dispatch://CORE-1"
   },
   {
     "href": "/issues/CORE-1/comments/11111111-1111-4111-8111-111111111111",

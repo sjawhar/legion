@@ -707,7 +707,7 @@
         }
       ]
     },
-    "yjs_update_v1_b64": "ASUBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIhV2hpY2ggdHJhbnNwb3J0IHNob3VsZCB3ZSBleHBvc2U/KAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDC2J1bGxldF9saXN0BwABJQMJbGlzdF9pdGVtBwABJgMJcGFyYWdyYXBoBwABJwYEAAEoI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJwdibG9ja0lkAXcIYi0wMDAwMDQoAAEmBWxhYmVsAXcD4oCiKAABJghsaXN0VHlwZQF3BmJ1bGxldCgAASYGc3ByZWFkAXkoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwM4cBJgMJbGlzdF9pdGVtBwABUQMJcGFyYWdyYXBoBwABUgYEAAFTFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUgdibG9ja0lkAXcIYi0wMDAwMDYoAAFRBWxhYmVsAXcD4oCiKAABUQhsaXN0VHlwZQF3BmJ1bGxldCgAAVEGc3ByZWFkAXkoAAFRB2Jsb2NrSWQBdwhiLTAwMDAwNSgAASUGc3ByZWFkAXkoAAElB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQAHdXJnZW5jeQF3BGhpZ2goAAEACG11bHRpcGxlAXkoAAEABXN0YXRlAXcIYW5zd2VyZWQoAAEAC2Fuc3dlcmVkX2J5AXcFYWxpY2UoAAEAC2Fuc3dlcmVkX2F0AXcUMjAyNi0wOS0xMlQxMzoyMDowMFooAAEACHNlbGVjdGVkAXUBdwRSRVNUKAABAAZhbnN3ZXIBdxBTaGlwIFJFU1QgZmlyc3QuKAABAAdpbnZhbGlkAX8oAAEAC2NvcGllZF9mcm9tAX8oAAEAFGNvcGllZF9mcm9tX2RvY3VtZW50AX8oAAEAB2Jsb2NrSWQBdwVhc2stMQA=",
+    "yjs_update_v1_b64": "ASYBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIhV2hpY2ggdHJhbnNwb3J0IHNob3VsZCB3ZSBleHBvc2U/KAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDC2J1bGxldF9saXN0BwABJQMJbGlzdF9pdGVtBwABJgMJcGFyYWdyYXBoBwABJwYEAAEoI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJwdibG9ja0lkAXcIYi0wMDAwMDQoAAEmBWxhYmVsAXcD4oCiKAABJghsaXN0VHlwZQF3BmJ1bGxldCgAASYGc3ByZWFkAXkoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwM4cBJgMJbGlzdF9pdGVtBwABUQMJcGFyYWdyYXBoBwABUgYEAAFTFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUgdibG9ja0lkAXcIYi0wMDAwMDYoAAFRBWxhYmVsAXcD4oCiKAABUQhsaXN0VHlwZQF3BmJ1bGxldCgAAVEGc3ByZWFkAXkoAAFRB2Jsb2NrSWQBdwhiLTAwMDAwNSgAASUGc3ByZWFkAXkoAAElB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQAGc2hhcGVkAX8oAAEAB3VyZ2VuY3kBdwRoaWdoKAABAAhtdWx0aXBsZQF5KAABAAVzdGF0ZQF3CGFuc3dlcmVkKAABAAthbnN3ZXJlZF9ieQF3BWFsaWNlKAABAAthbnN3ZXJlZF9hdAF3FDIwMjYtMDktMTJUMTM6MjA6MDBaKAABAAhzZWxlY3RlZAF1AXcEUkVTVCgAAQAGYW5zd2VyAXcQU2hpcCBSRVNUIGZpcnN0LigAAQAHaW52YWxpZAF/KAABAAtjb3BpZWRfZnJvbQF/KAABABRjb3BpZWRfZnJvbV9kb2N1bWVudAF/KAABAAdibG9ja0lkAXcFYXNrLTEA",
     "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-09-12T13:20:00Z\" selected=\"[&#x22;REST&#x22;]\" answer=\"Ship REST first.\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
   },
   {
@@ -798,7 +798,7 @@
         }
       ]
     },
-    "yjs_update_v1_b64": "ASUBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIhV2hpY2ggdHJhbnNwb3J0IHNob3VsZCB3ZSBleHBvc2U/KAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDC2J1bGxldF9saXN0BwABJQMJbGlzdF9pdGVtBwABJgMJcGFyYWdyYXBoBwABJwYEAAEoI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJwdibG9ja0lkAXcIYi0wMDAwMDQoAAEmBWxhYmVsAXcD4oCiKAABJghsaXN0VHlwZQF3BmJ1bGxldCgAASYGc3ByZWFkAXkoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwM4cBJgMJbGlzdF9pdGVtBwABUQMJcGFyYWdyYXBoBwABUgYEAAFTFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUgdibG9ja0lkAXcIYi0wMDAwMDYoAAFRBWxhYmVsAXcD4oCiKAABUQhsaXN0VHlwZQF3BmJ1bGxldCgAAVEGc3ByZWFkAXkoAAFRB2Jsb2NrSWQBdwhiLTAwMDAwNSgAASUGc3ByZWFkAXkoAAElB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQAHdXJnZW5jeQF3BGhpZ2goAAEACG11bHRpcGxlAXkoAAEABXN0YXRlAXcEb3BlbigAAQALYW5zd2VyZWRfYnkBfygAAQALYW5zd2VyZWRfYXQBfygAAQAIc2VsZWN0ZWQBfygAAQAGYW5zd2VyAX8oAAEAB2ludmFsaWQBfygAAQALY29waWVkX2Zyb20BfygAAQAUY29waWVkX2Zyb21fZG9jdW1lbnQBfygAAQAHYmxvY2tJZAF3BWFzay0xAA==",
+    "yjs_update_v1_b64": "ASYBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIhV2hpY2ggdHJhbnNwb3J0IHNob3VsZCB3ZSBleHBvc2U/KAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDC2J1bGxldF9saXN0BwABJQMJbGlzdF9pdGVtBwABJgMJcGFyYWdyYXBoBwABJwYEAAEoI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJwdibG9ja0lkAXcIYi0wMDAwMDQoAAEmBWxhYmVsAXcD4oCiKAABJghsaXN0VHlwZQF3BmJ1bGxldCgAASYGc3ByZWFkAXkoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwM4cBJgMJbGlzdF9pdGVtBwABUQMJcGFyYWdyYXBoBwABUgYEAAFTFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUgdibG9ja0lkAXcIYi0wMDAwMDYoAAFRBWxhYmVsAXcD4oCiKAABUQhsaXN0VHlwZQF3BmJ1bGxldCgAAVEGc3ByZWFkAXkoAAFRB2Jsb2NrSWQBdwhiLTAwMDAwNSgAASUGc3ByZWFkAXkoAAElB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQAGc2hhcGVkAX8oAAEAB3VyZ2VuY3kBdwRoaWdoKAABAAhtdWx0aXBsZQF5KAABAAVzdGF0ZQF3BG9wZW4oAAEAC2Fuc3dlcmVkX2J5AX8oAAEAC2Fuc3dlcmVkX2F0AX8oAAEACHNlbGVjdGVkAX8oAAEABmFuc3dlcgF/KAABAAdpbnZhbGlkAX8oAAEAC2NvcGllZF9mcm9tAX8oAAEAFGNvcGllZF9mcm9tX2RvY3VtZW50AX8oAAEAB2Jsb2NrSWQBdwVhc2stMQA=",
     "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
   },
   {
@@ -5790,6 +5790,114 @@
     },
     "yjs_update_v1_b64": "AUQBAAcBC3Byb3NlbWlycm9yAwpjb2RlX2Jsb2NrBwABAAYEAAEBEWZtdC5QcmludGxuKCJoaSIpKAABAAhsYW5ndWFnZQF3AmdvKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmNvZGVfYmxvY2sHAAEVBgQAARYFcGxhaW4oAAEVB2Jsb2NrSWQBdwhiLTAwMDAwMocBFQMKY29kZV9ibG9jawcAAR0GBAABHgZpbmRlbnQoAAEdB2Jsb2NrSWQBdwhiLTAwMDAwM4cBHQMJcGFyYWdyYXBoBwABJgYEAAEnBVRleHQuKAABJgdibG9ja0lkAXcIYi0wMDAwMDSHASYDDG9yZGVyZWRfbGlzdAcAAS4DCWxpc3RfaXRlbQcAAS8DCXBhcmFncmFwaAcAATAGBAABMSxBbiBpdGVtIGhvbGRpbmcgaXRzIGNvbnRlbnQgZml2ZSBjb2x1bW5zIGluLigAATAHYmxvY2tJZAF3CGItMDAwMDA3KAABLwVsYWJlbAF3A+KAoigAAS8IbGlzdFR5cGUBdwZidWxsZXQoAAEvBnNwcmVhZAF5KAABLwdibG9ja0lkAXcIYi0wMDAwMDYoAAEuBW9yZGVyAX2kASgAAS4Gc3ByZWFkAXkoAAEuB2Jsb2NrSWQBdwhiLTAwMDAwNYcBLgMKY29kZV9ibG9jawcAAWYGBAABZxlvbmUgbGluZSBvZiBjb2RlIGFmdGVyIGl0KAABZgdibG9ja0lkAXcIYi0wMDAwMDiHAWYDCXBhcmFncmFwaAcAAYIBBgQAAYMBQ0luZGVudGVkIGNvZGUgYWZ0ZXIgYSBxdW90ZSwgYSBibGFuayBsaW5lIGJldHdlZW4gb3Igb25lIGxpbmUgbG9uZzooAAGCAQdibG9ja0lkAXcIYi0wMDAwMDmHAYIBAwpibG9ja3F1b3RlBwAByAEDB2hlYWRpbmcHAAHJAQYEAAHKAQFoKAAByQECaWQBdwAoAAHJAQVsZXZlbAF9ASgAAckBB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAcgBB2Jsb2NrSWQBdwhiLTAwMDAxMIcByAEDCmNvZGVfYmxvY2sHAAHQAQYEAAHRAQNhCmIoAAHQAQdibG9ja0lkAXcIYi0wMDAwMTKHAdABAwtidWxsZXRfbGlzdAcAAdYBAwlsaXN0X2l0ZW0HAAHXAQMJcGFyYWdyYXBoKAAB2AEHYmxvY2tJZAF3CGItMDAwMDE1hwHYAQMKYmxvY2txdW90ZQcAAdoBAwlwYXJhZ3JhcGgoAAHbAQdibG9ja0lkAXcIYi0wMDAwMTcoAAHaAQdibG9ja0lkAXcIYi0wMDAwMTaHAdoBAwpjb2RlX2Jsb2NrBwAB3gEGBAAB3wEIb25lIGxpbmUoAAHeAQdibG9ja0lkAXcIYi0wMDAwMTgoAAHXAQVsYWJlbAF3A+KAoigAAdcBCGxpc3RUeXBlAXcGYnVsbGV0KAAB1wEGc3ByZWFkAXkoAAHXAQdibG9ja0lkAXcIYi0wMDAwMTQoAAHWAQZzcHJlYWQBeSgAAdYBB2Jsb2NrSWQBdwhiLTAwMDAxMwA=",
     "rendered_by_milkdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n```\nindent\n```\n\nText.\n\n100. An item holding its content five columns in.\n\n```\none line of code after it\n```\n\nIndented code after a quote, a blank line between or one line long:\n\n> # h\n\n```\na\nb\n```\n\n*\n  >\n  ```\n  one line\n  ```\n"
+  },
+  {
+    "name": "decision",
+    "markdown": "# Decision nodes\n\n::::decision{#one-source title=\"Keep one source\" shaped=\"dispatch://CORE-1/spec#b-rule@v1\" from_ask=\"dispatch://CORE-1/ask/a1\" decided_by=\"alice\"}\nUse the original row, not a copied answer.\n\n:::callout{#why kind=\"note\" title=\"Why\"}\nRelations stay on the decision node when it moves.\n:::\n\nUnsure: a source that cannot retain identity would change this choice.\n::::\n\n:::decision{#old-file title=\"Keep a separate file\" replaced=\"true\"}\nThe file has been replaced by native nodes.\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Decision nodes"
+            }
+          ]
+        },
+        {
+          "type": "decision",
+          "attrs": {
+            "title": "Keep one source",
+            "replaced": false,
+            "shaped": [
+              "dispatch://CORE-1/spec#b-rule@v1"
+            ],
+            "from_ask": "dispatch://CORE-1/ask/a1",
+            "decided_by": "alice",
+            "blockId": "one-source"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Use the original row, not a copied answer."
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "Why",
+                "blockId": "why"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Relations stay on the decision node when it moves."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Unsure: a source that cannot retain identity would change this choice."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "decision",
+          "attrs": {
+            "title": "Keep a separate file",
+            "replaced": true,
+            "blockId": "old-file"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The file has been replaced by native nodes."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ASgBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwABAAYEAAEBDkRlY2lzaW9uIG5vZGVzKAABAAJpZAF3ACgAAQAFbGV2ZWwBfQEoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMIZGVjaXNpb24HAAETAwlwYXJhZ3JhcGgHAAEUBgQAARUqVXNlIHRoZSBvcmlnaW5hbCByb3csIG5vdCBhIGNvcGllZCBhbnN3ZXIuKAABFAdibG9ja0lkAXcIYi0wMDAwMDKHARQDB2NhbGxvdXQHAAFBAwlwYXJhZ3JhcGgHAAFCBgQAAUMyUmVsYXRpb25zIHN0YXkgb24gdGhlIGRlY2lzaW9uIG5vZGUgd2hlbiBpdCBtb3Zlcy4oAAFCB2Jsb2NrSWQBdwhiLTAwMDAwMygAAUEEa2luZAF3BG5vdGUoAAFBBXRpdGxlAXcDV2h5KAABQQdibG9ja0lkAXcDd2h5hwFBAwlwYXJhZ3JhcGgHAAF6BgQAAXtGVW5zdXJlOiBhIHNvdXJjZSB0aGF0IGNhbm5vdCByZXRhaW4gaWRlbnRpdHkgd291bGQgY2hhbmdlIHRoaXMgY2hvaWNlLigAAXoHYmxvY2tJZAF3CGItMDAwMDA0KAABEwV0aXRsZQF3D0tlZXAgb25lIHNvdXJjZSgAARMIcmVwbGFjZWQBeSgAARMGc2hhcGVkAXUBdyBkaXNwYXRjaDovL0NPUkUtMS9zcGVjI2ItcnVsZUB2MSgAARMIZnJvbV9hc2sBdxhkaXNwYXRjaDovL0NPUkUtMS9hc2svYTEoAAETCmRlY2lkZWRfYnkBdwVhbGljZSgAARMHYmxvY2tJZAF3Cm9uZS1zb3VyY2WHARMDCGRlY2lzaW9uBwAByQEDCXBhcmFncmFwaAcAAcoBBgQAAcsBK1RoZSBmaWxlIGhhcyBiZWVuIHJlcGxhY2VkIGJ5IG5hdGl2ZSBub2Rlcy4oAAHKAQdibG9ja0lkAXcIYi0wMDAwMDUoAAHJAQV0aXRsZQF3FEtlZXAgYSBzZXBhcmF0ZSBmaWxlKAAByQEIcmVwbGFjZWQBeCgAAckBBnNoYXBlZAF/KAAByQEIZnJvbV9hc2sBfygAAckBCmRlY2lkZWRfYnkBfygAAckBB2Jsb2NrSWQBdwhvbGQtZmlsZQA=",
+    "rendered_by_milkdown": "# Decision nodes\n\n::::decision{#one-source title=\"Keep one source\" replaced=\"false\" shaped=\"dispatch://CORE-1/spec#b-rule@v1\" from_ask=\"dispatch://CORE-1/ask/a1\" decided_by=\"alice\"}\nUse the original row, not a copied answer.\n\n:::callout{#why kind=\"note\" title=\"Why\"}\nRelations stay on the decision node when it moves.\n:::\n\nUnsure: a source that cannot retain identity would change this choice.\n::::\n\n:::decision{#old-file title=\"Keep a separate file\" replaced=\"true\"}\nThe file has been replaced by native nodes.\n:::\n"
   },
   {
     "name": "definition-callout-holding-an-unclosed-fence",

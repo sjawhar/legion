@@ -155,7 +155,7 @@ Which transport?
 		t.Fatalf("project decision_blocks = %d err=%v", projectCount, err)
 	}
 	issueUpload := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+with.Key+"/artifacts", map[string]string{
-		"name": "decisions.md", "content": withBlocks,
+		"name": "choices.md", "content": withBlocks,
 	}, "alice")
 	issueUploadAdvice := adviceFromResponse(t, issueUpload.Code, issueUpload.Body.String())
 	if issueUploadAdvice.DecisionBlocks == nil || *issueUploadAdvice.DecisionBlocks != 2 {

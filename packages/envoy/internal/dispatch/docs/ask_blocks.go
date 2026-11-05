@@ -275,8 +275,12 @@ func (s *Service) reconcileAskBlocks(
 	actor := credit.actor
 	var reconciled settlementReconciliation
 	for _, invalid := range invalidBlocks {
+		ask, exists := rows[invalid.id]
+		if !exists {
+			ask.State = "open"
+		}
 		delete(rows, invalid.id)
-		if reconciled.repair(invalid.node, invalid.id, askInvalidAttribute(invalid.reason.Error())) {
+		if reconciled.repair(invalid.node, invalid.id, invalidAskAttributes(ask, invalid.reason.Error())) {
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner,
 				artifactID,
@@ -971,10 +975,16 @@ func setAskInvalidAttribute(node *pmdoc.Node, reason string) bool {
 	return true
 }
 
-// askInvalidAttribute is setAskInvalidAttribute for reason, for a repair to make again on another
-// tree (settlementReconciliation.repair).
-func askInvalidAttribute(reason string) func(*pmdoc.Node) bool {
-	return func(node *pmdoc.Node) bool { return setAskInvalidAttribute(node, reason) }
+// invalidAskAttributes keeps even an unreadable ask's answer metadata tied to its row. With no
+// row it is open, never a browser's claim that someone answered it. The invalid marker survives.
+func invalidAskAttributes(ask model.Ask, reason string) func(*pmdoc.Node) bool {
+	return func(node *pmdoc.Node) bool {
+		invalid, _ := node.Attrs["invalid"].(string)
+		delete(node.Attrs, "invalid")
+		changed, _ := setAskServerAttributes(node, ask, "", false)
+		setAskInvalidAttribute(node, reason)
+		return changed || invalid != reason
+	}
 }
 
 func documentAskEvent(owner artifactOwner, artifactID, eventType string, actor model.Actor, payload any) model.Event {

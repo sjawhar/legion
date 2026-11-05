@@ -81,11 +81,12 @@
       }
     },
     "BlockAttributeScope": {
-      "description": "BlockAttributeScope limits where a `block[]` attribute may point. `document` points only at a block of the document holding it: a plan task's `needs` orders the tasks of one plan, so it names a task of its own document and never another plan's. An attribute declaring no scope points at a block of its document's own issue or of any issue above it, which every pointer is held to anyway. It is a server rule, which the server checks on a write it accepts (pmdoc's CheckBlockPointers), not something an editor draws, so declaring it leaves the schema version alone.",
+      "description": "BlockAttributeScope limits a block[] relation's target document. document means the writing document itself. spec means the primary document of the writing issue. With no scope, a pointer may name blocks of its own issue or ancestors. The server enforces scope on writes; it does not change the JSON value's format.",
       "type": "string",
-      "enum": ["document"],
+      "enum": ["document", "spec"],
       "x-go-constants": {
-        "document": "BlockAttributeScopeDocument"
+        "document": "BlockAttributeScopeDocument",
+        "spec": "BlockAttributeScopeSpec"
       }
     },
     "BlockContentRule": {
@@ -101,13 +102,25 @@
     "BlockAttributeKind": {
       "description": "BlockAttributeKind is the kind of value a typed block attribute holds. A `block[]` attribute points at blocks: canonical block references (parseBlockPointerValue in @legion/contracts' dispatch-block-ref.ts), each making an edge of the attribute's name.",
       "type": "string",
-      "enum": ["string", "bool", "enum", "string[]", "block[]", "actor", "timestamp"],
+      "enum": [
+        "string",
+        "bool",
+        "enum",
+        "string[]",
+        "block[]",
+        "ask",
+        "person",
+        "actor",
+        "timestamp"
+      ],
       "x-go-constants": {
         "string": "BlockAttributeString",
         "bool": "BlockAttributeBool",
         "enum": "BlockAttributeEnum",
         "string[]": "BlockAttributeStringList",
         "block[]": "BlockAttributeBlockList",
+        "ask": "BlockAttributeAsk",
+        "person": "BlockAttributePerson",
         "actor": "BlockAttributeActor",
         "timestamp": "BlockAttributeTimestamp"
       }
