@@ -406,7 +406,7 @@ test("the forward-merge re-check searches the new head for each earlier finding'
 // (dispatch://INFRA-206). The role prompts carry the rest of R4; roles_test.go pins those.
 test("a planner waits on an open decision instead of completing around it", () => {
   expect(collapsed(path.join(staged, "legion-worker", "SKILL.md"))).toContain(
-    'A planner is the one exception to "otherwise proceed": a decision the plan itself needs waits, with a WAITING line naming it'
+    "a planner on a decision the plan itself needs, because a plan completed around an open decision carries that gap into every later phase"
   );
 });
 
