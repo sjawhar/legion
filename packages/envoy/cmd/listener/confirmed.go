@@ -201,7 +201,17 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 // not kept: writeRoleHolderError's 404 (unclaimed or holder_lapsed), which the Legion daemon
 // reads as notify.ErrNoHolder, recorded role_unclaimed or role_lapsed. The role lane counts an
 // unclaimed role skipped and a lapsed holder failed.
+//
+// It is also the one place a message to a Legion role of a released issue pod is seen at all, so
+// it raises the wake report beside the answer, before either answer and waiting for neither
+// (reportRoleWake). Both answers need it: a message kept for the role's next holder waits until
+// something claims the role again, and a publish with keep: false keeps nothing and is still
+// answered 404, so only the wake brings the released pod back to claim the role, drain what was
+// kept for it (drainKeptRole) and take the sender's next attempt. The report names the role and
+// nothing else; which daemon owns it, and whether any claim of that role is released, is for the
+// daemons to decide.
 func (s *roleSend) noHolder(result roleHolderResult) {
+	reportRoleWake(s.d, s.d.delivery.logger, s.role)
 	if s.keep && roleKeepable(result) && keepForNextHolder(*s.d.delivery, s.role, s.item) {
 		s.kept(result)
 		return

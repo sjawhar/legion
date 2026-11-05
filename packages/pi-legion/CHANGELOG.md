@@ -3,6 +3,27 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.5.0] - 2026-11-05
+
+### Added
+
+- Every claimed Oh My Pi session tells the Legion daemon what it is doing — whether it runs
+  background work, and for a phase worker when its next phase reminder is due — at each turn's
+  end and whenever the reading changes. That is what lets the daemon release an issue pod no
+  role of which has a turn in progress or a turn due, and bring it back on the next wake.
+
+## [18.4.0] - 2026-11-05
+
+### Changed
+
+- The controller reads the whole Slack thread of a mention posted inside one, with Slack's
+  `conversations.replies` through the secrets broker's client, before it decides what the person
+  wants: the paging loop to five pages, de-duplication by `ts`, the success test, and whose words
+  make a request. A mention that adopts an earlier message's request files an issue whose
+  `Filed for` line names both messages. The worker, controller and architect skills point at the
+  new `agent-secrets` skill instead of restating the client's rules.
+  They name `skill://agent-secrets`, so they need a `@sjawhar/pi-envoy` that ships that skill.
+
 ## [18.3.0] - 2026-11-04
 
 ### Changed

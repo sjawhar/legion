@@ -31,6 +31,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): 3.3 s - one sign-in and one load of the Spec tab, then a second version of the
+// Verification document written under that same open page and its flag watched clearing there.
+// The live refresh of the coverage read is held to the start of its first fetch plus a second
+// (MIN_REFETCH_INTERVAL_MS, web/src/api/query-refresh.ts), and that second is the row's third.
 test("a requirement no check serves is flagged on the Spec tab, and a check that serves it clears the flag", async ({
   browser,
 }, testInfo) => {
@@ -71,7 +75,8 @@ A requirement nothing checks is flagged.
     });
     await expect.poll(() => coverageOf(issue.key, "r2").then((row) => row.checks)).toBe(1);
 
-    await page.reload();
+    // The page is left open: the Spec tab's coverage read is invalidated live by
+    // `artifact.version` (web/src/api/event-refresh.ts), so no reload is needed.
     await expect(unserved).toHaveAttribute("data-covered", "true");
     await expect(page.getByTestId("spec-requirement-gap")).toHaveCount(0);
   } finally {
@@ -79,6 +84,10 @@ A requirement nothing checks is flagged.
   }
 });
 
+// SLOW(>=2s): 3.4 s - two loads of the issue page, since the backlink panel has no live
+// invalidation on `artifact.version` (web/src/api/event-refresh.ts): only the whole-cache
+// refresh a feed gap schedules reaches it, 5 s out (WHOLE_CACHE_REFRESH_MS,
+// web/src/api/event-feed.ts), where a second load reads the dropped edge back in 1.4 s.
 test("a requirement's Referenced-by list shows the plan task that serves it, and loses it when that task goes", async ({
   browser,
 }) => {
@@ -121,6 +130,9 @@ List every requirement under the spec.
     });
     await expect.poll(() => coverageOf(issue.key, "r1").then((row) => row.plan_tasks)).toBe(0);
 
+    // The backlink panel has no live invalidation on `artifact.version`
+    // (web/src/api/event-refresh.ts), unlike the coverage read of the row above, so the panel is
+    // read again on a fresh load rather than waited out on this one.
     await page.reload();
     await requirement.getByRole("button", { name: "Referenced by" }).click();
     await expect(requirement.getByRole("region", { name: "Referenced by" })).toContainText(

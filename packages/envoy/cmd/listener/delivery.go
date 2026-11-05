@@ -45,6 +45,10 @@ func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
 
 type listenerDeliveryHandlerConfig struct {
 	client *bus.Client
+	// wakes publishes the wake reports an unplaceable agent delivery raises, off the delivery
+	// path and under the listener's own lifetime (wakeReporter); nil in a test that builds the
+	// handlers without it, which reports no wake.
+	wakes *wakeReporter
 	// forwardRole publishes a role-lane envelope to the holder's agent subject under msgID, its
 	// Nats-Msg-Id when not empty, and returns the wait for its outcome; main.go wires
 	// startRoleForward(client). The forward counts as delivered once the stream acknowledges

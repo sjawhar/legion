@@ -6,6 +6,7 @@ package delivery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -712,5 +713,176 @@ func TestAStopAfterTheConnectionWasReplacedDrainsTheRestoredSubscription(t *test
 	awaitAcknowledged(t, natsClient)
 	if events, want := held.of("2"), []string{"start 2", "end 2"}; !slices.Equal(events, want) {
 		t.Fatalf("pull request 2's events = %q, want %q: the next process handles the message published during the stop", events, want)
+	}
+}
+
+// githubEnvelopeData is one GitHub envelope's bytes as the bus carries them, for a test that
+// hands intakeKey a message of its own rather than publishing one.
+func githubEnvelopeData(t *testing.T, topic, payload string) []byte {
+	t.Helper()
+	data, err := json.Marshal(contracts.Envelope{
+		EventID: "event-1", Source: "github", SourceEventID: "1", Topic: topic,
+		DedupeKey: "github.1", Payload: payload, TraceID: "test-trace", IssuedAt: time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("encode the envelope of %s: %v", topic, err)
+	}
+	return data
+}
+
+// The repository a message's subject names decides whether the intake wants it: the one the
+// payload names is the canonical one, and a subject naming another is the copy the listener
+// publishes under a renamed repository's former name (internal/ghrename), which the original
+// already carries to the same handler. A message that names no repository to compare -- an
+// envelope or a payload that does not decode, or a payload with no repo -- is wanted and keyed
+// as it was keyed before the rule, since it cannot be judged.
+func TestIntakeKeyWantsOnlyTheSubjectOfTheRepositoryThePayloadNames(t *testing.T) {
+	const (
+		prPayload       = `{"kind":"pr","action":"closed","merged":"true","repo":"cybermonklabs/legion","number":"42","author":"octocat"}`
+		workflowPayload = `{"kind":"workflow","action":"completed","repo":"cybermonklabs/legion","run_id":"77"}`
+	)
+	for _, tc := range []struct {
+		name     string
+		subject  string
+		payload  string
+		data     []byte
+		key      string
+		wanted   bool
+		envelope bool
+	}{
+		{
+			name:    "a pull request under its payload's repository",
+			subject: "notifications.github.cybermonklabs.legion.pr.42", payload: prPayload,
+			key: "pr cybermonklabs/legion#42", wanted: true, envelope: true,
+		},
+		{
+			name:    "the same pull request under the repository's former name",
+			subject: "notifications.github.sjawhar.legion.pr.42", payload: prPayload,
+		},
+		{
+			name:    "a workflow run under its payload's repository",
+			subject: "notifications.github.cybermonklabs.legion.workflow.deploy_yml.completed", payload: workflowPayload,
+			key: "workflow cybermonklabs/legion#77", wanted: true, envelope: true,
+		},
+		{
+			name:    "the same workflow run under the repository's former name",
+			subject: "notifications.github.sjawhar.legion.workflow.deploy_yml.completed", payload: workflowPayload,
+		},
+		{
+			name:    "a repository name holding a dot, which the subject sanitizes",
+			subject: "notifications.github.acme.site_io.pr.7", payload: `{"kind":"pr","repo":"acme/site.io","number":"7"}`,
+			key: "pr acme/site_io#7", wanted: true, envelope: true,
+		},
+		{
+			name:    "a capital in the payload's repository against a lowercase subject",
+			subject: "notifications.github.cybermonklabs.legion.pr.42", payload: `{"kind":"pr","repo":"CyberMonkLabs/Legion","number":"42"}`,
+			key: "pr cybermonklabs/legion#42", wanted: true, envelope: true,
+		},
+		{
+			name:    "a pull request whose envelope does not decode",
+			subject: "notifications.github.sjawhar.legion.pr.42", data: []byte("{not an envelope"),
+			key: "pr sjawhar/legion#42", wanted: true,
+		},
+		{
+			name:    "a workflow run whose envelope does not decode",
+			subject: "notifications.github.sjawhar.legion.workflow.deploy_yml.completed", data: []byte("{not an envelope"),
+			key: "workflow notifications.github.sjawhar.legion.workflow.deploy_yml.completed", wanted: true,
+		},
+		{
+			name:    "a pull request whose payload does not decode",
+			subject: "notifications.github.sjawhar.legion.pr.42", payload: "not a payload",
+			key: "pr sjawhar/legion#42", wanted: true, envelope: true,
+		},
+		{
+			name:    "a workflow run whose payload does not decode",
+			subject: "notifications.github.sjawhar.legion.workflow.deploy_yml.completed", payload: `{"run_id":["77"]}`,
+			key: "workflow notifications.github.sjawhar.legion.workflow.deploy_yml.completed", wanted: true, envelope: true,
+		},
+		{
+			name:    "a pull request whose payload names no repository",
+			subject: "notifications.github.sjawhar.legion.pr.42", payload: `{"kind":"pr","repo":"","number":"42"}`,
+			key: "pr sjawhar/legion#42", wanted: true, envelope: true,
+		},
+		{
+			name:    "a workflow run whose payload names no repository",
+			subject: "notifications.github.sjawhar.legion.workflow.deploy_yml.completed", payload: `{"kind":"workflow","repo":"","run_id":"77"}`,
+			key: "workflow #77", wanted: true, envelope: true,
+		},
+		{name: "a review on a pull request", subject: "notifications.github.cybermonklabs.legion.pr.42.review", payload: prPayload},
+		{name: "the checks of a pull request", subject: "notifications.github.cybermonklabs.legion.pr.42.checks", payload: prPayload},
+		{name: "a push", subject: "notifications.github.cybermonklabs.legion.push.heads.main", payload: prPayload},
+		{name: "a job", subject: "notifications.github.cybermonklabs.legion.job.500.completed", payload: prPayload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := tc.data
+			if data == nil {
+				data = githubEnvelopeData(t, tc.subject, tc.payload)
+			}
+			key, envelope, wanted := intakeKey(&natsgo.Msg{Subject: tc.subject, Data: data})
+			if wanted != tc.wanted || key != tc.key {
+				t.Fatalf("intakeKey(%s) = key %q, wanted %t; want key %q, wanted %t", tc.subject, key, wanted, tc.key, tc.wanted)
+			}
+			if (envelope != nil) != tc.envelope {
+				t.Fatalf("intakeKey(%s) handed on envelope %v, want handed on = %t: a decode the handler would otherwise redo is handed on, and one that failed is not",
+					tc.subject, envelope, tc.envelope)
+			}
+		})
+	}
+}
+
+// The listener publishes a renamed repository's envelopes a second time under the repository's
+// former name (internal/ghrename): the same event_id, the same dedupe_key and the same payload,
+// differing only in the topic. Both copies reach this durable. Only the one whose subject is the
+// repository its payload names is wanted, so one merged pull request keys once and is fetched
+// from GitHub once; keyed by their own subjects the two copies would key apart, and keyedRunner
+// would run two handlers at once on that one pull request's row.
+func TestTheCopyUnderARepositorysFormerNameRunsNoSecondHandler(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	fake := newFakeGitHub(t)
+	var fetches atomic.Int64
+	fake.handle("GET /repos/cybermonklabs/legion/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		// The fetch's answer decides nothing here; what is counted is that it happened once. A
+		// 500 is logged and acknowledged, as every failed fetch of a merged pull request is.
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	natsClient := intakeTestClient(t)
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	awaitBoundDurable(t, natsClient)
+
+	id := fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano())
+	published := contracts.Envelope{
+		EventID: id, Source: "github", SourceEventID: id, DedupeKey: "github." + id,
+		Topic:   "notifications.github.cybermonklabs.legion.pr.42",
+		Payload: `{"kind":"pr","action":"closed","merged":"true","repo":"cybermonklabs/legion","number":"42","author":"octocat"}`,
+		TraceID: id, IssuedAt: time.Now().Unix(),
+	}
+	renamed := published
+	renamed.Topic = "notifications.github.sjawhar.legion.pr.42"
+	copies := []contracts.Envelope{published, renamed}
+
+	keys := map[string]int{}
+	for _, item := range copies {
+		data, err := json.Marshal(item)
+		if err != nil {
+			t.Fatalf("encode the envelope of %s: %v", item.Topic, err)
+		}
+		if key, _, wanted := intakeKey(&natsgo.Msg{Subject: item.Topic, Data: data}); wanted {
+			keys[key]++
+		}
+	}
+	if len(keys) != 1 || keys["pr cybermonklabs/legion#42"] != 1 {
+		t.Fatalf("the two copies of one merged pull request key as %v, want only pr cybermonklabs/legion#42 once", keys)
+	}
+
+	for _, item := range copies {
+		if err := natsClient.Publish(item); err != nil {
+			t.Fatalf("publish %s: %v", item.Topic, err)
+		}
+	}
+	awaitAcknowledged(t, natsClient)
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("fetched pull request 42 from GitHub %d times for one merged pull request published under its repository and under the repository's former name, want 1", got)
 	}
 }

@@ -13,6 +13,64 @@ async function daemonFixture(name: string): Promise<unknown> {
   return JSON.parse(await readFile(file, "utf8"))
 }
 
+/** A window of release records as the daemon serves it: two releases, the first woken five
+ * minutes later and the second two hours later, each with a first turn observed. */
+const RELEASE_RECORDS = {
+  releases: [
+    {
+      id: 1,
+      issue: "LEGION-208",
+      generation: 2,
+      roles: ["implementer"],
+      at: "2026-11-01T12:00:00Z",
+      bundleBytes: 2048,
+    },
+    {
+      id: 2,
+      issue: "LEGION-209",
+      generation: 1,
+      roles: ["tester"],
+      at: "2026-11-01T13:00:00Z",
+      bundleBytes: 0,
+    },
+  ],
+  resumes: [
+    {
+      id: 1,
+      release: 1,
+      issue: "LEGION-208",
+      role: "implementer",
+      kind: "task",
+      at: "2026-11-01T12:05:00Z",
+      podReadyAt: "2026-11-01T12:05:30Z",
+      firstTurnAt: "2026-11-01T12:06:00Z",
+      stuck: false,
+    },
+    {
+      id: 2,
+      release: 2,
+      issue: "LEGION-209",
+      role: "tester",
+      kind: "message",
+      at: "2026-11-01T15:00:00Z",
+      podReadyAt: "2026-11-01T15:01:00Z",
+      firstTurnAt: "2026-11-01T15:02:00Z",
+      stuck: false,
+    },
+  ],
+  holds: [
+    {
+      id: 1,
+      issue: "LEGION-210",
+      reason: "background_work",
+      detail: "async-job",
+      firstAt: "2026-11-01T12:50:00Z",
+      at: "2026-11-01T13:00:00Z",
+      passes: 11,
+    },
+  ],
+}
+
 interface Request {
   readonly method: string
   readonly path: string
@@ -28,6 +86,7 @@ async function daemon(): Promise<{
     "/legion/v1/grants": await daemonFixture("grant.json"),
     "/legion/v1/handoff/complete": await daemonFixture("handoff-complete.json"),
     "/legion/v1/phase/backward": {},
+    "/legion/v1/claims/release-records": RELEASE_RECORDS,
   }
   const requests: Request[] = []
   const stub = (async (input, init) => {
@@ -68,15 +127,22 @@ const grantRequest = {
   },
 }
 
-test("declares the four phase-worker operations under one op, and names the Envoy publish tool as Claude Code shows it", () => {
+test("declares the five phase-worker operations under one op, and names the Envoy publish tool as Claude Code shows it", () => {
   const definition = legionToolDefinition()
   expect(definition.name).toBe("legion")
   expect(definition.inputSchema).toMatchObject({
     properties: {
       op: {
-        enum: ["read_record", "handoff_complete", "request_backward_move", "ready_for_update"],
+        enum: [
+          "read_record",
+          "read_release_records",
+          "handoff_complete",
+          "request_backward_move",
+          "ready_for_update",
+        ],
       },
       issue: { type: "string" },
+      since: { type: "string" },
       summary: { type: "string" },
       verdict: { enum: ["pass", "pending", "fail"] },
       ready: { type: "boolean" },
@@ -86,7 +152,7 @@ test("declares the four phase-worker operations under one op, and names the Envo
     required: ["op"],
   })
   expect(definition.description).toContain(
-    "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete",
+    "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. read_release_records returns this deployment's idle-release records from `since` (an RFC 3339 time) on, read with this session's own claim: every release, resume and hold the daemon recorded, and over them the counts of releases, of resumes by wake kind and of holds by reason, the pod-hours released, the share of releases woken again within ten minutes, and the median, 90th percentile and maximum seconds from a wake to the woken role's first turn. handoff_complete",
   )
   expect(definition.description).toContain(
     "arm nothing. ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the daemon takes your answer for that round alone. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
@@ -222,6 +288,68 @@ test("read_record answers the issue's record, and request_backward_move posts wi
   ])
 })
 
+test("read_release_records posts the claim's own credential and counts the window; a refusal is the caller's", async () => {
+  const { client, requests } = await daemon()
+  const runtime = {
+    daemon: client,
+    claim: () => implementer,
+    handoffReport: async (): Promise<never> => {
+      throw new Error("no handoff report expected")
+    },
+    branchHead: noBranchHead,
+  }
+
+  await expect(
+    executeLegionTool(runtime, { op: "read_release_records", since: "2026-11-01T00:00:00Z" }),
+  ).resolves.toMatchObject({
+    since: "2026-11-01T00:00:00Z",
+    releases: RELEASE_RECORDS.releases,
+    counts: {
+      releases: 2,
+      resumes: 2,
+      resumesByKind: { task: 1, message: 1 },
+      holds: 1,
+      holdsByReason: { background_work: 1 },
+    },
+    // Five minutes and two hours released; the first wake came within ten minutes of its
+    // release, and the two first turns were 60 and 120 seconds after their wakes.
+    podHoursReleased: 2.08,
+    wokenWithinTenMinutes: { releases: 1, share: 0.5 },
+    wakeToFirstTurnSeconds: { measured: 2, withoutFirstTurn: 0, median: 60, p90: 120, max: 120 },
+  })
+  expect(requests).toEqual([
+    {
+      method: "POST",
+      path: "/legion/v1/claims/release-records",
+      body: {
+        claimToken: "legion-legion-legion-208-implementer",
+        secret: "U2VjcmV0",
+        since: "2026-11-01T00:00:00Z",
+      },
+    },
+  ])
+
+  // A window the route could not read is refused before the post, as read_record's missing
+  // issue is; the daemon's own refusal reaches the caller with its sentence.
+  await expect(
+    executeLegionTool(runtime, { op: "read_release_records", since: "yesterday" }),
+  ).rejects.toThrow("read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is")
+  expect(requests).toHaveLength(1)
+  const refusing = createLegionDaemonClient("http://daemon.test", (async (_input, _init) =>
+    Response.json(
+      { error: "the daemon keeps no release records" },
+      { status: 500 },
+    )) as typeof fetch)
+  await expect(
+    executeLegionTool(
+      { ...runtime, daemon: refusing },
+      { op: "read_release_records", since: "2026-11-01T00:00:00Z" },
+    ),
+  ).rejects.toThrow(
+    "POST /legion/v1/claims/release-records failed with 500: the daemon keeps no release records",
+  )
+})
+
 test("refuses before the claim registered, an operation a phase worker has not, and a field its operation does not take", async () => {
   const { client, requests } = await daemon()
   const handoffReport = async () => ({ commit: "c" })
@@ -240,7 +368,7 @@ test("refuses before the claim registered, an operation a phase worker has not, 
   await expect(
     executeLegionTool(runtime, { op: "set_status", issue: "LEGION-208" }),
   ).rejects.toThrow(
-    "op is one of read_record, handoff_complete, request_backward_move, ready_for_update",
+    "op is one of read_record, read_release_records, handoff_complete, request_backward_move, ready_for_update",
   )
   await expect(
     executeLegionTool(runtime, { op: "read_record", issue: "LEGION-208", summary: "x" }),

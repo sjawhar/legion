@@ -603,6 +603,10 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		// that did not answer is the 503 below, which asks it to try again instead.
 		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, roles.Registered)
 		if errors.Is(err, nats.ErrKeyNotFound) {
+			// A session of a released Legion issue pod is gone from the bucket with its pod, and
+			// this 404 is the only sight of the message meant for it: the wake is reported so the
+			// pod comes back and the sender's next attempt reaches it.
+			reportAgentWake(d.wakes, logger, targetSession)
 			record.refuse(w, http.StatusNotFound, outcomeNoLiveSession, fmt.Sprintf("no live session %s", targetSession))
 			return
 		}
@@ -758,6 +762,18 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		}
 		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
+			return
+		}
+		// The wake subject is this listener's own report of a released Legion pod, and a Legion
+		// daemon acts on what it reads there: it wakes the pod a role token or a session names,
+		// and it holds its whole release gate open on a `listener_ready` report's clock. A caller
+		// of this route chooses every field of the envelope and the payload, source "envoy"
+		// included, so a session that could publish here — a prompt-injected one among them —
+		// could wake pods at will and keep that gate open with a report dated in the future. Only
+		// the listener publishes it, and it does so directly (wake.go).
+		if strings.TrimSpace(request.Topic) == bus.LegionWakeTopic {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest,
+				"cannot publish to "+bus.LegionWakeTopic+"; the listener alone reports a Legion pod wake", "topic")
 			return
 		}
 		if strings.HasPrefix(request.Topic, bus.KeptTopicPrefix) {
