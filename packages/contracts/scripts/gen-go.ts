@@ -114,6 +114,9 @@ func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string)
 const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
 
+// GithubTopicPrefix begins every GitHub subject, before the repository's owner and name.
+const GithubTopicPrefix = "notifications.github."
+
 // DeliveryDuplicateWindow is how long a repeated delivery is recognised as a duplicate, by the
 // notification stream and by every host that subscribes over core NATS. Generated from
 // DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, whose doc comment states the retry promise
@@ -290,15 +293,15 @@ func AgentSubject(session string) string {
 	return AgentTopicPrefix + session
 }
 
-// githubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
+// GithubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
 // segment: a name may hold a dot, which a NATS subject splits on. Mirrored on the TS side as
 // \`githubRepositoryPrefix\`.
-func githubRepositoryPrefix(owner, repo string) string {
-	return "notifications.github." + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
+func GithubRepositoryPrefix(owner, repo string) string {
+	return GithubTopicPrefix + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
 }
 
 func GithubSubject(owner string, repo string, kind string) string {
-	return githubRepositoryPrefix(owner, repo) + "." + kind
+	return GithubRepositoryPrefix(owner, repo) + "." + kind
 }
 
 func SlackSubject(team string, channel string, kind string) string {
@@ -334,7 +337,7 @@ const SubjectMaxBytes = ${SUBJECT_MAX_BYTES}
 // ref, so a cut segment is never another ref's whole one. A consumer that needs the exact ref reads
 // the payload's ref. Mirrored on the TS side as \`githubPushSubject\`.
 func GithubPushSubject(owner, repo, refType, refName string) string {
-	prefix := githubRepositoryPrefix(owner, repo) + ".push." + refType + "."
+	prefix := GithubRepositoryPrefix(owner, repo) + ".push." + refType + "."
 	segment := SanitizeSubjectSegment(refName)
 	if len(prefix)+len(segment) <= SubjectMaxBytes {
 		return prefix + segment
@@ -349,17 +352,17 @@ func GithubPushSubject(owner, repo, refType, refName string) string {
 }
 
 func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
-	return githubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
+	return GithubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
 }
 
 // GithubJobSubject names a finished GitHub Actions job on the default branch, of a run with no pull
 // request, by its run. Mirrored on the TS side as \`githubJobSubject\`.
 func GithubJobSubject(owner, repo, runID, action string) string {
-	return githubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
+	return GithubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
 }
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
-	return githubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
+	return GithubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
 }
 
 const GhostWisprTopicPrefix = "notifications.ghostwispr."

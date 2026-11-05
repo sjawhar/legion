@@ -162,7 +162,7 @@ func TestRenderReadsEachWritingBackUnderAReaderOnce(t *testing.T) {
 	if _, err := Render(doc); err != nil {
 		t.Fatalf("Render(Parse(%q)) = %v", markdown, err)
 	}
-	if len(reads) <= len(readBackReaders) {
+	if len(reads) <= readBackReaderCount {
 		t.Fatalf("Render(Parse(%q)) read back %d writings under a reader, want it to try its respellings", markdown, len(reads))
 	}
 	repeated, total := 0, 0

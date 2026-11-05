@@ -1,0 +1,7 @@
+kind: Added
+body: |-
+  The listener reports on `notifications.legion.wake` the two wakes only it sees — a message
+  published to a role topic nobody holds, and a message to the agent subject of a session that
+  is not there — and publishes a `listener_ready` heartbeat every five minutes. A Legion daemon
+  releases no idle issue pod unless it has seen one of those heartbeats, so the listener and the
+  daemon roll in either order.

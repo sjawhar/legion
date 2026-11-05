@@ -27,6 +27,14 @@ const (
 	roleInitAgentEnv = "LEGION_ROLE_INIT_TEST_AGENT"
 )
 
+// Each helper of this file is the test binary re-executed with its own LEGION_ marker, which
+// Guard would take out, so TestMain runs none in such a child (helperChildVariables,
+// main_test.go). This file builds only under Linux, where the namespaces it works in exist, so it
+// registers its markers itself rather than leaving them in that list.
+func init() {
+	helperChildVariables = append(helperChildVariables, roleInitStageEnv, roleInitAgentEnv, uncoverControlEnv, roleCheckEnv)
+}
+
 // stagePlan is what the stage builds and runs. Mount is the directory it covers with a memory
 // filesystem of its own, so the layout it builds — and the role's own mounts over it — stay out
 // of the machine's filesystem and out of the test process's view.

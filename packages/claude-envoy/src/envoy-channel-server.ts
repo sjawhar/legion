@@ -1942,6 +1942,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
           claim: () => claim?.capability(),
           booted: claimBooted.promise,
           readState: (signal) => daemon.state({ signal }),
+          reportActivity: (input) => daemon.activity(input),
           inbox:
             inbox === undefined
               ? undefined

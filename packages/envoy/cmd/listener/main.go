@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/envconf"
+	"github.com/sjawhar/envoy/internal/ghrename"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -51,6 +52,10 @@ type listenerDeps struct {
 	consumers *sessionDelivery
 	// caches lists the stores above that are open, for the sites that treat every cache alike.
 	caches []listenerCache
+	// wakes publishes the wake reports a role send with no holder and an unplaceable agent
+	// message raise, off those paths and under the listener's own lifetime (wakeReporter); nil
+	// in a test that builds the deps without it, which reports no wake.
+	wakes *wakeReporter
 	// consumer names the durable whose lag /healthz reports.
 	consumer   string
 	streamName string
@@ -650,31 +655,38 @@ func dependencyUnavailable(dependency string, err error) string {
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only
-// dependencies a webhook uses: the NATS client it publishes through and the CI store the GitHub
+// dependencies a webhook uses: the publisher it publishes through and the CI store the GitHub
 // route records checks in, which main opens only when that route is configured.
+//
+// The handler is built here, and not before webhookRoutes is called, because neither is open when
+// main registers the paths: the routes answer 503 until they are.
 type webhookRoute struct {
 	path    string
-	handler func(*bus.Client, *cistore.Store) http.Handler
+	handler func(webhook.Publisher, *cistore.Store) http.Handler
 }
 
 // webhookRoutes lists the webhook routes the configuration enables. main registers the paths
 // before NATS is up, so they answer 503 while it connects, and builds the handlers once NATS and,
 // for the GitHub route, the CI store are open.
+//
+// Every route publishes through the rename publisher, which costs the Slack and the Ghost Wispr
+// routes nothing: a pair names a GitHub repository, and a subject that is not
+// `notifications.github.<owner>.<name>.…` names none, so those two publish exactly as they did.
 func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	var routes []webhookRoute
 	if github := cfg.GitHub; github != nil {
-		routes = append(routes, webhookRoute{"/webhook/github", func(client *bus.Client, ciStore *cistore.Store) http.Handler {
-			return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, client, ciStore)
+		routes = append(routes, webhookRoute{"/webhook/github", func(publisher webhook.Publisher, ciStore *cistore.Store) http.Handler {
+			return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, publisher, ciStore)
 		}})
 	}
 	if slack := cfg.Slack; slack != nil {
-		routes = append(routes, webhookRoute{"/webhook/slack", func(client *bus.Client, _ *cistore.Store) http.Handler {
-			return webhook.SlackHandler(slack.Secret, client)
+		routes = append(routes, webhookRoute{"/webhook/slack", func(publisher webhook.Publisher, _ *cistore.Store) http.Handler {
+			return webhook.SlackHandler(slack.Secret, publisher)
 		}})
 	}
 	if ghostWispr := cfg.GhostWispr; ghostWispr != nil {
-		routes = append(routes, webhookRoute{"/webhook/ghostwispr", func(client *bus.Client, _ *cistore.Store) http.Handler {
-			return webhook.GhostWisprHandler(ghostWispr.Secret, client)
+		routes = append(routes, webhookRoute{"/webhook/ghostwispr", func(publisher webhook.Publisher, _ *cistore.Store) http.Handler {
+			return webhook.GhostWisprHandler(ghostWispr.Secret, publisher)
 		}})
 	}
 	return routes
@@ -738,13 +750,14 @@ func isListRead(r *http.Request) bool {
 	return r.Method == http.MethodGet && (r.URL.Path == "/v1/sessions" || r.URL.Path == "/v1/interests/")
 }
 
-// openWebhooks builds the webhook routes over NATS and the CI store (nil without the GitHub route)
-// and opens the webhook gate onto them. A webhook waits on nothing else, not even the interest and
-// session caches /v1 waits on, and GitHub does not redeliver a delivery refused while they warm.
-func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, ciStore *cistore.Store) {
+// openWebhooks builds the webhook routes over the publisher they publish through and the CI store
+// (nil without the GitHub route) and opens the webhook gate onto them. A webhook waits on nothing
+// else, not even the interest and session caches /v1 waits on, and GitHub does not redeliver a
+// delivery refused while they warm.
+func openWebhooks(gate *startingGate, hooks []webhookRoute, publisher webhook.Publisher, ciStore *cistore.Store) {
 	routes := http.NewServeMux()
 	for _, hook := range hooks {
-		routes.Handle(hook.path, hook.handler(client, ciStore))
+		routes.Handle(hook.path, hook.handler(publisher, ciStore))
 	}
 	gate.open(routes)
 }
@@ -849,6 +862,17 @@ func main() {
 	webhookCfg, err := webhook.LoadWebhookConfig()
 	if err != nil {
 		log.Fatal(err)
+	}
+	// The renames a deployment configures belong beside the other settings lines: an operator who
+	// reads from the top sees from them alone whether ENVOY_GITHUB_REPOSITORY_RENAMES took, and a
+	// value that configures none logs nothing, as every other repository's publishing is unchanged.
+	// The line names the subject prefix each pair's copies go out on, not the pair alone, because
+	// the former name is written into the subject as the value spells it while a NATS subject is
+	// compared with case: an operator who spelled it in a case GitHub never used reads here the
+	// subject nothing subscribes to, rather than meeting the silence later (Renames.String).
+	if github := webhookCfg.GitHub; github != nil && !github.RepositoryRenames.IsZero() {
+		logger.Info("github repository renames: every envelope of the current repository is published a second time under the former name",
+			slog.String("renames", github.RepositoryRenames.String()))
 	}
 
 	// Phase 2: Serve on the socket the listener inherited (ENVOY_LISTEN_FD) or bind its address,
@@ -961,7 +985,9 @@ func main() {
 	// it starts (62 MB in production), and over a relayed link that burst holds up the replies the
 	// stores below wait on past their 10 s deadline.
 	var ciStore *cistore.Store
+	var renames ghrename.Renames
 	if webhookCfg.GitHub != nil {
+		renames = webhookCfg.GitHub.RepositoryRenames
 		ciStore, err = cistore.Open(client.Conn, logger, cistore.WithReplicas(cfg.NATSReplicas), cistore.WithTTL(7*24*time.Hour))
 		if err != nil {
 			log.Fatal(err)
@@ -969,7 +995,13 @@ func main() {
 	} else {
 		logger.Info("CI store not opened: no GitHub webhook route, so this listener records and settles no checks")
 	}
-	openWebhooks(webhookGate, hooks, client, ciStore)
+	// The one publisher every envelope goes out through: the webhook routes' deliveries and the CI
+	// summary loop's settlements alike, so a renamed repository's subscribers of the former name
+	// hear both. It is built here, over the open client, because it publishes through it, and it
+	// carries the configured pairs, which the start-up line above names; a listener with no GitHub
+	// route configures none and publishes exactly what the client publishes.
+	publisher := ghrename.Publishing(client, renames, logger)
+	openWebhooks(webhookGate, hooks, publisher, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
 
 	// The registry and its cache watcher log through the listener's own handler, so its role-restore
@@ -1099,9 +1131,17 @@ func main() {
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
+	// Wake reports are published off the paths that raise them, under a lifetime of the
+	// listener's own — the shutdown ends every retry still running — and a cap on how many
+	// retry at once (wakeReporter). It is built here because the delivery handlers below copy
+	// this configuration by value, so every seam of it must be set before they are built.
+	wakesCtx, stopWakeReports := context.WithCancel(context.Background())
+	wakes := newWakeReporter(wakesCtx, client)
+
 	// Phase 6: Open the role lane and /v1 onto the stores, then bind the durable consumer.
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
+		wakes:             wakes,
 		forwardRole:       startRoleForward(client),
 		registry:          registry,
 		sessions:          sessions,
@@ -1179,12 +1219,13 @@ func main() {
 	// The parts a shutdown ends, gathered once: every end of a start that serves /v1 passes them
 	// to shutdownListener.
 	parts := listenerParts{
-		server:   server,
-		client:   client,
-		lane:     lane,
-		delivery: delivery,
-		relays:   relays,
-		caches:   caches,
+		server:    server,
+		client:    client,
+		lane:      lane,
+		delivery:  delivery,
+		relays:    relays,
+		caches:    caches,
+		stopWakes: stopWakeReports,
 	}
 
 	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
@@ -1203,6 +1244,7 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
+		wakes:      wakes,
 		delivery:   &deliveryConfig,
 		confirmed:  dedupe.New(10 * time.Minute),
 
@@ -1300,12 +1342,21 @@ func main() {
 	// pr.<n>.checks event once a commit's checks settle, for every commit of a pull request, its
 	// head or not; new runs re-arm settlement. The debounce window is ENVOY_CI_DEBOUNCE (default
 	// 5s). The loop runs a pass only on a one-second tick by which a cached record changed or fell
-	// due.
+	// due. It publishes through the same publisher the webhook routes do: a settlement is a GitHub
+	// envelope like any other, and a subscriber of a renamed repository's former name waits on its
+	// checks as much as on its comments.
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	if ciStore != nil {
 		ciDebounce := envconf.Duration(logger.Slog(), os.LookupEnv, "ENVOY_CI_DEBOUNCE", 5*time.Second)
-		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
+		cistore.StartSummaryLoop(summaryCtx, ciStore, publisher, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
+
+	// Phase 6b3: Say we are alive and reporting, now and every listenerReadyInterval, on the one
+	// topic the Legion daemons read wakes of released issue pods from. Without it a daemon
+	// cannot tell "the listener sends no reports" from "the listener has nothing to report", so
+	// it releases nothing: this is the positive signal that lets release run at all. It shares
+	// summaryCtx, which the shutdown cancels.
+	startListenerReadyReports(summaryCtx, client, logger, listenerReadyInterval)
 
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;
@@ -1390,15 +1441,23 @@ type listenerParts struct {
 	delivery *sessionDelivery
 	relays   *sessionRelays
 	caches   []listenerCache
+	// stopWakes ends the wake reports still retrying (wakeReporter), nil on a shutdown reached
+	// before the reporter was built.
+	stopWakes func()
 }
 
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
 // signal, a fatal error or a bind that did not complete, and exits non-zero so the runtime's
 // restart policy restores the listener.
 func shutdownListener(logger *logging.Logger, parts listenerParts, loops listenerLoops) {
-	// Stop background loops before draining NATS.
+	// Stop background loops before draining NATS, the wake reports retrying off their callers'
+	// paths among them: each holds its goroutine for minutes otherwise, and a report published
+	// into a draining connection reaches nothing.
 	if loops.stop != nil {
 		loops.stop()
+	}
+	if parts.stopWakes != nil {
+		parts.stopWakes()
 	}
 
 	// Ordered shutdown:
