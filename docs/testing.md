@@ -77,7 +77,7 @@ Go's own detector finds a closure that reaches its object:
 
 ```sh
 cd packages/envoy
-GODEBUG=checkfinalizers=1 go test -count=1 -timeout 40m ./internal/dispatch/docs/
+GODEBUG=checkfinalizers=1 go test -count=1 -timeout 23m ./internal/dispatch/docs/
 ```
 
 It prints `WARNING: LIKELY CLEANUP/FINALIZER ISSUES`, then one `is reachable from cleanup or cleanup argument` line per site naming that site's file and line, and ends the run with `fatal error: detected possible issues with cleanups and/or finalizers`.

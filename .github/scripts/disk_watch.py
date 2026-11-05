@@ -44,9 +44,9 @@ import subprocess
 import sys
 import time
 
-# How often the sampler re-reads the free space. The steps it watches run for minutes, and the
-# whole state file is rewritten on each sample, so a second is often enough to catch the trough
-# and rare enough to cost nothing.
+# How often the sampler re-reads the free space. The steps it watches run for minutes, so a
+# second is often enough to catch the trough and rare enough to cost nothing: a sample that
+# finds nothing changed writes nothing at all.
 SAMPLE_SECONDS = 1.0
 
 # The sampler gives up after this long on its own, so a job that is cancelled between the two
@@ -66,13 +66,11 @@ TOOL_SECONDS = 20.0
 
 def total_free_kb(directory: str) -> tuple[int, int]:
     """The total and the free kB of the file system holding `directory`, read from the kernel
-    (os.statvfs), not parsed out of df. Free is what an unprivileged process may still write:
-    df's "Available", which is what a CI step actually has."""
-    stats = os.statvfs(directory)
-    return (
-        stats.f_blocks * stats.f_frsize // 1024,
-        stats.f_bavail * stats.f_frsize // 1024,
-    )
+    (shutil.disk_usage, which is os.statvfs here), not parsed out of df. Free is what an
+    unprivileged process may still write: df's "Available", which is what a CI step actually
+    has, and which is the number disk_usage reports as free."""
+    usage = shutil.disk_usage(directory)
+    return usage.total // 1024, usage.free // 1024
 
 
 def free_kb(directory: str) -> int:
@@ -83,12 +81,9 @@ def mount_point(directory: str) -> str:
     """Where the file system holding `directory` is mounted: the highest directory above it that
     is still on the same device."""
     here = os.path.realpath(directory)
-    device = os.stat(here).st_dev
-    while True:
-        parent = os.path.dirname(here)
-        if parent == here or os.stat(parent).st_dev != device:
-            return here
-        here = parent
+    while not os.path.ismount(here):
+        here = os.path.dirname(here)
+    return here
 
 
 def tool_says(argv: list[str]) -> str | None:
@@ -216,10 +211,17 @@ def sample(path: str, state_path: str) -> int:
             least = min(int(state["least_kb"]), free)
         except (KeyError, TypeError, ValueError):
             least = free
+        # Nearly every sample finds the file already saying this, and the file is on the very
+        # file system being measured, so a sample that would rewrite the same bytes writes
+        # nothing.
+        if state.get("least_kb") == least and state.get("sampler_pid") == os.getpid():
+            continue
         state["least_kb"] = least
         # This process is the sampler, so its own pid is the one the report must stop; taking it
         # from here rather than from the file keeps a sample written before `start`'s second
-        # write from putting a null back.
+        # write from putting a null back. That repair is why the guard above also asks whose pid
+        # the file names: a first sample landing between `start`'s two writes finds a null there
+        # and writes.
         state["sampler_pid"] = os.getpid()
         write_state(state_path, state)
     return 0

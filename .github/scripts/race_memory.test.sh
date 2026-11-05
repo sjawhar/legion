@@ -4,10 +4,11 @@
 # `go test -json` stream's output reaches the log.
 #
 # Each case runs the real script around a stand-in command — a shell or a Python program that
-# prints a -json stream and grows — so no Go, no race binary and no database are needed. The peak
-# function is called on its own, over fixture `/proc/<pid>/status` texts written here, because
-# one of its two branches cannot be reached on a kernel that reports no `VmHWM` (gVisor) and the
-# other cannot be reached on one that does.
+# prints a -json stream and grows — so no Go, no race binary and no database are needed. The two
+# functions the sampling loop reads its numbers with, `summarize` and `choose_peak`, are called
+# on their own, over fixture `/proc/<pid>/status` texts written here, because one of the rule's
+# two branches cannot be reached on a kernel that reports no `VmHWM` (gVisor) and the other
+# cannot be reached on one that does.
 #
 # Run from anywhere: .github/scripts/race_memory.test.sh
 # CI runs it in ci.yaml's test job.
@@ -35,7 +36,7 @@ run_sampler() {
   set -e
 }
 
-# peak <python expression over race_memory>: the peak function called with no process involved.
+# peak <python expression over race_memory>: the peak functions called with no process involved.
 peak() {
   env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$script_dir" python3 -c "$1"
 }
@@ -76,20 +77,22 @@ check "its last line gives the peak and the limit" \
 echo "case: the peak is the largest VmHWM when the kernel gives one"
 hwm=$(peak '
 import race_memory
-print("%d %s" % race_memory.peak_memory_kb([
+walk = race_memory.summarize([
     "Name:\tgo\nPPid:\t1\nVmRSS:\t    1000 kB\nVmHWM:\t    4200 kB\n",
     "Name:\tdocs.test\nPPid:\t2\nVmRSS:\t    3000 kB\nVmHWM:\t    3900 kB\n",
-]))
+], 0.0, "none")
+print("%d %s" % race_memory.choose_peak(walk.hwm_kb, walk.rss_kb))
 ')
 check "takes the largest VmHWM, not the largest VmRSS" "$(is "$hwm" "4200 VmHWM")"
 
 echo "case: the peak falls back to the highest sampled VmRSS where there is no VmHWM"
 rss=$(peak '
 import race_memory
-print("%d %s" % race_memory.peak_memory_kb([
+walk = race_memory.summarize([
     "Name:\tgo\nPPid:\t1\nVmRSS:\t    1000 kB\n",
     "Name:\tdocs.test\nPPid:\t2\nVmRSS:\t    3000 kB\n",
-]))
+], 0.0, "none")
+print("%d %s" % race_memory.choose_peak(walk.hwm_kb, walk.rss_kb))
 ')
 check "takes the highest sampled VmRSS" "$(is "$rss" "3000 VmRSS")"
 

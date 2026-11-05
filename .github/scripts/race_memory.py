@@ -14,7 +14,7 @@ process of the tree, so the last lines before a kill name what was running and h
 The peak is `VmHWM`, the kernel's own high-water mark of resident memory, because it sees what
 happens between two samples; the largest sampled `VmRSS` is the fallback for a kernel that
 reports no `VmHWM` (gVisor is one), and it can miss a peak that rose and fell inside one 5-second
-gap. peak_memory_kb() says which of the two a run used, and so does the last line of the log.
+gap. choose_peak() says which of the two a run used, and so does the last line of the log.
 
 Usage: race_memory.py <command> [args...], for example
 
@@ -32,7 +32,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,28 +64,17 @@ def status_kb(text: str, field: str) -> int | None:
     return int(value.split()[0])
 
 
-def peak_memory_kb(statuses: Iterable[str]) -> tuple[int, str]:
-    """The peak of the `/proc/<pid>/status` texts sampled over a run, in kB, with the name of the
-    number it comes from.
+def choose_peak(hwm_kb: int | None, rss_kb: int) -> tuple[int, str]:
+    """The peak of a run or of one walk, in kB, with the name of the number it comes from.
 
-    It is the largest `VmHWM` of any sampled text that has one, because that is the kernel's own
-    high-water mark: it holds a peak reached between two samples. gVisor reports no `VmHWM`, so
-    where none of the texts has that line the answer is the largest `VmRSS` instead, which is only
-    the highest moment this script happened to look at and can miss a higher one between samples.
-    An empty run peaks at 0 kB.
+    It is the `VmHWM` where there is one, because that is the kernel's own high-water mark: it
+    holds a peak reached between two samples. gVisor reports no `VmHWM`, so where there is none
+    the answer is the `VmRSS` instead, which is only the highest moment this script happened to
+    look at and can miss a higher one between samples. A run that saw neither peaks at 0 kB.
     """
-    peak_hwm = 0
-    peak_rss = 0
-    for text in statuses:
-        hwm = status_kb(text, "VmHWM")
-        if hwm is not None:
-            peak_hwm = max(peak_hwm, hwm)
-        rss = status_kb(text, "VmRSS")
-        if rss is not None:
-            peak_rss = max(peak_rss, rss)
-    if peak_hwm:
-        return peak_hwm, "VmHWM"
-    return peak_rss, "VmRSS"
+    if hwm_kb:
+        return hwm_kb, "VmHWM"
+    return rss_kb, "VmRSS"
 
 
 def tree_statuses(root_pid: int) -> list[str]:
@@ -230,12 +219,19 @@ def pump(stream: Iterable[str], tests: RunningTests, log: Log) -> None:
             log.write(output)
 
 
-def limit_from_env(environ: dict[str, str]) -> tuple[int, str]:
-    """The limit in kB and where it came from, for the first line of the log."""
-    raw = environ.get("RACE_MEM_LIMIT_KB", "").strip()
-    if not raw:
+def limit_from_env(environ: Mapping[str, str]) -> tuple[int, str]:
+    """The limit in kB and where it came from, for the first line of the log.
+
+    A value that is not a number of kB raises ValueError naming that value, which is the message
+    the caller prints.
+    """
+    raw = environ.get("RACE_MEM_LIMIT_KB", "")
+    if not raw.strip():
         return DEFAULT_LIMIT_KB, "the default; RACE_MEM_LIMIT_KB is unset"
-    return int(raw), "RACE_MEM_LIMIT_KB"
+    try:
+        return int(raw), "RACE_MEM_LIMIT_KB"
+    except ValueError:
+        raise ValueError(f"RACE_MEM_LIMIT_KB is {raw!r}, not a number of kB") from None
 
 
 def main(argv: list[str]) -> int:
@@ -246,12 +242,9 @@ def main(argv: list[str]) -> int:
         )
         return 2
     try:
-        limit_kb, source = limit_from_env(dict(os.environ))
-    except ValueError:
-        print(
-            f"race memory: RACE_MEM_LIMIT_KB is {os.environ['RACE_MEM_LIMIT_KB']!r}, not a number of kB",
-            file=sys.stderr,
-        )
+        limit_kb, source = limit_from_env(os.environ)
+    except ValueError as problem:
+        print(f"race memory: {problem}", file=sys.stderr)
         return 2
 
     log = Log()
@@ -267,24 +260,27 @@ def main(argv: list[str]) -> int:
     reader = threading.Thread(target=pump, args=(process.stdout, tests, log), daemon=True)
     reader.start()
 
-    samples: list[Sample] = []
-    # The peak is folded in walk by walk rather than kept as every text sampled: a forty-minute
-    # package at one walk every five seconds is hundreds of walks of a tree that is itself
-    # hundreds of processes while the race binary compiles, and this script runs inside the
-    # memory it measures.
+    # The peak and the highest sample are folded in walk by walk rather than kept as every text
+    # sampled: a forty-minute package at one walk every five seconds is hundreds of walks of a
+    # tree that is itself hundreds of processes while the race binary compiles, and this script
+    # runs inside the memory it measures. The Sample already carries both of the walk's numbers,
+    # so nothing is read twice.
     peak_hwm_kb = 0
     peak_rss_kb = 0
+    highest: Sample | None = None
     started = time.monotonic()
     while True:
         walked = tree_statuses(process.pid)
-        walk_kb, walk_field = peak_memory_kb(walked)
-        if walk_field == "VmHWM":
-            peak_hwm_kb = max(peak_hwm_kb, walk_kb)
-        else:
-            peak_rss_kb = max(peak_rss_kb, walk_kb)
         sample = summarize(walked, time.monotonic() - started, tests.names())
         if sample is not None:
-            samples.append(sample)
+            walk_kb, walk_field = choose_peak(sample.hwm_kb, sample.rss_kb)
+            if walk_field == "VmHWM":
+                peak_hwm_kb = max(peak_hwm_kb, walk_kb)
+            else:
+                peak_rss_kb = max(peak_rss_kb, walk_kb)
+            # Strictly greater, so the first of equally high samples is the one kept.
+            if highest is None or sample.rss_kb > highest.rss_kb:
+                highest = sample
             log.line(sample.line())
         try:
             process.wait(timeout=SAMPLE_SECONDS)
@@ -297,11 +293,10 @@ def main(argv: list[str]) -> int:
         process.stdout.close()
     status = process.wait()
 
-    peak_kb, field = (peak_hwm_kb, "VmHWM") if peak_hwm_kb else (peak_rss_kb, "VmRSS")
+    peak_kb, field = choose_peak(peak_hwm_kb, peak_rss_kb)
     log.line(f"race memory: the peak was {peak_kb} kB ({field}), the limit {limit_kb} kB")
 
     if peak_kb > limit_kb:
-        highest = max(samples, key=lambda sample: sample.rss_kb, default=None)
         where = (
             f"the highest sampled VmRSS, {highest.rss_kb} kB at {highest.seconds:.1f} s, "
             f"had these tests running: {highest.tests}"
