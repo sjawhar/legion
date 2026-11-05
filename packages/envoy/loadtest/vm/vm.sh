@@ -83,8 +83,15 @@
 # nothing worth keeping. The tunnel is closed when the step ends, however it ends. It is the
 # harness's own and not the deployment's: no row of check's table reads it. The command that
 # opens it is the deployment file's (pprof_tunnel_command), because it runs on the load machine
-# and not on this pod, so whatever credential that machine needs to reach the other is the
-# file's to give it.
+# and not on this pod; the identity that command presents is this script's, because the only
+# key those machines accept is the run's own OS Login key and it is made on this pod. step puts
+# that key on the load machine in a file of mode 600 under the run's own directory there
+# (tunnel_identity) and appends -i <that path> to the command, with the run's own known_hosts
+# under accept-new, so the generator's own ssh authenticates as every other ssh of this run
+# does. Without it that ssh is refused `publickey` -- the machines carry enable-oslogin and
+# block-project-ssh-keys, and the load machine has no ~/.ssh of its own -- and
+# ExitOnForwardFailure then leaves no tunnel at all, which is what refused every step of this
+# issue's first rehearsal on the deployment (dispatch://INFRA-988).
 #
 # Every machine is Container-Optimized OS, where /var is mounted noexec, so the loadgen copy
 # under <remote_root> cannot be executed where a plain mkdir puts it and every step fails on its
@@ -150,7 +157,9 @@
 # their defaults: ssh_command "ssh", ports.pprof_tunnel 16060 (the port on the load machine that
 # a step's profiling tunnel listens on), pprof_tunnel_command
 # "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes" (the command that opens it, run on the
-# load machine; the forward and the machine Dispatch runs on are appended to it), paths.loadgen
+# load machine; the run's identity -i, its known_hosts under accept-new, the forward and the
+# machine Dispatch runs on are appended to it, so the file names no key of its own and none of
+# them is a value anybody writes into it), paths.loadgen
 # "$LOADTEST_ROOT/bin/loadgen", paths.remote_loadgen "<remote_root>/loadgen", paths.nats_store
 # "<remote_root>/nats", paths.cert "<remote_root>/stub-embed.pem", paths.stateful_dir
 # "<remote_root's own last element>" (the directory under /mnt/stateful_partition that
@@ -227,9 +236,11 @@ TUNNEL_SECONDS=60
 TUNNEL_POLL_SECONDS=2
 # The port the tunnel listens on, on the load machine, and the command that opens it there. Both
 # are the deployment file's to change (ports.pprof_tunnel, pprof_tunnel_command): that machine's
-# own ssh may need a key, a jump host or a port of its own, and a test server stands in for it.
-# ExitOnForwardFailure is what makes a port already in use a refusal rather than a tunnel that
-# answers nothing.
+# own ssh may need a jump host or a port of its own, and a test server stands in for it. What
+# the file does not give is the key: the identity, the known_hosts file and the forward are
+# per-run, so tunnel_start appends them (tunnel_identity). ExitOnForwardFailure is what makes a
+# port already in use, or a connection that machine refuses, a refusal rather than a tunnel
+# that answers nothing, and BatchMode is what makes it refuse rather than ask for a passphrase.
 PPROF_TUNNEL_PORT_DEFAULT=16060
 PPROF_TUNNEL_COMMAND_DEFAULT="ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes"
 # COS's own writable partition, which is where the remote root's backing directory is made: /var
@@ -1207,9 +1218,10 @@ local_secret() {
 
 # remote_secrets_remove: the run's own directory on the load machine removed, with every
 # credential file this run wrote there (remote_secret). A deployment that is turned off should
-# leave no token, no api-key and no database password on a disk that outlives it. The removal is
-# read back rather than assumed, because a credential nobody knows is still there is the thing
-# this guards against.
+# leave no token, no api-key, no database password and no key of the run's on a disk that
+# outlives it -- the profiling tunnel's identity is the run's own OS Login key and lives there
+# too (tunnel_identity). The removal is read back rather than assumed, because a credential
+# nobody knows is still there is the thing this guards against.
 remote_secrets_remove() {
   local dir
   dir=$(remote_run)
@@ -1670,7 +1682,8 @@ sampler_stop() {
 # load machine, where nothing else can reach a port that binds 127.0.0.1 on another machine. It
 # is no part of the deployment: check reads no row of it, up starts none and down stops none; it
 # lives exactly as long as one step's load. The command that opens it is the deployment file's,
-# because it runs on the load machine and not on this pod: the run's own OS Login key stays here.
+# because it is the generator's own ssh and runs there; the key it presents is the run's own OS
+# Login key, which tunnel_identity puts on that machine for the run (dispatch://INFRA-988).
 
 # pprof_tunnel_port: the port the tunnel listens on, on the load machine.
 pprof_tunnel_port() { cfg_valid port .ports.pprof_tunnel "$PPROF_TUNNEL_PORT_DEFAULT"; }
@@ -1706,13 +1719,37 @@ tunnel_kill() {
   return 0
 }
 
+# tunnel_identity: the run's own OS Login private key on the load machine, in a file of mode 600
+# under the run's directory there, its path there printed. The tunnel is the generator's own
+# ssh -- the listening end of the forward has to be where loadgen's sampler reads it -- so the
+# key that opens it has to be on that machine. This pod's copy authenticates nothing from
+# there: the machines carry enable-oslogin and block-project-ssh-keys, the load machine has no
+# ~/.ssh of its own, and an ssh that names no identity is refused `publickey`, which under
+# ExitOnForwardFailure leaves no tunnel at all and refuses every step (dispatch://INFRA-988).
+#
+# The consequence, which is what the tunnel being the generator's own ssh costs: for the life of
+# the run, the load machine holds a key OS Login accepts on all three machines of this
+# deployment, as the login service account, and a key that reaches every machine is a wider
+# credential than the tokens beside it. It is written the way every other credential of that
+# machine is (remote_secret): over ssh's standard input, so it is no argument of anything, at
+# mode 600, so it is the ssh user's alone. What removes it is `down`, which removes the run's
+# whole directory there with every credential file in it (remote_secrets_remove), and nothing
+# before that: a deployment left up holds the key until down runs, and the import it stands on
+# expires OSLOGIN_KEY_SECONDS after the last subcommand whether down runs or not.
+tunnel_identity() {
+  local key
+  [ -n "$SSH_KEY" ] || die "tunnel_identity: no OS Login key yet; oslogin_ready runs before the first ssh of a subcommand"
+  key=$(cat -- "$SSH_KEY") || die "reading the run's OS Login key $SSH_KEY failed"
+  remote_secret oslogin "$key"
+}
+
 # tunnel_start NAME: the tunnel opened on the load machine and proven to answer. It returns 1
 # with TUNNEL_REFUSAL saying what went wrong, which run_step turns into the step's refusal: a
 # step whose sampler cannot read the profiling port measures no pool acquire waiters, and
 # criterion (e) is then FAIL for want of a measurement (curves.go passCriteria), so the step is
 # refused before it sends any load rather than run for nothing.
 tunnel_start() {
-  local name=$1 port remote_port probe raw cmd=() waited=0
+  local name=$1 port remote_port probe raw cmd=() identity waited=0
   TUNNEL_REFUSAL=""
   port=$(pprof_tunnel_port)
   remote_port=$(port_of pprof)
@@ -1723,12 +1760,20 @@ tunnel_start() {
     TUNNEL_REFUSAL="making $(remote_work) on the $LOAD_VM VM failed."
     return 1
   fi
+  # The key goes on that machine before the ssh that reads it is started, and the host key of
+  # the machine the forward reaches is taken into a known_hosts of the run's own there, under
+  # accept-new, as every ssh of this run takes one (ssh_cmd): these machines are made by a merge
+  # and the load machine has never met them either, so there is nothing to have known
+  # beforehand, and a machine replaced mid-series is still refused.
+  identity=$(tunnel_identity)
   tunnel_kill
   TUNNEL_OPEN=1
   # shellcheck disable=SC2016 # expanded by the load machine's sh
   if ! on_vm "$LOAD_VM" sh -c 'pid_file=$1 log=$2; shift 2; rm -f "$pid_file"; nohup "$@" >"$log" 2>&1 </dev/null & echo "$!" >"$pid_file"' \
     sh "$(pprof_tunnel_pid_file)" "$(pprof_tunnel_log)" \
-    "${cmd[@]}" -L "$port:127.0.0.1:$remote_port" "$(vm_ssh "$DISPATCH_VM")"; then
+    "${cmd[@]}" -i "$identity" -o StrictHostKeyChecking=accept-new \
+    -o "UserKnownHostsFile=$(remote_run)/known_hosts" \
+    -L "$port:127.0.0.1:$remote_port" "$(vm_ssh "$DISPATCH_VM")"; then
     TUNNEL_REFUSAL="starting the profiling tunnel on the $LOAD_VM VM failed (its output is $(pprof_tunnel_log) there)."
     return 1
   fi
@@ -2093,7 +2138,10 @@ cmd_down() {
   done
   # Nothing of the deployment reads them again, and they outlive it otherwise: the run's
   # directory on the load machine holds the agent token, the listener token, the Postgres URL
-  # with its password and the embedder's key, each mode 600 but on a disk that stays.
+  # with its password, the embedder's key and -- once a step has opened a profiling tunnel --
+  # the run's own OS Login private key, which OS Login accepts on all three machines
+  # (tunnel_identity). Each is mode 600, but on a disk that stays; this is what removes them,
+  # and the only thing that does.
   remote_secrets_remove
   note "down done: every container of run $RUN is stopped and the run's credential files are gone from the $LOAD_VM VM. The machines and the Cloud SQL instance are left as they are: dispatch://INFRA-1051's merge removes them."
 }

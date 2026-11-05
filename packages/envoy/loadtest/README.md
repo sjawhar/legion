@@ -2867,9 +2867,10 @@ variable and reaches no log, no command line another process can list — `curl`
 the four steps failed and what the endpoint answered, and `up` refuses before it starts anything.
 
 Because `vms.<name>` no longer carries a user, the file names a host and an instance alone. The
-profiling tunnel is the exception that proves it: its command runs **on the load machine**, not on
-this pod, so whatever credential that machine needs to reach the other is
-`pprof_tunnel_command`'s to give it.
+profiling tunnel is the exception that proves it: its command runs **on the load machine**, not
+on this pod, so `vm.sh` puts the run's own private key on that machine for the life of the run
+and appends `-i <that file>` to the command, with the run's own `known_hosts` under
+`accept-new` (The profiling tunnel, below). The deployment file names no key of its own.
 
 ### Where the deployment's credentials go
 
@@ -2886,6 +2887,10 @@ of every process, so a credential of the deployment is not one:
   written the same way; `loop-seed-write` and `loadgen run` are given `-token-file`,
   `-listener-token-file` and `-pg-file`, and the stub embedder `-key-file` (The guard, above).
   The endpoint flags that are addresses alone stay on the command line.
+- **The profiling tunnel's identity** — the run's own OS Login private key — goes in a file of
+  mode 600 in that same directory, put there by the first `step` that opens a tunnel, because
+  that tunnel is an `ssh` the load machine runs itself (The profiling tunnel, below). It is the
+  one credential there that reaches all three machines, and `down` removes it with the rest.
 - **The credentials of the seed's phases that run on this pod** — `loop-seed-check`,
   `loop-seed-export` and `seed-finish` — go in files of mode 600 under the run's directory
   here, given as `-pg-file` and, for the embedding gate, `-token-file`. Each is removed when the
@@ -3068,6 +3073,14 @@ by name**, its directory removed so it can run again under it: without that read
 measures no pool acquire waiters, pass criterion (e) is FAIL for want of a measurement, and the
 step is worth nothing. The tunnel is closed when the step ends, however it ends, and leaves no
 process and no pid file on the load machine.
+
+That `ssh` is the generator's own, not this pod's, so the identity it presents is the run's own
+OS Login private key, which `step` puts on the load machine in a file of mode 600 under the
+run's directory there and names with `-i`, the host key going into a `known_hosts` of the run's
+own there under `accept-new`: with no identity that `ssh` is refused `publickey` — the machines
+carry `block-project-ssh-keys` and the load machine has no `~/.ssh` of its own — and
+`ExitOnForwardFailure` then leaves no tunnel at all, which refused all four steps of the first
+rehearsal on the deployment. `down` removes that key with the run's other credential files.
 
 The tunnel is the harness's, not the deployment's: `up` starts none, `down` stops none, and no row
 of `check`'s table reads it — `check` says so under its table, naming the ports it runs between,

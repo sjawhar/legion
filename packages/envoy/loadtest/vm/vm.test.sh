@@ -18,8 +18,10 @@
 # list and makes the database a `create database` names; `nc` refuses every address unless the
 # test says otherwise; `loadgen` records its argv, writes the files the next step reads, and as
 # the stub embedder holds a port, which a second stub on it is refused; `pprof-tunnel` is the
-# deployment file's pprof_tunnel_command, which stands for the `ssh -N -L ...` a step runs on
-# the load machine. `jq`, `ssh-keygen` and `sudo`'s own commands are the real ones, and `rm` is
+# deployment file's pprof_tunnel_command, which stands for the `ssh -N -i <key> -L ...` a step
+# runs on the load machine, and which refuses the forward with ssh's own `Permission denied
+# (publickey)` when the command names no identity, as the deployment's ssh did.
+# `jq`, `ssh-keygen` and `sudo`'s own commands are the real ones, and `rm` is
 # the real one but for a path a case registers as another user's directory at mode 700, which it
 # refuses to remove unless the removal came through `sudo`: this pod is not root, so no fake can
 # make a file of another user.
@@ -55,8 +57,11 @@
 # machine and proves it with a read of /debug/pprof/goroutine?debug=1 through it before loadgen
 # run, gives loadgen that tunnel as -pprof, takes its local port from the deployment file and
 # 16060 when it names none, closes it when the step ends -- no process and no pid file left on
-# the load machine -- and refuses the step by name, before any load and leaving no directory,
-# when the tunnel does not answer; (n) up gives every machine's remote root a bind mount of a
+# the load machine -- refuses the step by name, before any load and leaving no directory,
+# when the tunnel does not answer, and presents the run's own OS Login key as the identity of
+# that ssh, put on the load machine at mode 600 under the run's directory there before the
+# tunnel starts, with the host key taken into the run's own known_hosts there, and removed by
+# down; (n) up gives every machine's remote root a bind mount of a
 # directory under the stateful partition, made with sudo, remounted exec,nosuid,nodev and given
 # to the ssh user, all of it before the loadgen copy and any container, mounts nothing a second
 # time over a machine that already carries the mount, takes the backing directory's name from
@@ -529,21 +534,40 @@ REAL_SLEEP=$REAL_SLEEP
 EOF
 cat >>"$bin/pprof-tunnel" <<'EOF'
 # The fake tunnel: what the deployment file's pprof_tunnel_command names, standing for
-# `ssh -N -L <port>:127.0.0.1:<pprof port> <Dispatch's machine>` run on the load machine. It
-# records its argv, says in FAKE_DIR/tunnel-up which port now answers and under which pid, and
-# ends on TERM as ssh does. FAKE_DIR/tunnel-refuses makes it exit at once, as ssh does when the
-# forward cannot be made (ExitOnForwardFailure) or that machine refuses the connection.
+# `ssh -N -i <the run's key> -L <port>:127.0.0.1:<pprof port> <Dispatch's machine>` run on the
+# load machine. It records its argv, says in FAKE_DIR/tunnel-up which port now answers and
+# under which pid, and ends on TERM as ssh does. FAKE_DIR/tunnel-refuses makes it exit at once,
+# as ssh does when the forward cannot be made (ExitOnForwardFailure) or that machine refuses
+# the connection.
+#
+# It refuses the forward when the command names no -i, or names one that is not on this machine
+# yet, in the words and the status ssh answers with: that is the one thing this fake has to
+# have of the real ssh, because the deployment's own machines carry enable-oslogin and
+# block-project-ssh-keys and the load machine has no ~/.ssh at all, so a tunnel command with no
+# identity is refused `publickey` there and leaves no forward at all (dispatch://INFRA-988).
 set -u
 printf 'tunnel\t%s\n' "$*" >>"$FAKE_DIR/actions.log"
 printf '%s\n' "$*" >>"$FAKE_DIR/tunnel.log"
-forward=""
+forward="" identity="" target=""
 while [ $# -gt 0 ]; do
   case $1 in
     -L) forward=$2; shift 2 ;;
-    *) shift ;;
+    -i) identity=$2; shift 2 ;;
+    -o | -F | -l | -p) shift 2 ;;
+    -*) shift ;;
+    *) target=$1; shift ;;
   esac
 done
 [ -n "$forward" ] || { echo 'fake tunnel: no -L forward' >&2; exit 2; }
+if [ -z "$identity" ]; then
+  printf '%s: Permission denied (publickey).\n' "${target:-the machine Dispatch runs on}" >&2
+  exit 255
+fi
+if [ ! -r "$identity" ]; then
+  printf 'Warning: Identity file %s not accessible: No such file or directory.\n' "$identity" >&2
+  printf '%s: Permission denied (publickey).\n' "${target:-the machine Dispatch runs on}" >&2
+  exit 255
+fi
 [ ! -f "$FAKE_DIR/tunnel-refuses" ] || exit 255
 printf '%s %s\n' "$$" "${forward%%:*}" >"$FAKE_DIR/tunnel-up"
 trap 'exit 0' TERM INT
@@ -1215,9 +1239,11 @@ run_vm step --config "$config" 1x 1 --duration 10m
 ((RC == 0)) || fail "the step of the tunnel cases failed: see the output above"
 
 # The tunnel forwards a port of the load machine, where loadgen run runs, to the profiling port
-# on the loopback of Dispatch's own machine, which is the one place that port answers.
-grep -q -- "^-L $tunnel_port:127.0.0.1:6060 $app_target$" "$fake/tunnel.log" ||
-  fail "the step's tunnel is not '-L $tunnel_port:127.0.0.1:6060 $app_target': $(cat "$fake/tunnel.log")"
+# on the loopback of Dispatch's own machine, which is the one place that port answers. The
+# forward and the machine it reaches are the last two words of the command, whatever the
+# identity and host-key options vm.sh puts in front of them (the identity case below).
+grep -q -- " -L $tunnel_port:127.0.0.1:6060 $app_target\$" "$fake/tunnel.log" ||
+  fail "the step's tunnel does not end in '-L $tunnel_port:127.0.0.1:6060 $app_target': $(cat "$fake/tunnel.log")"
 tunnel_at=$(grep -n '^tunnel	' "$fake/actions.log" | head -n1 | cut -d: -f1)
 probe_at=$(grep -n "^curl	http://127.0.0.1:$tunnel_port/debug/pprof/goroutine?debug=1$" "$fake/actions.log" | head -n1 | cut -d: -f1)
 run_at=$(grep -n '^loadgen	run ' "$fake/actions.log" | head -n1 | cut -d: -f1)
@@ -1243,10 +1269,8 @@ pass "the step's profiling tunnel is closed when the step ends, leaving no proce
 jq 'del(.ports.pprof_tunnel)' "$config" >"$tmp/default-tunnel.json"
 run_vm step --config "$tmp/default-tunnel.json" 3x 3 --duration 10m
 ((RC == 0)) || fail "a step on a deployment file with no ports.pprof_tunnel failed: see the output above"
-grep -q -- "^-L 16060:127.0.0.1:6060 $app_target$" "$fake/tunnel.log" ||
+grep -q -- " -L 16060:127.0.0.1:6060 $app_target\$" "$fake/tunnel.log" ||
   fail "a deployment file with no ports.pprof_tunnel did not take the default port: $(cat "$fake/tunnel.log")"
-[[ $(tail -n1 "$fake/loadgen-run.log") == *"-pprof http://127.0.0.1:16060"* ]] ||
-  fail "a step on the default tunnel port did not give loadgen that port: $(tail -n1 "$fake/loadgen-run.log")"
 pass "the tunnel's local port comes from the deployment file, and 16060 is its default"
 
 # A tunnel that cannot be opened refuses the step by name, before any load: a step whose sampler
@@ -1264,6 +1288,82 @@ grep -q 'pool acquire waiters p50 = 0' "$tmp/out" ||
   fail "a refused step left its directory, so it cannot run again under its own name"
 rm -f "$fake/tunnel-refuses"
 pass "a step whose profiling tunnel does not answer is refused by name, before any load, and leaves no directory behind"
+
+# The tunnel's identity (dispatch://INFRA-988). The tunnel is an ssh the generator VM runs
+# itself, and the only key those machines accept is the run's own OS Login key, which is made
+# on this pod: the load machine has no ~/.ssh at all. The first rehearsal on the deployment
+# refused all four steps for exactly that -- `Permission denied (publickey)` in
+# pprof-tunnel.log there, no forward left under ExitOnForwardFailure, and the probe timing out
+# -- while up and check stayed green, because no row of check's table reads the tunnel. So this
+# case reads the recorded commands: the tunnel's ssh names an identity file, that file was put
+# on the load machine before the tunnel was started, at mode 600 and holding the run's own key,
+# the host key goes into a known_hosts of the run's own there rather than checking being turned
+# off, and down takes the key away again. The fake tunnel refuses a forward whose command names
+# no -i, in the words that ssh refused it with, so a tunnel that goes back to naming none
+# refuses every step of this suite too.
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the tunnel identity case: see the output above"
+seeded_run
+: >"$fake/actions.log"
+run_vm step --config "$config" 1x 1 --duration 10m
+((RC == 0)) || fail "the step of the tunnel identity case failed: see the output above"
+
+tunnel_argv=$(tail -n1 "$fake/tunnel.log")
+identity=$(awk '{ for (i = 1; i < NF; i++) if ($i == "-i") { print $(i + 1); exit } }' <<<"$tunnel_argv")
+[ -n "$identity" ] ||
+  fail "the step's tunnel names no identity file, so the generator's own ssh has no key to open it with: $tunnel_argv"
+run_secrets=$remote/work/runs/$(cat "$LOADTEST_VM_ROOT/current")
+case $identity in
+  "$run_secrets"/*) ;;
+  *) fail "the tunnel's identity $identity is no file under the run's own directory on the load machine ($run_secrets), so down would not remove it" ;;
+esac
+[ -f "$identity" ] || fail "the tunnel names the identity $identity and no such file is on the load machine"
+[ "$(stat -c %a "$identity")" = 600 ] ||
+  fail "the tunnel's identity on the load machine is mode $(stat -c %a "$identity"), not 600"
+cmp -s "$(run_dir)/oslogin" "$identity" ||
+  fail "the identity the tunnel names is not the run's own OS Login private key ($(wc -c <"$identity") bytes there, $(wc -c <"$(run_dir)/oslogin") here)"
+# The key itself reached that machine over ssh's standard input, as every other credential of
+# it does: its path is an argument of the put and of the tunnel -- a path is no credential --
+# but no line of the key is an argument of anything. A line number is all a failure here
+# prints, since the line it names holds the key.
+grep -v '^$' "$(run_dir)/oslogin" >"$tmp/key-lines"
+! grep -qFf "$tmp/key-lines" "$fake/ssh.log" ||
+  fail "a line of the run's OS Login key reached a command line (ssh.log line $(grep -nFf "$tmp/key-lines" "$fake/ssh.log" | head -n1 | cut -d: -f1))"
+
+# It was put there before the tunnel was started: put_file's own remote command is the one that
+# writes beside its target and renames it on, and its last two words are the path and the mode.
+put_at=$(awk -F'\t' -v p=" $identity 600" '$1 == "ssh" && index($3, "cat >\"$1.new\"") > 0 && index($3, p) > 0 { print NR; exit }' "$fake/actions.log")
+tunnel_at=$(grep -n '^tunnel	' "$fake/actions.log" | head -n1 | cut -d: -f1)
+[ -n "$put_at" ] || fail "no put_file wrote the tunnel's identity $identity on the load machine"
+[ -n "$tunnel_at" ] && ((put_at < tunnel_at)) ||
+  fail "the tunnel's identity was put on the load machine at line ${put_at} and the tunnel started at line ${tunnel_at:-none}: the key must be there before the ssh that reads it"
+
+# The host key of the machine the forward reaches is taken into a known_hosts of the run's own
+# on the load machine, under accept-new, as every ssh of this run takes one; checking it off
+# would trust whatever answers that address.
+[[ $tunnel_argv == *"-o StrictHostKeyChecking=accept-new"* && $tunnel_argv == *"-o UserKnownHostsFile=$run_secrets/known_hosts"* ]] ||
+  fail "the tunnel's ssh does not take the host key into the run's own known_hosts on the load machine under accept-new: $tunnel_argv"
+[[ $tunnel_argv == *"StrictHostKeyChecking=no"* || $tunnel_argv == *"UserKnownHostsFile=/dev/null"* ]] &&
+  fail "the tunnel's ssh turns host-key checking off rather than trusting the run's own known_hosts: $tunnel_argv"
+# BatchMode and ExitOnForwardFailure are the deployment file's own words, and this test's file
+# names the fake above instead, so they are read where a real deployment gets them: the default
+# vm.sh gives a file that names no command. Without the first that ssh waits on a passphrase
+# prompt nobody answers; without the second a forward it cannot make leaves a tunnel that
+# answers nothing.
+default_tunnel=$(grep -m1 '^PPROF_TUNNEL_COMMAND_DEFAULT=' "$vm")
+[[ $default_tunnel == *"-o BatchMode=yes"* && $default_tunnel == *"-o ExitOnForwardFailure=yes"* ]] ||
+  fail "vm.sh's default pprof_tunnel_command lost BatchMode or ExitOnForwardFailure: ${default_tunnel:-no PPROF_TUNNEL_COMMAND_DEFAULT in $vm}"
+
+# And down takes the key away with every other credential of the run: a key that reaches all
+# three machines is the last thing to leave on a disk that outlives the deployment.
+run_vm down --config "$config"
+((RC == 0)) || fail "down failed after the tunnel identity case: see the output above"
+[ ! -e "$identity" ] ||
+  fail "down left the run's OS Login private key on the load machine: $identity"
+[ ! -e "$run_secrets" ] ||
+  fail "down left the run's own directory on the load machine: $(ls -A "$run_secrets" | tr '\n' ' ')"
+pass "the step's tunnel presents the run's own OS Login key, put on the load machine at mode 600 before the tunnel started and removed from it by down, and takes the host key into the run's own known_hosts there"
 
 # ---- (n) the remote root is a directory loadgen can be executed from -----------------------------
 
