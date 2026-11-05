@@ -79,6 +79,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -1078,6 +1079,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	// never a value. A reader of the command's log can tell these values from another secrets
 	// CLI's for the same names.
 	fmt.Fprintf(stderr, "agent-secrets: %s from %s\n", strings.Join(names, ", "), src())
+	warnTrailingNewline(stderr, values.Values)
 	if err := syscall.Exec(path, command, buildChildEnv(os.Environ(), values.Values)); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: exec %s: %v\n", command[0], err)
 		return 1
@@ -1157,4 +1159,36 @@ func buildChildEnv(environ []string, values map[string]string) []string {
 		envp = append(envp, name+"="+value)
 	}
 	return envp
+}
+
+// warnTrailingNewline writes one line naming each released secret whose value ends in a line
+// ending, before the command runs. The value is injected exactly as it is stored, because a
+// stored value may legitimately be several lines, a PEM document among them (`secret set` reads
+// whatever is piped to it and drops only the newline that ends that pipe), and this CLI cannot
+// tell a value's own last newline from the one a producer added.
+//
+// It is worth a line of standard error all the same, because a one-line credential that ends in
+// a newline is a seeding mistake that is invisible where it is written and expensive where it is
+// read: a caller that puts such a value straight into an HTTP header gets a rejected header, and
+// the error reporting that can quote the whole secret into a log or a saved session
+// (dispatch://INFRA-1042). So the line names the secret, never any part of its value, and leaves
+// the decision with the reader: an ending that belongs to the value stays, and one that does not
+// is removed by storing the value again.
+//
+// The line says to pipe the value without its ending rather than to pipe the value, because
+// `secret set` drops one final LF from its standard input and nothing else (readSecretValue): a
+// value re-piped as it is keeps a CR, whether it ends in CRLF or in a lone CR, and keeps every
+// LF but the last.
+func warnTrailingNewline(stderr io.Writer, values map[string]string) {
+	ending := make([]string, 0, len(values))
+	for name, value := range values {
+		if strings.HasSuffix(value, "\n") || strings.HasSuffix(value, "\r") {
+			ending = append(ending, name)
+		}
+	}
+	if len(ending) == 0 {
+		return
+	}
+	slices.Sort(ending)
+	fmt.Fprintf(stderr, "agent-secrets: %s end in a line ending, and are injected as stored; keep it where the value is meant to end that way, and where it is not (a one-line credential a caller sends unstripped makes an error that can print the whole secret) store the value again with `agent-secrets secret set`, piping it with the ending already removed, since that form drops one final LF and no CR\n", strings.Join(ending, ", "))
 }
