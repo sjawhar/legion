@@ -20,9 +20,9 @@ Extends docs/solutions/testing/a-test-only-knob-widens-the-value-production-runs
 
 - **Find the specs first.** Before you put a cache or a shared fetch under a Dispatch endpoint,
   grep `packages/dispatch/e2e/` for the helpers that change the fake behind it (for the Envoy
-  listener: `setLiveSessions`, `seedAgents`, `setSessionLive`) and for the route itself. The suite
-  runs one worker against one server and reseeds a fake, then navigates at once, so a copy taken
-  before the reseed is shown for a whole poll interval.
+  listener: `setLiveSessions`, `seedAgents`, `setSessionLive`) and for the route itself. A worker
+  runs against its own lane's server and reseeds that lane's fake, then navigates at once, so a
+  copy taken before the reseed is shown for a whole poll interval.
 - **Turn the cache off, do not shorten it.** A TTL of zero still lets reads that arrive during a
   fetch join it and get the answer from before the change. The switch makes every read call the
   dependency itself (the `uncached` branch of `readRouteRoster`, `api/issue_route_status.go`).
