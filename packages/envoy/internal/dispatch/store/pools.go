@@ -139,7 +139,9 @@ func (r *RawPool) Ping(ctx context.Context) error {
 // outbox's own listener and the compaction's 2 are the only connections added since, and the
 // horizon's came with the pool itself. A write
 // takes a connection per statement one after another, and a read pins one for its whole length
-// (PinConnection), so under load the API holds every connection of this pool; the background
+// (PinConnection); an issue read, which once took six statements, two more when the issue had
+// documents, two more when it had open asks, and one per artifact, now takes two batches. So
+// under load the API holds every connection of this pool; the background
 // loops, the live-update readers and the settlements wait on pools of their own, so neither side
 // can starve the other, and an acquire here waits at most requestAcquireBound before it is
 // refused with ErrPoolBusy rather than queueing without end. Admission derives the units it may

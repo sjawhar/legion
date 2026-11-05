@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -279,6 +280,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"events_person_words",
 		"comment_deliveries_session",
 		"message_deliveries_session_created",
+		"embeddings_window_owner",
 		"asks_issue_key",
 		"messages_issue_roots",
 		"document_search_vector",
@@ -314,6 +316,36 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		from information_schema.columns
 		where table_schema = current_schema() and column_name = 'search' and is_generated = 'ALWAYS'
 	`, []string{"issues", "artifact_versions", "comments", "asks", "messages"})
+
+	// The whole-text embedding triggers are gone: a document, a comment, a message and an ask
+	// are embedded in windows of their blocks, which each indexer writes, and only an issue is
+	// still embedded whole (the issues trigger and the issue-spec trigger on artifact_versions
+	// stay).
+	assertDatabaseObjects(t, ctx, store.Pool, `
+		select trigger_name
+		from information_schema.triggers
+		where trigger_schema = current_schema() and trigger_name like '%_embeddings_enqueue'
+	`, []string{"issues_embeddings_enqueue", "artifact_versions_issue_embeddings_enqueue"})
+	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
+		select trigger_name
+		from information_schema.triggers
+		where trigger_schema = current_schema()
+	`, []string{
+		"artifact_versions_embeddings_enqueue",
+		"comments_embeddings_enqueue",
+		"messages_embeddings_enqueue",
+		"asks_embeddings_enqueue",
+	})
+	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
+		select proname
+		from pg_proc
+		where pronamespace = current_schema()::regnamespace
+	`, []string{
+		"embeddings_enqueue_document",
+		"embeddings_enqueue_comment",
+		"embeddings_enqueue_message",
+		"embeddings_enqueue_ask",
+	})
 
 	expectedConstraints := []string{
 		"people_pkey",
@@ -458,6 +490,37 @@ func TestTouchedTablesOfEveryMigrationAreTheTablesItLocks(t *testing.T) {
 	t.Cleanup(func() { conn.Close(context.Background()) })
 	if err := pgmigratetest.CheckTouchedTablesAgainstLocks(ctx, conn, migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The migrations that move meaning search onto windows of blocks take one table's ACCESS
+// EXCLUSIVE lock each, as 0073-0077 took one each to add the triggers they drop: a migration
+// that dropped two tables' triggers would hold the first table's lock while it waited for the
+// second's, and a write to the first would wait behind a lock the migration cannot use yet.
+func TestTheBlockEmbeddingMigrationsLockOneTableEach(t *testing.T) {
+	locks := map[string]string{
+		"20261102233625_block_embedding_windows.up.sql":          "embeddings",
+		"20261102233626_drop_document_embeddings_trigger.up.sql": "artifact_versions",
+		"20261102233627_drop_comment_embeddings_trigger.up.sql":  "comments",
+		"20261102233628_drop_message_embeddings_trigger.up.sql":  "messages",
+		"20261102233629_drop_ask_embeddings_trigger.up.sql":      "asks",
+	}
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations {
+		want, named := locks[migration.Name]
+		if !named {
+			continue
+		}
+		delete(locks, migration.Name)
+		if tables := pgmigrate.TouchedTables(migration.SQL); !slices.Equal(tables, []string{want}) {
+			t.Errorf("%s locks %v, want %s alone", migration.Name, tables, want)
+		}
+	}
+	for name := range locks {
+		t.Errorf("the set holds no migration named %s", name)
 	}
 }
 

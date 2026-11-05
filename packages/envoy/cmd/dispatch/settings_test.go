@@ -1176,6 +1176,31 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("not an integer: err = %v, want a refusal naming DISPATCH_APP_ID", err)
 			}
 		},
+		"DISPATCH_REVIEWER_APP_ID": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.ReviewerAppID != "" {
+				t.Errorf("unset: ReviewerAppID = %q, want empty, which records no verdict check", boot.ReviewerAppID)
+			}
+			boot := resolveWith(t, map[string]string{"DISPATCH_REVIEWER_APP_ID": " 5341243 "})
+			if boot.ReviewerAppID != "5341243" {
+				t.Errorf("ReviewerAppID = %q, want %q", boot.ReviewerAppID, "5341243")
+			}
+			for _, value := range []string{"x", "0", "-1", "5341243x", "5 341 243"} {
+				refusedWith(t, map[string]string{"DISPATCH_REVIEWER_APP_ID": value}, "DISPATCH_REVIEWER_APP_ID")
+			}
+			// Its reader: the pass main starts, which compares a verdict check's app.id against
+			// this id. The pass this builds runs nothing, so the rate limits it would read make
+			// an empty database every database it needs, as the sweeper's own case above does.
+			_, url := testnats.Start(t)
+			_, pemText := githubapptest.Key(t)
+			reconciler, err := ciReconciler(startDispatchStream(t, []string{url}, nil), &store.Store{},
+				&auth.AppConfig{ClientID: "Iv1.reviewer", PEM: pemText}, "", boot.ReviewerAppID)
+			if err != nil || reconciler == nil {
+				t.Fatalf("build the CI reconcile pass: %+v, %v", reconciler, err)
+			}
+			if reconciler.ReviewerAppID != "5341243" {
+				t.Errorf("the pass's ReviewerAppID = %q, want %q", reconciler.ReviewerAppID, "5341243")
+			}
+		},
 		"DISPATCH_APP_SLUG": func(t *testing.T) {
 			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_SLUG": "table-slug"}), t.TempDir())
 			if err != nil || app.Slug != "table-slug" {
@@ -1625,6 +1650,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Error("two dev-sign-in processes with no shared value signed with one key")
 			}
 		},
+		"DISPATCH_DEV_EMBEDDER": func(t *testing.T) {
+			// Its reader: the embedder newEmbedder builds, which calls nothing and names itself.
+			boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_EMBEDDER": "1"}))
+			if err != nil {
+				t.Fatalf("DISPATCH_DEV_EMBEDDER=1 under dev sign-in: %v", err)
+			}
+			embedder, err := newEmbedder(context.Background(), boot.Embedder)
+			if err != nil || embedder == nil || embedder.Identity() != embed.NewDev().Identity() {
+				t.Fatalf("newEmbedder = %v, %v, want the dev embedder", embedder, err)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_DEV_EMBEDDER": "1"}, "DISPATCH_DEV_EMBEDDER is read only with DISPATCH_DEV_SIGNIN=1")
+		},
 		"DISPATCH_TEST_HOOKS": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); !boot.TestHooksEnabled {
 				t.Error("DISPATCH_TEST_HOOKS=1: hooks off")
@@ -1663,6 +1700,36 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_MARK_WAIT": func(t *testing.T) {
+			const shortWait = 250 * time.Millisecond
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":     "1",
+				"DISPATCH_TEST_MARK_WAIT": shortWait.String(),
+			})
+			if boot.MarkWait != shortWait {
+				t.Errorf("DISPATCH_TEST_MARK_WAIT: MarkWait = %v, want %v", boot.MarkWait, shortWait)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_MARK_WAIT": invalid},
+					fmt.Sprintf("DISPATCH_TEST_MARK_WAIT=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_MARK_WAIT": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_UNRECORDED_MARK_TTL": func(t *testing.T) {
+			const shortTTL = 4 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":               "1",
+				"DISPATCH_TEST_UNRECORDED_MARK_TTL": shortTTL.String(),
+			})
+			if boot.UnrecordedMarkTTL != shortTTL {
+				t.Errorf("DISPATCH_TEST_UNRECORDED_MARK_TTL: UnrecordedMarkTTL = %v, want %v", boot.UnrecordedMarkTTL, shortTTL)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_UNRECORDED_MARK_TTL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_UNRECORDED_MARK_TTL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_UNRECORDED_MARK_TTL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_ROUTE_ROSTER_TTL": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{}); boot.RouteRosterTTL != 0 {
 				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL unset: RouteRosterTTL = %v, want 0 (the server's own five seconds)", boot.RouteRosterTTL)
@@ -1683,6 +1750,27 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					fmt.Sprintf("DISPATCH_TEST_ROUTE_ROSTER_TTL=%q (expected a positive Go duration)", invalid))
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_ROUTE_ROSTER_TTL": "1m"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.ListenerTakeoverWindow != 0 {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW unset: ListenerTakeoverWindow = %v, want 0 (the server's own twelve seconds)", boot.ListenerTakeoverWindow)
+			}
+			const shortWindow = time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                    "1",
+				"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": shortWindow.String(),
+			})
+			if boot.ListenerTakeoverWindow != shortWindow {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW: ListenerTakeoverWindow = %v, want %v", boot.ListenerTakeoverWindow, shortWindow)
+			}
+			if options := appContextOptions(boot, routes.AppContextOptions{}); options.ListenerTakeoverWindow != shortWindow {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW: the router is handed ListenerTakeoverWindow = %v, want %v", options.ListenerTakeoverWindow, shortWindow)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": invalid},
+					fmt.Sprintf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
 			const shortQuiet = 3 * time.Second
@@ -1707,6 +1795,24 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Error("DISPATCH_TEST_RECONCILE_AT_START=true: ReconcileAtStart true, want only 1 to set it")
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_RECONCILE_AT_START": "1"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_CI_RECONCILE_INTERVAL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.CIReconcileInterval != 0 {
+				t.Errorf("DISPATCH_TEST_CI_RECONCILE_INTERVAL unset: CIReconcileInterval = %v, want 0 (cireconcile.Interval's five minutes)", boot.CIReconcileInterval)
+			}
+			const quick = 2 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                 "1",
+				"DISPATCH_TEST_CI_RECONCILE_INTERVAL": quick.String(),
+			})
+			if boot.CIReconcileInterval != quick {
+				t.Errorf("DISPATCH_TEST_CI_RECONCILE_INTERVAL: CIReconcileInterval = %v, want %v", boot.CIReconcileInterval, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_CI_RECONCILE_INTERVAL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_CI_RECONCILE_INTERVAL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_CI_RECONCILE_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {
@@ -1743,6 +1849,23 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					}
 				}
 			})
+		},
+		"DISPATCH_TEST_EMBEDDER_OFF": func(t *testing.T) {
+			// Azure's own environment, the one shape that builds an embedder with no AWS SDK and
+			// no model service reachable, so the switch is what decides and not the credentials.
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{
+				"DISPATCH_TEST_HOOKS":        "1",
+				"DISPATCH_TEST_EMBEDDER_OFF": "1",
+			})); !boot.EmbedderOff {
+				t.Error("DISPATCH_TEST_EMBEDDER_OFF=1: EmbedderOff false")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_EMBEDDER_OFF": "true"}); boot.EmbedderOff {
+				t.Error("DISPATCH_TEST_EMBEDDER_OFF=true: EmbedderOff true, want only 1 to set it")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); boot.EmbedderOff {
+				t.Error("unset: EmbedderOff true")
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_EMBEDDER_OFF": "1"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 	}
 	for _, row := range settings {

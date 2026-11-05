@@ -55,6 +55,9 @@ type runConfig struct {
 	dashboard string
 	rngSeed   uint64
 	natsConns int
+	// heapSamples turns on the sampler's periodic read of Dispatch's heap profile inside the
+	// window (-heap-samples); without it no sample carries a heap read.
+	heapSamples bool
 	// sessionDelivery is how the simulated sessions take their messages: sessionDeliveryCore
 	// (their core subscriptions) or sessionDeliveryConsumer (relay frames of their consumers).
 	sessionDelivery string
@@ -105,6 +108,7 @@ func runLoad(args []string) error {
 	recoveryRefP99 := fs.Float64("recovery-ref-p99", 0, "with -schedule: the reference request p99 in ms of the recovery criterion (default: the last three 10 s windows of the step)")
 	rngSeed := fs.Uint64("rng-seed", 1, "seed of the event and request schedules")
 	natsConns := fs.Int("nats-conns", 50, "NATS connections the sessions share")
+	heapSamples := fs.Bool("heap-samples", false, "read Dispatch's heap profile (/debug/pprof/heap) every 15 s inside the window; off by default, since Dispatch writes the profile itself and the write is charged to the CPU this harness measures")
 	out := fs.String("out", "", "output directory (required)")
 	name := fs.String("name", "", "step name (default: the -out directory's name)")
 	seedPath := fs.String("seed", "", "seed.json path (default $LOADTEST_ROOT/seed.json)")
@@ -235,8 +239,8 @@ func runLoad(args []string) error {
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, schedule: sched, recoveryRefP99: refP99,
-		sessionDelivery: *delivery,
-		buildCommit:     *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
+		heapSamples: *heapSamples, sessionDelivery: *delivery,
+		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 		copyMeta: copyMeta, replay: rs,
 	}, sf)
 }
@@ -474,8 +478,8 @@ func execute(cfg runConfig, sf seedFile) error {
 	if len(cfg.schedule) > 0 {
 		schedText = cfg.schedule.String()
 	}
-	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s schedule=%s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d session-delivery=%s marker-nonce=%s",
-		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, schedText, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, cfg.sessionDelivery, formatNonce(nonce))
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s schedule=%s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d session-delivery=%s heap-samples=%t marker-nonce=%s",
+		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, schedText, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, cfg.sessionDelivery, cfg.heapSamples, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -782,10 +786,12 @@ type probes struct {
 }
 
 // startProbes starts the probes. The two lock samplers run from 20 s into the window to its end.
-// The sampler reads pulls' counts at each sample, when pulls is not nil.
+// The sampler reads pulls' counts at each sample, when pulls is not nil, and Dispatch's heap
+// every 15 s under -heap-samples.
 func (st *step) startProbes(ctx context.Context, pulls *pullSpy) *probes {
 	p := &probes{smp: newSampler(st.cfg.ep), smpDone: make(chan struct{}), lp: &lockProbe{}, ls: &lockSampler{}}
 	p.smp.pulls = pulls
+	p.smp.heapSamples = st.cfg.heapSamples
 	go func() {
 		defer close(p.smpDone)
 		p.smp.loop(ctx, st.winStart, st.winEnd, st.lg)

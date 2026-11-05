@@ -122,7 +122,7 @@ type settlement struct {
 	// reads counts the reads of the room its passes have made. The first is quiet: the updates it
 	// classifies are in the tree this settlement reconciles and versions, and arming a settlement
 	// for them would end this one as superseded. A later pass's read arms one, since the
-	// reconciliation before it did not see them (readPointQuietly).
+	// reconciliation before it did not see them (treePoint).
 	reads        int
 	plan         *repairPlan
 	stoppedShort func(error) settleOutcome
@@ -426,21 +426,20 @@ func (p *settlementPass) take() (settleStep, settleOutcome) {
 	if s.afterSettleAuthorsTake != nil {
 		s.afterSettleAuthorsTake(room)
 	}
-	// The tree is the room at an exact commit position (readPoint): the pass stores every update
+	// The tree is the room at an exact commit position (treePoint): the pass stores every update
 	// of the instance through it before it versions the copy (Ledger.flushThrough), and nothing
-	// the room commits after it is in that version. The room's peers and the service can write the
-	// live tree while a walk of it, which takes no lock, reads it, and a torn read would be
-	// versioned as the document, so the copy is taken at that one position.
-	encoded, point, _, settles, err := s.readPointQuietly(room, p.doc)
-	if err != nil {
-		return settleDone, p.stoppedShort(err)
-	}
+	// the room commits after it is in that version. The tree is the one the room's replica holds,
+	// read under the replica's lock and owned by this read alone. The room's peers and the service
+	// can write the live tree while a walk of it, which takes no lock, reads it, and a torn read
+	// would be versioned as the document, so the tree is taken at that one position.
+	//
+	// A pass that found updates but could not read the tree arms their settlement all the same,
+	// so the drain's classification is acted on wherever the tree read ends.
+	read, point, settles, err := s.treePoint(room, p.doc)
 	if settles && p.reads > 0 {
 		s.scheduleSettle(room)
 	}
 	p.reads++
-	p.taken.point = point
-	read, err := stateTree(encoded)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -448,6 +447,7 @@ func (p *settlementPass) take() (settleStep, settleOutcome) {
 		}
 		return settleDone, p.stoppedShort(err)
 	}
+	p.taken.point = point
 	p.read = read
 	if s.afterSettleTreeRead != nil {
 		s.afterSettleTreeRead(room, read)

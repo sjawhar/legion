@@ -19,10 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-const (
-	maxAskQuestion16 = contracts.AskQuestionMax
-	maxAskOptions    = 8
-)
+const maxAskOptions = 8
 
 const (
 	askHintLimit         = 8
@@ -64,8 +61,17 @@ func validateAskQuestion(question string) error {
 	if strings.TrimSpace(question) == "" {
 		return errorf(http.StatusBadRequest, "INVALID_ASK", "ask question is required")
 	}
-	if length := len16(question); length > maxAskQuestion16 {
-		return capExceededError("question", length, maxAskQuestion16)
+	return nil
+}
+
+// validateAskWording holds an ask's question and every option's label and description, together,
+// to contracts.DispatchEventBodyMax UTF-16 units. They share one bound because they travel
+// together: an ask.answered event carries the wording, the labels the human selected and the
+// answer's text at once, and that is the largest event Dispatch publishes. A bound on the
+// question alone would leave the options free to carry the same text past what the event takes.
+func validateAskWording(question string, options []model.AskOption) error {
+	if units := docs.AskWordingUnits(question, options); units > contracts.DispatchEventBodyMax {
+		return capExceededError("question and options", units, contracts.DispatchEventBodyMax)
 	}
 	return nil
 }
@@ -156,6 +162,10 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		input.Options = []model.AskOption{}
 	}
 	if err := validateAskOptions(input.Options); err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	if err := validateAskWording(input.Question, input.Options); err != nil {
 		s.writeHandlerError(w, r, err)
 		return
 	}
@@ -496,6 +506,12 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Urgency != nil {
 		ask.Urgency = requestedUrgency
+	}
+	// The bound is on the ask as it will be stored, not on the fields this request named: an
+	// edit that sends options alone is held against the question the row already holds.
+	if err := validateAskWording(ask.Question, ask.Options); err != nil {
+		s.writeHandlerError(w, r, err)
+		return
 	}
 	// The block is the text's source of truth. Write it first, then take the row's values from
 	// what the block parses back to, so trimming can never leave the two disagreeing and the
@@ -1088,6 +1104,21 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 		return nil, nil, err
 	}
 	defer rows.Close()
+	asks, replies, err := scanAskReads(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := loadAskDetails(ctx, q, askReadPointers(asks)); err != nil {
+		return nil, nil, err
+	}
+	return asks, replies, nil
+}
+
+// scanAskReads reads the rows an askReadColumns query returns, in the order it listed them, with
+// the newest reply in each ask's thread keyed by ask id; an ask nobody has replied to has no
+// entry. The issue read queues one of those queries in a batch (getIssue) and reads its rows
+// with this, so the two paths decode an ask the same way.
+func scanAskReads(rows pgx.Rows) ([]model.Ask, map[string]model.AskLastReply, error) {
 	asks := []model.Ask{}
 	replies := map[string]model.AskLastReply{}
 	for rows.Next() {
@@ -1103,17 +1134,17 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
-	askPointers := make([]*model.Ask, len(asks))
-	for index := range asks {
-		askPointers[index] = &asks[index]
-	}
-	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
-		return nil, nil, err
-	}
-	if err := attachAskReadFields(ctx, q, askPointers); err != nil {
-		return nil, nil, err
-	}
 	return asks, replies, nil
+}
+
+// askReadPointers addresses each ask in place, which the opened-event and backlink-count
+// loaders fill.
+func askReadPointers(asks []model.Ask) []*model.Ask {
+	pointers := make([]*model.Ask, len(asks))
+	for index := range asks {
+		pointers[index] = &asks[index]
+	}
+	return pointers
 }
 
 // lockAskForTransition reads one ask and locks its row for the transition about to be applied.
@@ -1142,14 +1173,7 @@ func (s *server) attachOpenedEventIDs(
 	q queryer,
 	asks []*model.Ask,
 ) error {
-	askIDs := make([]string, 0, len(asks))
-	seen := make(map[string]struct{}, len(asks))
-	for _, ask := range asks {
-		if _, exists := seen[ask.ID]; !exists {
-			seen[ask.ID] = struct{}{}
-			askIDs = append(askIDs, ask.ID)
-		}
-	}
+	askIDs := distinctAskIDs(asks)
 	if len(askIDs) == 0 {
 		return nil
 	}
@@ -1158,6 +1182,27 @@ func (s *server) attachOpenedEventIDs(
 	if err != nil {
 		return err
 	}
+	return applyOpenedEventIDs(asks, openedEventIDs)
+}
+
+// distinctAskIDs is each listed ask's id once, in the order the asks are listed: the argument
+// events.OpenedEventIDs takes, whether it is run on its own or queued in a batch
+// (events.QueueOpenedEventIDs, through queueAskDetails).
+func distinctAskIDs(asks []*model.Ask) []string {
+	askIDs := make([]string, 0, len(asks))
+	seen := make(map[string]struct{}, len(asks))
+	for _, ask := range asks {
+		if _, exists := seen[ask.ID]; !exists {
+			seen[ask.ID] = struct{}{}
+			askIDs = append(askIDs, ask.ID)
+		}
+	}
+	return askIDs
+}
+
+// applyOpenedEventIDs stamps each ask with its identity event. An ask the query answered none
+// for has no identity to serve, so the read fails rather than answering an ask without one.
+func applyOpenedEventIDs(asks []*model.Ask, openedEventIDs map[string]int64) error {
 	for _, ask := range asks {
 		openedEventID, ok := openedEventIDs[ask.ID]
 		if !ok {

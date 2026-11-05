@@ -17,6 +17,7 @@ import {
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import { newAsks } from "@legion/envoy-client/askgate-new-asks";
+import { bearerCredential } from "@legion/envoy-client/bearer";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { DispatchClient, DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
@@ -453,7 +454,12 @@ function dispatchServing(
     return body(documentBlocks(doc.markdown));
   }) as typeof fetch;
   const session = (_directory: string, signal: AbortSignal): DispatchSession => ({
-    client: new DispatchClient("https://dispatch.example", "token", fetchImpl, signal),
+    client: new DispatchClient(
+      "https://dispatch.example",
+      bearerCredential("token"),
+      fetchImpl,
+      signal
+    ),
     serverUrls: ["https://dispatch.example"],
   });
   return { requests, session };
@@ -926,8 +932,8 @@ describe("untrusted text (security)", () => {
     expect(context).toMatch(/… \[elided \d+ bytes\]/);
   });
   test("a revise reason holding a full-length rewritten question in non-ASCII text arrives whole", async () => {
-    // 2,000 UTF-16 units (ASK_QUESTION_MAX) of three-byte characters is 6,000 bytes, and the reason
-    // names its failure and quotes the words on top: the recommendation at its end must survive.
+    // 2,000 three-byte characters is 6,000 UTF-8 bytes, and the reason names its failure and
+    // quotes the words on top: the recommendation at its end must survive.
     const reason = `failure 13 (content): "Hi! I hope this finds you well." is a preamble. Send: ${"€".repeat(2_000)} I recommend A.`;
     const g = bind({ complete: reviseWith(reason) });
     const context = (await g.device("t1", "dispatch_comment", COMMENT))?.additionalContext ?? "";
@@ -5241,6 +5247,7 @@ describe("askgate.ts, the entry", () => {
         configFile: { path: CONFIG_FILE, error: null },
         logger: { warn: (message: string) => warnings.push(message) },
         runtimeLogger: { warn: () => {} },
+        session: () => "gate-session",
       }
     ).loaded;
     const roles = opts.roles ?? { askgate: MODEL };
@@ -5333,6 +5340,7 @@ describe("askgate.ts, the entry", () => {
         configFile: { path: CONFIG_FILE, error: null },
         logger: { warn: () => {} },
         runtimeLogger: { warn: () => {} },
+        session: () => "gate-session",
       }
     );
     const { loaded } = registration;

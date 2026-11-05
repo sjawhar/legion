@@ -136,7 +136,7 @@ var errHolderUnjudged = errors.New("claim holder was not covered by the liveness
 // fetchHolderLiveness asks the listener about the holder's own session, by id, and answers
 // with that one session's record, or with none when the session store holds no record of it.
 // It must be called with nothing held: it is a cross-service HTTP call of up to five seconds,
-// and each process's pool is bounded (store.sharedPoolSize), so a connection held across it is
+// and each process's pool is bounded (store.SharedPoolSize), so a connection held across it is
 // one fewer for that process's other requests, and a row lock held across it stalls every
 // process that writes the issue. An unreachable or unconfigured listener is a 503, never
 // "unknown, therefore free" — Dispatch does not hand one session's work to another on a

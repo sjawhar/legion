@@ -20,6 +20,7 @@ import type {
   IssueSummary,
   MessageRead,
 } from "@legion/contracts";
+import type { RequestCredential } from "@legion/envoy-client/bearer";
 import { type DispatchEnvironment, dispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 import { messageFor } from "@legion/envoy-client/errors";
@@ -52,10 +53,12 @@ export function processIo(): CliIo {
   };
 }
 
-/** Dispatch's address and the bearer for it. */
+/** Dispatch's address and what a request to it presents: the bearer a variable or a file gave,
+ * or this machine's own identity traded at the secrets broker, which signs a DPoP proof for each
+ * request (`ActiveDispatchConfig.credential`). */
 export interface DispatchCredentials {
   readonly url: string;
-  readonly token: string;
+  readonly credential: RequestCredential;
 }
 
 /**
@@ -75,7 +78,7 @@ export function resolveDispatch(env: DispatchEnvironment, cwd: string): Dispatch
   if (!resolution.enabled) {
     throw new Error(`Dispatch is not configured: ${resolution.error ?? resolution.notice}`);
   }
-  return { url: resolution.url, token: resolution.token };
+  return { url: resolution.url, credential: resolution.credential };
 }
 
 /** How many times one read is tried before it fails. */
@@ -96,13 +99,13 @@ export function transient(status: number): boolean {
 /** A GET-only client of production Dispatch's API. */
 export class ProductionDispatch {
   readonly #base: string;
-  readonly #token: string;
+  readonly #credential: RequestCredential;
   readonly #fetch: Fetch;
   readonly #sleep: Sleep;
 
   constructor(credentials: DispatchCredentials, fetchImpl: Fetch, sleep: Sleep) {
     this.#base = credentials.url.replace(/\/+$/, "");
-    this.#token = credentials.token;
+    this.#credential = credentials.credential;
     this.#fetch = fetchImpl;
     this.#sleep = sleep;
   }
@@ -174,7 +177,10 @@ export class ProductionDispatch {
       try {
         response = await this.#fetch(url.toString(), {
           method: "GET",
-          headers: { Accept: "application/json", Authorization: `Bearer ${this.#token}` },
+          headers: {
+            Accept: "application/json",
+            ...(await this.#credential.headers("GET", url.toString())),
+          },
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
         text = await response.text();

@@ -26,6 +26,7 @@ import {
   selfOwner,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
+import { forgetBrokerSession } from "@legion/envoy-client/broker-credential";
 import {
   type ConsumerDelivery,
   type ConsumerFrame,
@@ -45,6 +46,7 @@ import {
   readArrivals,
   renderInbound,
   senderLabel,
+  wholeCarriedBody,
 } from "@legion/envoy-client/delivery";
 import { commandName } from "@legion/envoy-client/dispatch-command";
 import {
@@ -56,6 +58,7 @@ import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
+import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
@@ -116,6 +119,7 @@ import {
   mergeInterestSources,
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
+import { currentSessionID } from "@legion/pi-shared/dispatch-session-id";
 import {
   dropInjectedUserTurn,
   endInjectedUserTurns,
@@ -267,6 +271,9 @@ const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
+/** How long a delivery waits on the whole body of an item an event carried only in part before
+ *  it goes out with that part and the note saying so. */
+const WHOLE_BODY_TIMEOUT_MS = 10_000;
 /** The most BTW event ids an instance remembers, so a failure notice naming one stays inert. */
 const BTW_EVENTS_LIMIT = 1_000;
 /** The line a replayed BTW's notice ends with: it runs nothing and asks for nothing. */
@@ -569,7 +576,8 @@ if (CONFIG_FILE.path !== null) process.env.ENVOY_CONFIG_FILE = CONFIG_FILE.path;
  * effect without a reload. Undefined when the session has no Dispatch configuration.
  */
 const timedDispatchClient = (ms: number) =>
-  sessionDispatchClient(CONFIG_FILE, process.cwd(), AbortSignal.timeout(ms))?.client;
+  sessionDispatchClient(CONFIG_FILE, process.cwd(), AbortSignal.timeout(ms), currentSessionID)
+    ?.client;
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -583,11 +591,15 @@ export default function envoyExtension(pi: PiApi): void {
   // (`currentDispatchConfig`), so a Dispatch that moved - a new dispatch.serverUrl in envoy.json -
   // takes effect without /reload-plugins, and a file that has since broken fails with its own
   // error instead of quietly using the stale endpoint.
-  const atStart = sessionSettings(CONFIG_FILE, process.env, { cwd: process.cwd() });
+  const atStart = sessionSettings(CONFIG_FILE, process.env, {
+    cwd: process.cwd(),
+    session: currentSessionID,
+  });
   const { envoy } = atStart;
   const currentDispatchConfig = (): ActiveDispatchConfig => {
     const resolution = sessionDispatchSettings(CONFIG_FILE, process.env, {
       cwd: process.cwd(),
+      session: currentSessionID,
     }).dispatch;
     const config = activeDispatchSettings(resolution);
     if (config === null) {
@@ -665,7 +677,7 @@ export default function envoyExtension(pi: PiApi): void {
         client: createEnvoyClient({
           baseUrl: envoy.url,
           fetch: serverClock.observing(fetch),
-          token: envoy.token,
+          credential: envoy.credential,
         }),
       }
     : undefined;
@@ -1302,7 +1314,20 @@ export default function envoyExtension(pi: PiApi): void {
         // A `/model` or `/effort` has run by now: the viewer's header shows its result before the
         // reply that names it reaches the page.
         refreshAgentStreamSettings(sessionID);
-        if (reply !== undefined) await postDispatchReply(delivery, { body: reply }, replySessionID);
+        if (reply === undefined) return;
+        try {
+          await postDispatchReply(delivery, { body: reply }, replySessionID);
+        } catch (error) {
+          // Nothing cuts the reply here, so a reply Dispatch refuses - one holding a block longer
+          // than it takes - would leave the person who typed the command with no answer at all.
+          // Dispatch's own words say why, and they are short enough to post in its place.
+          if (!(error instanceof DispatchServiceError) || !error.fromDispatch) throw error;
+          await postDispatchReply(
+            delivery,
+            { body: `Your command ran, and Dispatch refused its output: ${error.message}` },
+            replySessionID
+          );
+        }
       })
       .catch((error: unknown) => {
         logger.warn("envoy: the reply to a person's typed input did not reach Dispatch", {
@@ -1384,7 +1409,7 @@ export default function envoyExtension(pi: PiApi): void {
     receivedAt: number,
     relayed?: ConsumerFrame
   ): Promise<void> => {
-    const rendered = renderInbound(raw, sessionID, subject);
+    let rendered = renderInbound(raw, sessionID, subject);
     // Acknowledge first. The listener waits two seconds for this receipt: its
     // publish route, which forwards a role message or an ad-hoc topic's copy
     // here, forwards again until a receipt arrives within its four-second window
@@ -1474,6 +1499,20 @@ export default function envoyExtension(pi: PiApi): void {
     if (identity !== undefined && replay?.delivered(identity) === true) {
       claim.settle();
       return;
+    }
+    // A body is bounded block by block, so one event can carry its first part alone, and an
+    // event the bus refused carries none of it (`cutItem`). The agent is prompted with the
+    // whole body the comment or message route answers, read through this session's own
+    // Dispatch; with no Dispatch configured, or a read that fails, it keeps what the event
+    // carried and the note that says so. This runs after the receipt and after every drop
+    // above, so no acknowledgement waits on it and no frame nobody sees costs a read.
+    if (rendered.cutItem !== undefined) {
+      const dispatch = timedDispatchClient(WHOLE_BODY_TIMEOUT_MS);
+      const body =
+        dispatch === undefined
+          ? undefined
+          : await wholeCarriedBody(dispatch, rendered.cutItem, sessionID);
+      if (body !== undefined) rendered = renderInbound(raw, sessionID, subject, body);
     }
     const envelope = rendered.envelope;
     if (envelope !== undefined) noteInbox(envelope);
@@ -2927,12 +2966,23 @@ export default function envoyExtension(pi: PiApi): void {
         continues.set(host, from);
       }
       knownSessions.add(from);
+      leftSessions.add(from);
     }
     knownSessions.add(host);
   };
 
   // Every session id this process has been on: a move with no word back to one is a rollback.
   const knownSessions = new Set<string>();
+
+  // The sessions this process has left and still holds a broker client for: a key pair and the
+  // token last traded for it (`CLIENTS`, @legion/envoy-client/broker-credential). A session goes
+  // in when the host leaves it (`noteMove`, and the pass that closes its agent subject) and out
+  // once the pass has run its role move (`settleRole`), the last call that presents that
+  // session's own credential — whether or not that move decided anything — so a process that
+  // moves between sessions all day holds one client rather than one per session it ever bound.
+  // Only a pass fenced before that point leaves its entries here for the next; a later hand-back
+  // for a session already forgotten trades again under that session's name.
+  const leftSessions = new Set<string>();
 
   interface PassCause {
     // A heartbeat tick, which also checks the listener still resolves a held role.
@@ -2979,6 +3029,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
     for (const other of handle.forgetOtherAgentSessions(host)) {
       closeIntentionally(agentSubject(other));
+      leftSessions.add(other);
     }
     // Another session's relay: its unsettled frames go back to the listener (`nak`).
     if (relay !== undefined && relay.sessionID !== host) closeRelay();
@@ -3049,6 +3100,13 @@ export default function envoyExtension(pi: PiApi): void {
         settleRole(context, host, cause, registration === undefined, move)
       )) ?? false;
     handle.check();
+    // The role move above was the last call for every session this process has left, so each
+    // one's key pair and token go now (`leftSessions`), whether or not the move decided. The
+    // session running now is never one of them: a rollback to a session this pass left behind
+    // keeps trading under it.
+    leftSessions.delete(host);
+    for (const other of leftSessions) forgetBrokerSession(other);
+    leftSessions.clear();
     if (registration !== undefined) {
       throw new RegistrationError(messageFor(registration.error), { cause: registration.error });
     }
@@ -3521,6 +3579,7 @@ export default function envoyExtension(pi: PiApi): void {
         dispatch: sessionDispatchSettings(CONFIG_FILE, process.env, {
           cwd: process.cwd(),
           commands: "kept",
+          session: currentSessionID,
         }).dispatch,
         env: process.env,
       });
@@ -3905,6 +3964,7 @@ export default function envoyExtension(pi: PiApi): void {
       configFile: gateFile,
       logger: gateLogger,
       runtimeLogger: logger,
+      session: currentSessionID,
     });
     askgateRecorder = registration;
     askgateLoad = registration.loaded.catch((error: unknown) => {

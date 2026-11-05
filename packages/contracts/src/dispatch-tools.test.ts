@@ -4,8 +4,6 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
-  ASK_QUESTION_MAX,
-  DISPATCH_BODY_MAX,
   DISPATCH_HANDOFF_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
@@ -73,6 +71,42 @@ function specFor(name: string) {
   return spec;
 }
 
+/** A schema node that keeps every description its chain carries and validates nothing. */
+interface Described extends SchemaNode<Described> {}
+
+/**
+ * Every description one spec's arguments carry, nested objects' and array items' included: what
+ * a host shows beside each field, read through the builder rather than off the source.
+ */
+function argumentDescriptions(name: string): readonly string[] {
+  const texts: string[] = [];
+  const node = (): Described => ({
+    optional: node,
+    nullable: node,
+    describe: (text) => {
+      texts.push(text);
+      return node();
+    },
+  });
+  dispatchToolSchema(specFor(name), {
+    string: node,
+    number: node,
+    boolean: node,
+    enum: node,
+    array: node,
+    unknown: node,
+    object: node,
+    refineObject: node,
+  });
+  return texts;
+}
+
+/** The one rule every ask instruction gives, written once in `dispatch-tools.ts`. */
+const ASK_RULE =
+  "An ask is short and asks one thing; its reasoning goes in the document, not in the question.";
+/** A character count in words: a group of digits, then `character`. */
+const characterCount = /\d[\d,]*[\s-]*characters?\b/iu;
+
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
@@ -124,6 +158,7 @@ const validCalls = {
   dispatch_open_asks: {},
   dispatch_answers: {},
   dispatch_whoami: {},
+  dispatch_limits: {},
   dispatch_handoff_write: specFor("dispatch_handoff_write").example,
   dispatch_handoff_read: { issue: "DSP-1", phase: "implement", version: 2 },
   dispatch_inbox: {},
@@ -146,13 +181,13 @@ describe("zodSchemaApi", () => {
   });
 
   test("names how far an over-limit string is over its cap", () => {
-    const result = schemaFor("dispatch_ask").safeParse({
+    const result = schemaFor("dispatch_issue_update").safeParse({
       issue: "DSP-1",
-      question: "x".repeat(ASK_QUESTION_MAX + 50),
+      title: "x".repeat(ISSUE_TITLE_MAX + 50),
     });
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.message)).toEqual([
-      `is 50 characters over the ${ASK_QUESTION_MAX}-character limit (${ASK_QUESTION_MAX + 50}/${ASK_QUESTION_MAX})`,
+      `is 50 characters over the ${ISSUE_TITLE_MAX}-character limit (${ISSUE_TITLE_MAX + 50}/${ISSUE_TITLE_MAX})`,
     ]);
   });
 
@@ -196,6 +231,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_open_asks",
       "dispatch_answers",
       "dispatch_whoami",
+      "dispatch_limits",
       "dispatch_handoff_write",
       "dispatch_handoff_read",
       "dispatch_inbox",
@@ -459,6 +495,16 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
   });
 
+  test("dispatch_limits accepts no arguments and says the server refuses an over-long text", () => {
+    const schema = schemaFor("dispatch_limits");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ project: "CORE" }).success).toBe(false);
+    expect(specFor("dispatch_limits").description).toContain(
+      "Dispatch refuses a text over a bound and names the block or the field it passed"
+    );
+  });
+
   test("dispatch_inbox accepts no arguments, names the Envoy tool it is not, and rejects any key", () => {
     const schema = schemaFor("dispatch_inbox");
 
@@ -468,18 +514,17 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_inbox").description).toContain("envoy_inbox");
   });
 
-  test("dispatch_handoff_write takes one JSON object body up to the byte cap, and a phase slug", () => {
+  test("dispatch_handoff_write takes one JSON object body of any length, and a phase slug", () => {
     const schema = schemaFor("dispatch_handoff_write");
     const refusals = (args: Record<string, unknown>) =>
       schema.safeParse(args).error?.issues.map((issue) => issue.message);
     const call = { issue: "DSP-1", phase: "implement" };
 
-    // A body of exactly the cap, counted in UTF-8 bytes: "é" is two of them.
+    // A body of exactly the server's cap, counted in UTF-8 bytes ("é" is two of them), and one
+    // a byte over it: the server owns that bound and answers 413 CAP_EXCEEDED, so both reach it.
     const filler = "é".repeat((DISPATCH_HANDOFF_BODY_MAX - '{"a":""}'.length) / 2);
     expect(schema.safeParse({ ...call, body: `{"a":"${filler}"}` }).success).toBe(true);
-    expect(refusals({ ...call, body: `{"a":"${filler}x"}` })).toEqual([
-      `body is 1 bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${DISPATCH_HANDOFF_BODY_MAX + 1}/${DISPATCH_HANDOFF_BODY_MAX})`,
-    ]);
+    expect(schema.safeParse({ ...call, body: `{"a":"${filler}x"}` }).success).toBe(true);
     for (const body of ["[1]", '"text"', "null", "{not json", "{} {}"]) {
       expect(refusals({ ...call, body }), body).toEqual([
         'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}',
@@ -713,17 +758,33 @@ describe("dispatchToolSpecs", () => {
         JSON.stringify(args)
       ).toEqual([refusal]);
     }
+    // The Dispatch server owns the bound on a body (INFRA-370), so the schema takes a reason the
+    // old client-side cap of 32,000 characters refused.
     expect(
-      schema.safeParse({
-        issue: "DSP-1",
-        status: "done",
-        reason: "x".repeat(DISPATCH_BODY_MAX + 1),
-      }).success
-    ).toBe(false);
-    expect(
-      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(DISPATCH_BODY_MAX) })
-        .success
+      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(32001) }).success
     ).toBe(true);
+  });
+
+  // The server owns the bound on an ask's question too, and names it in its refusal.
+  test("dispatch_ask takes a question longer than the old client-side cap", () => {
+    expect(
+      schemaFor("dispatch_ask").safeParse({ issue: "DSP-1", question: "x".repeat(2001) }).success
+    ).toBe(true);
+  });
+
+  // Every instruction an agent reads about an ask gives one rule and no count: the server owns
+  // the bound on a question and its options, names the bound in its refusal, and prints it
+  // through `dispatch limits`, so a number written here would be a second source that drifts the
+  // day the server's changes (INFRA-370). The rule itself is what the instruction carries.
+  test("every ask instruction gives one rule and states no character count", () => {
+    for (const name of ["dispatch_ask", "dispatch_edit_ask"]) {
+      const texts = [specFor(name).description, ...argumentDescriptions(name)];
+
+      for (const text of texts) {
+        expect(characterCount.exec(text), `${name}: ${text}`).toBeNull();
+      }
+      expect(texts.join(" "), name).toContain(ASK_RULE);
+    }
   });
 
   // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);

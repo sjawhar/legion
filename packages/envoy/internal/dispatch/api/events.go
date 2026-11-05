@@ -298,10 +298,7 @@ func (s *server) attachAskEventFields(ctx context.Context, pool queryer, events 
 	for index := range asks {
 		askPointers[index] = &asks[index]
 	}
-	if err := s.attachOpenedEventIDs(ctx, pool, askPointers); err != nil {
-		return err
-	}
-	if err := attachAskReadFields(ctx, pool, askPointers); err != nil {
+	if err := loadAskDetails(ctx, pool, askPointers); err != nil {
 		return err
 	}
 	for index := range payloads {

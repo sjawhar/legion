@@ -72,7 +72,8 @@ const (
 // triggers main had — its phase's start, a workflow delivery, the controller keeper
 // (RequestRuleResume) — unless an operator suspended it: that suspension holds until the operator
 // resumes the claim. The boot's resume by rule, which main did not have, acts only on a source
-// ByRule names, so it never overrides a drain recorded before the source existed.
+// ByRule names, so it never overrides a drain recorded before the source existed, and it leaves a
+// released claim to the wake that brings its pod back.
 type SuspendSource string
 
 const (
@@ -87,12 +88,33 @@ const (
 	SuspendedByDaemon SuspendSource = "daemon"
 	// SuspendedByExit: the tree root's agent reported its own exit, which suspends a root.
 	SuspendedByExit SuspendSource = "exit"
+	// SuspendedByReleased: the daemon released the claim's idle issue pod, whose disk and Sandbox
+	// went with it and whose unpushed work was saved as a git bundle. The claim keeps its phase and
+	// its pending task, and the next wake for its role resumes the same session; a daemon restart
+	// resumes no such claim, since only that wake brings the pod back (workflow's booted). It is no
+	// source ByRule names: the rules that act on a released claim name it themselves — the wake
+	// that brings its pod back, and the stranded report once a wake has run out with no turn.
+	SuspendedByReleased SuspendSource = "released"
 )
 
-// ByRule is whether the source is one the daemon itself recorded, the daemon's own suspend or a
-// root's exit: the only sources the boot's resume by rule acts on, and the only suspended phase
-// workers the stranded report leaves out.
-func (s SuspendSource) ByRule() bool { return s == SuspendedByDaemon || s == SuspendedByExit }
+// ByRule is whether the source is one the daemon itself recorded as a stop of its own — its own
+// suspend, or a root's exit: the sources a daemon rule resumes with no operator, and the only
+// suspended phase workers the stranded report leaves out. A release is not one of them. It is a
+// stop the daemon recorded too, but no rule here acts on it: the boot's resume by rule leaves it to
+// its role's wake (workflow's booted), and the stranded report holds it to R6's one fact
+// (workflow's stranded).
+func (s SuspendSource) ByRule() bool {
+	return s == SuspendedByDaemon || s == SuspendedByExit
+}
+
+// RetiresPhaseTask is whether a suspension by this source ends the claim's phase, so a task queued
+// for that phase goes with it (settle). Every source does but two: an operator's, and a release.
+// Each of those resumes this same claim in the same phase — the operator's by hand, a released
+// claim's at its role's next wake — so the pending task waits through the suspension and is sent
+// on that resume.
+func (s SuspendSource) RetiresPhaseTask() bool {
+	return s != SuspendedByOperator && s != SuspendedByReleased
+}
 
 // Claim is one role claim as the supervisor holds and persists it.
 type Claim struct {
@@ -194,6 +216,32 @@ type Claim struct {
 	// UpdateToldAt is when this round was last reported to the operator's side, so one round is
 	// not reported again at every sweep that finds it open.
 	UpdateToldAt *time.Time
+	// UpdateAnsweredByTurnEnd is whether the answer this claim's UpdateSignalledAt records was
+	// given by the end of the turn the round's own task started (answerByTurnEnd) rather than by
+	// the worker's own ready_for_update call (podUpdateSignalled). Every answer is written with
+	// it — the call's write clears it in the same statement — so what the daemon reads is how
+	// the answer standing now was given.
+	//
+	// It is durable because the rule it decides outlives the daemon that recorded the answer. A
+	// worker that answers by its turn's end holds its plugin's own phase-stall reminder, which
+	// starts a turn of its own every quarter of an hour while the round waits, and the daemon
+	// cannot tell such a turn from an Envoy notice: the mark is what keeps those turns from
+	// taking the answer back at every one of them (takeBackSignal). Read from the claim's plugin
+	// contract instead, a worker at this daemon's contract whose `legion` tool has no
+	// ready_for_update operation lost its answer to its own reminder every fifteen minutes and
+	// its round never ended.
+	UpdateAnsweredByTurnEnd bool
+	// UpdateReaskedForPushCheck is whether this round has already asked this claim's worker
+	// again because the pod's shim could not run the daemon's push check
+	// (internal/daemon's checkUnpushed). A pod whose shim predates that check is guarded by the
+	// workers' answers alone, and a turn's end is the weakest of those answers, so each such
+	// claim is asked once more — with the call, or with a second turn — before the disk goes.
+	//
+	// Once only, which is what this mark is for: the second answer sets
+	// UpdateAnsweredByTurnEnd again, and a round that read that mark alone would refuse its own
+	// replacement at every attempt and never end. It goes with the round (clearUpdate), so the
+	// next round asks again once of its own.
+	UpdateReaskedForPushCheck bool
 	// UpdateLeftRound is the pod round this claim left, and "" when it has left none: the daemon
 	// started the claim's process again in another pod than the one that round was opened over
 	// (launchAfter).
@@ -277,6 +325,15 @@ func (c Claim) LeftPodRound(round string) bool {
 // operator's, which holds until an operator resumes the claim.
 func (c Claim) RuleMayResume() bool {
 	return c.State == StateSuspended && c.SuspendedBy != SuspendedByOperator
+}
+
+// Released is whether the claim is the one suspension a wake brings back: the daemon released its
+// idle issue pod, so the claim keeps its session, its phase and its pending task, and the next
+// wake for its role resumes it (SuspendedByReleased). Every rule that acts on a released claim —
+// the wakes, the notice routing, the stranded report, a release the store cancelled — reads it
+// here rather than spelling the pair out again.
+func (c Claim) Released() bool {
+	return c.State == StateSuspended && c.SuspendedBy == SuspendedByReleased
 }
 
 // RuleHolds is whether an operator's suspension blocks a daemon rule: the claim is suspended by the
@@ -581,12 +638,12 @@ var ErrHeldByOperator = wait.New("the suspension holds until the operator resume
 
 // Machine is one claim's decision owner.
 type Machine struct {
-	mu         sync.Mutex
-	ctx        context.Context
-	deps       Deps
-	log        *slog.Logger
-	claim      Claim
-	onTerminal func(Claim, ClaimState)
+	mu             sync.Mutex
+	ctx            context.Context
+	deps           Deps
+	log            *slog.Logger
+	claim          Claim
+	onDurableState func(Claim, ClaimState)
 
 	timers map[TimerKind]armed
 	seq    uint64
@@ -993,17 +1050,20 @@ func (m *Machine) unlock() {
 	m.mu.Unlock()
 }
 
-// OnTerminal installs the daemon callback for durable ready and failed transitions.
-// The callback runs after the transition's claim write has succeeded.
-func (m *Machine) OnTerminal(callback func(Claim, ClaimState)) {
+// OnDurableState installs the daemon callback for the durable transitions it acts on: ready,
+// working and failed. Two of them are terminal for the workflow and one, working, is not: the
+// daemon reads a turn starting to stamp a woken pod's first turn. The callback runs after the
+// transition's claim write has succeeded, and a machine keeps one, so a daemon that observes
+// more than one of them observes them in that one callback.
+func (m *Machine) OnDurableState(callback func(Claim, ClaimState)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.onTerminal = callback
+	m.onDurableState = callback
 }
 
-func (m *Machine) terminal(state ClaimState) {
-	if m.onTerminal != nil {
-		m.onTerminal(copyClaim(m.claim), state)
+func (m *Machine) durableState(state ClaimState) {
+	if m.onDurableState != nil {
+		m.onDurableState(copyClaim(m.claim), state)
 	}
 }
 
@@ -1343,7 +1403,7 @@ func (m *Machine) stopPrevious(ctx context.Context) error {
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
-	if err := m.interrupted(ctx, "the process died in the task's turn"); err != nil {
+	if err := m.interrupted(ctx, "the process died in the task's turn", observation.OutOfMemory); err != nil {
 		return err
 	}
 	if m.held != nil {
@@ -1379,7 +1439,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
-	m.terminal(StateFailed)
+	m.durableState(StateFailed)
 	return nil
 }
 
@@ -1645,6 +1705,8 @@ func claimOf(ev Event) claim.Token {
 	case PodUpdateEnded:
 		return ev.Claim
 	case PodUpdateSignalled:
+		return ev.Claim
+	case PodUpdateReask:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim

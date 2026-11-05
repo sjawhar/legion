@@ -101,17 +101,20 @@ func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 // whoami tells any authenticated caller who the server takes it for: a human by login, or an
-// agent with the lowercase login of the personal token's owner (null for the shared token), the
-// verified Kubernetes subject of its service-account token (null for every other bearer), the
-// session its credential proved (null for a credential that proves none, which every one but a
-// broker-issued token is) and the one project that credential lets it write (null where it names
-// none, a person-scoped token included).
+// agent with the lowercase login of the person it acts for — the personal token's owner, or a
+// broker-issued token's person (null for the shared token and for a broker-issued token that
+// names a service and no person) — the service it is, which is the verified Kubernetes subject
+// of its service-account token or the fleet a broker-issued token naming no person belongs to
+// (null for every other credential), the session its credential proved (null for a credential
+// that proves none, which every one but a broker-issued token is) and the one project that
+// credential lets it write (null where it names none, a person-scoped token included).
 //
 // Every caller is told the OAuth scopes its credential holds, which is what decides the routes it
 // may call (gateRouteScopes): both for a person at a browser, the set its own row names for a
-// personal token, and none for the shared token and a pod's service-account token. The kind stays
-// `agent` for a personal token holding the person scope, since the kind names the credential and
-// not the act; the person that token acts for is its `owner`, which the dispatch command reads.
+// personal token, and none for the shared token, a pod's service-account token and a
+// broker-issued token that names a service and no person. The kind stays `agent` for a personal
+// token holding the person scope, since the kind names the credential and not the act; the
+// person that token acts for is its `owner`, which the dispatch command reads.
 func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -82,7 +83,7 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	// Any bearer writes a name into the project list every dashboard reads, and no route renames a
 	// project, so a name is capped as an issue title is and shows a reader what it says.
-	if length := len16(input.Name); length > contracts.ProjectNameMax {
+	if length := itemblocks.Units16(input.Name); length > contracts.ProjectNameMax {
 		capExceeded(w, "name", length, contracts.ProjectNameMax)
 		return
 	}

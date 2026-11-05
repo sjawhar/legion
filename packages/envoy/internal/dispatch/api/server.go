@@ -140,10 +140,10 @@ type Deps struct {
 	// that reads two processes inside one answer's life needs no timing window.
 	RouteRosterTTL time.Duration
 	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
-	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; neither
-	// routes.BuildAppContext nor cmd/dispatch sets it, so every deployment runs twelve seconds.
-	// Only this package's tests set another, so a send to a session that is gone settles without
-	// sleeping the production window.
+	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; a
+	// deployment leaves it zero, and only a test process sets another (cmd/dispatch:
+	// DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW, under the test hooks), so a send to a session that
+	// is gone settles without sleeping the production window.
 	ListenerTakeoverWindow time.Duration
 	// TestHookTimeout replaces how long a test hook waits for every process's acknowledgement
 	// (testHookTimeout, test_hooks_fanout.go). Zero keeps ten seconds; neither
@@ -469,11 +469,14 @@ type warnedProductionRun struct {
 	applyStep string
 }
 
-// queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
-// serves both the plain-read and in-transaction paths.
+// queryer is the pgx surface shared by *store.Pool and pgx.Tx, so one loader
+// serves both the plain-read and in-transaction paths. A loader that reads
+// several statements at once queues them in one batch on it (loadArtifactDetails,
+// loadAskDetails) rather than spending a round trip on each.
 type queryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
 }
 
 // Register mounts every native-workspace route on mux. The routes live in routes_table.go; the
@@ -684,8 +687,8 @@ const defaultReadDeadline = 20 * time.Second
 // token's decision (decideBrokerToken), its layers outermost first: the transaction tracking,
 // the drain a write's early answer waits behind, admission, a read's deadline and pinned
 // connection, the row's OAuth scopes, the parameter refusal every route has, the changed-login
-// check, a write's project and session scope, an upload's closed-issue refusal, and the keyed
-// layer.
+// check, the signed-in person a write needs, a write's project and session scope, an upload's
+// closed-issue refusal, and the keyed layer.
 //
 // Admission comes before the deadline so a request's wait for room is bounded by admission's own
 // wait, and the deadline counts only the work the read was admitted to do; the pinned connection
@@ -707,10 +710,16 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 	}
 	if route.Method != http.MethodGet {
 		// Outside the keyed layer and the upload's spool, so a write to another project's
-		// object, or into another session's own rows, claims no idempotency key and costs
-		// no body (withinProjectScope, withinSessionScope).
+		// object, into another session's own rows, or by a credential that names no person
+		// claims no idempotency key and costs no body (withinProjectScope,
+		// withinSessionScope, writeNeedsASignedInPerson).
 		handler = s.withinProjectScope(route, handler)
 		handler = s.withinSessionScope(route, handler)
+		// Outermost of the three, so a caller that may make no write at all is told that
+		// rather than which session the write it tried belongs to. The project check has
+		// nothing to tell it: a token naming a service is held to no one project
+		// (broker_token.go).
+		handler = s.writeNeedsASignedInPerson(handler)
 		handler = s.refuseChangedLogin(handler)
 	}
 	handler = s.refuseUnstorableParameters(route.Pattern, handler)
@@ -1666,7 +1675,8 @@ func (s *server) requireCallerScope(w http.ResponseWriter, r *http.Request, scop
 }
 
 // capExceededError names how far a text field is over its cap so one trim lands:
-// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units (len16).
+// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units
+// (itemblocks.Units16).
 func capExceededError(field string, length, limit int) *apiError {
 	return errorf(http.StatusBadRequest, "CAP_EXCEEDED",
 		"%s is %d characters over the %d-character limit (%d/%d)", field, length-limit, limit, length, limit)
@@ -1676,6 +1686,18 @@ func capExceededError(field string, length, limit int) *apiError {
 func countExceededError(code, field string, count, limit int) *apiError {
 	return errorf(http.StatusBadRequest, code,
 		"%s is %d over the %d-item limit (%d/%d)", field, count-limit, limit, count, limit)
+}
+
+// blockBoundError is what a route answers an itemblocks.Check with: nil where the body passed
+// both bounds, else the refusal the typed error words (itemblocks.CapExceeded names the block,
+// itemblocks.CountExceeded the count), with the status and code every cap refusal carries.
+// Every route that bounds a body calls this one helper, so a route added later cannot word the
+// same refusal differently.
+func blockBoundError(err error) *apiError {
+	if err == nil {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err)
 }
 
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {
@@ -1696,17 +1718,6 @@ func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
 		return false
 	}
 	return true
-}
-
-func len16(value string) int {
-	length := 0
-	for _, rune := range value {
-		length++
-		if rune > 0xffff {
-			length++
-		}
-	}
-	return length
 }
 
 const maxJSONRequestBytes int64 = 1 << 20
