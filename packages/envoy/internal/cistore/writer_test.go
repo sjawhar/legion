@@ -387,6 +387,15 @@ func TestConcurrentCallersOfOneHeadEachReportTheirOwnChange(t *testing.T) {
 		t.Fatalf("%d of the %d concurrent callers report a change, want %d: only the new run and the new suite were not in the record (%v)",
 			changed, len(callers), wantChanged, answers)
 	}
+	// Both assertions hold whatever order the callers arrive in: the two calls of a pair carry
+	// identical observations, so whichever applies first changes the record and the other finds
+	// its own observation already there.
+	if answers[2] || answers[3] {
+		t.Fatalf("a caller whose run the record already held reports a change: %v", answers)
+	}
+	if answers[0] == answers[1] || answers[4] == answers[5] {
+		t.Fatalf("each pair sending one new observation must hold exactly one change: %v", answers)
+	}
 
 	entry, err := client.JS().KeyValue(bus.CIStateBucket)
 	if err != nil {
