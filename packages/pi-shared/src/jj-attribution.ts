@@ -22,16 +22,29 @@
 //
 // For a pane whose issue sits on a repository the deployment names, the
 // overlay carries a second line, `Dispatch: <KEY>`, so a squash landing
-// message carries the issue key. Both lines are one template, because
-// `templates.commit_trailers` is a single key and a later configuration layer
-// replaces an earlier one rather than adding to it.
+// message carries the issue key. That line rides a `[[--scope]]` table whose
+// `--when.workspaces` names the pane's own resolved workspace, and the
+// unscoped `[templates]` table keeps the session line alone: a commit the
+// pane's shell makes in any other jj repository carries the session line and
+// no issue key, so a clone of a public repository never carries this
+// deployment's issue key.
 //
-// That single key is global to the process, so a pane whose issue is on a
-// named repository stamps the issue line into *any* jj repository its shell
-// commits in — a scratch repository or a second checkout included. Nothing in
-// the trailer mechanism can be per repository: jj reads the template before it
-// knows which repository a `describe` is in. In practice a role commits in
-// `LEGION_WORKSPACE` alone.
+// The scoped table repeats *both* lines, because a scoped
+// `templates.commit_trailers` replaces the key rather than adding to it: a
+// scope carrying the issue line alone would drop `Omp-Session:` from every
+// commit it stamps.
+//
+// jj resolves a workspace root before it matches the scope, and matches it as
+// a path prefix on whole path components, so the path written must be the
+// real, absolute one (`resolvedWorkspace`). A jj repository a role creates
+// *under* its own workspace is stamped too; a sibling whose name merely
+// extends that path is not; and a second jj workspace of the same repository,
+// at another path, carries the session line alone. A workspace path the
+// writer cannot contain — one holding a character a TOML basic string cannot
+// carry raw — and one that does not resolve both leave the session line
+// alone, rather than a scope jj refuses: a scope jj cannot parse breaks every
+// `jj` command in the pane, which is far worse than a missing trailer.
+import { realpathSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -48,9 +61,37 @@ const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
  * inside a TOML literal, so a quote, a backslash or a newline would write a template jj cannot
  * parse and break every `jj describe` in the pane. */
 const ISSUE_KEY = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
+/** The first code point a TOML basic string carries raw, and the one it cannot: every control
+ * character below the space, and the DEL. */
+const FIRST_RAW_CODE = 0x20;
+const DEL_CODE = 0x7f;
 
 export function sessionIdFromTranscript(sessionFile: string): string | undefined {
   return TOP_LEVEL_TRANSCRIPT.exec(path.basename(sessionFile))?.[1];
+}
+
+/** The real, absolute path of `workspace` — what `jj root` prints in the pane, and so what jj
+ * matches a `[[--scope]]` against — or undefined for an empty, unset or unresolvable one. A
+ * relative path and a path that does not exist match no scope and say nothing, so neither may
+ * ever reach the overlay. */
+export function resolvedWorkspace(workspace: string | undefined): string | undefined {
+  if (!workspace) return undefined;
+  try {
+    return realpathSync(workspace);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `workspace` as a TOML basic string, quotes included, or undefined when it holds a character
+ * such a string cannot carry raw and no escape of ours should guess at: a scope jj cannot parse
+ * would break every `jj` command in the pane, so the caller writes the session line alone. */
+function tomlBasicString(workspace: string): string | undefined {
+  for (let at = 0; at < workspace.length; at += 1) {
+    const code = workspace.charCodeAt(at);
+    if (code < FIRST_RAW_CODE || code === DEL_CODE) return undefined;
+  }
+  return `"${workspace.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
 function withoutOverlays(chain: string): string {
@@ -116,39 +157,50 @@ export async function userConfigChain(
 /** Writes the overlay for `sessionId` under `stateDir` and returns the chain it exported into
  * `env.JJ_CONFIG`, or undefined when it exported none: an empty session id, no base chain to layer
  * over, or a failed write — which still degrades `env.JJ_CONFIG` to the base, since no overlay is
- * active. `options.issueKey` adds the `Dispatch:` line only when its whole value is a key. */
+ * active. `options.issueKey` and `options.workspace` add the `Dispatch:` line, scoped to that one
+ * workspace, only when the key's whole value is a key and the path is one a TOML basic string can
+ * carry; `options.workspace` is the resolved path (`resolvedWorkspace`), which is what jj matches
+ * a scope against. */
 export async function exportJjSessionAttribution(
   sessionId: string,
   stateDir: string,
   options: {
     issueKey?: string;
+    workspace?: string;
     env?: NodeJS.ProcessEnv;
     resolveBase?: () => Promise<string | undefined>;
   } = {}
 ): Promise<string | undefined> {
-  const { issueKey, env = process.env, resolveBase = userConfigChain } = options;
+  const { issueKey, workspace, env = process.env, resolveBase = userConfigChain } = options;
   if (!sessionId) return undefined;
   const overlay = path.join(stateDir, `omp-attribution-${sessionId}.toml`);
-  const active = env.JJ_CONFIG;
+  const active = env["JJ_CONFIG"];
   // Already active — never rewrite a live layer; the caller still learns the live chain.
   if (active?.split(":").includes(overlay)) return active;
   const base = (active ? withoutOverlays(active) : "") || (await resolveBase());
   if (!base) return undefined;
   // `\n` is the two characters jj's template language reads as a newline, inside a TOML literal.
-  const trailers =
-    issueKey !== undefined && ISSUE_KEY.test(issueKey)
-      ? `Omp-Session: ${sessionId}\\nDispatch: ${issueKey}`
-      : `Omp-Session: ${sessionId}`;
+  const sessionTrailer = `Omp-Session: ${sessionId}`;
+  const scopedTo =
+    issueKey !== undefined && ISSUE_KEY.test(issueKey) && workspace
+      ? tomlBasicString(workspace)
+      : undefined;
+  const contents =
+    `[templates]\ncommit_trailers = '"${sessionTrailer}"'\n` +
+    (scopedTo === undefined
+      ? ""
+      : `\n[[--scope]]\n--when.workspaces = [${scopedTo}]\n[--scope.templates]\n` +
+        `commit_trailers = '"${sessionTrailer}\\nDispatch: ${issueKey}"'\n`);
   try {
     await mkdir(stateDir, { recursive: true });
     const tmp = `${overlay}.${process.pid}.tmp`;
-    await writeFile(tmp, `[templates]\ncommit_trailers = '"${trailers}"'\n`);
+    await writeFile(tmp, contents);
     await rename(tmp, overlay);
     const chain = `${base}:${overlay}`;
-    env.JJ_CONFIG = chain;
+    env["JJ_CONFIG"] = chain;
     return chain;
   } catch {
-    env.JJ_CONFIG = base; // degrade to no trailer, never a stale one
+    env["JJ_CONFIG"] = base; // degrade to no trailer, never a stale one
     return undefined;
   }
 }

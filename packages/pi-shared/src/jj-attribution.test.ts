@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   exportJjSessionAttribution,
   JJ_CONFIG_PATH_TIMEOUT_MS,
+  resolvedWorkspace,
   sessionIdFromTranscript,
   userConfigChain,
 } from "./jj-attribution";
@@ -42,6 +43,20 @@ describe("exportJjSessionAttribution", () => {
     await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
   const sessionLine = `[templates]\ncommit_trailers = '"Omp-Session: ${ROOT_ID}"'\n`;
+  /** A real directory to scope an overlay to, under a scratch directory the afterEach removes. */
+  async function workspace(name = "ws"): Promise<string> {
+    const dir = path.join(await stateDir("jj-attribution-ws-"), name);
+    await mkdir(dir, { recursive: true });
+    return await realpath(dir);
+  }
+  /** The overlay the writer composes: the unscoped session line, then the scope carrying both.
+   * `inToml` is the workspace path as a TOML basic string's body, escapes included. */
+  function scopedOverlay(inToml: string, issueKey: string): string {
+    return (
+      `${sessionLine}\n[[--scope]]\n--when.workspaces = ["${inToml}"]\n` +
+      `[--scope.templates]\ncommit_trailers = '"Omp-Session: ${ROOT_ID}\\nDispatch: ${issueKey}"'\n`
+    );
+  }
 
   it("writes the trailer overlay and chains it after the resolved user config", async () => {
     const dir = await stateDir();
@@ -57,7 +72,24 @@ describe("exportJjSessionAttribution", () => {
     expect(await readFile(overlay, "utf8")).toBe(sessionLine);
   });
 
-  it("adds the Dispatch line for an issue key of the accepted shape", async () => {
+  it("scopes the Dispatch line to the pane's workspace for a key of the accepted shape", async () => {
+    const dir = await stateDir();
+    const ws = await workspace();
+    const env: NodeJS.ProcessEnv = {};
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "ACME-7",
+      workspace: ws,
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
+    expect(await readFile(path.join(dir, `omp-attribution-${ROOT_ID}.toml`), "utf8")).toBe(
+      scopedOverlay(ws, "ACME-7")
+    );
+  });
+
+  // Without a workspace there is nothing to scope the key to, and an unscoped key would stamp
+  // this deployment's issue into every jj repository the pane's shell commits in.
+  it("writes no scope for an accepted key with no workspace", async () => {
     const dir = await stateDir();
     const env: NodeJS.ProcessEnv = {};
     await exportJjSessionAttribution(ROOT_ID, dir, {
@@ -66,7 +98,77 @@ describe("exportJjSessionAttribution", () => {
       resolveBase: async () => "/u/base.toml",
     });
     expect(await readFile(path.join(dir, `omp-attribution-${ROOT_ID}.toml`), "utf8")).toBe(
-      `[templates]\ncommit_trailers = '"Omp-Session: ${ROOT_ID}\\nDispatch: ACME-7"'\n`
+      sessionLine
+    );
+  });
+
+  // jj resolves a workspace root before it matches a scope, so the link's own path would match
+  // nothing — and say nothing about it.
+  it("scopes to the real path when the workspace is reached through a symlink", async () => {
+    const dir = await stateDir();
+    const real = await workspace("real-ws");
+    const link = path.join(path.dirname(real), "link-ws");
+    await symlink(real, link);
+    const env: NodeJS.ProcessEnv = {};
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "ACME-7",
+      workspace: resolvedWorkspace(link),
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
+    expect(await readFile(path.join(dir, `omp-attribution-${ROOT_ID}.toml`), "utf8")).toBe(
+      scopedOverlay(real, "ACME-7")
+    );
+  });
+
+  it("writes no scope for a workspace path that does not exist", async () => {
+    const dir = await stateDir();
+    const env: NodeJS.ProcessEnv = {};
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "ACME-7",
+      workspace: resolvedWorkspace(path.join(dir, "no-such-workspace")),
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
+    expect(await readFile(path.join(dir, `omp-attribution-${ROOT_ID}.toml`), "utf8")).toBe(
+      sessionLine
+    );
+  });
+
+  // The path goes into a TOML basic string inside an array; a raw quote would end that string
+  // and a raw backslash would open an escape, leaving jj a file it refuses.
+  it("escapes a workspace path holding a double quote and a backslash", async () => {
+    const dir = await stateDir();
+    const ws = await workspace('ws "quoted\\odd');
+    const env: NodeJS.ProcessEnv = {};
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "ACME-7",
+      workspace: ws,
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
+    expect(await readFile(path.join(dir, `omp-attribution-${ROOT_ID}.toml`), "utf8")).toBe(
+      scopedOverlay(ws.replaceAll("\\", "\\\\").replaceAll('"', '\\"'), "ACME-7")
+    );
+  });
+
+  // No escape of ours is worth guessing at here: a scope jj cannot parse breaks every `jj`
+  // command in the pane, which is far worse than a missing trailer.
+  it.each([
+    ["a newline", "/ws/line\nbreak"],
+    ["a tab", "/ws/tab\there"],
+    ["a DEL", "/ws/del\u007fhere"],
+  ])("writes no scope for a workspace path holding %s", async (_name, ws) => {
+    const dir = await stateDir();
+    const env: NodeJS.ProcessEnv = {};
+    await exportJjSessionAttribution(ROOT_ID, dir, {
+      issueKey: "ACME-7",
+      workspace: ws,
+      env,
+      resolveBase: async () => "/u/base.toml",
+    });
+    expect(await readFile(path.join(dir, `omp-attribution-${ROOT_ID}.toml`), "utf8")).toBe(
+      sessionLine
     );
   });
 
@@ -87,6 +189,7 @@ describe("exportJjSessionAttribution", () => {
     const env: NodeJS.ProcessEnv = {};
     await exportJjSessionAttribution(ROOT_ID, dir, {
       issueKey,
+      workspace: await workspace(),
       env,
       resolveBase: async () => "/u/base.toml",
     });
@@ -97,17 +200,17 @@ describe("exportJjSessionAttribution", () => {
 
   it("carries a state directory holding a space and a single quote whole", async () => {
     const dir = path.join(await stateDir(), "state 'dir");
+    const ws = await workspace();
     const env: NodeJS.ProcessEnv = {};
     const chain = await exportJjSessionAttribution(ROOT_ID, dir, {
       issueKey: "ACME-7",
+      workspace: ws,
       env,
       resolveBase: async () => "/u/base.toml",
     });
     const overlay = path.join(dir, `omp-attribution-${ROOT_ID}.toml`);
     expect(chain).toBe(`/u/base.toml:${overlay}`);
-    expect(await readFile(overlay, "utf8")).toBe(
-      `[templates]\ncommit_trailers = '"Omp-Session: ${ROOT_ID}\\nDispatch: ACME-7"'\n`
-    );
+    expect(await readFile(overlay, "utf8")).toBe(scopedOverlay(ws, "ACME-7"));
   });
 
   it("strips stale attribution overlays from an inherited JJ_CONFIG, keeping user layers", async () => {
@@ -188,6 +291,51 @@ describe("exportJjSessionAttribution", () => {
     expect(
       await readFile(path.join(dir, "omp-attribution-.toml"), "utf8").catch(() => undefined)
     ).toBeUndefined();
+  });
+});
+
+describe("resolvedWorkspace", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+  async function scratch(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), "jj-attribution-resolve-"));
+    dirs.push(dir);
+    return await realpath(dir);
+  }
+
+  it("answers the real path of an existing directory", async () => {
+    const dir = await scratch();
+    expect(resolvedWorkspace(dir)).toBe(dir);
+  });
+
+  it("follows a symlink to the path jj would resolve the workspace to", async () => {
+    const dir = await scratch();
+    const real = path.join(dir, "real");
+    await mkdir(real);
+    const link = path.join(dir, "link");
+    await symlink(real, link);
+    expect(resolvedWorkspace(link)).toBe(real);
+  });
+
+  // A relative path matches no scope and says nothing about it, so the absolute one is written.
+  it("answers an absolute path for a relative one", async () => {
+    const dir = await scratch();
+    const relative = path.relative(process.cwd(), dir);
+    expect(path.isAbsolute(relative)).toBe(false);
+    expect(resolvedWorkspace(relative)).toBe(dir);
+  });
+
+  it.each([
+    ["an unset workspace", undefined],
+    ["an empty workspace", ""],
+  ])("answers undefined for %s", (_name, workspace) => {
+    expect(resolvedWorkspace(workspace)).toBeUndefined();
+  });
+
+  it("answers undefined for a path that does not exist", async () => {
+    expect(resolvedWorkspace(path.join(await scratch(), "gone"))).toBeUndefined();
   });
 });
 

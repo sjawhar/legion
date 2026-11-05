@@ -3,7 +3,7 @@
 // characters, so a long open-asks summary or answers list sharing a command with the skill could
 // push it out.
 //
-// open-asks (every SessionStart: startup, resume, clear, compact, fork). Three jobs:
+// open-asks (every SessionStart: startup, resume, clear, compact, fork). Four jobs:
 // 1. Name Claude Code as the `dispatch` command's host and hand on the session's envoy.json:
 //    append `export DISPATCH_HOST=claude` and `export ENVOY_CONFIG_FILE='<path>'` (the file
 //    Claude Code's rule picks, `$CLAUDE_CONFIG_DIR/envoy.json` when that is set) to
@@ -15,9 +15,22 @@
 //    The path is single-quoted, the one form Claude Code's PowerShell
 //    bridge also reads. The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which
 //    Claude Code sets fresh in each Bash command, so a `/clear` needs nothing more here.
-// 2. Record the CURRENT session id for this Claude process so the channel
+// 2. For a Legion pane (`LEGION_STATE_DIR` set), write the pane's jj attribution overlay under
+//    that directory and hand on the jj config chain it layers over: `export JJ_CONFIG='<chain>'`
+//    in the same file, so every jj commit a Bash command of the session makes carries an
+//    `Omp-Session: <id>` trailer, and a `Dispatch: <KEY>` line too when `LEGION_ISSUE_TRAILER`
+//    names the issue key — that line scoped to the pane's own workspace (`LEGION_WORKSPACE`
+//    resolved), so a commit made in any other jj repository carries the session line alone
+//    (`exportJjSessionAttribution`, `@legion/pi-shared/jj-attribution`). The
+//    hook writes it, not the claim boot: that boot is the MCP server Claude Code spawns as a
+//    child, and a child cannot change its parent's environment. A `/clear` gives the session a
+//    new id and so a new overlay path, so this line replaces an earlier one rather than joining
+//    it: exactly one `export JJ_CONFIG=` stands however many times the hook runs. A session that
+//    is no Legion pane gets nothing, and an overlay that could not be written (no jj, or a jj
+//    that never answers inside its 3 s) costs the session that one export and nothing else.
+// 3. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
-// 3. Put the session's open Dispatch asks into the model's context, after one `envoy: <warning>`
+// 4. Put the session's open Dispatch asks into the model's context, after one `envoy: <warning>`
 //    line for each file the read found and did not read (a checkout's `.opencode/envoy.json`,
 //    naming its rename), as the other plugins' start notices and the `dispatch` command name it.
 // Plain stdout becomes context; it always exits 0 so a Dispatch outage never
@@ -87,6 +100,11 @@ import {
   sessionDispatchSettings,
   sessionDispatchUrl,
 } from "@legion/envoy-client/session-settings"
+import {
+  exportJjSessionAttribution,
+  resolvedWorkspace,
+  userConfigChain,
+} from "@legion/pi-shared/jj-attribution"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -149,6 +167,15 @@ const RefreshOutcome = z.object({
 const ANSWERS_TIMING_FILE = "ENVOY_ANSWERS_TIMING_FILE"
 
 const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
+/** What an overlay export line starts with: the one line of the env file this hook replaces
+ *  rather than adds to. */
+const JJ_CONFIG_EXPORT = "export JJ_CONFIG="
+/** The bound on resolving jj's own user config chain for the overlay, inside the 20 s hooks.json
+ *  gives this hook: 3 s of jj and then 3 s of the Dispatch read (`OPEN_ASKS_TIMEOUT_MS`) still
+ *  leave the session its summary. Not `JJ_CONFIG_PATH_TIMEOUT_MS`, which is the Oh My Pi lane's
+ *  bound inside the 30 s that harness gives its session-start handler. A jj that never answers
+ *  costs the session the export and nothing else. */
+const JJ_BASE_CHAIN_TIMEOUT_MS = 3_000
 
 /** Appends `line` to the env file, once: every SessionStart of the session runs this. */
 function appendOnce(envFile: string, line: string): void {
@@ -163,6 +190,32 @@ function appendOnce(envFile: string, line: string): void {
   appendFileSync(envFile, `${separator}${line}\n`)
 }
 
+/** Writes `line` to the env file as the only line starting with `prefix`, replacing an earlier
+ *  one in its place and appending when there is none: a `/clear` gives the session a new id and so
+ *  a new overlay path, and two `export JJ_CONFIG=` lines in one sourced file would leave which
+ *  overlay wins to the order they were written in. Every other line keeps its text and its place.
+ *  A replacement is written through a temporary file and a rename, so a process that dies
+ *  mid-write leaves the shell the whole old file, never a truncated one; with no earlier line it
+ *  appends, as `appendOnce` does, rather than rewriting what another hook may be appending to. */
+function replaceOnce(envFile: string, prefix: string, line: string): void {
+  let written = ""
+  try {
+    written = readFileSync(envFile, "utf8")
+  } catch (error) {
+    if (!hasErrnoCode(error, "ENOENT")) throw error
+  }
+  const lines = written.split("\n")
+  const at = lines.findIndex((existing) => existing.startsWith(prefix))
+  if (at === -1) {
+    const separator = written === "" || written.endsWith("\n") ? "" : "\n"
+    appendFileSync(envFile, `${separator}${line}\n`)
+    return
+  }
+  if (lines[at] === line) return
+  lines[at] = line
+  writeAtomically(envFile, lines.join("\n"))
+}
+
 async function openAsks(raw: unknown): Promise<void> {
   const input = OpenAsksInput.parse(raw)
   const envFile = process.env["CLAUDE_ENV_FILE"]
@@ -173,6 +226,32 @@ async function openAsks(raw: unknown): Promise<void> {
     appendOnce(envFile, DISPATCH_HOST_LINE)
     if (chosen.path !== null) {
       appendOnce(envFile, `export ENVOY_CONFIG_FILE='${chosen.path.replaceAll("'", "'\\''")}'`)
+    }
+    const stateDir = process.env["LEGION_STATE_DIR"]
+    if (stateDir) {
+      try {
+        // Absent or empty is no key, and the trailer is the session line alone; the same for a
+        // workspace that does not resolve, which the `Dispatch:` line is scoped to.
+        const issueKey = process.env["LEGION_ISSUE_TRAILER"]
+        const workspace = resolvedWorkspace(process.env["LEGION_WORKSPACE"])
+        const chain = await exportJjSessionAttribution(input.session_id, stateDir, {
+          ...(issueKey ? { issueKey } : {}),
+          ...(workspace ? { workspace } : {}),
+          resolveBase: () => userConfigChain(JJ_BASE_CHAIN_TIMEOUT_MS),
+        })
+        if (chain !== undefined) {
+          replaceOnce(
+            envFile,
+            JJ_CONFIG_EXPORT,
+            `${JJ_CONFIG_EXPORT}'${chain.replaceAll("'", "'\\''")}'`,
+          )
+        }
+      } catch (error) {
+        // The overlay writer swallows its own failures, but replacing a line writes a temporary
+        // file beside the env file, which needs its directory writable where appending above did
+        // not: attribution must cost the session neither its exports nor its summary.
+        process.stderr.write(`envoy: could not export the jj attribution — ${messageFor(error)}\n`)
+      }
     }
   }
   const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
