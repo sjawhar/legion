@@ -321,16 +321,18 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
     ).toHaveCount(0);
     // No component attached anywhere on the chain: the rail's read-only line says so.
     await expect(page.getByTestId("issue-components")).toContainText("Components:Not attached");
-    await page.getByRole("tab", { name: "Children" }).click();
+    // The children are a section of every preset now, not a tab of their own (R10).
     const childRow = page
-      .getByRole("tabpanel")
+      .getByTestId("issue-children")
       .locator("li")
       .filter({ hasText: `${child.key} · Child decision` });
     await expect(
       childRow.getByRole("link", { name: `${child.key} · Child decision` })
     ).toBeVisible();
-    // The row rolls up the whole subtree: the child itself plus its done grandchild.
-    await expect(childRow).toContainText("1/2 done");
+    // The whole subtree's roll-up - the child itself plus its done grandchild - is the section
+    // header's own labelled count now, beside the direct one (dispatch://INFRA-1196 R10).
+    await expect(page.getByTestId("issue-children-subtree-count")).toContainText("1/2");
+    await expect(page.getByTestId("issue-children-direct-count")).toContainText("0/1");
     await expect(childRow.locator("time")).toHaveCount(1);
   } finally {
     await context.close();
@@ -402,8 +404,8 @@ test("editing the parent line moves the issue across Children tabs live", async 
     await Promise.all([
       (async () => {
         await parentPage.goto(`/issues/${newParent.key}`);
-        await parentPage.getByRole("tab", { name: "Children" }).click();
-        await expect(parentPage.getByText("No child issues")).toBeVisible();
+        // An issue with no children draws no children section at all (R10).
+        await expect(parentPage.getByTestId("issue-children")).toHaveCount(0);
       })(),
       (async () => {
         await moverPage.goto(`/issues/${mover.key}`);
@@ -419,7 +421,7 @@ test("editing the parent line moves the issue across Children tabs live", async 
     // The new parent's open page hears child.added on the live event feed and gains the row
     // without a reload.
     const movedRow = parentPage
-      .getByRole("tabpanel")
+      .getByTestId("issue-children")
       .getByRole("link", { name: `${mover.key} · Moving decision` });
     await expect(movedRow).toBeVisible();
 
@@ -435,7 +437,8 @@ test("editing the parent line moves the issue across Children tabs live", async 
 
     // And child.removed empties it again, still without a reload.
     await expect(movedRow).toHaveCount(0);
-    await expect(parentPage.getByText("No child issues")).toBeVisible();
+    // An issue with no children draws no section at all, so the row's place is gone with it.
+    await expect(parentPage.getByTestId("issue-children")).toHaveCount(0);
   } finally {
     await context.close();
   }
@@ -463,7 +466,7 @@ test("an answered ask remains in the issue conversation @phone", async ({ browse
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Close review panel (0 open asks)" }).click();
     }
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await page.goto(`/issues/${issue.key}/conversation`);
     const conversationAsk = page.getByTestId(`ask-${ask.id}`);
     await expect(conversationAsk).toHaveCount(1);
     await expect(conversationAsk).toContainText("Answered by");
@@ -508,7 +511,7 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
       await page.getByRole("button", { name: "Close review panel (1 open ask)" }).click();
     }
 
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await page.goto(`/issues/${issue.key}/conversation`);
     const conversationCard = page.locator("#issue-conversation-panel").getByTestId(`ask-${ask.id}`);
     await expect(conversationCard.getByRole("link", { name: "spec.md" })).toHaveAttribute(
       "href",
@@ -644,7 +647,11 @@ test("pinning survives an immediate full navigation @phone", async ({ browser },
       await page.getByRole("button", { name: /Open review panel/ }).click();
     }
     await page.getByRole("tab", { name: "Pinned" }).click();
-    await expect(page.getByText("Pinned before navigation", { exact: true })).toBeVisible();
+    // The redesign draws the message in the tree and in the panel (R1, R12), so this reads the
+    // panel's copy rather than resolving to both.
+    await expect(
+      page.getByTestId("margin-sheet").getByText("Pinned before navigation", { exact: true })
+    ).toBeVisible();
   } finally {
     await alice.close();
   }
@@ -702,9 +709,9 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
       .toBe(true);
 
     // The removal is an event, so it is the Activity tab's line and not a Conversation card.
-    await page.getByRole("tab", { name: "Activity" }).click();
+    await page.goto(`/issues/${issue.key}/activity`);
     await expect(page.getByRole("list", { name: "Issue activity" })).toContainText("unsubscribed");
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await page.goto(`/issues/${issue.key}/conversation`);
     await expect(page.getByRole("list", { name: "Conversation turns" })).not.toContainText(
       "unsubscribed"
     );

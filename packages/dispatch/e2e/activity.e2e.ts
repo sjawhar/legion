@@ -15,6 +15,7 @@ import {
   resolveAsk,
   resolveComment,
 } from "./api";
+import { conversationState, openIssueAddress } from "./issue-presets";
 import { resetDatabase, setEventCreatedAt } from "./seed";
 import { asUser } from "./users";
 
@@ -58,10 +59,7 @@ test("the Activity tab lists the event rows the Conversation does not draw", asy
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/activity`);
-    await expect(page.getByRole("tab", { name: "Activity" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    await expect(conversationState(page, "everything")).toHaveAttribute("aria-selected", "true");
     const rows = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
     // The three kinds the Conversation never draws, each a line of its own.
     for (const description of ["updated the issue", "claimed the issue", "added note.md"]) {
@@ -154,7 +152,7 @@ test("Activity breaks its rows by day and marks where the reader stopped", async
     // Nothing the tab did wrote the reader's watermark, and the Conversation is the control:
     // its own write is what says the page had the chance to make one.
     expect(stateWrites).toBe(0);
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await openIssueAddress(page, "conversation");
     await expect.poll(() => stateWrites, { intervals: [50, 50, 100, 200, 500] }).toBe(1);
   } finally {
     await alice.close();

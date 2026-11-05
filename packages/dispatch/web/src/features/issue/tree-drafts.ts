@@ -119,10 +119,7 @@ export function treeDrafts(reads: IssueTreeReads, context: TreeContext): Map<str
   addDocumentBlocks(drafts, reads, context);
   addChildren(drafts, reads);
   addAsks(drafts, reads, context);
-  // The conversation's own turns - each comment and each message - are nodes of this tree too,
-  // and the check that reads them is a child issue's (c-conversation, dispatch://INFRA-1289):
-  // until it lands the panel draws the conversation (R12) and the tree draws its questions
-  // alone, so one page never says a comment's words twice.
+  addTurns(drafts, reads, context);
   addDecisions(drafts, reads, context);
   addRequirements(drafts, reads, context);
   addChecks(drafts, reads, context);
@@ -272,6 +269,43 @@ function addAsks(drafts: Map<string, Draft>, reads: IssueTreeReads, context: Tre
     // An open question is what the fold unfolds the path to, whatever its depth (R6).
     draft.question = ask.state === "open";
   }
+}
+
+/**
+ * The conversation's own turns: each comment and each message a node of this tree, a root turn
+ * under the issue and a reply under the turn it answers (R1, R19). A thread head a page never
+ * read is no node, so a reply whose parent is missing falls back to the issue, as every node
+ * whose parent is absent does (`assemble`).
+ *
+ * The page draws these rows *and* the panel draws the same conversation (R12): the tree is the
+ * issue's one ordered body, and the panel is where a reader answers. An address naming a
+ * comment or a message (`/comments/<id>`, `/messages/<id>`, `?comment=`) is therefore an
+ * address of a row of this tree.
+ */
+function addTurns(drafts: Map<string, Draft>, reads: IssueTreeReads, context: TreeContext): void {
+  (reads.comments ?? []).forEach((comment, index) => {
+    const draft = add(drafts, blank(comment.id, "comment", ROOT_ORDER.turn + index));
+    draft.author = comment.author;
+    draft.parents = comment.reply_to === null ? [] : [comment.reply_to];
+    draft.reference = buildDispatchReference({
+      id: comment.id,
+      key: context.key,
+      kind: "comment",
+    });
+    draft.text = comment.body;
+  });
+  const messages = (reads.messages ?? []).flatMap((thread) => [thread.message, ...thread.replies]);
+  messages.forEach((message, index) => {
+    const draft = add(drafts, blank(message.id, "message", ROOT_ORDER.turn + index));
+    draft.author = message.author;
+    draft.parents = message.in_reply_to === null ? [] : [message.in_reply_to];
+    draft.reference = buildDispatchReference({
+      id: message.id,
+      key: context.key,
+      kind: "message",
+    });
+    draft.text = message.body;
+  });
 }
 
 /**

@@ -112,26 +112,19 @@ test("Conversation owns the route, lists one card per message newest first, and 
     await expect(subscribedAgents.getByText("Planner (e2e)", { exact: true })).toBeVisible();
     await expect(subscribedAgents.getByText("ghost-session-0000", { exact: true })).toHaveCount(0);
 
-    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
-    await expect(page.getByRole("tablist", { name: "Issue detail" }).getByRole("tab")).toHaveText([
-      "Spec",
-      "Verification",
-      "Plan",
-      "Conversation",
-      "Children",
-      "Artifacts1",
-      "Activity",
-      "Decisions",
-    ]);
+    // The eight tabs are five presets (dispatch://INFRA-1196 R3), so the ordered label list
+    // this test carried is the presets' own, and `/conversation` is the panel's `words` state
+    // rather than a tab of its own.
+    await expect(
+      page.getByTestId("issue-margin").locator('[data-conversation-state="words"]')
+    ).toHaveAttribute("aria-selected", "true");
+    const presets = page.getByRole("tablist", { name: "Issue presets" }).getByRole("tab");
+    await expect(presets).toHaveCount(5);
+    for (const [index, name] of ["Tree", "Decisions", "Checks", "Spec", "Plan"].entries()) {
+      await expect(presets.nth(index)).toHaveAccessibleName(name);
+    }
 
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
 
     // One card per root message, newest activity first: five messages, five cards, no event row
     // between them.
@@ -233,14 +226,14 @@ test("Conversation updates an open ask in place after an agent edit and preserve
     await expect(card.getByRole("list", { name: "Options" })).toContainText("REST");
     await expect(card.getByRole("list", { name: "Options" })).toContainText("gRPC");
 
-    await page.getByRole("tab", { name: "Activity" }).click();
+    await page.goto(`/issues/${issue.key}/activity`);
     await expect(
       page
         .getByRole("list", { name: "Issue activity" })
         .getByRole("listitem")
         .filter({ hasText: 'edited the question "Which transport' })
     ).toHaveCount(1);
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await page.goto(`/issues/${issue.key}/conversation`);
 
     await navigateInApp(page, "/");
     const inboxCard = page.getByTestId(`ask-${ask.id}`);
@@ -557,7 +550,7 @@ test("Conversation answers an ask in place, draws no event row, and keeps its ca
     await expect(page.locator(`[data-turn="ask:${ask.id}"]`)).toHaveCount(1);
     expect(await handle.evaluate((element) => element.isConnected)).toBe(true);
 
-    await page.getByRole("tab", { name: "Activity" }).click();
+    await page.goto(`/issues/${issue.key}/activity`);
     const activity = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
     await expect(activity.filter({ hasText: "updated the issue" })).not.toHaveCount(0);
     await expect(activity.filter({ hasText: `moved ${child.key} from` })).toHaveCount(1);

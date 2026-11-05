@@ -9,6 +9,7 @@ import {
   putIssueState,
 } from "./api";
 import { barAction, selectEditorText } from "./editor";
+import { openPreset } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -112,7 +113,7 @@ test("double-clicking Submit posts exactly one comment", async ({ browser }) => 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   await page.goto(`/issues/${issue.key}`);
-  await page.getByRole("tab", { name: "Spec" }).click();
+  await openPreset(page, "Spec");
   await selectEditorText(page, "brown");
   await barAction(page, "Comment");
   const composer = page.getByRole("form", { name: "Comment composer" });

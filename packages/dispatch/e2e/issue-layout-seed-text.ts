@@ -3,11 +3,19 @@
 // Every typed block carries an explicit `#id`, so a seed names the ids its tests read rather than
 // looking one up by its text.
 
-/** The three sentences a seeded spec puts at its head. */
+/**
+ * The three sentences a seeded spec puts at its head. Together with the block's own fence they
+ * are well past the 240 runes the server cuts a block's stored excerpt to
+ * (`packages/envoy/internal/dispatch/refs/graph.go`), and they hold characters outside ASCII,
+ * so a head that read the excerpt rather than the document's own text at the block's span
+ * would draw a shortened third sentence and fail c-three-things.
+ */
 export const SUMMARY_SENTENCES = [
   "The issue page draws one ordered body in place of eight tabs.",
   "Every property that carries a value is visible at every width.",
-  "The reasoning behind each requirement is reachable without leaving the page.",
+  "The reasoning behind each requirement is reachable without leaving the page, because every " +
+    "node the issue holds — its documents, its decisions, its checks, its plan tasks and the " +
+    "results recorded against them — is a row of the one tree every preset is a query over.",
 ] as const;
 
 /** The block id of those three sentences. `callout` is the nearest thing today's block schema

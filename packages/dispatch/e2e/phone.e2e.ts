@@ -1,6 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { setLiveSessions } from "./agents";
-
 import {
   createArtifactAsk,
   createAsk,
@@ -17,6 +16,7 @@ import {
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
 import { askCard, inboxList } from "./inbox-pane";
+import { expectActivePreset, openIssueAddress } from "./issue-presets";
 import { expectConsecutiveLinksClear } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { navigateInApp, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
@@ -112,7 +112,8 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
     } else {
       await page.goto(`/issues/${issue.key}`);
     }
-    await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
+    // The issue's own address is the Tree preset's now (dispatch://INFRA-1196 R19).
+    await expectActivePreset(page, "Tree");
     if (isPhone) {
       const reviewToggle = page.getByRole("button", { name: "Open review panel (1 open ask)" });
       await expect(reviewToggle).toBeVisible();
@@ -131,7 +132,7 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       ).toBe(true);
       await page.getByRole("button", { name: /Close review panel/ }).click();
     }
-    await expect(page.getByRole("tabpanel", { name: "Spec" }).getByRole("article")).toContainText(
+    await expect(page.locator("#issue-spec-panel").getByRole("article")).toContainText(
       "The quick brown fox jumps over the lazy dog"
     );
     await expect(documentEditor(page).locator("table")).toBeVisible();
@@ -184,7 +185,7 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
     }
 
     // D25: a pinned Conversation turn renders its own description, never the literal "Event <seq>".
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await openIssueAddress(page, "conversation");
     const pinnedTurn = turn(page, pinnedMessage);
     await pinnedTurn.hover();
     await pinnedTurn.getByRole("button", { name: "Pin" }).click();

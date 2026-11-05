@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { conversationFilter, threadCard } from "./editor";
 import { inboxRow } from "./inbox-pane";
+import { openIssueAddress, openPreset } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
@@ -105,7 +106,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   // page holds to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer its own clock fires.
   await alicePage.clock.install();
   await alicePage.goto(`/issues/${issue.key}`);
-  await alicePage.getByRole("tab", { name: "Spec" }).click();
+  await openPreset(alicePage, "Spec");
   await setSheet(alicePage, testInfo.project.name, true);
 
   const margin = alicePage.getByTestId("margin-sheet");
@@ -188,7 +189,7 @@ test("an answered ask's thread keeps a reply typed before the card leaves Needs 
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
-    await page.getByRole("tab", { name: "Spec" }).click();
+    await openPreset(page, "Spec");
     await setSheet(page, testInfo.project.name, true);
     const margin = page.getByTestId("margin-sheet");
     const card = margin.getByTestId(`ask-${ask.id}`);
@@ -485,7 +486,7 @@ test("a session retraction leaves its reason on the card and removes the human's
 
   const issuePage = await alice.newPage();
   await issuePage.goto(`/issues/${issue.key}`);
-  await issuePage.getByRole("tab", { name: "Spec" }).click();
+  await openPreset(issuePage, "Spec");
   if (testInfo.project.name === "iphone") {
     await issuePage.getByRole("button", { name: "Open navigation" }).click();
   }
@@ -536,7 +537,7 @@ test("a session retraction leaves its reason on the card and removes the human's
 
   // The margin folds a retracted ask away; the Conversation lists it like every other
   // conversation, under All and under Closed, with no control of its own to reveal it.
-  await issuePage.getByRole("tab", { name: "Conversation" }).click();
+  await openIssueAddress(issuePage, "conversation");
   const conversation = issuePage.getByRole("region", { name: "Conversation" });
   const resolvedCard = conversation.getByTestId(`ask-${ask.id}`);
   await expect(resolvedCard).toHaveCount(1);

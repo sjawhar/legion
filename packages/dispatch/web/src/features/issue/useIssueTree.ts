@@ -49,6 +49,16 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
     queryKey: ["asks", key],
     queryFn: () => api.listIssueAsks(key, "all"),
   });
+  // Under the keys the Conversation and the margin already own, so a reader opening the panel
+  // after the tree finds them answered rather than read a second time.
+  const comments = useQuery({
+    queryKey: ["comments", key],
+    queryFn: () => api.listComments(key),
+  });
+  const messages = useQuery({
+    queryKey: ["issue-messages", key],
+    queryFn: () => api.listIssueMessages(key),
+  });
   const documentIds = issue.artifacts
     .filter((artifact) => artifact.kind === "doc")
     .map((artifact) => artifact.id);
@@ -67,14 +77,26 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
   const reads = useMemo<IssueTreeReads>(
     () => ({
       asks: asks.data,
+      comments: comments.data,
       coverage: coverage.data,
       decisions: decisions.data,
       documents,
       issue,
+      messages: messages.data,
       references: references.data,
       results: results.data,
     }),
-    [asks.data, coverage.data, decisions.data, documents, issue, references.data, results.data]
+    [
+      asks.data,
+      comments.data,
+      coverage.data,
+      decisions.data,
+      documents,
+      issue,
+      messages.data,
+      references.data,
+      results.data,
+    ]
   );
   const unnamed = useMemo(() => buildIssueTree(reads), [reads]);
   const refs = useMemo(() => treeReferences(unnamed), [unnamed]);

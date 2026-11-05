@@ -19,6 +19,7 @@ import {
   setAgentStreamResponder,
 } from "./api";
 import { seedDeliveryFixture } from "./delivery-seed";
+import { conversationState } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { navigateInApp } from "./sends";
 import { asUser } from "./users";
@@ -333,10 +334,7 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     const first = page.waitForEvent("websocket", isLiveSocket);
     await page.goto(`/issues/${issue.key}/activity`);
     await expect(page.getByText("Rotation target", { exact: true })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Activity" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    await expect(conversationState(page, "everything")).toHaveAttribute("aria-selected", "true");
     await first;
     await expect.poll(() => sockets.received.includes("events_start")).toBe(true);
     await waitForReads(pending);

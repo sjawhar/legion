@@ -40,6 +40,7 @@ import {
  */
 export function NodeRow({
   body,
+  context,
   expanded,
   focused,
   folded,
@@ -55,6 +56,9 @@ export function NodeRow({
 }: {
   /** Whether this row draws its body: it has the focus, or the reader pinned it open. */
   body: boolean;
+  /** Whether the preset draws this row only as the ancestor of a match: the row is faint and
+   *  marked, and the arrow keys reach it as they reach any other row (R3). */
+  context: boolean;
   /** `true` when its children are drawn, `false` when it holds children and they are not, and
    *  undefined for a node that holds none. */
   expanded?: boolean;
@@ -104,8 +108,9 @@ export function NodeRow({
       aria-level={level}
       className={`flex min-w-0 flex-col border-l-2 py-1 pr-2 ${
         focused ? quoteAccentBorder : borderTransparent
-      } ${surfaceMutedHoverBg}`}
+      } ${context ? "opacity-60" : ""} ${surfaceMutedHoverBg}`}
       data-folded-count={folded}
+      data-node-context={context ? "" : undefined}
       data-node-id={node.id}
       data-node-row=""
       data-node-state={node.state}

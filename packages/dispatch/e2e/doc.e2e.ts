@@ -29,6 +29,7 @@ import {
   selectEditorText,
   typeAtEnd,
 } from "./editor";
+import { openPreset } from "./issue-presets";
 import { engineParagraphs } from "./read-back";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -109,7 +110,7 @@ test("the spec opens as a formatted, editable document with no source pane @phon
     await expect(editor.locator('input[type="checkbox"]')).toBeVisible();
     await expect(editor.locator("pre code")).toBeVisible();
     await expect(page.getByRole("button", { name: /^(Edit|Preview)$/ })).toHaveCount(0);
-    await expect(page.getByRole("tabpanel", { name: "Spec" }).locator("textarea")).toHaveCount(0);
+    await expect(page.locator("#issue-spec-panel").locator("textarea")).toHaveCount(0);
 
     if (testInfo.project.name === "iphone") {
       expect(
@@ -406,25 +407,34 @@ test("tab round-trips keep one document connection, the typed text, and the Conv
     await expect(editor).toContainText("stay mounted");
     await expect.poll(sockets).toBe(1);
 
-    await page.getByRole("tab", { name: "Conversation" }).click();
-    await expect(page.getByRole("tab", { name: "Conversation" })).toBeFocused();
-    await expect(page.getByText("Existing message 29")).toBeVisible();
+    // The conversation's address is reached from the panel's own state control, which is a
+    // move inside the page, as the Conversation tab was (dispatch://INFRA-1196 R12): a fresh
+    // load of the address would open a second document connection by itself and prove nothing.
+    const openConversation = page.getByRole("option", { name: "What people said" });
+    await openConversation.click();
+    await expect(
+      page.getByRole("list", { name: "Conversation turns" }).getByText("Existing message 29")
+    ).toBeVisible();
     await page.evaluate(() => window.scrollTo(0, 500));
     const scrollPosition = await page.evaluate(() => window.scrollY);
     expect(scrollPosition).toBeGreaterThan(0);
 
-    // Three tabs sit between them — Spec, Verification, Plan, Conversation — and the arrow
-    // activates each tab it lands on, so the walk back mounts the two in between on the way.
-    for (const from of ["Conversation", "Plan", "Verification"]) {
-      await page.getByRole("tab", { name: from }).press("ArrowLeft");
+    // Two presets sit between the Spec and the Tree the conversation's address opens - the
+    // row is Tree, Decisions, Checks, Spec, Plan now (dispatch://INFRA-1196 R3) - and the arrow
+    // activates each preset it lands on, so the walk mounts the ones in between on the way.
+    for (const from of ["Tree", "Decisions", "Checks"]) {
+      await page.getByRole("tab", { exact: true, name: from }).press("ArrowRight");
     }
-    await expect(page.getByRole("tab", { name: "Spec" })).toBeFocused();
+    await expect(page.getByRole("tab", { exact: true, name: "Spec" })).toBeFocused();
     await expect(editor).toContainText("stay mounted");
-    for (const from of ["Spec", "Verification", "Plan"]) {
-      await page.getByRole("tab", { name: from }).press("ArrowRight");
+    for (const from of ["Spec", "Checks", "Decisions"]) {
+      await page.getByRole("tab", { exact: true, name: from }).press("ArrowLeft");
     }
-    await expect(page.getByRole("tab", { name: "Conversation" })).toBeFocused();
-    await expect(page.getByText("Existing message 29")).toBeVisible();
+    await expect(page.getByRole("tab", { exact: true, name: "Tree" })).toBeFocused();
+    await openConversation.click();
+    await expect(
+      page.getByRole("list", { name: "Conversation turns" }).getByText("Existing message 29")
+    ).toBeVisible();
     await expect.poll(sockets).toBe(1);
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollPosition);
   } finally {
@@ -698,15 +708,13 @@ test("the Conversation tab downloads no editor transport; the Spec tab loads it 
     };
 
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
-    await expect(page.getByText("A message, no document")).toBeVisible();
+    await expect(
+      page.getByRole("list", { name: "Conversation turns" }).getByText("A message, no document")
+    ).toBeVisible();
     expect(scripts.size).toBeGreaterThan(1);
     expect(await transportChunks()).toEqual([]);
 
-    await page.getByRole("tab", { name: "Spec" }).click();
+    await openPreset(page, "Spec");
     await expect(documentEditor(page)).toContainText("Use SQLite");
     expect((await transportChunks()).length).toBeGreaterThan(0);
   } finally {

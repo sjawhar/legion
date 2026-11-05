@@ -11,6 +11,7 @@ import {
   patchIssue,
   putIssueState,
 } from "./api";
+import { openIssueAddress } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { type Traffic, watchTraffic } from "./traffic";
 import { asUser } from "./users";
@@ -193,9 +194,9 @@ test("budget: 20 title writes to issues the page does not show send at most 5 re
 
     // ... and a child's new status in the open parent's Children tab, which reads the parent's
     // own detail: only the child's event can refresh it once the tab shows the old status.
-    await page.getByRole("tab", { name: "Children" }).click();
+    await openIssueAddress(page, "children");
     const childRow = page
-      .getByRole("tabpanel")
+      .getByTestId("issue-children")
       .locator("li")
       .filter({ hasText: `${child.key} · ${child.title}` });
     await expect(childRow).toContainText("Todo");

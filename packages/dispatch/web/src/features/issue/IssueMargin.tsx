@@ -13,6 +13,7 @@ import {
 import { AgentName } from "../refs/AgentName";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
+import { ConversationStates } from "./conversation-states";
 import { FocusedNodeFacts } from "./FocusedNodeFacts";
 import type { FocusedNode } from "./focused-node";
 import { GitHubLink } from "./GitHubLink";
@@ -24,6 +25,7 @@ import {
   PROPERTY_LABELS,
   pageChrome,
 } from "./page-structure";
+import type { ConversationState } from "./page-words";
 import { RepoControl } from "./RepoControl";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { useIssueSubscribers } from "./useIssueSubscribers";
@@ -44,18 +46,24 @@ import { useMarginSections } from "./useMarginSections";
  */
 export function IssueMarginPanel({
   conversation,
+  conversationState,
   focused,
   isClosed,
   issue,
+  onConversationState,
 }: {
   /** The margin's own content, where this panel sits inside the shell's margin. */
   conversation?: ReactNode;
+  /** Which state the conversation is in, which the address names and these controls move. */
+  conversationState: ConversationState;
   /** What the reader's focus is on, which the page reads and hands over: this panel is drawn
    *  where the margin is, so it is outside the page's own React tree and reads no context of
    *  it (`focused-node.tsx`). */
   focused: FocusedNode;
   isClosed: boolean;
   issue: IssueDetails;
+  /** Takes the state a reader picked, which the page turns into its address. */
+  onConversationState: (state: ConversationState) => void;
 }): ReactNode {
   const sections = useMarginSections();
   const subscribers = useIssueSubscribers(issue.key);
@@ -154,6 +162,10 @@ export function IssueMarginPanel({
       </PropertySection>
       <FocusedNodeFacts node={focused} />
       {conversation}
+      {/* Under the margin's own content, not above it: the margin places a landed card at a
+          `top` it measures from the content above it, and a section inserted over that content
+          moves the anchor it measured against. */}
+      <ConversationStates onPick={onConversationState} state={conversationState} />
     </div>
   );
 }

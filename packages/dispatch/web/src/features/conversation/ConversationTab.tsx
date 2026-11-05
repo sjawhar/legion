@@ -95,6 +95,10 @@ interface ConversationTabProps {
   focusItemId?: string;
   isClosed: boolean;
   issueKey: string;
+  /** What the panel's conversation state keeps, where the reader picked one that narrows the
+   *  list (`features/issue/conversation-states.tsx`); every conversation is kept without it.
+   *  It narrows beside the All / Open / Closed filter rather than in place of it. */
+  narrow?: (conversation: Conversation) => boolean;
   /** Called once, when the tab first places the reader at the newest card (`useFollowLatest`'s
    *  `onFirstPlacement`), before the parent's layout effects of that commit run. */
   onFirstPlacement?: () => void;
@@ -876,6 +880,7 @@ export function ConversationTab({
   focusItemId,
   isClosed,
   issueKey,
+  narrow,
   onFirstPlacement,
   state,
   visible,
@@ -978,15 +983,16 @@ export function ConversationTab({
       // its thread open inline or full-screen, the phone thread composer holding a reply to it,
       // or its card's own reply held, out or refused, for its thread to show again - and keeps
       // its place in that order rather than falling in behind the conversations the filter took.
+      // The panel's own state narrows the same pass, and a conversation in hand outranks it too.
       conversations.filter(
         (conversation) =>
-          matchesFilter(conversation, filter) ||
+          ((narrow === undefined || narrow(conversation)) && matchesFilter(conversation, filter)) ||
           (conversation.kind === "comment" &&
             (openThreads.has(conversation.root.id) ||
               phone.holds(conversation.root.id) ||
               heldCardReplies.some((held) => held.request.replyTo?.id === conversation.root.id)))
       ),
-    [conversations, filter, heldCardReplies, openThreads, phone.holds]
+    [conversations, filter, heldCardReplies, narrow, openThreads, phone.holds]
   );
   // Counted over the list as shown, which is the list the pill acts on: it jumps to the first
   // card on the page, so a count taken over the whole set would name unread conversations the

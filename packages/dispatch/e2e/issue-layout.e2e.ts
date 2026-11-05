@@ -830,6 +830,11 @@ test("an open question is unfolded and on the first screen @phone", async ({ bro
 test("the children section opens each preset and collapses to its counts @phone", async ({
   browser,
 }) => {
+  // Two whole seeds and fifteen page loads, each one a cold load of the issue page: the work
+  // is the check's own, not a page that got slower, and on the emulated-phone project it runs
+  // within a second or two of the 30 s default. The repo's way of saying a test is long is to
+  // name its own budget (`e2e/heavy-document-writes.e2e.ts`, `e2e/cli-body-cap.e2e.ts`).
+  test.setTimeout(90_000);
   await phase(browser, seedWholeIssue, async (page, seeded) => {
     // No seed claims a child, and the check reads who holds the running one, so this test puts a
     // child in progress and claims it: that is the state the assertion is read against.

@@ -17,6 +17,7 @@ import {
   slowWrites,
   userHeaders,
 } from "./api";
+import { openIssueAddress } from "./issue-presets";
 import {
   dropFirstAnswer,
   keptWrites,
@@ -417,7 +418,7 @@ test("an upload throttled to take 30 s is one attempt and lands once @phone", as
       const reviewPanel = page.getByRole("button", { name: /review panel/i });
       if ((await reviewPanel.getAttribute("aria-expanded")) === "true") await reviewPanel.click();
     }
-    await page.getByRole("tab", { name: "Artifacts" }).click();
+    await openIssueAddress(page, "artifacts");
     await page.getByLabel("Upload artifact").setInputFiles({
       buffer: Buffer.alloc(bytes, 7),
       mimeType: "application/octet-stream",
@@ -502,7 +503,7 @@ test("a 20 MB upload repeated while its first request runs is answered 409 KEY_I
       const reviewPanel = page.getByRole("button", { name: /review panel/i });
       if ((await reviewPanel.getAttribute("aria-expanded")) === "true") await reviewPanel.click();
     }
-    await page.getByRole("tab", { name: "Artifacts" }).click();
+    await openIssueAddress(page, "artifacts");
     await page.getByLabel("Upload artifact").setInputFiles({
       buffer: Buffer.alloc(bytes, 7),
       mimeType: "application/octet-stream",

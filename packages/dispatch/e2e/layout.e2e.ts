@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
-
 import { createComment, createIssue, createProject } from "./api";
+import { conversationState } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -27,9 +27,7 @@ test("tablet keeps the Conversation readable and exposes the review sheet", asyn
 
     await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
     await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
-    const conversationBounds = await page
-      .getByRole("tabpanel", { name: "Conversation" })
-      .boundingBox();
+    const conversationBounds = await page.locator("#issue-conversation-panel").boundingBox();
     expect(conversationBounds?.width ?? 0).toBeGreaterThanOrEqual(400);
     const tabletScreenshot = testInfo.outputPath("tablet-800.png");
     await page.screenshot({ path: tabletScreenshot, fullPage: true });
@@ -83,10 +81,7 @@ test("a comment deep link keeps the compact review-panel toggle hit-testable", a
 
     await page.setViewportSize({ height: 768, width: 1024 });
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    await expect(conversationState(page, "words")).toHaveAttribute("aria-selected", "true");
     await expect(
       page.locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`)
     ).toBeVisible();

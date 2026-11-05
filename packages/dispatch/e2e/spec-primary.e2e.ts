@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { createAsk, createIssue, createProject } from "./api";
 import { needsYouCards } from "./editor";
+import { expectActivePreset } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -42,7 +43,9 @@ test("issue landing keeps Spec primary and puts open asks in Needs you @phone", 
     );
     await page.goto(`/issues/${issue.key}`);
 
-    await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
+    // The issue's own address is the Tree preset's now (dispatch://INFRA-1196 R19); at a phone
+    // width the row of five is one control naming it.
+    await expectActivePreset(page, "Tree");
 
     if (isPhone) {
       const toggle = page.getByRole("button", { name: "Open review panel (2 open asks)" });

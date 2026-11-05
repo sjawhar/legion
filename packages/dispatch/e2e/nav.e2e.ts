@@ -105,33 +105,33 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
     await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
     await expect(page).toHaveTitle(`${issue.key} · ${issue.title} · Dispatch`);
-    await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
+    // The eight tabs are five presets now (dispatch://INFRA-1196 R3), each with an address of
+    // its own, and the issue's own address is the Tree preset's. The children are a section of
+    // every preset rather than a tab, and `/children` still resolves.
+    await expect(page.getByRole("tab", { name: "Tree" })).toHaveAttribute("aria-selected", "true");
 
-    await page.getByRole("tab", { name: "Children" }).click();
-    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/children$`));
+    await page.goto(`/issues/${issue.key}/children`);
+    await expect(page.getByTestId("issue-children")).toContainText("Child task");
     await page.reload();
-    await expect(page.getByRole("tab", { name: "Children" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
-    await expect(page.getByRole("tabpanel")).toContainText("Child task");
+    await expect(page.getByRole("tab", { name: "Tree" })).toHaveAttribute("aria-selected", "true");
 
-    await page.getByRole("tab", { name: "Children" }).focus();
-    await page.keyboard.press("ArrowLeft");
-    await expect(page.getByRole("tab", { name: "Conversation" })).toBeFocused();
-    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
-    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
-
-    // Decisions is the last tab, and Activity before it has its own route.
-    await page.keyboard.press("End");
+    await page.getByRole("tab", { name: "Tree" }).focus();
+    await page.keyboard.press("ArrowRight");
     await expect(page.getByRole("tab", { name: "Decisions" })).toBeFocused();
+    await expect(page.getByRole("tab", { name: "Decisions" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/decisions$`));
+
+    // Plan is the last preset, and Spec before it keeps the address the Spec tab answered.
+    await page.keyboard.press("End");
+    await expect(page.getByRole("tab", { name: "Plan" })).toBeFocused();
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/plan$`));
     await page.keyboard.press("ArrowLeft");
-    await expect(page.getByRole("tab", { name: "Activity" })).toBeFocused();
-    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/activity$`));
+    await expect(page.getByRole("tab", { name: "Spec" })).toBeFocused();
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/spec$`));
+    await page.goto(`/issues/${issue.key}/activity`);
     await expect(page.getByRole("list", { name: "Issue activity" })).toBeVisible();
 
     // A read the server answers 404 is asked again twice, QUERY_RETRY_DELAY_MS apart

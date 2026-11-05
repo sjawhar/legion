@@ -1,7 +1,8 @@
+import { useNavigate } from "react-router-dom";
+
 import type { IssuePriority } from "../../api/types";
-import { tabButtonId } from "../../components/Tabs";
 import { outsideAskCard } from "../inbox/ask-card";
-import type { IssueTab } from "../refs/routes";
+import { buildIssuePath, type IssueTab } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import type { IssuePriorityWrite } from "./useIssuePriority";
 
@@ -52,7 +53,9 @@ function outsideInputsAndAskCards(): boolean {
   return !(document.activeElement instanceof HTMLInputElement) && outsideAskCard();
 }
 
-/** The tabs the chords reach, each through the tablist button `IssueTabs` renders for it. */
+/** The address each chord opens, by the tab whose address it was: the presets replaced the
+ *  tablist, and every one of those addresses still resolves (R19), so a chord navigates to it
+ *  rather than pressing a button that is no longer there. */
 const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
   { keys: "t s", label: "Spec tab", tab: "spec" },
   // `t v` is Activity and `t c` the Conversation, so Verification takes its checks' `k`; `t p`
@@ -76,7 +79,8 @@ const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
  * the same cache the picker writes. `IssueHeader` registers the palette-only issue actions into
  * this same scope (`useIssuePalette.ts`); neither pushes a scope of its own.
  */
-export function useIssueKeymap(priorityWrite: IssuePriorityWrite): void {
+export function useIssueKeymap(priorityWrite: IssuePriorityWrite, issueKey: string): void {
+  const navigate = useNavigate();
   useKeymapScope("issue");
   useKeymap("issue", [
     {
@@ -142,8 +146,7 @@ export function useIssueKeymap(priorityWrite: IssuePriorityWrite): void {
       id: `tab-${tab}`,
       keys,
       label,
-      run: () => document.getElementById(tabButtonId("issue", tab))?.click(),
-      when: () => document.getElementById(tabButtonId("issue", tab)) !== null,
+      run: () => navigate(buildIssuePath({ key: issueKey, kind: tab })),
     })),
   ]);
 }

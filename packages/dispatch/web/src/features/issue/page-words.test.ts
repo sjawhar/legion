@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { issueStatuses, statusText } from "../project/board-model";
 import {
   HELP_LINES,
   MARGIN_SECTION_NAMES,
@@ -8,16 +9,21 @@ import {
   PROPERTY_LABELS,
 } from "./page-structure";
 import {
+  APPROVAL_STATE_WORDS,
   BLOCK_ATTRIBUTE_LABELS,
   blockAttributeLabel,
   CHECK_WHEN_WORDS,
   CONTROL_LABELS,
+  CONVERSATION_STATE_NAMES,
+  CONVERSATION_STATE_ORDER,
   DECLARED_WORDS,
   EMPTY_STATE_LINES,
   GAP_LINES,
   GAP_WORDS,
   GLYPH_NAMES,
   GLYPH_TOKENS,
+  ISSUE_STATUS_WORDS,
+  issueStatusWord,
   NODE_STATE_WORDS,
   NODE_TYPE_NAMES,
   NODE_TYPES,
@@ -79,17 +85,38 @@ const WORD_SOURCES: readonly unknown[] = [
   NODE_TYPE_NAMES,
   NODE_STATE_WORDS,
   PRESET_NAMES,
+  CONVERSATION_STATE_NAMES,
+  ISSUE_STATUS_WORDS,
   EMPTY_STATE_LINES,
   GAP_LINES,
   GAP_WORDS,
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
+  APPROVAL_STATE_WORDS,
   CONTROL_LABELS,
   PROPERTY_LABELS,
   MARGIN_SECTION_NAMES,
   HELP_LINES,
   BLOCK_ATTRIBUTE_LABELS,
 ];
+
+test("the conversation's four states are named in the order the panel offers them", () => {
+  expect(CONVERSATION_STATE_ORDER.map((state) => CONVERSATION_STATE_NAMES[state])).toEqual([
+    "Everything",
+    "Pinned",
+    "Questions",
+    "What people said",
+  ]);
+});
+
+test("every issue status the board knows has a word, and it is the board's own", () => {
+  for (const status of issueStatuses) {
+    expect(Object.keys(ISSUE_STATUS_WORDS), `${status} has no word`).toContain(status);
+    expect(issueStatusWord(status)).toBe(statusText(status));
+  }
+  expect(Object.keys(ISSUE_STATUS_WORDS).sort()).toEqual([...issueStatuses].sort());
+  expect(issueStatusWord("something-the-server-added")).toBe("something-the-server-added");
+});
 
 test("every node type has a plain name, and no name is an internal token", () => {
   expect(NODE_TYPES.length).toBeGreaterThan(0);

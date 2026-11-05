@@ -281,7 +281,7 @@ test("children: a child's priority write moves its active time in the open paren
     await page.clock.install();
     await openLive(page, `/issues/${parent.key}/children`);
     const active = page
-      .getByRole("tabpanel")
+      .getByTestId("issue-children")
       .locator("li")
       .filter({ hasText: `${child.key} · ${child.title}` })
       .locator("time[datetime]");

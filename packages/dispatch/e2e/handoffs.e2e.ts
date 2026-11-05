@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
-
 import { createHandoff, createIssue, createProject } from "./api";
+import { conversationState } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -75,10 +75,7 @@ test("the Conversation lists each handoff version, and expanding one shows its f
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${key}/conversation`);
-    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    await expect(conversationState(page, "words")).toHaveAttribute("aria-selected", "true");
 
     const cards = page
       .getByRole("list", { name: "Conversation turns" })
@@ -190,10 +187,7 @@ test("the Activity list has one line per recorded handoff version", async ({ bro
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${key}/activity`);
-    await expect(page.getByRole("tab", { name: "Activity" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    await expect(conversationState(page, "everything")).toHaveAttribute("aria-selected", "true");
     const rows = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
     await expect(rows.filter({ hasText: "recorded the implement handoff" })).toHaveCount(2);
     for (const version of [1, 2]) {

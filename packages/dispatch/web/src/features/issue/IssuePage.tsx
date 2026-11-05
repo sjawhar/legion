@@ -21,6 +21,7 @@ import { useFillMarginSlot } from "../margin/margin-slot";
 import { PlanTab } from "../plan/PlanTab";
 import { statusText } from "../project/board-model";
 import {
+  buildIssuePath,
   buildReferencePath,
   documentRoute,
   type IssueRoute,
@@ -32,18 +33,18 @@ import { type FrameAttributes, usePageFrame } from "../shell/page-frame";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { VerificationTab } from "../verification/VerificationTab";
-import { ChildrenTab } from "./ChildrenTab";
+import { narrowConversation } from "./conversation-states";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { type FocusedNode, FocusedNodeProvider, useFocusedNode } from "./focused-node";
+import { IssueBody } from "./IssueBody";
 import { IssueHeader } from "./IssueHeader";
 import { IssueMarginPanel } from "./IssueMargin";
-import { IssueTabs } from "./IssueTabs";
-import { IssueTree } from "./IssueTree";
-import { NODE_TYPE_NAMES, sentenceCase } from "./page-words";
+import { issueAddress } from "./issue-address";
+import { PresetToolbar } from "./PresetToolbar";
+import { type ConversationState, NODE_TYPE_NAMES, sentenceCase } from "./page-words";
 import { stateForIssue } from "./pins";
 import { RoleDocumentPanel } from "./RoleDocumentPanel";
 import { SpecRequirements } from "./SpecRequirements";
-import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
 import { useIssueKeymap } from "./useIssueKeymap";
 import { useIssuePriority } from "./useIssuePriority";
@@ -122,6 +123,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     verificationArtifact,
   } = useIssueDetail(route);
   const landing = useItemLanding(route, issue.data);
+  const { hash, pathname, search } = useLocation();
   const navigate = useNavigate();
   const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
   const [specShowDiff, setSpecShowDiff] = useState(false);
@@ -140,6 +142,16 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       setArtifactShowDiff(false);
     }
   }, []);
+  // What this address opens: its preset, the node it names, the conversation's state, the
+  // filter and the version it pins (`issue-address.ts`).
+  const address = issueAddress(route, search, hash, isPrimaryArtifactRoute);
+  // Which state the conversation is in: the address names one, and a state the reader picked
+  // in the panel holds for the address it navigated to and for no other, so opening another
+  // address is back to what that address says.
+  const [picked, setPicked] = useState<{ at: string; state: ConversationState } | undefined>(
+    undefined
+  );
+  const conversationState = picked?.at === pathname ? picked.state : address.conversation;
 
   // The issue page's own root is the frame the shell draws around this column and the margin
   // beside it: the identity block, the body and the panel's properties are one page, however the
@@ -164,6 +176,26 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       },
     [details, focusedNode, route.key]
   );
+  // Where the reader was when they left this address, taken before the move: the tablist used
+  // to say so before it changed tab (`onBeforeTabChange`), and the presets are navigation, so
+  // every control that leaves an address says so first. Taken afterwards it would be the
+  // position the page had already clamped to as the panel it is leaving went.
+  const recordScroll = useCallback(() => {
+    panelScroll.current[activeTab] = window.scrollY;
+  }, [activeTab]);
+
+  const pickState = useCallback(
+    (next: ConversationState) => {
+      const to = buildIssuePath({
+        key: route.key,
+        kind: next === "everything" ? "activity" : "conversation",
+      });
+      setPicked({ at: to, state: next });
+      recordScroll();
+      navigate(to);
+    },
+    [navigate, recordScroll, route.key]
+  );
   const panel = useCallback(
     (conversation: ReactNode) =>
       details === undefined ? (
@@ -171,12 +203,14 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       ) : (
         <IssueMarginPanel
           conversation={conversation}
+          conversationState={conversationState}
           focused={focused}
           isClosed={details.closed_at !== null}
           issue={details}
+          onConversationState={pickState}
         />
       ),
-    [details, focused]
+    [conversationState, details, focused, pickState]
   );
   useFillMarginSlot(isCompactViewport ? undefined : panel);
 
@@ -191,7 +225,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   // is the page's one, shared with the identity block and the palette, so a refusal of any of
   // them is reported once.
   const priorityWrite = useIssuePriority(route.key);
-  useIssueKeymap(priorityWrite);
+  useIssueKeymap(priorityWrite, route.key);
 
   // Where the reader left this tab, which this commit is about to put them back at. It is read
   // here, in the render, and not only in the effect below, because the identity block's two
@@ -202,10 +236,10 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   useLayoutEffect(() => {
     const top = panelScroll.current[activeTab];
     if (top === undefined) return;
-    window.scrollTo({ top });
     // Taken, so the next render of this tab reads the page's own position again rather than a
     // place the reader has since left; leaving the tab records it afresh.
     delete panelScroll.current[activeTab];
+    window.scrollTo({ top });
   }, [activeTab]);
 
   // Once a panel's tab has ever been active, keep rendering its content even
@@ -290,6 +324,14 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const issueKey = issue.data.key;
   const selectDocumentVersion = (artifact: Artifact, version: number | null) =>
     navigate(buildReferencePath(documentRoute(artifact, version ?? undefined)));
+  // Which version of the spec the page reads: the version a `/artifacts/<spec>` route carries,
+  // and the `?v=` the issue's own `/spec` address holds, which is the address a reference to a
+  // version of the spec resolves to (R19, c-urls).
+  const specVersion = address.preset === "spec" ? address.version : undefined;
+  // The item an address names (`?ask=`, `?comment=`) is handed to the spec's editor only where
+  // the Spec preset is what the address opens. On every other preset the document is content
+  // beside the tree, and the tree is what the address names (R19): an editor that focused the
+  // item there would take the focus off the row the reader was sent to.
 
   return (
     <section>
@@ -301,63 +343,56 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         restoringTo={restoringTo}
         state={issueState}
       />
-      {/* The issue's body: one folded tree of its nodes (R1). It sits directly under the
-          identity block, before the panel the compact widths draw here, because the fold opens
-          to the frontier and the first open question has to be on the first screen (R6).
-
-          It is drawn at the issue's own address, which is the Tree preset's (R19): the tabs
-          below still own every other address until the presets replace them
-          (`dispatch://INFRA-1196/artifact/plan-md#b-t9`), and a tree drawn over a tab would say
-          each node's words twice on one page. */}
-      {route.kind === "issue" ? <IssueTree issue={issue.data} /> : null}
-      {/* Below the width the shell's margin keeps a column at, the panel is drawn here, under
-          the identity block, and the margin becomes the phone sheet that holds the
-          conversation: the properties are read at every width with nothing opened (R11, R12). */}
-      {isCompactViewport ? (
-        <div className="mb-3">
-          <IssueMarginPanel focused={focused} isClosed={isClosed} issue={issue.data} />
-        </div>
-      ) : null}
-      <IssueTabs
-        activeTab={activeTab}
-        artifactCount={issue.data.artifacts.length}
-        issueKey={issueKey}
-        onBeforeTabChange={(current) => {
-          panelScroll.current[current] = window.scrollY;
-        }}
+      {/* The head of the page, the preset row, the children section and the one folded tree
+          the presets are queries over (R1, R3, R5, R10), on every address. The eight tabs are
+          gone; what each preset draws beside the tree is the panel below, until the presets
+          own their content (`dispatch://INFRA-1196/artifact/plan-md#b-t16` to `#b-t18a`). */}
+      <IssueBody
+        address={address}
+        issue={issue.data}
+        onLeave={recordScroll}
+        plan={planArtifact}
         toolbar={
-          activeTab === "spec" && specToolbar !== undefined ? (
-            <SpecToolbar
+          address.preset === "spec" && specToolbar !== undefined ? (
+            <PresetToolbar
+              artifact={primaryArtifact}
               isClosed={isClosed}
               onShowDiffChange={setSpecShowDiff}
               onVersionChange={(version) => {
                 setSpecShowDiff(false);
                 selectDocumentVersion(primaryArtifact, version);
               }}
-              reference={documentRoute(
-                primaryArtifact,
-                isPrimaryArtifactRoute ? artifactRoute?.version : undefined
-              )}
+              reference={documentRoute(primaryArtifact, specVersion)}
               showDiff={specShowDiff}
               toolbar={specToolbar}
-              version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+              version={specVersion}
             />
           ) : undefined
         }
       />
-      <div
-        aria-hidden={activeTab !== "spec"}
-        aria-labelledby="issue-spec-tab"
-        hidden={activeTab !== "spec"}
-        id="issue-spec-panel"
-        role="tabpanel"
-      >
+      {/* Below the width the shell's margin keeps a column at, the panel is drawn here, under
+          the identity block, and the margin becomes the phone sheet that holds the
+          conversation: the properties are read at every width with nothing opened (R11, R12). */}
+      {isCompactViewport ? (
+        <div className="mb-3">
+          <IssueMarginPanel
+            conversationState={conversationState}
+            focused={focused}
+            isClosed={isClosed}
+            issue={issue.data}
+            onConversationState={pickState}
+          />
+        </div>
+      ) : null}
+      {/* What each preset draws beside the tree. These are plain panels, not tabpanels: the
+          presets are queries over one tree and the page has no tablist of panels any more. */}
+      <div aria-hidden={activeTab !== "spec"} hidden={activeTab !== "spec"} id="issue-spec-panel">
         {activatedTabs.spec && !(artifactRoute !== undefined && !isPrimaryArtifactRoute) ? (
           <div className="space-y-4">
             <ArtifactDocument
               artifact={primaryArtifact}
-              askId={askId}
-              commentId={commentId}
+              askId={address.preset === "spec" ? askId : undefined}
+              commentId={address.preset === "spec" ? commentId : undefined}
               highlightTerm={highlightTerm}
               isClosed={isClosed}
               onToolbarChange={handleSpecToolbarChange}
@@ -367,7 +402,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
                 selectDocumentVersion(primaryArtifact, version);
               }}
               showDiff={specShowDiff}
-              version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+              version={specVersion}
             />
             <SpecRequirements issueKey={issueKey} />
           </div>
@@ -395,10 +430,8 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       />
       <div
         aria-hidden={activeTab !== "conversation"}
-        aria-labelledby="issue-conversation-tab"
         hidden={activeTab !== "conversation"}
         id="issue-conversation-panel"
-        role="tabpanel"
       >
         {activatedTabs.conversation ? (
           <ConversationTab
@@ -406,20 +439,12 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             focusItemId={conversationFocusItemId}
             isClosed={isClosed}
             issueKey={issueKey}
+            narrow={narrowConversation(conversationState, issueState.dismissed)}
             onFirstPlacement={forgetConversationScroll}
             state={state.data}
             visible={activeTab === "conversation"}
           />
         ) : null}
-      </div>
-      <div
-        aria-hidden={activeTab !== "children"}
-        aria-labelledby="issue-children-tab"
-        hidden={activeTab !== "children"}
-        id="issue-children-panel"
-        role="tabpanel"
-      >
-        {activatedTabs.children ? <ChildrenTab issue={issue.data} /> : null}
       </div>
       <ArtifactRoutePanel
         active={activeTab === "artifacts"}
@@ -453,19 +478,15 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       </ArtifactRoutePanel>
       <div
         aria-hidden={activeTab !== "activity"}
-        aria-labelledby="issue-activity-tab"
         hidden={activeTab !== "activity"}
         id="issue-activity-panel"
-        role="tabpanel"
       >
         {activatedTabs.activity ? <ActivityTab issueKey={issueKey} state={state.data} /> : null}
       </div>
       <div
         aria-hidden={activeTab !== "decisions"}
-        aria-labelledby="issue-decisions-tab"
         hidden={activeTab !== "decisions"}
         id="issue-decisions-panel"
-        role="tabpanel"
       >
         {activatedTabs.decisions ? (
           <DecisionsPanel

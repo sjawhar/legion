@@ -627,7 +627,7 @@ test("the verification tab owns its path, its reference and its short form", () 
 
   expect(parseDispatchReference("dispatch://CORE-1/verification")).toEqual(route);
   expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/verification");
-  expect(shortForm(route)).toBe("CORE-1 verification");
+  expect(shortForm(route)).toBe("CORE-1 Checks");
   expect(parseIssuePath("/issues/CORE-1/verification")).toEqual(route);
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/verification"));
   expect(

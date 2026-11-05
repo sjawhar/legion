@@ -37,6 +37,7 @@ import {
   tree,
   treeActiveDescendant,
 } from "./issue-page";
+import { conversationState, openPreset } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -169,26 +170,26 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     await page.keyboard.press("c");
     await expect(indicator).toHaveCount(0);
     await expect(page.getByRole("dialog", { name: "Create issue" })).toHaveCount(0);
-    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    await expect(conversationState(page, "words")).toHaveAttribute("aria-selected", "true");
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
     await page.screenshot({
       path: testInfo.outputPath(`issue-tab-conversation-${testInfo.project.name}.png`),
     });
 
-    for (const [key, tab] of [
-      ["k", "Verification"],
-      ["p", "Plan"],
-      ["h", "Children"],
-      ["a", "Artifacts"],
-      ["v", "Activity"],
-      ["s", "Spec"],
+    // Every address the eight tabs answered still resolves (dispatch://INFRA-1196 R19), so a
+    // chord opens its address; four of them are a preset's own and the rest open the Tree
+    // preset, whose content the address names.
+    for (const [key, address] of [
+      ["k", "verification"],
+      ["p", "plan"],
+      ["h", "children"],
+      ["a", "artifacts"],
+      ["v", "activity"],
+      ["s", "spec"],
     ] as const) {
       await page.keyboard.press("t");
       await page.keyboard.press(key);
-      await expect(page.getByRole("tab", { name: tab })).toHaveAttribute("aria-selected", "true");
+      await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/${address}$`));
     }
 
     // ? lists the scope as "Issue"; the digits collapse to one 0 – 3 row.
@@ -518,11 +519,8 @@ test("Escape leaves a focused header select, so the next chord is a chord and no
       await page.keyboard.press("t");
       await expect(page.getByTestId("chord-indicator")).toHaveText(/t/);
       await page.keyboard.press("c");
-      await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-        "aria-selected",
-        "true"
-      );
-      await page.getByRole("tab", { name: "Spec" }).click();
+      await expect(conversationState(page, "words")).toHaveAttribute("aria-selected", "true");
+      await openPreset(page, "Spec");
       await leaveFocus(page);
     }
 

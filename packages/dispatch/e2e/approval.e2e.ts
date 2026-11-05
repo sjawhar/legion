@@ -26,6 +26,7 @@ import {
 } from "./api";
 import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./editor";
 import { askControls, hasReadingPane, inboxRow } from "./inbox-pane";
+import { conversationState, openIssueAddress } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { navigateInApp } from "./sends";
 import { assertWhole } from "./unclipped";
@@ -539,7 +540,7 @@ test("a hand-back is an Activity line, live and after a reload, and leaves one a
     await expect(handBackLine).toHaveCount(1);
 
     // The Conversation draws no line for any of it: the ask is still exactly one card.
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await openIssueAddress(page, "conversation");
     const askTurn = page.locator(`[data-turn="ask:${requested.ask.id}"]`);
     await expect(askTurn).toHaveCount(1);
     await expect(
@@ -926,7 +927,10 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
     await expect(owner).toHaveAttribute("href", (await head.getAttribute("href")) ?? "");
     await owner.click();
     await expect(page).toHaveURL(specPath);
-    await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { exact: true, name: "Spec" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
     await expect(page.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
 
     // The drawer's card names the document and version it asks about, as a link; following it
@@ -951,10 +955,7 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
 
     await page.goto(`/issues/${issue.key}/asks/${unanchoredAsk.id}`);
     await expect(page).toHaveURL(`/issues/${issue.key}/asks/${unanchoredAsk.id}`);
-    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    await expect(conversationState(page, "words")).toHaveAttribute("aria-selected", "true");
     await expect(
       page.locator("#issue-conversation-panel").getByTestId(`ask-${unanchoredAsk.id}`)
     ).toContainText("Ship it?");
@@ -987,7 +988,7 @@ test("an open approval ask's document link reaches the issue's Conversation, and
 
     // The issue's Conversation names the document the open request is about.
     await page.goto(`/issues/${issue.key}`);
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await openIssueAddress(page, "conversation");
     const conversationCard = page
       .locator("#issue-conversation-panel")
       .getByTestId(`ask-${requested.ask.id}`);
@@ -1064,7 +1065,7 @@ test("an approval ask keeps its document link and the version it asked about onc
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await openIssueAddress(page, "conversation");
     const conversationCard = page
       .locator("#issue-conversation-panel")
       .getByTestId(`ask-${requested.ask.id}`);

@@ -18,6 +18,7 @@ import {
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { inboxRow } from "./inbox-pane";
+import { conversationState } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -255,15 +256,16 @@ test("live: closing a grandchild updates every loaded ancestor's Children rollup
   const page = await alice.newPage();
   try {
     await page.goto(`/issues/${root.key}/children`);
-    const childRow = page
-      .getByRole("tabpanel")
-      .locator("li")
-      .filter({ hasText: `${child.key} · Child` });
-    await expect(childRow).toContainText("0/2 done");
+    // The children are a section of every preset now, and the whole subtree's roll-up is the
+    // section header's own labelled count beside the direct one (dispatch://INFRA-1196 R10).
+    const children = page.getByTestId("issue-children");
+    await expect(children.locator("li").filter({ hasText: `${child.key} · Child` })).toBeVisible();
+    const subtree = page.getByTestId("issue-children-subtree-count");
+    await expect(subtree).toContainText("0/2");
 
     await patchIssue(grandchild.key, { status: "done" });
 
-    await expect(childRow).toContainText("1/2 done");
+    await expect(subtree).toContainText("1/2");
   } finally {
     await alice.close();
   }
@@ -344,14 +346,13 @@ test("live: new events on the open issue appear in Conversation and mark it read
   const page = await alice.newPage();
   await page.clock.install();
   await page.goto(`/issues/${issue.key}/conversation`);
-  await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
-    "aria-selected",
-    "true"
-  );
+  await expect(conversationState(page, "words")).toHaveAttribute("aria-selected", "true");
 
   await createMessage(issue.key, { body: "Live message from bob" }, bob);
 
-  await expect(page.getByText("Live message from bob")).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "Conversation turns" }).getByText("Live message from bob")
+  ).toBeVisible();
   // The mark is written once the reader has dwelt on the newest card (`DWELL_MS`), a page timer
   // the page's own clock spends; the jump repeats because the timer is armed only once the
   // observer has reported the card.
@@ -475,11 +476,15 @@ test("live: a forced server disconnect resumes from the last event id", async ({
   await page.clock.install();
   await page.goto(`/issues/${issue.key}/conversation`);
   const head: string = (await (await whoami).json()).event_head;
-  await expect(page.getByText("Before disconnect")).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "Conversation turns" }).getByText("Before disconnect")
+  ).toBeVisible();
   // The first subscription resumes from the sign-in check's head.
   await expect.poll(() => sockets[0]?.resumes).toEqual([head]);
   await createMessage(issue.key, { body: "Seen live before disconnect" }, bob);
-  await expect(page.getByText("Seen live before disconnect")).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "Conversation turns" }).getByText("Seen live before disconnect")
+  ).toBeVisible();
   const first = sockets[0];
   if (first === undefined) throw new Error("the page opened no live socket");
   expect(first.events.length).toBeGreaterThan(0);
@@ -500,7 +505,9 @@ test("live: a forced server disconnect resumes from the last event id", async ({
   await expect.poll(() => sockets[1]?.starts).toEqual([true]);
 
   await createMessage(issue.key, { body: "Missed during disconnect" }, bob);
-  await expect(page.getByText("Missed during disconnect")).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "Conversation turns" }).getByText("Missed during disconnect")
+  ).toBeVisible();
 
   await alice.close();
 });
@@ -561,7 +568,7 @@ test("live: a change committed while the first live socket fails to open is show
     await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const head: string = (await (await whoami).json()).event_head;
-    await expect(page.getByText("Before the failed handshake", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Before the failed handshake" })).toBeVisible();
     await refused.promise;
     await patchIssue(issue.key, { title: "Committed while the socket was down" }, bob);
     committed.resolve();
@@ -576,8 +583,10 @@ test("live: a change committed while the first live socket fails to open is show
       )
       .toBe(2);
 
+    // The issue's title, which the identity block draws and the panel's facts repeat: the
+    // heading is the one this test means.
     await expect(
-      page.getByText("Committed while the socket was down", { exact: true })
+      page.getByRole("heading", { name: "Committed while the socket was down" })
     ).toBeVisible();
     // The first subscribe the page ever sent rode the second socket, and resumed from the sign-in
     // check's head: the patch is above it, so Dispatch replayed it there.
@@ -613,7 +622,9 @@ test("live: a fresh page load opens the socket at the current head and stays wit
     (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   await page.goto(`/issues/${issue.key}/conversation`);
-  await expect(page.getByText("Backlog message 4")).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "Conversation turns" }).getByText("Backlog message 4")
+  ).toBeVisible();
   await socketOpened;
 
   // The socket is outside the HTTP request budget, and the sign-in check carries its event head.
@@ -639,12 +650,21 @@ test("live: a fresh page load opens the socket at the current head and stays wit
   // the inbox on every page, `me/replies?limit=1`, whose total the Replies badge counts on
   // every page (the sidebar's on desktop, the compact header's on phone), and the
   // Conversation's list of the issue's phase handoffs, which it shows beside the messages.
-  // The Conversation pages no event log at all now that the history is the Activity tab's,
-  // and the Activity panel is unmounted until its tab is opened. The phone project (iphone)
-  // does not fetch the sidebar while its drawer is closed, so it uses 19. Asserted exactly
-  // (not a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
-  // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 19 : 21);
+  // The Conversation pages no event log at all now that the history is the Activity list's,
+  // and that list is unmounted until its own address is opened.
+  //
+  // Eight of those requests are the one tree the page's body is, which every preset is a query
+  // over and which therefore draws on every address (dispatch://INFRA-1196 R1, R3): the
+  // issue's coverage, its decisions, its check results, its references, its asks, the blocks
+  // of each of its documents - this issue carries one - and the one batched read of every
+  // `dispatch://` address the tree holds. The conversation's own comments and messages are
+  // the tree's reads too and are shared with the list, not fetched twice.
+  //
+  // The phone project (iphone) does not fetch the sidebar while its drawer is closed, so it
+  // uses two fewer. Asserted exactly (not a ceiling) so a panel that starts eagerly fetching
+  // before its own address is ever opened trips this immediately instead of only breaking
+  // some looser upper bound.
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 27 : 29);
   expect(
     apiRequestUrls.filter((url) => url.endsWith(`/api/v1/issues/${issue.key}/handoffs`))
   ).toHaveLength(1);

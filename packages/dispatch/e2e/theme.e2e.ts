@@ -5,6 +5,7 @@ import { oklchToSrgb8 } from "../web/src/theme/contrast";
 import type { Swatch } from "../web/src/theme/palette";
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { conversationThreadScope } from "./editor";
+import { openIssueAddress } from "./issue-presets";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -155,7 +156,7 @@ test("an issue's spec and Conversation tabs render the dark palette in dark mode
     const dock = page.getByRole("form", { name: "Comment composer" });
 
     await page.emulateMedia({ colorScheme: "light" });
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await openIssueAddress(page, "conversation");
     await expect(dock).toBeVisible();
     await expectBackgroundColor(dock, C.SURFACE.light);
     await attachScreenshot(page, testInfo, "issue-conversation-light");

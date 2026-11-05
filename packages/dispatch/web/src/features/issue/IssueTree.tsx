@@ -1,6 +1,5 @@
-import { type ReactNode, useCallback, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
-import type { IssueDetails } from "../../api/types";
 import { borderDefault, borderTransparent, textMutedOnCanvas } from "../../theme/classes";
 import { useMediaQuery } from "../shell/useDialog";
 import { useSetFocusedNode } from "./focused-node";
@@ -17,15 +16,18 @@ import {
   zoomedRows,
   zoomOpensOn,
 } from "./tree-fold";
-import { useIssueTree } from "./useIssueTree";
 
 /**
- * The issue's body: one folded tree of its nodes (dispatch://INFRA-1196 R1, R2, R6,
+ * The issue's body: one folded tree of its nodes (dispatch://INFRA-1196 R1, R2, R3, R6,
  * `dispatch://INFRA-1196/artifact/plan-md#b-t14`).
  *
- * The model is `issue-tree.ts`'s and the fold is `tree-fold.ts`'s, both pure; this holds what
- * only a reader's page can hold - what they opened, what they pinned, and where the focus is -
- * and draws the rows (`NodeRow.tsx`).
+ * The model is `issue-tree.ts`'s, the preset's query over it is `presets.ts`'s and the fold is
+ * `tree-fold.ts`'s, all three pure; this holds what only a reader's page can hold - what they
+ * opened, what they pinned, and where the focus is - and draws the rows (`NodeRow.tsx`).
+ *
+ * The tree is the one body every preset draws: the page hands it the tree its preset left, and
+ * a row drawn only because a match sits under it is context, faint and marked, and reached by
+ * the arrow keys like any other row.
  *
  * The tree answers the WAI-ARIA tree pattern's roles and properties and keeps one tab stop: the
  * focused row is the only row that takes the focus. The keys that move it are
@@ -34,17 +36,49 @@ import { useIssueTree } from "./useIssueTree";
  * At 1024 px and below the tree is zoomed, one node at a time: the path down to the node the
  * reader is on, that node, and its children as one-line rows, with no second indent level.
  */
-export function IssueTree({ issue }: { issue: IssueDetails }): ReactNode {
-  const root = useIssueTree(issue);
+export function IssueTree({
+  context,
+  emptyLine,
+  focusReveal,
+  reveal,
+  root,
+}: {
+  /** The ids of the rows this preset draws only as the ancestor of a match. */
+  context: ReadonlySet<string>;
+  /** What the page says where the preset's query matched nothing under the issue. */
+  emptyLine: string;
+  /** Whether the node the address names is the tree's to put the focus on. It is not when the
+   *  preset's own document is open on that node - a comment anchored in it, an ask indexed from
+   *  one of its blocks, a block named by a fragment - because the document lands on it there,
+   *  and two surfaces scrolling for the same node would each undo the other. */
+  focusReveal: boolean;
+  /** The chain down to the node the address names, the issue first: the tree unfolds it and
+   *  puts the focus on its last node, once per address (R19). */
+  reveal: readonly TreeNode[] | undefined;
+  /** The tree as the preset left it. */
+  root: TreeNode;
+}): ReactNode {
   const [opened, setOpened] = useState<OpenedBranches>(NOTHING_OPENED);
   const [focused, setFocused] = useState<string | undefined>(undefined);
   const [pinned, setPinned] = useState<ReadonlySet<string>>(() => new Set());
   const [zoom, setZoom] = useState<string | undefined>(undefined);
   const zoomed = useMediaQuery(ZOOMED_TREE_QUERY);
   const setFocusedNode = useSetFocusedNode();
+  const body = useRef<HTMLDivElement | null>(null);
 
-  const on = zoom ?? zoomOpensOn(root);
-  const rows = zoomed ? zoomedRows(root, on) : treeRows(root, opened);
+  const target = reveal?.at(-1);
+  // The address's own node is unfolded to whatever the reader has opened by hand, at every
+  // depth: a `#b-` fragment names a block of a document the page opens folded.
+  const path = reveal ?? [];
+  const shown: OpenedBranches =
+    path.length === 0
+      ? opened
+      : {
+          branches: new Set([...opened.branches, ...path.map((above) => above.id)]),
+          deeper: new Set([...opened.deeper, ...path.map((above) => above.id)]),
+        };
+  const on = zoom ?? (target === undefined ? zoomOpensOn(root) : (reveal?.at(-2) ?? root).id);
+  const rows = zoomed ? zoomedRows(root, on) : treeRows(root, shown);
   const breadcrumb: readonly TreeNode[] = zoomed ? zoomBreadcrumb(root, on) : [];
 
   const takeFocus = useCallback(
@@ -92,6 +126,27 @@ export function IssueTree({ issue }: { issue: IssueDetails }): ReactNode {
     });
   }, []);
 
+  // An address that names a node puts the focus on it (R19). The row is not on the page until
+  // the read that holds it has answered, and the document the preset draws beside the tree
+  // mounts later still and can leave the focus nowhere as it does, so this looks again on
+  // every tree the page draws and takes the focus whenever nothing else holds it. Once the
+  // reader - or anything else on the page - has the focus, it is theirs: the effect leaves it
+  // alone until another address names another node.
+  const taken = useRef<string | undefined>(undefined);
+  const targetId = target?.id;
+  useEffect(() => {
+    if (targetId === undefined || !focusReveal) return;
+    const loose = document.activeElement === null || document.activeElement === document.body;
+    if (taken.current === targetId && !loose) return;
+    if (!rows.some((row) => row.kind === "node" && row.node.id === targetId)) return;
+    const row = body.current?.querySelector<HTMLElement>(
+      `[data-node-row][data-node-id="${CSS.escape(targetId)}"]`
+    );
+    if (row === null || row === undefined) return;
+    taken.current = targetId;
+    row.focus();
+  }, [focusReveal, rows, targetId]);
+
   // Before the reader has touched the tree its first row is its tab stop, so Tab reaches the
   // tree rather than passing it by.
   const first = rows[0];
@@ -119,6 +174,7 @@ export function IssueTree({ issue }: { issue: IssueDetails }): ReactNode {
         aria-label={CONTROL_LABELS.tree}
         className="flex min-w-0 flex-col"
         onBlur={releaseFocus}
+        ref={body}
         role="tree"
       >
         {rows.map((row) => {
@@ -138,6 +194,7 @@ export function IssueTree({ issue }: { issue: IssueDetails }): ReactNode {
           return (
             <NodeRow
               body={focused === key || pinned.has(key)}
+              context={context.has(row.node.id)}
               expanded={row.expanded}
               focused={focused === key}
               folded={row.folded}
@@ -157,6 +214,11 @@ export function IssueTree({ issue }: { issue: IssueDetails }): ReactNode {
           );
         })}
       </div>
+      {root.children.length === 0 ? (
+        <p className={`py-1 text-sm ${textMutedOnCanvas}`} {...pageChrome}>
+          {emptyLine}
+        </p>
+      ) : null}
     </div>
   );
 }

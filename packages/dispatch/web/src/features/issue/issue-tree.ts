@@ -2,11 +2,13 @@ import type {
   Actor,
   ArtifactBlock,
   Ask,
+  Comment,
   IssueCheckResults,
   IssueCoverage,
   IssueDecisions,
   IssueDetails,
   IssueReferences,
+  MessageRead,
   ReferenceTarget,
 } from "../../api/types";
 import type { GapKind, NodeType } from "./page-words";
@@ -129,9 +131,13 @@ export interface IssueTreeReads {
   readonly asks?: readonly Ask[];
   readonly coverage?: IssueCoverage;
   readonly decisions?: IssueDecisions;
+  /** The issue's comments, each a node of the tree (`addTurns`). */
+  readonly comments?: readonly Comment[];
   /** One entry per document of the issue whose blocks the page has read. */
   readonly documents?: readonly DocumentBlocks[];
   readonly issue: IssueDetails;
+  /** The issue's messages with their replies, each a node of the tree (`addTurns`). */
+  readonly messages?: readonly MessageRead[];
   /** Which block cites each document the issue references (`via_blocks`). */
   readonly references?: IssueReferences;
   /** Each check of the Verification document with the results recorded against it. */
@@ -190,6 +196,11 @@ export function treeReferences(root: TreeNode): string[] {
  * also drawn under and counting the nodes it holds. A placement that would sit under itself, or
  * under a node it already holds, is dropped, so a `from` edge that ever points in a circle still
  * draws a tree.
+ *
+ * A parent no draft answers to is no placement at all: a document cited by a paragraph, which
+ * is the document's own text and no node, and a reply to a turn the page never read. Rather
+ * than dropping the node with its missing parent, it sits under the issue, which is where
+ * every node whose parent is absent goes (R4).
  */
 function assemble(
   issue: IssueDetails,
@@ -199,9 +210,16 @@ function assemble(
   const key = issue.key;
   const byParent = new Map<string, Draft[]>();
   const references = new Map<string, string>();
+  const known = new Set(drafts.map((draft) => draft.id));
+  /** Where each draft is actually drawn: the parents a draft of its own answers for, and the
+   *  issue itself for a draft whose every named parent is absent. */
+  const placements = new Map<string, readonly string[]>();
   for (const draft of drafts) {
     references.set(draft.id, draft.reference ?? draft.id);
-    for (const parent of draft.parents.length === 0 ? [key] : draft.parents) {
+    const named = draft.parents.filter((parent) => known.has(parent));
+    const placed = named.length === 0 ? [key] : named;
+    placements.set(draft.id, placed);
+    for (const parent of placed) {
       byParent.set(parent, [...(byParent.get(parent) ?? []), draft]);
     }
   }
@@ -212,10 +230,10 @@ function assemble(
       .map((child) => build(child, id, [...above, id]));
   const build = (draft: Draft, parent: string, above: readonly string[]): TreeNode => {
     const children = childrenOf(draft.id, above);
-    const others = draft.parents.filter((one) => one !== parent);
+    const parents = placements.get(draft.id) ?? [];
+    const others = parents.filter((one) => one !== parent);
     return {
-      alsoUnder:
-        draft.parents.length > 1 ? others.map((one) => chipOf(references.get(one) ?? one)) : [],
+      alsoUnder: parents.length > 1 ? others.map((one) => chipOf(references.get(one) ?? one)) : [],
       ...(draft.author === undefined ? {} : { author: draft.author }),
       children,
       chips: draft.chips,
@@ -228,7 +246,7 @@ function assemble(
       replaced: draft.replaced,
       ...(draft.state === undefined ? {} : { state: draft.state }),
       text: draft.text,
-      transcluded: draft.parents.indexOf(parent) > 0,
+      transcluded: parents.indexOf(parent) > 0,
       type: draft.type,
     };
   };

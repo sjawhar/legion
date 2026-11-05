@@ -6,8 +6,8 @@ import {
   type Route,
   test,
 } from "@playwright/test";
-
 import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
+import { conversationState, openIssueAddress } from "./issue-presets";
 import { boxesApart } from "./layout";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -304,11 +304,8 @@ test("on a phone, a reader who leaves the Conversation while it loads lands on i
     await expect(page.getByText("Loading conversation…")).toBeVisible();
     await expect.poll(() => held.length).toBe(1);
 
-    await page.getByRole("tab", { name: "Activity" }).click();
-    await expect(page.getByRole("tab", { name: "Activity" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    await openIssueAddress(page, "activity");
+    await expect(conversationState(page, "everything")).toHaveAttribute("aria-selected", "true");
     const answered = page.waitForResponse(
       (response) => asksRead(new URL(response.url())) && response.status() === 200
     );
@@ -318,7 +315,7 @@ test("on a phone, a reader who leaves the Conversation while it loads lands on i
     // The list renders in the hidden panel before the reader comes back.
     await expect(newestCard).toBeAttached();
 
-    await page.getByRole("tab", { name: "Conversation" }).click();
+    await openIssueAddress(page, "conversation");
     await settle(newestCard, "back on the Conversation");
     await expectNewestInView(page, newestCard, "back on the Conversation");
   } finally {

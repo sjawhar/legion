@@ -153,6 +153,52 @@ export const PRESET_NAMES = freeze({
   tree: "Tree",
 } as const satisfies Record<Preset, string>);
 
+/** The four states the conversation panel can be read in (R12), in the order the panel offers
+ *  them: everything the issue recorded, what the reader pinned, the questions alone, and what
+ *  people and agents actually said. */
+export const CONVERSATION_STATE_ORDER = freeze([
+  "everything",
+  "pinned",
+  "questions",
+  "words",
+] as const);
+
+/** One state of the conversation panel, by its own token, which is its `data-conversation-state`. */
+export type ConversationState = (typeof CONVERSATION_STATE_ORDER)[number];
+
+/** The name of each conversation state. */
+export const CONVERSATION_STATE_NAMES = freeze({
+  everything: "Everything",
+  pinned: "Pinned",
+  questions: "Questions",
+  words: "What people said",
+} as const satisfies Record<ConversationState, string>);
+
+/**
+ * How an issue stands, as the page says it: the word a child's row draws beside it (R10). The
+ * keys are the server's own status tokens, in the lifecycle order `features/project/board-model.ts`
+ * holds them in, and `page-words.test.ts` reads that module, so a status added there fails
+ * until it has a word here.
+ */
+export const ISSUE_STATUS_WORDS = freeze({
+  backlog: "Backlog",
+  done: "Done",
+  icebox: "Icebox",
+  in_progress: "In progress",
+  needs_review: "Needs review",
+  retro: "Retro",
+  testing: "Testing",
+  todo: "Todo",
+  triage: "Triage",
+} as const);
+
+/** The word for the issue status `token`. A token the module does not declare reads as itself,
+ *  which is what the server sent; `page-words.test.ts` fails until a declared status has a word. */
+export function issueStatusWord(token: string): string {
+  const words: Readonly<Record<string, string>> = ISSUE_STATUS_WORDS;
+  return words[token] ?? token;
+}
+
 /**
  * Every line the page draws where a place holds nothing, one per situation: a preset whose
  * query matches nothing, an issue with no children, a spec with no summary, a check with no
@@ -186,6 +232,8 @@ export const GAP_LINES = freeze({
   no_check: "No check serves this requirement.",
   no_origin: "Nothing explains this node: it names nothing it came from.",
   no_plan_task: "No plan task serves this requirement.",
+  no_read_back: "Nobody is recorded as having read these sentences back.",
+  no_summary_author: "Nobody is recorded as having written these sentences.",
   shaped_disagreement: "A decision says it shaped this node, which came from another one.",
 } as const);
 
@@ -201,6 +249,8 @@ export const GAP_WORDS = freeze({
   no_check: "No check",
   no_origin: "Nothing explains it",
   no_plan_task: "No plan task",
+  no_read_back: "Not read back",
+  no_summary_author: "No author",
   shaped_disagreement: "Two origins",
 } as const satisfies Record<GapKind, string>);
 
@@ -225,6 +275,20 @@ export const RESULT_CURRENCY_WORDS = freeze({
 } as const);
 
 /**
+ * How a document of the issue stands with its reviewers, in words (R5): the head's "How it gets
+ * done" row says this of the plan. The keys are `ArtifactApproval.state`; the version a review
+ * covers is no part of the word, because the head is one line and the document's own toolbar
+ * carries the version.
+ */
+export const APPROVAL_STATE_WORDS = freeze({
+  approved: "Approved",
+  awaiting: "Awaiting approval",
+  changes_requested: "Changes requested",
+  draft: "Draft",
+  stale: "Approved, and changed since",
+} as const);
+
+/**
  * Every label the page's own controls and headings carry. They live here rather than inside a
  * component so `DECLARED_WORDS` stays derived: a label a component writes inline would be a
  * word the page draws and the list does not hold.
@@ -246,6 +310,8 @@ export const CONTROL_LABELS = freeze({
   children_done: "Children done",
   /** Closes the issue, from the identity block's one actions control (R11). */
   close_issue: "Close issue",
+  /** The heading of the conversation inside the one right-hand panel (R12). */
+  conversation: "Conversation",
   /** Copies a check's `run` command, which renders as code beside it (R15). */
   copy_command: "Copy the command",
   /** The one row a branch below the three drawn levels folds to, which opens it in place: the
@@ -255,10 +321,14 @@ export const CONTROL_LABELS = freeze({
   download: "Download",
   /** Gives an issue that has a parent a different one (R11, row one). */
   edit_parent: "Edit parent issue",
+  /** The box that narrows the preset to the rows whose words hold what is typed (R3). */
+  filter: "Filter",
   /** Closes a branch of the tree (R1). */
   fold: "Fold",
   /** What a folded branch says it holds, after the count of the nodes under it (R1). */
   folded_nodes: "nodes folded",
+  /** The head's first row: where the plan says how the issue gets done (R5). */
+  how_it_gets_done: "How it gets done",
   /** The one control row one keeps the actions behind: close, reopen and setting the parent.
    *  It names actions, never a property (R11 bans "more"). */
   issue_actions: "Issue actions",
@@ -267,6 +337,8 @@ export const CONTROL_LABELS = freeze({
   keep_open: "Keep open",
   /** Lets a node kept open close again (R2). */
   let_close: "Let it close",
+  /** Gives the open document's current text a version of its own (R16). */
+  name_version: "Name version",
   /** Moves to the next open question that waits on the reader (R6). */
   next_question: "Next open question",
   /** What the route control says while the issue has none to show. */
@@ -275,6 +347,8 @@ export const CONTROL_LABELS = freeze({
   nothing_cites_it: "Cited by nothing",
   /** The node menu beside the presets, holding what no block cites and the upload (R16). */
   other_nodes: "Files and documents",
+  /** The row of five queries over the one tree, as a reader of it hears it named (R3). */
+  presets: "Issue presets",
   /** Hands a claimed issue back, so another agent can take it (R11, row four). */
   release_claim: "Release",
   /** Reopens a closed issue, from the actions control or the closed issue's own line (R11). */
@@ -308,8 +382,12 @@ export const CONTROL_LABELS = freeze({
   unfold: "Unfold",
   /** Adds an artifact from the node menu (R16). */
   upload: "Upload",
+  /** Which version of the open document the preset draws (R16). */
+  version: "Version",
   /** Every version an artifact has (R16). */
   versions: "Versions",
+  /** The head's second row: where the checks say what the reader will be shown (R5). */
+  what_you_will_be_shown: "What you will be shown",
   /** Names the author of a node whose author the model holds (R7); the name itself is the
    *  author's own text. */
   written_by: "Written by",
@@ -454,11 +532,14 @@ const WORD_SOURCES: readonly unknown[] = [
   NODE_TYPE_NAMES,
   NODE_STATE_WORDS,
   PRESET_NAMES,
+  CONVERSATION_STATE_NAMES,
+  ISSUE_STATUS_WORDS,
   EMPTY_STATE_LINES,
   GAP_LINES,
   GAP_WORDS,
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
+  APPROVAL_STATE_WORDS,
   CONTROL_LABELS,
   PROPERTY_LABELS,
   MARGIN_SECTION_NAMES,

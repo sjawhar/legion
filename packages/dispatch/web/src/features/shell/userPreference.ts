@@ -5,6 +5,8 @@ import { whoAmIQuery } from "../../api/queries";
 
 export type UserPreference =
   | "agents.pinned"
+  /** Whether this reader collapsed the issue page's children section. */
+  | "issue.children-section"
   /** Which of the issue panel's property sections this reader has collapsed. */
   | "issue.margin-sections"
   | "project.board-edges"

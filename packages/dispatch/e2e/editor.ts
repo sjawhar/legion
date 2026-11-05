@@ -532,7 +532,16 @@ export async function openIssue(browser: Browser, title: string, spec: string) {
 export async function blockId(artifactId: string, text: string): Promise<string> {
   const { markdown } = await getArtifactText(artifactId);
   const blocks = await getArtifactBlocks(artifactId);
-  const block = blocks.find((candidate) => markdown.slice(candidate.from, candidate.to) === text);
+  // `from`/`to` are offsets into the document's bytes, which is what the server slices the same
+  // markdown with (`packages/envoy/internal/dispatch/docs/closed_version_blocks.go`), so the cut
+  // is made over the encoded bytes: a document holding anything outside ASCII puts every later
+  // block's byte offset past its JavaScript string index, and a string slice would read the
+  // wrong text.
+  const bytes = new TextEncoder().encode(markdown);
+  const decoder = new TextDecoder();
+  const block = blocks.find(
+    (candidate) => decoder.decode(bytes.slice(candidate.from, candidate.to)) === text
+  );
   if (block === undefined) {
     throw new Error(`no block of ${artifactId} reads ${JSON.stringify(text)}: ${markdown}`);
   }

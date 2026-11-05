@@ -587,7 +587,7 @@ for (const state of crossDocumentLandingStates) {
       await (await searchHit(page, "must show its quote")).click();
       await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
       if (!state.holdIssuePageCode) {
-        await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute(
+        await expect(page.getByRole("tab", { exact: true, name: "Spec" })).toHaveAttribute(
           "aria-selected",
           "true"
         );
@@ -622,13 +622,14 @@ const hiddenEditorJourneys = [
   {
     name: "a hidden spec editor withdraws its report before View in document returns to it",
     namedVersion: false,
-    async hide(page: Page): Promise<() => Promise<void>> {
-      await page.getByRole("tab", { name: "Conversation" }).click();
-      const conversation = page.getByRole("tabpanel", { name: "Conversation" });
+    async hide(page: Page, issueKey: string): Promise<() => Promise<void>> {
+      // The conversation keeps its address; the Spec editor it hides is the Spec preset's.
+      await page.goto(`/issues/${issueKey}/conversation`);
+      const conversation = page.locator("#issue-conversation-panel");
       await expect(conversation).toBeVisible();
       return async () => {
         await conversation.getByRole("link", { name: "View in document" }).click();
-        await expect(page.getByRole("tabpanel", { name: "Spec" })).toBeVisible();
+        await expect(page.locator("#issue-spec-panel")).toBeVisible();
       };
     },
   },
