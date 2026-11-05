@@ -161,9 +161,13 @@ type sessionRelays struct {
 	// replyPrefix<token>, and one subscription to the inbox's wildcard hears every reply.
 	replyPrefix string
 	// pauseFirst and pauseMax are the bounds of a paused relay's backoff, relayPauseFirst and
-	// relayPauseMax; a test shortens them. Set before the first relay starts and read-only after.
-	pauseFirst time.Duration
-	pauseMax   time.Duration
+	// relayPauseMax; a test shortens them. receiptWait is relayReceiptWait, how long the oldest
+	// unanswered frame may wait before the relay pauses, and a test shortens it the same way, so
+	// a row about what an unreachable session leaves behind spends its own short wait rather
+	// than three seconds of the clock. Set before the first relay starts and read-only after.
+	pauseFirst  time.Duration
+	pauseMax    time.Duration
+	receiptWait time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -347,6 +351,7 @@ func startSessionRelays(delivery *sessionDelivery, cfg listenerDeliveryHandlerCo
 		replyPrefix: inbox + ".",
 		pauseFirst:  relayPauseFirst,
 		pauseMax:    relayPauseMax,
+		receiptWait: relayReceiptWait,
 		loopDone:    make(chan struct{}),
 		events:      map[string]relayNotice{},
 		wake:        make(chan struct{}, 1),
@@ -615,7 +620,7 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 				paused = true
 				m.logger.Info("session relay paused: the session answered no frame within the receipt wait; it sends again after the pause backoff, or at the session's next registration",
 					slog.String("session_id", run.sessionID),
-					slog.String("receipt_wait", relayReceiptWait.String()),
+					slog.String("receipt_wait", m.receiptWait.String()),
 					slog.String("backoff", pause.String()))
 			}
 			if !run.waitPause(ctx, pause) {
@@ -833,7 +838,7 @@ func (m *sessionRelays) receiptDeadline(run *relayRun) (time.Time, bool) {
 	if len(run.unanswered) == 0 {
 		return time.Time{}, false
 	}
-	return run.unanswered[0].sentAt.Add(relayReceiptWait), true
+	return run.unanswered[0].sentAt.Add(m.receiptWait), true
 }
 
 // forget drops every frame of run still awaiting an answer: a reply to one is ignored, and its
