@@ -69,7 +69,7 @@ func getMyAnswers(t *testing.T, handler http.Handler, login, query string) myAns
 }
 
 func TestListMyAnswersReturnsOwnAnswersAndRepliesNewestFirst(t *testing.T) {
-	handler := newTestHandler(t)
+	handler, database := newTestHandlerWithStore(t)
 	firstIssue := createInteractionIssue(t, handler, "TEST", "First answer", "A spec")
 	secondIssue := createAnswerListIssue(t, handler, "Second answer")
 	thirdIssue := createAnswerListIssue(t, handler, "Reply only")
@@ -134,8 +134,19 @@ func TestListMyAnswersReturnsOwnAnswersAndRepliesNewestFirst(t *testing.T) {
 	if invalid := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/answers?limit=0", nil, "alice"); invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_QUERY"`) {
 		t.Fatalf("invalid answer page: status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
-	if bearer := sessionRequest(t, handler, http.MethodGet, "/api/v1/me/answers", nil); bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("agent answer page: status=%d body=%s", bearer.Code, bearer.Body.String())
+	// The page is the calling person's own, so the deployment's shared token, which holds no
+	// scope, is turned away, and Alice's own token reads the three rows her browser reads.
+	if bearer := sessionRequest(t, handler, http.MethodGet, "/api/v1/me/answers", nil); bearer.Code != http.StatusForbidden ||
+		!strings.Contains(bearer.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's answer page: status=%d body=%s, want 403 %s", bearer.Code, bearer.Body.String(), codeScopeRequired)
+	}
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/me/answers", nil,
+		personalTokenHolding(t, database, model.ScopePerson))
+	if own.Code != http.StatusOK {
+		t.Fatalf("Alice's own token reading her answer page: status=%d body=%s", own.Code, own.Body.String())
+	}
+	if read := decodeBody[myAnswersRead](t, own); read.Total != 3 {
+		t.Fatalf("Alice's own token read %d answers, want her three", read.Total)
 	}
 }
 

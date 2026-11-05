@@ -60,7 +60,7 @@ right, and now right for this reason.
 
 ## Evidence
 
-Measured on sjawhar/legion itself, on scratch base branches of `main`, by two roles with two
+Measured on cybermonklabs/legion itself, on scratch base branches of `main`, by two roles with two
 different GitHub Apps, with the mutation text read out of the shipped
 `packages/daemon/internal/ghautomerge/ghautomerge.go`. The repository's live settings were
 `squash_merge_commit_message=COMMIT_MESSAGES`, `squash_merge_commit_title=COMMIT_OR_PR_TITLE`.

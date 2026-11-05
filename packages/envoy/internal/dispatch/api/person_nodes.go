@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -30,16 +29,34 @@ type personNodes struct {
 	Offset int          `json:"offset"`
 }
 
+const personAliasesQuery = `
+	select coalesce(bool_or(alias_kind = 'login'), false),
+	       coalesce(array_agg(alias) filter (where alias_kind = 'session'), '{}'::text[])
+	from person_aliases where person = $1 and alias_kind in ('login', 'session')`
+
 const personNodesQuery = `
-	with related as (
+	with reached as materialized (
+		select case e.type when 'comment.created' then 'comment' when 'ask.answered' then 'ask' else 'message' end as from_kind,
+		       e.payload->>'id' as from_id
+		from events e
+		where e.type in ('ask.answered', 'comment.created', 'message.created', 'message.answered')
+		  and e.payload->>'id' <> '' and e.created_at >= $4
+		  and e.published_destinations && array(select 'notifications.agent.' || unnest($5::text[]))
+	), related as (
 		select from_kind, from_id, array_agg(distinct kind order by kind) as relations from (
-			select g.from_kind, g.from_id, g.kind from ` + refs.AllEdgesSQL + ` g
+			select g.from_kind, g.from_id, g.kind from graph_person_edges g
 			where g.kind = 'authored_by' and g.to_kind = 'person' and g.to_id = $1
 			  and g.from_kind in ('comment', 'message', 'ask')
 			union all
-			select g.from_kind, g.from_id, g.kind from person_aliases a
-			join ` + refs.AllEdgesSQL + ` g on g.to_kind = 'session' and g.to_id = a.alias and g.kind = 'delivered_to'
-			where a.person = $1 and a.alias_kind = 'session' and g.from_kind in ('comment', 'message', 'ask')
+			select from_kind, from_id, 'delivered_to' from reached
+			union all
+			select 'message', d.message_id::text, 'delivered_to'
+			from message_deliveries d
+			where d.session_id = any($5) and d.state = 'sent' and d.created_at >= $4
+			union all
+			select 'comment', d.comment_id::text, 'delivered_to'
+			from comment_deliveries d
+			where d.session_id = any($5) and d.state = 'sent' and d.created_at >= $4
 		) edges group by from_kind, from_id
 	), items as (
 		select 'comment' as kind, c.id::text as id, c.body as title, c.created_at, r.relations,
@@ -60,22 +77,33 @@ const personNodesQuery = `
 	from (select count(*)::int as total from items) totals left join page p on true
 	order by p.created_at desc, p.kind, p.id desc`
 
-// listPersonNodes is a named graph read, not a graph traversal API. Like listAgentMessages it
-// is human-only: people may read direct conversations, while a bearer cannot use a person's
-// alias to reach another session's conversation. Session ownership affects receipt, not who
-// authored an item; an agent's own words remain authored by that session.
+// listPersonNodes is a named graph read, not a graph traversal API. The whole route is private
+// to people: its routeScopes row (routes_table.go) needs model.ScopePerson, and that row is the
+// only gate — a credential the deployment configured is refused before the handler runs, so a
+// bearer cannot use a person's alias to reach another session's conversation. The handler makes
+// no second check: the route reads the nodes of the person its path names, not the caller's.
+// Session ownership affects receipt, not who authored an item; an agent's own words remain
+// authored by that session.
 func (s *server) listPersonNodes(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
-		return
-	}
 	limit, offset, err := parseMyAnswersPage(r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	query := r.URL.Query()
+	if len(query["since"]) > 1 {
+		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "since must be one RFC3339 timestamp")
+		return
+	}
+	since, err := parseOptionalRFC3339(query, "since", time.Now().UTC().Add(-30*24*time.Hour))
+	if err != nil {
+		writeError(w, "INVALID_QUERY", http.StatusBadRequest, err.Error())
+		return
+	}
 	login := model.CanonicalLogin(r.PathValue("login"))
 	var exists bool
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select exists (select 1 from person_aliases where person = $1 and alias_kind = 'login')`, login).Scan(&exists); err != nil {
+	var sessions []string
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), personAliasesQuery, login).Scan(&exists, &sessions); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -83,7 +111,7 @@ func (s *server) listPersonNodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "PERSON_NOT_FOUND", http.StatusNotFound, "person not found")
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), personNodesQuery, login, limit, offset)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), personNodesQuery, login, limit, offset, since, sessions)
 	if err != nil {
 		s.writeHandlerError(w, fmt.Errorf("read person nodes: %w", err))
 		return

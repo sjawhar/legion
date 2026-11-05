@@ -59,61 +59,6 @@ type Query struct {
 // the ask's own text. The count on a card and the rows its panel opens read the same exclusion.
 var AskBacklinkExclusions = []string{"replies_to", "part_of"}
 
-// BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
-// list carries beside a row, counted the same way the rows behind it are listed. It counts only
-// edges whose source is a node kind this build reads, so the count is the rows its list shows,
-// and counts a document's, comment's, message's or ask's mention once for each of its blocks'
-// links to the node, in place of the item's own edge (heldByABlock): a comment citing a node
-// from two paragraphs counts 2, and a document's block pointing at the node counts once whatever
-// its link's kind. An edge at a current block of a counted item is counted as that item's, since
-// the item's own read lists it (readEdgeRows): a comment citing one part of an ask counts once
-// for that ask. A node with no inbound edge is absent from the result; the caller decides what
-// zero means.
-//
-// An ask is counted with its own clarification thread and its own parts excluded
-// (AskBacklinkExclusions), which is also what keeps a reply that answers one of its parts from
-// being counted beside the reply's edge to the ask itself.
-func BacklinkCounts(
-	ctx context.Context,
-	q Queryer,
-	toKind string,
-	ids []string,
-	excludeKinds []string,
-) (map[string]int, error) {
-	counts := make(map[string]int, len(ids))
-	if len(ids) == 0 {
-		return counts, nil
-	}
-	args := []any{toKind, ids, nodeKinds}
-	narrow := ` and g.from_kind = any($3) and not ` + heldByABlock("g")
-	if len(excludeKinds) > 0 {
-		args = append(args, excludeKinds)
-		narrow += " and not (g.kind = any($4))"
-	}
-	arms := `select g.to_id from graph_edges g where g.to_kind = $1 and g.to_id = any($2)` + narrow
-	if item := ItemKind(toKind); slices.Contains(itemKinds, item) {
-		tables, _ := item.tables()
-		arms += ` union all
-			select b.` + tables.item + `::text from graph_edges g
-			join ` + tables.blocks + ` b on b.node_id = g.to_id and b.position is not null
-			where g.to_kind = '` + item.BlockKind() + `' and b.` + tables.item + `::text = any($2)` + narrow
-	}
-	rows, err := q.Query(ctx, `select id, count(*)::int from (`+arms+`) e (id) group by id`, args...)
-	if err != nil {
-		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var count int
-		if err := rows.Scan(&id, &count); err != nil {
-			return nil, fmt.Errorf("scan %s backlink count: %w", toKind, err)
-		}
-		counts[id] = count
-	}
-	return counts, rows.Err()
-}
-
 // resolvedEdge is a graph edge plus the ref_key of an artifact node, which the legacy
 // referenced-by shape still reports.
 type resolvedEdge struct {
@@ -462,6 +407,7 @@ var nodeLoaders = map[string]nodeLoader{
 	"message":       loadMessageNodes,
 	"component":     loadComponentNodes,
 	"session":       loadSessionNodes,
+	"role":          loadRoleNodes,
 	"person":        loadPersonNodes,
 	"block":         loadBlockNodes,
 	"ask_block":     loadAskBlockNodes,
@@ -470,7 +416,9 @@ var nodeLoaders = map[string]nodeLoader{
 }
 
 // nodeKinds is every node kind nodeLoaders resolves, sorted, as the reads that filter
-// graph_edges in SQL bind it.
+// graph_edges in SQL bind it. BacklinkCounts binds it on its mention arm alone, the one arm
+// whose from_kind is a column; every other arm it reads fixes from_kind as a literal this list
+// holds, so the filter would drop nothing there.
 var nodeKinds = slices.Sorted(maps.Keys(nodeLoaders))
 
 // resolveNodes loads every distinct other end by kind.
@@ -504,6 +452,17 @@ func resolveNodes(ctx context.Context, q Queryer, byRefKey bool, rows []edgeRow)
 // loadSessionNodes addresses a session node by its id alone. Dispatch records no fact of a
 // session: it is made by nobody recorded, never changed and belongs to no node.
 func loadSessionNodes(_ context.Context, _ Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	for _, id := range ids {
+		nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id, MadeBy: []model.Actor{}, ChangedBy: []model.Actor{}}}
+	}
+	return nil
+}
+
+// loadRoleNodes addresses a role node by its token alone, as loadSessionNodes does a session.
+// A role is a name an event was published to (notifications.role.<token>); Dispatch records no
+// fact of it, and who holds it at a moment is the listener's, not a fact of the graph. A role
+// endpoint resolves whether or not anyone holds it, because the delivery to it happened.
+func loadRoleNodes(_ context.Context, _ Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	for _, id := range ids {
 		nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id, MadeBy: []model.Actor{}, ChangedBy: []model.Actor{}}}
 	}

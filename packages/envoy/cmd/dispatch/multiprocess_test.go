@@ -2344,49 +2344,86 @@ func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
 	return head
 }
 
-// openSyncedEditor opens a spec tab on A, as openEditor does, and returns once the update the tab
-// sends as it syncs is stored, so that whatever B writes next is the only thing that can leave A's
-// room behind the durable head.
-//
-// A browser's provider answers the room's sync step 1 with its own state (docstest.Peer.read, as
-// y-websocket does), and the room appends that update even when it changes nothing, since ygo runs
-// the room's update observer for every transaction it commits. An append from a room standing
-// behind the head is refused by the durable gate, and the refusal fails the room
-// (ErrRoomBehindHead; docs/stale_room.go names this path): the room closes and the browser
-// reconnects. That is correct for a browser, but a row timing which path closes A's room reads it
-// as some other path. So a tab whose update is still on its way when B's write lands closes its
-// own socket within milliseconds of that write, which is how the refused-notification row failed
-// 2 of 20 runs on a development machine (dispatch://INFRA-396).
-//
-// The head is read before the dial, and nothing else writes the document while the tab connects:
-// B writes only after this returns, and a settlement is at least the settle delay away (2 s by
-// default). So the head moves by exactly one, the tab's own update, and anything more fails the
-// row rather than letting it run on with that update still on its way. The wait is openEditor's
-// own ten seconds: on a loaded development machine 52 such updates were stored 16-294 ms after
-// the dial, and one was not stored within a second. A tab whose update is not stored in ten fails
-// the row: either the room stopped storing an update for a sync that changes nothing, and this
-// wait has outlived its reason, or the machine is too slow for the row. How much of the eviction
-// window a reconnect spent is the gap burstLeavingTheRoomBehind asserts.
+// Rendering is not an acknowledgement of a browser update's durable append.
+func TestSyncedEditorWaitsForItsOwnAppend(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "SYNC")
+	pair.a.createProject(t, project, "Documents")
+	_, artifactID := pair.a.createIssueIn(t, project, "Held browser append", "before")
+	gate, err := pair.database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `lock table doc_updates in share mode`); err != nil {
+		t.Fatal(err)
+	}
+	opened := make(chan *docstest.Peer, 1)
+	go func() { opened <- openSyncedEditor(t, pair, artifactID, "before\n") }()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		select {
+		case <-opened:
+			t.Fatal("editor setup returned while its append was held")
+		default:
+		}
+		waiting, err := storetest.CountLockWaits(context.Background(), pair.database, "%insert into doc_updates%")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			select {
+			case <-opened:
+				t.Fatal("editor setup returned before its held append committed")
+			case <-time.After(100 * time.Millisecond):
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("editor setup never sent an append")
+		}
+	}
+	if err := gate.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case editor := <-opened:
+		if got := markdown(editor); got != "before\n" {
+			t.Fatalf("sync marker changed the document to %q", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("editor setup did not finish after its append was released")
+	}
+}
+
+// openSyncedEditor sends a metadata marker after the tab renders and returns only once that
+// specific update is stored. Sync frames ahead of it on the socket have then been processed too,
+// so only a subsequent write on B can leave A's room behind the durable head.
 func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
 	t.Helper()
-	const within = 10 * time.Second
-	before := storedHead(t, pair, artifactID)
-	dialled := time.Now()
 	editor := pair.a.openEditor(t, artifactID, want)
-	for {
-		head := storedHead(t, pair, artifactID)
-		switch {
-		case head == before+1:
-			t.Logf("the tab's own sync update was stored %v after it dialled the room", time.Since(dialled))
-			return editor
-		case head > before+1:
-			t.Fatalf("the document moved from update %d to %d while a tab connected, and only the tab's own sync update was to be stored: something else wrote it, and the tab's update may still be on its way",
-				before, head)
-		case time.Since(dialled) >= within:
-			t.Fatalf("the tab's own sync update was not stored within %v of its dial: the document still stands at update %d. Either the room no longer stores an update for a sync that changes nothing, which makes this wait unnecessary, or the machine is too slow for this row.",
-				within, before)
+	markers := editor.Doc.GetMap("test-sync")
+	marker := strconv.FormatUint(uint64(editor.Doc.ClientID()), 10)
+	update, err := editor.Send(func(txn *crdt.Transaction) { markers.Set(txn, marker, true) })
+	if err != nil {
+		t.Fatalf("send the editor's sync marker: %v", err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var stored bool
+		if err := pair.database.Pool.QueryRow(context.Background(),
+			`select exists(select 1 from doc_updates where artifact_id = $1 and update = $2)`, artifactID, update).Scan(&stored); err != nil {
+			t.Fatalf("read the editor's stored sync marker: %v", err)
 		}
-		time.Sleep(10 * time.Millisecond)
+		if stored {
+			return editor
+		}
+		select {
+		case <-editor.Ended:
+			t.Fatalf("the editor closed before its sync marker was stored:\n%s", pair.a.Output.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the editor's sync marker was never stored:\n%s", pair.a.Output.String())
+		}
 	}
 }
 
@@ -2468,8 +2505,9 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	// eviction that starts the window. A reconnect that waited for the eviction's log line first
 	// put up to that poll's 50 ms between the two, so the evictor's re-examination at the window's
 	// end and that settlement met less often than they do for a browser (dispatch://INFRA-396). Its
-	// own sync update is stored before the trailing write (openSyncedEditor), so that write alone
-	// leaves the room behind the head.
+	// own sync changes nothing in the room, so the room stores nothing for it (ygo calls no update
+	// observer for a transaction that changes nothing, reearth/ygo#350), and the trailing write
+	// alone leaves the room behind the head.
 	//
 	// Dialling this early can land in ygo's own window between a close's peer hang-up and its
 	// removal of the room, where the dial is refused: a real browser's reconnect has the same

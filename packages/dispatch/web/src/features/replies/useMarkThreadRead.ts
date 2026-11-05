@@ -56,7 +56,8 @@ export function useMarkThreadRead({
   threadId,
 }: MarkThreadReadOptions): DwellRef {
   const queryClient = useQueryClient();
-  // The routes are human-only; any other principal never asks, so never cycles on a 403.
+  // The routes need the `person` scope, which a signed-in browser holds, so the surface waits for
+  // the sign-in read before it asks and nothing without the scope cycles on a 403.
   const human = useIsHuman();
   const watching = enabled && human && owner !== undefined && newestShownAt !== undefined;
   const unreadSet = useQuery({ ...myRepliesOwnerQuery(owner ?? NO_OWNER), enabled: watching });
