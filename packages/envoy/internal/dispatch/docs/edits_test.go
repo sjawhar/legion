@@ -2813,10 +2813,18 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 		t.Fatalf("ask events after move = %d, want no retract, reopen, or repair", got)
 	}
 
-	// Deleting the answered block leaves the answered row as the record; a resolved row
-	// carrying an answer is what the asks table forbids, and settlement must not fail on it.
-	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err != nil {
-		t.Fatalf("delete answered ask block: %v", err)
+	// An agent cannot hide the person's decision; the person can remove their own block.
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err == nil {
+		t.Fatal("agent deleted an answered ask")
+	} else {
+		var removed *ErrAnsweredDecisionRemoved
+		if !errors.As(err, &removed) || removed.AskID != askID {
+			t.Fatalf("agent deletion error = %v, want the answered ask %s", err, askID)
+		}
+	}
+	// The answered row remains the record; a resolved row carrying an answer is forbidden.
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
+		t.Fatalf("person deleting their answered ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n")
 	settle()

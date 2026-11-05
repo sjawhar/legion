@@ -1893,7 +1893,7 @@ the version current when an unanchored comment or ask is written on a document, 
 
 `envoy-dispatch convert-decisions` reads `DATABASE_URL` and reports every legacy `decisions.md` source, which records become native decision blocks in its issue's spec, which citation-only restatements can be dropped in favour of the actual ask, and which answered asks can be restored to the spec.
 The default writes nothing and applies no schema migration.
-Review the report, then run the same command with `--apply` after the decision-aware build is deployed and no old build is serving:
+Deploy the schema and converter while the legacy decision read and writing skill are still serving. Review the report, then apply the conversion:
 
 ```sh
 DATABASE_URL=postgres://... envoy-dispatch convert-decisions
@@ -1904,13 +1904,12 @@ Each issue is converted in one document-service transaction.
 The conversion keeps the original ask rows and their answers; it does not create copied decisions for a person's words.
 Narrative that merely cites an ask but may contain independent reasoning is retained as an agent record and flagged for attribution review rather than silently discarded.
 A source with open comments or asks is left untouched, with those conversation ids listed.
-Retired sources become `decision-history-<uuid>.md`, whose current body links to the spec; their earlier versions, reviews and resolved conversations remain readable.
-This leaves one retired history document per converted source, and another run appends no duplicate node.
+Retired sources become `decision-history-<uuid>.md` by name but keep their `decisions-md` slug, original blocks and Keep receipts, so existing links and the independent comparison remain valid. The converter replaces the spec's pointer line with its node-based description in the same transaction.
+Another run appends no duplicate node. Agent document writes cannot remove an answered ask or set a decision node's `decided_by`; a person's own write is allowed.
 Answered asks can be restored when their original rows and spec block history remain; deleted ask rows and removals predating that history cannot be detected automatically.
 
-Old builds refuse decision blocks.
-The schema-version bump makes already-open editors read-only until reload, and rolling back does not convert the stored nodes back to the old schema.
-After conversion, `GET /api/v1/issues/{key}/decisions-shadow` compares source and graph node counts; `differences` must be zero before the issue's Decisions view is treated as verified.
+Old builds refuse decision blocks. The schema-version bump makes already-open editors read-only until reload, and rolling back does not convert stored nodes back to the old schema.
+`GET /api/v1/issues/{key}/decisions-shadow` compares each original section and Keep receipt with the node result. It reports sections as moved, dropped only when their answered ask still exists, or flagged, with `missing` and `extra` lists. Require `differences: 0` before deploying the node-only read and the node-writing skill together.
 
 ## Search
 

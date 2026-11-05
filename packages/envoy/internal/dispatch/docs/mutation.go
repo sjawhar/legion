@@ -370,7 +370,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		return err
 	}
 	if contentChanged {
-		if err := refuseRemovingAnsweredDecisions(ctx, op.tx, artifactID, actor, tree.Node()); err != nil {
+		if err := refuseAgentDecisionChanges(ctx, op.tx, artifactID, actor, tree.Node()); err != nil {
 			return err
 		}
 	}
