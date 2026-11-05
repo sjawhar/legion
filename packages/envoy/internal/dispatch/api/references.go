@@ -91,8 +91,12 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// Reading an identity's references is reading what belongs to a person, and only part of
+	// this route needs it, so the check sits in the handler rather than in routeScopes.
 	if ref.Kind == "person" || ref.Kind == "session" || ref.Kind == "role" {
-		if _, ok := s.requireHuman(w, r); !ok {
+		if !s.callerHoldsScope(r, model.ScopePerson) {
+			writeError(w, "REFERENCE_FORBIDDEN", http.StatusForbidden,
+				"a person, session or role reference is read with the person scope")
 			return
 		}
 	}

@@ -43,7 +43,7 @@ could disappear in the merge with nothing failing.
 The plan's decision D5 answered it structurally: the launch-side account tests went into a new
 file, `packages/daemon/internal/runtime/sandbox/account_drift_test.go`, never into
 `relaunch_test.go`. The implementer recorded the deciding observation — `gh pr view 2538 -R
-sjawhar/legion --json state,mergedAt,mergeCommit` answering `OPEN` with a null `mergedAt`, and no
+cybermonklabs/legion --json state,mergedAt,mergeCommit` answering `OPEN` with a null `mergedAt`, and no
 `drift.go` in the tree — and posted one comment on #2538 naming that file as what fails if the
 term is dropped.
 

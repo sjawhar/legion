@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/mentiongraph"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -39,7 +38,7 @@ const participationDeliverySources = `
         u.last_reply_id::text from user_threads u where u.login = $1 and u.last_reply_id is not null
  union
  select 'message', m.id::text from messages m
- cross join lateral dispatch_thread_ancestors('message', m.id) walk
+ cross join lateral dispatch_thread_ancestors(array['message'], array[m.id]) walk
  join messages root on walk.kind = 'message' and root.id = walk.id and walk.parent_id is null
  where m.author->>'kind' = 'session' and m.issue_key is null
    and root.in_reply_to is null and root.issue_key is null and root.target like 'session:%'
@@ -65,6 +64,42 @@ const participationAuthoredSources = `
  union
  select 'ask', a.id::text from events e join asks a on a.id::text = e.payload->>'id'
  where e.type = 'ask.answered' and user_threads_login(e.payload->'answer'->>'user') = $1`
+
+// Read only this person's recorded mention targets and verified session aliases.
+// No graph view is used here, so an omitted participation arm remains observable.
+const participationMentionSources = `
+ with sessions as materialized (
+   select alias from person_aliases where alias_kind = 'session' and person = $1
+ )
+ select r.from_kind, r.from_id from refs r
+ where r.to_kind = 'person_mention' and r.to_id = $1 and r.kind = 'mentions'
+   and r.from_kind in ('comment', 'message', 'ask')
+ union
+ select r.from_kind, r.from_id from refs r join sessions s on s.alias = r.to_id
+ where r.to_kind = 'session_mention' and r.kind = 'mentions'
+   and r.from_kind in ('comment', 'message', 'ask')
+ union
+ select 'ask', r.ask_id::text from ask_block_refs r
+ join ask_blocks b on b.ask_id = r.ask_id and b.block_id = r.block_id
+ where r.to_kind = 'person_mention' and r.to_id = $1 and r.kind = 'mentions' and b.position is not null
+ union
+ select 'ask', r.ask_id::text from ask_block_refs r
+ join ask_blocks b on b.ask_id = r.ask_id and b.block_id = r.block_id
+ join sessions s on s.alias = r.to_id
+ where r.to_kind = 'session_mention' and r.kind = 'mentions' and b.position is not null
+ union
+ select 'comment', m.comment_id::text from comment_mentions m join sessions s on m.target = 'session:' || s.alias
+ union
+ select 'comment', m.comment_id::text from comment_mentions m join sessions s on m.resolved_session_id = s.alias
+ union
+ select 'comment', d.comment_id::text from comment_deliveries d join sessions s on d.session_id = s.alias
+ where d.resolve_error is null or d.resolve_error not like 'no live session %'
+ union
+ select 'message', m.id::text from messages m join sessions s on m.target = 'session:' || s.alias
+ union
+ select 'message', d.message_id::text from message_deliveries d join sessions s on d.session_id = s.alias`
+
+const participationShadowTimeout = 5 * time.Second
 
 func loadParticipationSources(ctx context.Context, tx pgx.Tx, query, login string) ([]threadSource, error) {
 	rows, err := tx.Query(ctx, query, login)
@@ -102,7 +137,7 @@ func rootParticipationSources(ctx context.Context, tx pgx.Tx, cause string, sour
     union all select id from messages where s.kind = 'message' and id::text = s.id
     union all select id from asks where s.kind = 'ask' and id::text = s.id
   ) source
-  cross join lateral dispatch_thread_ancestors(s.kind,source.id) r
+  cross join lateral dispatch_thread_ancestors(array[s.kind],array[source.id]) r
   left join artifacts a on a.id = r.artifact_id
   left join messages m on r.kind = 'message' and m.id = r.id
   where r.parent_id is null and (r.issue_key is not null or a.project_key is not null or m.target like 'session:%')
@@ -132,18 +167,20 @@ func (s *server) myThreadsShadow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	login := model.CanonicalLogin(caller.ID)
-	tx, err := s.deps.Store.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	ctx, cancel := context.WithTimeout(r.Context(), participationShadowTimeout)
+	defer cancel()
+	tx, err := s.deps.Store.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	defer tx.Rollback(r.Context())
-	report, err := readParticipationShadow(r.Context(), tx, login)
+	defer tx.Rollback(ctx)
+	report, err := readParticipationShadow(ctx, tx, login)
 	if err != nil {
 		s.writeHandlerError(w, fmt.Errorf("shadow my threads: %w", err))
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -153,7 +190,7 @@ func (s *server) myThreadsShadow(w http.ResponseWriter, r *http.Request) {
 func readParticipationShadow(ctx context.Context, tx pgx.Tx, login string) (participationShadow, error) {
 	report := participationShadow{Person: login, CheckedAt: time.Now().UTC(), ByCause: map[string]*participationCount{"authored": {}, "mentioned": {}, "addressed": {}}}
 	expected := map[threadMembership]bool{}
-	for _, source := range []struct{ cause, sql string }{{"authored", participationAuthoredSources}, {"addressed", participationDeliverySources}} {
+	for _, source := range []struct{ cause, sql string }{{"authored", participationAuthoredSources}, {"addressed", participationDeliverySources}, {"mentioned", participationMentionSources}} {
 		records, err := loadParticipationSources(ctx, tx, source.sql, login)
 		if err != nil {
 			return report, err
@@ -165,19 +202,6 @@ func readParticipationShadow(ctx context.Context, tx pgx.Tx, login string) (part
 		if source.cause == "authored" {
 			report.AuthoredDirect = direct
 		}
-	}
-	mentions, err := mentiongraph.Recorded(ctx, tx, time.Time{})
-	if err != nil {
-		return report, err
-	}
-	var mentioned []threadSource
-	for _, edge := range mentions {
-		if edge.ToKind == "person" && edge.ToID == login && (edge.FromKind == "comment" || edge.FromKind == "message" || edge.FromKind == "ask") {
-			mentioned = append(mentioned, threadSource{edge.FromKind, edge.FromID})
-		}
-	}
-	if _, err := rootParticipationSources(ctx, tx, "mentioned", mentioned, expected); err != nil {
-		return report, err
 	}
 	actual := map[threadMembership]bool{}
 	rows, err := tx.Query(ctx, `select distinct cause,thread_kind,thread_id::text from graph_thread_participation where person=$1`, login)

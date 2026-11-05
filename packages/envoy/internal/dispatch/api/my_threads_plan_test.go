@@ -3,20 +3,23 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
 func TestMyThreadsPlansKeepExistingReadAndUserThreadsIndex(t *testing.T) {
-	_, database, _ := newTestServer(t, testServerOptions{})
+	handler, database, _ := newTestServer(t, testServerOptions{})
 	ctx := context.Background()
 	_, err := database.Pool.Exec(ctx, `
  insert into projects(key,name) values('TVOL','Thread volume');
  insert into issues(key,project_key,number,title,created_by,rank) values('TVOL-1','TVOL',1,'Volume','{"kind":"user","id":"sender"}','U');
  insert into comments(id,issue_key,author,body,created_at)
- select md5(n::text)::uuid,'TVOL-1',jsonb_build_object('kind','user','id',case when n%1000=0 then 'alice' else 'user-'||(n%1000)::text end),'Thread '||n::text,now()-interval '1 hour'
+ select md5(n::text)::uuid,'TVOL-1',jsonb_build_object('kind','user','id',case when n%1000=0 then 'alice' when n%10=0 then 'busy' else 'user-'||(n%1000)::text end),'Thread '||n::text,now()-interval '1 hour'
  from generate_series(1,20000) n;
  insert into comments(id,issue_key,author,body,reply_to)
  select md5(('reply-'||n::text))::uuid,'TVOL-1','{"kind":"session","id":"bot","owner":"alice"}','A newer reply',md5(n::text)::uuid
@@ -49,16 +52,11 @@ func TestMyThreadsPlansKeepExistingReadAndUserThreadsIndex(t *testing.T) {
 				Plan      map[string]any
 				Execution float64         `json:"Execution Time"`
 				Planning  float64         `json:"Planning Time"`
-				JIT       json.RawMessage `json:"JIT"`
 			}
 			if err := json.Unmarshal(raw, &plans); err != nil {
 				t.Fatal(err)
 			}
 			t.Logf("40000 comments, 20000 indexed threads, 100000 events: planning %.3fms execution %.3fms", plans[0].Planning, plans[0].Execution)
-			t.Logf("JIT: %s", plans[0].JIT)
-			if query.name == "my-threads" && len(plans[0].JIT) > 0 && string(plans[0].JIT) != "null" {
-				t.Fatal("the indexed named read must not expand into a JIT-compiled sibling union")
-			}
 			hasIndex := false
 			var walk func(map[string]any)
 			walk = func(p map[string]any) {
@@ -66,7 +64,7 @@ func TestMyThreadsPlansKeepExistingReadAndUserThreadsIndex(t *testing.T) {
 				relation, _ := p["Relation Name"].(string)
 				index, _ := p["Index Name"].(string)
 				if relation != "" {
-					t.Logf("%s %s %s", node, relation, index)
+					t.Logf("%s relation=%s index=%s", node, relation, index)
 				}
 				if strings.HasPrefix(index, "user_threads") {
 					hasIndex = true
@@ -97,6 +95,37 @@ func TestMyThreadsPlansKeepExistingReadAndUserThreadsIndex(t *testing.T) {
 		t.Fatalf("volume participation total=%d rows=%s", total, rows)
 	}
 	t.Logf("volume My threads: total=%d", total)
+	// This is the release gate, independent of EXPLAIN's plan shape or JIT choice.
+	// Time the authenticated route including query planning, execution and decoding;
+	// cover both a typical caller and one participating in 1,980 candidate threads.
+	const latencyBudget = 500 * time.Millisecond
+	for _, person := range []struct {
+		login string
+		total int
+	}{{"alice", 60}, {"busy", 1980}} {
+		t.Run("http-p99-"+person.login, func(t *testing.T) {
+			times := make([]time.Duration, 0, 100)
+			for range 100 {
+				start := time.Now()
+				response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/threads?limit=50", nil, person.login)
+				if response.Code != http.StatusOK {
+					t.Fatalf("%s latency read: %d %s", person.login, response.Code, response.Body.String())
+				}
+				page := decodeBody[myThreadsPage](t, response)
+				elapsed := time.Since(start)
+				if page.Total != person.total || len(page.Rows) != 50 {
+					t.Fatalf("%s volume membership: total=%d rows=%d", person.login, page.Total, len(page.Rows))
+				}
+				times = append(times, elapsed)
+			}
+			slices.Sort(times)
+			p99 := times[98]
+			t.Logf("HTTP %s: 100 samples, %d candidate threads, p99=%s, budget=%s", person.login, person.total, p99, latencyBudget)
+			if p99 > latencyBudget {
+				t.Errorf("My threads %s p99 %s exceeds release budget %s", person.login, p99, latencyBudget)
+			}
+		})
+	}
 	tx, err := database.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		t.Fatal(err)

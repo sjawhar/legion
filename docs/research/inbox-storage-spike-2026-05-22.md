@@ -46,7 +46,7 @@ For each shape:
   the parent issue without markers; the parser is re-run.
 
 Spike artifacts at `/tmp/inbox-spike/`. Test issues #614, #615, #628 in
-sjawhar/legion (closed after the spike — labeled `inbox-spike`).
+cybermonklabs/legion (closed after the spike — labeled `inbox-spike`).
 
 ## Headline numbers
 
@@ -101,7 +101,7 @@ their comments — fits under the cap with room to spare).
 
 ### 2. Linear-bot auto-closes parents when sub-issues close (REPO-SPECIFIC)
 
-In `sjawhar/legion`, posting a closed sub-issue caused **Linear-bot** (the
+In `cybermonklabs/legion`, posting a closed sub-issue caused **Linear-bot** (the
 Linear-GitHub bidirectional sync app installed on the repo) to also close
 the parent issue 2-3 seconds later. Confirmed via `closed_by` field:
 

@@ -41,7 +41,7 @@ type unifiedInboxPage struct {
 // requireOwnInbox rejects identity selectors rather than treating a spelling of
 // another login as an ignored filter. There is no caller-supplied person id.
 func (s *server) requireOwnInbox(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return actor, false
 	}

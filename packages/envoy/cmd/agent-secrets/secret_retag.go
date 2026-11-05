@@ -60,7 +60,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	flags, profile := secretFlags(form, stderr)
 	newOwner := flags.String("owner", "", "the new owner: me (your email, from your AWS or Google sign-in) or shared")
 	newTier := flags.String("tier", "", "the new tier: agent or human")
-	newKind := flags.String("kind", "", "github-app, google-login or none")
+	newKind := flags.String("kind", "", strings.Join(policy.Kinds, ", ")+" or none")
 	newGitHubOwners := flags.String("github-owners", "", `the GitHub accounts a github-app secret mints for, separated by spaces ("<login> <login>"), or none`)
 	newMaxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows, or none")
 	newDefaultGrant := flags.String("default-grant", "", "session (no --ttl lasts until the session ends) or none (12 hours)")

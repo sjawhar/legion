@@ -42,7 +42,7 @@ The mention view also reads explicit comment mentions, message targets and recor
 An old build re-indexing identity-address text drops these unknown records; unchanged bodies are not automatically revisited by the owed sweep.
 After returning to the new build, run `envoy-dispatch rebuild-refs`, let the existing block-index reconciliation drain, then run the mention census.
 
-`graph_thread_participation` projects existing `user_threads` authorship alongside recorded mentions, deliveries and direct authorship; `graph_thread_edges` exposes the resulting `person -> participates_in -> thread root` relation.
-`dispatch_thread_ancestors` is the shared bounded, cycle- and owner-guarded root walk, including comment replies whose root is an ask.
-`GET /api/v1/me/threads/shadow` compares authored/answered membership against the source graph and server-owned answers, mentions against recorded resolution and addresses against recorded delivery; each cause reports missing/unexpected counts separately from membership beyond `user_threads`.
+`graph_thread_participation` projects existing `user_threads` authorship alongside historical answer events, question and current ask-part mentions, recorded deliveries and direct authorship; `graph_thread_edges` exposes the resulting `person -> participates_in -> thread root` relation.
+`dispatch_thread_ancestors` is the cycle- and owner-guarded root walk, including comment replies whose root is an ask: comments retain their 32-node limit and messages reach their root without a depth limit.
+`GET /api/v1/me/threads/shadow` compares authored/answered membership against the source graph and server-owned answers, mentions against caller-filtered raw resolution records and addresses against recorded delivery, within a five-second read-only snapshot; each cause reports missing/unexpected counts separately from membership beyond `user_threads`.
 Read marks do not affect membership or activity ordering, and no new path writes `user_threads`.

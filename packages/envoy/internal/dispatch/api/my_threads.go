@@ -17,10 +17,14 @@ const myThreadsQuery = `
    select thread_kind, thread_id, array_agg(distinct cause order by cause) as causes
    from graph_thread_participation where person = $1
    group by thread_kind, thread_id
+ ), activity as materialized (
+   select activity.* from (
+     select array_agg(thread_kind) as kinds, array_agg(thread_id) as ids from membership
+   ) roots cross join lateral dispatch_thread_activity(roots.kinds, roots.ids) activity
  ), items as materialized (
    select p.thread_kind as kind, p.thread_id::text as thread_id, p.causes,
           coalesce(a.question, c.body, m.body, '') as subject,
-          dispatch_thread_activity(p.thread_kind, p.thread_id) as activity_at,
+          activity.activity_at,
           coalesce(a.issue_key, c.issue_key, m.issue_key) as issue_key,
           ar.project_key as project, ar.slug as document,
           case
@@ -32,6 +36,7 @@ const myThreadsQuery = `
           end as href,
           coalesce(u.unread, false) as unread
    from membership p
+   join activity on activity.thread_kind = p.thread_kind and activity.thread_id = p.thread_id
    left join asks a on p.thread_kind = 'ask' and a.id = p.thread_id
    left join comments c on p.thread_kind = 'comment' and c.id = p.thread_id
    left join messages m on p.thread_kind = 'message' and m.id = p.thread_id
@@ -93,8 +98,12 @@ func (s *server) listMyThreads(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, response)
 }
 
+// requireOwnThreads rejects identity selectors rather than treating a spelling of another
+// login as an ignored filter. There is no caller-supplied person id: actingPerson resolves
+// the person from the credential and refuses one that does not hold model.ScopePerson, the
+// scope both routes declare in routeScopes.
 func (s *server) requireOwnThreads(w http.ResponseWriter, r *http.Request, page bool) (model.Actor, bool) {
-	caller, ok := s.requireHuman(w, r)
+	caller, ok := s.actingPerson(w, r)
 	if !ok {
 		return caller, false
 	}

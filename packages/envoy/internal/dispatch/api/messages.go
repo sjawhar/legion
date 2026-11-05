@@ -74,7 +74,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 // A send under an Idempotency-Key commits its message as the key's recovery point, and a repeat is
 // answered from it (replayAgentMessage).
 func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -578,12 +578,12 @@ func loadMessageReplyThread(ctx context.Context, tx pgx.Tx, message model.Messag
 	return parent.thread(ctx, tx)
 }
 
-// messageThreadCTE names the message and its ancestors through the shared bounded,
-// cycle-guarded thread walk. A malformed chain has no terminal row.
+// messageThreadCTE names the message and every ancestor through the shared cycle-
+// and owner-guarded walk, with no depth limit. A malformed chain has no terminal row.
 const messageThreadCTE = `
 		with thread as (
 			select m.id, m.target, m.in_reply_to
-			from dispatch_thread_ancestors('message', $1) a join messages m on m.id = a.id
+			from dispatch_thread_ancestors(array['message'], array[$1::uuid]) a join messages m on m.id = a.id
 		)`
 
 // threadRootDelivery walks a reply's ancestry to the thread root and returns that root's
@@ -673,11 +673,12 @@ func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 }
 
 // readableMessageThread is the conversation message {id} belongs to, when the caller may read it
-// under getMessageThread's rule: a human reads any, a bearer an issue thread and only a direct
-// conversation its ?session= is in. Every route that reads a message by its id alone (the
-// conversation, the message's blocks) asks it. ok is false once it has written the refusal.
+// under getMessageThread's rule: a person's own credential reads any, and every other reads an
+// issue thread and only a direct conversation its ?session= is in. Every route that reads a
+// message by its id alone (the conversation, the message's blocks) asks it. ok is false once it
+// has written the refusal.
 func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (messageRead, bool) {
-	_, human, err := s.optionalActor(r)
+	_, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return messageRead{}, false
@@ -697,7 +698,10 @@ func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (
 		s.writeHandlerError(w, err)
 		return messageRead{}, false
 	}
-	if !human && read.Message.IssueKey == nil {
+	// A direct conversation is the person's own, so a credential of theirs reads it whole and
+	// names no session in it, as their browser does. The scope is the request's credential's;
+	// this read records no actor, so there is nothing else to resolve.
+	if !s.callerHoldsScope(r, model.ScopePerson) && read.Message.IssueKey == nil {
 		session := strings.TrimSpace(r.URL.Query().Get("session"))
 		if session == "" {
 			writeError(w, "SESSION_REQUIRED", http.StatusBadRequest,
@@ -768,6 +772,18 @@ func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Messag
 	return reads, nil
 }
 
+// listIssueRootMessagesQuery is every root message of one issue, oldest first. It is named
+// rather than written into its handler so that the plan test and the equality test read the
+// statement the route runs, not a copy of it: messages_issue_roots (20261101182433) is keyed on
+// exactly this predicate and this order, and a test that held a copy would keep passing after
+// an edit that took the statement off the index.
+var listIssueRootMessagesQuery = `
+		select ` + messageColumns + `
+		from messages
+		where issue_key = $1 and in_reply_to is null
+		order by created_at, id
+	`
+
 // listIssueMessages is every root message of one issue, oldest first, each with its deliveries
 // and every message replying to it: one row per thread, the list a dashboard shows one card
 // from. It is unpaged, as an issue's comments are - the threads on an issue are the whole
@@ -777,12 +793,7 @@ func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select `+messageColumns+`
-		from messages
-		where issue_key = $1 and in_reply_to is null
-		order by created_at, id
-	`, r.PathValue("key"))
+	rows, err := s.deps.Store.Pool.Query(r.Context(), listIssueRootMessagesQuery, r.PathValue("key"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -811,7 +822,7 @@ func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 func TestMyThreadsIsOwnAllActivityReadAndKeepsReadThreads(t *testing.T) {
@@ -62,6 +64,27 @@ func TestMyThreadsIsOwnAllActivityReadAndKeepsReadThreads(t *testing.T) {
 			t.Fatalf("invalid/identity selector %s: %d %s", target, got.Code, got.Body.String())
 		}
 	}
+	personToken := personalTokenHolding(t, database, model.ScopePerson)
+	for _, target := range []string{"/api/v1/me/threads", "/api/v1/me/threads/shadow"} {
+		own := agentRequest(t, handler, http.MethodGet, target, nil, personToken)
+		if own.Code != http.StatusOK {
+			t.Fatalf("person-scoped bearer %s: %d %s", target, own.Code, own.Body.String())
+		}
+		identity := decodeBody[struct {
+			Person string `json:"person"`
+		}](t, own)
+		if identity.Person != "alice" {
+			t.Fatalf("person-scoped bearer resolved %q, want its owner alice", identity.Person)
+		}
+	}
+	mark := "/api/v1/me/threads/10000000-0000-0000-0000-000000000001/read"
+	body := map[string]string{"read_through": time.Now().UTC().Format(time.RFC3339Nano)}
+	if refused := sessionRequest(t, handler, http.MethodPut, mark, body); refused.Code != http.StatusForbidden {
+		t.Fatalf("read mark without person scope: %d %s", refused.Code, refused.Body.String())
+	}
+	if own := agentRequest(t, handler, http.MethodPut, mark, body, personToken); own.Code != http.StatusNoContent {
+		t.Fatalf("person-scoped read mark: %d %s", own.Code, own.Body.String())
+	}
 	for _, target := range []string{"/api/v1/me/threads", "/api/v1/me/threads/shadow"} {
 		if got := sessionRequest(t, handler, http.MethodGet, target, nil); got.Code != http.StatusForbidden {
 			t.Fatalf("bearer %s: %d %s", target, got.Code, got.Body.String())
@@ -88,7 +111,7 @@ func TestThreadAncestryHasOneBoundedCycleAndOwnerGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	var root string
-	if err := database.Pool.QueryRow(ctx, `select id::text from dispatch_thread_ancestors('comment','20000000-0000-0000-0000-000000000002') where parent_id is null`).Scan(&root); err != nil {
+	if err := database.Pool.QueryRow(ctx, `select id::text from dispatch_thread_ancestors(array['comment'],array['20000000-0000-0000-0000-000000000002'::uuid]) where parent_id is null`).Scan(&root); err != nil {
 		t.Fatal(err)
 	}
 	if root != "20000000-0000-0000-0000-000000000001" {
@@ -98,7 +121,7 @@ func TestThreadAncestryHasOneBoundedCycleAndOwnerGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err := database.Pool.QueryRow(ctx, `select count(*) from dispatch_thread_ancestors('comment','20000000-0000-0000-0000-000000000002')`).Scan(&count); err != nil {
+	if err := database.Pool.QueryRow(ctx, `select count(*) from dispatch_thread_ancestors(array['comment'],array['20000000-0000-0000-0000-000000000002'::uuid])`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 2 {

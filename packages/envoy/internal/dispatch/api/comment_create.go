@@ -318,7 +318,7 @@ func (s *server) threadHeadOf(
 	}
 	var kind, id string
 	err := tx.QueryRow(ctx, `
-		select kind, id::text from dispatch_thread_ancestors('comment', $1)
+		select kind, id::text from dispatch_thread_ancestors(array['comment'], array[$1::uuid])
 		where parent_id is null and issue_key is not distinct from $2
 		  and artifact_id is not distinct from $3
 	`, from.ID, owner.IssueKey, owner.ArtifactID).Scan(&kind, &id)

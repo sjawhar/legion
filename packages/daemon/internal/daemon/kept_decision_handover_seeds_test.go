@@ -15,8 +15,11 @@ import (
 // run under load can take another schedule (the daemon's machinery runs on real time), and under
 // -race on one CPU seeds 13 and 24 each took one that never reached it about once in thirty runs.
 // So the run takes that step the first time it is enabled while the held task names kept decisions
-// (seekHeldHandOver); every other step is the seed's own. Seeds 96, 414 and 432, which found the
-// fault this test was written for, never reach it at this code; they run in keptLongRegressionSeeds.
+// (seekHeldHandOver), and until then no other step hands a member over, orphans the child or closes
+// the tree: on a schedule that handed both members over before the root held such a task, seed 24
+// never had the step enabled at all (run 41808140568). Every other step is the seed's own. Seeds
+// 96, 414 and 432, which found the fault this test was written for, never reach it at this code;
+// they run in keptLongRegressionSeeds.
 func TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild(t *testing.T) {
 	t.Parallel()
 	// Each seed's run has a database, runtime and state directory of its own (newKeptRun), so the

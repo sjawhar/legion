@@ -228,6 +228,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_block_state",
 		"comment_block_refs",
 		"message_block_refs",
+		"document_search",
+		"search_term_queue",
 		"handoffs",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
@@ -246,7 +248,6 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"events_outbox_fresh",
 		"events_outbox_retry",
 		"events_outbox_owner",
-		"asks_open_artifact",
 		"issues_search",
 		"comments_search",
 		"asks_search",
@@ -258,6 +259,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"asks_anchor_artifact_id",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
+		"ask_followers_session_id",
 		"events_ask_answered_by_user",
 		"comments_ask_replies_by_user",
 		"document_blocks_node_id",
@@ -293,17 +295,29 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comment_mentions_comment_id_text",
 		"comment_deliveries_comment_id_text",
 		"message_deliveries_message_id_text",
+		"events_participation_answer_person",
+		"asks_issue_key",
+		"messages_issue_roots",
+		"document_search_vector",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
 		from pg_indexes
 		where schemaname = current_schema()
 	`, expectedIndexes)
+	// Migration 20261101182440 drops asks_open_artifact, the partial index 0009 built for the one
+	// read that lists a document's open asks: that read uses asks_artifact_id, which
+	// api.TestTheAuditedReadsSearchTheirIndex holds it to.
+	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
+		select indexname
+		from pg_indexes
+		where schemaname = current_schema()
+	`, []string{"asks_open_artifact"})
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select viewname
 		from pg_views
 		where schemaname = current_schema()
-	`, []string{"graph_edges", "graph_inbox_edges", "graph_mention_edges", "graph_mention_resolutions", "graph_person_edges", "person_aliases"})
+	`, []string{"graph_edges", "graph_inbox_edges", "graph_mention_edges", "graph_mention_resolutions", "graph_person_edges", "graph_thread_participation", "graph_thread_edges", "person_aliases"})
 
 	// Every search column is filled by its table's BEFORE trigger (0057-0061), never by application code.
 	assertDatabaseObjects(t, ctx, store.Pool, `
