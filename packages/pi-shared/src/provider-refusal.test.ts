@@ -257,3 +257,25 @@ describe("an error text on its own", () => {
     expect(classifyProviderError("")).toEqual({ kind: "provider-error" });
   });
 });
+
+describe("an error text a provider chose the length of", () => {
+  /** The text a provider error carries is the provider's own, and nothing bounds its length: the
+   * host hands `message.errorMessage` through as it arrived, and the fallback reason is that text
+   * behind `Request failed: `. A gateway that answers an error with its own page makes it long,
+   * so every pattern this module runs must stay linear in that length. CodeQL reports the two
+   * Google patterns as polynomial on this pull request's head (`js/polynomial-redos`, two high
+   * alerts at provider-refusal.ts:173). */
+
+  test("classifies a long text that almost matches a Google filter in linear time", () => {
+    for (const prefix of [
+      "Request blocked by Google (",
+      "Generation was blocked by content filters (",
+    ]) {
+      const text = prefix.repeat(16_000);
+      const started = performance.now();
+      expect(classifyProviderError(text)).toEqual({ kind: "provider-error" });
+      const spent = performance.now() - started;
+      expect({ prefix, spent: spent < 1_000 }).toEqual({ prefix, spent: true });
+    }
+  }, 60_000);
+});
