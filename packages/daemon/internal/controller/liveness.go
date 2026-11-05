@@ -10,29 +10,34 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/sessiontiming"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
-// Heartbeat is the pi-envoy plugin's registration heartbeat (`DEFAULT_HEARTBEAT_MS`,
-// packages/envoy-client/src/envoy-settings.ts): what refreshes a session's `last_seen` in the Envoy
-// listener's role lookup.
-const Heartbeat = 90 * time.Second
+// Heartbeat is the pi-envoy plugin's registration heartbeat (sessiontiming.Heartbeat, generated
+// from `SESSION_HEARTBEAT_MS` in packages/contracts): what refreshes a session's `last_seen` in
+// the Envoy listener's role lookup.
+const Heartbeat = sessiontiming.Heartbeat
+
+// StalenessWindowHeartbeats is how many heartbeats wide LivenessWindow is, where the boot timeout
+// does not widen it. Four rather than three: three heartbeats is 270 s, short of the 300 s a live
+// holder's `last_seen` can reach, since that is the listener's own session record lifetime
+// (sessiontiming.RecordLifetime, which OpenSessionRegistry's default ttl reads too,
+// packages/envoy/internal/session/registry.go). Four is 360 s, still wider than the 240 s this
+// replaced, so a pane that has not restarted and still refreshes every 120 s stays live and no
+// release ordering is forced. It is exported so a test reads it rather than a copy of it.
+const StalenessWindowHeartbeats = 4
 
 // probeTimeout bounds one role lookup, so a hung listener answers Unknown rather than holding the
 // caller.
 const probeTimeout = 10 * time.Second
 
 // LivenessWindow is how stale the controller holder's `last_seen` may be before the controller
-// counts as gone: four heartbeats at least, since one would flap on every tick, and never less
-// than the boot timeout — 360 s at the defaults.
-//
-// Four rather than three: three heartbeats is 270 s, short of the 300 s a live holder's
-// `last_seen` can reach, since that is the listener's own session record lifetime
-// (OpenSessionRegistry's default ttl, packages/envoy/internal/session/registry.go). Four is 360 s,
-// still wider than the 240 s this replaced, so a pane that has not restarted and still refreshes
-// every 120 s stays live and no release ordering is forced.
+// counts as gone: StalenessWindowHeartbeats heartbeats at least, since one would flap on every
+// tick, and never less than the boot timeout, which is deployment configuration this cannot see.
 func LivenessWindow(bootTimeout time.Duration) time.Duration {
-	return max(bootTimeout, 4*Heartbeat)
+	return max(bootTimeout, StalenessWindowHeartbeats*Heartbeat)
 }
 
 // Liveness is what the Envoy listener says of the registered controller session.
