@@ -390,6 +390,34 @@ its next start walks the parked roots. That walk reads only the last 10 events o
 
 ## An issue is held
 
+**A provider's failure almost never holds the issue.** A turn that ends in an error the model's
+provider returned keeps its task: the daemon sends the same task to the same session again after 30
+seconds, then 60, then 120, doubling to at most 10 minutes between sends, with no attempt limit and
+no new session. Each such turn logs the warning `supervise: the turn this task's prompt ran ended
+in a provider error; the task is kept and sent again`, which names the model, the HTTP status and
+whether the provider marked the error retryable, and the send that follows it logs `supervise: this
+provider error can clear; the task goes to the same session again after a wait`, with the attempt
+and the wait. The re-sent prompt tells the agent the turn stopped, names the error's category or its
+HTTP status, and carries none of the provider's own words. A content filter is sent again because
+the session has already stepped down to the next model of its fallback chain, so the next prompt
+goes to another model
+([Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged));
+a 429, a 5xx, and an error that neither the error's own fields nor the agent's report settles
+within two minutes are sent again too.
+
+**One provider error does hold the issue**, for its architect: one the provider marked not
+retryable *and* that the agent's own report of the turn called a `provider-error`. A malformed
+request is the case it exists for. The claim fails with `why` reading `a provider error that cannot
+clear ended this claim's turn: <cause>`, where the cause is the refusal's category or the HTTP
+status, and the hold is the architect's to retry or escalate as any held phase is.
+
+**After six turns of one claim in a row have ended in a provider error**, the project's controller
+is told once, as `provider-errors on <KEY>`, with the run, the model and the cause
+(`supervise: a run of turns that ended in a provider error; the controller is told`). Nothing is
+held and nothing is stopped by that count: the task is still kept and still sent again. The run
+goes back to zero at the first turn of that claim that ends with no provider error, and only then
+can another notice go.
+
 When an agent's budget runs out (launches that failed, deaths with work outstanding, prompts it
 never took a turn on) the daemon stops relaunching it and holds the issue. The daemon logs JSON
 lines; the one to look for is the error whose `msg` is `supervise: claim failed`, and its `why`
@@ -436,16 +464,25 @@ its tree stands:
 
 `legion claims retry --claim <token>` relaunches a failed architect on its session with fresh
 budgets, and retries a failed phase worker whose issue is held for that worker's own role by
-applying the held phase's retry, as its architect's `retry_or_escalate` would. It refuses a claim
-in any other state, naming the state, a failed phase worker whose issue is not held or is held for
-another role, and a failed controller, naming who retries it; a retry that leaves the issue held,
-as a lingering tree's does, is refused naming the issue. `legion claims retry --failed` asks the
-same of every failed claim the daemon holds, in turn, prints each one it retried, and exits 1
-naming each it refused: run it once the cause of a run of failed launches is gone (a host moved
-onto tmux, a broken key replaced).
+applying the held phase's retry, as its architect's `retry_or_escalate` would. It reaches a claim an
+operator stopped as well as a failed one, since `legion claims stop` retires the claim it stops: a
+stopped phase worker is started again on the task of the phase its issue stands in now. Every other
+state is refused and named: a queued claim is spawned rather than retried, a suspended claim is
+resumed, and the daemon's own controller is its keeper's to retry, which the refusal says. A retry
+that leaves the issue held, as a lingering tree's does, is refused naming the issue.
+`legion claims retry --failed` asks the same of every failed claim the daemon holds, in turn,
+prints each one it retried, and exits 1 naming each it refused: run it once the cause of a run of
+failed launches is gone (a host moved onto tmux, a broken key replaced). It passes over a stopped
+claim, which is retired rather than failed, so name that one with `--claim`.
 
-When a failed architect's session was lost with its volume or wedged by a provider refusal, clear
-the stopped claim's matching record before retrying:
+`legion claims retry --claim <token> --fresh-session` is the whole recovery for a claim whose
+session a provider keeps refusing: it forgets the session that claim recorded and starts the claim
+in a new session with its phase's task, so no `legion claims forget-session` comes before it. What a
+refusal does on its own, before any of this, is in the paragraphs above and in
+[Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged).
+
+When a failed architect's session was lost with its volume, clear the stopped claim's matching
+record before retrying:
 
 ```sh
 legion claims forget-session --config legion.yaml --operator-token-file operator-token --claim <token> --session <recorded session id>
@@ -665,13 +702,11 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   architect decides in the same turn whether to narrow the next rounds, split work off (a sibling child, or, on a root, an ask whether the rest needs an issue), or
   let rounds that are converging run, and posts that decision on the issue; it asks you only for a
   decision that needs your authority.
-- **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
-  stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
-  counted head and every head pushed on top of it until a push lands on a head CI judged green, or
-  on a settled head whose base branch requires no check and no workflow; such a push raises no
-  count) no longer sends the work back by itself, so the issue waits in testing, review, acceptance,
-  retro or merging for the architect, or for a worker's own decision such as a reviewer's request
-  for changes. A `READY` is still withdrawn on red CI.
+- **No message for red CI.** A pull request is never blocked for a count of failed fixes: a check
+  or workflow the base branch requires that stands red sends the work back to the implementer every
+  time, however many reds came before, and reaches the architect as a `checks-red` notice rather
+  than as a message on the issue. The architect decides when to stop, and `review_round_cap` is the
+  one reason a `pr-blocked` notice has left. A `READY` is still withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a

@@ -434,7 +434,7 @@ What each part is for:
   decimals allowed), `pod_update_retask_hours` (1: how long an update round waits before it asks
   a worker that has not answered again, decimals allowed), `pod_update_notice_hours` (4: how long
   an update round runs before the controller is told it is not finishing, decimals allowed),
-  `review_round_cap` (3), `max_fix_attempts` (3), `controller_wake_interval_seconds` (3600), and
+  `review_round_cap` (3), `controller_wake_interval_seconds` (3600), and
   the supervision budgets `launch_failure_limit` (3), `prompt_failure_limit` (3) and
   `prompt_retire_limit` (2).
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
@@ -849,8 +849,8 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
-  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
-  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
+  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`),
+  `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
   `waitingOn` (`kind` `ask` with its `ask`, or `gate` with `gateVersion` and `artifactId`; `since`; and
   `answeredAt` with `answeredBy` once it was answered) and, for a closed
   issue whose
@@ -866,7 +866,7 @@ Closing the terminal leaves the project without one, and the daemon logs
   stream time of the oldest waiting message and its age in whole seconds, both null when nothing
   waits or that message could not be read; `lastHandledAt`, null before the first; `stalled`; and
   `unavailable`, present only when a NATS read failed),
-  `settings` (the daemon's resolved `legion.yaml` — `max_fix_attempts`, `worker_boot_timeout_seconds`
+  `settings` (the daemon's resolved `legion.yaml` — `review_round_cap`, `worker_boot_timeout_seconds`
   and the rest as the daemon runs them — with every credential, credential source and credential
   file path left out, and a URL's userinfo masked as `xxxxx@`), and `agentSecretsLogin` when the
   broker is configured:

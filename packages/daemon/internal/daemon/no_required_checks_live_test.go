@@ -11,12 +11,11 @@
 // real store and its migrations, the real HTTP API, the real openWorkflow and its required-checks
 // pass (watchRequiredChecks), the real JetStream consumers and the real outbox lanes. Facts enter
 // only as production's do: GitHub envelopes on the ENVOY_NOTIFICATIONS stream for the settlements,
-// the push and the synchronize, and the daemon's own reads of GitHub's REST API for what each base
-// branch requires. Every assertion is a read of GET /legion/v1/state - raw, where the step holds
-// that a key is absent - or of the notices the daemon published to the Envoy listener stand-in.
-// The store is read only to know that the daemon took what a step drove, which no route shows: the
-// settlement it recorded (checked_head), the required set its pass read (required), and the
-// processed_events rows of the push and the synchronize.
+// and the daemon's own reads of GitHub's REST API for what each base branch requires. Every
+// assertion is a read of GET /legion/v1/state - raw, where the step holds that a key is absent - or
+// of the notices the daemon published to the Envoy listener stand-in. The store is read only to
+// know that the daemon took what a step drove, which no route shows: the settlement it recorded
+// (checked_head) and the required set its pass read (required).
 //
 // What the proof stands in for lies outside the rule. The broker is a native nats-server the script
 // starts and names in LEGION_E2E_NATS_URL. GitHub is noRequiredChecksGitHub, a REST stand-in that
@@ -24,13 +23,13 @@
 // read, so a switch would never reach the daemon - and whose base branches the driver switches
 // between requiring nothing and requiring the check `ci`. Dispatch is the board the package's
 // whole-daemon live proofs share (liveDispatch, in live_proof_test.go, the harness this driver
-// shares with merged_root_waits_live_test.go), which takes the status writes and messages a
-// send-back and a blocked count post. Envoy's listener is the package's noticeListener, and the two
-// Apps' tokens are workflowTokenRecorder's placeholders. No agent runs: an implementer a send-back
-// starts is launched by the package's fake runtime, which says it provisions each workspace in the
-// claim's own pod, as the Agent Sandbox runtime does, so the daemon clones nothing from GitHub, and
-// the launch never registers. The three issues and their pull requests are seeded through the
-// store, as every daemon test seeds its fixture.
+// shares with merged_root_waits_live_test.go), which takes the status writes and the messages a
+// send-back makes. Envoy's listener is the package's noticeListener, and the two Apps' tokens are
+// workflowTokenRecorder's placeholders. No agent runs: an implementer a send-back starts is
+// launched by the package's fake runtime, which says it provisions each workspace in the claim's
+// own pod, as the Agent Sandbox runtime does, so the daemon clones nothing from GitHub, and the
+// launch never registers. The two issues and their pull requests are seeded through the store, as
+// every daemon test seeds its fixture.
 package daemon
 
 import (
@@ -67,7 +66,7 @@ const noRequiredChecksCheck = "ci"
 const noRequiredChecksRead = requiredChecksInterval + time.Minute
 
 // noRequiredChecksLive is one run of the proof: the booted daemon, the stand-ins it reads and
-// writes, and the three issues the steps drive.
+// writes, and the two issues the steps drive.
 type noRequiredChecksLive struct {
 	liveProof
 	github *noRequiredChecksGitHub
@@ -136,7 +135,7 @@ func newNoRequiredChecksLive(t *testing.T) *noRequiredChecksLive {
 	return r
 }
 
-// showOnBoard puts the three issues on the Dispatch stand-in at the statuses they are seeded with.
+// showOnBoard puts the two issues on the Dispatch stand-in at the statuses they are seeded with.
 func (r *noRequiredChecksLive) showOnBoard() {
 	r.board.show(r.nothing.key, "testing")
 	r.board.show(r.green.key, "needs_review")
@@ -145,8 +144,7 @@ func (r *noRequiredChecksLive) showOnBoard() {
 // seed records the two issues as the daemon would hold them: each a root handed to Legion,
 // holding its tree's admission slot, its lifecycle open under the workflow, on an open pull request
 // at its first head. The first's pull request has no required set yet, which the boot's pass reads
-// as the empty set its base requires; the other two record the [ci] their bases require, and the
-// third its one fix attempt, counted at that head and not yet reported.
+// as the empty set its base requires; the other records the [ci] its base requires.
 func (r *noRequiredChecksLive) seed() {
 	t := r.t
 	t.Helper()
@@ -179,7 +177,7 @@ func (r *noRequiredChecksLive) seed() {
 		}
 		return r.admit(ctx, tx, r.nothing.key, r.green.key)
 	}); err != nil {
-		t.Fatalf("seed the three issues: %v", err)
+		t.Fatalf("seed the two issues: %v", err)
 	}
 	for _, seeded := range issues {
 		if _, err := r.st.OpenTreeLifecycle(ctx, r.project, seeded.issue.key, treelifecycle.AuthorityWorkflow); err != nil {
@@ -384,38 +382,6 @@ func (r *noRequiredChecksLive) publishSettlement(issue noRequiredChecksIssue, he
 	r.publish(subject, "github", fmt.Sprintf("checks-%d-%s-%d", issue.number, head, r.seq), string(payload))
 }
 
-// publishPush publishes the implementer's push of to onto from on issue's branch, changing code, as
-// Envoy relays a GitHub push (intake's decodePush reads it), and returns its event id.
-func (r *noRequiredChecksLive) publishPush(issue noRequiredChecksIssue, from, to string) string {
-	r.t.Helper()
-	payload, err := json.Marshal(map[string]string{
-		"kind": "push", "repo": liveRepo, "ref": "refs/heads/" + issue.branch(), "before": from, "after": to,
-		"pusher": "legion-implement[bot]", "commit_count": "1", "head_subject": "fix the widget",
-	})
-	if err != nil {
-		r.t.Fatalf("encode the push payload: %v", err)
-	}
-	subject := fmt.Sprintf("notifications.github.%s.push.branch.%s", r.subjectRepo(), issue.branch())
-	return r.publish(subject, "github", fmt.Sprintf("push-%d-%s", issue.number, to), string(payload))
-}
-
-// publishSynchronize publishes GitHub's synchronize of issue's pull request to head, as Envoy relays
-// a GitHub pull-request event (intake's decodePullRequest reads it), and returns its event id.
-func (r *noRequiredChecksLive) publishSynchronize(issue noRequiredChecksIssue, head string) string {
-	r.t.Helper()
-	payload, err := json.Marshal(map[string]string{
-		"action": "synchronize", "kind": "pr", "repo": liveRepo, "number": strconv.Itoa(issue.number),
-		"head_sha": head, "base_ref": issue.base, "head_ref": issue.branch(), "title": "an issue on " + issue.base,
-		"url":        "https://github.com/" + liveRepo + "/pull/" + strconv.Itoa(issue.number),
-		"updated_at": time.Now().UTC().Format(time.RFC3339),
-	})
-	if err != nil {
-		r.t.Fatalf("encode the synchronize payload: %v", err)
-	}
-	subject := fmt.Sprintf("notifications.github.%s.pr.%d", r.subjectRepo(), issue.number)
-	return r.publish(subject, "github", fmt.Sprintf("pr-%d-synchronize-%s", issue.number, head), string(payload))
-}
-
 // noRequiredChecksGitHub is GitHub's REST API for acme/widgets as this proof's daemon reads it,
 // answering every read of the required-checks pass (readRequiredChecks) with a 2xx: each pull
 // request with its base, head and `mergeable: true` (readPullRequest), its reviews as none
@@ -456,15 +422,6 @@ func (g *noRequiredChecksGitHub) pull(issue noRequiredChecksIssue, head string, 
 	defer g.mu.Unlock()
 	g.pulls[issue.number] = noRequiredChecksPull{issue: issue, head: head}
 	g.requires[issue.base] = checks
-}
-
-// head moves issue's pull request to head, as a push does on GitHub.
-func (g *noRequiredChecksGitHub) head(issue noRequiredChecksIssue, head string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	pull := g.pulls[issue.number]
-	pull.head = head
-	g.pulls[issue.number] = pull
 }
 
 // require switches base's rulesets to require checks, and nothing when none is named.

@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+  The plugin reports how each settled turn of its claim's session ended to the daemon, from its
+  `agent_end` hook: `clean`, `refused` for a provider's content filter, with the refusal's own
+  category when the provider named one, or `provider-error` for every other failure of the provider.
+  It is what lets the daemon tell a refusal, which the same session often takes on the next model of
+  its chain, from an error that no other model would take, and the report carries none of the
+  provider's own words. The daemon keeps only the newest report of a claim's generation, so a turn
+  that ends in a provider error it can neither read as retryable nor as a 429 or a 5xx waits at most
+  two minutes for this report before it is taken as one that can clear.

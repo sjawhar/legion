@@ -1040,8 +1040,8 @@ func webhookPush(before, after, pusher string) intake.Push {
 // The review App pushes the tester's red tests twice, and both push webhooks are lost, with the
 // synchronize. The pass reads the branch's activity, follows it back from GitHub's head to the
 // recorded one, and applies each push, oldest first, as its webhook would have carried it, then
-// the synchronize. The move is the review App's, so the record counts no fix attempt and the red
-// the tests leave is planned, as the webhooks would have left them. The push webhooks arriving
+// the synchronize. The move is the review App's, so the red the tests leave is planned, as the
+// webhooks would have left it. The push webhooks arriving
 // afterwards decide nothing.
 func TestThePassRebuildsTheReviewAppsRedTestPushesLost(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
@@ -1074,8 +1074,8 @@ func TestThePassRebuildsTheReviewAppsRedTestPushesLost(t *testing.T) {
 
 // The implementer pushes its fix onto the review App's planned red, and the push webhook is lost
 // with the synchronize. The pass rebuilds the push from the branch's activity: the implementer's
-// code clears the planned mark without counting the planned red. The fix's own red then stands
-// unplanned, so the implementer's next push, lost too, is a counted fix attempt. The fix's push
+// code clears the planned mark. The fix's own red then stands
+// unplanned, so the implementer's next push, lost too, leaves an unplanned red. The fix's push
 // webhook arriving afterwards decides nothing.
 func TestThePassRebuildsTheImplementersFixPushLost(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)

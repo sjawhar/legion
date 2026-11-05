@@ -235,7 +235,7 @@ func appAttempt(attempt func(context.Context) error) func(context.Context) bootp
 // attempt run again after a failure GitHub reports as its own trouble (appauth.TransientError); any
 // other failure is refused at once. It returns the review App's login: the engine judges a push by
 // its pusher against it, so one App configured for both roles would make every implementer push the
-// review App's and count no fix attempt, and is refused, as is a review App that names no login.
+// review App's and every red it leaves a planned one, and is refused, as is a review App that names no login.
 func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
 	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, appAttempt(func(ctx context.Context) error {

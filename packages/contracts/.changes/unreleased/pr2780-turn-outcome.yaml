@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+  `LegionTurnOutcomeRequest` mirrors `POST /legion/v1/claims/turn-outcome`, the claim route daemon
+  API contract 47 adds in the shape of `claims/ready`: `claimToken`, `sessionId`, `secret`,
+  `generation`, a `sequence` counted from 1 within that generation, an `outcome` of `clean`,
+  `refused` or `provider-error`, and an optional `category`. The third value, `provider-error`, is
+  every provider failure that is no content filter — a rate limit, an overload, a malformed request
+  — which the same session may not take on another model, where `refused` is a content filter, which
+  it often does; `category` is a refusal's own category as the provider named it
+  (`reasoning_extraction`), and no field of the body carries the provider's words. The route answers
+  204. A plugin before 47 sends no such report and a daemon before 47 answers the post a 404, so the
+  boot gate and `legion probe-image` refuse either pair.

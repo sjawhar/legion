@@ -41,8 +41,8 @@ import (
 //
 // Before the synchronize it applies, oldest first, the pushes that took the branch to the new head,
 // as their push webhooks would have carried them (headPushes): those webhooks wait in the same
-// backlog, or were lost, and the workflow judges a move by the chain of its pushes - whether it is a
-// fix attempt, and whether the red it leaves is the review App's planned one
+// backlog, or were lost, and the workflow judges a move by the chain of its pushes - whether the
+// red it leaves is the review App's planned one
 // (classify.AdvancePullRequestHead). When a recorded push already ends at the new head it applies
 // none, and when no recorded push does they are the pushes GitHub's activity of the branch shows
 // (lostPushes); a push that activity cannot account for is left to its webhook, as when a

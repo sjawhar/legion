@@ -1042,7 +1042,30 @@ Those rights are the ones `postgres` needs too: Oh My Pi creates and migrates `o
 
 ### Starting fresh when a session is lost or wedged
 
-Use this recovery when a stopped claim's session was lost with its volume, after importing its file session before its volume can be reaped, or when its agent is wedged after a provider refusal.
+A provider's content filter asks nothing of the operator.
+Any of the four providers' filters (Anthropic's, OpenAI's, Google's and Amazon Bedrock's) moves the session to the next model of the deployment's own `retry.fallbackChains`, in the same session, and the plugin brings it back to the role's own model an hour later.
+The refusal that lands after the model has already sent text is one of them: Oh My Pi does not walk its chain for that one, because the turn cannot be replayed, so the plugin walks it (`packages/pi-legion/src/model-fallback.ts`).
+Each further refusal of the same model doubles that wait, to at most eight hours, and a clean turn on the model puts it back to one hour.
+The two waits are a pane's and a pod's environment, `LEGION_REFUSAL_COOLDOWN_MS` (3600000, one hour) and `LEGION_REFUSAL_COOLDOWN_MAX_MS` (28800000, eight hours):
+the daemon passes each to the worker it launches while its own environment holds it, and a worker told neither runs on those two numbers (`refusalCooldownVariables`, `internal/daemon/specs.go`).
+The plugin writes each arming into the session's own transcript, so a worker the daemon relaunches on that session waits out the time that was left rather than coming back early.
+
+Every deployment sets `retry.fallbackRevertPolicy: never` beside its `retry.fallbackChains`, wherever it keeps them (the operator's `overlay.yml`, or a `role_config_files` overlay of its own).
+Without it Oh My Pi returns the session to a model it suppressed itself, for a rate limit or for an error it could not classify, as soon as that suppression ends, and its floor for one it cannot time is five minutes, well inside the plugin's hour.
+For a refusal, which the plugin pins, the setting changes nothing: the plugin's own return is what moves the session back.
+`scripts/e2e/refusal-fallback-omp.sh` measures the difference on a ten-minute cooldown: with the setting, no request at all reaches the refused model between the fifth minute and the tenth, and the first request after the tenth goes to that model again.
+
+One command replaces a session worth replacing, a session a provider refuses turn after turn among them:
+
+```sh
+legion claims retry --claim <token> --operator-token-file <file> --fresh-session
+```
+
+It reaches a claim the daemon holds failed and one an operator stopped, since `legion claims stop` retires the claim it stops.
+It forgets the session that claim recorded and starts the claim in a new session, with the task of the phase its issue stands in now.
+No `forget-session` comes before it, and no recovery here needs an edit of the daemon's store.
+
+Use `legion claims forget-session` for a session that is gone rather than refused: a stopped claim's session lost with its volume, or a file session imported before its volume can be reaped.
 Read the claim's recorded session from `legion claims list`, then run:
 
 ```sh
@@ -4401,7 +4424,7 @@ The cutover, in this order:
 
    - in `held` it is deferred, since the hold may have come from any of the phases above and the retry that restores the phase would find the push;
 
-   - in `implementing` on a red head it counts one fix attempt, as any push onto a red head does;
+   - in `implementing` on a red head it goes, and nothing counts it: the new head's own checks run, and the issue already stands where a red would send it;
 
    - in `accepting` or `retro` the new head runs its required checks, and a red sends the issue back to `implementing` as any red does;
      READY lets the removal of `.legion/` above the approved head through without a new review round, and refuses a `.legion/` file added there.
@@ -4688,12 +4711,13 @@ each issue's pod (every role of it alike) and the image probe's.
 
 - **`role_config_files`** gives one role Oh My Pi overlays no other role gets:
   a top-level `legion.yaml` key mapping a role (an issue role, or `controller` under `controller: daemon`) to absolute paths of overlays in the operator's mounts.
-  A deployment that wants a model fallback chain only for the roles whose output a machine checks keeps `retry.modelFallback` off in the operator's `overlay.yml` and puts the chain in an overlay of its own, in a ConfigMap of its own (`apply.sh` writes only `legion-operator-route`'s two keys):
+  A deployment that wants a model fallback chain only for the roles whose output a machine checks keeps `retry.modelFallback` off in the operator's `overlay.yml` and puts the chain in an overlay of its own, in a ConfigMap of its own (`apply.sh` writes only `legion-operator-route`'s two keys), with `retry.fallbackRevertPolicy: never` beside it ([Starting fresh when a session is lost or wedged](#starting-fresh-when-a-session-is-lost-or-wedged)):
 
   ```yaml
   # fallback.yml: kubectl -n legion create configmap legion-operator-roles --from-file=fallback.yml
   retry:
     modelFallback: true
+    fallbackRevertPolicy: never
     fallbackChains:
       default: [anthropic/claude-opus-5:xhigh]
   ```
@@ -5129,7 +5153,7 @@ The controller is the one Legion session a person talks to.
 `controller: daemon` needs `dispatch_url` (`controller: daemon needs dispatch_url: …`), and the loader refuses any value but the two.
 
 Under either mode a controller reads its daemon's resolved settings
-— `max_fix_attempts`, `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential, credential source and credential file path left out
+— `review_round_cap`, `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential, credential source and credential file path left out
 — from `read_state`'s `settings` (contract 35, LEGION-791), never from the ConfigMap in `legion-system`, which `legion-worker` may not read.
 
 ### Controller liveness
