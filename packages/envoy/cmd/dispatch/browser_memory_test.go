@@ -3015,6 +3015,13 @@ const (
 	// is granted for each byte of the state it decodes, so a state of more than 8,202,195 bytes is
 	// granted the whole copy bound and decodes alone among the copies.
 	copyHeapPerByteForTest = 48
+	// liveWriteHeapPerByteForTest mirrors liveWriteHeapPerByte, what a live write's fork is
+	// granted of the copy bound for each byte of the state it was built from, for the fork's
+	// whole life rather than for a decode alone (liveWriteWeight): a decode's own 48 and the 17 a
+	// byte the write keeps beside it. The server names each grant's weight in the line it logs
+	// for it (heapGrantLine), and TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory fails
+	// unless the grants of its writes' forks are this many times their document's stored state.
+	liveWriteHeapPerByteForTest = 65
 	// heaviestHandoffEstimate is the hook's estimate of the heaviest honest handoff at F, measured
 	// into the room holding it (peerWeighing.applyHeap):
 	// the long-edited document typed on until 4,096 structs short of the decode cap and padded to
@@ -3486,6 +3493,529 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 	} {
 		requireUnderThePod(t, measured.peak, measured.step)
 	}
+}
+
+// liveWriteDeadline is the deadline each write of the drive below runs under, which is the one a
+// real caller's write has. No deadline is the server's: its http.Server names ReadHeaderTimeout
+// and IdleTimeout and leaves WriteTimeout zero, deliberately, because the event stream is
+// long-lived (newHTTPServer, conn_age.go:46-53), and no handler of the API wraps a request's
+// context in a timeout of its own, so a write waits for its part of the copy-heap bound exactly as
+// long as its client keeps the request (docs' liveWrite.coverFork). The client is the one every
+// agent's `dispatch` command goes through, which bounds each HTTP call at
+// DISPATCH_TOOL_DEADLINE_MS, 60 seconds (packages/envoy-client/src/dispatch-http.ts:291,
+// requestSignal).
+const liveWriteDeadline = 60 * time.Second
+
+// A burst of concurrent API live writes to large documents, over a server whose room budget their
+// rooms charge, keeps the pod inside its memory, because every live write's fork holds a grant of
+// the pod-wide copy-heap bound for the fork's whole life: 65 bytes for each byte of the state the
+// fork was built from, from before the fork is built until it is dropped (docs' liveWriteWeight,
+// liveWriteHeapPerByteForTest). A mebibyte of prose stores about 2.93 to 3.01 MB of state, so one
+// write of such a document is granted some 190 to 196 MB of the 393,705,336-byte bound and three
+// of them cannot hold it at once: however many writes a swarm of agents sends at once, two forks
+// of a mebibyte stand at a time, and every other write waits for its grant inside its own request,
+// holding no copy of a document. Before this change a write's fork took no grant at all for the
+// usual warm path and the decode's grant alone for the cold one, and nothing pod-wide made two
+// hundred forks take turns (INFRA-179).
+//
+// Measured on 2026-11-05 on a two-processor pod, 320 writes to documents of a mebibyte of prose,
+// 12 of them resident (the budget holds 36, and the fill leaves burstOpens of those for the rooms
+// the burst's own writes open): the fill charged 1,166 MiB of the pod's 4,096 and the burst 3,691,
+// holding 3,798,709,944 bytes of what the 3,865,470,566-byte Go limit bounds, 66,760,622 under it.
+// The burst took 1 m 34 s: 21 writes applied, 50 were refused 503 for the bound, and 249 were
+// answered where their caller's deadline found them - 192 of those in the transaction they had not
+// yet begun, waiting for a connection of the shared pool. Of the applied, the slowest took 1 m
+// 30.2 s and the median 1 m 21.4 s, and five landed before the first refusal. The copy bound's
+// grants waited up to 56.4 s and were held up to 10.5 s.
+//
+// The same burst with the grant patched out - liveWrite.coverFork made to return at once, the shape
+// before INFRA-179 - ran every fork the shared pool let it: 26 writes applied and 294 were answered
+// where their caller's deadline found them, none refused for a bound that no longer held them, and
+// no grant was logged at a fork's weight, which is the check below that tells the two apart. It
+// charged 3,756 MiB and held 3,865,466,584 bytes, 3,982 under the limit: the forks it no longer
+// weighed went to the collector, which spent the whole limit on them where the granted run stayed
+// 66,760,622 bytes inside it. What else it cost was time and answers - 2 m 30 s for its 26 applies,
+// the slowest 2 m 27.3 s against 1 m 30.2 s, and a copy grant of a room's load waiting 1 m 36.7 s
+// where the granted run's longest wait was 56.4 s - and that a write the bound would have refused
+// at its caller's deadline is instead applied at leisure or answered 500.
+//
+// The burst is what a swarm of agents makes: writes to documents of many owners, all at once. Two
+// things of the pod bound how far such a burst gets before this bound is reached at all, and the
+// drive measures both rather than assuming either:
+//
+//   - The room budget bounds how many of these documents can be resident, since each reserves what
+//     its elements are priced at, at both copies (storedShape, roomBudgetBytesForTest): 36 of a
+//     mebibyte of prose. The drive opens browsers of as many of them as its arithmetic leaves
+//     beside the rooms the burst itself will open (burstOpens) and writes to the rest cold - a
+//     write to a document no room holds reads the stored history and decodes it into its fork
+//     (docs' coldFork), which is the path that holds those bytes while it waits for its grant.
+//   - The shared pool bounds how many of them are live writes at any moment, since each write's
+//     handler holds one of its connections from the transaction it opens to the commit or rollback
+//     that ends it (api's begin, editArtifact), so a write past sharedPoolSizeForTest waits for a
+//     connection and not for the bound. A burst deeper than that pool therefore costs the pod no
+//     more memory than one the size of it, and only takes longer to drain.
+//
+// Every API write to a document takes its owner's row for the length of its transaction, so the
+// owner cannot close under the write (api's requireOpenOwnerStatus, ownerRowLock, "for no key
+// update"). For a document of an issue that row is the issue's, so a burst of writes to many
+// documents of one issue runs strictly one write at a time whatever any bound would have done with
+// it - which is why this drive writes to documents no issue owns (projectDocumentCopies), each of
+// which takes its own artifact row, as writes to documents of different issues take different
+// issue rows.
+//
+// What the drive holds:
+//
+//   - Both figures a pod is weighed by stay within their bounds through the fill of the budget and
+//     through the burst (requireUnderThePod): what a pod's kernel would charge, under the pod's 4
+//     GiB, and what the Go memory limit bounds, within the margin of that limit.
+//   - No write is lost and none is half-made: a document whose write the server answered 200 holds
+//     that write's text in its latest stored version, and one whose write it answered anything else
+//     holds exactly the text and the history it was stored with.
+//   - The copy bound is what the writes waited for: the server logs a grant of it for each fork,
+//     weighed at 65 bytes a byte of the document's stored state, and those grants waited
+//     (heapGrantLine, logHeapGrants).
+//   - A person typing in an ordinary small room keeps typing through the burst, their keystrokes
+//     answered in a 99th percentile under 5 s (startTyping).
+//
+// What it records rather than asserts, because each is the system working as it is written to:
+//
+//   - A caller's deadline is not what ends a write's wait. A write still waiting for its grant when
+//     its caller gives up is often left waiting and then applied, long after the caller read a
+//     timeout of its own: net/http ends a request's context when the server reads the end of the
+//     connection its client closed, and it starts the read that would see that end only once the
+//     handler has read the request's body to its end. So the 503 a write refused for want of the
+//     bound is answered (docs' errWriteBusy, api's documentErrorCode) is not the whole of what a
+//     real burst's callers meet, and a request whose context does end somewhere other than that
+//     wait - in a query, a lock or a slot - is answered 500 rather than 503. The drive counts the
+//     answers the server logged by status, how many of the writes it applied it answered past their
+//     caller's deadline, and what each handler failure was.
+//   - The rooms the cold writes' own publishes open can take the budget past its limit, and while
+//     it is past it every update that inserts anything is refused in every room with the transient
+//     4503 DOC_BUSY, the person's keystrokes among them (docs' refusedUnderPressure, and
+//     TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks). The drive records how far the person got
+//     and that what stopped them, where anything did, was that refusal and nothing else.
+//   - One keystroke of that person's waits far longer than the percentile: 10.9 to 11.0 s at this
+//     fill, and 1 m 5.795 s over a fill that left the budget nothing for the burst's own rooms,
+//     behind the burst's own queue for the copy bound, which the work their room owes waits in
+//     beside the writes' forks. The drive logs every percentile and the worst of them.
+func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
+	const writes, find, with = 320, "Section 0", "Section Zero"
+	// burstOpens is how many rooms of the budget the fill leaves free for the burst's own cold
+	// writes to open: nineteen to twenty-three of these writes applied inside a burst over the
+	// runs of 2026-11-05, each of them loading the room it published into, so this is a little
+	// past the most of them.
+	const burstOpens = 24
+	building := time.Now()
+	memory := newMemoryHarness(t)
+	memory.env = append(memory.env, podServerEnv()...)
+	sourceID, state := memory.storedDocument(t, proseMarkdown(t, pmdoc.MaxDocumentBytes))
+	source := memory.storedShape(t, "a mebibyte of prose", sourceID)
+	typedIDs, _ := memory.smallDocuments(t, 1)
+	typed := memory.storedShape(t, "the ordinary document a person types in", typedIDs[0])
+	typedGrowth := int64(typingKeystrokes * keystrokeChargeForTest)
+	// What the budget holds of these documents beside the room a person types in and what their
+	// keystrokes can add to it, less the rooms the burst's own cold writes will open: a cold
+	// write's publish loads its document's room, from the store, which by then holds the write
+	// (docs' coldFork says why it loads then rather than before), and that room is charged to
+	// this same budget and cannot be closed while the settlement the write arms still holds it
+	// (closeIfOpenedOverBudget). A fill to the whole of the budget therefore measures the pod
+	// going past its memory for those rooms rather than for the forks this drive weighs: filled to
+	// the whole 37 of them on 2026-11-05, the burst charged 4,435 MiB of the pod's 4,096 and held
+	// 713,885,218 bytes past the Go limit, where the same burst over a fill that keeps burstOpens
+	// rooms free charged 3,854 and held 104,124,530 past it.
+	holds := int((roomBudgetBytesForTest-typed.reserved-typedGrowth)/source.reserved) - 1
+	full := holds - burstOpens
+	if full < 2 || full >= writes {
+		t.Fatalf("the %d-byte budget holds %d documents reserving %d bytes each beside the typed room's %d and its typing's %d, which leaves %d once %d are kept free for the burst's own rooms; want at least two and fewer than the %d documents written",
+			roomBudgetBytesForTest, holds, source.reserved, typed.reserved, typedGrowth, full, burstOpens, writes)
+	}
+	copies := memory.projectDocumentCopies(t, sourceID, writes)
+	grant := min(int64(len(state))*liveWriteHeapPerByteForTest, copyHeapBoundForTest)
+	t.Logf("%d documents of a mebibyte of prose, %d bytes of stored state each: the budget holds %d of them resident, of which %d are made resident here and %d are left for the rooms the burst's own cold writes open; the fill reserves %d of the %d-byte budget beside the typed room's %d and its typing's %d, and %d documents are written cold; they took %s to build",
+		writes, len(state), holds, full, burstOpens, int64(full)*source.reserved, roomBudgetBytesForTest, typed.reserved, typedGrowth, writes-full, time.Since(building).Round(time.Second))
+	t.Logf("the bound: a fork of %d bytes of state is granted %d bytes of the %d-byte copy bound at %d a byte, so %d forks of them stand at once; at most %d of the %d writes are live writes at any moment, one for each connection of the shared pool, and each cold fork waiting for its grant holds the %d stored bytes it read, %d bytes for all of them",
+		len(state), grant, copyHeapBoundForTest, liveWriteHeapPerByteForTest, copyHeapBoundForTest/grant, sharedPoolSizeForTest, writes, len(state), sharedPoolSizeForTest*len(state))
+	t.Logf("the drive's %d documents owe the server no block index, so the only reads of them are the drive's own", memory.oweNoBlockIndex(t))
+
+	server := memory.start(t)
+	requirePodGoMemoryLimit(t, server)
+	var held []*browser
+	t.Cleanup(func() {
+		for _, opened := range held {
+			opened.leave()
+		}
+	})
+	step := time.Now()
+	var typing *browser
+	filledPeak := server.peakResident(t, func() {
+		typing = server.openBrowser(t, typedIDs[0])
+		held = append(held, typing)
+		for _, room := range copies[:full] {
+			held = append(held, server.openBrowser(t, room))
+		}
+	})
+	for _, room := range copies[:full] {
+		if !server.roomLive(t, room) {
+			t.Fatalf("document %s is not resident after its browser opened it, so the burst's writes to it would not fork warm", room)
+		}
+	}
+	t.Logf("the budget is filled to what the burst's own rooms leave of it: the room a person types in and %d rooms of a mebibyte of prose, in %s; %d MiB resident now",
+		full, time.Since(step).Round(time.Second), server.resident(t, "VmRSS")>>20)
+	if refusals := budgetRefusalsByRoom(t, server); len(refusals) != 0 {
+		t.Errorf("the room budget refused %d of the browsers that fill it (%+v), want room for every one of them", len(refusals), refusals)
+	}
+
+	// From here through the burst a person types in the room they opened first.
+	typist := startTyping(t, typing)
+	type outcome struct {
+		status int
+		took   time.Duration
+		err    error
+	}
+	outcomes := make([]outcome, writes)
+	mark := len(server.output.String())
+	step = time.Now()
+	burstPeak := server.peakResident(t, func() {
+		start := make(chan struct{})
+		var group sync.WaitGroup
+		for index, room := range copies {
+			group.Go(func() {
+				<-start
+				ctx, cancel := context.WithTimeout(context.Background(), liveWriteDeadline)
+				defer cancel()
+				answered, err := server.editWithin(ctx, room, find, with)
+				outcomes[index] = outcome{status: answered.status, took: time.Since(step), err: err}
+			})
+		}
+		close(start)
+		group.Wait()
+		// The writes that applied are settled once the settle delay after them has passed, a
+		// render and a version of each, and a load of every room the burst wrote cold, which the
+		// peak counts too.
+		for _, room := range copies {
+			memory.waitForSettled(t, room)
+		}
+	})
+	took := time.Since(step)
+	window := server.output.String()[mark:]
+	keys, typingErr := typist.finish()
+	latency := keystrokeLatencies(keys)
+	t.Logf("keystrokes in the ordinary room during the burst: %d, each answered applied in p50 %s, p90 %s, p99 %s, at most %s",
+		len(keys), latency.p50, latency.p90, latency.p99, latency.max)
+	switch {
+	case typingErr == nil:
+	case strings.Contains(typingErr.Error(), contracts.DocumentBusyCloseReason):
+		// The rooms the cold writes' own publishes open take the budget past its limit, and while
+		// it is past it every update that inserts anything is refused in every room with the
+		// transient close, the person's keystroke among them (docs' refusedUnderPressure, and
+		// TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks, which holds that refusal of a
+		// browser's own growth). The editor shows it and retries; the drive records how far the
+		// person got before the burst's own pressure refused them.
+		t.Logf("the person's typing was refused after %d keystrokes with the transient %d %s every insert meets while the open rooms are past their budget: %v",
+			len(keys), contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, typingErr)
+	default:
+		t.Errorf("the person typing in an ordinary room through the burst stopped before it ended: %v", typingErr)
+	}
+	if len(keys) == 0 {
+		t.Errorf("the person typed nothing during the burst, want a keystroke every %s", typingInterval)
+	}
+	// Most keystrokes are answered as promptly as an unloaded room answers them, and one is not:
+	// the worst waits behind the burst's own queue for the copy bound, since the work the typed
+	// room owes - its settlement's fold, its replica's build - waits there with the writes'
+	// forks, and the room's next apply waits behind that work. Measured on 2026-11-05 over five
+	// runs: p50 8 to 164 ms, p90 56 to 444 ms, p99 183 ms to 1.966 s, and a worst keystroke of
+	// 10.9 to 11.3 s, of 17.022 s with the fork's grant patched out, and of 1 m 5.795 s over a fill
+	// that left the budget nothing for the burst's own rooms - against the p99 under 2 s and none
+	// over 5 s an ordinary room answers in beside the heaviest applies
+	// (TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory). So the drive
+	// holds the percentile a person feels as typing and records the worst, which is bounded by
+	// that queue and not by a figure of its own; a keystroke the room never answers is the
+	// typist's own error above (browserAnswerWithin).
+	if latency.p99 >= 5*time.Second {
+		t.Errorf("keystrokes in an ordinary room during the burst were answered in p99 %s, at most %s, want a 99th percentile under 5 s: typing waited behind the writes further than any burst has made it",
+			latency.p99, latency.max)
+	}
+
+	// What the server answered each write, read from its own access log beside what its caller
+	// saw: a write still waiting for its grant when its caller's deadline passes is left waiting,
+	// since net/http ends a request's context only once the server reads the end of the
+	// connection its client closed, so the answer the caller never read is the server's own line.
+	answers := editAnswers(t, window)
+	rewritten, updates := memory.rewrittenDocuments(t, append(slices.Clone(copies), sourceID), "## "+with)
+	stored := updates[sourceID]
+	applied, refused, elsewhere, late, gaveUp := 0, 0, 0, 0, 0
+	statuses := map[int]int{}
+	var appliedTook []time.Duration
+	var elsewhereSample []string
+	folded := 0
+	var firstRefusal time.Duration
+	for index, room := range copies {
+		answered, logged := answers[room]
+		statuses[answered.status]++
+		if outcomes[index].err != nil {
+			gaveUp++
+		}
+		switch {
+		case !logged:
+			t.Errorf("write %d to document %s is in no line of the server's access log, so the server never served it (its caller read %d, %v)", index, room, outcomes[index].status, outcomes[index].err)
+		case answered.status == http.StatusOK:
+			applied++
+			appliedTook = append(appliedTook, answered.elapsed)
+			if answered.elapsed > liveWriteDeadline {
+				late++
+			}
+			if !rewritten[room] || updates[room] < stored {
+				t.Errorf("write %d to document %s was answered 200, and the document holds the written text %v with %d stored updates, want the text in its latest version and no fewer than the %d updates it was stored with",
+					index, room, rewritten[room], updates[room], stored)
+			}
+			if updates[room] != stored+1 {
+				// A compaction of the document, which folds its history into one row, is the
+				// only thing that leaves an applied write's update anywhere but in a row of its
+				// own (PgVersioned's compaction); it is counted so that a write landing in no
+				// row at all cannot hide behind it.
+				folded++
+			}
+		case answered.status == http.StatusServiceUnavailable:
+			refused++
+			if firstRefusal == 0 || answered.elapsed < firstRefusal {
+				firstRefusal = answered.elapsed
+			}
+			if rewritten[room] || updates[room] != stored {
+				t.Errorf("write %d to document %s was refused 503, and the document holds the written text %v with %d stored updates, want it exactly as it was stored, with %d",
+					index, room, rewritten[room], updates[room], stored)
+			}
+		default:
+			elsewhere++
+			if len(elsewhereSample) < 3 {
+				elsewhereSample = append(elsewhereSample, fmt.Sprintf("write %d to document %s was answered %d in %s, its caller reading %v",
+					index, room, answered.status, answered.elapsed.Round(time.Millisecond), outcomes[index].err))
+			}
+			if rewritten[room] || updates[room] != stored {
+				t.Errorf("write %d to document %s was answered %d, and the document holds the written text %v with %d stored updates, want it exactly as it was stored, with %d",
+					index, room, answered.status, rewritten[room], updates[room], stored)
+			}
+		}
+	}
+	before := 0
+	for _, elapsed := range appliedTook {
+		if firstRefusal == 0 || elapsed < firstRefusal {
+			before++
+		}
+	}
+	slices.Sort(appliedTook)
+	var median, slowest time.Duration
+	if len(appliedTook) > 0 {
+		median, slowest = appliedTook[len(appliedTook)/2], appliedTook[len(appliedTook)-1]
+	}
+	t.Logf("%d concurrent writes (%d warm, %d cold), each under its caller's %s deadline, in %s: %d applied, %d refused 503 DOC_SERVICE_UNAVAILABLE, %d answered otherwise; %d applied before the first refusal, the slowest applied in %s and the median in %s",
+		writes, full, writes-full, liveWriteDeadline, took.Round(time.Second), applied, refused, elsewhere, before, slowest, median)
+	t.Logf("the statuses the server answered, by count: %v; %d of the writes it applied it answered past their caller's %s deadline, %d callers read an error of their own rather than an answer, and a compaction folded the history of %d of the documents written",
+		statuses, late, liveWriteDeadline, gaveUp, folded)
+	if elsewhere > 0 {
+		t.Logf("the %d writes answered neither 200 nor 503 were answered where their caller's deadline found them, which is not the bound's wait: %s; the server logged %d handler failures, %s",
+			elsewhere, strings.Join(elsewhereSample, "; "), len(handlerFailureLine.FindAllString(window, -1)), handlerFailures(window))
+	}
+	if applied+refused+elsewhere != writes {
+		t.Errorf("%d writes were applied, %d refused and %d answered otherwise, which is not the %d sent", applied, refused, elsewhere, writes)
+	}
+	if applied == 0 {
+		t.Errorf("none of the %d writes applied, want the burst to make the writes the bound has room for", writes)
+	}
+
+	// The grants the writes' forks held, which is what made them wait, and what the budget did
+	// with the rooms the writes to cold documents left open: a cold write's publish loads the
+	// document's room, which the budget then closes, since the browsers of the fill hold it full
+	// (closeIfOpenedOverBudget, sweepRooms).
+	grants := heapGrants(t, window)
+	forks := 0
+	for _, logged := range grants {
+		if logged.bound != "copy" {
+			continue
+		}
+		if logged.weight == grant {
+			forks++
+		}
+	}
+	logHeapGrants(t, "the burst of concurrent live writes", grants)
+	t.Logf("the room budget closed %d rooms the server's own work opened over it and swept %d unused rooms during the burst",
+		len(serverOpenedCloseLine.FindAllString(window, -1)), len(budgetCloseLine.FindAllString(window, -1)))
+	if forks == 0 {
+		t.Errorf("the server logged no grant of the copy bound weighed at the %d bytes a fork of these documents is granted, want one for each write that waited for it", grant)
+	}
+	for _, measured := range []struct {
+		step string
+		peak podPeak
+	}{
+		{"the room budget filled", filledPeak},
+		{"the burst of concurrent live writes", burstPeak},
+	} {
+		requireUnderThePod(t, measured.peak, measured.step)
+	}
+}
+
+// sharedPoolSizeForTest mirrors store's sharedPoolSize, the connections every request reads and
+// writes through. A write's handler holds one from the transaction it opens to the commit or
+// rollback that ends it, so no more than this many API writes are live writes at one moment and a
+// burst past it waits for a connection rather than for a memory bound. A wrong mirror moves only
+// what TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory logs of its burst's arithmetic.
+const sharedPoolSizeForTest = 64
+
+// editAnswerLine is the line the server logs for each edit it served (accesslog.Handler,
+// accesslog.Message): the document in the path, the status it answered and how long the request
+// took. It is how a drive reads the answer to a write whose own client gave up first, which the
+// server writes into a connection that has already closed.
+var editAnswerLine = regexp.MustCompile(`msg="dispatch: request" method=POST route=/api/v1/artifacts/\{id\}/edits path=/api/v1/artifacts/([0-9a-fA-F-]+)/edits [^\n]*status=(\d+) elapsed_ms=(\d+)`)
+
+// editAnswer is what the server answered one write, as its line records it.
+type editAnswer struct {
+	status  int
+	elapsed time.Duration
+}
+
+// editAnswers is the server's own answer to every edit served in output, by document.
+func editAnswers(t *testing.T, output string) map[string]editAnswer {
+	t.Helper()
+	answers := map[string]editAnswer{}
+	for _, match := range editAnswerLine.FindAllStringSubmatch(output, -1) {
+		status, err := strconv.Atoi(match[2])
+		if err != nil {
+			t.Fatalf("read the status of %q: %v", match[0], err)
+		}
+		elapsed, err := strconv.Atoi(match[3])
+		if err != nil {
+			t.Fatalf("read the elapsed time of %q: %v", match[0], err)
+		}
+		answers[match[1]] = editAnswer{status: status, elapsed: time.Duration(elapsed) * time.Millisecond}
+	}
+	return answers
+}
+
+// handlerFailureLine is the line the server logs for a request whose error names no status of its
+// own, which it answers 500 INTERNAL (api's writeHandlerError).
+var handlerFailureLine = regexp.MustCompile(`msg="dispatch: API handler failed" error="([^"]*)"`)
+
+// handlerFailures is what those failures were in output: each distinct error with how many
+// requests met it, so a drive says where a request its caller ended was when it ended rather than
+// guessing.
+func handlerFailures(output string) string {
+	counted := map[string]int{}
+	for _, match := range handlerFailureLine.FindAllStringSubmatch(output, -1) {
+		counted[match[1]]++
+	}
+	failures := make([]string, 0, len(counted))
+	for failure, count := range counted {
+		failures = append(failures, fmt.Sprintf("%d of %q", count, failure))
+	}
+	slices.Sort(failures)
+	return strings.Join(failures, ", ")
+}
+
+// editWithin sends one quote-anchored edit of artifactID, replacing find with with, as an agent's
+// `dispatch doc-edit` does, bounded by ctx: the deadline a drive gives it is its client's, since
+// the server sets none (liveWriteDeadline). A request its deadline ends answers the error the
+// client raises, and the answer the server wrote for it is in the server's log (editAnswers).
+func (p *memoryServer) editWithin(ctx context.Context, artifactID, find, with string) (response, error) {
+	body, err := json.Marshal(map[string]any{"ops": []map[string]string{{"op": "replace", "find": find, "with": with}}})
+	if err != nil {
+		return response{}, fmt.Errorf("encode the edit: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base+"/api/v1/artifacts/"+artifactID+"/edits", bytes.NewReader(body))
+	if err != nil {
+		return response{}, fmt.Errorf("build the edit: %w", err)
+	}
+	request.Header = http.Header{"Content-Type": {"application/json"}, "X-Dispatch-User": {"alice"}}
+	answer, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return response{}, fmt.Errorf("edit document %s: %w", artifactID, err)
+	}
+	defer answer.Body.Close()
+	read, err := io.ReadAll(answer.Body)
+	if err != nil {
+		return response{}, fmt.Errorf("read the answer of the edit of document %s: %w", artifactID, err)
+	}
+	return response{status: answer.StatusCode, body: read}, nil
+}
+
+// projectDocumentCopies is cloneDocuments into documents of the source's project that no issue
+// owns, so that a write to each takes its own artifact row and not one row every write of the
+// burst waits for (api's ownerForArtifact, documentOwner, ownerRowLock). It leaves none of them
+// owing the server a block index, which each copy's versions mark it owed, as oweNoBlockIndex
+// does for the issue's own documents.
+func (h *memoryHarness) projectDocumentCopies(t *testing.T, sourceID string, count int) []string {
+	t.Helper()
+	ctx := context.Background()
+	copies := make([]string, count)
+	for index := range copies {
+		tx, err := h.database.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin copy %d: %v", index, err)
+		}
+		slug := fmt.Sprintf("project-copy-%d-%03d", time.Now().UnixNano(), index)
+		if err := tx.QueryRow(ctx, `
+			insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+			select null, project_key, $2, $2 || '.md', kind, false, created_by from artifacts where id = $1
+			returning id::text
+		`, sourceID, slug).Scan(&copies[index]); err != nil {
+			t.Fatalf("copy artifact %d: %v", index, err)
+		}
+		for _, statement := range []string{
+			`insert into doc_updates (artifact_id, version, update, content_changed)
+				select $1, version, update, content_changed from doc_updates where artifact_id = $2`,
+			`insert into doc_checkpoints (artifact_id, ceiling, state)
+				select $1, ceiling, state from doc_checkpoints where artifact_id = $2`,
+			`insert into artifact_versions (artifact_id, number, markdown, content, mime, size, sha256, authors, named, summary, doc_update_version)
+				select $1, number, markdown, content, mime, size, sha256, authors, named, summary, doc_update_version
+				from artifact_versions where artifact_id = $2`,
+		} {
+			if _, err := tx.Exec(ctx, statement, copies[index], sourceID); err != nil {
+				_ = tx.Rollback(ctx)
+				t.Fatalf("copy %d: %v", index, err)
+			}
+		}
+		// Each copy's versions mark its blocks owed (0122's trigger), which this clears as
+		// oweNoBlockIndex clears the issue's own.
+		if _, err := tx.Exec(ctx, `delete from document_block_versions where artifact_id = $1`, copies[index]); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatalf("clear the block index copy %d owes: %v", index, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit copy %d: %v", index, err)
+		}
+	}
+	return copies
+}
+
+// rewrittenDocuments reads, for each of documents and for the source they were copied from, how
+// many updates its stored history holds and whether its latest stored version holds heading, the
+// text a write of the drive leaves: one query of the store rather than a read of the server for
+// each document, and a second source beside the answers the server logged.
+func (h *memoryHarness) rewrittenDocuments(t *testing.T, documents []string, heading string) (map[string]bool, map[string]int) {
+	t.Helper()
+	rows, err := h.database.Pool.Query(context.Background(), `
+		select a.id::text,
+			(select count(*) from doc_updates u where u.artifact_id = a.id),
+			coalesce((select v.markdown like $2 from artifact_versions v
+				where v.artifact_id = a.id order by v.number desc limit 1), false)
+		from artifacts a where a.id = any($1)
+	`, documents, "%"+heading+"%")
+	if err != nil {
+		t.Fatalf("read what the writes left the documents: %v", err)
+	}
+	defer rows.Close()
+	rewritten, updates := map[string]bool{}, map[string]int{}
+	for rows.Next() {
+		var id string
+		var stored int
+		var holds bool
+		if err := rows.Scan(&id, &stored, &holds); err != nil {
+			t.Fatalf("read a document's stored history: %v", err)
+		}
+		rewritten[id], updates[id] = holds, stored
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read what the writes left the documents: %v", err)
+	}
+	return rewritten, updates
 }
 
 // typingInterval is how often the person typing in an ordinary room presses a key (startTyping),
