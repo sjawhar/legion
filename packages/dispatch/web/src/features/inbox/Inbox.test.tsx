@@ -3157,7 +3157,7 @@ test("a focus that leaves the column for the body alone drops the record", async
   }
 });
 
-// This row and the one below drive the one unmount inside the column the Inbox can reach from
+// This row and the two below drive the one unmount inside the column the Inbox can reach from
 // the keyboard: the head's `Assign to me`, which goes once its write lands, leaving the focus it
 // held on `document.body` with no blur and no `focusin` behind it. The cleared filter is what
 // keeps the column on that question through the assignment - under a `?assignee=` the viewer
@@ -3311,6 +3311,85 @@ test("a focus landing outside the column drops the record an unmount inside it l
     scroller().focus();
     fireEvent.keyDown(scroller(), { key: "Escape" });
     expect(document.activeElement).toBe(shortRow("ask-b"));
+    expect(selectedIds()).toEqual(["ask-b"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+    patchIssue.mockRestore();
+  }
+});
+
+// The third route through that same unmount, and the one that tells the record's writer apart
+// from a writer gated on where the focus is: from the body the unmount leaves the focus on, `l`
+// is the keyboard's only way back into the column, and the press finds a record already
+// standing. It must leave that record alone, exactly as the click back in two rows above does,
+// or the two ways back into a column the reader never left would owe them different rows.
+test("l back into a column an unmount dropped the focus out of leaves the record standing", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    issueAsk({
+      id: "ask-b",
+      issue: { assignee: null, key: "CORE-2", title: "Nobody's issue" },
+      issue_key: "CORE-2",
+      question: "Which format?",
+    }),
+  ];
+  let served: InboxRow[] = rows;
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const save = Promise.withResolvers<Issue>();
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
+  const { unmount } = renderInbox("/?assignee=everyone");
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+
+    // The same column and the same record as the two rows above: ask-a is the row `l` is
+    // pressed on, ask-b the question the column shows.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    const assign = await within(screen.getByTestId("inbox-pane")).findByRole("button", {
+      name: "Assign CORE-2 to me",
+    });
+    assign.focus();
+    fireEvent.click(assign);
+    served = served.map((row) =>
+      row.id === "ask-b"
+        ? { ...row, issue: { assignee: "alice", key: "CORE-2", title: "Nobody's issue" } }
+        : row
+    );
+    await act(async () => {
+      save.resolve(narrowIssueOf(rows[1] as InboxRow, "alice"));
+      await save.promise;
+    });
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("inbox-pane")).queryByRole("button", {
+          name: "Assign CORE-2 to me",
+        })
+      ).toBeNull()
+    );
+    expect(document.activeElement).toBe(document.body);
+
+    // The reader reaches for `l` to get back to the document they were reading. The record they
+    // made on the way in stands, so this press writes nothing: it only hands the scroller the
+    // focus the unmount took.
+    fireEvent.keyDown(document.body, { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // So Escape owes them the row they pressed `l` on first, not the row of the question the
+    // column is showing - which is what a press writing the selected row over the record here
+    // would give them, and what the click back in two rows above does not.
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-a"));
     expect(selectedIds()).toEqual(["ask-b"]);
   } finally {
     unmount();

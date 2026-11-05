@@ -739,10 +739,14 @@ export function Inbox({
    *  focus stayed in the list. Null for every other way into the column, where Escape returns
    *  to the row the column is showing, as it always has.
    *
-   *  It is written by one key - `read-pane`'s `run`, and only by the press that carries the
-   *  focus in from outside, so a second `l` cannot write the row the column is showing over the
-   *  row the reader came from - and read by one accessor, `paneWayBack`, which both halves of
-   *  Escape ask, so the `when` and the `run` cannot disagree about where the key goes.
+   *  It is written by one key - `read-pane`'s `run` - and only where no record stands, so the
+   *  press that carries the focus in is the press that writes it: a second `l`, and the `l` a
+   *  reader comes back in on after an unmount inside the column left the record standing, both
+   *  leave it alone, where either would otherwise write the row the column is showing over the
+   *  row the reader came from. That is what makes re-entry by key and re-entry by click, which
+   *  writes nothing at all, leave the same record. It is read by one accessor, `paneWayBack`,
+   *  which both halves of Escape ask, so the `when` and the `run` cannot disagree about where
+   *  the key goes.
    *
    *  The record stands exactly while two facts hold of the reader, each with its own drops;
    *  between them no route can outlive the record.
@@ -1040,15 +1044,18 @@ export function Inbox({
       keys: "l",
       label: "Move the focus into the reading pane",
       run: () => {
-        // The row the reader came from, for Escape: the one holding the focus, or the selected
-        // one where the focus is on nothing - `document.body`, where a reader who has pressed
-        // no key yet stands - or on something that is not a row.
+        // The record Escape reads, written only where no record stands: the press that carries
+        // the focus in is the press that makes it, and it names the row the reader came from -
+        // the one holding the focus, or the selected one where the focus is on nothing
+        // (`document.body`, where a reader who has pressed no key yet stands) or on something
+        // that is not a row.
         //
-        // Only the press that carries the focus in records anything. Pressed again from inside
-        // the column the key moves the focus back to the scroller and leaves the record alone:
-        // a second `l` would otherwise write the selected row, or null, over the row the reader
-        // actually came from, which is the row Escape owes them.
-        if (!focusInPane()) {
+        // A press with a record standing writes nothing, whether the reader is in the column
+        // already or on the body an unmount inside the column dropped their focus to: both
+        // would write the row the column is showing, or null, over the row the reader actually
+        // came from, which is the row Escape owes them. So the key leaves a standing record
+        // exactly as a click back into the column does, and the two ways back in agree.
+        if (paneReturn.current === null) {
           paneReturn.current =
             focusedRow()?.dataset.inboxRow ?? paneSelection.selectedRow()?.dataset.inboxRow ?? null;
         }
