@@ -143,6 +143,11 @@
       "needs": "the pinned Oh My Pi every pane runs (LEGION_OMP_PATH, an absolute executable, which a GitHub-hosted runner has none of), a loopback PostgreSQL (LEGION_TEST_PG_DSN), go, awk, tar and bun with this repository's node_modules"
     },
     {
+      "script": "refusal-fallback-omp.sh",
+      "needs": "the pinned Oh My Pi every pane runs (LEGION_OMP_PATH, an absolute executable, which a GitHub-hosted runner has none of), bun with this repository's node_modules, and about fifteen minutes of wall clock, which is longer than any job of ci.yaml holds",
+      "timeout_minutes": 25
+    },
+    {
       "script": "share-volumes-kind.sh",
       "needs": "a throwaway kind cluster with gVisor on an amd64 Linux host, an NFS server in that cluster, with docker, go, kubectl, curl, zstd, a tar that supports --zstd and kind, and a worker image by digest (LEGION_E2E_IMAGE)"
     },
