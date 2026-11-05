@@ -748,20 +748,23 @@ func fillTable(t *builder) {
 		[]ClaimState{StateLaunching, StateFailed, StateSuspended, StateWorking}, append(slices.Clone(inRound), StateFailed)...)
 	t.ignore(onPodUpdateEnded, "the claim is retired; its update round ended with it", StateRetired)
 
-	// The worker's answer to the update task: it has pushed its work and may be replaced.
+	// The worker's answer to the update task — its work is pushed and its process may be
+	// replaced — and the round taking that answer back. Both are weighed in the same states:
+	// answering is every state a claim whose agent is registered can give or lose an answer in,
+	// and unregistered is every state before that agent, where there is no answer either way.
+	answering := []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended}
+	unregistered := []ClaimState{StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected}
 	t.row(onPodUpdateSignalled, "the worker signalled that its work is pushed and its process may be replaced", podUpdateSignalled,
-		nil, StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended)
-	t.ignore(onPodUpdateSignalled, "a claim with no registered agent cannot have signalled",
-		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+		nil, answering...)
+	t.ignore(onPodUpdateSignalled, "a claim with no registered agent cannot have signalled", unregistered...)
 	t.ignore(onPodUpdateSignalled, "the claim failed; the process that would have signalled is gone", StateFailed)
 	t.ignore(onPodUpdateSignalled, "the claim is retired; its update round ended with it", StateRetired)
 
 	// The round asking a worker again for an answer its turn's end gave, because the pod's shim
 	// cannot be asked what the disk still holds (internal/daemon's checkUnpushed).
 	t.row(onPodUpdateReask, "take back the answer the turn's end gave, and let the round ask this worker again", podUpdateReask,
-		nil, StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended)
-	t.ignore(onPodUpdateReask, "a claim with no registered agent has given no answer to take back",
-		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+		nil, answering...)
+	t.ignore(onPodUpdateReask, "a claim with no registered agent has given no answer to take back", unregistered...)
 	t.ignore(onPodUpdateReask, "the claim failed; the process whose turn answered is gone, and the round asks it nothing", StateFailed)
 	t.ignore(onPodUpdateReask, "the claim is retired; its update round ended with it", StateRetired)
 
@@ -2034,7 +2037,7 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 	if p := m.claim.Pending; updatesRound(p, open.Round) && p.ConfirmedAt.IsZero() {
 		return nil
 	}
-	if tasked := m.claim.UpdateTaskedAt; tasked != nil && now.Sub(*tasked) < m.deps.podUpdateRetask() {
+	if !m.updateReaskDue(now) {
 		return nil
 	}
 	task := RequestDeliver{Claim: m.claim.Token, ID: updateTaskID(open.Round), Task: open.Task}
@@ -2063,6 +2066,14 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 		return m.revive(ctx)
 	}
 	return m.sendPending(ctx)
+}
+
+// updateReaskDue is whether the round may ask this claim now: it has never been asked, or the
+// re-task bound has passed since the last ask (pod_update_retask_hours). It is the one bound
+// both the sweep's ask and the free slot's ask read (askForUpdate, takeSlotForUpdate).
+func (m *Machine) updateReaskDue(now time.Time) bool {
+	tasked := m.claim.UpdateTaskedAt
+	return tasked == nil || now.Sub(*tasked) >= m.deps.podUpdateRetask()
 }
 
 // takeSlotForUpdate gives this claim's open pod round its ask while the claim's one delivery
@@ -2115,7 +2126,7 @@ func (m *Machine) takeSlotForUpdate(ctx context.Context, launching bool) error {
 		return nil
 	}
 	now := m.deps.Clock.Now()
-	if tasked := m.claim.UpdateTaskedAt; tasked != nil && now.Sub(*tasked) < m.deps.podUpdateRetask() {
+	if !m.updateReaskDue(now) {
 		return nil
 	}
 	task := RequestDeliver{

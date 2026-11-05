@@ -152,12 +152,12 @@ type podUpdateSweep struct {
 // as waiting under the limit that did. Where both hold it back the limit on open rounds is the
 // one recorded: it is the one that will still hold the issue back at the next sweep, and the
 // one an operator reading the record has to weigh.
-func (w *podUpdateSweep) holds(issue string) bool {
+func (sweep *podUpdateSweep) holds(issue string) bool {
 	switch {
-	case w.slots.exhausted():
-		w.waiting = append(w.waiting, podUpdateHeld{issue: issue, limit: limitPodUpdateOpenRounds})
-	case w.budget.exhausted():
-		w.waiting = append(w.waiting, podUpdateHeld{issue: issue, limit: limitPodUpdateRoundsPerMinute})
+	case sweep.slots.exhausted():
+		sweep.waiting = append(sweep.waiting, podUpdateHeld{issue: issue, limit: limitPodUpdateOpenRounds})
+	case sweep.budget.exhausted():
+		sweep.waiting = append(sweep.waiting, podUpdateHeld{issue: issue, limit: limitPodUpdateRoundsPerMinute})
 	default:
 		return false
 	}
@@ -168,17 +168,17 @@ func (w *podUpdateSweep) holds(issue string) bool {
 // made for. The claims this sweep read cannot name it — the post that carries a round to a
 // machine is asynchronous — and the sweep's own record says it is in a round all the same
 // (recordPodUpdateSweep), as the next sweep's count of the slots does (podUpdateOpenings).
-func (w *podUpdateSweep) charge(issue string) {
-	w.slots.take()
-	w.budget.take()
-	w.opened = append(w.opened, issue)
+func (sweep *podUpdateSweep) charge(issue string) {
+	sweep.slots.take()
+	sweep.budget.take()
+	sweep.opened = append(sweep.opened, issue)
 }
 
 // held names every issue a limit held back at this sweep, with the limit that held it, for the
 // one line the sweep logs of them (reconcilePodUpdates).
-func (w podUpdateSweep) held() []string {
-	named := make([]string, len(w.waiting))
-	for i, h := range w.waiting {
+func (sweep podUpdateSweep) held() []string {
+	named := make([]string, len(sweep.waiting))
+	for i, h := range sweep.waiting {
 		named[i] = fmt.Sprintf("%s (%s)", h.issue, h.limit)
 	}
 	return named
@@ -323,12 +323,7 @@ func recordsAPod(group []supervise.Claim) bool {
 
 // recordsRound is whether any claim of the group records round, answered or not and open or not.
 func recordsRound(group []supervise.Claim, round string) bool {
-	for _, c := range group {
-		if c.UpdateRound == round {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(group, func(c supervise.Claim) bool { return memberOf(c, round) })
 }
 
 // reconcileIssuePodUpdate carries one issue's pod round a step. group is every claim of the issue
@@ -450,8 +445,9 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 	// the round in the one and be no worker of it in the other: the replacement would wait on
 	// that claim for an answer the post never asked it for, and the round would run out its
 	// notice bound waiting for a worker nothing had asked anything of.
-	live := s.liveGroup(group)
+	var live []supervise.Claim
 	if open != "" {
+		live = s.liveGroup(group)
 		if replace, decided := s.completePodUpdate(ctx, issue, group, live, open, pod, joined, now); decided {
 			return replace
 		}
@@ -461,7 +457,8 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 	// holds back: a round held back after it opened would leave its workers waiting in a pod the
 	// daemon has already told them is going, and these limits are about how fast a change
 	// reaches the fleet, not about how long a round may run.
-	opening := open != supervise.PodRound(pod)
+	round := supervise.PodRound(pod)
+	opening := open != round
 	if opening && sweep.holds(issue) {
 		// The claims' own plugin rounds are carried all the same, as they are for an issue with
 		// no drift at all: what one of those replaces is the claim's process, not the pod, and
@@ -469,8 +466,16 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 		s.reconcilePluginUpdates(ctx, group, now)
 		return nil
 	}
+	// An issue no round is open over reads its claims live here, after the gate, because a read
+	// taken above it is a read nothing uses: the post below is the one thing that weighs them,
+	// and a limit that holds the issue back has already returned. The read is one per path all
+	// the same — a round that is open was read for the decision above, and live is nil only
+	// where nothing has read it yet, since roundGroup always answers a slice of its own.
+	if live == nil {
+		live = s.liveGroup(group)
+	}
 	if s.openPodUpdate(ctx, issue, live, pod, joined, now) && opening {
-		s.recordPodUpdateOpening(sweep, issue, supervise.PodRound(pod), now)
+		s.recordPodUpdateOpening(sweep, issue, round, now)
 	}
 	return nil
 }
@@ -722,7 +727,7 @@ func (s *supervision) roundWithNoProcessInItsPod(ctx context.Context, issue stri
 // errReplacementNotDue is every answer replacementDue gives that is not "go on": the round the
 // sweep found complete is not complete now, or the claims could not be read to say that it is.
 // The runtime hands it back from inside ReplacePod having written nothing (runtime.Runtime), and
-// completePodUpdate tells it from a replacement that failed by this error alone — a failure is a
+// replacePodForRound tells it from a replacement that failed by this error alone — a failure is a
 // stall the operator's side is told of, and this is the daemon's own refusal, which costs the
 // round one sweep and nothing else.
 var errReplacementNotDue = errors.New("the pod replacement is no longer due")
@@ -772,7 +777,7 @@ func (s *supervision) replacementDue(issue, round, pod string, checked *pushChec
 }
 
 // The push check's bounds: one workspace's check and push, and the whole check of a pod's disk.
-// The whole bound is what completePodUpdate adds to the replacement's own, since the check runs
+// The whole bound is what replacePodForRound adds to the replacement's own, since the check runs
 // inside it. rescueAnswerMargin is what the shim's bound leaves of the time the replacement has
 // left, for the answer to cross the stream: a check bounded at the whole of that time would be
 // read as a failure the moment it finished, and would run on in the pod beside the next one.
@@ -784,7 +789,7 @@ const (
 
 // errPushCheckFailed is a push check that could not show every workspace of the pod safe: a
 // workspace whose check or push failed, or no process in the pod that could run the check. The
-// runtime hands it back from inside ReplacePod having written nothing, and completePodUpdate
+// runtime hands it back from inside ReplacePod having written nothing, and replacePodForRound
 // holds the round on it and tells the operator's side through the late-round notice.
 var errPushCheckFailed = errors.New("the push check of the pod's workspaces failed")
 
@@ -868,10 +873,11 @@ func (s *supervision) checkUnpushed(ctx context.Context, issue, round, pod strin
 				for _, asked := range again {
 					s.supervisor.post(asked.Token, supervise.PodUpdateReask{Claim: asked.Token, Round: round})
 				}
+				reasked := namesOf(again)
 				s.log.Warn("supervise: the pod's shim predates the push check, and a worker of this round answered by the end of its task's turn; the replacement is refused and each such worker is asked once more",
-					"issue", issue, "round", round, "pod", pod, "claim", c.Token, "reasked", namesOf(again), "error", err)
+					"issue", issue, "round", round, "pod", pod, "claim", c.Token, "reasked", reasked, "error", err)
 				return fmt.Errorf("%w: the pod's shim cannot check the disk for unpushed work, and %s answered by the end of its task's turn; each is asked once more",
-					errReplacementNotDue, strings.Join(namesOf(again), ", "))
+					errReplacementNotDue, strings.Join(reasked, ", "))
 			}
 			*checked = pushCheck{role: c.Role, unchecked: "the pod's shim predates the push check; only the workers' answers guarded this replacement"}
 			s.log.Warn("supervise: the pod's shim predates the push check; its workspaces are not checked before the replacement",
