@@ -190,6 +190,7 @@ func describeMarkdown(markdown *string) string {
 // compares at: before the room's first transaction, when the replica holds no state and the fork
 // read takes its copy from the room itself, and after each of its browser edits.
 func TestTheClonedForkMatchesTheReadPointsForkAcrossTheCorpus(t *testing.T) {
+	t.Parallel()
 	writes := 0
 	forks, documents := driveCorpusRooms(t, func(at corpusRoom) {
 		writes += compareForkReads(t, at)

@@ -1302,6 +1302,40 @@ func askRowCount(t *testing.T, service *Service, artifactID, blockID string) int
 	return count
 }
 
+// askBodySeed is the decision every case of the two exhaustive refusal suites below starts from:
+// one open decision of a question and two options, valid, as a person's document holds it.
+const askBodySeed = ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n" +
+	"Should we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n"
+
+// askBodyCasesPerDocument is how many of a suite's cases run on one document, in turn.
+//
+// A case leaves its decision valid, its row open and its document settled - which is what the next
+// case needs to start from - so the base is built once per document rather than once per case. The
+// two suites enumerate 1,957 bodies between them, and at 0.45 s a case in CI the document created,
+// seeded and settled before each one was 47 per cent of it: create 5 ms, seed 4 ms, the settlement
+// that opens the row 32 ms, the body's edit 1.5 ms, the settlement that flags it 29 ms, and the
+// refusal the case is about 55 ms and up (dispatch://INFRA-1075). The base is built by the
+// service's own writes - the seed and a settlement, never rows written here - so a case starts
+// from what production leaves, and the first case on each document runs that base and its own
+// settlement end to end.
+//
+// The documents run beside one another, so the suites keep the parallelism they had: the cases of
+// one document are a chain of this many, which at 64 is a tenth of a suite and shorter than its
+// slowest other test. A document also keeps the stored history of every case run on it, so the
+// number bounds that too.
+const askBodyCasesPerDocument = 64
+
+// askBodyDocument is a document of its own, on an issue of its own, holding askBodySeed as a
+// settled open decision: the base a suite's cases run on. number is the issue's number, unique
+// within the suite.
+func askBodyDocument(t *testing.T, service *Service, number int) string {
+	t.Helper()
+	artifactID := createIssueDocument(t, service.store, number, "# First")
+	seedServiceText(t, service, artifactID, askBodySeed)
+	settleCurrentGeneration(t, service, artifactID)
+	return artifactID
+}
+
 // Every decision body of one to five blocks - each a paragraph holding text (P), a paragraph
 // holding none (E), a bullet list (L), or a bullet list whose item holds a nested list (N) - that
 // breaks the content rule is refused, and the refusal followed exactly as written - the same ask
@@ -1331,6 +1365,12 @@ func TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision(t *testing
 			t.Logf("%d naming no delete (%s among them): %s", count, noDeleteShape[reason], reason)
 		}
 	})
+	type askBodyCase struct {
+		shape    string
+		number   int
+		children []*pmdoc.Node
+	}
+	cases := make([]askBodyCase, 0, len(bodies))
 	for index, body := range bodies {
 		children := make([]*pmdoc.Node, len(body))
 		for position, kind := range body {
@@ -1339,111 +1379,123 @@ func TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision(t *testing
 		if pmdoc.AskContentError(&pmdoc.Node{Type: "ask", Children: children}) == nil {
 			continue
 		}
-		broken++
-		shape := strings.Join(body, "-")
-		t.Run(shape, func(t *testing.T) {
-			t.Parallel()
-			// A document of its own on an issue of its own, so no two bodies share a lock.
-			artifactID := createIssueDocument(t, service.store, index+2, "# First")
-			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
-			settleCurrentGeneration(t, service, artifactID)
-			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
-				firstAsk(tree).Children = children
-				return tree
-			})
-			settleCurrentGeneration(t, service, artifactID)
-			before := liveTree(t, service, artifactID)
-			ask := firstAsk(before)
-			edit := AskBlockEdit{Urgency: new("high")}
-			err := sendAskOptions(service, artifactID, edit)
-			unrepresentable := askEditRefusal(t, before, "ask-lists", err)
-			breaksTheRule := true
-			if unrepresentable.Reason == emptyQuestionStep("ask-lists") {
-				before, ask, err, unrepresentable, breaksTheRule = followEmptyQuestionStep(
-					t, service, artifactID, "ask-lists", &edit, err, unrepresentable)
+		cases = append(cases, askBodyCase{shape: strings.Join(body, "-"), number: index + 2, children: children})
+	}
+	broken = len(cases)
+	// runCase puts one body in the decision the document holds, sends the ask edit, and follows
+	// the refusal to its end.
+	runCase := func(t *testing.T, artifactID string, one askBodyCase) {
+		shape, children := one.shape, one.children
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			firstAsk(tree).Children = children
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		ask := firstAsk(before)
+		edit := AskBlockEdit{Urgency: new("high")}
+		err := sendAskOptions(service, artifactID, edit)
+		unrepresentable := askEditRefusal(t, before, "ask-lists", err)
+		breaksTheRule := true
+		if unrepresentable.Reason == emptyQuestionStep("ask-lists") {
+			before, ask, err, unrepresentable, breaksTheRule = followEmptyQuestionStep(
+				t, service, artifactID, "ask-lists", &edit, err, unrepresentable)
+		}
+		kept := textWords(before)
+		if breaksTheRule {
+			if !blocksToDelete.MatchString(unrepresentable.Reason) {
+				why := noDeleteExplanation(ask, unrepresentable.Reason)
+				if why == "" || strings.Contains(unrepresentable.Reason, "delete the blocks") {
+					t.Fatalf("the refusal names no delete list and does not say why: %v", err)
+				}
+				if !liveTree(t, service, artifactID).EqualWithBlockIDs(before) {
+					t.Fatalf("the refused ask edit wrote to the document: %v", err)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				unnamed++
+				if noDelete[why]++; noDelete[why] == 1 {
+					noDeleteShape[why] = shape
+				}
+				return
 			}
-			kept := textWords(before)
-			if breaksTheRule {
-				if !blocksToDelete.MatchString(unrepresentable.Reason) {
-					why := noDeleteExplanation(ask, unrepresentable.Reason)
-					if why == "" || strings.Contains(unrepresentable.Reason, "delete the blocks") {
-						t.Fatalf("the refusal names no delete list and does not say why: %v", err)
-					}
-					if !liveTree(t, service, artifactID).EqualWithBlockIDs(before) {
-						t.Fatalf("the refused ask edit wrote to the document: %v", err)
-					}
-					mu.Lock()
-					defer mu.Unlock()
-					unnamed++
-					if noDelete[why]++; noDelete[why] == 1 {
-						noDeleteShape[why] = shape
-					}
-					return
+			deletes, quoted := refusalDeletes(t, err)
+			if len(deletes) == 0 || len(quoted) != len(ask.Children) {
+				t.Fatalf("the refusal names %q to delete and quotes %d blocks, want a delete and the ask's %d: %v", deletes, len(quoted), len(ask.Children), err)
+			}
+			ops := make([]model.EditOp, 0, len(deletes))
+			for _, id := range deletes {
+				if !slices.ContainsFunc(ask.Children, func(child *pmdoc.Node) bool { return child.Attrs[pmdoc.BlockIDAttr] == id }) {
+					t.Fatalf("the refusal names %q to delete, which is no block of the ask: %v", id, err)
 				}
-				deletes, quoted := refusalDeletes(t, err)
-				if len(deletes) == 0 || len(quoted) != len(ask.Children) {
-					t.Fatalf("the refusal names %q to delete and quotes %d blocks, want a delete and the ask's %d: %v", deletes, len(quoted), len(ask.Children), err)
+				ops = append(ops, model.EditOp{Op: "delete", Block: id})
+			}
+			kept = []string{}
+			for _, block := range before.Children {
+				if block != ask {
+					kept = append(kept, textWords(block)...)
+					continue
 				}
-				ops := make([]model.EditOp, 0, len(deletes))
-				for _, id := range deletes {
-					if !slices.ContainsFunc(ask.Children, func(child *pmdoc.Node) bool { return child.Attrs[pmdoc.BlockIDAttr] == id }) {
-						t.Fatalf("the refusal names %q to delete, which is no block of the ask: %v", id, err)
-					}
-					ops = append(ops, model.EditOp{Op: "delete", Block: id})
-				}
-				kept = []string{}
-				for _, block := range before.Children {
-					if block != ask {
-						kept = append(kept, textWords(block)...)
+				for _, child := range ask.Children {
+					id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+					if !slices.Contains(deletes, id) {
+						kept = append(kept, textWords(child)...)
 						continue
 					}
-					for _, child := range ask.Children {
-						id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
-						if !slices.Contains(deletes, id) {
-							kept = append(kept, textWords(child)...)
-							continue
-						}
-						for _, word := range textWords(child) {
-							if !strings.Contains(quoted[id], word) {
-								t.Fatalf("the refusal does not quote %q of block %q it has the caller delete: %v", word, id, err)
-							}
+					for _, word := range textWords(child) {
+						if !strings.Contains(quoted[id], word) {
+							t.Fatalf("the refusal does not quote %q of block %q it has the caller delete: %v", word, id, err)
 						}
 					}
 				}
-				if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
-					t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", deletes, applyErr, err)
+			}
+			if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+				t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", deletes, applyErr, err)
+			}
+			if editErr := sendAskOptions(service, artifactID, edit); editErr != nil {
+				t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", deletes, editErr, err)
+			}
+		}
+		settleCurrentGeneration(t, service, artifactID)
+		after := liveTree(t, service, artifactID)
+		repaired := firstAsk(after)
+		if got, exists := repaired.Attrs["invalid"]; exists {
+			t.Fatalf("after following the refusal the ask is invalid: %v\nrefusal: %v", got, err)
+		}
+		block, parseErr := parseAskBlock(repaired)
+		if strictErr := readAskBlockStrictly(repaired); parseErr != nil || strictErr != nil || repaired.Attrs["urgency"] != "high" {
+			t.Fatalf("after following the refusal the ask reads %v / %v with urgency %v, want it valid and the ask edit applied\nrefusal: %v",
+				parseErr, strictErr, repaired.Attrs["urgency"], err)
+		}
+		if edit.Question != nil && block.question != *edit.Question {
+			t.Fatalf("after following the refusal the ask asks %q, want the question the follow wrote, %q\nrefusal: %v",
+				block.question, *edit.Question, err)
+		}
+		if state, question, options := blockAskRow(t, service, artifactID, "ask-lists"); state != "open" || question != block.question || !slices.Equal(options, block.options) {
+			t.Fatalf("ask row = state=%q question=%q options=%#v, want it open as the block reads: %q %#v", state, question, options, block.question, block.options)
+		}
+		words := textWords(after)
+		for _, word := range kept {
+			if !slices.Contains(words, word) {
+				t.Fatalf("the document lost %q, which the refusal did not name for deletion: it reads %q\nrefusal: %v", word, words, err)
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		followed++
+	}
+	for start := 0; start < len(cases); start += askBodyCasesPerDocument {
+		group := cases[start:min(start+askBodyCasesPerDocument, len(cases))]
+		t.Run(fmt.Sprintf("document-%d", start/askBodyCasesPerDocument+1), func(t *testing.T) {
+			t.Parallel()
+			artifactID := askBodyDocument(t, service, group[0].number)
+			for _, one := range group {
+				if !t.Run(one.shape, func(t *testing.T) { runCase(t, artifactID, one) }) {
+					// A case that failed leaves the decision as it found it or worse, so the
+					// cases after it on this document start from a base of their own.
+					artifactID = askBodyDocument(t, service, one.number)
 				}
-				if editErr := sendAskOptions(service, artifactID, edit); editErr != nil {
-					t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", deletes, editErr, err)
-				}
 			}
-			settleCurrentGeneration(t, service, artifactID)
-			after := liveTree(t, service, artifactID)
-			repaired := firstAsk(after)
-			if got, exists := repaired.Attrs["invalid"]; exists {
-				t.Fatalf("after following the refusal the ask is invalid: %v\nrefusal: %v", got, err)
-			}
-			block, parseErr := parseAskBlock(repaired)
-			if strictErr := readAskBlockStrictly(repaired); parseErr != nil || strictErr != nil || repaired.Attrs["urgency"] != "high" {
-				t.Fatalf("after following the refusal the ask reads %v / %v with urgency %v, want it valid and the ask edit applied\nrefusal: %v",
-					parseErr, strictErr, repaired.Attrs["urgency"], err)
-			}
-			if edit.Question != nil && block.question != *edit.Question {
-				t.Fatalf("after following the refusal the ask asks %q, want the question the follow wrote, %q\nrefusal: %v",
-					block.question, *edit.Question, err)
-			}
-			if state, question, options := blockAskRow(t, service, artifactID, "ask-lists"); state != "open" || question != block.question || !slices.Equal(options, block.options) {
-				t.Fatalf("ask row = state=%q question=%q options=%#v, want it open as the block reads: %q %#v", state, question, options, block.question, block.options)
-			}
-			words := textWords(after)
-			for _, word := range kept {
-				if !slices.Contains(words, word) {
-					t.Fatalf("the document lost %q, which the refusal did not name for deletion: it reads %q\nrefusal: %v", word, words, err)
-				}
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			followed++
 		})
 	}
 }
@@ -1594,9 +1646,15 @@ func TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDec
 			t.Logf("%d naming no delete (%s among them): %s", count, noDeleteShape[reason], reason)
 		}
 	})
+	type askBodyCase struct {
+		shape  string
+		number int
+		// build makes the body's blocks again for each use: the live room writes the nodes it is
+		// given, and the tree read back holds its own.
+		build func(*testing.T) []*pmdoc.Node
+	}
+	cases := make([]askBodyCase, 0, len(bodies))
 	for index, body := range bodies {
-		// The blocks are built again for each use: the live room writes the nodes it is given,
-		// and the tree read back holds its own.
 		build := func(t *testing.T) []*pmdoc.Node {
 			built := make([]*pmdoc.Node, len(body))
 			for position, kind := range body {
@@ -1604,7 +1662,7 @@ func TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDec
 					built[position] = askBodyBlock(t, kind, position+1)
 					continue
 				}
-				built[position] = askNestedDecisionBlock(t, position+1, nested[(index+position)%len(nested)])
+				built[position] = askNestedDecisionBlock(t, index, position+1, nested[(index+position)%len(nested)])
 			}
 			return built
 		}
@@ -1618,70 +1676,82 @@ func TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDec
 		if pmdoc.AskContentError(&pmdoc.Node{Type: "ask", Children: build(t)}) == nil {
 			continue
 		}
-		broken++
-		t.Run(strings.Join(shape, "-"), func(t *testing.T) {
+		cases = append(cases, askBodyCase{shape: strings.Join(shape, "-"), number: index + 2, build: build})
+	}
+	broken = len(cases)
+	// runCase puts one body in the decision the document holds and follows every refusal it draws.
+	runCase := func(t *testing.T, artifactID string, one askBodyCase) {
+		shape := one.shape
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			firstAsk(tree).Children = one.build(t)
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		unreadable := unreadableAsks(before)
+		whys := []string{}
+		// The decision an option holds is refused on its own first: repairing it must not
+		// wait on the decision holding it, and must not send the caller round in a circle.
+		// A decision asking nothing is read here too, since the refusal of an ask edit of it
+		// names the step that repairs it, a question, which no delete writes.
+		for _, decision := range nestedAsks(firstAsk(before).Children) {
+			if readAskBlockStrictly(decision) == nil {
+				continue
+			}
+			id, _ := decision.Attrs[pmdoc.BlockIDAttr].(string)
+			whys = append(whys, followAskRefusal(t, service, artifactID, id))
+		}
+		if readAskBlockStrictly(firstAsk(liveTree(t, service, artifactID))) != nil {
+			whys = append(whys, followAskRefusal(t, service, artifactID, "ask-lists"))
+		} else if err := editAskUrgency(service, artifactID, "ask-lists"); err != nil {
+			t.Fatalf("ask edit of the decision the nested repair left reading as one: %v", err)
+		}
+		settleCurrentGeneration(t, service, artifactID)
+		// No follow left a decision worse than it found it: every decision that still does
+		// not read as one did not read as one before any of them either, each refusal having
+		// named either a delete that repaired the decision it was sent to, or no delete at
+		// all and why.
+		after := liveTree(t, service, artifactID)
+		for id, reason := range unreadableAsks(after) {
+			if _, found := unreadable[id]; !found {
+				t.Fatalf("after following every refusal, ask block %q no longer reads as a decision: %v", id, reason)
+			}
+			// Following the refusals has reached its end: a decision that still does not read
+			// as one is refused the next edit with no delete at all, so a caller following
+			// them is never sent round a circle.
+			next := editAskUrgency(service, artifactID, id)
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(next, &unrepresentable) || blocksToDelete.MatchString(unrepresentable.Reason) {
+				t.Fatalf("the edit of ask block %q, which still does not read as a decision (%v), = %v, want a refusal naming no delete",
+					id, reason, next)
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if readAskBlockStrictly(firstAsk(after)) == nil {
+			valid++
+		}
+		for _, why := range whys {
+			if why == "" {
+				followed++
+				continue
+			}
+			unnamed++
+			if noDelete[why]++; noDelete[why] == 1 {
+				noDeleteShape[why] = shape
+			}
+		}
+	}
+	for start := 0; start < len(cases); start += askBodyCasesPerDocument {
+		group := cases[start:min(start+askBodyCasesPerDocument, len(cases))]
+		t.Run(fmt.Sprintf("document-%d", start/askBodyCasesPerDocument+1), func(t *testing.T) {
 			t.Parallel()
-			// A document of its own on an issue of its own, so no two bodies share a lock.
-			artifactID := createIssueDocument(t, service.store, index+2, "# First")
-			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
-			settleCurrentGeneration(t, service, artifactID)
-			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
-				firstAsk(tree).Children = build(t)
-				return tree
-			})
-			settleCurrentGeneration(t, service, artifactID)
-			before := liveTree(t, service, artifactID)
-			unreadable := unreadableAsks(before)
-			whys := []string{}
-			// The decision an option holds is refused on its own first: repairing it must not
-			// wait on the decision holding it, and must not send the caller round in a circle.
-			// A decision asking nothing is read here too, since the refusal of an ask edit of it
-			// names the step that repairs it, a question, which no delete writes.
-			for _, decision := range nestedAsks(firstAsk(before).Children) {
-				if readAskBlockStrictly(decision) == nil {
-					continue
-				}
-				id, _ := decision.Attrs[pmdoc.BlockIDAttr].(string)
-				whys = append(whys, followAskRefusal(t, service, artifactID, id))
-			}
-			if readAskBlockStrictly(firstAsk(liveTree(t, service, artifactID))) != nil {
-				whys = append(whys, followAskRefusal(t, service, artifactID, "ask-lists"))
-			} else if err := editAskUrgency(service, artifactID, "ask-lists"); err != nil {
-				t.Fatalf("ask edit of the decision the nested repair left reading as one: %v", err)
-			}
-			settleCurrentGeneration(t, service, artifactID)
-			// No follow left a decision worse than it found it: every decision that still does
-			// not read as one did not read as one before any of them either, each refusal having
-			// named either a delete that repaired the decision it was sent to, or no delete at
-			// all and why.
-			after := liveTree(t, service, artifactID)
-			for id, reason := range unreadableAsks(after) {
-				if _, found := unreadable[id]; !found {
-					t.Fatalf("after following every refusal, ask block %q no longer reads as a decision: %v", id, reason)
-				}
-				// Following the refusals has reached its end: a decision that still does not read
-				// as one is refused the next edit with no delete at all, so a caller following
-				// them is never sent round a circle.
-				next := editAskUrgency(service, artifactID, id)
-				var unrepresentable *ErrAskBlockUnrepresentable
-				if !errors.As(next, &unrepresentable) || blocksToDelete.MatchString(unrepresentable.Reason) {
-					t.Fatalf("the edit of ask block %q, which still does not read as a decision (%v), = %v, want a refusal naming no delete",
-						id, reason, next)
-				}
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if readAskBlockStrictly(firstAsk(after)) == nil {
-				valid++
-			}
-			for _, why := range whys {
-				if why == "" {
-					followed++
-					continue
-				}
-				unnamed++
-				if noDelete[why]++; noDelete[why] == 1 {
-					noDeleteShape[why] = strings.Join(shape, "-")
+			artifactID := askBodyDocument(t, service, group[0].number)
+			for _, one := range group {
+				if !t.Run(one.shape, func(t *testing.T) { runCase(t, artifactID, one) }) {
+					// A case that failed leaves the decision as it found it or worse, so the
+					// cases after it on this document start from a base of their own.
+					artifactID = askBodyDocument(t, service, one.number)
 				}
 			}
 		})
@@ -2444,12 +2514,14 @@ func askChildHolding(ask *pmdoc.Node, blockID string) *pmdoc.Node {
 
 // askNestedDecisionBlock is the D block of an ask's body at position: a bullet list whose option
 // holds a decision of its own, its body the blocks of body, its words found nowhere else in the
-// document.
-func askNestedDecisionBlock(t *testing.T, position int, body []string) *pmdoc.Node {
+// document. run names the case it is built for, so the decision's id is that case's own: the ask
+// row settlement opens for it outlives the case on the document it ran on, and a later case
+// repeating the id would meet that row rather than open one (askBodyCasesPerDocument).
+func askNestedDecisionBlock(t *testing.T, run, position int, body []string) *pmdoc.Node {
 	t.Helper()
 	list := parsedBlock(t, fmt.Sprintf("- Choice%d: Holds%d\n", position, position))
 	decision := parsedBlock(t, fmt.Sprintf(
-		":::ask{#ask-held-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nPlaceholder%d?\n:::\n", position, position))
+		":::ask{#ask-held-%d-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nPlaceholder%d?\n:::\n", run, position, position))
 	children := make([]*pmdoc.Node, len(body))
 	for index, kind := range body {
 		children[index] = askHeldBodyBlock(t, kind, position, index+1)

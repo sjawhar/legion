@@ -99,10 +99,12 @@ func storedOrderOverlappingHistory(t *testing.T) [][]byte {
 }
 
 func TestStoredOrderReplayWithOverlappingParkedUpdates(t *testing.T) {
+	t.Parallel()
 	checkStoredOrderEquivalence(t, storedOrderOverlappingHistory(t), false, time.Time{})
 }
 
 func TestStoredOrderReplayMatchesFullPrefixReplay(t *testing.T) {
+	t.Parallel()
 	seed := newDocumentCopy(crdt.WithClientID(100))
 	defer seed.Destroy()
 	seed.Transact(typeParagraph(seed, "base"))
@@ -170,6 +172,7 @@ func TestStoredOrderReplayMatchesFullPrefixReplay(t *testing.T) {
 }
 
 func TestBuildForkPreservesOverlappingParkedUpdates(t *testing.T) {
+	t.Parallel()
 	updates := storedOrderOverlappingHistory(t)
 	full := newDocumentCopy()
 	defer full.Destroy()

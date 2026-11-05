@@ -203,6 +203,9 @@ func TestTwoCreditedWritersBothSurviveACrashRestart(t *testing.T) {
 // The issue route closes an issue's rooms on its request's context, which the pool tracks as one
 // caller holding at most one connection. Every closing document still records its latest edit
 // source and releases its state, however many documents the issue has.
+//
+// It runs on its own because it swaps process-wide state: each case sets GOMAXPROCS, which every
+// test running beside it would be given.
 func TestClosingAnIssueOnATrackedContextPersistsEveryDocumentsCredit(t *testing.T) {
 	for _, procs := range []int{4, 16} {
 		t.Run(fmt.Sprintf("GOMAXPROCS=%d", procs), func(t *testing.T) {

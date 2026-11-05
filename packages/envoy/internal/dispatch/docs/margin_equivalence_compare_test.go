@@ -193,11 +193,9 @@ func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, fl
 	ctx := context.Background()
 	var observed flowObservation
 	if side.classes == nil {
-		t.Fatal("no room of the side was loaded with the class recorder (recordClasses), which a flow that starts from the browser edit installs")
+		t.Fatal("no class recorder (installClassRecorder) was installed on the side, which newEquivalenceSide installs")
 	}
-	side.classes.mu.Lock()
-	classesFrom := len(side.classes.classes)
-	side.classes.mu.Unlock()
+	classesFrom := side.classes.count(ids.artifact)
 
 	tx, err := side.database.Pool.Begin(ctx)
 	if err != nil {
@@ -249,9 +247,7 @@ func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, fl
 		observed.Blocks = encodeObserved(blocks)
 	}
 
-	side.classes.mu.Lock()
-	recorded := slices.Clone(side.classes.classes[classesFrom:])
-	side.classes.mu.Unlock()
+	recorded := side.classes.since(ids.artifact, classesFrom)
 	tagged := 0
 	for _, class := range recorded {
 		origin := fmt.Sprintf("%T", class.origin)

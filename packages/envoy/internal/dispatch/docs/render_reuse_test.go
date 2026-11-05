@@ -1836,6 +1836,8 @@ func topLevelAskElement(t *testing.T, fragment *crdt.YXmlFragment) *crdt.YXmlEle
 // replica has started (pauseCollections), since the replica holds the rendering only weakly and a
 // collection in between would otherwise decide the counts; the collector runs again before the
 // shadow renders, so a race build's memory does not grow through the whole test.
+// It runs on its own because it swaps process-wide state: pauseCollections turns the garbage
+// collector off, which every test allocating beside it would be given.
 func TestRenderReuseACatchUpTakesTheLoadsRendering(t *testing.T) {
 	t.Run("the first commit takes the load's rendering", func(t *testing.T) {
 		service, artifactID, sh := newRenderReuseService(t)

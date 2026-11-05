@@ -1605,7 +1605,9 @@ func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) 
 // observer, which takes the record (consumeUpdateClass). An observer registered in
 // OnLoadDocument after the service's own runs there: ygo fires a transaction's update observers in
 // the order they were registered, and the room registers its persistence observer after
-// OnLoadDocument returns. Only rooms loaded after recordClasses installs it are read.
+// OnLoadDocument returns. Only rooms loaded after the recorder is installed are read. Each record
+// names the room it came from, so a service holding more than one recorded room reads each room's
+// records apart from the others' (count, since).
 type recordedClasses struct {
 	mu      sync.Mutex
 	classes []recordedClass
@@ -1614,16 +1616,16 @@ type recordedClasses struct {
 // recordedClass is the class the room recorded for one update and the origin the room applied
 // that update with; found is false when the room recorded none for it.
 type recordedClass struct {
+	room   string
 	origin any
 	class  documentUpdateClass
 	found  bool
 }
 
-// recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
-// have loaded before the recorder was there, so the room it returns is read.
-func recordClasses(t *testing.T, service *Service, artifactID string) (*recordedClasses, *crdt.Doc) {
-	t.Helper()
-	ctx := context.Background()
+// installClassRecorder installs the recorder on service, for every room it loads from now on. A
+// caller that installs it before the service has loaded anything - before any test goroutine of
+// its own runs - needs no reload; recordClasses is for one that does.
+func installClassRecorder(service *Service) *recordedClasses {
 	recorded := &recordedClasses{}
 	load := service.srv.OnLoadDocument
 	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
@@ -1631,7 +1633,7 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 			return err
 		}
 		doc.OnUpdate(func(update []byte, origin any) {
-			read := recordedClass{origin: origin}
+			read := recordedClass{room: room, origin: origin}
 			if state := service.lockExistingState(room); state != nil {
 				for _, class := range state.updateClasses {
 					if bytes.Equal(class.update, update) {
@@ -1647,6 +1649,15 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 		})
 		return nil
 	}
+	return recorded
+}
+
+// recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
+// have loaded before the recorder was there, so the room it returns is read.
+func recordClasses(t *testing.T, service *Service, artifactID string) (*recordedClasses, *crdt.Doc) {
+	t.Helper()
+	ctx := context.Background()
+	recorded := installClassRecorder(service)
 	if err := service.Evict(ctx, artifactID); err != nil {
 		t.Fatalf("evict the room loaded before the recorder: %v", err)
 	}
@@ -1654,6 +1665,38 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 		t.Fatalf("load the recorded room: %v", err)
 	}
 	return recorded, service.srv.GetDoc(artifactID)
+}
+
+// count is how many updates the rooms of artifactID have recorded so far: the cursor a caller
+// reads its own records from (since).
+func (r *recordedClasses) count(artifactID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	counted := 0
+	for _, class := range r.classes {
+		if class.room == artifactID {
+			counted++
+		}
+	}
+	return counted
+}
+
+// since is every class the rooms of artifactID recorded past the first from of them, oldest first.
+func (r *recordedClasses) since(artifactID string, from int) []recordedClass {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var taken []recordedClass
+	for _, class := range r.classes {
+		if class.room != artifactID {
+			continue
+		}
+		if from > 0 {
+			from--
+			continue
+		}
+		taken = append(taken, class)
+	}
+	return taken
 }
 
 // latest is the class the room recorded for the latest update it applied with an origin matches

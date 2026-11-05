@@ -31,6 +31,13 @@ import (
 // DISPATCH_TEST_SPEC_CORPUS names a directory, every *.md in it is one more document. Those may be
 // private specs: the test logs only their size, sha256 and anchor count, and a difference on one
 // names only lengths and sha256s.
+//
+// Each source runs as a parallel subtest of its own: its flows are one chain of room loads and
+// writes over a document of hundreds of kilobytes, and run in turn, so the sources run beside one
+// another rather than one after the other. Each has a comment-id range of its own
+// (equivalenceDocument.comments) and its own issues and artifacts (flowIDsFor), and the sides
+// record each room's update classes apart (installClassRecorder), so the two share nothing but
+// the two services and their pools.
 func TestAMarginWriteMatchesTheWholeDocumentWrite(t *testing.T) {
 	t.Parallel()
 	sources := []equivalenceSource{
@@ -43,13 +50,12 @@ func TestAMarginWriteMatchesTheWholeDocumentWrite(t *testing.T) {
 		newEquivalenceSide(t, "whole-document write", false, wholeDocumentWrite),
 	}
 	flows := equivalenceFlows()
-	number := 0
-	for _, source := range sources {
+	for ordinal, source := range sources {
 		t.Run(source.name, func(t *testing.T) {
-			document := prepareEquivalenceDocument(t, source)
-			for _, flow := range flows {
-				number++
-				ids := flowIDsFor(number)
+			t.Parallel()
+			document := prepareEquivalenceDocument(t, source, ordinal)
+			for index, flow := range flows {
+				ids := flowIDsFor(ordinal*len(flows) + index + 1)
 				t.Run(flow.name, func(t *testing.T) {
 					compareFlow(t, sides, document, flow, ids)
 				})

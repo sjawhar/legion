@@ -59,6 +59,7 @@ func describeError(err error) string {
 // at: before the room's first transaction, when the replica holds no state and both reads take
 // their copy from the room itself, and after each of its browser edits.
 func TestTheSettlementTreeReadMatchesTheReadPointsTreeAcrossTheCorpus(t *testing.T) {
+	t.Parallel()
 	reads, documents := driveCorpusRooms(t, func(at corpusRoom) {
 		if err := settlementTreeReads(t, at); err != nil {
 			t.Fatalf("%s: both reads of a corpus document answered %s, want the tree", at.stage, describeError(err))

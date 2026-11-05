@@ -44,6 +44,10 @@ import (
 // a document neither wrote, which reads back with no block at all once each kept a block the other
 // replaced. Every load of the room is checked against the writes its earlier instances took
 // (watchRoomLoads), and the document the store holds at the end is the last one written.
+//
+// It runs on its own because it measures this process: its readers and writers run for a window of
+// three to thirty seconds and the evidence is how many rounds and writes they made in it, which
+// every parallel test's share of the cores would take from.
 func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -425,6 +429,9 @@ func (w *roomLoads) count() int {
 // been. Two writers stand in for two browser peers (ygo applies a peer's update in that peer's
 // goroutine and fires the observer there), and a third is the service projecting comment records.
 // Under -race the walk of the live tree is a data race with the other writers.
+// It runs on its own because it swaps process-wide state: it captures the default logger
+// (logtest.SetDefault) to read the WARN a torn walk logs, which any other test logging beside it
+// would be given.
 func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour

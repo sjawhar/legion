@@ -76,9 +76,11 @@ var (
 
 const suggestedWording = "The accepted wording replaces the suggested sentence."
 
-var (
-	newCommentID   = equivalenceCommentID(100)
-	replyCommentID = equivalenceCommentID(101)
+// The ids of the comments a flow writes itself, taken from its document's own range
+// (equivalenceDocument.commentID): the new anchored comment and the reply.
+const (
+	newCommentNumber   = 100
+	replyCommentNumber = 101
 )
 
 func equivalenceCommentID(number int) string {
@@ -181,6 +183,10 @@ func generatedSpec(size int) string {
 type equivalenceDocument struct {
 	name    string
 	private bool
+	// comments is the first comment id of the document's own range: its anchors are marked with
+	// ids from it, and so are the comments a flow on it writes, so two documents' flows may run
+	// at once on one side's database, whose comment ids are one table's primary key.
+	comments int
 	// markdown is the seed's rendering, its first version.
 	markdown string
 	seed     []byte
@@ -190,6 +196,11 @@ type equivalenceDocument struct {
 	lateEdit []byte
 	anchors  []seedAnchor
 	newQuote string
+}
+
+// commentID is the id, in the document's own range, of the comment numbered within it.
+func (d *equivalenceDocument) commentID(number int) string {
+	return equivalenceCommentID(d.comments + number)
 }
 
 // seedAnchor is one seeded comment or suggestion: its row and its margin record.
@@ -230,10 +241,11 @@ func (d *equivalenceDocument) shown(text string) string {
 
 // prepareEquivalenceDocument seeds source's tree with its anchors, written in-process as
 // MarkQuote writes them (pmdoc.MarkRange at pmdoc.FindQuote's range, MarkSpec's mark) beside
-// their margin records, and builds the two browser edits from the seed.
-func prepareEquivalenceDocument(t *testing.T, source equivalenceSource) *equivalenceDocument {
+// their margin records, and builds the two browser edits from the seed. ordinal is the source's
+// place in the run, which gives its document a comment-id range of its own.
+func prepareEquivalenceDocument(t *testing.T, source equivalenceSource, ordinal int) *equivalenceDocument {
 	t.Helper()
-	document := &equivalenceDocument{name: source.name, private: source.private}
+	document := &equivalenceDocument{name: source.name, private: source.private, comments: (ordinal + 1) * 1_000}
 	tree, err := pmdoc.Parse(source.markdown)
 	if err != nil {
 		t.Fatalf("parse the document: %s", document.shown(err.Error()))
@@ -255,7 +267,7 @@ func prepareEquivalenceDocument(t *testing.T, source equivalenceSource) *equival
 	document.newQuote = quotes[anchorCount]
 	for index, quote := range quotes[:anchorCount] {
 		anchor := seedAnchor{
-			id:       equivalenceCommentID(index + 1),
+			id:       document.commentID(index + 1),
 			kind:     MarkComment,
 			quote:    quote,
 			body:     fmt.Sprintf("Seeded comment %d on this sentence.", index+1),
@@ -472,8 +484,9 @@ type equivalenceSide struct {
 	write    marginWriter
 	database *store.Store
 	service  *Service
-	// classes records the class the side's rooms record for each update they apply, installed at
-	// the side's first room load (recordClasses).
+	// classes records, per room, the class the side's rooms record for each update they apply. It
+	// is installed before any flow runs, rather than at the first room load, so two documents'
+	// flows may run at once without one installing the hook under the other's load.
 	classes *recordedClasses
 }
 
@@ -484,7 +497,10 @@ func newEquivalenceSide(t *testing.T, name string, margin bool, write marginWrit
 	if _, err := database.Pool.Exec(context.Background(), `insert into projects (key, name) values ('EQ', 'Equivalence')`); err != nil {
 		t.Fatalf("create the %s's project: %v", name, err)
 	}
-	return &equivalenceSide{name: name, margin: margin, write: write, database: database, service: service}
+	return &equivalenceSide{
+		name: name, margin: margin, write: write, database: database, service: service,
+		classes: installClassRecorder(service),
+	}
 }
 
 // execer is a pool or a transaction.
@@ -545,9 +561,7 @@ func (side *equivalenceSide) setUp(t *testing.T, document *equivalenceDocument, 
 	if flow.corrupt != nil {
 		return
 	}
-	if side.classes == nil {
-		side.classes, _ = recordClasses(t, side.service, ids.artifact)
-	} else if err := side.service.warmLiveDocument(ctx, ids.artifact); err != nil {
+	if err := side.service.warmLiveDocument(ctx, ids.artifact); err != nil {
 		t.Fatalf("load the flow's room: %v", err)
 	}
 	side.applyBrowserEdit(t, ids.artifact, document.edit, browserEditor)
