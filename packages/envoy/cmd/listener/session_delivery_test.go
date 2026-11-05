@@ -662,9 +662,9 @@ func TestSessionConsumerInvalidSessionIDIsRefused(t *testing.T) {
 	rig.requireNothingWritten(t, "ses.dotted")
 }
 
-// A registration carrying no delivery field is a plugin older than consumer delivery. Nothing
+// A registration carrying no delivery field asks for nothing this listener delivers. Nothing
 // would deliver to it, so it is refused 409 and leaves no row, no entry and no consumer: the
-// plugin learns it must ask for a consumer instead of waiting on a subscription of its own, and,
+// client learns it must ask for a consumer instead of waiting on a subscription of its own, and,
 // since this body names no plugin either - every build before those fields - the refusal says so,
 // nothing else in the answer saying which session process it was.
 func TestSessionConsumerRegistrationWithoutDeliveryIsRefused(t *testing.T) {
@@ -692,6 +692,42 @@ func TestSessionConsumerRegistrationAskingForNoConsumerIsRefused(t *testing.T) {
 	rig.requireNothingWritten(t, "ses_no_ask")
 }
 
+// The floor a client is dated against rises with each release that changes what a client must do,
+// so the comparison has to hold for floors this repository has not reached yet. Comparing each
+// part as text is the bug this table exists to catch: it calls "9" above "16" and "10" below "9",
+// which dates a two-year-old build as current and a current one as too old. The cases below are
+// the ones a refusal table pinned to the floor 14.1.0 cannot write.
+func TestVersionAtLeastComparesEachPartAsANumber(t *testing.T) {
+	for _, c := range []struct {
+		version string
+		floor   string
+		want    bool
+	}{
+		// A minor of two digits is above a single-digit floor, which a comparison made as text
+		// gets backwards.
+		{version: "14.10.0", floor: "14.9.0", want: true},
+		{version: "16.10.0", floor: "16.6.0", want: true},
+		// As text "9" sorts above "16", so that comparison calls a two-year-old build current.
+		{version: "9.0.0", floor: "16.6.0", want: false},
+		// A prerelease of a release carries that release's behaviour: the suffix is cut off the
+		// part rather than making the build undatable.
+		{version: "14.1.0-rc.1", floor: "14.1.0", want: true},
+		// A patch above the floor's does not make up for a minor below it.
+		{version: "14.0.9", floor: "14.1.0", want: false},
+		// A build that is no version at all cannot be dated, and the refusal then names the
+		// upgrade.
+		{version: "source", floor: "14.1.0", want: false},
+		// A version missing its patch part is not one this listener can date either.
+		{version: "14.1", floor: "14.1.0", want: false},
+	} {
+		t.Run(c.version+" against "+c.floor, func(t *testing.T) {
+			if got := versionAtLeast(c.version, c.floor); got != c.want {
+				t.Fatalf("versionAtLeast(%q, %q) = %t, want %t", c.version, c.floor, got, c.want)
+			}
+		})
+	}
+}
+
 // A session that receives nothing reads why in its own transcript, from this refusal, so the
 // refusal has to say what that session's own client must do. A build older than consumer delivery,
 // another client, or one that names its build vaguely is told the release to upgrade to and what
@@ -712,6 +748,24 @@ func TestSessionConsumerRefusalSaysWhatTheClientMustDo(t *testing.T) {
 			sessionID: "ses_old_plugin",
 			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"14.0.0"`,
 			want:      []string{upgrade, "@sjawhar/pi-envoy 14.0.0"},
+		},
+		{
+			// 8 sorts above 14 as text, so a comparison made part by part as strings would call
+			// this release current and tell a session on a two-year-old plugin that its relay
+			// subject is closed. The tag pi-envoy-v8.14.1 exists.
+			name:      "a released pi-envoy whose major sorts above the floor as text",
+			sessionID: "ses_text_sorted_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"8.14.1"`,
+			want:      []string{upgrade, "@sjawhar/pi-envoy 8.14.1"},
+		},
+		{
+			// A prerelease of the floor carries the floor's behaviour, so its suffix is left out
+			// of the comparison rather than making the build undatable.
+			name:      "a prerelease of the release that asks for one",
+			sessionID: "ses_prerelease_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"14.1.0-rc.1"`,
+			want:      []string{"@sjawhar/pi-envoy 14.1.0-rc.1 asks for a consumer only while its relay subject is open"},
+			unwanted:  upgrade,
 		},
 		{
 			name:      "a pi-envoy at the release that asks for one",

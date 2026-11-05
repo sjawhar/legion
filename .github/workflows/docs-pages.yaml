@@ -124,7 +124,7 @@ on:
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
-      # ci.yaml's *dispatch_server, 54 patterns:
+      # ci.yaml's *dispatch_server, 55 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/bus/testdata/*'

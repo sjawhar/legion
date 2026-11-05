@@ -509,8 +509,8 @@ func (p *idleRigRoleProcess) dial(bootToken string) error {
 // listener that owns the session publishes each message of the session's durable consumer. Every
 // message the session is given arrives there, and that is where the rig records it. A role-lane
 // forward and an ad-hoc topic's forward are published into the stream on the session's agent
-// subject, so each comes back as a frame of that consumer; the session subscribes to that subject
-// for nothing and answers nothing on it.
+// subject, so each comes back as a frame of that consumer; the session does not subscribe to that
+// subject at all and answers nothing on it.
 //
 // It is taken, and flushed to the server, before the session registers, so nothing the
 // listener relays or forwards once it knows the session can arrive before this process listens.

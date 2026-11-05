@@ -519,7 +519,7 @@ type RequestOptions = {
   readonly onUnanswered?: () => void;
   /**
    * The session this call acts for, where its body names one the listener binds to the
-   * credential: a subscribe, an unsubscribe, a deregistration, a role claim, a replay, and a
+   * credential: a subscribe, an unsubscribe, a deregistration, a role claim, and a
    * send's or a publish's `source_session`. The listener answers 403 to a body naming a session
    * its broker token does not (`sessionNotBound`, packages/envoy/cmd/listener/brokerauth.go), so
    * the credential is asked for that session's own headers rather than the caller's current

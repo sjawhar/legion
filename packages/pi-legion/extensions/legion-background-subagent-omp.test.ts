@@ -146,10 +146,11 @@ interface Held {
 
 /**
  * A role-lane message as the Envoy listener forwards it to the role holder's agent subject: the
- * envelope keeps the role topic, so the session would acknowledge it on the request's reply inbox
- * (`expectsLaneReceipt`, packages/envoy-client/src/delivery.ts). This one is published with no
- * reply inbox — nothing here reads the receipt, and the case's stamp is the publish — under a
- * dedupe key minted per label as pi-envoy's card-delivery-omp.test.ts builds it.
+ * envelope keeps the role topic. The listener forwards each role message once from one shared
+ * role-lane queue group, stored only, with no receipt
+ * (.dispatch/architecture/envoy-listener.md), so this one is published with no reply inbox and
+ * the case's stamp is the publish, under a dedupe key minted per label as pi-envoy's
+ * card-delivery-omp.test.ts builds it.
  */
 function forwardedRoleEnvelope(summary: string, label: string): string {
   const minted = createHash("sha256").update(label).digest("hex").slice(0, 32);

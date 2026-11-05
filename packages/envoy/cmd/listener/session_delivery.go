@@ -45,14 +45,8 @@ const (
 // consumerPluginPackage and consumerPluginMinimumVersion name the release of Oh My Pi's plugin
 // that first asked for the session's durable consumer, @sjawhar/pi-envoy 14.1.0
 // (packages/pi-envoy/CHANGELOG.md, 14.1.0, "Consumer delivery"); every release before it receives
-// from a plain NATS subscription this listener no longer feeds. A release at or above it asks for
-// a consumer whenever its relay subject is open and sends no delivery field while it holds none,
-// which every release up to 16.5.0 does (packages/pi-envoy/extensions/envoy.ts on main, the
-// `asking === undefined` spread of its registration body; this change's own plugin instead
-// registers not at all until that subject is open, @legion/envoy-client's registerWithRelay). So
-// the refusal below names an upgrade only for a client below that version, for another plugin, or
-// for one that names no version at all, and tells a current one that its relay subject was not
-// open (noConsumerRemedy).
+// from a plain NATS subscription this listener no longer feeds. noConsumerRemedy says what the
+// refusal below tells a client at or above that release and what it tells every other.
 const (
 	consumerPluginPackage        = "@sjawhar/pi-envoy"
 	consumerPluginMinimumVersion = "14.1.0"
@@ -295,11 +289,12 @@ func clientNamed(body subscribeBody) string {
 
 // noConsumerRemedy says what the client that asked for no consumer must do, for the refusal below.
 // A pi-envoy at or above consumerPluginMinimumVersion asks for a consumer whenever its relay
-// subject is open and sends no delivery field while it holds none, so such a session needs no
-// upgrade: what it lacks is the relay subject, and its next heartbeat registers again once it has
-// one. Every other client - an older pi-envoy, another plugin, or one naming no version or no
-// package at all - is told the build to replace, since an operator reading this refusal in the
-// session's own transcript has nothing else to go on.
+// subject is open, and sends no delivery field while it holds none
+// (packages/pi-envoy/extensions/envoy.ts, the `asking === undefined` spread of its registration
+// body), so such a session needs no upgrade: what it lacks is that subject, and its next heartbeat
+// registers again once it has one. Every other client - an older pi-envoy, another plugin, or one
+// naming no version or no package at all - is told the build to replace, since an operator reading
+// this refusal in the session's own transcript has nothing else to go on.
 func noConsumerRemedy(body subscribeBody) string {
 	named := clientNamed(body)
 	if body.Plugin == consumerPluginPackage && versionAtLeast(body.PluginVersion, consumerPluginMinimumVersion) {
@@ -359,11 +354,10 @@ func versionPart(version string, i int) (int, bool) {
 // refusal decided before the lock was taken returns noUnlock.
 func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal, func()) {
 	if body.Delivery == nil || !body.Delivery.Consumer {
-		// A registration with no delivery field asks for nothing this listener delivers: a plugin
-		// older than consumer delivery, or a current one whose relay subject is not open. Either
-		// receives nothing, so it is told so rather than left registered and silent, with what to
-		// do about it (noConsumerRemedy), since the session's own transcript is where whoever runs
-		// that build reads why its Envoy went quiet.
+		// A registration with no delivery field asks for nothing this listener delivers, so it is
+		// told so rather than left registered and silent, with what to do about it
+		// (noConsumerRemedy, which says which client each answer is for), since the session's own
+		// transcript is where whoever runs it reads why its Envoy went quiet.
 		return sessionDeliveryOutcome{}, &deliveryRefusal{
 			status: http.StatusConflict,
 			Error: fmt.Sprintf("%s asked for no session consumer: a session receives only what its own consumer holds, so register with delivery.consumer true; %s",
