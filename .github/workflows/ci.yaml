@@ -286,6 +286,8 @@ jobs:
             # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
