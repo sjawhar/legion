@@ -162,6 +162,7 @@ const {
   setLegionBootstrapExitForTests,
   setLegionCapabilityBudgetsForTests,
   setLegionCapabilityHostForTests,
+  setLegionCapabilitySendTimeoutForTests,
 } = await import("./legion");
 
 type RegisteredCommand = {
@@ -294,6 +295,8 @@ afterEach(async () => {
   // The budgets a capability test shortened; production never sets them, and no later test may
   // inherit a 20 ms check.
   setLegionCapabilityBudgetsForTests(undefined);
+  // The same for the bound on one `claims/ready` the schedule sends: back to the real 10 s.
+  setLegionCapabilitySendTimeoutForTests(undefined);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
   testAgentRoster().splice(0);
   for (const key of environmentKeys) {
@@ -3275,6 +3278,57 @@ describe("Legion OMP extension", () => {
       expect(String(failures[1]?.context?.error)).toContain("connection refused");
       // The activity route answered 204, so no warning of the activity report's is among these.
       expect(warnings.filter((warning) => warning.message.includes("activity report"))).toEqual([]);
+    });
+
+    test("a send the daemon takes and never answers is bounded: the tick ends, the failure costs one log line, and the session measures again at its next due tick", async () => {
+      // The real bound is 10 s, past Bun's limit for one test; the machine is the same at 50 ms.
+      setLegionCapabilitySendTimeoutForTests(50);
+      const session = await capabilitySession({
+        sessionId: "ses_capability_hung",
+        // The boot's own ready is the first; the schedule's first report is the second, which
+        // this daemon takes and never answers.
+        ready: (attempt) =>
+          attempt === 2
+            ? Promise.withResolvers<Response>().promise
+            : new Response(null, { status: 204 }),
+      });
+      /** Resolves at the line the bound writes, which is what a test waits for here: the bound
+       * is a real timer inside the schedule, and no duration is guessed at. */
+      const bounded = Promise.withResolvers<void>();
+
+      const { warnings } = await loggedWarnings(async () => {
+        const stopSink = logger.registerLogSink((entry) => {
+          if (entry.message.includes("capability report did not reach the daemon")) {
+            bounded.resolve();
+          }
+        });
+        try {
+          await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+          await session.reported(1);
+          // The bound passes: the send is aborted and the tick that made it ends, rather than
+          // leaving the schedule's in-flight guard set for the session's life.
+          await bounded.promise;
+          await drain();
+          await ticks(session.pane, CAPABILITY_RETRY_TICKS);
+          await session.reported(2);
+          await drain();
+        } finally {
+          stopSink();
+        }
+      });
+
+      // The attempt was spent as a refused one is, and the next due tick measured afresh.
+      expect(measurements(session.calls)).toBe(2);
+      expect(session.reports).toHaveLength(2);
+      expect(session.reports[1]?.rows.every((row) => row.ok)).toBe(true);
+      expect(session.pane.exits).toEqual([]);
+      const failures = warnings.filter(
+        (warning) =>
+          warning.message === "legion: this session's capability report did not reach the daemon"
+      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.context?.issue).toBe("REPO-43");
+      expect(String(failures[0]?.context?.error)).toContain("claims/ready did not answer within");
     });
   });
 });

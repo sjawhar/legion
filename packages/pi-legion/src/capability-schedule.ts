@@ -23,7 +23,11 @@ import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
  *
  * The send is a plain `send` call with no retry helper, unlike the boot's ready
  * (`callReadyWithRetry`, @legion/pi-shared/daemon-client), so one failure costs one log line and
- * one attempt and the next due tick is the retry.
+ * one attempt and the next due tick is the retry. It is bounded at
+ * `CAPABILITY_SEND_TIMEOUT_MS`: a daemon that takes the connection and never answers would
+ * otherwise leave this machine's in-flight guard set for the session's life, so the session would
+ * measure once, send once, log nothing and never measure again — the very failure this schedule
+ * exists to end.
  *
  * Every collaborator is injected — the claim, the idle answer, the measurement, the send and the
  * log — so this module reaches no Legion module of its own, and a test drives the machine tick
@@ -37,6 +41,15 @@ export const CAPABILITY_FIRST_DUE_TICK = 6;
 export const CAPABILITY_RETRY_TICKS = 5;
 /** The measurements one process makes in all. */
 export const CAPABILITY_ATTEMPTS = 3;
+/** How long one `claims/ready` carrying a report may take: the same 10 s the whole measurement is
+ * bounded at (`CAPABILITY_REPORT_TIMEOUT_MS`, ./capability-report), and far inside the 25 s
+ * `CAPABILITY_RETRY_TICKS` leaves before the next due tick, so a send that times out never
+ * overlaps the attempt that follows it. */
+export const CAPABILITY_SEND_TIMEOUT_MS = 10_000;
+
+/** `10 s` for a whole number of seconds, else the milliseconds, as the measurement's own budgets
+ * read (`budgetLabel`, ./capability-report). */
+const label = (ms: number): string => (ms % 1_000 === 0 ? `${ms / 1_000} s` : `${ms} ms`);
 
 export interface CapabilitySchedule {
   /** One reading of the session's own interval. It never rejects, and the caller never awaits it:
@@ -53,13 +66,19 @@ export interface CapabilitySchedule {
  * idle answer, read afresh at every reading: `undefined` is a host that answers nothing about its
  * idleness, and counts as idle. `measure` is one whole measurement of the six rows, `send` is one
  * `claims/ready` carrying a report, which resolves when the daemon took it and rejects on a
- * refusal or a transport failure, and `log` writes one line with its fields.
+ * refusal or a transport failure, `sendTimeoutMs` is how long that send may take, and `log`
+ * writes one line with its fields.
  */
 export function createCapabilitySchedule(deps: {
   readonly claim: ClaimCapability;
   readonly isIdle: () => boolean | undefined;
   readonly measure: () => Promise<LegionCapabilityReportBody>;
-  readonly send: (report: LegionCapabilityReportBody) => Promise<void>;
+  /** One `claims/ready` carrying the report. `signal` aborts once the bound passes, and the send
+   * is to abort the request with it (`LegionDaemonClient.ready`'s `signal`), so a daemon that
+   * hangs is left no open request. */
+  readonly send: (report: LegionCapabilityReportBody, signal: AbortSignal) => Promise<void>;
+  /** The bound on one send, `CAPABILITY_SEND_TIMEOUT_MS` in production. */
+  readonly sendTimeoutMs: number;
   readonly log: (message: string, fields: Readonly<Record<string, string>>) => void;
 }): CapabilitySchedule {
   /** The ticks since the interval was registered; `1` at the first tick. */
@@ -100,14 +119,26 @@ export function createCapabilitySchedule(deps: {
     }
   };
 
-  /** One `claims/ready` carrying `report`, which the caller has already marked running. The hold
-   * is cleared however it ends — a refused report is dropped rather than sent again as it
-   * stands — and every ending but a settled one leaves the next attempt due
-   * `CAPABILITY_RETRY_TICKS` after the send ended, read then, so a slow send does not shorten the
-   * wait. */
+  /** One `claims/ready` carrying `report`, which the caller has already marked running, bounded
+   * at `deps.sendTimeoutMs`: the bound aborts the request and rejects, so a daemon that takes
+   * the connection and never answers ends this send rather than the session's reporting. A send
+   * that times out takes the path a refused one takes — the report dropped, one line logged, the
+   * attempt spent, the next attempt due `CAPABILITY_RETRY_TICKS` later. The hold is cleared
+   * however it ends — a refused report is dropped rather than sent again as it stands — and
+   * every ending but a settled one leaves the next attempt due `CAPABILITY_RETRY_TICKS` after
+   * the send ended, read then, so a slow send does not shorten the wait. */
   const sendReport = async (report: LegionCapabilityReportBody): Promise<void> => {
+    // The abort is what ends the real request; the race is what guarantees this machine ends even
+    // against a `send` that ignores the signal, so `running` always clears.
+    const controller = new AbortController();
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(() => {
+      const late = new Error(`claims/ready did not answer within ${label(deps.sendTimeoutMs)}`);
+      deadline.reject(late);
+      controller.abort(late);
+    }, deps.sendTimeoutMs);
     try {
-      await deps.send(report);
+      await Promise.race([deps.send(report, controller.signal), deadline.promise]);
       // "Every row present" over the session's own six rows. A report with no rows settles
       // nothing: it proves no capability.
       if (report.rows.length > 0 && report.rows.every((row) => row.ok)) {
@@ -117,6 +148,7 @@ export function createCapabilitySchedule(deps: {
     } catch (error) {
       note("legion: this session's capability report did not reach the daemon", error);
     } finally {
+      clearTimeout(timer);
       held = undefined;
     }
     dueTick = count + CAPABILITY_RETRY_TICKS;

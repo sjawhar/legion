@@ -49,7 +49,11 @@ import {
   measureCapabilities,
   ompCapabilityHost,
 } from "../src/capability-report";
-import { type CapabilitySchedule, createCapabilitySchedule } from "../src/capability-schedule";
+import {
+  CAPABILITY_SEND_TIMEOUT_MS,
+  type CapabilitySchedule,
+  createCapabilitySchedule,
+} from "../src/capability-schedule";
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
@@ -87,6 +91,15 @@ export function setLegionCapabilityHostForTests(host: () => CapabilityHost): voi
 let capabilityBudgets: CapabilityBudgets | undefined;
 export function setLegionCapabilityBudgetsForTests(budgets: CapabilityBudgets | undefined): void {
   capabilityBudgets = budgets;
+}
+
+// The bound on one `claims/ready` the capability schedule sends. Production never sets this, so
+// the send keeps `CAPABILITY_SEND_TIMEOUT_MS`, the real 10 s; a test sets a short one, since a
+// send the daemon never answers would otherwise hold its tick for 10 s, past Bun's 5 s default
+// for a single test.
+let capabilitySendTimeoutMs = CAPABILITY_SEND_TIMEOUT_MS;
+export function setLegionCapabilitySendTimeoutForTests(ms: number | undefined): void {
+  capabilitySendTimeoutMs = ms ?? CAPABILITY_SEND_TIMEOUT_MS;
 }
 
 async function persistedTranscript(
@@ -387,14 +400,18 @@ export default function legionExtension(pi: PiApi): void {
         capabilitySchedule = createCapabilitySchedule({
           claim: capabilityClaim,
           measure: () => measureCapabilities(capabilityHost(), capabilityInput, capabilityBudgets),
-          send: (report) =>
-            roleDaemon().ready({
-              claimToken: capabilityClaim.claimToken,
-              sessionId: capabilityClaim.sessionID,
-              secret: capabilityClaim.secret,
-              generation: capabilityClaim.generation,
-              capabilities: report,
-            }),
+          send: (report, signal) =>
+            roleDaemon().ready(
+              {
+                claimToken: capabilityClaim.claimToken,
+                sessionId: capabilityClaim.sessionID,
+                secret: capabilityClaim.secret,
+                generation: capabilityClaim.generation,
+                capabilities: report,
+              },
+              { signal }
+            ),
+          sendTimeoutMs: capabilitySendTimeoutMs,
           // Live, as the activity report reads it: a context captured once would answer for the
           // session as it was at its start.
           isIdle: () => paneContext?.isIdle?.(),
