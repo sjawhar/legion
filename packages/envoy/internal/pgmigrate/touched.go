@@ -37,6 +37,9 @@ var touchedTablePatterns = []struct {
 	{regexp.MustCompile(`(?is)\bdrop\s+table\s+(?:if\s+exists\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`), dropsTable},
 	{regexp.MustCompile(`(?is)\btruncate\s+(?:table\s+)?(?:only\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`), truncatesRows},
 	{regexp.MustCompile(`(?is)\bcreate\s+(?:or\s+replace\s+)?(?:constraint\s+)?trigger\s+[\w."]+.*?\bon\s+([\w."]+)`), 0},
+	// drop trigger names its table where create trigger does, and takes the same ACCESS
+	// EXCLUSIVE lock on it.
+	{regexp.MustCompile(`(?is)\bdrop\s+trigger\s+(?:if\s+exists\s+)?[\w."]+\s+on\s+([\w."]+)`), 0},
 	// The table may carry an alias (update comments c set …), as 0043 and 0044 write it.
 	{regexp.MustCompile(`(?is)\bupdate\s+(?:only\s+)?([\w."]+)(?:\s+(?:as\s+)?[\w"]+)?\s+set\b`), updatesRows},
 	{regexp.MustCompile(`(?is)\bdelete\s+from\s+(?:only\s+)?([\w."]+)`), deletesRows},
@@ -59,16 +62,17 @@ var touchedIndexPatterns = []*regexp.Regexp{
 
 // TouchedTables names, sorted and once each, the tables a migration's statements lock above
 // ACCESS SHARE: the targets of alter table, create index … on, drop table, truncate, create
-// trigger … on, update (with or without an alias), delete from, insert into and lock table, and
-// the table a foreign key references. A table a statement only reads (insert … select from, create
-// view … as) is left out: its ACCESS SHARE waits only behind an ACCESS EXCLUSIVE holder. It reads
-// the statements the migration runs (migrationCode): not its comments, its string literals or the
-// body of a function it defines, and a DO block's body as statements; it lowercases and strips a
-// public. qualifier and quotes. The forms are the ones the repository's migrations use. What it
-// reads from the text alone is part of the census's reading, CensusTables, which every store's
-// tests hold to what each of its migrations really locks
-// (pgmigratetest.CheckTouchedTablesAgainstLocks), so a migration written in a form this does not
-// know (reindex, cluster, create policy … on, merge into) fails there and needs a pattern here.
+// trigger … on, drop trigger … on, update (with or without an alias), delete from, insert into
+// and lock table, and the table a foreign key references. A table a statement only reads (insert
+// … select from, create view … as) is left out: its ACCESS SHARE waits only behind an ACCESS
+// EXCLUSIVE holder. It reads the statements the migration runs (migrationCode): not its
+// comments, its string literals or the body of a function it defines, and a DO block's body as
+// statements; it lowercases and strips a public. qualifier and quotes. The forms are the ones
+// the repository's migrations use. What it reads from the text alone is part of the census's
+// reading, CensusTables, which every store's tests hold to what each of its migrations really
+// locks (pgmigratetest.CheckTouchedTablesAgainstLocks), so a migration written in a form this
+// does not know (reindex, cluster, create policy … on, merge into) fails there and needs a
+// pattern here.
 func TouchedTables(sql string) []string {
 	return touchedNames(readMigration(sql).code)
 }

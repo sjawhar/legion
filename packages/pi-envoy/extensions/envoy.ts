@@ -46,6 +46,7 @@ import {
   readArrivals,
   renderInbound,
   senderLabel,
+  wholeCarriedBody,
 } from "@legion/envoy-client/delivery";
 import { commandName } from "@legion/envoy-client/dispatch-command";
 import {
@@ -57,6 +58,7 @@ import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
+import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
@@ -269,6 +271,9 @@ const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
+/** How long a delivery waits on the whole body of an item an event carried only in part before
+ *  it goes out with that part and the note saying so. */
+const WHOLE_BODY_TIMEOUT_MS = 10_000;
 /** The most BTW event ids an instance remembers, so a failure notice naming one stays inert. */
 const BTW_EVENTS_LIMIT = 1_000;
 /** The line a replayed BTW's notice ends with: it runs nothing and asks for nothing. */
@@ -1309,7 +1314,20 @@ export default function envoyExtension(pi: PiApi): void {
         // A `/model` or `/effort` has run by now: the viewer's header shows its result before the
         // reply that names it reaches the page.
         refreshAgentStreamSettings(sessionID);
-        if (reply !== undefined) await postDispatchReply(delivery, { body: reply }, replySessionID);
+        if (reply === undefined) return;
+        try {
+          await postDispatchReply(delivery, { body: reply }, replySessionID);
+        } catch (error) {
+          // Nothing cuts the reply here, so a reply Dispatch refuses - one holding a block longer
+          // than it takes - would leave the person who typed the command with no answer at all.
+          // Dispatch's own words say why, and they are short enough to post in its place.
+          if (!(error instanceof DispatchServiceError) || !error.fromDispatch) throw error;
+          await postDispatchReply(
+            delivery,
+            { body: `Your command ran, and Dispatch refused its output: ${error.message}` },
+            replySessionID
+          );
+        }
       })
       .catch((error: unknown) => {
         logger.warn("envoy: the reply to a person's typed input did not reach Dispatch", {
@@ -1391,7 +1409,7 @@ export default function envoyExtension(pi: PiApi): void {
     receivedAt: number,
     relayed?: ConsumerFrame
   ): Promise<void> => {
-    const rendered = renderInbound(raw, sessionID, subject);
+    let rendered = renderInbound(raw, sessionID, subject);
     // Acknowledge first. The listener waits two seconds for this receipt: its
     // publish route, which forwards a role message or an ad-hoc topic's copy
     // here, forwards again until a receipt arrives within its four-second window
@@ -1481,6 +1499,20 @@ export default function envoyExtension(pi: PiApi): void {
     if (identity !== undefined && replay?.delivered(identity) === true) {
       claim.settle();
       return;
+    }
+    // A body is bounded block by block, so one event can carry its first part alone, and an
+    // event the bus refused carries none of it (`cutItem`). The agent is prompted with the
+    // whole body the comment or message route answers, read through this session's own
+    // Dispatch; with no Dispatch configured, or a read that fails, it keeps what the event
+    // carried and the note that says so. This runs after the receipt and after every drop
+    // above, so no acknowledgement waits on it and no frame nobody sees costs a read.
+    if (rendered.cutItem !== undefined) {
+      const dispatch = timedDispatchClient(WHOLE_BODY_TIMEOUT_MS);
+      const body =
+        dispatch === undefined
+          ? undefined
+          : await wholeCarriedBody(dispatch, rendered.cutItem, sessionID);
+      if (body !== undefined) rendered = renderInbound(raw, sessionID, subject, body);
     }
     const envelope = rendered.envelope;
     if (envelope !== undefined) noteInbox(envelope);
