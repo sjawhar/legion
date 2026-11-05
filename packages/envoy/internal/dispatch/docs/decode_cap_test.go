@@ -740,7 +740,7 @@ func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *tes
 	if structs <= maxUpdateItems || structCeiling(past) < structs {
 		t.Fatalf("the fork's struct total is %d and its ceiling %d, want the total past the %d cap and the ceiling at or above it", structs, structCeiling(past), maxUpdateItems)
 	}
-	err := service.refuseUndecodable(cold, past, nil)
+	err := service.refuseUndecodable(context.Background(), cold, past, nil)
 	if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "this change would leave the document's live state past the 1048576 items ygo decodes in one update") {
 		t.Fatalf("refuseUndecodable of a fork past the cap with parked structs: %v, want ErrDocumentTooLarge naming the cap", err)
 	}
@@ -749,7 +749,7 @@ func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *tes
 	if structs := countRoomStructs(short); structCeiling(short) < structs {
 		t.Fatalf("the short fork's struct total is %d and its ceiling %d, want the ceiling at or above it", structs, structCeiling(short))
 	}
-	if err := service.refuseUndecodable(cold, short, nil); err != nil {
+	if err := service.refuseUndecodable(context.Background(), cold, short, nil); err != nil {
 		t.Fatalf("refuseUndecodable of a fork far short of the cap: %v, want nil", err)
 	}
 }
@@ -865,7 +865,7 @@ func TestAWriteIsRefusedAsUndecodableByTheRoomItsForkUndercounts(t *testing.T) {
 		}
 		service := calibratedService()
 		counts := recordWriteCounts(service)
-		err := service.refuseUndecodable(write, fork, updates)
+		err := service.refuseUndecodable(context.Background(), write, fork, updates)
 		if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "this change would leave the document's live state past the 1048576 items ygo decodes in one update") {
 			t.Fatalf("refuseUndecodable of a write the room cannot take: %v, want ErrDocumentTooLarge naming the cap", err)
 		}
@@ -889,7 +889,7 @@ func TestAWriteIsRefusedAsUndecodableByTheRoomItsForkUndercounts(t *testing.T) {
 		})
 		service := calibratedService()
 		counts := recordWriteCounts(service)
-		if err := service.refuseUndecodable(write, fork, updates); err != nil {
+		if err := service.refuseUndecodable(context.Background(), write, fork, updates); err != nil {
 			t.Fatalf("refuseUndecodable of a short write to a short room: %v, want nil", err)
 		}
 		requireNeverCounted(t, counts)
@@ -963,13 +963,13 @@ func BenchmarkDecodeCapConfirmation(b *testing.B) {
 				measure func(measurer *elementMeasurer) error
 			}{
 				{"count", func(measurer *elementMeasurer) error {
-					if got := measurer.structsAfter(live, serverWrite{bounded: true, apply: typeOne}); got != structs {
+					if got := measurer.structsAfter(context.Background(), live, serverWrite{bounded: true, apply: typeOne}, state); got != structs {
 						return fmt.Errorf("the write was counted to %d structs, want the document's %d", got, structs)
 					}
 					return nil
 				}},
 				{"copy-and-count", func(measurer *elementMeasurer) error {
-					if got := measurer.structsAfter(live, serverWrite{apply: typeOne}); got <= structs {
+					if got := measurer.structsAfter(context.Background(), live, serverWrite{apply: typeOne}, state); got <= structs {
 						return fmt.Errorf("the write was counted to %d structs, want more than the document's %d", got, structs)
 					}
 					return nil

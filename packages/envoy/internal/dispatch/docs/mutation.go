@@ -82,24 +82,30 @@ type liveOperation struct {
 // (ErrServiceUnavailable) and a context Join did not return (errUnjoined), then takes the
 // transaction's write to the document (joinLiveWrite) and brings that write's fork up to date with
 // the room (forkLive). The caller defers the operation's abandon once it is open.
-func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liveOperation, error) {
+//
+// It answers the context the rest of the operation runs under: ctx carrying the write's grant of
+// the copy-heap bound (liveWrite.carriedBy), so every decode and copy the operation makes - the
+// decode-cap copy of the room its fork was read from, above all (elementMeasurer.structsAfter) -
+// covers that one grant rather than acquire a second inside it. The fork's build covered it
+// already, for the fork's whole life.
+func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liveOperation, context.Context, error) {
 	if s.shuttingDown(artifactID) {
-		return liveOperation{}, ErrServiceUnavailable
+		return liveOperation{}, ctx, ErrServiceUnavailable
 	}
 	tx, joined := txFromContext(ctx)
 	if !joined {
-		return liveOperation{}, errUnjoined
+		return liveOperation{}, ctx, errUnjoined
 	}
 	ledger := ledgerFrom(ctx)
 	write, err := s.joinLiveWrite(ctx, ledger, artifactID)
 	if err != nil {
-		return liveOperation{}, err
+		return liveOperation{}, ctx, err
 	}
 	fork, err := s.forkLive(ctx, write)
 	if err != nil {
-		return liveOperation{}, err
+		return liveOperation{}, ctx, err
 	}
-	return liveOperation{tx: tx, write: write, fork: fork, read: write.forkRead}, nil
+	return liveOperation{tx: tx, write: write, fork: fork, read: write.forkRead}, write.carriedBy(ctx), nil
 }
 
 // abandon, deferred once the operation is open, undoes what an operation that changed the fork but
@@ -167,7 +173,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	// third tree (LEGION-504). Only a room the count leaves within what the transaction adds of
 	// the cap is copied as well, for the one count, as the three server writes copy it
 	// (structsAfter).
-	if err := s.refuseUndecodable(op.write, op.fork, op.updates); err != nil {
+	if err := s.refuseUndecodable(ctx, op.write, op.fork, op.updates); err != nil {
 		return err
 	}
 	update, err := mergeUpdates(op.updates)
@@ -260,7 +266,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
 // string the render would make. A fork no rendering is known for is rendered here.
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error) error {
-	op, err := s.openLiveOperation(ctx, artifactID)
+	op, ctx, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
 		return err
 	}
@@ -443,7 +449,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 // A marks-map Set always adds an item, so the write always changes the fork: unlike applyLive it
 // never answers websocket.ErrNoChanges. A panic in it is its error (recoverMutation), as there.
 func (s *Service) applyMargin(ctx context.Context, artifactID string, actor model.Actor, markID string, record map[string]any) error {
-	op, err := s.openLiveOperation(ctx, artifactID)
+	op, ctx, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
 		return err
 	}

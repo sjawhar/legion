@@ -255,7 +255,7 @@ func measureCopyPaths(t *testing.T, state []byte, atCap bool) {
 			return replica
 		}},
 		{"the measurer's copy for a server write", func() { fresh(); live = resident() }, liveState, func() any {
-			return service.measurer.structsAfter(live, serverWrite{apply: func(*crdt.Doc) {}})
+			return service.measurer.structsAfter(ctx, live, serverWrite{apply: func(*crdt.Doc) {}}, service.roomStateBytes(live))
 		}},
 		// The rebuild is granted twice this state's weight for the two decodes it holds at once
 		// (rebuildSource); the row holds them to one state's weight, the stricter figure.

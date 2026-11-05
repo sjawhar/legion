@@ -1029,7 +1029,7 @@ func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 			fragment := copied.GetXmlFragment(fragmentName)
 			copied.Transact(func(txn *crdt.Transaction) { _ = unmarkFound(txn, fragment, expired, math.MaxInt) })
 		}}
-		if runs > 0 && s.leavesPastDecodeCap(doc, sweep) {
+		if runs > 0 && s.leavesPastDecodeCap(context.Background(), doc, sweep) {
 			sweepErr = errPastDecodeCap
 			return
 		}

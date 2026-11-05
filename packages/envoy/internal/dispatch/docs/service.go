@@ -1294,7 +1294,7 @@ func (s *Service) stampBlockIDs(doc *crdt.Doc, origin any, repairs int) (*pmdoc.
 	stamp := serverWrite{adds: uint64(repairs), bounded: true, apply: func(copied *crdt.Doc) {
 		_, _ = rewriteLive(copied, nil, func(live *pmdoc.Node) bool { return pmdoc.EnsureBlockIDsCount(live) > 0 })
 	}}
-	if s.leavesPastDecodeCap(doc, stamp) {
+	if s.leavesPastDecodeCap(context.Background(), doc, stamp) {
 		return nil, 0, nil, errPastDecodeCap
 	}
 	minted := 0

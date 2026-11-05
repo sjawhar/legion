@@ -612,10 +612,11 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 // update's. A base that does not apply leaves no replica (recover). A rendering other than the
 // one the room last published is published as the room's measurement (publishSize).
 //
-// The decode runs under a grant of the copy-heap bound of its own (holdServerCopy), given back
-// once the copy is the replica's. Its wait has no deadline: it is the update observer's, which
-// holds mu and has no request to end it. No observer runs under a grant, so the observer holds
-// none of the bound as it waits (podCopyHeaps).
+// The decode runs under a grant of the copy-heap bound where one is free at once, and beside the
+// bound's holders where none is (holdFreeCopy), given back once the copy is the replica's. It
+// may not wait: it runs under mu, which a live write holding a grant of that bound waits for to
+// clone the replica (warmFork, liveWriteWeight), so a wait here would hold that write and this
+// replica against each other. No observer holds a grant as it runs (podCopyHeaps).
 //
 // The first run of a replica its load handed no copy takes the load's rendering (loaded) as
 // base's rather than render base, when the rendering is still there: a weak pointer that no
@@ -644,7 +645,7 @@ func (r *renderedReplica) start(room string, base []byte) {
 	published := r.rendering
 	loaded := r.loaded.Value()
 	r.loaded = weak.Pointer[replicaRendering]{}
-	release := holdServerCopy(len(base))
+	release := holdFreeCopy(len(base))
 	doc := newDocumentCopy()
 	err := crdt.ApplyUpdateV1(doc, base, nil)
 	release()

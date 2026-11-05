@@ -2331,3 +2331,19 @@ func TestUnauthenticatedLargeIssueBodyIsRejectedBeforeDecoding(t *testing.T) {
 		t.Fatalf("unauthenticated large body status = %d body=%s, want %d", response.Code, response.Body.String(), http.StatusUnauthorized)
 	}
 }
+
+// A write refused because the pod is already holding as many whole-document copies as its memory
+// allows is DOC_SERVICE_UNAVAILABLE and 503, which the client contract is to retry: the write
+// waited for its fork's part of the copy-heap bound until its own request ended, and changed
+// nothing (docs' liveWrite.coverFork, errWriteBusy, and
+// TestAnAPIWriteWhoseRequestEndsWhileItWaitsForTheCopyBoundIsRefusedAndChangesNothing, which
+// holds that the service answers this error).
+func TestAWriteRefusedForTheCopyHeapBoundIsDocServiceUnavailable(t *testing.T) {
+	busy := fmt.Errorf("%w: the document service is holding as many whole-document copies as its memory allows: %w",
+		docs.ErrServiceUnavailable, context.Canceled)
+	recorder := httptest.NewRecorder()
+	(&server{}).writeHandlerError(recorder, busy)
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"`+codeDocServiceUnavailable+`"`) {
+		t.Fatalf("status=%d body=%s, want %d %s", recorder.Code, recorder.Body.String(), http.StatusServiceUnavailable, codeDocServiceUnavailable)
+	}
+}

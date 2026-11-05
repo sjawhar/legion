@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -397,8 +398,8 @@ func elements(size pmdoc.DocumentSize) string {
 // structs can still cause, so it refuses every state a decode would. A state past the cap is
 // refused whether or not the write grew the document: storing it would leave every read unable
 // to load it.
-func (s *Service) refuseUndecodable(write *liveWrite, fork *crdt.Doc, updates [][]byte) error {
-	if s.leavesRoomPastDecodeCap(write, fork, updates) {
+func (s *Service) refuseUndecodable(ctx context.Context, write *liveWrite, fork *crdt.Doc, updates [][]byte) error {
+	if s.leavesRoomPastDecodeCap(ctx, write, fork, updates) {
 		return fmt.Errorf("%w: this change would leave the document's live state past the %d items ygo decodes in one update; shorten the change, or split the document",
 			ErrDocumentTooLarge, maxUpdateItems)
 	}
@@ -406,8 +407,10 @@ func (s *Service) refuseUndecodable(write *liveWrite, fork *crdt.Doc, updates []
 }
 
 // leavesRoomPastDecodeCap is refuseUndecodable's question: whether updates, with write's earlier
-// updates, leave the room write's fork was read from past the decode cap.
-func (s *Service) leavesRoomPastDecodeCap(write *liveWrite, fork *crdt.Doc, updates [][]byte) bool {
+// updates, leave the room write's fork was read from past the decode cap. ctx carries the write's
+// grant of the copy-heap bound, which the copy the count may take covers rather than acquiring a
+// second grant inside it (liveWrite.carriedBy, elementMeasurer.structsAfter).
+func (s *Service) leavesRoomPastDecodeCap(ctx context.Context, write *liveWrite, fork *crdt.Doc, updates [][]byte) bool {
 	live := write.forkedFrom.Value()
 	if live == nil {
 		return structCeiling(fork) > maxUpdateItems && countRoomStructs(fork) > maxUpdateItems
@@ -415,7 +418,7 @@ func (s *Service) leavesRoomPastDecodeCap(write *liveWrite, fork *crdt.Doc, upda
 	transaction := append(append(make([][]byte, 0, len(write.updates)+len(updates)), write.updates...), updates...)
 	adds, bounded := updatesAdd(transaction)
 	unapplied := false
-	past := s.leavesPastDecodeCap(live, serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) {
+	past := s.leavesPastDecodeCap(ctx, live, serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) {
 		if err := applyTransactionWrites(copied, transaction); err != nil {
 			// Each update applied to the fork, a decode of the same room; one that does not
 			// apply to the copy leaves a count that cannot be trusted to hold all of it.
@@ -575,11 +578,17 @@ type serverWrite struct {
 // they write within the bound they were answered on whatever such an edit leaves (stampBlockIDs,
 // unmarkExpired), and each of settlement's repairs lands on the one block its id names
 // (repairLive).
-func (s *Service) leavesPastDecodeCap(doc *crdt.Doc, write serverWrite) bool {
+//
+// ctx carries the grant of the copy-heap bound a live write's transaction already holds
+// (liveWrite.carriedBy), which the copy covers rather than acquire a second inside it; a write
+// of the server's own carries none and takes one before the turn (structsAfter says why before).
+// The room's own state is weighed by its running totals here, where the Service that keeps them
+// is at hand (roomStateBytes).
+func (s *Service) leavesPastDecodeCap(ctx context.Context, doc *crdt.Doc, write serverWrite) bool {
 	if write.bounded && plusCapped(structCeiling(doc), write.adds) <= maxUpdateItems {
 		return false
 	}
-	return s.measurer.structsAfter(doc, write) > maxUpdateItems
+	return s.measurer.structsAfter(ctx, doc, write, s.roomStateBytes(doc)) > maxUpdateItems
 }
 
 // errPastDecodeCap is the refusal of a server write outside applyLive - the block-id stamp

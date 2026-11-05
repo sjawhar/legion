@@ -215,18 +215,28 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 // copy's total after the write less its total before. A write the copy shows taking structs away
 // is credited none of them. The copy is a decode of doc's state into a fresh document with doc's
 // client id, so the write's own items take the clocks they would take in doc; it holds a whole
-// second document while it is counted, and is dropped when this returns. The decode and the count
-// on the copy run under a grant of the copy-heap bound of their own (holdServerCopy), covered once
-// doc's state is encoded, which takes doc's lock, and given back with the copy. Its wait has no
-// deadline, as the turn's has none: no holder of the bound waits for the turn or for anything a
-// waiter holds (podCopyHeaps).
+// second document while it is counted, and is dropped when this returns.
+//
+// The grant of the copy-heap bound that holds the copy is covered before the turn is taken, not
+// inside it, and is weighed by stateBytes, the room's whole state as its running totals hold it
+// (Service.roomStateBytes), since doc's state is not encoded until the turn. That order is what
+// keeps the two bounds deadlock-free now that a live write holds a copy grant across its whole
+// transaction (liveWriteWeight): a write holding part of the bound waits here for the turn, so
+// no holder of the turn may wait for the bound, or the two would hold each other. A live write
+// carries its own grant, which already holds more than this copy would ask for, and so waits for
+// nothing here (liveWrite.carriedBy); one of the server's own writes carries none and waits
+// without a deadline, as every copy of the server's own does (holdServerCopy). A turn that
+// answers from the totals alone pays for a copy it does not take, which is the price of covering
+// before the state is encoded; only a document near the decode cap reaches this at all
+// (leavesPastDecodeCap).
 //
 // The one encode of doc's state below is both doc's own total, counted from it as countRoomStructs
 // counts a room's (its parked structs read first), and what the copy is decoded from, so a turn
 // that reaches the copy pays one encode rather than two, and the two totals answer for the same
 // state. A turn the first two cases answer pays what it paid before: the parked structs, that
 // encode and a walk of it.
-func (m *elementMeasurer) structsAfter(doc *crdt.Doc, write serverWrite) uint64 {
+func (m *elementMeasurer) structsAfter(ctx context.Context, doc *crdt.Doc, write serverWrite, stateBytes int) uint64 {
+	defer holdServerCopy(ctx, stateBytes)()
 	m.turn.Lock()
 	defer m.turn.Unlock()
 	pending := doc.PendingStats()
@@ -242,7 +252,6 @@ func (m *elementMeasurer) structsAfter(doc *crdt.Doc, write serverWrite) uint64 
 		return live + write.adds
 	}
 	m.writeMeasured(true)
-	defer holdServerCopy(len(state))()
 	copied := newDocumentCopy(crdt.WithClientID(doc.ClientID()))
 	if err := crdt.ApplyUpdateV1(copied, state, nil); err != nil {
 		// A state whose total is within the cap is within what a decode reads; one that still

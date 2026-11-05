@@ -801,7 +801,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// the copy is the replica's.
 	if record == nil {
 		encoded := crdt.EncodeStateAsUpdateV1(doc, nil)
-		release := holdServerCopy(len(encoded))
+		release := holdServerCopy(ctx, len(encoded))
 		loaded, _ = decodeStoredCopy(encoded, s.maxPendingItems)
 		release()
 	}

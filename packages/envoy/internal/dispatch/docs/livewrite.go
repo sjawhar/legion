@@ -58,6 +58,18 @@ type liveWrite struct {
 	// rebuilt fork authors under a new one (rebuildFork), which replaces it.
 	clientID crdt.ClientID
 	fork     *crdt.Doc
+	// grant is the transaction's part of the pod's copy-heap bound (forkGrant, podCopyHeaps),
+	// shared with every other live write the transaction opens, and forkWeight is what this
+	// write's own fork holds of it: covered for the state the fork is built from before it is
+	// built and given back when the fork is dropped (coverFork, releaseFork), so one grant
+	// covers the fork's whole life - the clone or decode that builds it, the trees the
+	// transaction's operations read off it, the markdown they render, and whatever the write
+	// keeps until it ends (liveWriteWeight). Every decode and copy the write makes runs under a
+	// context carrying it (carriedBy), so each covers that one grant rather than acquire a
+	// second inside it, and none asks for more than it holds, so the transaction never gives
+	// its part of the bound back while it holds a fork.
+	grant      *forkGrant
+	forkWeight int64
 	// point is the room the transaction's read of the document found, at an exact commit position
 	// (Service.forkPoint): its cursor, the durable version the fork's basis stands at, which
 	// gates each append of the write (heldThrough), and seq, the room's updates the fork holds,
@@ -283,7 +295,7 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 // A settlement that got past its supersession check before the write opened commits its own work,
 // and the one the write arms then finds nothing new.
 func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
-	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), done: make(chan struct{})}
+	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), grant: ledger.forkGrant(), done: make(chan struct{})}
 	for {
 		state := s.lockState(artifactID)
 		if state.reloading {
@@ -348,7 +360,11 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // A fork an operation abandoned (applyLive) is built again for the transaction's next operation:
 // read afresh while the transaction has appended nothing of its own, since nothing it stores then
 // was made on the abandoned read; otherwise rebuilt on that read exactly (rebuildFork).
+//
+// Every read of the fork runs under the write's grant of the copy-heap bound (liveWrite.carriedBy),
+// so the decodes the build makes cover that grant rather than acquire one of their own.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
+	ctx = write.carriedBy(ctx)
 	var fork *crdt.Doc
 	var err error
 	switch {
@@ -370,6 +386,96 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	return fork, nil
 }
 
+// forkGrant is one transaction's grant of the copy-heap bound, shared by every live write the
+// transaction opens (Ledger.forks, liveWrite.coverFork): one grant, used by one goroutine - the
+// transaction's - holding what all its open forks are weighed at together (liveWriteWeight). A
+// transaction that writes two documents therefore holds one grant for both forks rather than one
+// each, so it never waits for a part of the bound another grant of its own keeps from ever being
+// free, which is a wait nothing could end.
+type forkGrant struct {
+	grant *heapGrant
+	// weight is what the transaction's open forks are weighed at together: the sum of each
+	// write's forkWeight. The grant is given back whole once no fork is left and is left as it
+	// is while one remains, never shrunk: a shrink would give the bound back and take it again
+	// for the fork that stays, which is a wait while a whole document is held.
+	weight int64
+}
+
+// carriedBy is ctx carrying the transaction's grant of the copy-heap bound, so every decode and
+// copy the write makes covers that one grant (withCopyGrant, holdCopy) rather than acquire a
+// second inside it: the decode that builds a fork (buildForkHeld) and the decode-cap copy of the
+// room the fork was read from (elementMeasurer.structsAfter). Neither asks for more than the
+// grant holds (liveWriteWeight), so neither waits, and the write never gives its part of the
+// bound back while it holds a fork.
+//
+// A write with no transaction behind it carries none and covers none (coverFork): every write a
+// caller makes belongs to one, which makes the grant as it opens the write (openLiveWrite,
+// Ledger.forkGrant), so only a test's hand-built liveWrite reaches the fork read without one,
+// and its decodes take a grant of their own for their own length, as every full-state decode
+// outside a write does (buildForkHeld, holdServerCopy).
+func (w *liveWrite) carriedBy(ctx context.Context) context.Context {
+	if w.grant == nil {
+		return ctx
+	}
+	return w.grant.grant.carriedBy(ctx)
+}
+
+// coverFork makes the transaction's grant hold what a fork built from bytes of state is granted
+// for its whole life (liveWriteWeight), beside whatever the transaction's other open forks are
+// weighed at, waiting within ctx. It is covered before the fork is built - before the replica's
+// lock is taken for the clone that is the usual warm fork (warmFork, rebuildFork), and once the
+// store's read is done for a decode (coldFork) - and given back when the fork is dropped
+// (releaseFork), never in between: every hold the write makes inside it asks for less.
+//
+// The wait is the request's. An API write waits for its part of the bound until its request's
+// context ends and is then refused errWriteBusy, which the API answers 503 and its caller
+// retries; a write the server makes of its own, whose context carries no deadline and no cancel,
+// waits until it holds its grant and is never refused. A weight past the whole bound waits for
+// all of it and runs alone, as a load of the same document does (heapGrant.coverWeight), so no
+// document is too large to be written for want of room in the bound. A wait that ends leaves the
+// transaction holding nothing of the bound, this write's own fork included, which is sound
+// because a refused write's transaction goes no further.
+func (w *liveWrite) coverFork(ctx context.Context, bytes int) error {
+	weight := liveWriteWeight(bytes)
+	if weight <= w.forkWeight {
+		return nil
+	}
+	if w.grant == nil {
+		return nil
+	}
+	forks := w.grant
+	added := weight - w.forkWeight
+	forks.weight += added
+	if err := forks.grant.coverWeight(ctx, forks.weight); err != nil {
+		forks.weight -= added
+		return fmt.Errorf("%w: %w", errWriteBusy, err)
+	}
+	w.forkWeight = weight
+	return nil
+}
+
+// giveFork drops what write's fork held of the transaction's grant (releaseFork), and gives the
+// grant back once no fork of the transaction holds any of it.
+func (w *liveWrite) giveFork() {
+	if w.grant == nil {
+		return
+	}
+	w.grant.weight -= w.forkWeight
+	w.forkWeight = 0
+	if w.grant.weight == 0 {
+		w.grant.grant.release()
+	}
+}
+
+// errWriteBusy refuses a write whose wait for its part of the copy-heap bound ended with its
+// request (liveWrite.coverFork): the pod is already holding as many whole-document
+// copies as its memory allows (MemoryBounds.CopyHeap), and this write's own caller has gone or
+// run out of time. Nothing of the write has been built or appended when it is answered. It is
+// ErrServiceUnavailable, which the API answers 503 DOC_SERVICE_UNAVAILABLE and the client
+// contract is to retry (api's documentErrorCode, writeHandlerError), rather than the 500 an error
+// that maps to no status becomes.
+var errWriteBusy = fmt.Errorf("%w: the document service is holding as many whole-document copies as its memory allows", ErrServiceUnavailable)
+
 // errForkReleased refuses a write to a document whose transaction's fork is gone and cannot be
 // built again: the write has ended, or an operation abandoned the fork after the transaction had
 // appended and the room has committed since the transaction read it, so the state its appends were
@@ -389,13 +495,19 @@ var errForkReleased = fmt.Errorf("%w: the transaction can no longer write this d
 // The read point's own mark stays as the fork read left it (warmFork): the room has committed
 // nothing since that read, so a replica standing at the mark has consumed only this write's
 // published updates, which the rebuilt fork holds too. The replica's rendering does not survive,
-// since the fork holds those updates and the replica does not yet.
+// since the fork holds those updates and the replica does not yet. The grant the rebuilt fork is
+// held under is the write's own, which it has held since its first fork (liveWrite.coverFork):
+// the cold rebuild's decode covers it for the history it reads (buildForkHeld), and the warm one
+// for the room it is about to clone, before the replica's lock is taken.
 func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
 	var fork *crdt.Doc
 	if write.cold {
 		loaded, err := s.persistence.Load(ctx, write.artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+		}
+		if err := write.coverFork(ctx, len(loaded.Update)); err != nil {
+			return nil, err
 		}
 		if fork, err = buildForkHeld(ctx, write.clientID, loaded.Update); err != nil {
 			return nil, fmt.Errorf("fork live document: %w", err)
@@ -404,6 +516,9 @@ func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc,
 		live := s.srv.GetDoc(write.artifactID)
 		if live == nil {
 			return nil, errForkReleased
+		}
+		if err := write.coverFork(ctx, s.roomStateBytes(live)); err != nil {
+			return nil, err
 		}
 		var err error
 		if fork, _, _, err = s.forkPoint(ctx, write.artifactID, live, write.clientID, &write.point); err != nil {
@@ -494,8 +609,18 @@ func (s *Service) roomBehindHead(live *crdt.Doc, head int64) bool {
 // the replica consumes moves the count, the safe way; recover draws a fresh epoch, and epochs are
 // unique in the process, so a replica of another room instance never matches. No pointer to the
 // replica outlives the read.
+//
+// The write covers its grant of the copy-heap bound here, for the room's whole state as the
+// room's running totals hold it (roomStateBytes), before it takes the replica's lock: the clone
+// decodes nothing, but it is a whole copy of the document, and the write keeps it through its
+// tree build and its render (liveWrite.coverFork). It waits for the bound holding no lock and no
+// part of it, so a wait here never stalls the room's update observer, which waits for the
+// replica's lock (renderedReplica.lockForUpdate) and which no holder of the bound waits for.
 func (s *Service) warmFork(ctx context.Context, write *liveWrite, live *crdt.Doc) (*crdt.Doc, error) {
 	seq := write.state.creditSeq.Load()
+	if err := write.coverFork(ctx, s.roomStateBytes(live)); err != nil {
+		return nil, err
+	}
 	fork, point, read, err := s.forkPoint(ctx, write.artifactID, live, write.clientID, nil)
 	if err != nil {
 		return nil, err
@@ -549,6 +674,10 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 		loaded.Update = nil
 		return s.warmFork(ctx, write, live)
 	}
+	if err := write.coverFork(ctx, len(loaded.Update)); err != nil {
+		loaded.Update = nil
+		return nil, err
+	}
 	fork, err := buildForkHeld(ctx, write.clientID, loaded.Update)
 	loaded.Update = nil
 	if err != nil {
@@ -576,17 +705,20 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 	return fork, nil
 }
 
-// buildForkHeld is buildFork under a grant of the copy-heap bound: a whole-state decode, taken
-// once the read that handed over state is done - the store's load for a cold fork, and for a warm
-// one the read of a room whose replica held no state to clone (Service.forkPoint) - so the write
-// holds no part of the bound while it reads or waits for a lock, and given back once the fork is
-// the write's. Its wait ends with ctx, the write's.
+// buildForkHeld is buildFork inside the grant of the copy-heap bound the transaction's write
+// already holds for this fork (liveWrite.coverFork): a whole-state decode, run once the read
+// that handed over the state is done - the store's load for a cold fork, and for a warm one the
+// read of a room whose replica held no state to clone (Service.forkPoint) - so the write holds
+// no part of the bound while it reads or waits for a lock, and holds one from before the decode
+// until its fork is dropped (releaseFork). The grant was covered for at least this state: the
+// cold fork covers it for the history it read, and the warm one for the room's whole state as
+// its running totals hold it, which is never below the copy a replica holding no state leaves
+// (Service.roomStateBytes). So the hold here waits for nothing.
+//
+// A caller whose context carries no grant - a test that forks a room directly - takes one of
+// the server's own for the decode alone, as every other full-state decode does (holdServerCopy).
 func buildForkHeld(ctx context.Context, client crdt.ClientID, state []byte) (*crdt.Doc, error) {
-	release, err := holdCopy(ctx, len(state))
-	if err != nil {
-		return nil, err
-	}
-	defer release()
+	defer holdServerCopy(ctx, len(state))()
 	return buildFork(client, state)
 }
 
@@ -669,9 +801,41 @@ func (w *liveWrite) rendering(fork *crdt.Doc) (renderedTree, bool) {
 // transaction's context holds its ledger and so the write, and a pooled pgx connection keeps the
 // context of the queries it last served. Kept, a heavy document's fork and tree stayed resident
 // after the edit that built them had answered, and beside the room its publish loads (LEGION-504).
+//
+// The write's part of the transaction's copy-heap grant goes with them (giveFork): it was
+// covered for the fork's whole life (coverFork), and once the fork and the trees and renderings
+// taken from it are gone the write holds no whole copy of the document for the bound to hold.
+// An operation that abandons its fork (liveOperation.abandon) gives it back here and the
+// rebuild that follows covers it again, so a transaction whose operation failed does not hold
+// the bound while it waits for whatever its caller does next. The ledger drops every fork of a
+// committed transaction, and with the last of them the grant, before it publishes any of them
+// (Ledger.publish says why before).
 func (w *liveWrite) releaseFork() {
 	w.fork = nil
 	w.tree, w.markdown, w.offsets, w.anchorsTree, w.forkMarkdown = nil, "", nil, nil, nil
+	w.giveFork()
+}
+
+// roomStateBytes is what the whole state of live, a resident room's document, encodes to, as the
+// grant a write's fork of it takes is weighed by (liveWrite.coverFork, liveWriteWeight). It is
+// the room's running whole-state frame (roomCount.frame, roomTotals.runningTotals): the length
+// of the state the room's last count encoded, with what deleting each of its structs can add,
+// and the frame bytes of every update the peer update hook has admitted since. So it is read
+// without encoding anything - an encode is what the clone exists to avoid (Service.forkPoint) -
+// and it states the state at or above its length, which is the safe side for a bound. It lags
+// only what the server's own writes have added since that count, a struct or two each, which the
+// hook never sees (roomTotals says so of the struct total).
+//
+// A room no load listed has no running total, a test's room and nothing in production
+// (keepReplica runs in every load), and is counted here instead: one encode of its state and one
+// walk of it, as a nil total is counted everywhere else (roomTotals.roomStructs).
+func (s *Service) roomStateBytes(live *crdt.Doc) int {
+	totals, _ := s.roomWeighingOf(live).totals()
+	if totals == nil {
+		return int(countRoom(live).frame)
+	}
+	total, _ := totals.runningTotals()
+	return int(total.frame)
 }
 
 // joinRead joins a read of artifactID to the calling transaction, as joinLiveWrite joins a write.

@@ -56,6 +56,11 @@ type Ledger struct {
 	// flushes are the room updates this transaction stored ahead of its own appends, one flush
 	// per document (flushThrough), which its commit marks stored.
 	flushes []*RoomFlush
+	// forks is this transaction's grant of the copy-heap bound, shared by every live write it
+	// opens and made on the first (forkGrant, liveWrite.coverFork): one grant for all its forks,
+	// so a transaction writing two documents never waits for a part of the bound a grant of its
+	// own holds.
+	forks *forkGrant
 }
 
 type ledgerVersion struct {
@@ -583,12 +588,32 @@ func (l *Ledger) ReadBackOf(artifactID, markdown string) *pmdoc.Node {
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.
 // Each update is already durable, so the room's own persistence of it is suppressed. A room that
 // cannot take its update is failed, and reloads the durable document on its next access.
+//
+// Every fork goes first, and with the last of them the transaction's grant of the copy-heap
+// bound (liveWrite.releaseFork). The transaction has committed, so its forks have served every
+// operation they will, and the publish reads only the updates and the renderings recorded beside
+// them. Holding them through the publish would hold a heavy document's fork and tree beside the
+// room the publish loads, which is what LEGION-504 cut; and holding the grant through it would
+// leave a holder of the bound waiting for a room load's own grant (onLoadDocument), a part of
+// the bound its own grant can keep from ever being free.
 func (l *Ledger) publish() {
+	for _, artifactID := range l.order {
+		l.live[artifactID].releaseFork()
+	}
 	for _, artifactID := range l.order {
 		if write := l.live[artifactID]; !write.finished {
 			l.service.publishLiveWrite(write)
 		}
 	}
+}
+
+// forkGrant is this transaction's grant of the copy-heap bound, made on its first live write
+// (forks).
+func (l *Ledger) forkGrant() *forkGrant {
+	if l.forks == nil {
+		l.forks = &forkGrant{grant: newCopyGrant()}
+	}
+	return l.forks
 }
 
 // fail fails the rooms a transaction wrote when its commit returned an error. The commit may
