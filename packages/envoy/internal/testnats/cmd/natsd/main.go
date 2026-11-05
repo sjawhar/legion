@@ -1,6 +1,8 @@
 // Command natsd runs one nats-server in this process, in the foreground, until it is signalled.
-// It is the bus of packages/envoy/scripts/e2e-local.sh, which builds it beside the listener it
-// builds: an agent's machine has no container runtime, so the script cannot run the NATS image.
+// It is the bus of packages/envoy/scripts/e2e-local.sh and packages/envoy/scripts/e2e-refill.sh,
+// each of which builds it beside the listener it builds: an agent's machine has no container
+// runtime, so neither script can run the NATS image. e2e-refill.sh also stops, kills and restarts
+// it under a running listener, and a restart reads back the JetStream store the directory holds.
 //
 // It is a test fixture, not a product. Nothing deployed runs it: it listens on loopback only, has
 // no users, keeps its JetStream store wherever the caller says and never cleans it up, and lives

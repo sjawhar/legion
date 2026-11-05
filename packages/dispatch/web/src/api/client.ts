@@ -50,6 +50,7 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialCapabilities,
   CredentialDecisionResponse,
   CredentialGrantsResponse,
   CredentialPendingResponse,
@@ -92,6 +93,7 @@ import type {
   ProjectDefaultAssigneeInput,
   RepoProject,
   SearchResponse,
+  SignInsResponse,
   Subscriber,
   Suggestions,
   UpdateDeliverySessionGroupInput,
@@ -351,10 +353,28 @@ export function isAnchorMissing(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING";
 }
 
+// The server refusing a write because its text passes a bound Dispatch holds it to: one block
+// too long, too many blocks, or an ask's question and options too long together. The refusal
+// names what passed which bound, so a page shows those words rather than wording of its own.
+export function isCapExceeded(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.code === "CAP_EXCEEDED";
+}
+
 // A document whose stored history cannot load at all: the state a rebuild from its latest saved
 // version repairs, and retrying the read cannot.
 export function isDocumentUnloadable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
+}
+
+/** What every view says while Envoy's agent list refills: the server's own `ENVOY_REFILLING`
+ *  message, shown wherever a view would otherwise say an agent is absent. */
+export const AGENT_LIST_REFILLING = "The agent list is refilling. Try again in a moment.";
+
+// The agents list and the subscriber reads answer this 503 while the Envoy listener refills its
+// copy of the session registry: the list is not known yet, so nothing on it may be read as gone.
+// It is transient, so the shared retry policy keeps retrying it like any other 5xx.
+export function isAgentListRefilling(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 503 && error.code === "ENVOY_REFILLING";
 }
 
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
@@ -1613,6 +1633,27 @@ export class DispatchApiClient {
    *  with it. */
   async revokeMachineLogin(credentialId: string, bounds: WriteBounds): Promise<void> {
     await this.post(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {}, bounds);
+  }
+
+  /** `GET /api/v1/signins`: the viewer's own sign-ins on their machines (`agent-secrets login`),
+   *  one per box key they have not revoked. Dispatch names the viewer, so nobody reads another
+   *  person's. */
+  getSignIns(): Promise<SignInsResponse> {
+    return this.json<SignInsResponse>("/api/v1/signins");
+  }
+
+  /** End one of the viewer's own sign-ins: that machine trades no token for them again and the
+   *  access tokens already minted under it end with it, while their sign-ins on other machines
+   *  keep working. */
+  async revokeSignIn(signInId: string, bounds: WriteBounds): Promise<void> {
+    await this.post(`/api/v1/signins/${pathSegment(signInId)}/revoke`, {}, bounds);
+  }
+
+  /** `GET /api/v1/credentials/capabilities`: what the credential pages may offer against this
+   *  deployment's secrets broker, which Dispatch relays from the broker's own RFC 8414 metadata
+   *  because a browser reaches no broker. */
+  getCredentialCapabilities(): Promise<CredentialCapabilities> {
+    return this.json<CredentialCapabilities>("/api/v1/credentials/capabilities");
   }
 }
 

@@ -1,4 +1,9 @@
-import { bearerSource, fileBearer } from "./bearer";
+import { bearerCredential, bearerSource, fileBearer, type RequestCredential } from "./bearer";
+import {
+  type BrokerSessionName,
+  brokerCredential,
+  brokerRouteConfigured,
+} from "./broker-credential";
 import {
   type EnvoyConfig,
   type EnvoyConfigEnvironment,
@@ -38,6 +43,52 @@ const MIN_INTERVAL_MS = 25;
 // and a pass deadline that abandons every queued task the moment it is queued. It is about 24.8
 // days, far past any configuration anyone means.
 const MAX_INTERVAL_MS = 2_147_483_647;
+
+/**
+ * How long a deregistration waits for a registration already on the wire. One that lands after
+ * the DELETE writes the record back, and the session stays registered with nothing heartbeating
+ * it (dispatch://INFRA-392); a listener call can take a timeout and a retry (5.25 s) to fail, so
+ * this is the whole of one attempt, past which the DELETE goes out anyway — one never sent always
+ * leaves the record behind, where one that races a slow registration only may.
+ */
+export const REGISTRATION_SETTLE_MS = 5_000;
+
+/**
+ * The whole of what a shutdown path spends settling, over the writes its chain holds and the
+ * registration on the wire. `REGISTRATION_SETTLE_MS` on each of them is 10 s before the DELETE is
+ * even sent, and no plugin is given that long: Oh My Pi abandons a shutdown handler after 2 s,
+ * and in a Legion pane the process group has 5 s between SIGTERM and SIGKILL (`DefaultGrace`,
+ * `packages/daemon/internal/shim`), shared with the agent itself. A quarter of a second covers a
+ * listener round trip many times over and leaves the rest of the budget for the DELETE to reach
+ * the wire.
+ */
+export const SHUTDOWN_SETTLE_MS = 250;
+
+/**
+ * The window the one extra registration a failed heartbeat makes waits out, before the heartbeat
+ * returns to its plain interval. A registration that times out under listener load costs the
+ * session a third of its live window (`.github/scripts/check-heartbeat-margin.sh`), and three
+ * missed refreshes drop a running session out of every live listing (dispatch://INFRA-392), so
+ * one failure buys one extra call rather than a whole interval's wait.
+ */
+export const HEARTBEAT_RETRY_MIN_MS = 20_000;
+export const HEARTBEAT_RETRY_MAX_MS = 40_000;
+
+/**
+ * How far out that extra registration is: a fresh draw between `HEARTBEAT_RETRY_MIN_MS` and
+ * `HEARTBEAT_RETRY_MAX_MS` per call, so the sessions a slow listener failed together come back
+ * spread over twenty seconds instead of in one burst — the listener sees one extra call per
+ * failing session per interval, never a herd on the same tick. Every plugin that heartbeats
+ * draws here, so the rule is one rule (`packages/pi-envoy/extensions/envoy.ts`,
+ * `packages/claude-envoy/src/envoy-channel-server.ts`). `draw` is `Math.random` unless a test
+ * passes its own, so a test reads a known delay without making the spread predictable in
+ * production.
+ */
+export function heartbeatRetryDelayMs(draw: () => number = Math.random): number {
+  return Math.round(
+    HEARTBEAT_RETRY_MIN_MS + draw() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS)
+  );
+}
 
 /** The interval `raw` names, when it names a usable one: a finite number above zero. Unusable is
  * undefined, which each caller replaces with its own fallback. The number is as written, before
@@ -103,8 +154,14 @@ export type EnvoyInbound =
 export interface EnabledEnvoySettings {
   readonly enabled: true;
   readonly url: string;
-  /** The listener's bearer; none for a loopback listener that asks for none. */
-  readonly token: string | undefined;
+  /**
+   * What every listener call presents: the listener's bearer (`bearerCredential`), the access
+   * token this machine traded its own identity for at the secrets broker, presented under the
+   * `DPoP` scheme with a fresh proof of this process's key on each request (`brokerCredential`),
+   * or undefined for a loopback listener that asks for none. One field, so no caller can present
+   * half of it.
+   */
+  readonly credential: RequestCredential | undefined;
   /** Inbound messages, which arrive over NATS. Off with `NO_NATS_SERVER` when nothing names a
    * NATS server, with the refusal when the seed for the named ones could not be read or used (the
    * listener and its bearer stand), and with `NO_NATS_CONNECTION` for a caller that opens none. */
@@ -205,7 +262,12 @@ function natsCredential(
 export function envoySettings(
   env: EnvoyEnvironment,
   config: EnvoyConfig,
-  options: { readonly nats?: boolean | undefined } = {}
+  options: {
+    readonly nats?: boolean | undefined;
+    /** The session a broker trade writes under (`BrokerSessionName`), for a caller that acts as
+     * one. Nothing else reads it: a bearer route resolves the same whatever it says. */
+    readonly session?: BrokerSessionName | undefined;
+  } = {}
 ): EnvoySettings {
   if (config.kind === "failed") return offWithError(config.error);
   const section = config.envoy;
@@ -235,7 +297,7 @@ export function envoySettings(
   }
   const listener = section.url ?? DEFAULT_ENVOY_URL;
   const url = namedUrl ?? listener;
-  let token: string | undefined;
+  let credential: RequestCredential | undefined;
   try {
     const source = bearerSource(env, "ENVOY", () =>
       section.token === undefined
@@ -248,12 +310,19 @@ export function envoySettings(
             checkout: false,
           }
     );
-    token =
-      source.kind === "none"
-        ? undefined
-        : source.kind === "variable"
-          ? source.token
-          : fileBearer(source, url, "ENVOY", env);
+    if (source.kind === "none") {
+      // No bearer: this machine's own identity, where it has one to trade, is what the listener
+      // checks at the broker's introspection route. A listener that asks for no credential is
+      // unaffected — it reads the request's identity, or none, the same way, and a trade that
+      // fails leaves its calls standing (`createEnvoyClient`, transport.ts).
+      credential = brokerRouteConfigured(env).traded
+        ? brokerCredential(env, options.session)
+        : undefined;
+    } else {
+      credential = bearerCredential(
+        source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env)
+      );
+    }
   } catch (error) {
     return offWithError(messageFor(error));
   }
@@ -286,7 +355,7 @@ export function envoySettings(
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
-    token,
+    credential,
     inbound,
     heartbeatMs,
     passDeadlineMs: Math.min(

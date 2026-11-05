@@ -99,6 +99,84 @@ func TestRunDoesNotReportACommandItsCallerStoppedAsTimedOut(t *testing.T) {
 	}
 }
 
+// A RunCommand command that exits on its own did not time out, however long commandWaitDelay then
+// holds the run open for a child still holding its output pipes: its exit is its answer. In the
+// first case the budget is 100 ms short of commandWaitDelay, so the run always returns past it,
+// while the command still has 900 ms to exit under load; a run that read a timeout from the
+// deadline having passed would report jj's own exit 3 as a timeout. In the second the command
+// exits 0 well inside its budget; a run that took exec.ErrWaitDelay for a failure would report
+// that success as an error. (Ported with RunCommand's own semantics from the shim's
+// runAdoptionCommand, which the adoption now reaches through RunCommand.)
+func TestRunCommandReportsTheCommandsOwnExitWhenAChildHoldsItsPipesPastIt(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		exit    int
+		budget  time.Duration
+		wantErr string
+	}{
+		"an exit 3, the pipes held past the budget": {3, commandWaitDelay - 100*time.Millisecond, "Command failed (exit 3)"},
+		"an exit 0 inside the budget":               {0, time.Minute, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			pidFile := filepath.Join(dir, "lingering.pid")
+			t.Cleanup(func() { killPIDFile(t, pidFile) })
+			ctx, cancel := context.WithTimeout(context.Background(), testCase.budget)
+			defer cancel()
+			script := `echo answered; echo refused >&2; sleep 30 & echo $! >"$1"; exit ` + strconv.Itoa(testCase.exit)
+
+			started := time.Now()
+			out, err := RunCommand(ctx, testCase.budget, started, []string{"PATH=" + os.Getenv("PATH")}, dir, nil, []string{"sh", "-c", script, "sh", pidFile})
+			elapsed := time.Since(started)
+
+			if elapsed < commandWaitDelay {
+				t.Fatalf("the run returned after %s, inside commandWaitDelay: nothing held the pipe, so this run proves nothing", elapsed)
+			}
+			if testCase.wantErr == "" {
+				if err != nil || out != "answered" {
+					t.Errorf("RunCommand = %q, %v after %s; want \"answered\" and no error: the command exited 0 on its own", out, err, elapsed)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), testCase.wantErr) || strings.Contains(err.Error(), "timed out") {
+				t.Errorf("RunCommand = %q, %v after %s; want an error naming %q and no timeout: the command exited on its own inside its %s budget",
+					out, err, elapsed, testCase.wantErr, testCase.budget)
+			}
+		})
+	}
+}
+
+// The commands of one save, one restore, or one adoption share a single budget, so a command can
+// find it already spent before it starts: that is the budget running out, reported as a timeout,
+// never a failure to run.
+func TestRunCommandReportsABudgetSpentBeforeItStartedAsATimeout(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, err := RunCommand(ctx, time.Second, time.Now(), []string{"PATH=" + os.Getenv("PATH")}, t.TempDir(), nil, []string{"sh", "-c", "exit 0"})
+
+	if err == nil || !strings.HasPrefix(err.Error(), "Command timed out after 1 s") {
+		t.Errorf("RunCommand under a spent budget = %v, want \"Command timed out after 1 s …\"", err)
+	}
+}
+
+// A command RunCommand's caller stopped was not cut off by the budget: the restore runs under the
+// launcher's own context (internal/launcher), so a launcher stopped mid-restore must read the
+// command's own exit, never a timeout naming a budget that had not run out. The cancel lands once
+// the command runs, never on one not yet started.
+func TestRunCommandDoesNotReportACommandItsCallerStoppedAsATimeout(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "started")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go cancelOnceExists(ctx, cancel, marker)
+
+	_, err := RunCommand(ctx, time.Minute, time.Now(), []string{"PATH=" + os.Getenv("PATH")}, dir, nil, []string{"sh", "-c", `: >"$1"; exec sleep 30`, "sh", marker})
+
+	if err == nil || strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "Command failed (exit -1)") {
+		t.Errorf("RunCommand = %v, want \"Command failed (exit -1)\": the caller's context ended the command inside its minute", err)
+	}
+}
+
 // cancelOnceExists calls cancel once path exists, which the command under test creates once it
 // runs, so the cancel lands on a running command and never on one not yet started.
 func cancelOnceExists(ctx context.Context, cancel context.CancelFunc, path string) {

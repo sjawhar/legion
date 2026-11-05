@@ -9,6 +9,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf16"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // The OAuth scopes a credential can hold. ScopePerson is "this credential acts as its person",
@@ -359,23 +362,66 @@ type Issue struct {
 
 // Route statuses: whether an issue's route reaches a running session right now.
 const (
-	// RouteLive is a role with a live holder, or a session the listener lists as live.
+	// RouteLive is a role whose holder is live, or a routed session that is live.
 	RouteLive = "live"
-	// RouteNoHolder is a role nobody live holds (unclaimed, or its holder's session lapsed), or
-	// a session the listener does not list.
+	// RouteHolderUnresponsive is a role whose holder, or a routed session that, is past the
+	// listener's live window and inside its gone horizon: it has missed heartbeats, it has not
+	// ended, and it still holds its role and its claims. The route reaches it - a message is
+	// stored for it and waits - so it is told apart from RouteLive, never folded into
+	// RouteNoHolder (dispatch://INFRA-392).
+	RouteHolderUnresponsive = "holder_unresponsive"
+	// RouteNoHolder is a role nobody holds (unclaimed, or its holder gone), or a session the
+	// registry holds no live or unresponsive record of.
 	RouteNoHolder = "no_holder"
-	// RouteUnknown is a route read while the listener did not answer; it is never read as live.
+	// RouteUnknown is a route read while the listener gave no list to judge it by; it is never
+	// read as live, nor as no_holder.
 	RouteUnknown = "unknown"
+)
+
+// Route status reasons: why a route reads RouteUnknown.
+const (
+	// RouteReasonRefilling is a listener that answered its refilling 503: its copy of the agent
+	// list cannot be served yet, so a missing row there says nothing about the route.
+	RouteReasonRefilling = "refilling"
+	// RouteReasonUnreachable is a listener that is not configured, did not answer in time, or
+	// failed in any other way.
+	RouteReasonUnreachable = "unreachable"
 )
 
 // IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the one stored
 // copy of the listener's session list every server process judges by, at most 5 s old, never
 // stored on the issue and never part of an event payload, which is why it sits beside Issue in a
-// read response rather than in it. Both fields are null for an issue with no route; RouteHolder
-// names the session only when RouteStatus is RouteLive.
+// read response rather than in it. Every field is null for an issue with no route; RouteHolder
+// names the session when RouteStatus is RouteLive or RouteHolderUnresponsive - the route reaches
+// that session either way - and RouteStatusReason says why only when RouteStatus is RouteUnknown.
 type IssueRouteReach struct {
-	RouteStatus *string `json:"route_status"`
-	RouteHolder *string `json:"route_holder"`
+	RouteStatus       *string `json:"route_status"`
+	RouteHolder       *string `json:"route_holder"`
+	RouteStatusReason *string `json:"route_status_reason"`
+}
+
+// ClaimHolderUnknown is what an issue read says about the session holding its claim when it
+// cannot judge: the listener gave it no list. It is this read's own answer and never a state the
+// registry reports - those are the registry's own three, which a reader names through the
+// listener client (envoy.StateLive, envoy.StateUnresponsive, envoy.StateGone).
+const ClaimHolderUnknown = "unknown"
+
+// IssueClaimLiveness is what an issue read says about the session holding its claim: its state,
+// when it was last seen, and from when another agent may take or release the claim without a
+// person's force. Like IssueRouteReach it is resolved on read from the server's copy of the
+// listener's session list, at most 5 s old, stored in no table and never part of an event
+// payload - which is why it sits beside Issue rather than in IssueClaim, the payload of every
+// issue.claimed and issue.released event. A claim write judges the holder again, against the
+// listener's authoritative per-session read, so a read and a write of the same moment can
+// disagree by the age of that copy.
+//
+// Every field is null when nobody holds the issue, and when a person does: a human holder has no
+// session state to read, and only a person releases their claim. TakeableAt is null for a live
+// holder, which no waiting frees, and for an unknown one, which the read cannot judge.
+type IssueClaimLiveness struct {
+	HolderState *string    `json:"holder_state"`
+	LastSeen    *time.Time `json:"last_seen"`
+	TakeableAt  *time.Time `json:"takeable_at"`
 }
 
 // IssueSummary is the lightweight issue listing representation.
@@ -461,9 +507,15 @@ type SearchResult struct {
 	Issue    *SearchIssue    `json:"issue,omitempty"`
 	Artifact *SearchArtifact `json:"artifact,omitempty"`
 	ID       string          `json:"id"`
-	Snippet  string          `json:"snippet"`
-	Rank     float64         `json:"rank"`
-	Href     string          `json:"href"`
+	// BlockID is the block of the hit whose own text matched, read from the window of blocks the
+	// meaning leg found (INFRA-370): for a document the block of the document, for a comment or
+	// a message a block of its body, for an ask the part of its question, options or answer. It
+	// is nil on an issue hit, which has no blocks, and on a hit only the keyword list found,
+	// which matched the item's whole text rather than one of its windows.
+	BlockID *string `json:"block_id,omitempty"`
+	Snippet string  `json:"snippet"`
+	Rank    float64 `json:"rank"`
+	Href    string  `json:"href"`
 	// Ask is set on ask hits and nil on every other kind; an ask removed between the search and
 	// the read of its state keeps it nil too.
 	Ask *SearchAsk `json:"ask,omitempty"`
@@ -516,8 +568,9 @@ type SearchResponse struct {
 
 // SearchCoverage is how much of what meaning search covers has a current vector from the
 // configured embedder (INFRA-393, GET /api/v1/search/coverage). Identity is the embedder's
-// identity (embed.Embedder.Identity), Place ("bedrock" or "azure") and Model are read from it;
-// all three are null when no embedder is configured, and then nothing is current.
+// identity (embed.Embedder.Identity), Place ("bedrock", "azure", or "dev" for the local
+// harness's own embedder, which no deployment runs) and Model are read from it; all three are
+// null when no embedder is configured, and then nothing is current.
 type SearchCoverage struct {
 	Identity *string              `json:"identity"`
 	Place    *string              `json:"place"`
@@ -526,13 +579,16 @@ type SearchCoverage struct {
 	Kinds    SearchCoverageKinds  `json:"kinds"`
 }
 
-// SearchCoverageKinds is SearchCoverage's counts for each kind meaning search ranks.
+// SearchCoverageKinds is SearchCoverage's counts for each kind meaning search ranks: the issue,
+// whose vector is its title and the head of its spec, and one kind for each kind of window of
+// blocks - a document's, a comment's, a message's and an ask's parts - whose items are the
+// windows themselves, not the documents or the comments they belong to.
 type SearchCoverageKinds struct {
-	Issue    SearchCoverageCounts `json:"issue"`
-	Document SearchCoverageCounts `json:"document"`
-	Comment  SearchCoverageCounts `json:"comment"`
-	Ask      SearchCoverageCounts `json:"ask"`
-	Message  SearchCoverageCounts `json:"message"`
+	Issue         SearchCoverageCounts `json:"issue"`
+	DocumentBlock SearchCoverageCounts `json:"document_block"`
+	CommentBlock  SearchCoverageCounts `json:"comment_block"`
+	MessageBlock  SearchCoverageCounts `json:"message_block"`
+	AskPart       SearchCoverageCounts `json:"ask_part"`
 }
 
 // SearchCoverageCounts splits Items, the searchable items of a kind (or of all of them), into
@@ -547,6 +603,22 @@ type SearchCoverageCounts struct {
 	Lacking              int64  `json:"lacking"`
 	Failed               int64  `json:"failed"`
 	OldestLackingSeconds *int64 `json:"oldest_lacking_seconds"`
+}
+
+// DispatchLimits is what GET /api/v1/limits answers: the bounds the server holds a write to, each
+// read from the constant that enforces it. BlockUnits and AskUnits are UTF-16 code units, as is
+// EventBodyUnits, the longest body an event carries whole; ItemBlocks is the most blocks one body
+// may hold and AskOptions the most options one ask may have; RequestBytes, DocumentBytes and
+// HandoffBytes are UTF-8 bytes.
+type DispatchLimits struct {
+	BlockUnits     int   `json:"block_units"`
+	ItemBlocks     int   `json:"item_blocks"`
+	AskOptions     int   `json:"ask_options"`
+	AskUnits       int   `json:"ask_units"`
+	EventBodyUnits int   `json:"event_body_units"`
+	RequestBytes   int64 `json:"request_bytes"`
+	DocumentBytes  int   `json:"document_bytes"`
+	HandoffBytes   int   `json:"handoff_bytes"`
 }
 
 // DuplicateCandidate is a potential duplicate issue proposed before creation.
@@ -798,12 +870,14 @@ type ArtifactReview struct {
 	// Kind is who gave the review: "person" for one a person gave, "plan_review" for a plan
 	// review's approval of a plan version. A review Dispatch carried forward to a later version
 	// keeps the kind of the review it carried.
-	Kind      string    `json:"kind"`
-	Actor     Actor     `json:"actor"`
-	Reason    *string   `json:"reason"`
-	AskID     *string   `json:"ask_id"`
-	CreatedAt time.Time `json:"created_at"`
-	EventSeq  *int64    `json:"-"`
+	Kind                string    `json:"kind"`
+	Actor               Actor     `json:"actor"`
+	Reason              *string   `json:"reason"`
+	AskID               *string   `json:"ask_id"`
+	CreatedAt           time.Time `json:"created_at"`
+	ContentSHA256       *string   `json:"content_sha256"`
+	ContentSHA256Source *string   `json:"content_sha256_source"`
+	EventSeq            *int64    `json:"-"`
 }
 
 // ArtifactApproval is a document's approval state as of its latest version:
@@ -820,16 +894,18 @@ type ArtifactReview struct {
 // among them where At, its transaction's start, cannot. Seq orders; Version, not
 // Seq, says which version the review covers.
 type ArtifactApproval struct {
-	State         string  `json:"state"`
-	LatestVersion int     `json:"latest_version"`
-	Version       *int    `json:"version,omitempty"`
-	By            *Actor  `json:"by,omitempty"`
-	At            *string `json:"at,omitempty"`
-	Seq           *int64  `json:"seq,omitempty"`
-	Reason        *string `json:"reason,omitempty"`
-	AskID         *string `json:"ask_id,omitempty"`
-	RequestedBy   *Actor  `json:"requested_by,omitempty"`
-	WaitingOn     string  `json:"waiting_on,omitempty"`
+	State               string  `json:"state"`
+	LatestVersion       int     `json:"latest_version"`
+	Version             *int    `json:"version,omitempty"`
+	By                  *Actor  `json:"by,omitempty"`
+	At                  *string `json:"at,omitempty"`
+	Seq                 *int64  `json:"seq,omitempty"`
+	Reason              *string `json:"reason,omitempty"`
+	AskID               *string `json:"ask_id,omitempty"`
+	ContentSHA256       *string `json:"content_sha256,omitempty"`
+	ContentSHA256Source *string `json:"content_sha256_source,omitempty"`
+	RequestedBy         *Actor  `json:"requested_by,omitempty"`
+	WaitingOn           string  `json:"waiting_on,omitempty"`
 	// Kind is the latest review's Kind, so a reader can say an approval is a plan review's
 	// rather than a person's; empty while no review stands.
 	Kind string `json:"kind,omitempty"`
@@ -845,13 +921,15 @@ type ArtifactApproval struct {
 // ask it answered (nil when given from the document header with no request open at
 // that version).
 type ArtifactReviewEventPayload struct {
-	ArtifactID string  `json:"artifact_id"`
-	Name       string  `json:"name"`
-	Version    int     `json:"version"`
-	Kind       string  `json:"kind"`
-	Actor      Actor   `json:"actor"`
-	Reason     *string `json:"reason"`
-	AskID      *string `json:"ask_id"`
+	ArtifactID          string  `json:"artifact_id"`
+	Name                string  `json:"name"`
+	Version             int     `json:"version"`
+	Kind                string  `json:"kind"`
+	Actor               Actor   `json:"actor"`
+	Reason              *string `json:"reason"`
+	AskID               *string `json:"ask_id"`
+	ContentSHA256       *string `json:"content_sha256,omitempty"`
+	ContentSHA256Source *string `json:"content_sha256_source,omitempty"`
 }
 
 // CurrencyCurrent, CurrencyOlder and CurrencyUnknown are whether a recorded result still speaks
@@ -976,7 +1054,9 @@ type ArtifactHumanEditedEventPayload struct {
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
 // lists a table block's rows and cells; nil for every other block. Attributes is a typed block's
 // attributes in the order its type declares them, which is the order its opening line writes
-// them; a block of no declared type carries none.
+// them; a block of no declared type carries none. Embedding is where meaning search stands on
+// the block (BlockEmbedded, BlockEmbeddingPending, BlockNotEmbedded), which the blocks route
+// sets and nothing that only indexes blocks does.
 type ArtifactBlock struct {
 	ID            string                `json:"id"`
 	Type          string                `json:"type"`
@@ -986,6 +1066,7 @@ type ArtifactBlock struct {
 	References    BlockReferences       `json:"references"`
 	Attributes    []BlockAttributeValue `json:"attributes,omitempty"`
 	Table         *BlockTable           `json:"table,omitempty"`
+	Embedding     string                `json:"embedding,omitempty"`
 	DescendantIDs []string              `json:"-"`
 }
 
@@ -1671,6 +1752,11 @@ type Comment struct {
 	Anchor     *Anchor `json:"anchor"`
 	AnchorPosition
 	ReplyTo *string `json:"reply_to"`
+	// Answers is the comment this reply answers, the one its request named, where ReplyTo is the
+	// head of the thread the write climbed to (comments.answers, api.threadHeadOf). The two are
+	// the same on a reply to a thread's root; a reply that names an ask alone carries neither,
+	// as no comment that is not a reply does. A conversation nests a reply under it.
+	Answers *string `json:"answers"`
 	AskID   *string `json:"ask_id"`
 	// Turn is set on a reply to an open ask (AskID non-nil) and names whose turn the reply hands
 	// over: "human" when the human needs to act, "agent" when the comment is a progress note and
@@ -1724,7 +1810,8 @@ type ItemBlocks struct {
 // its author wrote it, its reference (none for a block of a direct message, which has no address),
 // and From and To, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
 // string index). A comment block also carries the revision its text last changed in and that
-// revision's time; a message block has neither.
+// revision's time; a message block has neither. Embedding is where meaning search stands on the
+// block (BlockEmbedded, BlockEmbeddingPending, BlockNotEmbedded).
 type ItemBlock struct {
 	ID              string     `json:"id"`
 	Type            string     `json:"type"`
@@ -1734,7 +1821,18 @@ type ItemBlock struct {
 	To              int        `json:"to"`
 	ChangedRevision *int       `json:"changed_revision,omitempty"`
 	ChangedAt       *time.Time `json:"changed_at,omitempty"`
+	Embedding       string     `json:"embedding"`
 }
+
+// Where meaning search stands on one block (ItemBlock.Embedding, ArtifactBlock.Embedding): every
+// window of blocks covering it is embedded at the text it holds now, one of them is still waiting
+// for its vector, or no window covers the block at all - a block the indexer leaves out of every
+// window, and every block of an item whose windows are not written yet.
+const (
+	BlockEmbedded         = "embedded"
+	BlockEmbeddingPending = "pending"
+	BlockNotEmbedded      = "none"
+)
 
 // Suggestion carries a proposed document replacement and its resolution.
 type Suggestion struct {
@@ -1810,12 +1908,55 @@ type ChangedReference struct {
 	Ref        string  `json:"ref,omitempty"`
 }
 
+// EventBody is the body an event carries and whether that is only its first part. A body is
+// bounded block by block now (itemblocks.Check, contracts.DispatchBlockUnits on each block and
+// contracts.DispatchItemBlocks on how many blocks it holds), so one body can be far longer than
+// any single NATS payload: an event carries the first contracts.DispatchEventBodyMax UTF-16
+// units of it and says so, and every reader gets the rest from the server by reading the item
+// itself (GET /api/v1/comments/{id}, GET /api/v1/messages/{id}).
+//
+// A body of at most that many units rides whole and answers false. A longer one is cut at the
+// last blank line inside the bound, else at the last line break inside it, else at the last
+// character boundary, and answers true; a cut that would leave nothing falls through to the rule
+// after it. The walk reads whole characters, so a character whose UTF-16 form is a surrogate
+// pair is carried whole or not at all. A byte that is not valid UTF-8 reads as U+FFFD and counts
+// as the one unit the JSON encoder writes for it, as itemblocks counts it.
+func EventBody(body string) (string, bool) {
+	// A rune never takes more UTF-16 units than UTF-8 bytes, so a body inside the bound in bytes
+	// is inside it in units and rides whole.
+	if len(body) <= contracts.DispatchEventBodyMax {
+		return body, false
+	}
+	units, end := 0, -1
+	for index, r := range body {
+		if units+utf16.RuneLen(r) > contracts.DispatchEventBodyMax {
+			end = index
+			break
+		}
+		units += utf16.RuneLen(r)
+	}
+	if end < 0 {
+		return body, false
+	}
+	head := body[:end]
+	if cut := strings.LastIndex(head, "\n\n"); cut > 0 {
+		return head[:cut], true
+	}
+	if cut := strings.LastIndexByte(head, '\n'); cut > 0 {
+		return head[:cut], true
+	}
+	return head, true
+}
+
 // CommentEventPayload is the wire payload of comment.* and suggestion.* events:
 // the comment's own fields plus the anchored artifact's name. Comment is
 // embedded so the JSON stays flat, which is the shape every consumer reads.
 type CommentEventPayload struct {
 	Comment
-	ArtifactName string `json:"artifact_name"`
+	// BodyTruncated is that Body is the first part of the comment's body and not all of it
+	// (EventBody). A reader that needs the rest reads GET /api/v1/comments/{id}.
+	BodyTruncated bool   `json:"body_truncated,omitempty"`
+	ArtifactName  string `json:"artifact_name"`
 	// ProjectKey and ArtifactSlug identify the document owning an artifact comment,
 	// including direct author routes whose topic no longer carries document details.
 	ProjectKey   string `json:"project_key,omitempty"`
@@ -1922,7 +2063,10 @@ type MessageDelivery struct {
 // render "re: <preview>" without a second lookup.
 type MessageEventPayload struct {
 	Message
-	ReplyBody string `json:"reply_body,omitempty"`
+	// BodyTruncated is that Body is the first part of the message's body and not all of it
+	// (EventBody). A reader that needs the rest reads GET /api/v1/messages/{id}.
+	BodyTruncated bool   `json:"body_truncated,omitempty"`
+	ReplyBody     string `json:"reply_body,omitempty"`
 	// ThreadTarget is the target of the reply's thread root: the conversation the reply
 	// lands in, for a consumer that groups a thread under its root. A session replying to a
 	// message aimed at that session inherits no target of its own (the target would be
@@ -2121,7 +2265,7 @@ type GraphExcerpt struct {
 // GraphEdgeKinds is every structural edge kind graph_edges emits. A typed block's `block[]`
 // attribute makes edges of a kind named by the attribute (pmdoc.LinkKinds), which is never one of
 // these: a schema name equal to one would merge silently with it in every reader.
-var GraphEdgeKinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
+var GraphEdgeKinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "answers", "followed_by", "part_of", "depends_on", "affects"}
 
 // GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
 // the other end, Direction is "in" for edges pointing at the queried node and "out" for edges

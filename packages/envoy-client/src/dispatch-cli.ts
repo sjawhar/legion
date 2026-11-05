@@ -292,7 +292,9 @@ export async function runDispatchCli(
     // a dry run does not read. It runs with Dispatch off too, reading a dashboard-URL ref only
     // against a server it knows, and its standard output is the JSON alone.
     const settings =
-      file.path === null ? null : sessionDispatchSettings(file, env, { cwd: io.cwd }).dispatch;
+      file.path === null
+        ? null
+        : sessionDispatchSettings(file, env, { cwd: io.cwd, session: sessionId }).dispatch;
     const { problems } = await checkDispatchCall({
       tool: parsed.tool,
       args: parsed.args,
@@ -309,7 +311,12 @@ export async function runDispatchCli(
   if (file.path === null) {
     return refuse(`dispatch: ${file.error}`, USAGE, parsed.tool);
   }
-  const { dispatch: resolution, warnings } = sessionDispatchSettings(file, env, { cwd: io.cwd });
+  // The session this call acts as is the session a broker trade writes under, so the token this
+  // call presents names it rather than naming none or another of this machine's.
+  const { dispatch: resolution, warnings } = sessionDispatchSettings(file, env, {
+    cwd: io.cwd,
+    session: sessionId,
+  });
   // A checkout's OpenCode-era file, which is not read, is said on every call while it is there.
   for (const warning of warnings) print(`dispatch: ${warning}`);
   if (!resolution.enabled) {
@@ -429,12 +436,16 @@ export async function runDispatchCli(
   let topics: Promise<readonly string[] | null> | undefined;
   const readTopics = async (): Promise<readonly string[] | null> => {
     try {
-      const envoy = sessionEnvoySettings(file, env, { cwd: io.cwd, nats: false });
+      const envoy = sessionEnvoySettings(file, env, {
+        cwd: io.cwd,
+        nats: false,
+        session: sessionId,
+      });
       if (!envoy.enabled) return null;
       const listener = createEnvoyClient({
         baseUrl: envoy.url,
         fetch: io.fetchImpl ?? fetch,
-        token: envoy.token,
+        credential: envoy.credential,
         timeoutMs: SUBSCRIPTIONS_TIMEOUT_MS,
         retry: false,
       });

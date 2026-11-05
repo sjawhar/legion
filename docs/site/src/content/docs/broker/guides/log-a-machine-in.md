@@ -11,6 +11,15 @@ operator (the person whose agents it runs), that lets the helper enroll that ope
 The Legion daemon logs itself in with its own Kubernetes ServiceAccount token instead, which no
 person approves.
 
+This whole guide needs the broker to serve the device grant, which it does only while it is given
+a page for a person to type the code into (`BROKER_MACHINE_LOGIN_URL`). A deployment whose
+machines hold a Google identity leaves that unset: no machine prints a code, Dispatch serves no
+machine-code page, and `agent-secrets machine login` reaches no device authorization endpoint,
+which is not mounted at all. On such a machine a person runs `agent-secrets login` instead, which
+signs them in through Google and needs nobody to approve a code
+([Concepts](/legion/broker/concepts/#sessions-and-enrollment)); the machine itself trades its own
+identity token and needs no login of this kind at all.
+
 ## 1. Install and start the helper
 
 The helper runs on Linux only. Each `legion-envoy-v*` GitHub release ships
