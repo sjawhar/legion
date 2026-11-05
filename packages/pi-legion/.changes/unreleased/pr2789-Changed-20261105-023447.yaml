@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The worker guide tells a worker that an issue pod runs no heavy build and no whole test suite: in the pod it compiles and vets what its change touches, builds the program a check drives and runs Postgres-backed tests by name, while a whole module''s or whole package''s run goes to CI on the pull request or where the deployment''s instructions say. The skill''s own table sends a worker there before such a run rather than after one fails.'
+time: 2026-11-05T02:34:47.234163555Z
+custom:
+    Issue: pr2789
