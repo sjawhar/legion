@@ -221,6 +221,10 @@ Each item below names a task and where its code is, then notes on it.
   the issue a result was recorded on counts for nothing here, so a child's pull request never makes a result against a check above it `current`;
   an `after_merge` or `default_branch` result while the repository's default branch carries its commit (`default_branch_commits`, the App's answer cached: a yes for good, a no for five minutes);
   `unknown` when the check's issue resolves to no repository or the App cannot read it.
+  A pull request is attributed to the first issue its five ranked sources name that resolves to the pull request's own repository, not to the first key they name (`attributionCandidates`, `attributionHeld` in `delivery/attribution.go`):
+  a title naming another repository's issue first therefore does not cost the pull request its own, and a pull request no candidate of which resolves to its repository is attributed to nobody, as is one whose head branch is in another repository (`headInOwnRepository`).
+  The hold is the server's own repository-resolution rule spliced into the statement that reads the candidates (`refs.IssueRepoTerms` through `attributionCandidatesQuery`), so an attribution can never disagree with the issue page;
+  one pull request's best 25 candidates are the ones read (`attributionCandidateBound`).
   `GET /api/v1/issues/{key}/coverage` answers what each `requirement` block of the issue's spec lacks, counting the `check` and `plan_task` blocks of the issue and of its descendants;
   the same lines end `dispatch read --issue` and the answer to an approval request.
   Shapes: `IssueCheckResults`, `RecordCheckResultInput`, `IssueCoverage` in `packages/contracts/src/dispatch-api.ts`
@@ -2096,7 +2100,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   one walk climbs the parent chains of every issue the read answers for at once — its `subjects` term, which is a listing's page, a listing's whole match or the one issue a read names — and each issue takes the nearest issue on its chain (itself first) whose own `repo` is set, else its project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`, read for every project of the read in one join), else null.
   A chain stops at the first issue that names a repository or at `refs.IssueDepthCap` (32) links, the most any issue sits below its root (`api`'s `parentDepthCap` is that same number), so it costs at most 33 rows per issue;
   a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default, and a paged listing walks its own page alone, so such a chain fails the page it is on and no other.
-  `refs.IssueRepository` runs those same terms over a `subjects` term of one key, for the results route and the pull-request head attribution, so neither can name a repository the issue page does not show.
+  `refs.IssueRepository` runs those same terms over a `subjects` term of one key, which the results route reads for the issue of a check, so it cannot name a repository the issue page does not show.
+  Delivery's pull-request attribution splices those terms over one pull request's candidate keys instead (`attributionCandidatesQuery`), holding a candidate only where the walk finished and `refs.IssueRepoResolved` is the repository the pull request is in (`attributionHeld`, `refs.IssueRepoTooDeep`), so one walk resolves every candidate and that attribution cannot disagree with the page either.
 
 - An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop:
   its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running).

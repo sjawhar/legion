@@ -874,6 +874,8 @@ A process that finds it held tries again
   The webhook redelivery sweep (Webhook redelivery, above; `redeliver.Interval`) runs every 2 minutes, its first sweep at start.
   Each waits the interval plus up to a tenth again after every pass (`duty.Jittered`), drawn afresh every period, so two processes' passes drift apart rather than ticking in step.
   GitHub has no feed of what these three would miss.
+  A reconcile pass re-reads the pull request heads first, whether or not the deployment has delivery settings and outside the deploy repository's permission check (`Reconcile.runOnce`), since a recorded result's currency is read in every deployment;
+  every other step of the pass is gated on the settings and on that check, so a deployment with no settings runs the head pass and nothing else.
 
 - The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
   its pass records its period in `duty_passes` like the timers above, so the other process's tick inside a period already served skips.
@@ -1600,8 +1602,15 @@ A new table: nothing existing is read, locked or rewritten, the previous release
 Migration `20261102122300_pull_request_heads` creates `pull_request_heads`, the current head of every pull request Dispatch has seen an event for, so a recorded result can say whether it ran at the commit the work stands at.
 This is not `delivery_pull_requests`, which keeps the merged pull requests of the delivery population and no head commit: this table holds open ones too, by any author and in any repository, one row per pull request.
 A row names the `repo` and `number`, the `head_sha` (on a merge, the final head of the merged work), the `head_ref` and `base_ref`, the `state` (`open`, `closed` or `merged`), the `issue_key` Dispatch's attribution picks and which of its five sources named it, the title and URL, the pull request's `updated_at` as the event reported it, and when the reconcile last read it through the App.
+That key is the first issue the five sources name that resolves to the repository the pull request is in, not the first key they name (`attributionCandidates`, `attributionHeld` in `delivery/attribution.go`):
+a pull request titled after another repository's issue therefore keeps its own, and one no candidate of which resolves to its repository is attributed to nobody, with the source `none`, as is one whose head branch is in another repository (`headInOwnRepository`).
+The hold is the server's own repository-resolution rule spliced into the statement that reads the candidates (`refs.IssueRepoTerms`, `attributionCandidatesQuery`), so the attribution and the issue page cannot disagree, and a pull request's best 25 candidates are the ones read (`attributionCandidateBound`).
+One rule picks both attributions: this row's `issue_key` (`headAttribution`) and the issue of a `delivery_pull_requests` row, which the reconcile resolves again from the database alone (`AttributePullRequests`).
 An older event arriving after a newer one leaves the row as it is, and the reconcile re-reads an open row older than five minutes.
-It also reads, once each, the merged rows no read of GitHub has ever reached that are attributed to nobody: a `pull_request` envelope naming no head repository attributes nobody, and nothing else looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
+That head pass runs whether or not the deployment has delivery settings, and before the deploy repository's permission check (`Reconcile.runOnce`):
+the currency of a recorded result is read in every deployment, and behind the settings the pass never ran in one that had none, so a result recorded at a head a later push replaced read `current` for ever.
+A failed head pass is logged, and named in `delivery_settings.last_error` beside the other steps' failures when the pass reached them.
+The head pass also reads, once each, the merged rows no read of GitHub has ever reached that are attributed to nobody: a `pull_request` envelope naming no head repository attributes nobody, and nothing else looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
 `pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, and `pull_request_heads_merged_unread` its merged arm.
 A new table, as above; its census answers `0`.
 
