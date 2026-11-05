@@ -292,3 +292,168 @@ func TestAServerWriteWaitsForTheCopyBoundWithoutADeadlineAndThenLands(t *testing
 		t.Fatalf("the write still holds %d bytes of the bound once it has landed", held)
 	}
 }
+
+// streamHeading is what the stream's writes swap grantWriteHeading for and back, so each write
+// of a goroutine's loop finds the heading its last one left
+// (TestAStreamOfAPILiveWritesStarvesNeitherARoomLoadNorAServerWrite).
+const streamHeading = "Heading Grant"
+
+// A stream of API live writes that keeps the copy-heap bound busy starves neither a browser's
+// room load nor a write of the server's own: both wait their turn and both run. Three goroutines
+// write to resident rooms of their own, each starting its next write as soon as its last one
+// returned, against a bound with room for two of their forks, so one of them is always waiting;
+// while that runs, a room no process holds is loaded (the path a browser's join takes, which
+// covers a grant of its own with no deadline, loadDecodedHistory) and one write of the server's
+// own, whose context carries no deadline and no cancel, is made on a fourth room.
+//
+// Neither can starve, because the bound's waiters are served in the order they came. A caller
+// that finds the bound free takes it at once only while nothing is queued - golang.org/x/sync
+// v0.24.0, semaphore/semaphore.go:57-65, whose fast path is guarded by `s.waiters.Len() == 0` -
+// and a release notifies the waiters from the front of the list, stopping at the first whose
+// weight does not fit rather than passing over it (notifyWaiters, semaphore.go:145-165, whose
+// comment names the starvation it is avoiding). So a stream of writes cannot overtake a load or
+// a server write already queued, however fast it writes: each new write of the stream joins the
+// queue behind them.
+//
+// This test cannot be made to fail by taking that ordering away, which is why it asserts the
+// waits rather than the ordering: the ordering is semaphore.Weighted's own, inside the bound
+// (weighedHeaps.semaphore), and the service has no seam for a barging bound to be swapped in.
+// What a failure would look like is a probe that never returns, which is what the deadlines here
+// catch.
+func TestAStreamOfAPILiveWritesStarvesNeitherARoomLoadNorAServerWrite(t *testing.T) {
+	service, _ := newTestService(t)
+	service.settle = time.Hour
+	service.measurer.interval = time.Hour
+	state := grantTestState(t, 16<<10)
+	// Each room is on an issue of its own: writes to one issue queue on its owner row
+	// (lockArtifactOwner), not on the bound, and this test is about the bound.
+	const writers = 3
+	rooms := make([]string, 0, writers)
+	for issue := range writers {
+		room := createIssueDocument(t, service.store, 21+issue, "Written whole by this test.")
+		storeHistory(t, service, room, state)
+		if err := loadRoomOf(service, room); err != nil {
+			t.Fatalf("load room %s: %v", room, err)
+		}
+		rooms = append(rooms, room)
+	}
+	// The load's own document, which no room holds, so loading it reads and decodes the stored
+	// history under a grant of its own; and the server write's, resident, so its fork is a clone.
+	loadRoom := createIssueDocument(t, service.store, 31, "Written whole by this test.")
+	storeHistory(t, service, loadRoom, state)
+	serverRoom := createIssueDocument(t, service.store, 32, "Written whole by this test.")
+	storeHistory(t, service, serverRoom, state)
+	if err := loadRoomOf(service, serverRoom); err != nil {
+		t.Fatalf("load the server write's room: %v", err)
+	}
+	weight := grantRoomWeight(t, service, rooms[0])
+	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, 2*weight))
+	var waits atomic.Int64
+	heaps.waiting = func(int64) { waits.Add(1) }
+
+	// One write with the bound to itself, which the probes' deadline is a multiple of.
+	started := time.Now()
+	if err := grantWrite(context.Background(), service, rooms[0], grantWriteHeading, streamHeading); err != nil {
+		t.Fatalf("the uncontended write: %v", err)
+	}
+	one := time.Since(started)
+	if err := grantWrite(context.Background(), service, rooms[0], streamHeading, grantWriteHeading); err != nil {
+		t.Fatalf("the uncontended write back: %v", err)
+	}
+	// A few times one write, and never under a floor: a probe that waits its turn behind two
+	// forks waits about one write, and one that starves waits forever.
+	within := max(20*one, 15*time.Second)
+
+	stop := make(chan struct{})
+	var streaming sync.WaitGroup
+	var written atomic.Int64
+	failed := make(chan error, writers)
+	for _, room := range rooms {
+		streaming.Add(1)
+		go func() {
+			defer streaming.Done()
+			find, with := grantWriteHeading, streamHeading
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// An API write: a request context, which a refusal would end (coverFork).
+				request, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				err := grantWrite(request, service, room, find, with)
+				cancel()
+				if err != nil {
+					failed <- err
+					return
+				}
+				written.Add(1)
+				find, with = with, find
+			}
+		}()
+	}
+	// However this test ends, the stream stops: a goroutine still writing would hold the bound
+	// and the pool for the rest of the package's run.
+	stopped := sync.OnceFunc(func() { close(stop); streaming.Wait() })
+	defer stopped()
+	// Start the probes only once the stream has the bound crowded, so each of them queues behind
+	// a write rather than finding the bound free.
+	for crowded := time.Now(); waits.Load() == 0; {
+		if time.Since(crowded) > within {
+			t.Fatalf("the stream did not crowd the bound in %s: %d writes, no waiter", within, written.Load())
+		}
+		select {
+		case err := <-failed:
+			t.Fatalf("a write of the stream failed: %v", err)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	loaded := make(chan time.Duration, 1)
+	go func() {
+		started := time.Now()
+		if err := loadRoomOf(service, loadRoom); err != nil {
+			t.Errorf("the room load behind the stream failed: %v", err)
+		}
+		loaded <- time.Since(started)
+	}()
+	served := make(chan time.Duration, 1)
+	go func() {
+		started := time.Now()
+		// A write of the server's own: no deadline and no cancel, so the bound never refuses it.
+		if err := grantWrite(context.Background(), service, serverRoom, grantWriteHeading, streamHeading); err != nil {
+			t.Errorf("the server write behind the stream failed: %v", err)
+		}
+		served <- time.Since(started)
+	}()
+	var loadTook, serverTook time.Duration
+	for range 2 {
+		select {
+		case loadTook = <-loaded:
+		case serverTook = <-served:
+		case err := <-failed:
+			t.Fatalf("a write of the stream failed: %v", err)
+		case <-time.After(within):
+			t.Fatalf("the room load (%s) or the server write (%s) did not finish in %s behind a stream of %d API writes: one of them is starving",
+				loadTook, serverTook, within, written.Load())
+		}
+	}
+	stopped()
+	select {
+	case err := <-failed:
+		t.Fatalf("a write of the stream failed: %v", err)
+	default:
+	}
+	t.Logf("one uncontended write took %s; behind %d API writes over %d goroutines against a %d-byte bound holding two %d-byte forks, the room load took %s and the server write %s, and %d holds waited for the bound",
+		one, written.Load(), writers, heaps.size, weight, loadTook, serverTook, waits.Load())
+	if loadTook > within || serverTook > within {
+		t.Fatalf("the room load took %s and the server write %s, past the %s a write of %s allows", loadTook, serverTook, within, one)
+	}
+	if roomDocument(t, service, loadRoom) == nil {
+		t.Fatal("the room the load was asked for is not resident")
+	}
+	requireHeading(t, service, serverRoom, false)
+	if held := heaps.held.Load(); held != 0 {
+		t.Fatalf("%d bytes of the bound are still held once the stream has stopped", held)
+	}
+}
