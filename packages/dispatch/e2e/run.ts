@@ -150,6 +150,26 @@ function laneEnvironment(count: number): Record<string, string> {
   return { ...exported, ...lanes[0]?.env };
 }
 
+// `@legion/contracts` as Playwright's own runner reads it. The specs and `e2e/agents.ts` import
+// that package, and Playwright loads them under Node, which takes the package's `default` export
+// condition - `dist/`, which is gitignored - where a `bun` run takes its source. So a workspace
+// that has never built it dies at the first spec with `Cannot find module
+// @legion/contracts/dist/index.js`, naming no cause. Building it here costs a fraction of a
+// second and makes any run self-sufficient; CI builds it in a step of its own before this
+// (`.github/workflows/ci.yaml`, "Build contracts for dispatch e2e").
+async function buildContracts(): Promise<void> {
+  const built = Bun.spawn(["bun", "run", "build"], {
+    cwd: join(import.meta.dir, "..", "..", "contracts"),
+    stdio: ["ignore", "ignore", "inherit"],
+  });
+  if ((await built.exited) !== 0) {
+    throw new Error(
+      "e2e/run.ts: `bun run build` in packages/contracts failed, and Playwright's Node runner " +
+        "reads that build; the error above is the build's own."
+    );
+  }
+}
+
 /** No two lanes share a port. Each lane's listeners bind port 0 and its Postgres takes a port the
  *  OS named, so this is the check that no port was handed out twice, which would put two workers
  *  on one server. */
@@ -179,6 +199,7 @@ try {
   // Before a directory is made or a server starts, and before this adds its own values of the
   // variables it names, so a caller's value can never reach one lane's servers.
   if (count > 1) refuseLaneConflicts(count);
+  await buildContracts();
   const given = (process.env.DATABASE_URL ?? "").trim();
   runDir = mkdtempSync(join(tmpdir(), "dispatch-e2e-run-"));
   // A run of one lane against the database the caller named starts no Postgres, which is what

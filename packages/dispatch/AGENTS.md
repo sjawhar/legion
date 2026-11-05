@@ -1361,9 +1361,14 @@ import each other under `web/src`, confirm `bun run lint` fails naming both, and
 ## End-to-end tests
 
 `bun run e2e` drives Playwright against the real Go Dispatch server and
-Postgres. It runs Playwright through `e2e/run.ts`, which starts the harness
+Postgres. It runs Playwright through `e2e/run.ts`, which builds
+`packages/contracts` and starts the harness
 (`e2e/run-server.sh` and its fakes) unless `PLAYWRIGHT_BASE_URL` selects an
-already deployed server. Every harness server serves on a port the OS chooses
+already deployed server. That build is what Playwright's own runner reads: it
+loads the specs under Node, which takes the package's `default` export
+condition, its gitignored `dist/`, where a `bun` run takes the source, so a
+workspace that never built it would fail at the first spec that imports
+`@legion/contracts`. Every harness server serves on a port the OS chooses
 unless its variable sets one (below), so the temporary server never meets the
 production listener on port 8766. A run of one lane takes `DATABASE_URL`, unless
 it names a Postgres provider instead (below): the
