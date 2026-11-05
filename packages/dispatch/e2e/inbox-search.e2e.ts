@@ -862,7 +862,11 @@ test.describe("inbox search", () => {
     // to step.
     await createProject({ key: "STEP", name: "Step service" });
     const replayIssue = await createIssue({ project: "STEP", title: "Cold replay" });
-    await createAsk(replayIssue.key, { question: "Does a cold start need a second pass?" }, PLANNER);
+    await createAsk(
+      replayIssue.key,
+      { question: "Does a cold start need a second pass?" },
+      PLANNER
+    );
     const leaseIssue = await createIssue({ project: "STEP", title: "Cold lease handover" });
     await createAsk(leaseIssue.key, { question: "Who holds the cold lease?" }, PLANNER);
     const topIssue = await createIssue({ project: "STEP", title: "Ledger clock drift" });
