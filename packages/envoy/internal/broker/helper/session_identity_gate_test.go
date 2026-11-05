@@ -23,6 +23,7 @@ import (
 	"crypto/ecdsa"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -461,11 +462,15 @@ func TestTheAncestryWinnerIsRefusedToAPeerWhosePIDChanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Hide the victim's ancestry from register's own Root walk, so the ADMISSION's walk is the
-	// one that finds the root: exactly the lost-race shape, with a peer that no longer names
-	// the pid either walk resolved.
+	// The first walk — register's own Root(pid) — must MISS and the admission's must FIND, or
+	// the registration never reaches the branch this test is about: it takes the fresh-admission
+	// path instead, where a different peer check refuses it. So the victim's parent is hidden
+	// from the first question asked about it and shown to every later one. A reviewer's mutation
+	// proved this matters: with the victim hidden from both walks, removing the winner branch's
+	// peer check left this test passing.
+	var walks atomic.Int32
 	hidden := func(pid int) (int, error) {
-		if pid == victim.Process.Pid {
+		if pid == victim.Process.Pid && walks.Add(1) == 1 {
 			return 1, nil
 		}
 		return procParent(pid)
@@ -570,5 +575,285 @@ func TestNamingASessionThatHasLeftIsNotASuccess(t *testing.T) {
 	}
 	if sess.SessionID() != "" {
 		t.Fatal("a session that has left the registry must not be renamed")
+	}
+}
+
+// A third review round found four more, all of them ways a session LOSES the identity it came
+// back for rather than ways a stranger gains one. These pin them.
+
+// TestATransientRenewFailureDoesNotCostTheInheritedEnrollment: the renew that confirms an
+// inherited enrollment is the one thing standing between a session and a fresh identity, so
+// only the broker ANSWERING and refusing may send it to the enroll. A 503, a dial failure, a
+// timeout — none of them says anything about the row, and reading one as a refusal costs the
+// session every pending request and grant the enrollment carries.
+func TestATransientRenewFailureDoesNotCostTheInheritedEnrollment(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "sessions.json")
+	key := parkedRecord(t, state)
+	r := startRig(t, state)
+	// The broker holds enr-before for this runtime id but will NOT answer an enroll with it:
+	// its conflict is keyed on (launcher credential, runtime id), not on the key's thumbprint,
+	// so a machine that has logged in again is refused 409 rather than handed the same row.
+	// Seeding byTP as well would let a fall-through to the enroll pass unnoticed.
+	r.fake.mu.Lock()
+	r.fake.enrolled["enr-before"] = thumbprintOf(t, key)
+	r.fake.runtimeIDToID[SessionRuntimeID(testSessionID)] = "enr-before"
+	r.fake.renewFail = 1
+	r.fake.mu.Unlock()
+
+	id := testSessionID
+	if resp := r.call(t, Request{Op: "register", SessionID: &id, WaitSeconds: 5}); !resp.OK {
+		t.Fatalf("register: %+v", resp)
+	}
+	sess := r.srv.Registry.Get(os.Getpid())
+	if sess == nil {
+		t.Fatal("the resumed session must be registered")
+	}
+	waitFor(t, func() bool { return sess.snapshot().State == "enrolled" })
+	if got := sess.EnrollmentID(); got != "enr-before" {
+		t.Fatalf("a renew the broker could not answer cost the session its enrollment: %q", got)
+	}
+	r.fake.mu.Lock()
+	conflicts := r.fake.conflicts
+	r.fake.mu.Unlock()
+	if conflicts != 0 {
+		t.Fatalf("the helper enrolled afresh after a renew that only failed to reach the broker (%d conflicts)", conflicts)
+	}
+}
+
+// TestAWakeRaisedBeforeThisEnrollmentDoesNotEnrollAgain: the rename wake is buffered one and is
+// sent whether or not anyone is waiting, so a rename that landed BEFORE an enrollment was made
+// or confirmed leaves one in the channel for the renew loop to find afterwards. Acting on it
+// enrolls again and abandons the live enrollment the session has just proved — the very loss
+// this change exists to prevent. A wake counts only while the identity has in fact moved on.
+func TestAWakeRaisedBeforeThisEnrollmentDoesNotEnrollAgain(t *testing.T) {
+	r := startRig(t, "")
+	sess, err := newSession(1000, 1, "testhost:1000:1", "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.setEnrolled("enr-kept")
+	served := sess.identity().Generation
+	sess.wakeEnroll() // the rename's wake, left over from before enr-kept was confirmed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- r.srv.renewLoop(ctx, sess, time.Now().Add(time.Hour), served) }()
+	select {
+	case <-done:
+		t.Fatal("a wake left over from before this enrollment sent the session back to the enroll, abandoning a live enrollment")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// A wake for an identity that really has moved on still ends the loop at once.
+	if !sess.rename(testSessionID, SessionRuntimeID(testSessionID), nil, "", "named") {
+		t.Fatal("rename")
+	}
+	sess.wakeEnroll()
+	select {
+	case again := <-done:
+		if !again {
+			t.Fatal("a rename's wake must send the session to the enroll, not end its loops")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a rename's wake did not reach the renew loop")
+	}
+}
+
+// TestARevokeFinishingAfterARenameLeavesTheBlockingID: the lapsed slot is a precondition of the
+// next enroll, not a scratch field. While a revoke of the OLD id is out, a rename can put the
+// enrollment blocking the session's NEW runtime id there (takeLapsed). Clearing the slot for the
+// finished revoke, or filling it with a stale enroll's id, drops that blocker: the next enroll is
+// refused 409 ALREADY_ENROLLED for as long as its row lives, and nothing is left to revoke it.
+func TestARevokeFinishingAfterARenameLeavesTheBlockingID(t *testing.T) {
+	sess := namedSession(t, 1000, testSessionID, nil)
+	sess.setLapsed("enr-old") // the id whose revoke is in flight
+	takeLapsed(sess, []string{"enr-blocking"}, true)
+	if sess.clearLapsedIf("enr-old") {
+		t.Fatal("the finished revoke cleared a slot that no longer held its id")
+	}
+	if got := sess.lapsed(); got != "enr-blocking" {
+		t.Fatalf("the lapsed slot holds %q, want the blocking enr-blocking", got)
+	}
+	// The stale enroll's answer arrives next: it names the runtime the session has left, so it
+	// blocks nothing and must not take the slot from the one that does.
+	if sess.adoptLapsed("enr-stale") {
+		t.Fatal("a stale enroll's id displaced the blocking one")
+	}
+	if got := sess.lapsed(); got != "enr-blocking" {
+		t.Fatalf("the lapsed slot holds %q after a stale enroll, want enr-blocking", got)
+	}
+	if !sess.clearLapsedIf("enr-blocking") {
+		t.Fatal("the revoke of the id the slot does hold must clear it")
+	}
+}
+
+// TestAStaleEnrollArrivingAfterARenameIsNotKeptOverTheBlocker drives the real enrollLoop, not
+// the slot helpers it calls, so it fails if that callsite is changed back to setLapsed: an
+// enroll held in flight while a rename reclaims the blocking enrollment must send its own now-
+// obsolete id to the bounded revoke, not into the slot over the blocker. With the blocker kept,
+// the loop revokes it first and the new runtime enrols; with it overwritten, the new runtime's
+// enroll meets the live blocker and loops on 409 ALREADY_ENROLLED.
+func TestAStaleEnrollArrivingAfterARenameIsNotKeptOverTheBlocker(t *testing.T) {
+	r := startRig(t, filepath.Join(t.TempDir(), "sessions.json"))
+	// enr-blocking is live under the runtime id the session is about to be renamed to, so a
+	// fresh enroll for that runtime is refused until it is revoked.
+	seedEnrollment(r.fake, "enr-blocking", "tp-blocking", SessionRuntimeID(testSessionID))
+	key, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := newSession(4242, 1, "testhost:4242:1", "", key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.srv.Registry.Add(sess)
+	t.Cleanup(func() { r.srv.Registry.Remove(sess) })
+
+	gate, release := testGate(t)
+	r.fake.mu.Lock()
+	r.fake.enrollGate = gate // the session's first enroll, for its old runtime id, waits here
+	r.fake.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go r.srv.enrollLoop(ctx, sess)
+
+	// Wait until that enroll is in flight: past the generation check, blocked at the gate.
+	waitFor(t, func() bool {
+		r.fake.mu.Lock()
+		defer r.fake.mu.Unlock()
+		return r.fake.enrollArrivals >= 1
+	})
+	// The rename lands while it is in flight, reclaiming the blocking enrollment into the slot.
+	if !sess.rename(testSessionID, SessionRuntimeID(testSessionID), key, "", "named while enrolling") {
+		t.Fatal("rename")
+	}
+	takeLapsed(sess, []string{"enr-blocking"}, true)
+	release() // the in-flight enroll now returns an id for the runtime the session has left
+
+	// At HEAD the session enrols under its new name; under the setLapsed regression it never
+	// does, because the blocker it dropped keeps refusing the new runtime's enroll.
+	waitFor(t, func() bool { return sess.snapshot().State == "enrolled" })
+	if got := sess.RuntimeID(); got != SessionRuntimeID(testSessionID) {
+		t.Fatalf("the session enrolled under %q, want its new name's runtime id", got)
+	}
+	_, deletes, _ := r.fake.snapshot()
+	if !slices.Contains(deletes, "enr-blocking") {
+		t.Fatalf("the blocking enrollment was never revoked (deletes %v); the stale enroll took its slot", deletes)
+	}
+	r.fake.mu.Lock()
+	conflicts := r.fake.conflicts
+	r.fake.mu.Unlock()
+	if conflicts != 0 {
+		t.Fatalf("the new runtime's enroll hit the live blocker %d time(s): the blocker was dropped from the lapsed slot", conflicts)
+	}
+}
+
+// TestARenameDuringTheOldRevokeRevokesTheNewBlockerFirst drives enrollLoop through the OTHER way
+// a blocker reaches the slot: while the revoke of the old lapsed id is in flight, a rename puts
+// the enrollment blocking the new runtime id there. clearLapsedIf then leaves it, and the loop
+// must start again to revoke THAT before enrolling — not fall through to an enroll the live
+// blocker refuses 409 until its lease ends.
+func TestARenameDuringTheOldRevokeRevokesTheNewBlockerFirst(t *testing.T) {
+	r := startRig(t, filepath.Join(t.TempDir(), "sessions.json"))
+	seedEnrollment(r.fake, "enr-old", "tp-old", "testhost:4242:1")
+	seedEnrollment(r.fake, "enr-blocking", "tp-blocking", SessionRuntimeID(testSessionID))
+	key, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := newSession(4242, 1, "testhost:4242:1", "", key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.setLapsed("enr-old") // the id whose revoke the loop runs first
+	r.srv.Registry.Add(sess)
+	t.Cleanup(func() { r.srv.Registry.Remove(sess) })
+
+	// Hold the removal of enr-old long enough for the rename to land under it.
+	r.fake.mu.Lock()
+	r.fake.revokeFirstDelay = 500 * time.Millisecond
+	r.fake.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go r.srv.enrollLoop(ctx, sess)
+
+	waitFor(t, func() bool {
+		r.fake.mu.Lock()
+		defer r.fake.mu.Unlock()
+		return r.fake.revokeAttempts >= 1
+	})
+	if !sess.rename(testSessionID, SessionRuntimeID(testSessionID), key, "", "named while revoking") {
+		t.Fatal("rename")
+	}
+	takeLapsed(sess, []string{"enr-blocking"}, true)
+
+	waitFor(t, func() bool { return sess.snapshot().State == "enrolled" })
+	if got := sess.RuntimeID(); got != SessionRuntimeID(testSessionID) {
+		t.Fatalf("the session enrolled under %q, want its new name's runtime id", got)
+	}
+	_, deletes, _ := r.fake.snapshot()
+	if !slices.Contains(deletes, "enr-blocking") {
+		t.Fatalf("the blocker was never revoked (deletes %v); the loop enrolled over it", deletes)
+	}
+	r.fake.mu.Lock()
+	conflicts := r.fake.conflicts
+	r.fake.mu.Unlock()
+	if conflicts != 0 {
+		t.Fatalf("the new runtime's enroll hit the live blocker %d time(s): the loop did not revoke it first", conflicts)
+	}
+}
+
+// TestARegisterForASessionTheRegistryNoLongerHoldsIsRefused: the walk that finds a session is a
+// reading of a moment, and an unregister or an exit watch can retire it before the reply goes
+// out. A register whose name needs no claim — the session already has it, or the caller named
+// none — never reaches ClaimName, which is where a retired session is otherwise caught. Both
+// paths must refuse rather than tell a launcher its session holds a broker identity that
+// nothing live holds and the sweep is about to revoke.
+func TestARegisterForASessionTheRegistryNoLongerHoldsIsRefused(t *testing.T) {
+	r := startRig(t, "")
+	for _, tc := range []struct {
+		name      string
+		sessionID string
+	}{
+		{"the name it already has", testSessionID},
+		{"no name at all", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Never added to the registry: exactly what a session retired a moment ago is.
+			sess := namedSession(t, 4242, testSessionID, nil)
+			sess.setEnrolled("enr-kept")
+			resp, refused := r.srv.adoptSessionID(context.Background(), sess, tc.sessionID)
+			if !refused || resp.Code != CodeNotASession {
+				t.Fatalf("a register for a session the registry no longer holds got %+v (refused %v), want NOT_A_SESSION", resp, refused)
+			}
+		})
+	}
+}
+
+// TestARegisterWaitingWhenItsSessionRetiresIsNotASuccess: registerReply waits for the session to
+// enrol, and a retire — an unregister, or the exit watch firing — can land during that wait,
+// closing its stop. The reply must then be NOT_A_SESSION, not OK with the identity of a session
+// nothing live holds and the sweep is about to revoke.
+func TestARegisterWaitingWhenItsSessionRetiresIsNotASuccess(t *testing.T) {
+	r := startRig(t, "") // logged in, so the reply actually waits
+	sess, err := newSession(4242, 1, "testhost:4242:1", testSessionID, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.srv.Registry.Add(sess) // live and unenrolled, so the wait does not return at once
+	done := make(chan Response, 1)
+	go func() { done <- r.srv.registerReply(sess, 5*time.Second) }()
+	// Retire it while the reply is mid-wait; Remove closes its stop, which wakes the wait.
+	r.srv.Registry.Remove(sess)
+	select {
+	case resp := <-done:
+		if resp.OK || resp.Code != CodeNotASession {
+			t.Fatalf("a register whose session retired mid-wait got %+v, want NOT_A_SESSION", resp)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("registerReply did not return after its session retired")
 	}
 }

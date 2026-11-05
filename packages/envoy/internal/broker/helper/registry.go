@@ -362,11 +362,19 @@ func (s *Session) lapsed() string {
 	return s.lapsedID
 }
 
-// clearLapsed forgets the lapsed id once its revoke is done.
-func (s *Session) clearLapsed() {
+// clearLapsedIf forgets the lapsed id once its revoke is done — but only while it is still the
+// one that was revoked. A rename landing under that revoke puts the enrollment BLOCKING the
+// session's new runtime id in the slot (takeLapsed), and forgetting that one would leave the
+// next enroll refused 409 ALREADY_ENROLLED for as long as its row lives, with nothing left to
+// revoke it. Answers whether it cleared.
+func (s *Session) clearLapsedIf(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.lapsedID != id {
+		return false
+	}
 	s.lapsedID = ""
+	return true
 }
 
 func (s *Session) Info() SessionInfo {
@@ -638,6 +646,17 @@ func (r *Registry) ClaimName(s *Session, sessionID string, take func(rec Record,
 	r.mu.Unlock()
 	s.wakeEnroll()
 	return claim{Named: true, Orphans: orphans}
+}
+
+// Holds says whether this very session is still the registry's live one for its pid. A session
+// found by a walk is a reading of a moment, and a retire — an unregister, or its exit watch —
+// can land before the caller answers for it; ClaimName makes the same check inside its one
+// locked step, and this is it for a caller that has no claim to make.
+func (r *Registry) Holds(s *Session) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cur, member := r.byPID[s.PID]
+	return member && cur == s
 }
 
 func (r *Registry) Add(s *Session) {

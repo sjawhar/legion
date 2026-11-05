@@ -16,8 +16,9 @@ An **agent session** is one running agent and everything it starts. On a machine
 process `agent-secrets register --exec` starts (a coding agent, or a shell) and every process below
 it; in a container or a Kubernetes pod, it is whatever holds the session's key directory. The
 broker never deals with a person's or a machine's long-lived key on the agent's behalf. Instead,
-every session has a P-256 signing key of its own that lives only as long as the session does, and
-an **enrollment** that binds that key to the broker.
+every session has a P-256 signing key of its own, and an **enrollment** that binds that key to the
+broker. A named machine session keeps its key and enrollment across restarts
+([what a grant follows](#what-a-grant-follows)).
 
 Every call a session makes carries a `Proof` header: a JSON Web Signature over the call's method
 and URL, signed with the session's key, used once, and valid only within
@@ -29,7 +30,7 @@ Engine VM for itself. An enrollment has one of three kinds:
 
 | Kind | What it is | Who holds its key | Who enrolls it |
 | --- | --- | --- | --- |
-| `session` | An agent session on a machine a person logged in: running directly on the machine, or in a container on it (a **box**). | For a session on the machine, the machine's helper, in memory; for a box, the container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper: when the session registers with `agent-secrets register`, or, for a box, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
+| `session` | An agent session on a machine a person logged in: running directly on the machine, or in a container on it (a **box**). | For a session on the machine, the machine's helper, in memory and, for a named session, on disk; for a box, the container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper: when the session registers with `agent-secrets register`, or, for a box, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
 | `pod` | A Legion worker pod in Kubernetes. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`. |
 | `vm` | A Google Compute Engine VM of a fleet `BROKER_VM_SERVICES` binds to a service. | The VM, in `key.pem` under its key directory. | The VM itself, with `agent-secrets enroll --vm`: it logs in with the identity token its metadata server signs for its service account (no person approves it), and proves itself with the same token. The enrollment is keyed by `<account>@<project>/<zone>/<instance id>`, since an instance id is unique only within a project and a zone, so each VM of a fleet that shares one account holds a login and an enrollment of its own. |
 
@@ -63,8 +64,8 @@ secret, releases no grant it holds, opens no request and renews nothing, and a p
 a request it left pending grants nothing. Its enrollment then ends with its lease.
 
 An enrollment has **ended** once its launcher revokes it (the helper does
-as soon as a registered session's process exits), whoever may revoke its machine login revokes that
-login
+as soon as an unnamed registered session's process exits; a named session is
+[parked first](#what-a-grant-follows)), whoever may revoke its machine login revokes that login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
 lease lapses. A `pod` enrollment's launcher is the one machine login that made it: another login,
 even another login of the same service, such as the Legion daemon's after a restart or after its
@@ -444,6 +445,28 @@ operator revokes it the session asks for approval before it gets the same secret
 ended); a session revoking its own grant, and anyone but the operator revoking one, withholds
 nothing. To end every session's automatic access to a secret, change its tags
 ([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#end-every-sessions-access-to-a-secret)).
+
+### What a grant follows
+
+A request and a grant bind to the **enrollment id**, not to the session name or the box
+(`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`). A machine session is
+**named** when its launcher registers it with `agent-secrets register --session-id <omp session id>`.
+The helper keeps that session's signing key and enrollment id across a helper restart, its process
+going away and a reboot. A grant made for it stays usable afterwards with no new request, while
+the enrollment and grant are still live.
+
+A named session whose process is gone is parked, not revoked. If the same session id does not
+register again within `DormantGrace` (3 minutes), the helper's next dormant-session sweep revokes
+its enrollment, ending its grants and pending requests. An unnamed machine session's identity
+lives only in the helper's memory: it enrolls afresh after that identity is lost, and its pending
+requests and grants end with the old enrollment.
+
+What this recovery does not do is carry a grant to **another box**. The helper's record is
+local, and the broker's enrollment recovery is keyed on the launcher credential, the runtime id
+and the slot, and needs the same signing key: signing in as the same person on a second box mints
+a different launcher credential and so a different enrollment, and the grants given to the first
+do not transfer. A session name alone carries no grant, and a revoked box key carries none. A
+grant that follows a session across boxes is separate, still-open work (dispatch://INFRA-1167).
 
 ## Approvals
 

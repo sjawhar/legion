@@ -150,7 +150,15 @@ func TestStateFollowsEnrollment(t *testing.T) {
 	if got := sess.identity().LapsedID; got != "enr-2" {
 		t.Fatalf("the record keeps the lapsed id until its revoke: %q", got)
 	}
-	sess.clearLapsed()
+	if sess.clearLapsedIf("enr-other") {
+		t.Fatal("a revoke's clear must leave a lapsed id that is no longer the one it revoked")
+	}
+	if got := sess.identity().LapsedID; got != "enr-2" {
+		t.Fatalf("a clear for another id took the lapsed slot: %q", got)
+	}
+	if !sess.clearLapsedIf("enr-2") {
+		t.Fatal("the revoked lapsed id must clear")
+	}
 	if got := sess.identity().LapsedID; got != "" {
 		t.Fatalf("a revoked lapsed id leaves the record: %q", got)
 	}

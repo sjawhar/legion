@@ -18,11 +18,12 @@ supersedes:
 
 # A migration added after the numbered series is named for its creation instant, and a guard compares the applied set
 
-The two superseded files tell an author to renumber; sjawhar/legion#2411 replaced the next number with a timestamp, so nothing is renumbered any more.
+The two superseded files tell an author to renumber; for Dispatch's set and the daemon's, sjawhar/legion#2411 replaced the next number with a timestamp, so nothing in those sets is renumbered any more.
+The broker's set stays numbered 1 to N with no gap: keep the number on the file that merged first, and renumber a colliding broker migration to the next number.
 
 - Name a new daemon or Dispatch migration `YYYYMMDDHHMMSS_<slug>.up.sql`, the UTC moment you create it (`date -u +%Y%m%d%H%M%S`), with its census under the same timestamp.
   Never take the next number: `migrationid.Check` refuses a number above the series' recorded closing file, on your branch alone.
-- Never renumber or rename a numbered file: the closing file is how the check finds where the numbered series ends.
+- Never renumber or rename a numbered daemon or Dispatch file: the closing file is how the check finds where the numbered series ends.
 - Do not write a migration that depends on its order relative to one in another open pull request: a deployed database applies each when its release deploys, so two databases can apply them in opposite orders.
 - Compare the set of applied versions, never `max(version)`, in anything that decides whether the schema moved (a rollback guard, a seed check): a migration merged below one a database already applied runs there later and leaves the maximum unchanged.
 

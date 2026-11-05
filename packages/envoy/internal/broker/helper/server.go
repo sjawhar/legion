@@ -340,9 +340,21 @@ func (s *Server) reclaimIdentity(sessionID string, rec Record, kept bool) reclai
 // Whether the name is free, whether the record kept for it is consumed, and the rename itself
 // are one registry-level step (Registry.ClaimName): two sessions adopting one id must not both
 // be told it was theirs.
+//
+// Every path through it requires that the session is still the registry's own — the ones with
+// no name to claim included, which is what Registry.Holds is for. A register answering OK for a
+// session that has gone tells its launcher it has a broker identity that nothing live holds.
 func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID string) (Response, bool) {
 	cur := sess.identity()
 	if sessionID == "" || cur.SessionID == sessionID {
+		// Nothing to claim, so ClaimName — which is where a retired session is caught — never
+		// runs. The walk that found this session is a reading of a moment, and an unregister
+		// or its exit watch can retire it before the reply goes out; answering OK then would
+		// tell a launcher its session has a broker identity when nothing live holds the name
+		// and the identity is parked for the sweep.
+		if !s.Registry.Holds(sess) {
+			return Response{Code: CodeNotASession, Error: "the session this process was in ended before this register could answer for it; run: agent-secrets register"}, true
+		}
 		return Response{}, false
 	}
 	if cur.SessionID != "" {
@@ -393,6 +405,12 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 // changed meanwhile. A session whose enrollment lapsed waits for its re-enrollment, since a lapse
 // reopens its ready channel (markLapsed). The reply's id, state and error come from one snapshot,
 // so a lapse landing after the wait cannot give it an id from before and a state from after.
+//
+// The wait ends early when the session is retired (its stop closes), and a retire can also land
+// just as the wait runs out, so the reply is built only after a last membership check: a session
+// the registry no longer holds is answered NOT_A_SESSION, not OK with an identity nothing live
+// has. registerReply answers a session the caller has already found, so it takes the registry it
+// belongs to as well.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
 	if wait > 0 && credential {
@@ -401,6 +419,9 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 		case <-time.After(wait):
 		case <-sess.stop:
 		}
+	}
+	if !s.Registry.Holds(sess) {
+		return Response{Code: CodeNotASession, Error: "the session this process was in ended before this register could answer for it; run: agent-secrets register"}
 	}
 	st := sess.snapshot()
 	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID(), Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
@@ -705,14 +726,22 @@ func (s *Server) adopt(ctx context.Context, sess *Session) {
 	go s.watchExit(ctx, sess)
 }
 
-// errRenamed, returned by a try, ends retryUntilStop at once without success: the attempt's
-// precondition no longer holds and no number of retries can restore it, so the caller must run
-// its own loop again rather than spin here. enrollLoop returns it when a rename lands under an
-// enroll retry.
-var errRenamed = errors.New("the session was renamed while it was enrolling")
+// errFinal marks an error no retry can mend: the attempt's precondition no longer holds, or the
+// broker has answered and its answer will not change, so retryUntilStop ends at once without
+// success and the caller decides what happens next rather than spinning here.
+var errFinal = errors.New("no retry can mend this")
+
+// errRenamed, returned by a try, ends retryUntilStop at once without success: the identity moved
+// under the attempt, so the caller must run its own loop again. enrollLoop returns it when a
+// rename lands under an enroll retry, and confirmInherited when one lands under its renew.
+var errRenamed = fmt.Errorf("the session was renamed while it was enrolling: %w", errFinal)
+
+// errRefused, returned by confirmInherited's try, ends its retry: the broker ANSWERED and would
+// not honour the inherited enrollment, which is the one outcome that justifies enrolling afresh.
+var errRefused = fmt.Errorf("the broker will not honour this enrollment: %w", errFinal)
 
 // retryUntilStop retries try with backoff until it succeeds, stop closes, ctx ends, or try
-// answers errRenamed, which no retry can mend. Delay
+// answers an error wrapping errFinal. Delay
 // starts at start and doubles toward maxDelay after each failure (start == maxDelay gives a
 // caller a fixed delay instead of a growing one); attempts caps the number of tries (0 means
 // unlimited), and try's last permitted attempt failing ends the loop at once, without waiting.
@@ -734,7 +763,7 @@ func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake func() <-cha
 		if err == nil {
 			return true
 		}
-		if errors.Is(err, errRenamed) {
+		if errors.Is(err, errFinal) {
 			onFail(attempt, err, 0, false)
 			return false
 		}
@@ -779,7 +808,14 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 			if !s.revokeLapsed(ctx, sess, lapsed) {
 				return
 			}
-			sess.clearLapsed()
+			// If the slot no longer holds the id just revoked, a rename landed under the
+			// revoke and put the enrollment BLOCKING the new runtime id there. clearLapsedIf
+			// leaves it, and the loop must start again to revoke THAT before enrolling: the
+			// broker refuses a second row for the runtime id this session is about to enrol
+			// while the blocker lives, so proceeding would 409 until its lease ends.
+			if !sess.clearLapsedIf(lapsed) {
+				continue
+			}
 		}
 		// An identity reclaimed from a record, or one a restart re-pinned, arrives holding an
 		// enrollment the broker made for THIS key under THIS runtime id but which nothing has
@@ -787,23 +823,32 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// own key alone, so it confirms that very row whatever launcher credential the helper
 		// holds now, while an enroll is matched on (launcher credential, runtime id) and a
 		// machine that has logged in again would be handed a NEW enrollment, abandoning the
-		// pending requests and grants of the one the session came back for. A refusal falls
-		// through to the enroll below, which is what a row that really is gone needs.
+		// pending requests and grants of the one the session came back for. Only the broker
+		// REFUSING it falls through to the enroll below; see confirmInherited.
 		if pass := sess.identity(); pass.EnrollmentID != "" && !pass.Confirmed {
-			if lease, _, err := s.Broker.renewIdentity(ctx, pass); err == nil {
-				if sess.setEnrolledAt(pass.EnrollmentID, pass.Generation) {
-					s.save()
-					s.Log.Info("session kept the enrollment its record held; the broker still honours it",
-						"runtime_id", pass.RuntimeID, "enrollment_id", pass.EnrollmentID)
-					if !s.renewLoop(ctx, sess, lease) {
-						return
-					}
+			lease, outcome := s.confirmInherited(ctx, sess, pass)
+			switch outcome {
+			case confirmStopped:
+				return
+			case confirmMoved:
+				continue
+			case confirmKept:
+				if !sess.setEnrolledAt(pass.EnrollmentID, pass.Generation) {
+					// The identity moved between the renew and this write. The new one
+					// decides what happens next — it may itself be an inherited enrollment
+					// to confirm rather than one to enrol — so start the pass again.
 					continue
 				}
-			} else {
-				s.Log.Info("the enrollment this session's record held could not be renewed; enrolling instead",
-					"runtime_id", pass.RuntimeID, "enrollment_id", pass.EnrollmentID, "error", err)
+				s.save()
+				s.Log.Info("session kept the enrollment its record held; the broker still honours it",
+					"runtime_id", pass.RuntimeID, "enrollment_id", pass.EnrollmentID)
+				if !s.renewLoop(ctx, sess, lease, pass.Generation) {
+					return
+				}
+				continue
 			}
+			// confirmRefused: the broker answered that it will not honour that enrollment,
+			// so the session needs a new one.
 		}
 		var id string
 		var lease time.Time
@@ -853,19 +898,99 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		}
 		if !sess.setEnrolledAt(id, generation) {
 			// A rename landed while this enroll was in flight. The id belongs to the name this
-			// session no longer has; the next pass revokes it as the lapsed one and enrols
-			// under the new name.
+			// session no longer has, so it blocks nothing the session is about to enrol: it
+			// takes the lapsed slot only while that slot is free. The rename may have put the
+			// enrollment BLOCKING the new runtime id there (takeLapsed), and displacing that
+			// one would leave the next enroll refused 409 for as long as its row lives; this
+			// id goes to the bounded revoke instead.
 			s.Log.Info("an enrollment arrived for a name this session no longer has; enrolling again under its new one",
 				"runtime_id", sess.RuntimeID(), "enrollment_id", id)
-			sess.setLapsed(id)
+			if !sess.adoptLapsed(id) {
+				go s.revoke(ctx, id)
+			}
 			continue
 		}
 		s.save()
 		s.Log.Info("session enrolled", "runtime_id", sess.RuntimeID(), "enrollment_id", id)
-		if !s.renewLoop(ctx, sess, lease) {
+		if !s.renewLoop(ctx, sess, lease, generation) {
 			return
 		}
 	}
+}
+
+// confirmation is what confirmInherited concluded about an inherited enrollment.
+type confirmation int
+
+const (
+	confirmStopped confirmation = iota // the session ended, or the daemon is exiting
+	confirmKept                        // the broker still honours it; the lease is the renew's
+	confirmRefused                     // the broker answered that it does not; enrol afresh
+	confirmMoved                       // the identity moved under the renew; start the pass again
+)
+
+// confirmInherited proves that the broker still honours the enrollment an inherited identity
+// arrived holding, by renewing it with that identity's own retained key.
+//
+// Only the broker ANSWERING and refusing means the row is no longer this session's, and only
+// that justifies enrolling afresh: an enroll is matched on (launcher credential, runtime id), so
+// a machine that has logged in again is handed a NEW enrollment, and the pending requests and
+// grants of the one the session came back for end with it. A renew that did not reach the
+// broker, or that the broker could not answer, says nothing about the row — so it is retried
+// with the enroll's own backoff rather than read as a refusal. A single blip between a record
+// and the broker must not cost the session the grants that record exists to keep.
+func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass identity) (time.Time, confirmation) {
+	var lease time.Time
+	outcome := confirmStopped
+	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+		switch {
+		case errors.Is(err, errRenamed):
+			outcome = confirmMoved
+		case errors.Is(err, errRefused):
+			outcome = confirmRefused
+			s.Log.Info("the broker will not honour the enrollment this session's record held; enrolling instead",
+				"runtime_id", pass.RuntimeID, "enrollment_id", pass.EnrollmentID, "error", err)
+		default:
+			s.Log.Warn("the renew that would keep the enrollment this session's record held did not reach the broker; retrying",
+				"runtime_id", pass.RuntimeID, "enrollment_id", pass.EnrollmentID, "error", err, "in", delay)
+		}
+	}, func() error {
+		// The renew signs for ONE reading. A rename landing under it has given the session
+		// another identity, and this answer speaks for neither confirming nor refusing that.
+		if cur := sess.identity(); cur.Generation != pass.Generation || cur.EnrollmentID != pass.EnrollmentID {
+			return errRenamed
+		}
+		next, _, err := s.Broker.renewIdentity(ctx, pass)
+		if err != nil {
+			if _, ended := enrollmentNotLive(err); ended {
+				return fmt.Errorf("%w (%w)", errRefused, err)
+			}
+			return err
+		}
+		lease = next
+		return nil
+	})
+	if kept {
+		return lease, confirmKept
+	}
+	return time.Time{}, outcome
+}
+
+// enrollmentNotLive reports the broker's one verdict that an enrollment has ended:
+// ENROLLMENT_NOT_LIVE, with the exact PROOF_INVALID "not live" fallback older brokers still
+// answer, retained until they are retired. It is deliberately narrow. Every other refusal —
+// a skewed clock's PROOF_INVALID above all, which a corrected clock mends — says nothing about
+// the row, and reading one as the end of an enrollment costs a session every pending request
+// and grant that enrollment carries. renewLoop and confirmInherited draw the line in the same
+// place, so a renewal and a confirmation cannot disagree about what ended an enrollment.
+func enrollmentNotLive(err error) (string, bool) {
+	var be *BrokerError
+	if !errors.As(err, &be) {
+		return "", false
+	}
+	if be.Code == "ENROLLMENT_NOT_LIVE" || (be.Code == "PROOF_INVALID" && strings.Contains(be.Message, "not live")) {
+		return be.Code, true
+	}
+	return be.Code, false
 }
 
 // renewLoop renews at a third of the lease until the session ends (false) or the broker says this
@@ -873,12 +998,22 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 // verdict. An older broker still says PROOF_INVALID with "not live"; retain that exact fallback
 // until old brokers are retired. Other proof failures, including clock skew, keep the lease and
 // retry: a corrected clock can make the next proof valid.
-func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) bool {
+//
+// generation is the identity reading this loop renews. The wake is buffered one and nobody has
+// to be waiting when it is sent, so a rename that landed BEFORE this enrollment was made or
+// confirmed leaves one sitting in the channel for this loop to find. Acting on such a wake would
+// enrol again and abandon the live enrollment the session just proved, which is the whole of what
+// this change exists to prevent — so a wake counts only while the identity has in fact moved on
+// from the one being renewed.
+func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time, generation uint64) bool {
 	for {
 		interval := leasetime.HelperRenewAfter(time.Until(lease), s.MinRenew)
 		select {
 		case <-time.After(interval):
 		case <-sess.wakeCh():
+			if sess.identity().Generation == generation {
+				continue
+			}
 			// Rename lapsed this session's enrollment: enrol again now, under its new runtime
 			// id, rather than at the next renewal. enrollLoop revokes the lapsed id first.
 			return true
@@ -888,22 +1023,20 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 			return false
 		}
 		next, renewed, err := s.Broker.Renew(ctx, sess)
-		var be *BrokerError
-		if errors.As(err, &be) && (be.Code == "ENROLLMENT_NOT_LIVE" ||
-			(be.Code == "PROOF_INVALID" && strings.Contains(be.Message, "not live"))) {
+		if code, ended := enrollmentNotLive(err); ended {
 			// The refusal speaks for the enrollment this renew signed, not for whatever the
 			// session holds now. A rename landing while the request was out has given it
 			// ANOTHER identity — possibly one just reclaimed from a dormant record, with the
 			// grants this change exists to keep — and lapsing that one here would have
 			// enrollLoop revoke it. markLapsedAt applies the refusal only while the session
 			// still holds the very enrollment that was refused.
-			id, applied := sess.markLapsedAt(renewed, "the broker refused this session's renew ("+be.Code+"); enrolling again")
+			id, applied := sess.markLapsedAt(renewed, "the broker refused this session's renew ("+code+"); enrolling again")
 			if !applied {
 				s.Log.Info("a renew was refused for an enrollment this session no longer holds; leaving its current one alone",
-					"runtime_id", sess.RuntimeID(), "code", be.Code, "enrollment_id", renewed.EnrollmentID)
+					"runtime_id", sess.RuntimeID(), "code", code, "enrollment_id", renewed.EnrollmentID)
 				return true
 			}
-			s.Log.Warn("renew refused; revoking the lapsed enrollment before enrolling again", "runtime_id", sess.RuntimeID(), "code", be.Code, "enrollment_id", id)
+			s.Log.Warn("renew refused; revoking the lapsed enrollment before enrolling again", "runtime_id", sess.RuntimeID(), "code", code, "enrollment_id", id)
 			return true
 		}
 		if err != nil {

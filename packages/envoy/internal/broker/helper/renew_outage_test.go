@@ -162,7 +162,7 @@ func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			lapsed := make(chan bool, 1)
-			go func() { lapsed <- srv.renewLoop(ctx, sess, start.Add(c.lease)) }()
+			go func() { lapsed <- srv.renewLoop(ctx, sess, start.Add(c.lease), sess.identity().Generation) }()
 			if c.wantLapse {
 				select {
 				case got := <-lapsed:

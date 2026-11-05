@@ -1,0 +1,17 @@
+kind: Fixed
+body: >-
+  A machine session its launcher named with agent-secrets register --session-id keeps its
+  broker identity — its signing key and its enrollment id, and so the credential requests
+  waiting on it and the grants already given — when its helper restarts, when its process
+  goes away and comes back, and across a reboot of its box. A record re-pins a live process
+  only if it was written in this boot (/proc/sys/kernel/random/boot_id), fail-closed; a named
+  session whose process is gone is parked rather than revoked and swept after DormantGrace
+  (3 minutes); name ownership is decided in one locked step, so a registration that fails
+  leaves the identity reclaimable; and an inherited enrollment is confirmed by renewing it
+  with its own retained key, so a machine that has logged in again keeps it instead of being
+  handed a new row. A grant still does not follow a session to another box. A migration
+  collision is now refused with the remedy that fits the set that refused it: the next number
+  for the broker's numbered set, a 14-digit UTC timestamp for Dispatch's and the daemon's.
+time: 2026-11-05T04:30:00Z
+custom:
+  Issue: pr2791
