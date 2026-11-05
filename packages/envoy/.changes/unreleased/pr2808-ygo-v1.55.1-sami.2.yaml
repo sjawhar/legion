@@ -1,0 +1,14 @@
+kind: Changed
+body: |-
+    Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.2. A keystroke no longer scans
+    every distinct missing client in the waiting queue. Default document UUIDs use two allocations
+    instead of eight. Room closure cannot evict a room while an apply writes it, failed joins
+    reclaim eligible rooms, and cancelled applies can stop waiting for a room load. The library
+    also offers context-aware room closure; Dispatch retains its existing close wrapper. Logical
+    content lengths and splice offsets use uint64 without changing the wire format; Dispatch
+    needs no consumer API adaptation. Cloning a document with emptied waiting-queue slots no
+    longer panics, protecting current Dispatch's warm write forks. Three repeated library
+    microbenchmark slowdowns remain, but their percentages do not measure whole-update cost.
+time: 2026-11-05T13:42:25.000000000Z
+custom:
+    Issue: pr2808
