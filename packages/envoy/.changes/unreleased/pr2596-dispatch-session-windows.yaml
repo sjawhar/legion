@@ -1,0 +1,12 @@
+kind: Fixed
+body: |-
+    Dispatch judges a role route's holder by the session windows its own deployment sets,
+    `ENVOY_SESSION_LIVE_WINDOW` and `ENVOY_SESSION_GONE_HORIZON`, read with the listener's rules:
+    their compiled defaults when unset, a warning and the default for a value no Go duration can
+    be read from, and a refusal to start for one that is not positive. It used to judge every
+    holder by the compiled windows alone, so an operator who raised a listener's gone horizon —
+    the answer to a stall longer than an hour — left Dispatch calling a holder gone whose role
+    that listener still kept: the event was marked published with nothing sent and reached its
+    holder never. Give every listener of a deployment and Dispatch's server the same two values.
+custom:
+    Issue: pr2596

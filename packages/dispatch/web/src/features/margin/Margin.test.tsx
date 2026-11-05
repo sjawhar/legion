@@ -574,6 +574,7 @@ test("a reply typed into an answered ask's thread survives leaving the Comments 
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   });
   const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([askRow(answeredAsk)]);
@@ -786,6 +787,7 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [askReply],
   });
   const view = render(

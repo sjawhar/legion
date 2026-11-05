@@ -12,5 +12,5 @@ import (
 func (s *Store) WrapBucket(wrap func(nats.KeyValue) nats.KeyValue) {
 	s.kvMu.Lock()
 	defer s.kvMu.Unlock()
-	s.kv = bus.KeyValue{KeyValue: wrap(s.kv.KeyValue)}
+	s.kv = bus.NewKeyValue(wrap(s.kv.Legacy()), s.kv.WatchHandle(), s.kv.Streams())
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
@@ -74,7 +75,7 @@ func Open(conn *nats.Conn, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open legion agent registry JetStream: %w", err)
 	}
-	if _, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+	if _, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{
 		Bucket:   bus.LegionAgentBucket,
 		History:  1,
 		Replicas: o.replicas,
@@ -96,7 +97,7 @@ func openHandle(conn *nats.Conn) (bus.KeyValue, error) {
 	if err != nil {
 		return bus.KeyValue{}, fmt.Errorf("open legion agent registry JetStream: %w", err)
 	}
-	kv, err := bus.OpenKeyValue(js, bus.LegionAgentBucket)
+	kv, err := bus.OpenKeyValue(conn, js, bus.LegionAgentBucket)
 	if err != nil {
 		return bus.KeyValue{}, fmt.Errorf("open legion agent KV bucket: %w", err)
 	}
@@ -200,16 +201,21 @@ func (s *Store) read(ctx context.Context, sessionID string) (Entry, uint64, erro
 
 // list reads every key under prefix, an issue's or a role token's, from one watch filtered to it
 // (kvwatch.ScanExistingKeys, which fails a watch that did not deliver every key the filter held).
+// The scan holds no context of its own, so ctx is read before it starts and the scan is bounded by
+// kvwatch.ScanIdleTimeout, which gives up on a bucket that stops delivering.
 func (s *Store) list(ctx context.Context, prefix string) ([]Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var entries []Entry
-	_, err := kvwatch.ScanExistingKeys(ctx, s.bucket(), prefix+"*", "list legion agents under "+prefix, s.log, func(found nats.KeyValueEntry) error {
+	_, err := kvwatch.ScanExistingKeys(s.bucket(), prefix+"*", "list legion agents under "+prefix, kvwatch.ScanIdleTimeout, s.log, func(found kvwatch.Entry) error {
 		var entry Entry
-		if err := json.Unmarshal(found.Value(), &entry); err != nil {
-			return fmt.Errorf("decode legion agent key %s: %w", found.Key(), err)
+		if err := json.Unmarshal(found.Value, &entry); err != nil {
+			return fmt.Errorf("decode legion agent key %s: %w", found.Key, err)
 		}
 		entries = append(entries, entry)
 		return nil
-	}, nats.IgnoreDeletes())
+	}, jetstream.IgnoreDeletes())
 	if err != nil {
 		return nil, err
 	}

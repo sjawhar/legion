@@ -36,7 +36,7 @@ func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOu
 	published := map[string][]string{}
 	var settled atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(subject string, item contracts.Envelope, _ string, _ time.Duration) (func() error, error) {
+	cfg.forwardRole = func(subject string, item contracts.Envelope, _ string, _ time.Duration, _ bool) (func() error, error) {
 		mu.Lock()
 		published[subject] = append(published[subject], item.EventID)
 		mu.Unlock()

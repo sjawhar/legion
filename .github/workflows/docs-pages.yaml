@@ -174,6 +174,7 @@ on:
       - 'packages/envoy/internal/dispatch/store/*'
       - 'packages/envoy/internal/dispatch/store/migrations/**'
       - 'packages/envoy/internal/dispatch/text/*'
+      - 'packages/envoy/internal/envconf/*'
       - 'packages/envoy/internal/githubappjwt/*'
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/internal/id/*'

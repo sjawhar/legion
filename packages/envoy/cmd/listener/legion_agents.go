@@ -199,8 +199,15 @@ func (r *legionAgentRegistry) serving(w http.ResponseWriter) (*legionagents.Stor
 const legionAgentBodyLimit = 1 << 20
 
 // legionAgentAnswer is one Legion agent registry entry as a read answers it: the entry, the session
-// that replaced it within its role token (legionagents.Agent), and whether its session is in this
-// listener's session registry now. Both are derived at the read and neither is stored.
+// that replaced it within its role token (legionagents.Agent), and whether its session is answering
+// now. Both are derived at the read and neither is stored.
+//
+// Live is the session's own registration state, as every reader of the session registry judges it
+// (session.StateOf through SessionRegistry.Lookup, sessionIsLive): true only while that
+// registration is within the live window. It is never the row's membership of the session cache.
+// So live false does not say the agent has ended: a session past the live window is unresponsive
+// and keeps everything of its own (dispatch://INFRA-392), and only a session the registry calls
+// gone has stopped.
 type legionAgentAnswer struct {
 	legionagents.Agent
 	Live bool `json:"live"`
@@ -220,7 +227,8 @@ type legionAgentBatchFailure struct {
 }
 
 func answerLegionAgent(sessions *session.SessionRegistry, agent legionagents.Agent) legionAgentAnswer {
-	return legionAgentAnswer{Agent: agent, Live: isSessionLive(sessions, agent.SessionID)}
+	_, state := sessions.Lookup(agent.SessionID)
+	return legionAgentAnswer{Agent: agent, Live: sessionIsLive(state)}
 }
 
 func answerLegionAgents(sessions *session.SessionRegistry, agents []legionagents.Agent) legionAgentList {
