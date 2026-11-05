@@ -76,13 +76,15 @@ const CITATIONS: readonly RegExp[] = [
   /\bhttps?:\/\//i, // a URL
   /\b[a-z][a-z0-9+.-]*:\/\//i, // dispatch://, agent://, pr://, issue://, local://
   /\[[^\]\n]+\]\s*[([][^)\]\n]+[)\]]/, // a markdown link, inline or reference-style
-  /\b[A-Z][A-Z0-9]{1,9}-\d{2,}\b/, // a dispatch key (INFRA-515, BET-571), never GPT-5 or UTF-8
+  // A dispatch key (INFRA-515, BET-571), never GPT-5 or UTF-8: the number is two digits or more.
+  // Two digits is not enough on its own — `UTF-16`, `SHA-256` and `ISO-9001` are a standard's
+  // name, not a place to look — so the handful of prefixes that are never a project are named
+  // here. Telling the rest apart would need the live project list, which this module must not
+  // reach for; what is left is a known limitation, and it costs a flag, never a silence.
+  /\b(?!(?:UTF|SHA|ISO|AES|RSA|AVX|SSE|MD|GPT|CLAUDE|HTTP)-)[A-Z][A-Z0-9]{1,9}-\d{2,}\b/,
   /(?:^|[\s([])#\d+\b/, // a pull request or issue number
   /\b(?:PR|pull request|issue|commit)\s+#?\d+\b/i,
-  // A sha: seven to forty hex characters (git's own abbreviation is seven), upper or lower case,
-  // holding at least one digit — so an English word of hex letters (`defaced`, `effaced`) is not
-  // one, and a plain number, the thing being claimed, is not the source of itself.
-  /\b(?=[0-9a-f]{7,40}\b)[a-f]*[0-9][0-9a-f]*\b/i,
+  // (a sha is matched by TOKEN_CITATIONS below, where its condition can be stated in code)
   // A file name: a known extension with a name in front of it. Read from the extension backwards,
   // so no quantifier has to decide where the dots end.
   /(?<=[\w@-])\.(?:ts|tsx|js|jsx|json|jsonl|md|mdx|py|rs|go|java|rb|c|h|cpp|yaml|yml|toml|sh|sql|lean|thy|txt|log|csv|kdl|lock)\b/,
@@ -94,19 +96,32 @@ const CITATIONS: readonly RegExp[] = [
 ];
 
 /**
- * A token holding a slash, starting with a letter: `owner/repo`, `packages/x/y`,
- * `farm/20261103t005431z-25e6a4`, `theorem-labs/machcsl-riscv#52`. One quantifier per segment and
- * none of them overlapping, so it scans the text once.
- *
- * Starting with a letter is what keeps `11/05/2026` a date. What makes it a citation rather than
- * `and/or` is then decided in code: a second slash (a path), a digit after the first slash (a run
- * or job id), or a `#123` (a cross-repository reference).
+ * The citations whose condition no deterministic pattern can state: the pattern finds a candidate
+ * token in one pass, and a function decides. This is the shape every such rule takes here, since
+ * a pattern clever enough to decide on its own is a pattern that backtracks.
  */
-const SLASH_TOKEN = /\b[A-Za-z][\w.-]*\/[\w.@/-]*(?:#\d+)?/g;
-const NAMES_SOMETHING = (token: string) => {
-  const tail = token.slice(token.indexOf("/") + 1);
-  return tail.includes("/") || /\d/.test(tail);
-};
+const TOKEN_CITATIONS: ReadonlyArray<[RegExp, (token: string) => boolean]> = [
+  // A sha: seven to forty hex characters (git's own abbreviation is seven), upper or lower case,
+  // carrying both a letter and a digit. The letter keeps a plain seven-digit count — the thing
+  // being claimed — from being read as the source of itself; the digit keeps an English word of
+  // hex letters (`defaced`, `effaced`) from being read as one at all. A sha that is all digits or
+  // all letters is missed, which costs a flag and never a silence.
+  [/\b[0-9a-f]{7,40}\b/gi, (token) => /[a-f]/i.test(token) && /\d/.test(token)],
+  // A token holding a slash and starting with a letter: `packages/x/y`, `owner/repo#52`,
+  // `farm/20261103t005431z-25e6a4`. Starting with a letter keeps `11/05/2026` a date.
+  //
+  // What makes it a citation rather than `and/or` or a rate like `attempts/100`: a second slash
+  // (a path), a run of four digits or more (a date-stamped run id), or a tail of six characters
+  // or more mixing letters and digits (a named id).
+  [
+    /\b[A-Za-z][\w.-]*\/[\w.@/-]*(?:#\d+)?/g,
+    (token) => {
+      const tail = token.slice(token.indexOf("/") + 1);
+      if (tail.includes("/") || /\d{4}/.test(tail)) return true;
+      return tail.length >= 6 && /\d/.test(tail) && /[A-Za-z]/.test(tail);
+    },
+  ],
+];
 /**
  * A sentence the writer has already marked as something other than a measurement they took: an
  * inference, an estimate, a conditional, a requirement, a plan. The lint asks a sender to source a
@@ -131,6 +146,11 @@ const HEDGES: readonly RegExp[] = [
   // An instruction is not a report. "Run the full ladder of seven rungs" names a plan; a sentence
   // that opens with a bare imperative has nothing for a reader to go and re-run yet.
   /^(?:run|add|use|check|write|build|ship|keep|make|do|set|send|start|stop|take|put|read|fix|drop|move|hold|tell|ask|give)\b/i,
+  // A labelled fragment: `Next: 12 tests`, `Budget: 4 jobs`, `Expected: 100%`. The label says it
+  // is a plan, a target or a bound — not a number anyone took. These became candidates when the
+  // sentence floor fell from 25 to 14 characters to let `The suite passed.` through.
+  /^(?:next|plan|planned|budget|target|minimum|maximum|expected|goal|todo|retry|scope|owner|due|eta)\b\s*[:—-]?/i,
+  /\bconfidence\b/i, // a confidence or an interval is a statement about uncertainty
 ];
 
 /**
@@ -164,8 +184,10 @@ const KINDS: ReadonlyArray<[SourcingFlag["kind"], (sentence: string) => boolean]
 /** Whether the sentence carries something a reader can go and check. */
 export function hasCitation(sentence: string): boolean {
   if (CITATIONS.some((pattern) => pattern.test(sentence))) return true;
-  SLASH_TOKEN.lastIndex = 0;
-  for (const [token] of sentence.matchAll(SLASH_TOKEN)) if (NAMES_SOMETHING(token)) return true;
+  for (const [pattern, names] of TOKEN_CITATIONS) {
+    pattern.lastIndex = 0;
+    for (const [token] of sentence.matchAll(pattern)) if (names(token)) return true;
+  }
   return false;
 }
 

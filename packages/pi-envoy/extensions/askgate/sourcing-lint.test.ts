@@ -122,6 +122,43 @@ describe("sourcingLint", () => {
     expect(sourcingLint(flagged)).toHaveLength(1);
   });
 
+  // A token that matches ordinary English silences a real claim for free, which is worse than a
+  // flag nobody wanted. Each of these was a live suppression a reviewer found.
+  test.each([
+    ["a model name", "The GPT-5 run passed all 79 tests."],
+    ["an encoding", "The UTF-16 suite passed."],
+    ["a standard", "The SHA-256 suite passed and ISO-9001 was met."],
+    ["a date", "The run on 11/05/2026 passed all 79 tests."],
+    ["a word of hex letters", "The log was defaced after 15 of 79 runs."],
+    ["a plain seven-digit count", "The corpus holds 2997814 rows after the regrade."],
+    ["a rate", "The lander retried attempts/100 times in 9 of 11 runs."],
+  ])("%s does not source a claim", (_what, sentence) => {
+    expect(sourcingLint(sentence)).toHaveLength(1);
+  });
+
+  // The same shapes, where they really are a source.
+  test.each([
+    ["an abbreviated sha", "At 3fedd12 the suite is 627 tests and 0 failures."],
+    ["an uppercase sha", "At head ABCDEF12 the regrade moved 15 of 79 rewrites."],
+    ["a run id", "The run farm/20261103t005431z-25e6a4 moved 15 of 79 rewrites."],
+    ["a repository path", "packages/pi-envoy/extensions holds 3,740 lines of core."],
+    ["a reference-style link", "The regrade moved 15 of 79 rewrites [run log][evidence]."],
+  ])("%s does source a claim", (_what, sentence) => {
+    expect(sourcingLint(sentence)).toEqual([]);
+  });
+
+  // The floor is 14 characters so the shortest real results get through; what came with them is
+  // the labelled plan fragment, which the label itself rules out.
+  test.each([
+    ["a result", "The suite passed.", 1],
+    ["a short count", "All 79 tests passed.", 1],
+    ["a plan", "Next: 12 tests", 0],
+    ["a budget", "Budget: 4 jobs", 0],
+    ["an expectation", "Expected: 100%", 0],
+    ["an interval", "90% confidence", 0],
+  ])("a short line that is %s", (_what, sentence, flags) => {
+    expect(sourcingLint(sentence)).toHaveLength(flags);
+  });
   test("the same claim is flagged without its source and silent with it", () => {
     const bare = "The regrade moved 15 of 79 rewrites.";
     expect(sourcingLint(bare)).toHaveLength(1);
