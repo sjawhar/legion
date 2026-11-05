@@ -137,10 +137,13 @@ test("the Collaborators tab lists an issue's people and its Legion agents, runni
       )
     ).toEqual([newReviewer, oldReviewer]);
     // Only the old reviewer's own row names its replacement; the newest row names nobody else.
+    // The row is found by the name it carries as its own (`data-collaborator`): the old row also
+    // holds the new session's name, in the line that says what replaced it, so a row selected by
+    // any name inside it would match both.
     const rowOf = (sessionId: string) =>
       reviewers
         .getByRole("listitem")
-        .filter({ has: page.locator(`[data-agent-name="${sessionId}"]`) });
+        .filter({ has: page.locator(`[data-collaborator] [data-agent-name="${sessionId}"]`) });
     await expect(rowOf(oldReviewer).locator(`[data-replaced-by="${newReviewer}"]`)).toContainText(
       `replaced by Legion reviewer · ${issueKey}`
     );
@@ -190,11 +193,9 @@ test("the mention picker offers the issue's stopped roles and sends one as a rol
   browser,
 }) => {
   const { issueKey, tokens } = await seed();
-  // The issue is reopened for this row: a closed issue takes no send - its composer renders
-  // nothing (`closed` on `MentionComposer`) and Dispatch refuses the write `409 ISSUE_CLOSED` -
-  // while the picker's "Not running" options come from the collaborators read, which the close
-  // does not touch.
-  await patchIssue(issueKey, { status: "backlog" });
+  // On the closed issue itself, which is this issue's whole point: a finished issue's agents are
+  // asked from its own page, so the composer is the one a closed issue keeps and the comment is a
+  // closed issue's comment.
   const alice = await asUser(browser, "alice");
 
   try {
