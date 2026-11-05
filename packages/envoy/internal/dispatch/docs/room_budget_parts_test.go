@@ -979,6 +979,95 @@ func TestAWritePublishesIntoNoRoomWhileTheBudgetHasNoOpeningForOne(t *testing.T)
 	}
 }
 
+// A burst of API reads of documents no room holds opens no room while the budget has no opening
+// for one: each read is answered from the stored document instead (docTree, storedTree), and the
+// budget's charges stand where they stood. Without the opening each of those reads loaded a room
+// of its own, all of them at once, charged to a budget that refuses the server's own work
+// nothing.
+func TestABurstOfReadsOfColdDocumentsOpensNoRoomWhileTheBudgetHasNoOpeningForOne(t *testing.T) {
+	const reads = 12
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	service.measurer.interval = noInterval
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	ids := createDocuments(t, database, reads+1)
+	held, cold := ids[0], ids[1:]
+
+	browser := connectBrowser(t, httpServer.URL, held, "alice")
+	t.Cleanup(browser.Close)
+	waitFor(t, 10*time.Second, "the browser's room to be charged", func() bool { return budgetUsed(service) > 0 })
+	service.measurer.waitIdle()
+	limit := service.SetRoomBudgetForTest(budgetUsed(service))
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+
+	blocks := make([]string, reads)
+	errs := make([]error, reads)
+	var group sync.WaitGroup
+	start := make(chan struct{})
+	for index, room := range cold {
+		group.Go(func() {
+			<-start
+			blocks[index], errs[index] = service.BlockForQuote(ctx, room, "Room cap probe.")
+		})
+	}
+	close(start)
+	group.Wait()
+	for index, err := range errs {
+		if err != nil || blocks[index] == "" {
+			t.Fatalf("read %d of a document no room holds answered %q (%v), want the block holding its quote", index, blocks[index], err)
+		}
+	}
+	for index, room := range cold {
+		if service.srv.GetDoc(room) != nil {
+			t.Fatalf("read %d opened a room for document %s while the budget had no opening for one", index, room)
+		}
+	}
+	if used := budgetUsed(service); used != limit {
+		t.Fatalf("the open rooms are charged %d bytes of the %d-byte budget after %d reads, want the charges left where they stood", used, limit, reads)
+	}
+
+	// With an opening to be had, a read loads the room as such a read always has.
+	service.SetRoomBudgetForTest(0)
+	if _, err := service.BlockForQuote(ctx, cold[0], "Room cap probe."); err != nil {
+		t.Fatalf("a read with an opening to be had: %v", err)
+	}
+	if service.srv.GetDoc(cold[0]) == nil {
+		t.Fatal("a read of a document no room holds opened no room, want the room such a read opens while the budget has an opening for one")
+	}
+}
+
+// The opening the server's own work books is weighed against the charge of the room the opening
+// before it made, not against the budget as it stood before that room loaded: the load charges
+// the room inside the Apply that opens it (chargeLoadedRoom, roomBudget.load), which returns
+// before its opener gives the opening back (closeServerRoom), so the next openServerRoom reads a
+// used that already holds it. One room past the limit is therefore all the charges can stand
+// past it.
+func TestAnOpeningIsWeighedAgainstTheRoomTheOpeningBeforeItMade(t *testing.T) {
+	budget := &roomBudget{limit: 1_000}
+	if !budget.openServerRoom() {
+		t.Fatal("the first opening of an empty budget was refused")
+	}
+	if budget.openServerRoom() {
+		t.Fatal("a second opening was booked while the first stood")
+	}
+	// What the load does inside the Apply the opening covers, before the opening is given back.
+	budget.load("opened", 600)
+	budget.closeServerRoom()
+	if used := budget.used; used <= budget.limit {
+		t.Fatalf("the room the opening made is charged %d of %d bytes, want this test's room to fill the limit", used, budget.limit)
+	}
+	if budget.openServerRoom() {
+		t.Fatalf("an opening was booked with %d of %d bytes charged, want it refused against the room the opening before it made", budget.used, budget.limit)
+	}
+	budget.retire("opened")
+	if !budget.openServerRoom() {
+		t.Fatal("an opening was refused once the room before it retired")
+	}
+	budget.closeServerRoom()
+}
+
 // While the budget is full, a delete-only update is admitted while its structure keeps the
 // charges within the limit and the pressure reserve beyond it, and charged; past the reserve it is
 // refused with the transient close, never applied, and charged nothing. An insert is refused

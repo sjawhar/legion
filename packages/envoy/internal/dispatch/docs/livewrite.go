@@ -862,6 +862,18 @@ func (s *Service) joinRead(ctx context.Context, artifactID string) (*crdt.Doc, e
 // the tree may be the write's own rendering of the fork (reuseRendering), which every caller -
 // VerifyMark, BlockForQuote, SuggestionKind, prevalidateLiveOperations, currentToken and an ApplyOps
 // with no operation - only reads, and which a caller must never change.
+//
+// Where no room holds the document it loads one only while the room budget has an opening for it
+// (roomBudget.openServerRoom), and reads the stored document instead where it has none
+// (storedTree). Every caller above is a request's, so a burst of them - an agent swarm asking
+// about a quote, a mark or a precondition in a document apiece - would otherwise load a room for
+// each of those documents at once, each charged to a budget that refuses the server's own work
+// nothing (roomBudget). Reading the store in their place loses nothing: a document no room holds
+// has no peer writing it, so the store is what a room loaded here would decode, which is why a
+// write to such a document forks from the store too (coldFork). It takes the opening without
+// waiting for one, as the publish does and unlike a settlement (awaitServerRoom): this runs
+// inside the caller's transaction, holding a pooled connection, and a wait there would queue a
+// request behind work that may need the pool.
 func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
 	fork, err := s.joinRead(ctx, artifactID)
 	if err != nil {
@@ -873,6 +885,12 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 		}
 		valid, err := s.readForkTree(fork)
 		return valid.Node(), err
+	}
+	if !s.roomHoldsDocument(artifactID) {
+		if !s.budget.openServerRoom() {
+			return s.storedTree(ctx, artifactID)
+		}
+		defer s.budget.closeServerRoom()
 	}
 	var tree *pmdoc.Node
 	var treeErr error

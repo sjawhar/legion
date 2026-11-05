@@ -1809,8 +1809,27 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if _, err := s.joinRead(ctx, room); err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}
-	if err := s.warmLiveDocument(ctx, room); err != nil {
-		return renderedTree{}, authorCapture{}, err
+	// The warm-up loads the room where none holds the document, and does so only while the room
+	// budget has an opening for it (roomBudget.openServerRoom): a burst of whole-text writes -
+	// an upload apiece to a document apiece - would otherwise load a room for each of them at
+	// once, each charged to a budget that refuses the server's own work nothing (roomBudget).
+	// Without an opening the version is taken from the stored document instead, which is the
+	// path a room behind the head already takes below (behind): the store holds every update,
+	// and a document no room holds has no in-flight credit of its own to list
+	// (withoutInflight). The opening is taken without waiting for one, since this runs inside
+	// the caller's write transaction and holds one of the shared pool's connections.
+	fromStore := false
+	if !s.roomHoldsDocument(room) {
+		if s.budget.openServerRoom() {
+			defer s.budget.closeServerRoom()
+		} else {
+			fromStore = true
+		}
+	}
+	if !fromStore {
+		if err := s.warmLiveDocument(ctx, room); err != nil {
+			return renderedTree{}, authorCapture{}, err
+		}
 	}
 	// The warmed-read hook deliberately evicts a loaded room in tests. It runs before this
 	// transaction takes the document lock: CloseRoom flushes a room's persistence, which may
@@ -1836,14 +1855,16 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	var read []byte
 	var point roomPoint
 	var readErr error
-	var behind bool
-	err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
-			behind = true
-			return
-		}
-		read, point, _, readErr = s.readPoint(room, live)
-	})
+	behind := fromStore
+	if !fromStore {
+		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
+				behind = true
+				return
+			}
+			read, point, _, readErr = s.readPoint(room, live)
+		})
+	}
 	if readErr != nil {
 		return renderedTree{}, authorCapture{}, readErr
 	}

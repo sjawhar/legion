@@ -151,22 +151,40 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 // with one last read rather than on the subscription alone, so a mark written into a room
 // instance that replaced the subscribed one - which another process's eviction can leave behind -
 // is still found.
+//
+// It loads a room for a document none holds only while the room budget has an opening for it
+// (roomBudget.openServerRoom), since a burst of these - one for each mark a swarm of agents
+// writes - would otherwise load a room apiece. Without an opening it subscribes to nothing and
+// reads the stored document through the loop below (docTree): the mark it waits for is a
+// browser's, and a document no room holds has no browser to write one, so there is no update to
+// wait for and the first read answers. That is what a room evicted during the wait already
+// leaves it doing.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
-			select {
-			case updates <- struct{}{}:
-			default:
-			}
-		})
-	})
-	if unsubscribe != nil {
-		defer unsubscribe()
+	watch, booked := true, false
+	if !s.roomHoldsDocument(artifactID) {
+		booked = s.budget.openServerRoom()
+		watch = booked
 	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return Anchored{}, err
+	if watch {
+		err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
+				select {
+				case updates <- struct{}{}:
+				default:
+				}
+			})
+		})
+		if booked {
+			s.budget.closeServerRoom()
+		}
+		if unsubscribe != nil {
+			defer unsubscribe()
+		}
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			return Anchored{}, err
+		}
 	}
 	// The room can be evicted from here on: no close retires a room while an Apply is inside it.
 	if s.afterReadWarm != nil {

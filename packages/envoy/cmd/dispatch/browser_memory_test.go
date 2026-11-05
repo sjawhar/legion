@@ -3524,14 +3524,15 @@ const liveWriteDeadline = 60 * time.Second
 // hundred forks take turns (INFRA-179).
 //
 // Measured on 2026-11-05 on a two-processor pod, 320 writes to documents of a mebibyte of prose
-// over a budget filled to its brim, all 36 of the rooms it holds resident: the fill charged 3,452
-// MiB of the pod's 4,096, holding 3,549,898,376 bytes of what the 3,865,470,566-byte Go limit
-// bounds, 315,572,190 under it, and the burst charged 3,681, holding 3,789,993,656 bytes,
-// 75,476,910 under it. The burst took 1 m 26 s: 11 writes applied, 62 were refused 503 for the
-// bound, and 247 were answered where their caller's deadline found them. Of the applied, the
-// slowest took 1 m 12.8 s and the median 36.5 s, and ten landed before the first refusal. The
-// copy bound's grants waited up to 56.971 s and were held up to 11.515 s, and the room budget
-// closed the one room the server's own work had opened over it.
+// over a budget filled to its brim, all 36 of the rooms it holds resident: the fill charged 3,461
+// MiB of the pod's 4,096, holding 3,559,696,008 bytes of what the 3,865,470,566-byte Go limit
+// bounds, 305,774,558 under it, and the burst charged 3,657, holding 3,763,361,464 bytes,
+// 102,109,102 under it. The burst took 2 m 0 s: 16 writes applied, 62 were refused 503 for the
+// bound, and 242 were answered where their caller's deadline found them. Of the applied, the
+// slowest took 1 m 11.2 s and the median 38.8 s, and fifteen landed before the first refusal. The
+// copy bound's grants waited up to 56.367 s and were held up to 9.184 s, and the room budget
+// closed the 4 rooms the server's own work had opened over it. Three runs of it read 3,657 to
+// 3,681 MiB charged and 75,476,910 to 102,109,102 bytes under the limit.
 //
 // The same fill before the budget booked an opening for the server's own rooms (docs'
 // roomBudget.openServerRoom) took the pod past its memory: each applied cold write's publish
@@ -3732,25 +3733,26 @@ func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
 		t.Errorf("the person typed nothing during the burst, want a keystroke every %s", typingInterval)
 	}
 	// Most keystrokes are answered as promptly as an unloaded room answers them, and one is not.
-	// What the worst one waits on is the pod, not a bound of its own: the keystroke's own path
-	// takes no part of the copy bound (the one holder in it, the replica's build from a base,
-	// takes only what is free at once and never waits, docs' holdFreeCopy), no part of the apply
-	// bound (an insert of one character is far under docs' unweighedApplyHeapBytes, so it is
-	// never held, docs' weighPeerUpdate) and no pooled connection (its durable append is the
-	// room's own persistence worker's, handed over a buffered channel, and that worker's
-	// connection is taken off this goroutine, docs' withRoomLock). What it waits for is two
-	// processors running 64 writers' forks and renders, and the collector working at a heap near
-	// its limit. Measured on 2026-11-05 over two runs of this fill: p50 37 to 76 ms, p90 241 to
-	// 379 ms, p99 698 ms to 1.37 s and a worst keystroke of 11.015 to 12.87 s; 10.9 to 11.3 s
-	// over five runs of the fill that kept rooms free for the burst's own, and 17.022 s with the
-	// fork's grant patched out. The same brim fill
-	// before the budget booked an opening for the server's own rooms, whose heap stood
-	// 713,885,218 bytes past the Go limit, answered its worst keystroke in 1 m 5.795 s: the
-	// collector assists every allocating goroutine there, and a keystroke's apply allocates. All
-	// of them are against the p99 under 2 s and none over 5 s an ordinary room answers in beside
-	// the heaviest applies (TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory). So
-	// the drive holds the percentile a person feels as typing and records the worst, which is
-	// bounded by the pod's own work and not by a figure of its own; a keystroke the room never
+	// What the worst one waits on is the pod's own work, and none of the bounds: the keystroke's
+	// path takes no part of the copy bound (the one holder in it, the replica's build from a
+	// base, takes only what is free at once and never waits, docs' holdFreeCopy), no part of the
+	// apply bound (an insert of one character is far under docs' unweighedApplyHeapBytes, so it
+	// is never held, docs' weighPeerUpdate) and no pooled connection (its durable append is the
+	// room's own persistence worker's, handed over a buffered channel, and that worker takes its
+	// connection off this goroutine, docs' withRoomLock).
+	//
+	// The worst is not a repeatable figure and the drive does not hold it to one. Measured on
+	// 2026-11-05 over three runs of this fill, all of them with the heap inside the Go limit:
+	// p50 19 to 76 ms, p90 109 to 379 ms, p99 382 ms to 1.37 s, and a worst keystroke of
+	// 11.015 s, 12.87 s and 1 m 1.286 s. Over five runs of the earlier fill that kept rooms free
+	// for the burst's own it was 10.9 to 11.3 s, with the fork's grant patched out 17.022 s, and
+	// over the brim fill before the budget booked an opening for the server's own rooms - whose
+	// heap stood 713,885,218 bytes past the Go limit - 1 m 5.795 s. So the heap's overshoot is
+	// not what sets it: two processors carrying 64 writers' forks, renders and collections are,
+	// and nothing in this drive bounds that. All of them are against the p99 under 2 s and none
+	// over 5 s an ordinary room answers in beside the heaviest applies
+	// (TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory). So the drive holds the
+	// percentile a person feels as typing and records the worst; a keystroke the room never
 	// answers is the typist's own error above (browserAnswerWithin).
 	if latency.p99 >= 5*time.Second {
 		t.Errorf("keystrokes in an ordinary room during the burst were answered in p99 %s, at most %s, want a 99th percentile under 5 s: typing waited behind the writes further than any burst has made it",
