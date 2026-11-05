@@ -1247,7 +1247,27 @@ func (b *Broker) logger() *slog.Logger {
 // Enroll registers the session's key. 201 is a new enrollment; 200 is the live one for the same
 // credential, kind, runtime_id and thumbprint (the contract's idempotent enroll).
 func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, error) {
-	return b.enroll(ctx, s.RuntimeID, s.Thumbprint, nil, "host")
+	return b.EnrollIdentity(ctx, s.identity())
+}
+
+// EnrollIdentity enrols ONE reading of a session's identity, so the caller decides which
+// generation the attempt belongs to rather than the broker rereading a session a rename may
+// have moved on. The answer of an attempt that began under an identity the session no longer
+// has must not be installed on the one it does, and must not be revoked either, since it may
+// be the very enrollment the new identity is about to be handed back (dispatch://INFRA-1167).
+//
+// A named session states its omp session id as the enrolment's session_id. That is the name the
+// broker's own carry is keyed on: an enrolment of the same (carry principal, session_id) adopts
+// the enrollment the session had on the box it left, with the requests nobody has answered yet
+// and the grants a person has given (enroll.Service.Create). Without it the broker sees an
+// unnamed enrolment and the session follows nothing, which is the whole of what a machine
+// session registered by the helper for itself lost. A session with no name states none.
+func (b *Broker) EnrollIdentity(ctx context.Context, cur identity) (string, time.Time, error) {
+	var sessionID *string
+	if cur.SessionID != "" {
+		sessionID = &cur.SessionID
+	}
+	return b.enroll(ctx, cur.RuntimeID, cur.Thumbprint, sessionID, "host")
 }
 
 // EnrollSessionKey registers a key the helper does not hold, one a launcher enrolls for a session
@@ -1392,23 +1412,36 @@ func (b *Broker) enrollUnder(ctx context.Context, authority *brokerclient.Author
 
 // Renew extends the lease with a proof signed by the session key. Unchanged: it always
 // authenticates with the session's own key, never the launcher credential.
-func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, error) {
-	id := s.EnrollmentID()
+//
+// It answers the identity reading it signed, so the caller can act on the result only while the
+// session still holds that very enrollment: a refusal that arrives after a rename has reclaimed
+// another identity speaks for the OLD enrollment, and applying it to the new one would lapse —
+// and then revoke — an enrollment the broker is still honouring, with the grants it carries.
+func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, identity, error) {
+	// One reading: the enrollment id and the key that signs for it must be the same
+	// generation's, or the proof names an enrollment the key does not hold.
+	cur := s.identity()
+	return b.renewIdentity(ctx, cur)
+}
+
+// renewIdentity renews the enrollment one identity reading names, with that reading's key.
+func (b *Broker) renewIdentity(ctx context.Context, cur identity) (time.Time, identity, error) {
+	id := cur.EnrollmentID
 	url := b.URL + "/v1/enrollments/" + id + "/renew"
-	compact, err := proof.Sign(s.Key, id, http.MethodPost, url, time.Now())
+	compact, err := proof.Sign(cur.Key, id, http.MethodPost, url, time.Now())
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, cur, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return time.Time{}, redact.Error(err, b.URL)
+		return time.Time{}, cur, redact.Error(err, b.URL)
 	}
 	req.Header.Set("Proof", compact)
 	var out leaseReply
 	if err := b.do(req, []int{http.StatusOK}, &out); err != nil {
-		return time.Time{}, err
+		return time.Time{}, cur, err
 	}
-	return out.LeaseExpiresAt, nil
+	return out.LeaseExpiresAt, cur, nil
 }
 
 // Revoke deletes the enrollment and every grant under it. 204 and 404 both mean done.

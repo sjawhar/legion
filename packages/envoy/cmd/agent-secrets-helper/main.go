@@ -74,6 +74,10 @@ type config struct {
 	// launcher credential is bound to (helper.LoadOrMakeIdentityKey), beside the machine login
 	// a machine that proves none keeps: ~/.config/agent-secrets/identity-key.pem.
 	IdentityKeyFile string
+	// LegacyStatePath is the runtime-directory path the records used to live at, moved to
+	// StatePath at the first start that finds one (helper.MigrateStateFile). Empty once the
+	// caller named a state file of its own.
+	LegacyStatePath string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -118,7 +122,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 		// own socket lives in, so both find one place with neither variable set.
 		cfg.KeyDir = filepath.Dir(helper.DefaultSocket(getenv))
 	}
-	cfg.StatePath = filepath.Join(filepath.Dir(cfg.Socket), "sessions.json")
+	// The records hold a named session's signing key and must survive a reboot, so they live
+	// beside the machine login, not in the runtime directory the socket is in: that is tmpfs
+	// (dispatch://INFRA-1167). AGENT_SECRETS_STATE_FILE moves them, for a test or a second
+	// helper, and then nothing is migrated into it.
+	cfg.StatePath = getenv("AGENT_SECRETS_STATE_FILE")
+	if cfg.StatePath == "" {
+		cfg.StatePath = helper.DefaultStatePath(getenv)
+		cfg.LegacyStatePath = helper.LegacyStatePath(getenv)
+	}
 	return cfg, nil
 }
 
@@ -145,6 +157,11 @@ environment:
                                A machine that proves an identity of its own keeps no such file;
                                it keeps the key it trades with in
                                ~/.config/agent-secrets/identity-key.pem, mode 0600
+  AGENT_SECRETS_STATE_FILE     where the helper keeps its session records (mode 0600: a named
+                               session's signing key is in them, so they must outlive a reboot
+                               and sit beside the machine login, not in the runtime directory);
+                               records found at the old runtime-directory path are moved here
+                               once (default ~/.config/agent-secrets/sessions.json)
   AGENT_SECRETS_MACHINE_IDENTITY
                                the identity this machine proves at the broker's token exchange:
                                kubernetes (AGENT_SECRETS_MACHINE_TOKEN_FILE), metadata
@@ -280,7 +297,17 @@ func serve(cfg config) error {
 		case <-ctx.Done():
 		}
 	}()
+	// Before Recover reads them: a helper upgraded in place finds its records at the old
+	// runtime-directory path and keeps the sessions they name. A failure costs those sessions
+	// their continuity, never this start, so it is logged and nothing else.
+	if err := helper.MigrateStateFile(cfg.LegacyStatePath, cfg.StatePath); err != nil {
+		log.Warn("could not move the session records to their durable path; the sessions they name enrol afresh",
+			"from", cfg.LegacyStatePath, "to", cfg.StatePath, "error", err)
+	}
 	srv.Recover(ctx)
+	// Sessions parked when their process went away are revoked once DormantGrace passes without
+	// them coming back. A minute's tick: the grace is minutes, and nothing waits on it.
+	go srv.SweepLoop(ctx, time.Minute)
 	// The version says which release a restart came up on. The credential's state is logged where
 	// it changes (the Broker's resume, machine-login, refresh, expiry-warning and drop lines). The
 	// broker's URL is logged without a credential it may carry.

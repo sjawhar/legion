@@ -78,7 +78,7 @@ func TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll(t *testing.T) {
 	}
 	line := waitForRecord(t, &out, "session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets machine login, and have a human approve it")
 	for k, v := range map[string]any{
-		"level": "ERROR", "runtime_id": sess.RuntimeID, "enrollment_id": "enr-prior",
+		"level": "ERROR", "runtime_id": sess.RuntimeID(), "enrollment_id": "enr-prior",
 		"why": "no machine login since the helper started, and none kept on this machine",
 	} {
 		if line[k] != v {

@@ -232,7 +232,7 @@ func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
 	}
 	sess := r.srv.Registry.Get(os.Getpid())
 	v := &proof.Verifier{Skew: time.Minute,
-		Lookup: func(context.Context, string) (string, bool, error) { return sess.Thumbprint, true, nil },
+		Lookup: func(context.Context, string) (string, bool, error) { return sess.identity().Thumbprint, true, nil },
 		Replay: func(context.Context, string, time.Time) (bool, error) { return true, nil }}
 	if sub, err := v.Verify(context.Background(), signed.Proof, "POST", url, time.Now()); err != nil || sub.EnrollmentID != resp.EnrollmentID {
 		t.Fatalf("the proof must verify with the session key for its enrollment: %q %v", sub.EnrollmentID, err)
@@ -294,8 +294,8 @@ func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
 		t.Fatalf("the request object must verify with record.VerifyRequestObject: %v", err)
 	}
 	sess := r.srv.Registry.Get(os.Getpid())
-	if ro.Thumbprint != sess.Thumbprint {
-		t.Fatalf("iss must be the calling session's own key thumbprint: got %q, want %q", ro.Thumbprint, sess.Thumbprint)
+	if ro.Thumbprint != sess.identity().Thumbprint {
+		t.Fatalf("iss must be the calling session's own key thumbprint: got %q, want %q", ro.Thumbprint, sess.identity().Thumbprint)
 	}
 	if len(ro.Details) != 1 || ro.Details[0].Type != "agent_secret" || ro.Details[0].Identifier != "DEEL_API_KEY" || ro.Reason != "deel sync for ACME-1" {
 		t.Fatalf("claims: %+v", ro.Details)
@@ -436,7 +436,7 @@ func TestRenewRunsAndARefusedRenewReenrolls(t *testing.T) {
 	// helper enrolls again and gets a new enrollment for the same runtime_id.
 	r.fake.mu.Lock()
 	delete(r.fake.enrolled, reg.EnrollmentID)
-	delete(r.fake.byTP, r.srv.Registry.Get(os.Getpid()).Thumbprint)
+	delete(r.fake.byTP, r.srv.Registry.Get(os.Getpid()).identity().Thumbprint)
 	r.fake.mu.Unlock()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -455,7 +455,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	r.callerPID.Store(int64(child.Process.Pid))
 	first := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	oldSess := r.srv.Registry.Get(child.Process.Pid)
-	oldTP := oldSess.Thumbprint
+	oldTP := oldSess.identity().Thumbprint
 	// register()'s WaitSeconds only waits on sess.ready, which enrollLoop's setEnrolled closes
 	// BEFORE the s.save() a few lines later in the same goroutine — so the call above returning
 	// does not mean the enrolled record has actually reached disk yet. Wait for it explicitly:
@@ -518,7 +518,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled")
 	}
-	if sess.Thumbprint == oldTP || sess.EnrollmentID() == first.EnrollmentID || sess.RuntimeID != first.RuntimeID {
+	if sess.identity().Thumbprint == oldTP || sess.EnrollmentID() == first.EnrollmentID || sess.RuntimeID() != first.RuntimeID {
 		t.Fatalf("recovery uses a fresh key and a new enrollment for the same runtime_id: %+v", sess.Info())
 	}
 	// The recovered session's own goroutine revokes the old enrollment before its first enroll
@@ -800,7 +800,7 @@ func TestRecoverDropsDeadRecords(t *testing.T) {
 	dead := exec.Command("true")
 	_ = dead.Run()
 	reg := NewRegistry(state)
-	sess, _ := newSession(dead.ProcessState.Pid(), 1, "testhost:dead", nil)
+	sess, _ := newSession(dead.ProcessState.Pid(), 1, "testhost:dead", "", nil, nil)
 	sess.setEnrolled("enr-dead")
 	reg.Add(sess)
 	if err := reg.Save(); err != nil {
@@ -902,7 +902,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := r.srv.register(context.Background(), peer, os.Getpid(), 0)
+	resp := r.srv.register(context.Background(), peer, os.Getpid(), "", 0)
 	if resp.OK || resp.Code != CodeUnidentified {
 		t.Fatalf("a peer no longer matching the pid the ancestry walk resolved must be refused, not handed the root session: %+v", resp)
 	}
@@ -919,7 +919,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedBeforeAdopting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := r.srv.register(context.Background(), peer, victim.Process.Pid, 0)
+	resp := r.srv.register(context.Background(), peer, victim.Process.Pid, "", 0)
 	if resp.OK || resp.Code != CodeUnidentified {
 		t.Fatalf("a peer no longer matching an unclaimed pid must be refused, not adopted: %+v", resp)
 	}

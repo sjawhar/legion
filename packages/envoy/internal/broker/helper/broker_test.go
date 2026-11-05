@@ -593,7 +593,7 @@ func TestLoginHoldsTheKeyAndEnrollSignsLauncherProofs(t *testing.T) {
 		t.Fatalf("request object: %+v %v", ro, err)
 	}
 	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
-	sess, _ := newSession(1234, 77, "h:1234:77", nil)
+	sess, _ := newSession(1234, 77, "h:1234:77", "", nil, nil)
 	if _, _, err := b.Enroll(context.Background(), sess); err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +618,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	f := newFakeBroker(t)
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 	t.Cleanup(b.Close)
-	sess, _ := newSession(1, 1, "h:1:1", nil)
+	sess, _ := newSession(1, 1, "h:1:1", "", nil, nil)
 
 	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("no credential yet: expected the remedy in the error, got %v", err)
@@ -812,7 +812,7 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
-	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", nil)
+	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", "", nil, nil)
 	id, lease, err := b.Enroll(context.Background(), sess)
 	if err != nil || id == "" || time.Until(lease) < 10*time.Minute {
 		t.Fatalf("enroll: %q %v %v", id, lease, err)
@@ -820,7 +820,7 @@ func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 	posts, _, _ := f.snapshot()
 	post := posts[0]
 	if post["kind"] != "session" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
-		post["thumbprint"] != sess.Thumbprint || post["approver"] != nil ||
+		post["thumbprint"] != sess.identity().Thumbprint || post["approver"] != nil ||
 		post["session_id"] != nil || post["pod_token"] != nil {
 		t.Fatalf("enroll body: %+v", post)
 	}
@@ -833,13 +833,13 @@ func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
-	sess, _ := newSession(1, 1, "h:1:1", nil)
+	sess, _ := newSession(1, 1, "h:1:1", "", nil, nil)
 	id, _, err := b.Enroll(context.Background(), sess)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sess.setEnrolled(id)
-	if _, err := b.Renew(context.Background(), sess); err != nil {
+	if _, _, err := b.Renew(context.Background(), sess); err != nil {
 		t.Fatalf("renew: %v", err)
 	}
 	if _, _, renews := f.snapshot(); renews != 1 {
@@ -851,7 +851,7 @@ func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 	if err := b.Revoke(context.Background(), id); err != nil {
 		t.Fatalf("a second revoke (404) is done, not an error: %v", err)
 	}
-	_, err = b.Renew(context.Background(), sess)
+	_, _, err = b.Renew(context.Background(), sess)
 	var be *BrokerError
 	if !errors.As(err, &be) || be.Status != 401 {
 		t.Fatalf("renew after revoke must be 401: %v", err)
@@ -860,7 +860,7 @@ func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 
 func TestMissingCredentialNamesTheLoginCommand(t *testing.T) {
 	b := &Broker{URL: "http://127.0.0.1:1", OperatorFile: filepath.Join(t.TempDir(), "none"), HTTP: http.DefaultClient}
-	sess, _ := newSession(1, 1, "h:1:1", nil)
+	sess, _ := newSession(1, 1, "h:1:1", "", nil, nil)
 	_, _, err := b.Enroll(context.Background(), sess)
 	if err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("expected the remedy in the error, got %v", err)
