@@ -81,7 +81,10 @@ function drawnAttributes(
     // accepts exactly the values a writer is allowed to store. One it refuses, which no stored
     // block holds, points at nothing.
     const pointers =
-      parseBlockPointerValue(Array.isArray(value) ? value.join(" ") : String(value)) ?? [];
+      parseBlockPointerValue(
+        Array.isArray(value) ? value.join(" ") : String(value),
+        type.attributes[name]?.items
+      ) ?? [];
     return pointers.length === 0
       ? []
       : [

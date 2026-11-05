@@ -414,7 +414,7 @@ func FormatBlockRef(ref Ref) (string, bool) {
 }
 
 // CanonicalBlockRef reads value as one block of a document written exactly as FormatBlockRef
-// writes it - the one way a typed block's `block[]` attribute holds a pointer: value is the one
+// writes it: the document form of a typed block's `block[]` pointer. The value is the one
 // reference text would cite there (ExtractAt with no server URL, so a dashboard URL is never one),
 // it starts at value's first byte, it is a block, and FormatBlockRef writes it back as value. That
 // last check refuses what the reader alone accepts: lower-case or needless percent-encoding, an
@@ -426,6 +426,32 @@ func CanonicalBlockRef(value string) (Ref, bool) {
 		return Ref{}, false
 	}
 	if written, ok := FormatBlockRef(located[0].Ref); !ok || written != value {
+		return Ref{}, false
+	}
+	return located[0].Ref, true
+}
+
+var canonicalItemUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// FormatItemBlockRef writes an unpinned block of an issue's ask, comment or message.
+// The item uses its full lower-case UUID; project-document items are not pointer targets.
+func FormatItemBlockRef(ref Ref) (string, bool) {
+	if ref.Kind != "block" || ref.Pin != 0 || ref.Project != "" || ref.Session != "" ||
+		!issueKeyPattern.MatchString(ref.IssueKey) || !canonicalItemUUID.MatchString(ref.ID) ||
+		(ref.Item != "ask" && ref.Item != "comment" && ref.Item != "message") {
+		return "", false
+	}
+	return "dispatch://" + ref.IssueKey + "/" + ref.Item + "/" + ref.ID + "#b-" + EncodeBlockID(ref.Block), true
+}
+
+// CanonicalItemBlockRef reads exactly the unpinned item-block form FormatItemBlockRef writes.
+// ExtractAt applies the same block-id and target-size bounds as document pointers.
+func CanonicalItemBlockRef(value string) (Ref, bool) {
+	located := ExtractAt(value, "")
+	if len(located) != 1 || located[0].Offset != 0 {
+		return Ref{}, false
+	}
+	if written, ok := FormatItemBlockRef(located[0].Ref); !ok || written != value {
 		return Ref{}, false
 	}
 	return located[0].Ref, true

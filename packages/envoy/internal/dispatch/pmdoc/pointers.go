@@ -17,7 +17,7 @@ var ErrBlockPointer = errors.New("block pointer refused")
 
 // BlockPointer is one reference a typed block's `block[]` attribute holds: the typed block's id
 // and type, the attribute, the canonical block reference as written and as read, the attribute's
-// targets (none: any block) and the scope its declaration limits it to (none: any block of the
+// document target types (none: any document block) and the scope its declaration limits it to (none: any block of the
 // writing document's own issue or of one above it).
 type BlockPointer struct {
 	Block     string
@@ -85,6 +85,10 @@ func BlockPointers(tree *Node) []BlockPointer {
 				switch declared.Kind {
 				case BlockAttributeBlockList:
 					target, canonical = text.CanonicalBlockRef(ref)
+					if !canonical {
+						target, canonical = text.CanonicalItemBlockRef(ref)
+						canonical = canonical && slices.Contains(declared.Items, target.Item)
+					}
 				case BlockAttributeAsk:
 					target, canonical = text.ParseRef(ref, "")
 					canonical = canonical && target.Kind == "ask"
@@ -105,9 +109,9 @@ func BlockPointers(tree *Node) []BlockPointer {
 	return pointers
 }
 
-// BlockTarget is a block a pointer names, as the write naming it would leave it: the types the
-// block index holds under its node id, the document holding it (an artifact's reference key),
-// and that document's issue, "" for a document a project holds.
+// BlockTarget is a current block as the write naming it would leave it. A document block carries
+// its indexed types, its document's reference key and its issue (empty for a project document).
+// An item block carries only its actual issue; it has no document type restriction.
 type BlockTarget struct {
 	Types    []string
 	Document string
@@ -136,8 +140,8 @@ type BlockWriting struct {
 // block before indexing it. A typed block repeating the id of an earlier paragraph is checked,
 // though the index writes no edge for it either.
 //
-// A pointer is refused when it names a block no document holds, a block of a type the attribute's
-// targets do not allow (more than one type is refused when any is outside them), a block of an
+// A pointer is refused when it names no current document or declared item block, a document block
+// of a type its targets do not allow (any disallowed type is refused), a block of an
 // issue that is neither the writing document's own issue nor one above it, a block of another
 // document when a project holds the writing document and no issue does, or a block of another
 // document under an attribute the schema scopes to its own document (BlockAttributeScope).
@@ -184,7 +188,7 @@ func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (Blo
 				pointer.BlockType, TypedBlockIDAttribute(pointer.Block), pointer.Attribute, pointer.Ref)
 		}
 		target, holds := found[text.TargetID(pointer.Target)]
-		if !holds {
+		if !holds || pointer.Target.Item != "" && pointer.Target.IssueKey != target.Issue {
 			return fmt.Errorf("%w: %s, which no document holds", ErrBlockPointer, at())
 		}
 		for _, typ := range target.Types {

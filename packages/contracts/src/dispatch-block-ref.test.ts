@@ -103,16 +103,18 @@ test("the Go encoder's table is the same table", async () => {
 });
 
 test.each([...DISPATCH_BLOCK_POINTER_VALUES])("decides block[] value %p", (row) => {
-  expect(parseBlockPointerValue(row.value) !== undefined).toBe(row.ok);
+  expect(parseBlockPointerValue(row.value, row.items) !== undefined).toBe(row.ok);
   // A refused value has a reason, and an accepted one none.
-  expect(blockPointerValueProblem(row.value) === undefined).toBe(row.ok);
+  expect(blockPointerValueProblem(row.value, row.items) === undefined).toBe(row.ok);
   if (row.problem !== undefined) {
-    expect(blockPointerValueProblem(row.value)).toContain(row.problem);
+    expect(blockPointerValueProblem(row.value, row.items)).toContain(row.problem);
   }
 });
 
 test("each reference of an accepted value is written back as it was", () => {
-  for (const row of DISPATCH_BLOCK_POINTER_VALUES.filter((row) => row.ok && row.value !== "")) {
+  for (const row of DISPATCH_BLOCK_POINTER_VALUES.filter(
+    (row) => row.ok && row.value !== "" && row.items === undefined
+  )) {
     for (const value of row.value.split(" ")) {
       const reference = parseCanonicalBlockReference(value);
       expect(reference && formatBlockReference(reference)).toBe(value);

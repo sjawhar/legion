@@ -1,0 +1,5 @@
+kind: Added
+body: Allow from pointers to current blocks of issue comments, messages and item asks, with canonical unpinned references, ancestor scope checks and graph edges at both ends.
+time: 2026-11-05T09:43:00Z
+custom:
+  Issue: INFRA-1098

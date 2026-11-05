@@ -13,7 +13,7 @@ import {
   getArtifactText,
   getIssue,
 } from "./api";
-import { blockId } from "./editor";
+import { blockId, documentEditor, openSpec, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
@@ -395,4 +395,51 @@ test("a link to a block of a spec stops showing the block's text once a document
     .getByRole("link", { name: `${issue.key} spec block` });
   await expect(fresh).toHaveAttribute("href", `/issues/${issue.key}/spec#b-${paragraph}`);
   await expect(await openCard(page, fresh)).toHaveText(`${issue.key} spec block`);
+});
+
+test("a spec block whose from names a comment's block opens in the editor and links to the comment", async ({
+  page,
+}, testInfo) => {
+  const issue = await createIssue({
+    project: "CORE",
+    title: "Comment provenance",
+    spec: "An editable paragraph.\n",
+  });
+  const source = await createComment(issue.key, { body: "Require a bounded retry count." });
+  const target = `dispatch://${issue.key}/comment/${source.id}#b-b1`;
+  await editArtifact(issue.primary_artifact_id, {
+    ops: [
+      {
+        op: "insert",
+        after: "start",
+        markdown: `:::requirement{#r9 from="${target}"}\nRetries are bounded.\n:::\n`,
+      },
+    ],
+    summary: "Record the requirement's source",
+  });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await openSpec(page, issue.key, "Retries are bounded.");
+  const from = documentEditor(page).locator('dd[data-proof-block-attribute="from"]');
+  const link = from.getByRole("link");
+  const path = `/issues/${issue.key}/comments/${source.id}#b-b1`;
+  await expect(link).toHaveAttribute("href", path);
+  await typeAtEnd(page, "Another paragraph edited in the browser.");
+  await expect
+    .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown, PROBE)
+    .toContain("Another paragraph edited in the browser.");
+  expect((await getArtifactText(issue.primary_artifact_id)).markdown).toContain(`from="${target}"`);
+  await page.reload();
+  await expect(documentEditor(page)).toContainText("Another paragraph edited in the browser.");
+  await expect(link).toHaveAttribute("href", path);
+  await testInfo.attach("requirement source after browser save", {
+    body: await page.screenshot(),
+    contentType: "image/png",
+  });
+  await link.click();
+  await expect(page).toHaveURL(path);
+  await expect(page.getByRole("list", { name: "Conversation turns" })).toContainText(
+    "Require a bounded retry count."
+  );
+  expect(errors).toEqual([]);
 });

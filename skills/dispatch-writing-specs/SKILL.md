@@ -18,12 +18,12 @@ Part | Content
 `Summary` | The change in the reader's own terms, at most 100 words
 `Problem` | What goes wrong, for whom, with counts
 `Goals and non-goals` | What is in and out of scope
-`Requirements` | a `:::requirement` block each, `**R1.**` on, its source (`From:`)
+`Requirements` | A `:::requirement` block each, `**R1.**` on, with `from` naming its source block
 `Verification` | the issue's `verification.md`, a `:::check` block each: `serves`, `surface`, `run`, `when`, `negative_control`
 `Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
 
-`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
+`from` names the document ask, item ask, comment or issue-message block the requirement came from. An item pointer is `dispatch://KEY/comment/<full-lower-case-uuid>#b-b1` (or `ask` or `message`), unpinned, on this issue or an ancestor. `serves`, `needs` and `shaped` still name document blocks only; their scope rules are unchanged. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
 
 ## Rules for the text
 

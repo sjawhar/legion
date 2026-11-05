@@ -327,7 +327,8 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
     );
 }
 
-const SPEC_WRITING_POINTER = "Write a spec as skill://dispatch-writing-specs says.";
+const SPEC_WRITING_POINTER =
+  "Write a spec as skill://dispatch-writing-specs says. A requirement's from names the document ask, item ask, comment or issue-message block it came from; item pointers use a full lower-case UUID and no revision pin. serves, needs and shaped still name document blocks only.";
 
 /**
  * The `images` argument of the three tools that write text a person reads: local picture files,

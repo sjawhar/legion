@@ -38,11 +38,15 @@ type BlockAttributeSchema struct {
 	// Server marks an attribute the server owns: a client never writes it, and an agent's markdown
 	// never carries it.
 	Server bool `json:"server,omitempty"`
-	// Targets limits a `block[]` attribute to blocks of the named types (a typed block the schema
-	// declares, or a built-in block the link graph holds); absent or empty, it points at any block. No
-	// other kind carries it.
-	Targets []string            `json:"targets,omitempty"`
-	Scope   BlockAttributeScope `json:"scope,omitempty"`
+	// Targets limits a block[] attribute's document pointers to blocks of the named types (a typed
+	// block the schema declares, or a built-in block the link graph holds); absent or empty, any
+	// document block. No other kind carries it. It does not restrict declared item pointers.
+	Targets []string `json:"targets,omitempty"`
+	// Items admits unpinned blocks of the named issue item kinds, identified by their full canonical
+	// UUID. Only block[] attributes carry it; absent or empty permits document blocks only. Targets
+	// still limits document block types.
+	Items []string            `json:"items,omitempty"`
+	Scope BlockAttributeScope `json:"scope,omitempty"`
 }
 
 // BlockAttributeScope limits a block[] relation's target document. document means the writing

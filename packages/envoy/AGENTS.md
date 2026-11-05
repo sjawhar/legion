@@ -1776,7 +1776,7 @@ Schema changes are additive: add a type, add a defaulted attribute, add an enum 
 Tightening content, removing or renaming a type or attribute, or requiring a new attribute requires a document migration and version bump.
 
 The shipped types are `callout`, `ask`, `decision`, `requirement`, `plan_task` and `check` (`pmdoc/schema/blocks.json`, version 4).
-Each carries the optional `block[]` attribute `from`, with `targets: ["ask"]`: document asks only; comments and messages: item 24.
+Each carries the optional `block[]` attribute `from`, with `targets: ["ask"]` and `items: ["ask", "comment", "message"]`: document asks or the item block the requirement came from.
 `requirement` is one requirement of an issue's spec;
 `plan_task`, one task of a plan, with the `block[]` attributes `serves` (the requirements it serves) and `needs` (the tasks of the same plan it needs first);
 and `check`, one thing that must be proved, with `serves`, the enum `surface` (`browser`, `cli`, `api`), the strings `run` and `negative_control`, and the enum `when` (`before_merge`, `after_merge`, `default_branch`, defaulted `before_merge`).
@@ -1788,28 +1788,24 @@ anything else is refused, never normalised.
 A canonical reference is one `text.FormatBlockRef` writes back byte for byte (`text.CanonicalBlockRef`):
 `dispatch://<ISSUE>/spec#b-<id>` for a block of an issue's primary document, `dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>` for one of any other document (a project's document whose slug is `spec` included), the id as `text.EncodeBlockID` writes it, optionally pinned `@v<N>`;
 so lower-case or needless percent-encoding, an issue's `artifact/spec` and anything trailing the reference are refused.
-A part of an ask, or a block of a comment or a message (`text.Ref.Item`), is refused with a reason of its own, which names the kind with the article it takes (`"…" is a block of an ask: …`, `of a comment`, `of a message`):
-the attribute points only at blocks of documents, whose types its targets limit.
+An attribute's `items` admits the named issue item kinds (`ask`, `comment`, `message`), absent or empty admitting none. Its canonical item form is `dispatch://<ISSUE>/<ask|comment|message>/<full-lower-case-uuid>#b-<encoded id>`, unpinned (`text.CanonicalItemBlockRef` and `FormatItemBlockRef`). A project-document item, a UUID prefix, a non-canonical UUID spelling and a revision pin are refused. `serves`, `needs` and `shaped` declare no items, so they still name document blocks only.
 Go and `@legion/contracts`' `parseBlockPointerValue` are both tested against `DISPATCH_BLOCK_POINTER_VALUES`, whose Go copy is `pmdoc/testdata/block-pointer-values.json`.
 The attribute's name is the kind of the edges it makes:
 it matches `^[a-z][a-z0-9_]*$` and is none of `model.GraphEdgeKinds`, and two types declaring one name make one edge kind (`pmdoc.LinkKinds`, which `GET /api/v1/references?kind=` accepts beside the structural kinds; any other name is `400 INVALID_KIND`).
-Its `targets`, which no other kind may carry, limit the types of the blocks it points at, each a type the schema declares or a built-in block the link graph holds (`builtInBlockNode`:
-not a list item or a table's row or cell); absent or empty, it points at any block.
-Its default is absent or `[]`.
+Its `targets`, which no other kind may carry, limit document block types, each a type the schema declares or a built-in block the link graph holds (`builtInBlockNode`: not a list item or a table's row or cell); absent or empty, any document block. Item blocks have no document type restriction. Its default is absent or `[]`.
 
 Three rules enforce `targets`.
 An agent's or API write is refused when a pointer it introduces names a block the attribute may not name (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers`). Every immutable version checks the exact tree it indexes against the prior version, including browser settlement and standalone named versions.
 a pointer is introduced when the tree before the write holds no pointer with the same typed block id, typed block type, attribute and reference (a new pointer, a changed value, or a block retyped into a type declaring the attribute, whatever the type before declared under that name), and every pointer is when there is no such tree (a new document, a repair of a tree outside the schema, a rebuild whose latest version does not read back).
 `refs.BlockTargets` reads each target as the block index will hold it, with the writing document's own issue and that issue's ancestors (`refs.IssueAncestors`, the server's one recursive `child_of` walk, bounded by the same depth cap as every other issue walk):
-a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), any other from its current `document_blocks` rows. Ask pointers resolve their real owner from the ask row, not the reference's issue key.
-The write is refused when the pointer names a block no document holds, a block of a type the attribute's targets do not allow, a block of an issue that is neither the writing document's own issue nor an ancestor of it, a block of another document where a project holds the writing document and no issue does, or a block of another document under `needs`, which orders the tasks of one plan and so points only inside its own document.
+a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), other document blocks from current `document_blocks`, and declared item blocks from current `comment_blocks`, `message_blocks` and `ask_blocks` rows joined to their issue. Whole-ask references resolve their actual owner from the ask row, not the reference's issue key. One query reads each group, and the ancestor walk runs only for a target in another issue. An item block reference's issue must be the item's actual issue.
+The write is refused when the pointer names a block no document or declared item holds, a document block of a type the attribute's targets do not allow, a block of an issue that is neither the writing document's own issue nor an ancestor of it, a block of another document where a project holds the writing document and no issue does, or a block of another document under `needs`, which orders the tasks of one plan and so points only inside its own document.
 The refusal is `400 INVALID_OP` on `attributes` on the edit route and `400 INVALID_MARKDOWN` on every other;
 a pointer the write leaves unchanged is never refused.
 A browser's live update is stored before validation. Invalid introduced pointers cannot become a version or graph edge. Historical block-index reconciliation still indexes stored versions without changing them.
-Every block-aware read lists a pointer's edge only while its target has an allowed type:
-each `block_refs` row a pointer writes carries the attribute's targets as `to_types` (null:
-no limit), and the `graph_edges` block arm, `readEdgeRows`' document `?from=` arm and `refs.BlockLinks` list a row only while `block_ref_listed(to_types, to_id)` holds, true when no current `document_blocks` row of the target has a type outside `to_types` (migration 20261101144855).
-Retyping a target hides or shows the edge with no rewrite of the citing document, a pinned pointer is limited by its target's current type, and the index refreshes `to_types` on every row it keeps, so a change of an attribute's targets reaches a document's rows at its next index (a version write, or `rebuild-refs`).
+Every block-aware read lists a document pointer's edge only while its target has an allowed type:
+each `block_refs` row a document pointer writes carries the attribute's targets as `to_types` (null for an item pointer or no document type limit), and the `graph_edges` block arm, `readEdgeRows`' document `?from=` arm and `refs.BlockLinks` list a row only while `block_ref_listed(to_types, to_id)` holds, true when no current `document_blocks` row of the target has a type outside `to_types` (migration 20261101144855).
+Retyping a document target hides or shows the edge with no rewrite of the citing document, a pinned document pointer is limited by its target's current type, and the index refreshes `to_types` on every row it keeps, so a change of an attribute's targets reaches a document's rows at its next index (a version write, or `rebuild-refs`).
 The editor's typed-block commands refuse what they can see:
 a value that is not canonical, and a pointer to a block of their own document of a disallowed type (`packages/proof-editor/AGENTS.md`).
 

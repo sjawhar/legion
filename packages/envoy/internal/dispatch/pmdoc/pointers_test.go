@@ -109,10 +109,11 @@ func TestABlockPointerAttributeDecidesTheSharedCorpus(t *testing.T) {
 		t.Fatalf("read table: %v", err)
 	}
 	var rows []struct {
-		Value   string `json:"value"`
-		OK      bool   `json:"ok"`
-		Why     string `json:"why"`
-		Problem string `json:"problem"`
+		Value   string   `json:"value"`
+		OK      bool     `json:"ok"`
+		Why     string   `json:"why"`
+		Problem string   `json:"problem"`
+		Items   []string `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatalf("parse table: %v", err)
@@ -120,9 +121,9 @@ func TestABlockPointerAttributeDecidesTheSharedCorpus(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("the shared block pointer table is empty")
 	}
-	attr := BlockAttributeSchema{Kind: "block[]", Targets: []string{"requirement"}}
 	for _, row := range rows {
-		parsed, err := ParseBlockPointerValue(row.Value)
+		attr := BlockAttributeSchema{Kind: "block[]", Targets: []string{"requirement"}, Items: row.Items}
+		parsed, err := ParseBlockPointerValue(row.Value, row.Items)
 		if (err == nil) != row.OK {
 			t.Errorf("ParseBlockPointerValue(%q) (%s) = %v, want accepted %t", row.Value, row.Why, err, row.OK)
 		}

@@ -146,6 +146,9 @@ func blockPointers(artifactID, markdown string, blocks []model.ArtifactBlock, tr
 	pointers := make([]refs.Pointer, len(found))
 	for index, pointer := range found {
 		pointers[index] = refs.Pointer{Block: pointer.Block, BlockType: pointer.BlockType, Kind: pointer.Attribute, Target: pointer.Target, Targets: pointer.Targets}
+		if pointer.Target.Item != "" {
+			pointers[index].Targets = nil
+		}
 	}
 	return pointers
 }

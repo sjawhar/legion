@@ -48,11 +48,16 @@ export function findBlock(
  * pasted block writes it as `value`: none for the empty string, else canonical block references
  * joined by exactly one space. Any other value is refused, never normalised.
  */
-export function parseBlockPointers(typeName: string, name: string, value: string): string[] {
-  const pointers = parseBlockPointerValue(value);
+export function parseBlockPointers(
+  typeName: string,
+  name: string,
+  value: string,
+  items?: readonly string[]
+): string[] {
+  const pointers = parseBlockPointerValue(value, items);
   if (pointers === undefined) {
     throw new Error(
-      `typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${blockPointerValueProblem(value)}`
+      `typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${blockPointerValueProblem(value, items)}`
     );
   }
   return pointers;

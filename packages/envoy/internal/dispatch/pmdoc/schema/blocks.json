@@ -6,7 +6,7 @@
       "content": "block+",
       "render": "host",
       "attributes": {
-        "from": { "kind": "block[]", "targets": ["ask"] },
+        "from": { "kind": "block[]", "targets": ["ask"], "items": ["ask", "comment", "message"] },
         "kind": {
           "kind": "enum",
           "choices": ["note", "warning"],
@@ -23,7 +23,7 @@
       "content": "paragraph+ bullet_list?",
       "render": "host",
       "attributes": {
-        "from": { "kind": "block[]", "targets": ["ask"] },
+        "from": { "kind": "block[]", "targets": ["ask"], "items": ["ask", "comment", "message"] },
         "shaped": {
           "kind": "block[]",
           "scope": "spec"
@@ -81,7 +81,7 @@
         "title": { "kind": "string", "default": "" },
         "replaced": { "kind": "bool", "default": false },
         "shaped": { "kind": "block[]", "scope": "spec" },
-        "from": { "kind": "block[]", "targets": ["ask"] },
+        "from": { "kind": "block[]", "targets": ["ask"], "items": ["ask", "comment", "message"] },
         "from_ask": { "kind": "ask" },
         "decided_by": { "kind": "person" },
         "uncertainty": { "kind": "enum", "choices": ["low", "medium", "high"] },
@@ -93,7 +93,7 @@
       "content": "paragraph+",
       "render": "host",
       "attributes": {
-        "from": { "kind": "block[]", "targets": ["ask"] }
+        "from": { "kind": "block[]", "targets": ["ask"], "items": ["ask", "comment", "message"] }
       }
     },
     {
@@ -101,7 +101,7 @@
       "content": "paragraph+",
       "render": "host",
       "attributes": {
-        "from": { "kind": "block[]", "targets": ["ask"] },
+        "from": { "kind": "block[]", "targets": ["ask"], "items": ["ask", "comment", "message"] },
         "serves": {
           "kind": "block[]",
           "targets": ["requirement"]
@@ -118,7 +118,7 @@
       "content": "paragraph+",
       "render": "host",
       "attributes": {
-        "from": { "kind": "block[]", "targets": ["ask"] },
+        "from": { "kind": "block[]", "targets": ["ask"], "items": ["ask", "comment", "message"] },
         "serves": {
           "kind": "block[]",
           "targets": ["requirement"]
