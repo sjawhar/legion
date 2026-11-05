@@ -50,7 +50,7 @@ var testPool = New(Config{
 	Migrate:        migrateTestTemplate,
 })
 
-func TestMain(m *testing.M) { os.Exit(testPool.Main(m)) }
+func TestMain(m *testing.M) { os.Exit(testPool.Main(m, emptyTestPool)) }
 
 // templateSchema is what this file's migrations are. widgets is seeded and events is not, so one
 // test reads what the reset puts back and what it empties; the identity sequence and the
@@ -97,21 +97,21 @@ func migrateTestTemplate(ctx context.Context, dsn string) (Querier, func(), erro
 func TestADatabaseATestOnlyWroteRowsIntoIsReusedEmptied(t *testing.T) {
 	ctx := context.Background()
 	name := testPool.Take(t, true)
-	conn := connect(t, name)
+	conn := connect(t, testPool, name)
 	exec(t, conn, `
 		insert into widgets (label) values ('written by the test');
 		insert into events (body) values ('one'), ('two');
 		select setval('batches', 50)`)
 
-	if outcome := release(t, name, func() { conn.Close(ctx) }); outcome != reused {
+	if outcome := release(t, testPool, name, func() { conn.Close(ctx) }); outcome != reused {
 		t.Fatalf("the database of a test that only wrote rows was %s, not put back on the free list", outcome)
 	}
 	again := testPool.Take(t, true)
 	if again != name {
 		t.Fatalf("the next test was handed %s, not the emptied %s the free list held", again, name)
 	}
-	back := connect(t, again)
-	defer release(t, again, func() { back.Close(ctx) })
+	back := connect(t, testPool, again)
+	defer release(t, testPool, again, func() { back.Close(ctx) })
 
 	if held := probe(t, back, contentQuery); held != templateContent {
 		t.Fatalf("the reused database holds %s; a fresh clone of the template holds %s", held, templateContent)
@@ -168,9 +168,9 @@ func TestADatabaseWhoseSchemaATestChangedIsDropped(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			name := testPool.Take(t, true)
-			conn := connect(t, name)
+			conn := connect(t, testPool, name)
 			exec(t, conn, change.statement(name))
-			if outcome := release(t, name, func() { conn.Close(ctx) }); outcome != refused {
+			if outcome := release(t, testPool, name, func() { conn.Close(ctx) }); outcome != refused {
 				t.Fatalf("a database with %s was %s; the test after it would be handed a schema it never wrote", change.name, outcome)
 			}
 		})
@@ -185,22 +185,22 @@ func TestADatabaseWhoseSchemaATestChangedIsDropped(t *testing.T) {
 func TestATemporaryTableDoesNotCostADatabase(t *testing.T) {
 	ctx := context.Background()
 	name := testPool.Take(t, true)
-	conn := connect(t, name)
+	conn := connect(t, testPool, name)
 	exec(t, conn, "create temporary table scratch (note text) ; insert into scratch values ('written by the test')")
 	// The schema's own name, read while the session that owns it is still open, is what the
 	// check below holds the catalog to: without it this case would pass on a server that had
 	// quietly stopped leaving the schema behind, and prove nothing.
 	temporary := probe(t, conn, "select pg_my_temp_schema()::regnamespace::text")
 
-	if outcome := release(t, name, func() { conn.Close(ctx) }); outcome != reused {
+	if outcome := release(t, testPool, name, func() { conn.Close(ctx) }); outcome != reused {
 		t.Fatalf("the database of a test that made one temporary table was %s", outcome)
 	}
 	again := testPool.Take(t, true)
 	if again != name {
 		t.Fatalf("the next test was handed %s, not the emptied %s the free list held", again, name)
 	}
-	back := connect(t, again)
-	defer release(t, again, func() { back.Close(ctx) })
+	back := connect(t, testPool, again)
+	defer release(t, testPool, again, func() { back.Close(ctx) })
 	left := probe(t, back, "select count(*)::text from pg_namespace where nspname = '"+temporary+"'")
 	if left != "1" {
 		t.Fatalf("the temporary schema %s left the catalog with its session, so this test holds the fingerprint to nothing", temporary)
@@ -222,28 +222,28 @@ func TestATemporaryTableDoesNotCostADatabase(t *testing.T) {
 func TestTheResetLeavesTheStatisticsOfAFreshClone(t *testing.T) {
 	ctx := context.Background()
 	fresh := testPool.Take(t, false)
-	freshConn := connect(t, fresh)
+	freshConn := connect(t, testPool, fresh)
 	want := probe(t, freshConn, statisticsQuery)
 	freshConn.Close(ctx)
 	testPool.Drop(fresh)
 
 	name := testPool.Take(t, true)
-	conn := connect(t, name)
+	conn := connect(t, testPool, name)
 	exec(t, conn, "insert into widgets (label) select 'hot' from generate_series(1, 5000) ; analyze widgets")
 	left := probe(t, conn, statisticsQuery)
 	if left == want {
 		t.Fatalf("the 5000 rows this test wrote left the statistics a fresh clone carries (%s), so it holds the reset to nothing", want)
 	}
 
-	if outcome := release(t, name, func() { conn.Close(ctx) }); outcome != reused {
+	if outcome := release(t, testPool, name, func() { conn.Close(ctx) }); outcome != reused {
 		t.Fatalf("the database of a test that only wrote rows was %s", outcome)
 	}
 	again := testPool.Take(t, true)
 	if again != name {
 		t.Fatalf("the next test was handed %s, not the emptied %s the free list held", again, name)
 	}
-	back := connect(t, again)
-	defer release(t, again, func() { back.Close(ctx) })
+	back := connect(t, testPool, again)
+	defer release(t, testPool, again, func() { back.Close(ctx) })
 	if got := probe(t, back, statisticsQuery); got != want {
 		t.Fatalf("the reused database plans widgets.label on %s, the statistics of the test before (%s); a fresh clone plans it on %s",
 			got, left, want)
@@ -260,9 +260,9 @@ func TestTheResetLeavesTheStatisticsOfAFreshClone(t *testing.T) {
 func TestAFreshDatabaseIsNobodysLeftoversAndIsDropped(t *testing.T) {
 	ctx := context.Background()
 	warm := testPool.Take(t, true)
-	warmConn := connect(t, warm)
+	warmConn := connect(t, testPool, warm)
 	exec(t, warmConn, "insert into events (body) values ('written by the test')")
-	if outcome := release(t, warm, func() { warmConn.Close(ctx) }); outcome != reused {
+	if outcome := release(t, testPool, warm, func() { warmConn.Close(ctx) }); outcome != reused {
 		t.Fatalf("the database of a test that only wrote rows was %s, so the free list is empty and this test holds Take to nothing", outcome)
 	}
 
@@ -270,18 +270,18 @@ func TestAFreshDatabaseIsNobodysLeftoversAndIsDropped(t *testing.T) {
 	if fresh == warm {
 		t.Fatalf("a fresh database was handed back the free list's %s", warm)
 	}
-	if !onFreeList(warm) {
+	if !onFreeList(testPool, warm) {
 		t.Fatalf("a fresh database took %s off the free list, which the next ordinary test is owed", warm)
 	}
-	conn := connect(t, fresh)
+	conn := connect(t, testPool, fresh)
 	if held := probe(t, conn, contentQuery); held != templateContent {
 		t.Fatalf("a fresh database holds %s, not the template's own %s", held, templateContent)
 	}
 	conn.Close(ctx)
 
 	testPool.Drop(fresh)
-	waitDropped(t, fresh)
-	if onFreeList(fresh) {
+	waitDropped(t, testPool, fresh)
+	if onFreeList(testPool, fresh) {
 		t.Fatalf("the dropped %s is on the free list, where the next test would take a database the server has not got", fresh)
 	}
 }
@@ -323,31 +323,40 @@ const (
 	resetFailed outcome = "dropped: its reset failed"
 )
 
-// releaseWait bounds how long a release waits for its worker. A reset is a handful of statements
-// on a database the test has let go of, so this is a deadline for a pool that has stopped
-// answering rather than for a slow server: nothing waits anywhere near it.
-const releaseWait = 60 * time.Second
+// releaseWait bounds how long a release waits for its worker. It is a deadline for a pool that
+// has stopped answering, not for a slow server: a reset is a handful of statements, but a
+// database the pool refuses is DROPPED, and a drop forces a checkpoint on an instance every
+// package of the module is creating and dropping databases on at the same time. At 60 s the
+// refusal cases of TestADatabaseWhoseSchemaATestChangedIsDropped, which release seven such
+// databases at once, failed in CI's whole-module run at 104 s while the pool was working
+// normally (job 127129139977, dispatch://INFRA-1075). Waiting longer for an event costs a
+// healthy run nothing: these tests reach it in milliseconds on an idle server.
+const releaseWait = 5 * time.Minute
 
-// release hands name back the way a harness's cleanup does and answers what the pool decided.
-// Every release ends in one of the three: the database goes on the free list, or the pool will
-// not reuse it and drops it, or its reset failed and it is dropped for that. The first two are
-// read by name - the free list holds it, or the server no longer does - so releases running
-// beside each other are each read for themselves; only the third, which no test here expects,
-// is read from the pool's count, and its log line says a reset failed rather than naming this
-// database's.
-func release(t *testing.T, name string, close func()) outcome {
+// release hands name back to pool the way a harness's cleanup does and answers what that pool
+// decided. Every release ends in one of the three: the database goes on the free list, or the
+// pool will not reuse it and drops it, or its reset failed and it is dropped for that. The first
+// two are read by name - the free list holds it, or the server no longer does - so releases
+// running beside each other are each read for themselves; only the third, which no test here
+// expects, is read from the pool's count, and its log line says a reset failed rather than naming
+// this database's.
+//
+// Every helper below takes the pool it reads: this file's tests have two, the migrated one and
+// the empty one (empty_test.go), and each promise is the decision of one of them about one of its
+// own databases.
+func release(t *testing.T, pool *Pool, name string, close func()) outcome {
 	t.Helper()
-	_, wereFailed := refusals()
-	testPool.Release(name, close)
+	_, wereFailed := refusals(pool)
+	pool.Release(name, close)
 	for deadline := time.Now().Add(releaseWait); ; time.Sleep(time.Millisecond) {
-		if onFreeList(name) {
+		if onFreeList(pool, name) {
 			return reused
 		}
-		if dropped(t, name) {
-			if _, nowFailed := refusals(); nowFailed > wereFailed {
-				testPool.resetMu.Lock()
-				first := testPool.resetFirst
-				testPool.resetMu.Unlock()
+		if dropped(t, pool, name) {
+			if _, nowFailed := refusals(pool); nowFailed > wereFailed {
+				pool.resetMu.Lock()
+				first := pool.resetFirst
+				pool.resetMu.Unlock()
 				t.Logf("a reset failed while %s was released: %s", name, first)
 				return resetFailed
 			}
@@ -360,25 +369,25 @@ func release(t *testing.T, name string, close func()) outcome {
 }
 
 // refusals is how many databases the pool has refused to reuse and how many resets have failed.
-func refusals() (changed, failed int) {
-	testPool.resetMu.Lock()
-	defer testPool.resetMu.Unlock()
-	return testPool.changed, testPool.resetFails
+func refusals(pool *Pool) (changed, failed int) {
+	pool.resetMu.Lock()
+	defer pool.resetMu.Unlock()
+	return pool.changed, pool.resetFails
 }
 
-// onFreeList reports whether name is waiting for the next test that asks for a database.
-func onFreeList(name string) bool {
-	testPool.freeMu.Lock()
-	defer testPool.freeMu.Unlock()
-	return slices.Contains(testPool.free, name)
+// onFreeList reports whether name is waiting for the next test that asks pool for a database.
+func onFreeList(pool *Pool, name string) bool {
+	pool.freeMu.Lock()
+	defer pool.freeMu.Unlock()
+	return slices.Contains(pool.free, name)
 }
 
 // dropped reports whether the server no longer holds name, which is where a database the pool
 // would not reuse ends: the reset's decision carries no name, and this does.
-func dropped(t *testing.T, name string) bool {
+func dropped(t *testing.T, pool *Pool, name string) bool {
 	t.Helper()
 	var left int
-	if err := testPool.Admin().QueryRow(context.Background(), "select count(*) from pg_database where datname = $1", name).Scan(&left); err != nil {
+	if err := pool.Admin().QueryRow(context.Background(), "select count(*) from pg_database where datname = $1", name).Scan(&left); err != nil {
 		t.Fatalf("read whether %s is still on the server: %v", name, err)
 	}
 	return left == 0
@@ -386,10 +395,10 @@ func dropped(t *testing.T, name string) bool {
 
 // waitDropped waits for the drop Drop started in the background. It reads the server rather than
 // the pool's wait group, which only Main may wait on.
-func waitDropped(t *testing.T, name string) {
+func waitDropped(t *testing.T, pool *Pool, name string) {
 	t.Helper()
 	for deadline := time.Now().Add(releaseWait); ; time.Sleep(time.Millisecond) {
-		if dropped(t, name) {
+		if dropped(t, pool, name) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -399,9 +408,9 @@ func waitDropped(t *testing.T, name string) {
 }
 
 // connect opens the one session a test holds on its database, as a harness's store does.
-func connect(t *testing.T, name string) *pgx.Conn {
+func connect(t *testing.T, pool *Pool, name string) *pgx.Conn {
 	t.Helper()
-	conn, err := pgx.Connect(context.Background(), testPool.URL(name))
+	conn, err := pgx.Connect(context.Background(), pool.URL(name))
 	if err != nil {
 		t.Fatalf("connect to %s: %v", name, err)
 	}
