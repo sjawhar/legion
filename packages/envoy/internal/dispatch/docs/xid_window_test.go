@@ -67,19 +67,28 @@ func TestXidWindowRigPassesBackToBackStatementsAfterTheFirstWrite(t *testing.T) 
 	t.Logf("%s\n%s", window.Summary(), window.Detail())
 }
 
+// rigInjectedGap is the statement-free gap the deliberate-fault self-tests put inside the window.
+// A sleep cannot run shorter than it asks for, so it is the floor every build's gap allowance must
+// stay under: were storetest.XidGapAllowance to reach it, those self-tests would report no
+// violation and would say so.
+const rigInjectedGap = 20 * time.Millisecond
+
 // The rig sees a gap inside the window: the same transaction with Go work between its write and
-// its commit breaks D6, and the report names the statement the gap follows.
+// its commit breaks D6, and the report names the statement the gap follows. The injected gap is
+// far above the race build's allowance (storetest.XidRaceMaxGap), so this test says the same
+// thing under the race detector as without it; a fault the size of the scheduler's own stalls
+// would only say which build it ran in.
 func TestXidWindowRigCatchesAGapAfterTheFirstWrite(t *testing.T) {
 	_, database, tracer := xidService(t)
 	report := tracer.Measure(t, database.Pool, func() {
-		runRigTransaction(t, database, 20*time.Millisecond)
+		runRigTransaction(t, database, rigInjectedGap)
 	})
 	err := report.Err()
 	if err == nil || len(report.Problems) > 0 || !strings.Contains(err.Error(), "XID WINDOW VIOLATION") ||
 		!strings.Contains(err.Error(), "follows statement 0: insert into projects") {
-		t.Fatalf("a 20 ms gap after the write: verdict %v, want a D6 violation after the insert", err)
+		t.Fatalf("a %s gap after the write: verdict %v, want a D6 violation after the insert", rigInjectedGap, err)
 	}
-	t.Logf("the rig's verdict on a 20 ms gap after the write:\n%v", err)
+	t.Logf("the rig's verdict on a %s gap after the write:\n%v", rigInjectedGap, err)
 }
 
 // A write phase that is one batch can hold its xid for less than the poller's interval, which on a
@@ -93,7 +102,7 @@ func TestXidWindowRigJudgesAWriteThePollerNeverSaw(t *testing.T) {
 		gap  time.Duration
 	}{
 		{name: "back to back", gap: 0},
-		{name: "a 20 ms sleep after the write", gap: 20 * time.Millisecond},
+		{name: fmt.Sprintf("a %s sleep after the write", rigInjectedGap), gap: rigInjectedGap},
 	} {
 		t.Run(probe.name, func(t *testing.T) {
 			_, database, tracer := xidService(t)
@@ -136,6 +145,13 @@ func TestXidWindowRigJudgesAWriteThePollerNeverSaw(t *testing.T) {
 // before its first write, writes, waits gap, reads twice more and commits.
 func runRigTransaction(t *testing.T, database *store.Store, gap time.Duration) {
 	t.Helper()
+	runRigTransactionDoing(t, database, func() { time.Sleep(gap) })
+}
+
+// runRigTransactionDoing is runRigTransaction with between run after the write instead of a sleep:
+// what the transaction does in Go while it holds its transaction id.
+func runRigTransactionDoing(t *testing.T, database *store.Store, between func()) {
+	t.Helper()
 	ctx := storetest.MarkXid(context.Background())
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -150,7 +166,7 @@ func runRigTransaction(t *testing.T, database *store.Store, gap time.Duration) {
 	if _, err := tx.Exec(ctx, `insert into projects (key, name) values ('RIG', 'Rig')`); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	time.Sleep(gap)
+	between()
 	for range 2 {
 		if err := tx.QueryRow(ctx, `select count(*) from projects`).Scan(&count); err != nil {
 			t.Fatalf("read after the write: %v", err)
