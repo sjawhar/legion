@@ -753,7 +753,10 @@ async function until(
 // reads stays, current and alive, while the window is not current, and goes once it is. The
 // block-index tick runs every 30 s, so each wait below spans more than one pass.
 test("a windowed item keeps the whole-text row the older build's meaning search reads until its window is current", async () => {
-  test.setTimeout(240_000);
+  // Every wait below at its bound, and the two-tick sleep: 60 + 120 + 70 + 120 seconds, which a
+  // lane sharing the runner with the rest of the suite can need where an idle one returns in
+  // seconds.
+  test.setTimeout(420_000);
   await createProject({ key: "ROLL", name: "Rollout" });
   const issue = await createIssue({ project: "ROLL", title: "Two builds at once" });
   const body = "The canary pours the astrolabe over the quiet wharf.\n\nA second paragraph.";
@@ -763,13 +766,14 @@ test("a windowed item keeps the whole-text row the older build's meaning search 
   const windows = `select count(*) from embeddings where kind = 'comment_block' and split_part(id, '#', 1) = '${owner}'`;
   const currentWindows = `${windows} and embedded_hash = content_hash and embedding is not null`;
 
-  // The row the previous build's trigger wrote for this comment, which this build no longer
-  // writes at a write: the same call that trigger made.
-  // psql reads the body as one SQL string literal, with any quote of its own doubled.
-  const quoted = `'${body.replaceAll("'", "''")}'`;
-  await sql(`select embeddings_enqueue('comment', '${comment.id}', ${quoted})`);
-  const embedded = `${whole} and embedded_hash = content_hash and embedding is not null`;
-  await until(embedded, "1", 60, "the whole-text row is embedded");
+  // The window first, and stale before the whole-text row exists. The retirement arm deletes a
+  // whole-text row whenever its owner holds one current window (`wholeTextOwner.retire()`), and
+  // it does not ask whether that row is embedded, so a run that enqueued the row first would be
+  // racing its own queue against the block-index tick: on a machine where the queue embeds the
+  // row within the tick the row is there to be read, and on one where the tick comes first the
+  // row is deleted and no wait of any length can see it. That is what a lane sharing a runner
+  // with the rest of the browser suite made happen. With no window current, the arm cannot take
+  // the row, so what follows is decided by the queue's progress alone.
   await until(currentWindows, "1", 60, "the comment's window is embedded");
 
   // A window waiting for its vector: the state every item is in between this build's write and
@@ -780,6 +784,14 @@ test("a windowed item keeps the whole-text row the older build's meaning search 
        where kind = 'comment_block' and split_part(id, '#', 1) = '${owner}'`
   );
   expect((await sql(currentWindows)).trim(), "no window is current").toBe("0");
+
+  // The row the previous build's trigger wrote for this comment, which this build no longer
+  // writes at a write: the same call that trigger made.
+  // psql reads the body as one SQL string literal, with any quote of its own doubled.
+  const quoted = `'${body.replaceAll("'", "''")}'`;
+  await sql(`select embeddings_enqueue('comment', '${comment.id}', ${quoted})`);
+  const embedded = `${whole} and embedded_hash = content_hash and embedding is not null`;
+  await until(embedded, "1", 120, "the whole-text row is embedded");
 
   // Two ticks of the reconciliation pass over it, and the row the older build reads is still
   // there: alive, with its vector and the comment's own text.
