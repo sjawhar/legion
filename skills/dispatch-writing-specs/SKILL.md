@@ -21,7 +21,7 @@ Part | Content
 `Requirements` | a `:::requirement` block each, `**R1.**` on, its source (`From:`)
 `Verification` | the issue's `verification.md`, a `:::check` block each: `serves`, `surface`, `run`, `when`, `negative_control`
 `Design` | How it meets them; a value and its reason for each limit, size and time
-`Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
+`Decisions` | The spec's decision nodes and answered ask blocks, at the section each shaped
 
 `serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
 
@@ -30,7 +30,7 @@ Part | Content
 For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
-- Write about the current design, never the person or how people reached it, and never quote people or upload their words.
+- Write about the current design, never how people reached it. Never restate a person's answer as your own.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (test, review, check) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
@@ -55,16 +55,17 @@ For each spec, ask, comment and message:
 
 ## Decisions
 
-Choices—answered asks included—earn `decisions.md` `##` sections only if a disagreeing reader would act differently; keep others to one spec line each.
+A person's answered ask is the decision: keep it in its spec section, its answer unchanged. Never move or remove it.
 
-- The heading names the choice; the text gives the reason and the options weighed.
-- Link each spec block it shaped, `dispatch://KEY/spec#b-<id>` (`doc-read --blocks` lists the ids), and a person's decision its ask, `dispatch://KEY/ask/<id>`.
-- An unsure section adds a paragraph that starts `Unsure:`: what would change your mind.
-- A replaced section moves under a final `## Replaced` as a `###`.
+For a choice you made alone, write a `:::decision{title="..."}` block in the spec: your reason and the options you weighed.
+
+- `shaped="dispatch://KEY/spec#b-<id> ..."` names each spec block it shaped (`doc-read --blocks` lists the ids).
+- `from_ask` names an ask it follows; the choice stays yours.
+- An `Unsure:` paragraph says what would change your mind; `replaced="true"` marks a choice that no longer applies.
 
 ## Old specs
 
-At your next edit, rewrite a spec outside the outline whole in one version, moving its ask blocks with `doc-edit`'s `move`; restate each retelling, quotation or unlinked attribution as design, or cut it.
+At your next edit, rewrite prose outside the outline in one version. Keep each answered ask in place; move open asks with `doc-edit`'s `move`.
 
 ## Approval
 
