@@ -352,6 +352,17 @@ type Issue struct {
 	// Check is the issue's open production check, the work after its close (record.ProductionCheck):
 	// present only while the check is open, and absent once it closed or while none was opened.
 	Check *CheckView `json:"check,omitempty"`
+	// MemoryGroup is the memory group of the issue's tree (memorygroup.Group): `memory` for a
+	// tree whose roles run with the project's memory overlays and instructions, `none` for one
+	// that runs without them, and absent while nothing has drawn for the tree — a tree first
+	// opened before the setting existed, or one the draw never reached. MemoryDrawMode is the
+	// project's memory mode in force when that group was drawn (config.MemoryMode's words) and
+	// MemoryDrawnAt when it was drawn, both absent with the group. The draw is made once, on the
+	// tree's root record, when the tree's lifecycle row is first created, and every issue of the
+	// tree shows its root's: an issue's memory group is its tree's (contract 49).
+	MemoryGroup    string     `json:"memoryGroup,omitempty"`
+	MemoryDrawMode string     `json:"memoryDrawMode,omitempty"`
+	MemoryDrawnAt  *time.Time `json:"memoryDrawnAt,omitempty"`
 }
 
 // WaitingOnView is what a root in awaiting_person waits on from a person (record.Awaiting). Kind

@@ -374,6 +374,7 @@ jobs:
               - 'packages/daemon/internal/intake/*'
               - 'packages/daemon/internal/launcher/*'
               - 'packages/daemon/internal/lookpath/*'
+              - 'packages/daemon/internal/memorygroup/*'
               - 'packages/daemon/internal/modeltoken/*'
               - 'packages/daemon/internal/natsauth/*'
               - 'packages/daemon/internal/notify/*'

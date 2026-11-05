@@ -451,3 +451,50 @@ func TestProjectNamesWhatEveryBlockedRootAndChildWaitsOn(t *testing.T) {
 		t.Fatalf("blocked with nothing waiting on a link = %#v, want an empty list", none.Admission.Blocked)
 	}
 }
+
+// An issue's memory group is its tree root's, which is the one record the draw is written on: the
+// root and every issue of its tree are shown the group, the mode it was drawn under and the
+// instant of the draw, a done issue included, and an issue of a tree no draw has reached is shown
+// none of the three. There is no ancestor walk: a record's Tree is its root's key.
+func TestProjectShowsEveryIssueItsTreeRootsMemoryDraw(t *testing.T) {
+	drawnAt := projectedAt.Add(-48 * time.Hour)
+	store := projectionStore{issues: []record.Issue{
+		{
+			Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",
+			Phase: phase.Implementing, Status: "in_progress", Rank: "A", HandedOver: true,
+			MemoryGroup: "memory", MemoryDrawMode: "random", MemoryDrawnAt: &drawnAt,
+		},
+		// A child of that tree, which the draw never wrote to, and a done child of it: both run
+		// with what their root was drawn into.
+		{
+			Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",
+			Phase: phase.Admitted, Status: "in_progress", Rank: "B", HandedOver: true,
+		},
+		{
+			Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",
+			Phase: phase.Done, Status: "done", Rank: "C", HandedOver: true,
+		},
+		// A tree first opened before the setting existed: no draw, so no group.
+		{
+			Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211",
+			Phase: phase.Implementing, Status: "in_progress", Rank: "D", HandedOver: true,
+		},
+	}}
+
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	for _, key := range []string{"LEGION-208", "LEGION-209", "LEGION-210"} {
+		view := got.Issues[key]
+		if view.MemoryGroup != "memory" || view.MemoryDrawMode != "random" ||
+			view.MemoryDrawnAt == nil || !view.MemoryDrawnAt.Equal(drawnAt) {
+			t.Errorf("%s = group %q drawn as %q at %v, want its root's memory, random, %s",
+				key, view.MemoryGroup, view.MemoryDrawMode, view.MemoryDrawnAt, drawnAt)
+		}
+	}
+	if view := got.Issues["LEGION-211"]; view.MemoryGroup != "" || view.MemoryDrawMode != "" || view.MemoryDrawnAt != nil {
+		t.Errorf("the undrawn tree's root = group %q drawn as %q at %v, want none of the three",
+			view.MemoryGroup, view.MemoryDrawMode, view.MemoryDrawnAt)
+	}
+}

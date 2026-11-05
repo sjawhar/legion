@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  Each issue of the Legion state carries its tree's memory draw: `memoryGroup`, `memoryDrawMode`
+  and `memoryDrawnAt`, all optional. A tree no draw has reached carries none of the three, and a
+  daemon before contract 49 sends none.

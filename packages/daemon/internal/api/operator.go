@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,8 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -216,7 +220,7 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
-		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		if _, err := s.trees.OpenOperatorTreeLifecycle(ctx, s.project, req.Tree, s.drawMemory(req.Tree)); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
 			return
 		} else if err != nil {
@@ -247,6 +251,18 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	s.operatorDone(r, token)
 	writeJSON(w, status, operatorView(m.Claim()))
+}
+
+// drawMemory is the draw of tree's memory group, for the open that creates the tree's lifecycle
+// row to run in its own transaction (store.Store.OpenOperatorTreeLifecycle): the group this
+// project's mode gives the tree, recorded on the tree's root (memorygroup.DrawAndRecord, which
+// admission's own path draws through too). An operator's tree usually has no issue record at all,
+// and then the draw writes nothing (record.Store.DrawMemory) — nothing is refused and no record
+// is invented.
+func (s *server) drawMemory(tree string) func(ctx context.Context, tx pgx.Tx) error {
+	return func(ctx context.Context, tx pgx.Tx) error {
+		return memorygroup.DrawAndRecord(ctx, tx, s.records, tree, s.memory, s.coin, s.now())
+	}
 }
 
 // claimRequest is one operator request on an existing claim: event builds the request the claim's
@@ -378,7 +394,7 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := m.Claim()
-	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.records == nil || s.roleFor == nil {
+	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.roleFor == nil {
 		s.claimRequest("retry", retryEvent)(w, r)
 		return
 	}

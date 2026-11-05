@@ -362,6 +362,48 @@ What each part is for:
   Envoy App (or a repository webhook) must deliver the repository's events. The loader refuses one
   repository's workflow named twice, and a daemon that predates the key refuses it at boot, as it
   does any key it does not know.
+- **`projects.<KEY>.memory`** (optional) decides what each tree that project opens runs with.
+  `mode` is `off`, the default and what a project with no block gets, `on`, which gives every new
+  tree a memory group, or `random`, a fair coin for each new tree:
+
+  ```yaml
+  projects:
+    WIDGETS:
+      memory:
+        mode: random
+        config_files: [/etc/legion-memory/memory.yml]
+        instructions: /etc/legion-daemon/memory-instructions.md
+  ```
+
+  `config_files` are Oh My Pi settings overlays that every role of a memory-group tree names last
+  in its `PI_CONFIG_FILES`, after the operator's own and the role's own, and at least one is
+  required while the mode is not `off`.
+  `instructions` is optional and names one markdown file on the daemon's own disk, which the daemon
+  reads at boot and appends to such a role's system prompt after the deployment's own instructions.
+  Both keys take absolute paths, and under `runtime: kubernetes` each overlay must be a file one of
+  the operator's pod mounts carries.
+  The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
+  root issue record with the mode it was drawn under and the time of the draw.
+  A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
+  hands over as a tree of its own takes the answer of the tree it leaves at the hand-over: that
+  tree's draw where it had one, and no draw at all where that tree had been opened with none.
+  A tree first opened before this release has no group and runs without memory, nothing draws for
+  it later, and a change of mode reaches only the trees opened after it.
+  A child out of a tree the daemon never opened has run under nothing and the hand-over gives it
+  nothing, so its own first open draws it like any other new tree.
+  The launch follows the record, not the mode: a tree the daemon drew into the memory group keeps
+  its overlays and its instructions while the block still names them, whatever the mode is now, so
+  `mode: off` stops new draws and takes memory from no tree already running with it, and taking
+  the files away is removing them from the block.
+  That is why the overlay rules — the Kubernetes mount check, the readability check at boot, and
+  the refusal of a block that names overlays while `worker_backends` puts an issue role on Claude
+  Code — hold whatever the mode is.
+  The controller is in no memory group, a tree drawn `none` runs exactly as it ran before the block
+  existed, and a block with no `instructions` appends nothing.
+  `legion state` prints one `memory:` line counting the issues drawn under each group and mode —
+  the state names no tree, and a tree handed over as one of its own carries its old tree's draw
+  verbatim, so trees cannot be counted from it — and
+  `legion state --json` shows each issue its tree's group, the mode it was drawn under and when.
 - **`repository_renames`** (optional) tells the daemon that two names are one repository, for a
   repository that moved: after a transfer GitHub's events name the new repository while every tree
   Legion has already recorded names the old one.
