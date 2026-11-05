@@ -2081,6 +2081,10 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	); err != nil {
 		return versionWriteResult{}, fmt.Errorf("write document version: %w", err)
 	}
+	// The markdown this row holds is a stored text, so its display tree is stored once the
+	// transaction commits (collectVersionText): every version write passes here, and the routes
+	// above hold the version's number rather than its text.
+	collectVersionText(ctx, artifactID, markdown)
 	// The version's tree is the one the issue's task counts are read from, so they are written
 	// with it (LEGION-542).
 	if err := RecordTaskProgress(ctx, tx, artifactID, tree); err != nil {

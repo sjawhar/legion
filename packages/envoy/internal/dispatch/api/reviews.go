@@ -391,7 +391,13 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
+	// The reason the review gave, which every read of the document's reviews is shown
+	// (artifactReviewReads). A review that gave none - an approval with nothing written beside
+	// it - stores nothing, as an empty text has no tree.
+	if reason != nil {
+		s.storeDisplayTrees(r.Context(), artifact.ID, *reason)
+	}
 	WriteJSON(w, http.StatusCreated, reviews[artifact.ID])
 }
 
@@ -598,7 +604,12 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
+	// The question this request wrote: the one it opened the approval ask with, or the rewording
+	// a renewal left on the open ask (renewApprovalAsk).
+	if ask != nil {
+		s.storeDisplayTrees(r.Context(), ask.ID, ask.Question)
+	}
 	// 201 says this request opened the request, reworded it or handed it to the human; 200 says the
 	// open request already stood as asked.
 	status := http.StatusOK
@@ -943,6 +954,6 @@ func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
 	WriteJSON(w, http.StatusCreated, review)
 }

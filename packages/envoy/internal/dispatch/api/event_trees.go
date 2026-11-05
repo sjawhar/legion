@@ -17,10 +17,6 @@ import (
 // ("payload.body", "payload.options.0.label").
 const eventPayloadPrefix = "payload"
 
-// eventBodyTreePath is where the tree of a comment's or a message's body stands, which is the one
-// tree almost every event of a feed carries.
-const eventBodyTreePath = eventPayloadPrefix + ".body"
-
 // attachEventTrees fills the trees of every listed event, for a caller that asked for them. The
 // REST event lists do this only under the header; a /ws/live frame always does, since a browser
 // can set no header on a socket (liveEventFrame). The events are filled on as many processors as
@@ -38,6 +34,29 @@ func attachEventTrees(events []model.Event, trees bool) {
 // eventDisplayTrees is the display tree of every stored text the event's payload carries, keyed
 // by that text's path: the body a comment or a message event carries, and an ask event's
 // question, options, answer text and resolution reason, the question and options an edit
+// replaced among them. The texts themselves are found by eventPayloadTexts, which the publish
+// path reads the same payload with to store those trees (storeEventDisplayTrees).
+//
+// The map is made on the first text there is a tree for, so an event with no text, and one whose
+// every text failed to encode, answers nil and costs no map.
+func eventDisplayTrees(event model.Event) map[string]json.RawMessage {
+	var trees map[string]json.RawMessage
+	eventPayloadTexts(event, func(path, text string) {
+		tree := displayTree(text)
+		if tree == nil {
+			return
+		}
+		if trees == nil {
+			trees = make(map[string]json.RawMessage, 1)
+		}
+		trees[path] = tree
+	})
+	return trees
+}
+
+// eventPayloadTexts calls visit for every stored text the event's payload carries, under that
+// text's path rooted at the envelope: the body a comment or a message event carries, and an ask
+// event's question, options, answer text and resolution reason, the question and options an edit
 // replaced among them. A payload is read as the JSON it is rather than as its Go type, because a
 // read serves it as the database stored it (readEvents) and a publish as the type the write
 // built, and both have to answer the same keys.
@@ -45,24 +64,23 @@ func attachEventTrees(events []model.Event, trees bool) {
 // The event's type says which fields can hold a text, and only those are read: the whole payload
 // of a feed's event is several times the size of its body, and a decode of all of it -
 // generically, as a map of raw members - was the warm read's largest cost. An event of a type
-// that can hold no stored text is not read at all.
-func eventDisplayTrees(event model.Event) map[string]json.RawMessage {
+// that can hold no stored text is not read at all. A field the payload does not hold, or holds as
+// null or as anything but a string, is read as the empty string, which is no text: it is never
+// visited.
+func eventPayloadTexts(event model.Event, visit func(path, text string)) {
 	ask := strings.HasPrefix(event.Type, "ask.")
 	if !ask && !eventTypeHoldsBody(event.Type) {
-		return nil
+		return
 	}
 	payload := eventPayloadJSON(event)
 	if payload == nil {
-		return nil
+		return
 	}
 	if ask {
-		return askEventTrees(payload)
+		askEventPayloadTexts(payload, visit)
+		return
 	}
-	tree := displayTree(eventBodyText(payload))
-	if tree == nil {
-		return nil
-	}
-	return map[string]json.RawMessage{eventBodyTreePath: tree}
+	visitText(visit, eventPayloadPrefix, "body", eventBodyText(payload))
 }
 
 // eventTypeHoldsBody reports whether an event of this type can carry a stored body. The comment
@@ -114,57 +132,53 @@ type askEventTexts struct {
 	PreviousAnswer *askAnswerText `json:"previous_answer"`
 }
 
-// askEventTrees is the trees of an ask event: the ask's own texts, the ones an edit replaced, and
-// the superseded answer's. An ask event is a handful of a feed's events where a comment is
-// hundreds of them, and its texts stand in five places, so its payload is decoded in one pass
-// into the fields that can hold one rather than scanned for each.
+// askEventPayloadTexts visits the stored texts of an ask event: the ask's own, the ones an edit
+// replaced, and the superseded answer's. An ask event is a handful of a feed's events where a
+// comment is hundreds of them, and its texts stand in five places, so its payload is decoded in
+// one pass into the fields that can hold one rather than scanned for each.
 //
 // A payload no text can be read from - one that is not a JSON object, which no payload Dispatch
 // appends is - decodes to no texts, and so does a field of an unexpected type: each such text
-// stays empty, which has no tree, so a malformed field costs its own tree and no other's, as
-// reading each field on its own did. That is what the decode's error says, and why it is not
-// read.
-func askEventTrees(raw json.RawMessage) map[string]json.RawMessage {
+// stays empty, which is visited for nothing, so a malformed field costs its own tree and no
+// other's, as reading each field on its own did. That is what the decode's error says, and why it
+// is not read.
+func askEventPayloadTexts(raw json.RawMessage, visit func(path, text string)) {
 	var payload askEventTexts
 	_ = json.Unmarshal(raw, &payload)
-	trees := map[string]json.RawMessage{}
-	addDisplayTree(trees, eventPayloadPrefix, "body", payload.Body)
-	addAskTrees(trees, eventPayloadPrefix, &payload.askTexts)
+	visitText(visit, eventPayloadPrefix, "body", payload.Body)
+	visitAskTexts(visit, eventPayloadPrefix, &payload.askTexts)
 	if payload.Previous != nil {
-		addAskTrees(trees, eventPayloadPrefix+".previous", payload.Previous)
+		visitAskTexts(visit, eventPayloadPrefix+".previous", payload.Previous)
 	}
 	if payload.PreviousAnswer != nil {
-		addDisplayTree(trees, eventPayloadPrefix+".previous_answer", "text", payload.PreviousAnswer.Text)
+		visitText(visit, eventPayloadPrefix+".previous_answer", "text", payload.PreviousAnswer.Text)
 	}
-	if len(trees) == 0 {
-		return nil
-	}
-	return trees
 }
 
-// addAskTrees fills the trees of one ask-shaped object standing at path.
-func addAskTrees(trees map[string]json.RawMessage, path string, texts *askTexts) {
-	addDisplayTree(trees, path, "question", texts.Question)
+// visitAskTexts visits the texts of one ask-shaped object standing at path.
+func visitAskTexts(visit func(path, text string), path string, texts *askTexts) {
+	visitText(visit, path, "question", texts.Question)
 	if texts.Answer != nil {
-		addDisplayTree(trees, path+".answer", "text", texts.Answer.Text)
+		visitText(visit, path+".answer", "text", texts.Answer.Text)
 	}
 	if texts.Resolution != nil {
-		addDisplayTree(trees, path+".resolution", "reason", texts.Resolution.Reason)
+		visitText(visit, path+".resolution", "reason", texts.Resolution.Reason)
 	}
 	for index, option := range texts.Options {
 		optionPath := path + ".options." + strconv.Itoa(index)
-		addDisplayTree(trees, optionPath, "label", option.Label)
-		addDisplayTree(trees, optionPath, "description", option.Description)
+		visitText(visit, optionPath, "label", option.Label)
+		visitText(visit, optionPath, "description", option.Description)
 	}
 }
 
-// addDisplayTree reads text for display and writes its tree under "<path>.<name>", where there is
-// something in it. A field the payload does not hold, or holds as null or as anything but a
-// string, decoded to the empty string and has no text to read and no tree.
-func addDisplayTree(trees map[string]json.RawMessage, path, name, text string) {
-	if tree := displayTree(text); tree != nil {
-		trees[path+"."+name] = tree
+// visitText visits text under "<path>.<name>", where there is something in it. A field the payload
+// does not hold, or holds as null or as anything but a string, decoded to the empty string, which
+// has no tree to read or store.
+func visitText(visit func(path, text string), path, name, text string) {
+	if text == "" {
+		return
 	}
+	visit(path+"."+name, text)
 }
 
 // eventPayloadJSON is the event's payload as JSON, whatever it is held as: the JSON the database

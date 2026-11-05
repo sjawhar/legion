@@ -536,7 +536,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// lets the pool refuse a refresh run while a transaction is still open.
 		s.deps.Docs.SetIssueClosed(outlivingTheClient(r), key, after.ClosedAt != nil)
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
 	if closing {
 		// The rooms are closed now, so no browser of this process writes another ask block
 		// into them; the sweep catches the ones written since the close forked each document.

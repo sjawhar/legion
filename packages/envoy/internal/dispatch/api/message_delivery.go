@@ -264,7 +264,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(appended)
+	s.publish(ctx, appended)
 	WriteJSON(w, http.StatusOK, acceptedDelivery{MessageDelivery: accepted, Body: message.Body})
 }
 
@@ -501,7 +501,7 @@ func (s *server) recordPendingMessageDelivery(
 		return pendingMessageDelivery{}, err
 	}
 	if superseded != nil {
-		s.publish(*superseded)
+		s.publish(ctx, *superseded)
 	}
 	return pending, nil
 }
@@ -974,7 +974,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
 	WriteJSON(w, status, response)
 }
 

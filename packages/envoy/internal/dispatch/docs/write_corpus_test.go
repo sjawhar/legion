@@ -139,7 +139,7 @@ func seedWriteCorpusDocument(t *testing.T, service *Service, slug, markdown stri
 	`, artifactID, canonical, authors); err != nil {
 		t.Fatalf("write the document's first version: %v", err)
 	}
-	ledger.WroteVersion(artifactID, model.Version{Number: 1, Authors: authors})
+	ledger.WroteVersion(artifactID, model.Version{Number: 1, Authors: authors}, canonical)
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the upload: %v", err)
 	}

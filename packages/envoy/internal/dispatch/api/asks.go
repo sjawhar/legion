@@ -289,7 +289,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(appended...)
+	s.publish(r.Context(), appended...)
+	s.storeDisplayTrees(r.Context(), ask.ID, askDisplayTexts(nil, ask.Question, ask.Options)...)
 	// The related-item check. An ask on an issue searches that issue's project and, normally, rides its check's
 	// result on the issue's own advice; one on an unlinked project document searches the
 	// document's and has no issue state to report, so its advice carries the result alone, as does
@@ -531,7 +532,12 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
+	// The question and options this edit replaced are stored beside the new ones: the row holds
+	// only what the ask says now, and every read of the ask's history (askEditReads) is shown the
+	// previous wording, which no other write would ever store.
+	s.storeDisplayTrees(r.Context(), ask.ID,
+		askDisplayTexts(askDisplayTexts(nil, ask.Question, ask.Options), previous.Question, previous.Options)...)
 	WriteJSON(w, http.StatusOK, newAskRead(ask, wantsDisplayTrees(r)))
 }
 

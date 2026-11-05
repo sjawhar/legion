@@ -847,7 +847,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		s.publish(event)
+		s.publish(r.Context(), event)
 		WriteJSON(w, http.StatusOK, attempt)
 		return
 	}
@@ -940,6 +940,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
+	s.storeDisplayTrees(r.Context(), reply.ID, reply.Body)
 	WriteJSON(w, http.StatusCreated, commentWriteResponse{commentRead: newCommentRead(reply, wantsDisplayTrees(r)), AskWaitingOn: waitingOn})
 }

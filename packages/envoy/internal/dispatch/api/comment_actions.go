@@ -121,7 +121,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
 	WriteJSON(w, http.StatusOK, newCommentRead(comment, wantsDisplayTrees(r)))
 }
 
@@ -250,7 +250,8 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
+	s.storeDisplayTrees(r.Context(), comment.ID, input.Body)
 	WriteJSON(w, http.StatusOK, newCommentRead(comment, wantsDisplayTrees(r)))
 }
 
@@ -458,7 +459,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
 	if action == "accept" {
 		// The accepted text may have gone the way an edit's can: removed by a concurrent browser
 		// change after this write's version was rendered and before it reached the room, which is

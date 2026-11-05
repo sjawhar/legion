@@ -487,7 +487,7 @@ func (s *server) settleUndeliverableMessage(
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	s.publish(receipt)
+	s.publish(ctx, receipt)
 	return true, nil
 }
 
@@ -526,6 +526,6 @@ func (s *server) settleUndeliverableMention(ctx context.Context, undeliverable u
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	s.publish(receipt)
+	s.publish(ctx, receipt)
 	return true, nil
 }

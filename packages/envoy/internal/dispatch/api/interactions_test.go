@@ -1376,7 +1376,7 @@ func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.
 	if err != nil {
 		t.Fatalf("write the upload version: %v", err)
 	}
-	ledger.WroteVersion(issue.PrimaryArtifactID, uploadVersion)
+	ledger.WroteVersion(issue.PrimaryArtifactID, uploadVersion, uploaded)
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit upload transaction: %v", err)
 	}

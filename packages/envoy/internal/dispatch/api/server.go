@@ -1496,10 +1496,16 @@ func (s *server) appendEvent(ctx context.Context, tx pgx.Tx, event model.Event) 
 	return s.deps.Events.Append(ctx, tx, event)
 }
 
-func (s *server) publish(events ...model.Event) {
+// publish hands each event to the broker and then stores the display trees of the stored texts
+// their payloads carry (storeEventDisplayTrees). ctx is the caller's own: a route's request
+// context, which by here has committed and holds no connection of the pool, or a background
+// writer's. A caller that publishes while its transaction is still open stores nothing, and loses
+// no tree by it: such an event carries a text its own write already stored.
+func (s *server) publish(ctx context.Context, events ...model.Event) {
 	for _, event := range events {
 		s.deps.Events.Publish(event)
 	}
+	s.storeEventDisplayTrees(ctx, events)
 }
 
 func (s *server) begin(ctx context.Context) (pgx.Tx, error) {

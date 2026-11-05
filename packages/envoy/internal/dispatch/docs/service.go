@@ -1411,6 +1411,11 @@ func (s *Service) commitSettlement(ctx context.Context, tx pgx.Tx, ledger *Ledge
 	if err := s.commitConsuming(ctx, tx, captures, ended); err != nil {
 		return advanced, err
 	}
+	// The settlement's own transaction commits here rather than through Ledger.Commit, so the
+	// display tree of the version it wrote is stored here too: a settlement's version is a text
+	// a reader is shown like any other, and its markdown is this write's own, not the markdown of
+	// the version the route before it wrote.
+	ledger.storeVersionTrees(ctx)
 	if advanced {
 		s.noteStoredUpdates(room, int64(appended[len(appended)-1]))
 	}

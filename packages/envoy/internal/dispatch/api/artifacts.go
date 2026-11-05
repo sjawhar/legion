@@ -568,8 +568,10 @@ func (s *server) storeArtifact(
 			return
 		}
 		// The version credits the uploader alone, and holds the upload's write to the document,
-		// which clears the credit of every edit that write read when it changed the document.
-		ledger.WroteVersion(artifact.ID, version)
+		// which clears the credit of every edit that write read when it changed the document. It
+		// carries the markdown it stored, whose display tree the commit stores
+		// (Ledger.storeVersionTrees), since this route writes the row itself.
+		ledger.WroteVersion(artifact.ID, version, documentMarkdown)
 		documentReadBack = ledger.ReadBackOf(artifact.ID, documentMarkdown)
 		// The version row exists now, so the count names it (LEGION-542).
 		err = recordDocumentTaskProgress(r.Context(), tx, artifact.ID, documentReadBack, documentMarkdown)
@@ -688,7 +690,7 @@ func (s *server) storeArtifact(
 		// document's ask blocks are indexed and its block ids repaired.
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(published...)
+	s.publish(r.Context(), published...)
 	var blocks *documentBlocks
 	if kind == "doc" {
 		blocks = documentBlocksFor(documentReadBack, documentMarkdown)
@@ -1008,7 +1010,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
 	WriteJSON(w, http.StatusCreated, version)
 }
 
@@ -1138,7 +1140,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if edit.Applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(published...)
+	s.publish(r.Context(), published...)
 	unchanged := edit.Unchanged
 	if unchanged == nil {
 		unchanged = []int{}

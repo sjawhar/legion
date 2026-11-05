@@ -364,7 +364,8 @@ func (s *server) createStoredMessage(
 	if err := tx.Commit(ctx); err != nil {
 		return model.Message{}, nil, err
 	}
-	s.publish(event)
+	s.publish(ctx, event)
+	s.storeDisplayTrees(ctx, message.ID, input.Body)
 	if message.Target != nil {
 		// The send keeps the request's values (its transaction tracking) and drops its
 		// cancellation: a connection cut after the commit - a closed tab, a front door's pod

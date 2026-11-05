@@ -396,6 +396,9 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The spec is a stored text, so its display tree is stored once this transaction commits
+	// (docs.Ledger.storeVersionTrees); this route writes the version row itself.
+	ledger.WroteVersionText(artifactID, markdown)
 	// documentReadBack is the rendering the seed stored, read back by its own parse (docs'
 	// Ledger.ReadBackOf), which the task count and the advice's blocks read in place of parsing
 	// the same markdown again (recordDocumentTaskProgress, documentBlocksFor).
@@ -449,7 +452,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// closer that indexes its ask blocks and repairs block ids; queue it now that the
 	// transaction is durable.
 	s.deps.Docs.ScheduleSettlement(artifactID)
-	s.publish(event)
+	s.publish(r.Context(), event)
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		advice.documentBlocks = documentBlocksFor(documentReadBack, markdown)
 	}

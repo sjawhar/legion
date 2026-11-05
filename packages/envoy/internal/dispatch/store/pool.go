@@ -90,6 +90,14 @@ func holdsConnection(ctx context.Context) bool {
 	return ok && state.connection.Load()
 }
 
+// HoldsPooledConnection reports whether ctx's caller already holds one of this pool's connections:
+// its transaction, an open cursor, or a connection it acquired. Work that may be skipped asks
+// before it takes one of its own - storing a display tree beside a write (texttrees) is the one
+// such caller - because a second connection taken while one is held is the deadlock
+// ErrNestedAcquire refuses, and for optional work a quiet skip is better than that refusal, whose
+// stack names a call site that is working as intended.
+func HoldsPooledConnection(ctx context.Context) bool { return holdsConnection(ctx) }
+
 // ForConcurrentRead returns a context for one of a caller's reads that run side by side: ctx's
 // deadline, cancellation and values, with a hold mark of its own, so that read takes one
 // connection and the pool still refuses it a second. Reads sharing one mark would refuse each

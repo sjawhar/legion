@@ -880,7 +880,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
+	s.storeDisplayTrees(r.Context(), comment.ID, input.Body)
 	// Each mention's send outlives the request's connection, keeping its values and dropping its
 	// cancellation, as createStoredMessage's does: attempt 1 is committed above, and a client that
 	// gives up on the comment, or retries it under its key, must not leave that attempt pending

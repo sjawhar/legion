@@ -206,9 +206,7 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	for _, event := range events {
-		s.publish(event)
-	}
+	s.publish(r.Context(), events...)
 	// The send answers as soon as the messages are committed, and delivery runs behind it: a
 	// fan-out to many sessions, each bounded by the listener client's receipt timeout, is too
 	// long to hold an answer for. A single send to one session answers once its own attempt has
@@ -491,6 +489,9 @@ func (s *server) writeBroadcast(
 	if err := tx.Commit(ctx); err != nil {
 		return broadcastRead{}, nil, err
 	}
+	// One text, however many recipients: every copy holds the body the broadcast was sent with,
+	// and all of them share the one row keying on the text alone gives them.
+	s.storeDisplayTrees(ctx, sent.ID, body)
 	return sent, events, nil
 }
 
