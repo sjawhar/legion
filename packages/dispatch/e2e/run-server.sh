@@ -226,13 +226,24 @@ listener_takeover_window="${DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW:-500ms}"
 # default place DISPATCH_EMBEDDER names - takes those same static keys as its credentials and the
 # region as a real region: every text the embedding queue picks up, and every search query, then
 # makes a real call to bedrock-runtime.<region>.amazonaws.com that AWS refuses 403, retries it,
-# and logs it (merge-base run 41085647285 did that 1,522 times with the canary alone). No row
-# reads a meaning-search result - the suite has no model service, so search answers keyword-only
-# whether the call is made and refused or never made at all - so DISPATCH_TEST_EMBEDDER_OFF=1,
-# under the DISPATCH_TEST_HOOKS=1 below, builds no embedder: the queue's Run returns at once and
-# no query is embedded. A caller that set the variable itself keeps its own value, as it does for
-# the settle delay above, so a run that one day proves the embed path turns it back on with 0.
-embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-1}"
+# and logs it (merge-base run 41085647285 did that 1,522 times with the canary alone). Almost no
+# row reads a meaning-search result - the suite has no model service, so search answers
+# keyword-only whether the call is made and refused or never made at all - so
+# DISPATCH_TEST_EMBEDDER_OFF=1, under the DISPATCH_TEST_HOOKS=1 below, builds no embedder: the
+# queue's Run returns at once and no query is embedded. A caller that set the variable itself
+# keeps its own value, as it does for the settle delay above.
+#
+# The runs that do prove the embed path are the ones that ask for the dev embedder
+# (DISPATCH_E2E_EMBEDDER=1 above, which calls no model service): the acceptance driver's meaning
+# rows and `two-builds.multiprocess.e2e.ts`'s rollout row, which read vectors the queue wrote and
+# can pass no other way. They are the run "that one day proves the embed path turns it back on
+# with 0", so the default follows what the caller asked for rather than making each of them say
+# it twice.
+if [ "${DISPATCH_E2E_EMBEDDER:-}" = "1" ]; then
+  embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-0}"
+else
+  embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-1}"
+fi
 
 # The Go runtime's view of the machine, read before the sweep below. Go sizes GOMAXPROCS, and with
 # it the scheduler's threads and the garbage collector's parallelism, from every CPU it can see,
