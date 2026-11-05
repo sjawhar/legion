@@ -5,6 +5,7 @@
 package api
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -92,6 +93,8 @@ var featureOffRoutes = []struct {
 	{http.MethodPost, "/api/v1/credential-grants/grant1/revoke"},
 	{http.MethodGet, "/api/v1/machine-logins"},
 	{http.MethodPost, "/api/v1/machine-logins/cred1/revoke"},
+	{http.MethodGet, "/api/v1/signins"},
+	{http.MethodPost, "/api/v1/signins/signin1/revoke"},
 }
 
 func TestCredentialRoutesAnswerFeatureOffWithNilClient(t *testing.T) {
@@ -380,4 +383,157 @@ func TestApproverLiteralOtherValueIsRejectedBeforeReachingTheBroker(t *testing.T
 	if rig.calls != 0 {
 		t.Fatalf("broker was called %d times, want 0: a literal approver must never reach it", rig.calls)
 	}
+}
+
+// A sign-in belongs to one person, so the two routes that read and end one must name that person
+// from Dispatch's own session and never from the browser, exactly as every decision does.
+func TestSignInRoutesNameTheCallerNeverTheBrowser(t *testing.T) {
+	t.Run("the list asks for the caller's own sign-ins", func(t *testing.T) {
+		rig := newFakeBrokerRig(t)
+		handler := newCredentialTestHandler(t, rig.server.URL)
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/signins", nil, "Alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+		}
+		if rig.lastQuery != "person=alice" {
+			t.Fatalf("broker saw query %q, want person=alice", rig.lastQuery)
+		}
+	})
+	t.Run("the revoke names the caller whatever the browser sends", func(t *testing.T) {
+		rig := newFakeBrokerRig(t)
+		handler := newCredentialTestHandler(t, rig.server.URL)
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/signins/signin1/revoke",
+			map[string]any{"person": "bob"}, "Alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+		}
+		if rig.lastBody != `{"person":"alice"}` {
+			t.Fatalf(`broker saw body %s, want {"person":"alice"}`, rig.lastBody)
+		}
+	})
+}
+
+// One person must reach none of another's sign-ins, and the two halves of that sit in different
+// places: the list is held to the caller by the person Dispatch names, and the revoke by the
+// broker, which answers a sign-in of anybody else as an unknown id. This drives both against a
+// broker that behaves as the real one does.
+func TestOnePersonReachesNoneOfAnothersSignIns(t *testing.T) {
+	signIns := map[string]string{"signin-alice": "alice", "signin-bob": "bob"}
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/person-signins" {
+			rows := ""
+			for id, owner := range signIns {
+				if owner == r.URL.Query().Get("person") {
+					rows = `{"signin_id":"` + id + `","machine":"fleet","thumbprint":"abc",` +
+						`"created_at":"2026-11-01T00:00:00Z","last_used_at":"2026-11-02T00:00:00Z"}`
+				}
+			}
+			_, _ = w.Write([]byte(`{"signins":[` + rows + `]}`))
+			return
+		}
+		id, under := strings.CutPrefix(r.URL.Path, "/v1/person-signins/")
+		id, revokes := strings.CutSuffix(id, "/revoke")
+		if r.Method != http.MethodPost || !under || !revokes {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"NOT_FOUND","error":"no such route"}`))
+			return
+		}
+		var body struct {
+			Person string `json:"person"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if signIns[id] != body.Person {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"NOT_FOUND","error":"no sign-in of that person has that id"}`))
+			return
+		}
+		delete(signIns, id)
+		_, _ = w.Write([]byte(`{"state":"revoked","tokens_ended":1}`))
+	}))
+	t.Cleanup(broker.Close)
+	handler := newCredentialTestHandler(t, broker.URL)
+
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/signins", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("alice's list: status = %d: %s", listed.Code, listed.Body.String())
+	}
+	if body := listed.Body.String(); !strings.Contains(body, "signin-alice") || strings.Contains(body, "signin-bob") {
+		t.Fatalf("alice's list = %s, want hers alone", body)
+	}
+
+	refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/signins/signin-bob/revoke", nil, "alice")
+	if refused.Code != http.StatusNotFound {
+		t.Fatalf("alice revoking bob's sign-in: status = %d, want 404: %s", refused.Code, refused.Body.String())
+	}
+	if signIns["signin-bob"] != "bob" {
+		t.Fatalf("bob's sign-in was revoked by alice")
+	}
+
+	own := dispatchRequest(t, handler, http.MethodPost, "/api/v1/signins/signin-alice/revoke", nil, "alice")
+	if own.Code != http.StatusOK {
+		t.Fatalf("alice revoking her own sign-in: status = %d: %s", own.Code, own.Body.String())
+	}
+	if _, still := signIns["signin-alice"]; still {
+		t.Fatalf("alice's own revoke did not reach the broker")
+	}
+}
+
+// The capability route is Dispatch's relay of one fact out of the broker's RFC 8414 metadata, so
+// it has to follow that document, cost the broker one read however many pages ask, answer for a
+// Dispatch with no broker at all, and keep the page rather than lose it when the broker cannot
+// be read. What a lapsed window does with a broker that has stopped answering is the client's
+// own test (internal/dispatch/agentsecrets).
+func TestCredentialCapabilitiesFollowTheBrokersMetadata(t *testing.T) {
+	const metadata = "GET /.well-known/oauth-authorization-server"
+	ask := func(t *testing.T, handler http.Handler) bool {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credentials/capabilities", nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+		}
+		return decodeBody[struct {
+			MachineCodePage bool `json:"machine_code_page"`
+		}](t, response).MachineCodePage
+	}
+
+	t.Run("the broker serves the device grant", func(t *testing.T) {
+		rig := newFakeBrokerRig(t)
+		rig.bodyByRoute[metadata] = `{"grant_types_supported":["refresh_token","urn:ietf:params:oauth:grant-type:device_code"]}`
+		handler := newCredentialTestHandler(t, rig.server.URL)
+		if !ask(t, handler) {
+			t.Fatalf("machine_code_page = false, want true: the metadata names the device code")
+		}
+		if !ask(t, handler) || rig.calls != 1 {
+			t.Fatalf("the broker was read %d times for two asks, want 1: the read is cached", rig.calls)
+		}
+	})
+	t.Run("the broker serves no device grant", func(t *testing.T) {
+		rig := newFakeBrokerRig(t)
+		rig.bodyByRoute[metadata] = `{"grant_types_supported":["refresh_token","urn:ietf:params:oauth:grant-type:token-exchange"]}`
+		if ask(t, newCredentialTestHandler(t, rig.server.URL)) {
+			t.Fatalf("machine_code_page = true, want false: the metadata names no device code")
+		}
+	})
+	t.Run("no broker at all", func(t *testing.T) {
+		if ask(t, newCredentialTestHandler(t, "")) {
+			t.Fatalf("machine_code_page = true, want false: no broker prints a code for anyone to type")
+		}
+	})
+	t.Run("the broker cannot be read", func(t *testing.T) {
+		dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		deadURL := dead.URL
+		dead.Close()
+		if !ask(t, newCredentialTestHandler(t, deadURL)) {
+			t.Fatalf("machine_code_page = false, want true: a page that vanishes on one failed read is worse than one that lingers")
+		}
+	})
+	t.Run("a bearer is refused as every credential page is", func(t *testing.T) {
+		rig := newFakeBrokerRig(t)
+		handler := newCredentialTestHandler(t, rig.server.URL)
+		response := agentRequest(t, handler, http.MethodGet, "/api/v1/credentials/capabilities", nil, "agent-token")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("agent bearer = %d %s, want 403", response.Code, response.Body.String())
+		}
+	})
 }

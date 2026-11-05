@@ -155,9 +155,10 @@ func TestResolveInvocation(t *testing.T) {
 }
 
 // The one --append-system-prompt word every pane's OMP gets (runtime-tmux.ts:92-103): the role
-// prompt files `$(cat)`ed, the addressing text escaped for the double quotes, the instructions
-// file `$(cat)`ed, joined by blank lines — the same string processes.test.ts:481-491's
-// `promptArgument` builds.
+// prompt files `$(cat)`ed, the addressing text escaped for the double quotes, the deployment
+// instructions file `$(cat)`ed, then the project's memory instructions file, joined by blank
+// lines — the same string processes.test.ts:481-491's `promptArgument` builds. A pane whose tree
+// is in no memory group names no memory file and ends at the deployment's own.
 func TestSystemPromptArgument(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -179,6 +180,19 @@ func TestSystemPromptArgument(t *testing.T) {
 			want: "--append-system-prompt \"$(cat /roles/core/common.md '/role prompts/tester.md')\n\n" +
 				"Your topic is \\`notifications.role.legion-omp-LEGION-42-tester\\` \\\"\\$HOME\\\" \\\\\n\n" +
 				"$(cat /state/deployment-instructions.md)\"",
+		},
+		{
+			name: "all four fragments, the memory instructions last",
+			parts: runtime.PromptParts{
+				RolePromptPaths:            []string{"/roles/core/common.md", "/roles/tester.md"},
+				Addressing:                 "Your topic is `notifications.role.legion-omp-LEGION-42-tester`.",
+				DeploymentInstructionsPath: "/state/deployment-instructions.md",
+				MemoryInstructionsPath:     "/state/memory-instructions.md",
+			},
+			want: "--append-system-prompt \"$(cat /roles/core/common.md /roles/tester.md)\n\n" +
+				"Your topic is \\`notifications.role.legion-omp-LEGION-42-tester\\`.\n\n" +
+				"$(cat /state/deployment-instructions.md)\n\n" +
+				"$(cat /state/memory-instructions.md)\"",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

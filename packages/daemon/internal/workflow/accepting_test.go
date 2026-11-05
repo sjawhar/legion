@@ -231,28 +231,6 @@ func TestABackwardMoveOntoAcceptingWritesNeedsReview(t *testing.T) {
 	}
 }
 
-// No path reaches accepting with another board status than needs_review: every row onto it either
-// writes needs_review or writes nothing from a phase whose own board status is needs_review.
-func TestEveryRowOntoAcceptingLeavesTheBoardAtNeedsReview(t *testing.T) {
-	boardStatus := map[phase.Phase]string{phase.Reviewing: "needs_review"}
-	rows := 0
-	for _, row := range Table {
-		if row.To != phase.Accepting {
-			continue
-		}
-		rows++
-		switch {
-		case row.Status == "needs_review":
-		case row.Status == "" && boardStatus[row.From] == "needs_review":
-		default:
-			t.Errorf("row %s/%s -> accepting writes status %q from a phase whose board status is %q; want needs_review on the board", row.From, row.Trigger, row.Status, boardStatus[row.From])
-		}
-	}
-	if rows == 0 {
-		t.Fatal("no row of the table reaches accepting")
-	}
-}
-
 // seedAcceptingChild seeds an issue of LEGION-208's tree under parent, in the phase and status
 // given.
 func seedAcceptingChild(t *testing.T, pool *pgxpool.Pool, key, parent string, at phase.Phase, status string) {

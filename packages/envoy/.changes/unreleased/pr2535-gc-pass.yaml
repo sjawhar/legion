@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-  A settlement reads the room's tree from its replica, and a write forks its room
-  with `Doc.Clone` (sjawhar/ygo v1.55.1-sami.1), so neither one encodes the
-  room's state and decodes it into a document of its own any more. In the load
-  test's replay of the Verified Linux agents' writes, the median of three runs
-  allocated 90.2 GB in the window before and 73.9 GB after, and Dispatch's CPU
-  fell from 1,223 to 1,111 seconds (-9.1%). The replica's lock is held longer
-  during a write fork: about 95 ms against 32 ms on a 200 KiB document.
