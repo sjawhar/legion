@@ -13,7 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
-	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 const workerImage = "ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -1812,12 +1812,12 @@ func TestSamplerRulesSettleFromTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []sampler.Rule{
-		{Program: "cargo", Arguments: []string{"test"}, Kind: sampler.KindTest},
-		{Program: "tsc", Kind: sampler.KindBuild},
+	want := []samplerwire.Rule{
+		{Program: "cargo", Arguments: []string{"test"}, Kind: samplerwire.KindTest},
+		{Program: "tsc", Kind: samplerwire.KindBuild},
 	}
 	got := cfg.Runtime.Kubernetes.SamplerRules
-	if !slices.EqualFunc(got, want, func(a, b sampler.Rule) bool {
+	if !slices.EqualFunc(got, want, func(a, b samplerwire.Rule) bool {
 		return a.Program == b.Program && a.Kind == b.Kind && slices.Equal(a.Arguments, b.Arguments)
 	}) {
 		t.Fatalf("sampler_rules settled %+v, want %+v", got, want)
@@ -1840,7 +1840,11 @@ func TestSamplerRulesRefusals(t *testing.T) {
 	for name, tc := range map[string]struct{ block, want string }{
 		"a kind no rule answers": {
 			"    sampler_rules: [{ program: cargo, kind: agent }]\n",
-			`runtime.kubernetes.sampler_rules: rule "cargo" has kind "agent": a rule answers one of build, test, tool, other`,
+			`runtime.kubernetes.sampler_rules: rule "cargo" has kind "agent": a rule answers one of build, test, tool`,
+		},
+		"node mode's own kind, which no rule answers either": {
+			"    sampler_rules: [{ program: cargo, kind: other }]\n",
+			`runtime.kubernetes.sampler_rules: rule "cargo" has kind "other": a rule answers one of build, test, tool`,
 		},
 		"the same rule twice": {
 			"    sampler_rules: [{ program: cargo, arguments: [test], kind: test }, { program: cargo, arguments: [test], kind: build }]\n",

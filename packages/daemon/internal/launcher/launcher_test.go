@@ -281,13 +281,16 @@ func (g *rig) generationDir(generation uint64) string {
 // through the pointer the daemon names, looking for its generation's session socket where the
 // launcher binds it, and publishing both to marker.
 //
-// Every start names a LEGION_WORKSPACE of the test's own. The launcher merges a start's
-// environment over the process's (launcher.go's mergeEnv) and a restore reads the workspace from
-// the merged one (restore.go's bundleRestore.apply), so a start that named none would restore
-// into whatever workspace the process holds — in an issue pod, the live one its roles work in.
-// The package's guard takes that variable out of the test process (main_test.go), and this makes
-// the guard the second line rather than the only one: the start names a directory of this test,
-// so even an unguarded run reaches nothing of the pod's.
+// Every start names a LEGION_WORKSPACE of the test's own and clears Oh My Pi's two session
+// variables. The launcher merges a start's environment over the process's (launcher.go's
+// mergeEnv), and the merged one is where a restore reads the workspace (restore.go's
+// bundleRestore.apply) and where a resume reads the session store (claude.go's newSessionDial), so
+// a start that named neither would restore into whatever workspace the process holds and look a
+// session up in whatever store it names — in an issue pod, the live workspace its roles work in
+// and the deployment's own session table, which this pod's login may not read at all. The
+// package's guard takes every LEGION_ variable out of the test process (main_test.go) and no
+// OMP_ one, so for the workspace this is the second line and for the session store it is the
+// only one: a test that means a store of its own names it after these (session_store_test.go).
 func (g *rig) childStart(generation uint64, marker string, files map[string]string) shimwire.LauncherStart {
 	g.t.Helper()
 	self, err := os.Executable()
@@ -298,12 +301,22 @@ func (g *rig) childStart(generation uint64, marker string, files map[string]stri
 	return shimwire.LauncherStart{
 		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
 		Argv: []string{self, "-test.run=^TestLauncherChild$"},
-		Env: []string{launcherChildEnv + "=1", "LEGION_LAUNCHER_MARKER=" + marker,
-			"LEGION_WORKSPACE=" + filepath.Join(g.t.TempDir(), "workspace"),
-			"ENVOY_TOKEN_FILE=" + filepath.Join(dir, "ENVOY_TOKEN"),
-			"LEGION_LAUNCHER_SOCKET=" + filepath.Join(dir, ompsessions.SocketName)},
+		Env: append(noSessionStore(),
+			launcherChildEnv+"=1", "LEGION_LAUNCHER_MARKER="+marker,
+			"LEGION_WORKSPACE="+filepath.Join(g.t.TempDir(), "workspace"),
+			"ENVOY_TOKEN_FILE="+filepath.Join(dir, "ENVOY_TOKEN"),
+			"LEGION_LAUNCHER_SOCKET="+filepath.Join(dir, ompsessions.SocketName)),
 		Files: files,
 	}
+}
+
+// noSessionStore is the start of a generation's environment that names no session store: Oh My
+// Pi's two session variables, each empty, so the launcher's merge of the test process's
+// environment carries neither the pod's storage kind nor the pod's URL file into the generation.
+// A test that means a store of its own appends its values after these, which the merge and
+// envValue both read last-wins.
+func noSessionStore() []string {
+	return []string{ompsessions.StorageVariable + "=", ompsessions.DSNFileVariable + "="}
 }
 
 // observed is what the stand-in child saw when it ran: the pid of the descendant it started,
@@ -531,13 +544,17 @@ func TestStartsAreIdempotentAndRefusedBeforeWriting(t *testing.T) {
 
 // toldRecreated starts generation with env (resuming resume, "" for none), returns the
 // WorkspaceRecreatedVariable value its child was started with, and stops it.
+//
+// What env does not name, the generation carries none of: the session store and LEGION_WORKSPACE
+// are cleared before it, so a case that means no workspace at all is told "false" by the
+// launcher's own reading and not by whatever the process it runs in holds.
 func (g *rig) toldRecreated(generation uint64, env []string, resume string) string {
 	g.t.Helper()
 	told := filepath.Join(g.t.TempDir(), "told")
 	command := shimwire.LauncherStart{
 		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
 		Argv: []string{"/bin/sh", "-c", `printf '%s' "$` + WorkspaceRecreatedVariable + `" > "$TOLD.tmp" && mv "$TOLD.tmp" "$TOLD"; exec sleep 600`},
-		Env:  append([]string{"TOLD=" + told}, env...), ResumeFile: resume,
+		Env:  append(append(noSessionStore(), "TOLD="+told, "LEGION_WORKSPACE="), env...), ResumeFile: resume,
 	}
 	if got := g.start(command); !got.OK {
 		g.t.Fatalf("start of generation %d = %#v", generation, got)

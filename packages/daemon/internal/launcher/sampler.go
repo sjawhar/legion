@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // The pod's resource sampler, which an issue pod's launcher runs as a child of its own when the
 // daemon passes --sampler (Config.Sampler): `legion sampler`, this binary's own command, serving
-// the pod's Prometheus series on SamplerConfig.Port (docs/sampler-metrics.md). SamplerDirName is
+// the pod's Prometheus series on samplerwire.Port (docs/sampler-metrics.md). SamplerDirName is
 // the directory under the roles directory holding the two files the launcher writes it, which
 // every role's namespace covers (role-init), so no role can rewrite the map of pids the sampler
 // reads its roles from.
@@ -40,17 +40,20 @@ const (
 	samplerProgram = "legion-sampler"
 )
 
-// SamplerConfig is the pod's sampler as the daemon hands it over: the port it serves on, the
-// project and issue every series it serves carries, which the launcher is told because it knows
-// neither, the volumes to measure and the deployment's own kind rules. It is one JSON flag
-// (`legion launcher --sampler <json>`) and not a flag for each field, since a list of volumes is
-// no repeated scalar flag, and it is exported because the daemon's pod builder renders it.
+// SamplerConfig is the pod's sampler as the daemon hands it over: the project and issue every
+// series it serves carries, which the launcher is told because it knows neither, the volumes to
+// measure and the deployment's own kind rules. It is one JSON flag (`legion launcher --sampler
+// <json>`) and not a flag for each field, since a list of volumes is no repeated scalar flag, and
+// it is exported because the daemon's pod builder renders it.
+//
+// It carries no port: samplerwire.Port is the one value that decides it, which the container's
+// declared port and the command line below both read, so no two of them can name different ports
+// (dispatch://INFRA-1208, the review of pull request 2786).
 type SamplerConfig struct {
-	Port    int              `json:"port"`
-	Project string           `json:"project"`
-	Issue   string           `json:"issue"`
-	Volumes []sampler.Volume `json:"volumes"`
-	Rules   []sampler.Rule   `json:"rules,omitempty"`
+	Project string               `json:"project"`
+	Issue   string               `json:"issue"`
+	Volumes []samplerwire.Volume `json:"volumes"`
+	Rules   []samplerwire.Rule   `json:"rules,omitempty"`
 }
 
 // samplerInterval is how long the launcher waits before it starts the sampler again. The sampler
@@ -137,20 +140,17 @@ func runSampler(ctx context.Context, cfg Config, log *roleLog, guard *pidGuard, 
 var samplerExecutable = os.Executable
 
 // samplerArgv is the command line of one sampler: this binary's `sampler` command over the pod
-// the launcher serves. The two files are named by path rather than by the roles directory,
-// because the sampler takes each of them on a flag of its own and a node's sampler has neither.
+// the launcher serves, on the one port samplerwire.Port names. The two files are named by path
+// rather than by the roles directory, because the sampler takes each of them on a flag of its own
+// and a node's sampler has neither.
 func samplerArgv(cfg Config, restarts uint64) ([]string, error) {
 	self, err := samplerExecutable()
 	if err != nil {
 		return nil, fmt.Errorf("find this binary: %w", err)
 	}
-	port := cfg.Sampler.Port
-	if port == 0 {
-		port = sampler.Port
-	}
 	argv := []string{
 		self, samplerCommand,
-		"--listen", fmt.Sprintf("0.0.0.0:%d", port),
+		"--listen", fmt.Sprintf("0.0.0.0:%d", samplerwire.Port),
 		"--project", cfg.Sampler.Project,
 		"--issue", cfg.Sampler.Issue,
 		"--roles-file", samplerRolesPath(cfg.RolesDir),
@@ -178,14 +178,14 @@ type samplerRoles struct {
 	path string
 	log  *roleLog
 	mu   sync.Mutex
-	pids sampler.Roles
+	pids samplerwire.Roles
 }
 
 // newSamplerRoles is the file as a launcher that has started no generation has it: a map with no
 // role in it, written before any role connects, so the sampler's first pass reads a pod with no
 // generation running rather than a file that is not there.
 func newSamplerRoles(rolesDir string, log *roleLog) *samplerRoles {
-	roles := &samplerRoles{path: samplerRolesPath(rolesDir), log: log, pids: sampler.Roles{}}
+	roles := &samplerRoles{path: samplerRolesPath(rolesDir), log: log, pids: samplerwire.Roles{}}
 	roles.mu.Lock()
 	defer roles.mu.Unlock()
 	roles.rewrite()

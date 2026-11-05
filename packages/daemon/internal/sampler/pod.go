@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/procread"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // This file is the issue pod's collector: the loop that reads what one pod's kernel already
@@ -137,37 +138,14 @@ var (
 	usedBytes     = procread.UsedBytes
 )
 
-// Roles is the launcher's roles file: each role's role-init process id, which is the root of that
-// role's process subtree. The sampler reads the file again on every pass, so a generation that
-// starts or ends between two passes is picked up without a restart, and a role between
-// generations holds a pid that names no process, which the walk passes over.
-//
-// The type is exported because the launcher writes this file and the daemon reads it back: both
-// sides render the same shape, and this is it.
-type Roles map[string]int
-
-// Volume is one entry of the pod's volumes file: the volume as the pod spec declares it and the
-// paths this container sees it mounted at. A volume several roles mount holds one entry with one
-// path for each mount, and is measured once — the first path that can be read — since every mount
-// of it is the same filesystem and a sum over them would report it as many times as it is
-// mounted.
-//
-// Medium is `memory` or `disk` as the pod spec declares it and never what /proc/mounts shows,
-// where a disk emptyDir is a tmpfs too. Role is the role that owns the volume, and empty for one
-// no single role owns, which is served as `shared`.
-type Volume struct {
-	Name   string   `json:"name"`
-	Paths  []string `json:"paths"`
-	Medium string   `json:"medium"`
-	Role   string   `json:"role"`
-}
-
-// owner is the role label the volume's series carries.
-func (v Volume) owner() string {
-	if v.Role == "" {
+// volumeOwner is the role label a volume's series carries: the role that owns it, and RoleShared
+// for a volume no single role owns, which is how the pod spec's own list reaches the series
+// (samplerwire.Volume.Role).
+func volumeOwner(volume samplerwire.Volume) string {
+	if volume.Role == "" {
 		return RoleShared
 	}
-	return v.Role
+	return volume.Role
 }
 
 // PodOptions is everything the issue pod's collector reads and everything it writes to. Every
@@ -191,7 +169,7 @@ type PodOptions struct {
 	// is empty, or names a directory that is not there, the sampler reads the /proc profile.
 	CgroupRoot string
 	// Rules are the deployment's kind rules, which decide what a process's work is counted as.
-	Rules Rules
+	Rules samplerwire.Rules
 	// Registry is where every reading goes, and what the HTTP handler serves.
 	Registry *Registry
 	// Now is the clock the collector keeps its own windows by. A nil clock is the wall clock.
@@ -279,10 +257,10 @@ type podCollector struct {
 	totalsFloor                        int64
 
 	// roles is the last roles file that could be read, which stands until another one can be.
-	roles Roles
+	roles samplerwire.Roles
 	// volumes is the volumes file, read once; volumesRead is whether that read has succeeded,
 	// since a file that was not there at the start is tried again rather than given up on.
-	volumes     []Volume
+	volumes     []samplerwire.Volume
 	volumesRead bool
 	// reported are the volumes that have passed volumeFloor, by name, which is what keeps a
 	// volume's series from flickering once it has been served.
@@ -352,7 +330,7 @@ func newPodCollector(opts PodOptions) (*podCollector, error) {
 		totalsEvery: ticksPer(totalsInterval, podInterval),
 		walkEvery:   ticksPer(walkInterval, podInterval),
 		smapsEvery:  ticksPer(smapsInterval, podInterval),
-		roles:       Roles{},
+		roles:       samplerwire.Roles{},
 		volumesRead: opts.VolumesFile == "",
 		reported:    map[string]bool{},
 		groups:      map[string]*groupReading{},
@@ -703,7 +681,7 @@ func (c *podCollector) readRoles() {
 		c.failed(SourceProc, err)
 		return
 	}
-	var roles Roles
+	var roles samplerwire.Roles
 	if err := json.Unmarshal(raw, &roles); err != nil {
 		c.failed(SourceProc, fmt.Errorf("%s: %w", c.opts.RolesFile, err))
 		return
@@ -737,17 +715,17 @@ func (c *podCollector) readVolumes() {
 			c.reported[volume.Name] = true
 		}
 		c.opts.Registry.SetVolumeBytes(
-			c.opts.Registry.Volume(volume.Name, volume.Medium, volume.owner()), used)
+			c.opts.Registry.Volume(volume.Name, volume.Medium, volumeOwner(volume)), used)
 	}
 }
 
 // readVolumesFile is the pod's volumes file: the JSON list the launcher writes.
-func readVolumesFile(path string) ([]Volume, error) {
+func readVolumesFile(path string) ([]samplerwire.Volume, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var volumes []Volume
+	var volumes []samplerwire.Volume
 	if err := json.Unmarshal(raw, &volumes); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -758,7 +736,7 @@ func readVolumesFile(path string) ([]Volume, error) {
 // path is another role's mount of the same filesystem and reading two of them would answer twice.
 // A volume none of whose paths can be read is the error of the first one, which is the one the
 // pod spec names first.
-func (c *podCollector) volumeUsed(volume Volume) (int64, error) {
+func (c *podCollector) volumeUsed(volume samplerwire.Volume) (int64, error) {
 	var first error
 	for _, path := range volume.Paths {
 		used, err := usedBytes(path)
@@ -952,7 +930,7 @@ func (c *podCollector) readCgroups(pass Pass) {
 	if err != nil {
 		c.failed(SourceCgroup, err)
 	}
-	kinds := make(map[int]Kind, len(pass.Processes))
+	kinds := make(map[int]samplerwire.Kind, len(pass.Processes))
 	for _, process := range pass.Processes {
 		kinds[process.PID] = process.Work.Kind
 	}
@@ -1048,7 +1026,7 @@ func (c *podCollector) groupRole(name string) string {
 // cannot be read. That is the cgroup of a command whose processes have ended, kept for the
 // sampler's last read of it: its final numbers belong where every reading before them went, and
 // not under `tool` because the command that earned them has exited.
-func (c *podCollector) groupKind(dir string, kinds map[int]Kind, last Kind) Kind {
+func (c *podCollector) groupKind(dir string, kinds map[int]samplerwire.Kind, last samplerwire.Kind) samplerwire.Kind {
 	pids, err := procread.GroupProcesses(dir)
 	if err != nil {
 		c.failed(SourceCgroup, err)
@@ -1056,16 +1034,16 @@ func (c *podCollector) groupKind(dir string, kinds map[int]Kind, last Kind) Kind
 	}
 	for _, pid := range pids {
 		switch kinds[pid] {
-		case KindBuild:
-			return KindBuild
-		case KindTest:
-			return KindTest
+		case samplerwire.KindBuild:
+			return samplerwire.KindBuild
+		case samplerwire.KindTest:
+			return samplerwire.KindTest
 		}
 	}
 	if len(pids) == 0 && last != "" {
 		return last
 	}
-	return KindTool
+	return samplerwire.KindTool
 }
 
 // failed counts one read that failed under its own source and logs it once. The loop goes on:

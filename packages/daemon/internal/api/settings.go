@@ -8,7 +8,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // Settings is the daemon's resolved legion.yaml as `GET /legion/v1/state` carries it (contract
@@ -448,7 +448,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 // samplerRuleSettingsOf is the deployment's sampler rules as the state shows them, `[]` for a
 // deployment that configured none, as stringsOf answers `[]` for an unset argv: the state's
 // readers refuse a null.
-func samplerRuleSettingsOf(rules []sampler.Rule) []SamplerRuleSettings {
+func samplerRuleSettingsOf(rules []samplerwire.Rule) []SamplerRuleSettings {
 	settings := make([]SamplerRuleSettings, len(rules))
 	for i, rule := range rules {
 		settings[i] = SamplerRuleSettings{Program: rule.Program, Arguments: stringsOf(rule.Arguments), Kind: string(rule.Kind)}

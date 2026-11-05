@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 const samplerUsage = "usage: legion sampler [--listen 0.0.0.0:9464] [--rules <json>] [--restarts <n>] (--project <key> --issue <key> [--roles-file <path>] [--volumes-file <path>] [--cgroup-root <dir>] | --node [--node-name <node>] [--namespaces <a,b>] [--exclude-namespaces <a,b>] [--exclude-pods <a,b>])"
@@ -43,7 +44,7 @@ var samplerModes = []struct {
 // line on stderr and exit 1, which the launcher answers by starting it again five seconds later.
 func runSampler(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("sampler", samplerUsage, stderr)
-	listen := flags.String("listen", fmt.Sprintf("0.0.0.0:%d", sampler.Port), "the address /metrics and /healthz are served on")
+	listen := flags.String("listen", fmt.Sprintf("0.0.0.0:%d", samplerwire.Port), "the address /metrics and /healthz are served on")
 	project := flags.String("project", "", "the pod's legion.dev/project label value, which every series carries (an issue pod, required)")
 	issue := flags.String("issue", "", "the pod's legion.dev/issue label value, which every series carries (an issue pod, required)")
 	rolesFile := flags.String("roles-file", "", "the launcher's roles file, JSON of role name to role-init process id, read again on every pass (an issue pod)")
@@ -146,15 +147,15 @@ func samplerMode(flags *flag.FlagSet, node bool, stderr io.Writer) (code int, ok
 // samplerRules is the kind engine of this deployment: the JSON list of rules the daemon hands
 // over on --rules, refused here where it is not a list of rules or where the engine will not
 // take one of them, and the built-in list alone where the flag is empty.
-func samplerRules(value string) (sampler.Rules, error) {
+func samplerRules(value string) (samplerwire.Rules, error) {
 	if strings.TrimSpace(value) == "" {
-		return sampler.NewRules(nil)
+		return samplerwire.NewRules(nil)
 	}
-	var operator []sampler.Rule
+	var operator []samplerwire.Rule
 	if err := json.Unmarshal([]byte(value), &operator); err != nil {
-		return sampler.Rules{}, fmt.Errorf(`--rules is a JSON list of {"program":…,"arguments":[…],"kind":…}: %w`, err)
+		return samplerwire.Rules{}, fmt.Errorf(`--rules is a JSON list of {"program":…,"arguments":[…],"kind":…}: %w`, err)
 	}
-	return sampler.NewRules(operator)
+	return samplerwire.NewRules(operator)
 }
 
 // samplerList is one comma-separated flag as the list it names: an empty value is no list at

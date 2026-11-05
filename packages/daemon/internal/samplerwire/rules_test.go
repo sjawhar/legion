@@ -1,4 +1,4 @@
-package sampler
+package samplerwire
 
 import (
 	"fmt"
@@ -168,7 +168,9 @@ func TestADeploymentsRuleIsTriedBeforeTheBuiltInList(t *testing.T) {
 // A kind a rule cannot answer is refused when the rules are read, naming the rule and the word:
 // the alternative is a deployment whose rule quietly labels nothing, found months later in a
 // dashboard with a kind nobody queries. KindAgent and KindShared are refused too, because what
-// makes a process an agent's or shared is where it sits in the process tree and not what it runs.
+// makes a process an agent's or shared is where it sits in the process tree and not what it runs,
+// and KindOther because it is node mode's word for the work no rule named: a pod mode that took
+// it from a rule would serve a `kind` its own vocabulary has no word for.
 func TestNewRulesRefusesAKindARuleCannotAnswer(t *testing.T) {
 	for _, test := range []struct {
 		kind Kind
@@ -178,6 +180,7 @@ func TestNewRulesRefusesAKindARuleCannotAnswer(t *testing.T) {
 		{"", ""},
 		{KindAgent, "agent"},
 		{KindShared, "shared"},
+		{KindOther, "other"},
 		{"Build", "Build"},
 	} {
 		_, err := NewRules([]Rule{{Program: "zig", Arguments: []string{"build"}, Kind: test.kind}})

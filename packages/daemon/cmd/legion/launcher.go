@@ -10,7 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
-	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 const launcherUsage = "usage: legion launcher --connect tcp://host:port --sandbox <name> [--pod-uid <uid>] [--stop-grace <duration>] [--test-postgres] [--sampler <json>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>] (--roles-dir <dir> --role <role> [--role <role>…] | --token-file <path> --role <role> --private-dir <dir>)"
@@ -49,7 +49,7 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	sessionDatabase := flags.String("session-database", "", "the session database in that instance")
 	sessionUser := flags.String("session-user", "", "the IAM login this pod signs in to the session database as")
 	testPostgres := flags.Bool("test-postgres", false, "serve the pod's own PostgreSQL for tests from the worker image's legion-testpg, before any role starts and again whenever its postmaster exits (an issue pod's container, with --roles-dir)")
-	samplerFlag := flags.String("sampler", "", `run the pod's resource sampler, one JSON object of the port, the project, the issue, the volumes to measure and the deployment's kind rules: {"port":9464,"project":"INFRA","issue":"INFRA-1208","volumes":[…],"rules":[…]} (an issue pod's container, with --roles-dir)`)
+	samplerFlag := flags.String("sampler", "", `run the pod's resource sampler, one JSON object of the project, the issue, the volumes to measure and the deployment's kind rules: {"project":"INFRA","issue":"INFRA-1208","volumes":[…],"rules":[…]} (an issue pod's container, with --roles-dir)`)
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -108,17 +108,18 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 }
 
 // launcherSampler is the pod's sampler as the daemon hands it over on --sampler: one JSON object
-// of the port, the project, the issue, the volumes to measure and the deployment's own kind
-// rules, since the launcher knows neither the project nor the issue of the pod it serves and a
-// list of volumes is no repeated scalar flag. The rules are proved here, where a refusal is this
-// command line's own usage error, rather than in the sampler the launcher would otherwise start
-// again every five seconds for the pod's whole life.
+// of the project, the issue, the volumes to measure and the deployment's own kind rules, since
+// the launcher knows neither the project nor the issue of the pod it serves and a list of volumes
+// is no repeated scalar flag. The port is no part of it: samplerwire.Port is the one value that
+// decides it. The rules are proved here, where a refusal is this command line's own usage error,
+// rather than in the sampler the launcher would otherwise start again every five seconds for the
+// pod's whole life.
 func launcherSampler(value string) (*launcher.SamplerConfig, error) {
 	var cfg launcher.SamplerConfig
 	if err := json.Unmarshal([]byte(value), &cfg); err != nil {
-		return nil, fmt.Errorf("--sampler is one JSON object of the sampler's port, project, issue, volumes and rules: %w", err)
+		return nil, fmt.Errorf("--sampler is one JSON object of the sampler's project, issue, volumes and rules: %w", err)
 	}
-	if _, err := sampler.NewRules(cfg.Rules); err != nil {
+	if _, err := samplerwire.NewRules(cfg.Rules); err != nil {
 		return nil, fmt.Errorf("--sampler rules: %w", err)
 	}
 	return &cfg, nil

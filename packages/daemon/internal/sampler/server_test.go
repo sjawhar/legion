@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/procread"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // The tests below run the sampler's own process over a pod the test wrote, as the collectors'
@@ -385,7 +386,7 @@ func TestTheSamplerCostsUnderThreePercentOfOneCPUOver200Processes(t *testing.T) 
 	f.writeRoles(rolesOf())
 	// Four volumes, each a directory that is there, so every pass takes the statfs a pod's
 	// own volumes cost it rather than one the test answered for.
-	f.writeVolumes([]Volume{
+	f.writeVolumes([]samplerwire.Volume{
 		{Name: "private-implementer", Paths: []string{f.root}, Medium: "memory", Role: "implementer"},
 		{Name: "private-reviewer", Paths: []string{f.root}, Medium: "memory", Role: "reviewer"},
 		{Name: "workspace", Paths: []string{f.root}, Medium: "disk"},

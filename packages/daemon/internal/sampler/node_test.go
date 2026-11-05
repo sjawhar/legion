@@ -22,6 +22,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/procread"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // The tests below read a node the test wrote: a root of its own holding proc/… and
@@ -401,9 +402,9 @@ func TestAPodTakesTheQueueAndTheOwnerOfItsJobWhereItsOwnLabelsCarryNone(t *testi
 
 	e := f.scrape()
 	wantValue(t, e, 0.5, gradeCPUSecondsTotal,
-		"grade-run-7-ab12", gradeNamespace, string(KindBuild), "grade-queue", "alice")
+		"grade-run-7-ab12", gradeNamespace, string(samplerwire.KindBuild), "grade-queue", "alice")
 	wantValue(t, e, 0.25, gradeCPUSecondsTotal,
-		"grade-run-8-cd34", gradeNamespace, string(KindTest), "pod-queue", "the-pod")
+		"grade-run-8-cd34", gradeNamespace, string(samplerwire.KindTest), "pod-queue", "the-pod")
 }
 
 // The pod cgroup answers for the whole pod — every container of it and the kubelet's own pause —
@@ -536,13 +537,13 @@ func TestAProcessIsReadIntoItsPodUnderBothCgroupDrivers(t *testing.T) {
 
 	e := f.scrape()
 	page := int64(os.Getpagesize())
-	wantValue(t, e, 0.5, gradeCPUSecondsTotal, "grade-systemd", gradeNamespace, string(KindBuild), "", "alice")
+	wantValue(t, e, 0.5, gradeCPUSecondsTotal, "grade-systemd", gradeNamespace, string(samplerwire.KindBuild), "", "alice")
 	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes,
-		"grade-systemd", gradeNamespace, string(KindBuild), "", "alice")
+		"grade-systemd", gradeNamespace, string(samplerwire.KindBuild), "", "alice")
 	wantValue(t, e, 2, gradePodCPUSecondsTotal, "grade-systemd", gradeNamespace, "", "alice")
-	wantValue(t, e, 0.25, gradeCPUSecondsTotal, "grade-cgroupfs", gradeNamespace, string(KindBuild), "", "bob")
+	wantValue(t, e, 0.25, gradeCPUSecondsTotal, "grade-cgroupfs", gradeNamespace, string(samplerwire.KindBuild), "", "bob")
 	wantValue(t, e, float64(100*page), gradeMemoryResidentBytes,
-		"grade-cgroupfs", gradeNamespace, string(KindBuild), "", "bob")
+		"grade-cgroupfs", gradeNamespace, string(samplerwire.KindBuild), "", "bob")
 	wantValue(t, e, 4, gradePodCPUSecondsTotal, "grade-cgroupfs", gradeNamespace, "", "bob")
 }
 
@@ -571,18 +572,18 @@ func TestAPodsWorkIsBuildTestOrOther(t *testing.T) {
 	f.settle(c, processes...)
 
 	e := f.scrape()
-	labels := func(kind Kind) []string {
+	labels := func(kind samplerwire.Kind) []string {
 		return []string{"grade-run-7-ab12", gradeNamespace, string(kind), "", "alice"}
 	}
 	// The build and the compile it started are one kind, the test run another, and the
 	// container's init with the shell it holds are what is left.
-	wantValue(t, e, 0.5, gradeCPUSecondsTotal, labels(KindBuild)...)
-	wantValue(t, e, 0.4, gradeCPUSecondsTotal, labels(KindTest)...)
-	wantValue(t, e, 0.06, gradeCPUSecondsTotal, labels(KindOther)...)
+	wantValue(t, e, 0.5, gradeCPUSecondsTotal, labels(samplerwire.KindBuild)...)
+	wantValue(t, e, 0.4, gradeCPUSecondsTotal, labels(samplerwire.KindTest)...)
+	wantValue(t, e, 0.06, gradeCPUSecondsTotal, labels(samplerwire.KindOther)...)
 	page := int64(os.Getpagesize())
-	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(KindBuild)...)
-	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(KindTest)...)
-	wantValue(t, e, float64(60*page), gradeMemoryResidentBytes, labels(KindOther)...)
+	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(samplerwire.KindBuild)...)
+	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(samplerwire.KindTest)...)
+	wantValue(t, e, float64(60*page), gradeMemoryResidentBytes, labels(samplerwire.KindOther)...)
 }
 
 // A kind a pass of the node found no process of holds no memory, as an issue pod's pair does: a
@@ -598,7 +599,7 @@ func TestAGradePodsEndedWorkHoldsNoMemory(t *testing.T) {
 		args: []string{"bash", "-lc", "sleep 60"}}, cgroup: pod}
 	build := nodeProc{fakeProcess: fakeProcess{pid: 101, parent: 100, start: 1000, own: 50, pages: 300,
 		args: []string{"go", "build", "./..."}}, cgroup: pod}
-	labels := func(kind Kind) []string {
+	labels := func(kind samplerwire.Kind) []string {
 		return []string{"grade-run-7-ab12", gradeNamespace, string(kind), "", "alice"}
 	}
 	page := int64(os.Getpagesize())
@@ -607,8 +608,8 @@ func TestAGradePodsEndedWorkHoldsNoMemory(t *testing.T) {
 	f.list(c)
 	f.settle(c, shell, build)
 	e := f.scrape()
-	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(KindBuild)...)
-	wantValue(t, e, 0.5, gradeCPUSecondsTotal, labels(KindBuild)...)
+	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes, labels(samplerwire.KindBuild)...)
+	wantValue(t, e, 0.5, gradeCPUSecondsTotal, labels(samplerwire.KindBuild)...)
 
 	// The build ends and the shell that started it runs on: the pod holds the shell's pages
 	// and none of the build's.
@@ -616,9 +617,9 @@ func TestAGradePodsEndedWorkHoldsNoMemory(t *testing.T) {
 	c.pass(4)
 
 	e = f.scrape()
-	wantValue(t, e, 0, gradeMemoryResidentBytes, labels(KindBuild)...)
-	wantValue(t, e, 0.5, gradeCPUSecondsTotal, labels(KindBuild)...)
-	wantValue(t, e, float64(50*page), gradeMemoryResidentBytes, labels(KindOther)...)
+	wantValue(t, e, 0, gradeMemoryResidentBytes, labels(samplerwire.KindBuild)...)
+	wantValue(t, e, 0.5, gradeCPUSecondsTotal, labels(samplerwire.KindBuild)...)
+	wantValue(t, e, float64(50*page), gradeMemoryResidentBytes, labels(samplerwire.KindOther)...)
 }
 
 // Node mode reads no grade pod's smaps. Another user's is refused without rights the read-only
@@ -657,9 +658,9 @@ func TestNodeModeReadsNoGradePodsSmaps(t *testing.T) {
 	// not the whole pod: their resident memory, which /proc/<pid>/stat holds, is served.
 	page := int64(os.Getpagesize())
 	wantValue(t, e, float64(300*page), gradeMemoryResidentBytes,
-		"grade-run-7-ab12", gradeNamespace, string(KindBuild), "", "alice")
+		"grade-run-7-ab12", gradeNamespace, string(samplerwire.KindBuild), "", "alice")
 	wantValue(t, e, float64(100*page), gradeMemoryResidentBytes,
-		"grade-run-7-ab12", gradeNamespace, string(KindTest), "", "alice")
+		"grade-run-7-ab12", gradeNamespace, string(samplerwire.KindTest), "", "alice")
 	if got := e.value(t, readErrorsTotal, string(SourceProc)); got != 0 {
 		t.Errorf("%g reads of /proc failed, want none at all:\n%s", got, e.text)
 	}
@@ -707,7 +708,7 @@ func TestNodeModeReadsACommandLineOnlyForAPodsOwnProcesses(t *testing.T) {
 	// The kind that read gave stands, and the process of no pod is charged to nobody.
 	e := f.scrape()
 	wantValue(t, e, 0.5, gradeCPUSecondsTotal,
-		"grade-run-7-ab12", gradeNamespace, string(KindBuild), "", "alice")
+		"grade-run-7-ab12", gradeNamespace, string(samplerwire.KindBuild), "", "alice")
 	if got := e.value(t, readErrorsTotal, string(SourceProc)); got != 0 {
 		t.Errorf("%g reads of /proc failed, want none at all:\n%s", got, e.text)
 	}

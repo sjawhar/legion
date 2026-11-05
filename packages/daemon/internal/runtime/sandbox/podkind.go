@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -14,7 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -56,13 +55,14 @@ type podKind interface {
 	// container is the name of the pod's one container, which runs `legion launcher` for every
 	// role of roles, and launcherContainer that container: its command, the mounts of every role's
 	// own volumes and the pod's shared ones, and the kubelet-resolved environment (resolved).
-	// volumes is the pod's whole volume list (Runtime.volumes), which an issue pod's container
-	// hands its sampler so that the file the launcher writes and the pod spec can never name
-	// different volumes (samplerVolumes).
+	// volumes is the pod's whole volume list with the owner of each role's own (Runtime.volumes),
+	// which an issue pod's container hands its sampler so that the file the launcher writes and
+	// the pod spec can never name different volumes, nor charge one to another role
+	// (samplerVolumes).
 	// mainVolumes are the volumes that container mounts beyond each role's own, the pod's volume,
 	// the config home, the agent-secrets volumes, the providers and the operator's.
 	container() string
-	launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount, volumes []corev1.Volume) corev1.Container
+	launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount, volumes podVolumes) corev1.Container
 	mainVolumes(r *Runtime) []corev1.Volume
 	// agentEnv is what each agent is told of its kind, mainEnvironment's one block of its own.
 	agentEnv(l launch) []corev1.EnvVar
@@ -239,7 +239,7 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 // with mounts under it, and then binds each of them back at its own path, but the shared config
 // home, whose place gets the role's own copy of it (launcher.ConfigHomeDir). The values the kubelet
 // resolves are the same for every role (the downward API's POD_UID), so they are set once.
-func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount, volumes []corev1.Volume) corev1.Container {
+func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount, volumes podVolumes) corev1.Container {
 	command := []string{r.tools.Legion, "launcher", connectFlag, r.streamURL, "--sandbox", l.name, "--roles-dir", RolesDir}
 	mounts := []corev1.VolumeMount{
 		{Name: issueVolume, MountPath: TreeRoot},
@@ -279,7 +279,7 @@ func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvV
 		Command:         slices.Concat(command, []string{"--stop-grace", r.terminationGrace.String()}, r.sessionProxyFlags()),
 		Env:             resolved,
 		WorkingDir:      l.workspace,
-		Ports:           []corev1.ContainerPort{{Name: samplerPortName, ContainerPort: sampler.Port, Protocol: corev1.ProtocolTCP}},
+		Ports:           []corev1.ContainerPort{{Name: samplerPortName, ContainerPort: samplerwire.Port, Protocol: corev1.ProtocolTCP}},
 		VolumeMounts:    view,
 		Resources:       k.resources(r),
 		SecurityContext: restrictedContainer(),
@@ -298,25 +298,25 @@ const (
 	samplerMediumDisk   = "disk"
 )
 
-// samplerFlag is the value of the roles container's `legion launcher --sampler`: the port the
-// sampler binds, the project and issue every series it serves carries, the volumes to measure and
-// the deployment's own kind rules (runtime.kubernetes.sampler_rules). The project and the issue
-// are read from the pod's own labels, which is where the sampler's documented source for them is
-// (docs/sampler-metrics.md, "The series an issue pod serves"), so a pod and its readings can
-// never name two different issues. mounts are the roles container's own, already in that
-// container's view (homeMountsView).
+// samplerFlag is the value of the roles container's `legion launcher --sampler`: the project and
+// issue every series it serves carries, the volumes to measure and the deployment's own kind rules
+// (runtime.kubernetes.sampler_rules). The project and the issue are read from the pod's own
+// labels, which is where the sampler's documented source for them is (docs/sampler-metrics.md,
+// "The series an issue pod serves"), so a pod and its readings can never name two different
+// issues. The port is no part of it: samplerwire.Port is the one value that decides it, which the
+// container above declares and the launcher's command line reads. mounts are the roles container's
+// own, already in that container's view (homeMountsView).
 //
 // An encoding failure is unreachable — every field is a string, a number or a list of them — and
 // is logged and answers no flag at all, as an unencodable pod shape is (podShape): a pod whose
 // readings are missing still runs every role of its issue, where a launcher handed a flag it
 // cannot parse would run none.
-func (r *Runtime) samplerFlag(l launch, volumes []corev1.Volume, mounts []corev1.VolumeMount) string {
+func (r *Runtime) samplerFlag(l launch, volumes podVolumes, mounts []corev1.VolumeMount) string {
 	labels := r.labels(l)
 	encoded, err := json.Marshal(launcher.SamplerConfig{
-		Port:    sampler.Port,
 		Project: labels[labelProject],
 		Issue:   labels[labelIssue],
-		Volumes: samplerVolumes(volumes, mounts, l.roles),
+		Volumes: samplerVolumes(volumes, mounts),
 		Rules:   r.samplerRules,
 	})
 	if err != nil {
@@ -330,17 +330,22 @@ func (r *Runtime) samplerFlag(l launch, volumes []corev1.Volume, mounts []corev1
 // samplerVolumes are the pod's volumes as its sampler measures them: one entry for each volume of
 // the pod spec's own list that the roles container mounts, carrying the paths that container sees
 // it at — a volume several roles mount holds one entry with one path per mount, which the sampler
-// reads once — the medium the pod spec declares for it (volumeMedium) and the role its name names
-// (volumeRole). It is built from the list the pod spec itself carries, so the volumes file the
-// launcher writes and the pod can never disagree about which volumes there are.
+// reads once — the medium the pod spec declares for it (volumeMedium) and the role that owns it.
+// It is built from the list the pod spec itself carries, so the volumes file the launcher writes
+// and the pod can never disagree about which volumes there are.
+//
+// The owner is the one the pod builder recorded when it named the volume (podVolumes), and never a
+// `-<role>` suffix read back out of the name: the list holds the operator's own volumes too, whose
+// names the operator chooses, so a `cache-tester` of theirs is charged to no role rather than to
+// the tester (dispatch://INFRA-1208, the review of pull request 2786).
 //
 // A volume the roles container does not mount is left out: the two the init containers alone
 // mount (provisionVolume and tempVolume) are gone by the time the sampler runs and this container
 // holds no path to read either one at, and an entry with no path is one the sampler counts a
 // failed read for at every pass (legion_sampler_read_errors_total{source="volume"}).
-func samplerVolumes(volumes []corev1.Volume, mounts []corev1.VolumeMount, roles []claim.Role) []sampler.Volume {
-	measured := make([]sampler.Volume, 0, len(volumes))
-	for _, volume := range volumes {
+func samplerVolumes(volumes podVolumes, mounts []corev1.VolumeMount) []samplerwire.Volume {
+	measured := make([]samplerwire.Volume, 0, len(volumes.all))
+	for _, volume := range volumes.all {
 		var paths []string
 		for _, mount := range mounts {
 			if mount.Name == volume.Name {
@@ -350,8 +355,8 @@ func samplerVolumes(volumes []corev1.Volume, mounts []corev1.VolumeMount, roles 
 		if len(paths) == 0 {
 			continue
 		}
-		measured = append(measured, sampler.Volume{
-			Name: volume.Name, Paths: paths, Medium: volumeMedium(volume), Role: volumeRole(volume.Name, roles),
+		measured = append(measured, samplerwire.Volume{
+			Name: volume.Name, Paths: paths, Medium: volumeMedium(volume), Role: string(volumes.owners[volume.Name]),
 		})
 	}
 	return measured
@@ -369,18 +374,6 @@ func volumeMedium(volume corev1.Volume) string {
 		return samplerMediumMemory
 	}
 	return samplerMediumDisk
-}
-
-// volumeRole is the role that owns a volume, read from its name, and "" for a volume no single
-// role owns, which the sampler serves under the role `shared`: every per-role volume of an issue
-// pod is named `<what>-<role>` (roleVolume), and no other volume's name ends in a role's.
-func volumeRole(name string, roles []claim.Role) string {
-	for _, role := range roles {
-		if strings.HasSuffix(name, "-"+string(role)) {
-			return string(role)
-		}
-	}
-	return ""
 }
 
 // mainVolumes is the role homes volume: an emptyDir on the node's disk, charged to the pod's
@@ -543,7 +536,7 @@ func (controllerPod) initContainers(*Runtime, launch) []corev1.Container { retur
 // directory and the broker's token when the pod enrolls, beside the pod's volume, the config home,
 // the providers and the operator's mounts. It declares no port and is handed no sampler: the
 // controller holds no issue, and the sampler's series are an issue pod's.
-func (k controllerPod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount, _ []corev1.Volume) corev1.Container {
+func (k controllerPod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount, _ podVolumes) corev1.Container {
 	role := claim.RoleController
 	mounts := []corev1.VolumeMount{
 		{Name: issueVolume, MountPath: TreeRoot},

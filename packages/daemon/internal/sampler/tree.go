@@ -9,6 +9,7 @@ import (
 	"slices"
 
 	"github.com/sjawhar/legion/daemon/internal/procread"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // This file is the process walk, which is one body and not two: the pass itself — every
@@ -53,7 +54,7 @@ var readCmdline = procread.ReadCmdline
 // line, which is dispatch://INFRA-1208/spec#b-a-noargs.
 type Work struct {
 	Owner string
-	Kind  Kind
+	Kind  samplerwire.Kind
 }
 
 // Process is one process of a pass, as a series reader needs it: who it is, who reaped for it,
@@ -401,7 +402,7 @@ func climb[T comparable](pid, limit int, none T, known map[int]T, step func(int)
 // and still spending CPU, and a read that failed for a reason a pass does not expect is reported
 // as a /proc read error. A failed read is not tried again, since a file this process may not read
 // now is one it may not read in two seconds either.
-func ruleKind(root string, pid int, rules Rules, failed func(ReadSource, error)) (Kind, []string) {
+func ruleKind(root string, pid int, rules samplerwire.Rules, failed func(ReadSource, error)) (samplerwire.Kind, []string) {
 	args, err := readCmdline(root, pid)
 	if err != nil && !unreadable(err) {
 		failed(SourceProc, err)
@@ -414,14 +415,14 @@ func ruleKind(root string, pid int, rules Rules, failed func(ReadSource, error))
 // subtree, and the kind of work that process is doing (dispatch://INFRA-1208/spec#b-a-kinds).
 type podAttribution struct {
 	root   string
-	rules  Rules
+	rules  samplerwire.Rules
 	failed func(ReadSource, error)
 	// roles is each role's role-init process id, as the launcher's roles file holds it at the
 	// moment this pass began. The collector reads that file again for every pass and sets it
 	// here, so a generation that started or ended between two passes is picked up without a
 	// restart. A role whose pid is not positive names no process — which is what the file
 	// holds for a role between generations — and is passed over.
-	roles Roles
+	roles samplerwire.Roles
 	// seen is what the policy has read of each process that exists: the kind its own command
 	// line gives, empty where no rule names it, and whether the program it runs is one of
 	// Legion's own.
@@ -431,11 +432,11 @@ type podAttribution struct {
 // sighting is what an issue pod's policy reads of one process, once: its rule and whether it is
 // a role's own machinery. Neither can change, since a process never changes the program it runs.
 type sighting struct {
-	rule    Kind
+	rule    samplerwire.Kind
 	harness bool
 }
 
-func newPodAttribution(root string, rules Rules, failed func(ReadSource, error)) *podAttribution {
+func newPodAttribution(root string, rules samplerwire.Rules, failed func(ReadSource, error)) *podAttribution {
 	return &podAttribution{root: root, rules: rules, failed: failed, seen: map[int]*sighting{}}
 }
 
@@ -485,7 +486,7 @@ func (p *podAttribution) Attribute(live []int, stats map[int]procread.Stat) map[
 		}
 	}
 	roles := make(map[int]string, len(live))
-	kinds := make(map[int]Kind, len(live))
+	kinds := make(map[int]samplerwire.Kind, len(live))
 	attributed := make(map[int]Work, len(live))
 	for _, pid := range live {
 		work := Work{
@@ -495,12 +496,12 @@ func (p *podAttribution) Attribute(live []int, stats map[int]procread.Stat) map[
 		switch {
 		case work.Owner == RoleShared:
 			if work.Kind == "" {
-				work.Kind = KindShared
+				work.Kind = samplerwire.KindShared
 			}
 		case p.agent(pid, inits):
-			work.Kind = KindAgent
+			work.Kind = samplerwire.KindAgent
 		case work.Kind == "":
-			work.Kind = KindTool
+			work.Kind = samplerwire.KindTool
 		}
 		attributed[pid] = work
 	}
@@ -543,8 +544,8 @@ func (p *podAttribution) agent(pid int, inits map[int]string) bool {
 // The policy reads no command line here: a process's rule was read on the pass after the one that
 // first saw it, and a process no pass has read one for yet has none, which is what makes the
 // climb hand it its nearest ancestor's kind (Walk.Next).
-func (p *podAttribution) ruled(pid int, stats map[int]procread.Stat, inits, roles map[int]string, known map[int]Kind) Kind {
-	return climb(pid, len(stats)+1, "", known, func(pid int) (Kind, int) {
+func (p *podAttribution) ruled(pid int, stats map[int]procread.Stat, inits, roles map[int]string, known map[int]samplerwire.Kind) samplerwire.Kind {
+	return climb(pid, len(stats)+1, "", known, func(pid int) (samplerwire.Kind, int) {
 		entry, read := p.seen[pid]
 		if !read || p.agent(pid, inits) {
 			return "", -1
@@ -661,8 +662,8 @@ func (l ledger) chargeReaped(parent Work, pid int, ticks uint64, children []*rea
 // kind, except that a harness process is charged KindTool, since an agent does not spend its own
 // seconds on the compile it started — the kind is the work, and the work was the child's.
 func unseenChildWork(parent Work) Work {
-	if parent.Kind == KindAgent {
-		return Work{Owner: parent.Owner, Kind: KindTool}
+	if parent.Kind == samplerwire.KindAgent {
+		return Work{Owner: parent.Owner, Kind: samplerwire.KindTool}
 	}
 	return parent
 }

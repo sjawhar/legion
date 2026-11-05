@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/procread"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // The tests below read a pod the test wrote: a root of its own holding proc/… and
@@ -124,7 +125,7 @@ func (f *podFixture) writeRoles(roles map[string]int) {
 
 // writeVolumes is the launcher's volumes file, written by the tests that have volumes: a fixture
 // with none leaves PodOptions.VolumesFile empty, as a pod that declares none does.
-func (f *podFixture) writeVolumes(volumes []Volume) {
+func (f *podFixture) writeVolumes(volumes []samplerwire.Volume) {
 	f.t.Helper()
 	f.volumesFile = filepath.Join(f.root, "volumes.json")
 	f.writeJSON(f.volumesFile, volumes)
@@ -260,7 +261,7 @@ func TestTheProcProfileServesThePodItRead(t *testing.T) {
 	f.writeV1Totals(268435456, 12_500_000_000)
 	f.writeSmaps(12, 1024)
 	f.writeSmaps(14, 2048)
-	f.writeVolumes([]Volume{{
+	f.writeVolumes([]samplerwire.Volume{{
 		Name:   "private-implementer",
 		Paths:  []string{"/var/run/legion/roles/implementer/private"},
 		Medium: "memory",
@@ -289,21 +290,21 @@ func TestTheProcProfileServesThePodItRead(t *testing.T) {
 
 	// A role's work of one kind: the CPU of every process of that pair, the resident memory
 	// they hold together, and the anonymous memory of the ones the smaps pass reached.
-	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	build := []string{podProject, podIssue, "implementer", string(samplerwire.KindBuild)}
 	wantValue(t, e, 0.15, cpuSecondsTotal, build...)
 	wantValue(t, e, 150*page, memoryResidentBytes, build...)
 	wantValue(t, e, 150*page, memoryResidentPeakBytes, build...)
 	wantValue(t, e, 2048*1024, memoryAnonymousBytes, build...)
 	wantValue(t, e, 2048*1024, memoryAnonymousPeakBytes, build...)
 
-	agent := []string{podProject, podIssue, "implementer", string(KindAgent)}
+	agent := []string{podProject, podIssue, "implementer", string(samplerwire.KindAgent)}
 	wantValue(t, e, 0.2, cpuSecondsTotal, agent...)
 	wantValue(t, e, 200*page, memoryResidentBytes, agent...)
 	wantValue(t, e, 1024*1024, memoryAnonymousBytes, agent...)
 
 	// A process in no role's subtree is served under role shared, which is where the sampler
 	// itself and the launcher are counted.
-	wantValue(t, e, 500*page, memoryResidentBytes, podProject, podIssue, RoleShared, string(KindShared))
+	wantValue(t, e, 500*page, memoryResidentBytes, podProject, podIssue, RoleShared, string(samplerwire.KindShared))
 
 	// What the sampler costs the pod it is reading.
 	wantValue(t, e, 0.07, selfCPUSecondsTotal)
@@ -337,7 +338,7 @@ func TestAPairWhoseProcessesHaveEndedHoldsNoMemory(t *testing.T) {
 	f.writeV1Totals(1<<28, 1_000_000_000)
 	f.writeSmaps(14, 2048)
 	f.writeSmaps(15, 1024)
-	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	build := []string{podProject, podIssue, "implementer", string(samplerwire.KindBuild)}
 	page := float64(os.Getpagesize())
 
 	// Two windows of a settled pod: the second is the one that has read every command line,
@@ -372,7 +373,7 @@ func TestAPairWhoseProcessesHaveEndedHoldsNoMemory(t *testing.T) {
 	wantValue(t, e, 0.15, cpuSecondsTotal, build...)
 	// The pod's own processes are still read, so a pair that is still running keeps its
 	// memory: only the pairs the pass found none of are zeroed.
-	wantValue(t, e, 500*page, memoryResidentBytes, podProject, podIssue, RoleShared, string(KindShared))
+	wantValue(t, e, 500*page, memoryResidentBytes, podProject, podIssue, RoleShared, string(samplerwire.KindShared))
 }
 
 // A pod with no cgroup filesystem to read serves no pod totals at all. The collector is given the
@@ -453,27 +454,27 @@ func TestTheCgroupProfileServesEachCommandsOwnCgroup(t *testing.T) {
 
 	// The build cgroup: its CPU is the rise of its own cpu.stat, its resident memory what it
 	// holds now, and its peak the memory.peak the kernel has recorded for it.
-	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	build := []string{podProject, podIssue, "implementer", string(samplerwire.KindBuild)}
 	wantValue(t, e, 2, cpuSecondsTotal, build...)
 	wantValue(t, e, 100<<20, memoryResidentBytes, build...)
 	wantValue(t, e, 150<<20, memoryResidentPeakBytes, build...)
 	wantValue(t, e, 80<<20, memoryAnonymousBytes, build...)
 
 	// A cgroup holding neither a build nor a test process is tool.
-	tool := []string{podProject, podIssue, "implementer", string(KindTool)}
+	tool := []string{podProject, podIssue, "implementer", string(samplerwire.KindTool)}
 	wantValue(t, e, 0.5, cpuSecondsTotal, tool...)
 	wantValue(t, e, 10<<20, memoryResidentBytes, tool...)
 
 	// `pytest` is no role of this pod, so its cgroup is served under shared with the kind its
 	// processes give it.
-	shared := []string{podProject, podIssue, RoleShared, string(KindTest)}
+	shared := []string{podProject, podIssue, RoleShared, string(samplerwire.KindTest)}
 	wantValue(t, e, 1, cpuSecondsTotal, shared...)
 	wantValue(t, e, 20<<20, memoryResidentBytes, shared...)
 	wantValue(t, e, 16<<20, memoryAnonymousBytes, shared...)
 
 	// This profile reports what each command's cgroup holds, and a role's harness runs in no
 	// command cgroup: it stands in the pod's totals and in no pair of its own.
-	if e.has(cpuSecondsTotal, podProject, podIssue, "implementer", string(KindAgent)) {
+	if e.has(cpuSecondsTotal, podProject, podIssue, "implementer", string(samplerwire.KindAgent)) {
 		t.Errorf("a pair was served for processes in no command cgroup:\n%s", e.text)
 	}
 	// The costly per-process read belongs to the /proc profile: a command's anonymous memory
@@ -505,7 +506,7 @@ func TestARemovedCgroupKeepsItsLastValues(t *testing.T) {
 	c.pass(4)
 
 	e := f.scrape()
-	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	build := []string{podProject, podIssue, "implementer", string(samplerwire.KindBuild)}
 	wantValue(t, e, 2, cpuSecondsTotal, build...)
 	wantValue(t, e, 100<<20, memoryResidentBytes, build...)
 	wantValue(t, e, 80<<20, memoryAnonymousBytes, build...)
@@ -541,12 +542,12 @@ func TestACgroupKeptForOneMoreReadReportsTheFinalNumbers(t *testing.T) {
 	c.pass(4)
 
 	e := f.scrape()
-	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	build := []string{podProject, podIssue, "implementer", string(samplerwire.KindBuild)}
 	wantValue(t, e, 3, cpuSecondsTotal, build...)
 	wantValue(t, e, 130<<20, memoryResidentBytes, build...)
 	wantValue(t, e, 160<<20, memoryResidentPeakBytes, build...)
 	wantValue(t, e, 110<<20, memoryAnonymousBytes, build...)
-	if e.has(cpuSecondsTotal, podProject, podIssue, "implementer", string(KindTool)) {
+	if e.has(cpuSecondsTotal, podProject, podIssue, "implementer", string(samplerwire.KindTool)) {
 		t.Errorf("the command's final numbers moved to another kind:\n%s", e.text)
 	}
 }
@@ -596,7 +597,7 @@ func TestTheCgroupProfileClosesItsWindowAndStopsDeferring(t *testing.T) {
 	wantValue(t, e, 3, totalsDeferred)
 	// The cgroup profile went on reading: the command's own numbers are served, under the
 	// kind the walk that read its processes gave it.
-	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	build := []string{podProject, podIssue, "implementer", string(samplerwire.KindBuild)}
 	wantValue(t, e, 2, cpuSecondsTotal, build...)
 	wantValue(t, e, 100<<20, memoryResidentBytes, build...)
 }
@@ -657,7 +658,7 @@ func TestAScrapeBetweenTwoReadingsOfOnePassServesNeitherAsTheOther(t *testing.T)
 		t.Fatalf("a scrape could not be written: %v", failed)
 	}
 
-	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
+	build := []string{podProject, podIssue, "implementer", string(samplerwire.KindBuild)}
 	read, peaks := 0, 0
 	for _, text := range scrapes {
 		e := readExposition(t, text)
@@ -690,7 +691,7 @@ func TestAVolumeTwoRolesMountIsReadOnce(t *testing.T) {
 	f := newPodFixture(t)
 	f.writeProcesses(743092, 56, podTree()...)
 	f.writeV1Totals(1<<28, 1_000_000_000)
-	f.writeVolumes([]Volume{{
+	f.writeVolumes([]samplerwire.Volume{{
 		Name:   "workspace",
 		Paths:  []string{"/pod/implementer/workspace", "/pod/reviewer/workspace"},
 		Medium: "disk",
@@ -728,7 +729,7 @@ func TestAVolumeIsServedOnceItPassesAMebibyteAndKeepsItsSeries(t *testing.T) {
 	f := newPodFixture(t)
 	f.writeProcesses(743092, 56, podTree()...)
 	f.writeV1Totals(1<<28, 1_000_000_000)
-	f.writeVolumes([]Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
+	f.writeVolumes([]samplerwire.Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
 	used := map[string]int64{"/pod/scratch": 512 << 10}
 	useVolumeReader(t, used)
 	labels := []string{podProject, podIssue, "scratch", "memory", RoleShared}
@@ -766,7 +767,7 @@ func TestEveryReadErrorIsCountedUnderItsSourceAndThePassGoesOn(t *testing.T) {
 	if err := os.Remove(f.rolesFile); err != nil {
 		t.Fatalf("could not take the roles file away: %v", err)
 	}
-	f.writeVolumes([]Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
+	f.writeVolumes([]samplerwire.Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
 	useVolumeReader(t, nil)
 
 	c := f.collector()
@@ -797,11 +798,11 @@ func TestEveryReadErrorIsCountedUnderItsSourceAndThePassGoesOn(t *testing.T) {
 		// read, every process stands in no role's subtree, which is role shared — the
 		// walk's own answer for a generation the launcher has not named.
 		wantValue(t, e, 743092*1024, podProcessMemoryBytes, podProject, podIssue)
-		wantValue(t, e, pass.shared, cpuSecondsTotal, podProject, podIssue, RoleShared, string(KindShared))
+		wantValue(t, e, pass.shared, cpuSecondsTotal, podProject, podIssue, RoleShared, string(samplerwire.KindShared))
 	}
 	// The other 15 of the pod's 45 ticks are the build in that subtree, which the walk that
 	// read its command line charged there: a build nobody's role owns is still a build.
-	wantValue(t, f.scrape(), 0.15, cpuSecondsTotal, podProject, podIssue, RoleShared, string(KindBuild))
+	wantValue(t, f.scrape(), 0.15, cpuSecondsTotal, podProject, podIssue, RoleShared, string(samplerwire.KindBuild))
 	if len(f.log) == 0 {
 		t.Error("nothing was logged about the reads that failed")
 	}
@@ -1135,7 +1136,7 @@ func saturated(t *testing.T, f *podFixture) *costlyReads {
 	f.writeProcesses(743092, 56, budgetTree()...)
 	f.writeV1Totals(1<<28, 1_000_000_000)
 	f.writeRoles(map[string]int{})
-	f.writeVolumes([]Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
+	f.writeVolumes([]samplerwire.Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
 	useVolumeReader(t, map[string]int64{"/pod/scratch": 4 << 20})
 	return useCostlyReads(t, f, 110*time.Millisecond, 1200)
 }
@@ -1154,7 +1155,7 @@ func TestASaturatedWindowDefersTheWalkToTheFloorAndSlowsTheTotals(t *testing.T) 
 	f := newPodFixture(t)
 	reads := saturated(t, f)
 	page := float64(os.Getpagesize())
-	shared := []string{podProject, podIssue, RoleShared, string(KindShared)}
+	shared := []string{podProject, podIssue, RoleShared, string(samplerwire.KindShared)}
 
 	// The first pass has the whole allowance and reads everything: the thirteen processes of
 	// the tree hold 9,100 pages between them.
@@ -1330,7 +1331,7 @@ func TestTheWholeSamplerHoldsItsCapOverASaturatedMinute(t *testing.T) {
 	f.writeRoles(rolesOf())
 	// Two volumes, each a directory that is there, so a volume pass takes the statfs a pod's
 	// own volumes cost it beside the cost the fixture charges for it.
-	f.writeVolumes([]Volume{
+	f.writeVolumes([]samplerwire.Volume{
 		{Name: "private-implementer", Paths: []string{f.root}, Medium: "memory", Role: "implementer"},
 		{Name: "workspace", Paths: []string{f.root}, Medium: "disk"},
 	})
@@ -1432,7 +1433,7 @@ func TestTheRolesFileIsReadAgainOnEachPass(t *testing.T) {
 
 	c := f.collector()
 	c.pass(0)
-	reviewer := []string{podProject, podIssue, "reviewer", string(KindAgent)}
+	reviewer := []string{podProject, podIssue, "reviewer", string(samplerwire.KindAgent)}
 	if e := f.scrape(); e.has(cpuSecondsTotal, reviewer...) {
 		t.Errorf("a role the roles file does not name is served:\n%s", e.text)
 	}
@@ -1496,7 +1497,7 @@ func TestRunPodReadsUntilItsContextEnds(t *testing.T) {
 	f := newPodFixture(t)
 	f.writeProcesses(743092, 56, podTree()...)
 	f.writeV1Totals(1<<28, 12_500_000_000)
-	f.writeVolumes([]Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
+	f.writeVolumes([]samplerwire.Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
 	useVolumeReader(t, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())

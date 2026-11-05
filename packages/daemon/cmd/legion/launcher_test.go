@@ -166,12 +166,12 @@ func TestTheLauncherCommandRefusesASamplerItCannotRun(t *testing.T) {
 		want string
 	}{
 		{"a sampler without a roles directory",
-			[]string{"--token-file", token, "--role", "tester", "--private-dir", t.TempDir(), "--sampler", `{"port":9464}`},
+			[]string{"--token-file", token, "--role", "tester", "--private-dir", t.TempDir(), "--sampler", `{"project":"INFRA"}`},
 			"launcher: --sampler is an issue pod's container: it needs --roles-dir"},
 		{"a sampler that is not JSON", append(slices.Clone(pod), "--sampler", "{"),
-			"launcher: --sampler is one JSON object of the sampler's port, project, issue, volumes and rules"},
-		{"a sampler whose port is not a number", append(slices.Clone(pod), "--sampler", `{"port":"9464"}`),
-			"launcher: --sampler is one JSON object of the sampler's port, project, issue, volumes and rules"},
+			"launcher: --sampler is one JSON object of the sampler's project, issue, volumes and rules"},
+		{"a sampler whose issue is not a string", append(slices.Clone(pod), "--sampler", `{"issue":1208}`),
+			"launcher: --sampler is one JSON object of the sampler's project, issue, volumes and rules"},
 		{"a sampler whose rules the engine refuses", append(slices.Clone(pod), "--sampler", `{"rules":[{"program":"go","kind":"agent"}]}`),
 			"launcher: --sampler rules:"},
 	} {

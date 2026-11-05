@@ -19,7 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -221,14 +221,15 @@ func samplerConfigOf(t *testing.T, c corev1.Container) launcher.SamplerConfig {
 
 // Every issue pod's roles container declares the sampler's port, named `sampler` and numbered
 // 9464, which is what a scrape selects it by, and its launcher is handed the whole configuration
-// of that sampler on one flag: the port it binds, the project and issue of the pod's own labels,
-// which is where the series' `project` and `issue` come from, and the deployment's own kind rules
-// (runtime.kubernetes.sampler_rules), tried before the sampler's built-in list. The controller's
-// pod declares no port and is handed no flag: it holds no issue, and these series are an issue
-// pod's (docs/sampler-metrics.md).
+// of that sampler on one flag: the project and issue of the pod's own labels, which is where the
+// series' `project` and `issue` come from, and the deployment's own kind rules
+// (runtime.kubernetes.sampler_rules), tried before the sampler's built-in list. The flag carries
+// no port: samplerwire.Port is the one value that decides it, the number this container declares
+// and the launcher's own command line reads. The controller's pod declares no port and is handed
+// no flag: it holds no issue, and these series are an issue pod's (docs/sampler-metrics.md).
 func TestAnIssuePodDeclaresItsSamplersPort(t *testing.T) {
 	opts := goldenOptions()
-	opts.SamplerRules = []sampler.Rule{{Program: "cargo", Arguments: []string{"test"}, Kind: sampler.KindTest}}
+	opts.SamplerRules = []samplerwire.Rule{{Program: "cargo", Arguments: []string{"test"}, Kind: samplerwire.KindTest}}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -239,16 +240,16 @@ func TestAnIssuePodDeclaresItsSamplersPort(t *testing.T) {
 	if !slices.Equal(c.Ports, want) {
 		t.Errorf("the roles container declares ports %+v, want %+v", c.Ports, want)
 	}
+	if samplerwire.Port != 9464 {
+		t.Errorf("samplerwire.Port is %d, want the 9464 this container and every scrape of it pin", samplerwire.Port)
+	}
 	cfg := samplerConfigOf(t, c)
 	labels := r.labels(l)
-	if cfg.Port != 9464 {
-		t.Errorf("the sampler is told port %d, want the port the container declares, 9464", cfg.Port)
-	}
 	if cfg.Project != labels[labelProject] || cfg.Issue != labels[labelIssue] {
 		t.Errorf("the sampler is told project %q issue %q, want the pod's own labels %q and %q",
 			cfg.Project, cfg.Issue, labels[labelProject], labels[labelIssue])
 	}
-	sameRule := func(a, b sampler.Rule) bool {
+	sameRule := func(a, b samplerwire.Rule) bool {
 		return a.Program == b.Program && a.Kind == b.Kind && slices.Equal(a.Arguments, b.Arguments)
 	}
 	if !slices.EqualFunc(cfg.Rules, opts.SamplerRules, sameRule) {
@@ -275,16 +276,26 @@ func TestAnIssuePodDeclaresItsSamplersPort(t *testing.T) {
 
 // The volumes the sampler is told to measure are the rendered pod's own: each is a volume the pod
 // declares and the roles container mounts, carrying exactly that container's mount paths for it,
-// the medium the pod spec declares and the role its name names. Every memory-backed volume the
-// container mounts is among them — those are the ones that charge the pod's memory limit, which
-// is what the readings size — and no name that is not a volume of the pod is. The two volumes the
-// init containers alone mount are not in the list: this container holds no path to read either
-// at, and the sampler counts a failed read for an entry with no path.
+// the medium the pod spec declares and the role the pod builder gave it. Every memory-backed
+// volume the container mounts is among them — those are the ones that charge the pod's memory
+// limit, which is what the readings size — and no name that is not a volume of the pod is. The two
+// volumes the init containers alone mount are not in the list: this container holds no path to
+// read either at, and the sampler counts a failed read for an entry with no path.
 func TestTheSamplersVolumesAreTheRenderedPodsOwn(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	opts.TestPostgres = true
-	opts.Pod = Pod{Volumes: []corev1.Volume{operatorVolume}, VolumeMounts: []corev1.VolumeMount{operatorMount}}
+	// roleNamed is an operator's own volume whose name ends in a role's, which no role owns: the
+	// operator chose that name, and `cache-tester` is the tester's no more than `operator-extra`
+	// is (dispatch://INFRA-1208, the review of pull request 2786).
+	roleNamed := corev1.Volume{Name: "cache-" + string(claim.RoleTester), VolumeSource: corev1.VolumeSource{
+		EmptyDir: &corev1.EmptyDirVolumeSource{},
+	}}
+	roleNamedMount := corev1.VolumeMount{Name: roleNamed.Name, MountPath: "/var/cache/legion-operator"}
+	opts.Pod = Pod{
+		Volumes:      []corev1.Volume{operatorVolume, roleNamed},
+		VolumeMounts: []corev1.VolumeMount{operatorMount, roleNamedMount},
+	}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -305,7 +316,7 @@ func TestTheSamplersVolumesAreTheRenderedPodsOwn(t *testing.T) {
 		return volume.Secret != nil || volume.Projected != nil ||
 			(volume.EmptyDir != nil && volume.EmptyDir.Medium == corev1.StorageMediumMemory)
 	}
-	measured := map[string]sampler.Volume{}
+	measured := map[string]samplerwire.Volume{}
 	for _, entry := range samplerConfigOf(t, c).Volumes {
 		if _, twice := measured[entry.Name]; twice {
 			t.Errorf("the sampler is told volume %s twice", entry.Name)
@@ -336,8 +347,9 @@ func TestTheSamplersVolumesAreTheRenderedPodsOwn(t *testing.T) {
 			t.Errorf("the sampler is told %s, which this container mounts nowhere: it would fail a read at every pass", name)
 		}
 	}
-	// The role each volume belongs to is read from its name, and the volumes no single role owns
-	// carry none, which the sampler serves as `shared`.
+	// The role each volume belongs to is the one the pod builder recorded when it named it, so
+	// every volume Legion gives a role is that role's and every other volume — the operator's
+	// `cache-tester` among them — is no role's, which the sampler serves as `shared`.
 	for _, role := range claim.Roles {
 		for _, prefix := range []string{"launcher", "gh", "private", "state", agentSecretsKeyVolume} {
 			name := prefix + "-" + string(role)
@@ -346,7 +358,8 @@ func TestTheSamplersVolumesAreTheRenderedPodsOwn(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{issueVolume, configVolume, roleHomesVolume, testPGVolume, agentSecretsTokenVolume, operatorVolume.Name} {
+	shared := []string{issueVolume, configVolume, roleHomesVolume, testPGVolume, agentSecretsTokenVolume, operatorVolume.Name, roleNamed.Name}
+	for _, name := range shared {
 		if entry, told := measured[name]; !told || entry.Role != "" {
 			t.Errorf("the sampler is told %+v for volume %s, want it measured and owned by no role", entry, name)
 		}

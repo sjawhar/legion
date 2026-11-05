@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/procread"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // This file is node mode: the loop the DaemonSet of a grade node runs, which reports every pod of
@@ -91,7 +92,7 @@ type NodeOptions struct {
 	// Rules are the deployment's kind rules, which decide what a process's work is counted
 	// as. Node mode serves their `build` and `test` answers and counts everything else as
 	// `other`.
-	Rules Rules
+	Rules samplerwire.Rules
 	// Registry is where every reading goes, and what the HTTP handler serves. It is a node
 	// registry (NewNodeRegistry).
 	Registry *Registry
@@ -351,7 +352,7 @@ func (c *nodeCollector) publish(uid types.UID, write func(GradePod)) {
 // parent reaped — is the walk's, and is the same body an issue pod's sampler runs.
 type nodeAttribution struct {
 	root   string
-	rules  Rules
+	rules  samplerwire.Rules
 	failed func(ReadSource, error)
 	// learn hands the collector the cgroup directory a pass read for a pod, so the totals of
 	// the seconds between two walks are read without walking /proc again.
@@ -369,10 +370,10 @@ type nodeAttribution struct {
 type nodeSighting struct {
 	uid    types.UID
 	cgroup string
-	rule   Kind
+	rule   samplerwire.Kind
 }
 
-func newNodeAttribution(root string, rules Rules, failed func(ReadSource, error), learn func(types.UID, string)) *nodeAttribution {
+func newNodeAttribution(root string, rules samplerwire.Rules, failed func(ReadSource, error), learn func(types.UID, string)) *nodeAttribution {
 	return &nodeAttribution{root: root, rules: rules, failed: failed, learn: learn, seen: map[int]*nodeSighting{}}
 }
 
@@ -422,7 +423,7 @@ func (p *nodeAttribution) Forget(pid int) { delete(p.seen, pid) }
 // sampler serves answers no owner at all, which is what charges it to nobody, and the first
 // process of a pod a pass reads gives the collector that pod's own cgroup directory.
 func (p *nodeAttribution) Attribute(live []int, stats map[int]procread.Stat) map[int]Work {
-	kinds := make(map[int]Kind, len(live))
+	kinds := make(map[int]samplerwire.Kind, len(live))
 	attributed := make(map[int]Work, len(live))
 	for _, pid := range live {
 		entry, read := p.seen[pid]
@@ -452,31 +453,31 @@ func (p *nodeAttribution) Attribute(live []int, stats map[int]procread.Stat) map
 // the kubelet, whose work is nobody's. It is the climb an issue pod's role and kind take, which
 // keeps what each process answers, so a pass climbs each chain once however many processes stand
 // on it.
-func (p *nodeAttribution) kindOf(pid int, stats map[int]procread.Stat, known map[int]Kind) Kind {
-	return climb(pid, len(stats)+1, KindOther, known, func(pid int) (Kind, int) {
+func (p *nodeAttribution) kindOf(pid int, stats map[int]procread.Stat, known map[int]samplerwire.Kind) samplerwire.Kind {
+	return climb(pid, len(stats)+1, samplerwire.KindOther, known, func(pid int) (samplerwire.Kind, int) {
 		entry, read := p.seen[pid]
 		if !read {
-			return KindOther, -1
+			return samplerwire.KindOther, -1
 		}
 		if entry.rule != "" {
 			return nodeKind(entry.rule), -1
 		}
 		parent, held := p.seen[stats[pid].Parent]
 		if !held || parent.uid != entry.uid {
-			return KindOther, -1
+			return samplerwire.KindOther, -1
 		}
-		return KindOther, stats[pid].Parent
+		return samplerwire.KindOther, stats[pid].Parent
 	})
 }
 
 // nodeKind is a rule's answer in node mode's vocabulary. A rule may answer `tool` as well as
 // `build` and `test`, and a deployment may write one that does; on a node that is `other`, since
 // the three words the node-mode table carries are all a reader of it knows.
-func nodeKind(kind Kind) Kind {
-	if kind == KindBuild || kind == KindTest {
+func nodeKind(kind samplerwire.Kind) samplerwire.Kind {
+	if kind == samplerwire.KindBuild || kind == samplerwire.KindTest {
 		return kind
 	}
-	return KindOther
+	return samplerwire.KindOther
 }
 
 // readTotals is every served pod's own cgroup: the memory it holds and the CPU it has spent,

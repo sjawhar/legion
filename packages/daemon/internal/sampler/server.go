@@ -1,3 +1,10 @@
+// Package sampler is Legion's resource sampler (INFRA-1208): the CPU and memory a pod's processes
+// spend, read through internal/procread and served as Prometheus series — in an issue pod split by
+// role and by the kind of work each process does, on a node split by pod.
+//
+// What the daemon and this sampler say to each other — the port, the launcher's two files and the
+// deployment's kind rules — is internal/samplerwire, a leaf package the daemon's own packages
+// render these shapes from without building this one's Kubernetes client.
 package sampler
 
 import (
@@ -26,12 +33,6 @@ import (
 // server and the collector. Nothing here reads a path of its own either — the root every read is
 // given is the collector's — so a test drives the whole process over a directory it wrote.
 
-// Port is the port the sampler binds: the issue pod's `roles` container declares it as `sampler`
-// and node mode's DaemonSet serves on it too (docs/sampler-metrics.md, "The port"). The bind
-// address is every address and not loopback, since the collector that scrapes it runs outside
-// the pod.
-const Port = 9464
-
 // The two numbers the sampler's own memory rule is written with. Both are about anonymous memory
 // and neither about resident memory: under gVisor a process's resident memory counts the mapped
 // `legion` binary, which is 101,978,204 bytes, and a live `legion` of this pod reads VmRSS
@@ -58,6 +59,24 @@ var guardInterval = time.Second
 // shutdownGrace bounds the deferred Shutdown: a scrape being written when the sampler ends is
 // given this long to finish, and the process leaves whether or not it does.
 const shutdownGrace = 5 * time.Second
+
+// The timeouts the sampler's own HTTP server holds a connection to, besides the shutdown above.
+// The port is unauthenticated and anything in the pod or the cluster can open a connection on it,
+// so a peer that sends nothing, reads nothing or holds a connection it is not using is closed out
+// rather than served for as long as it likes (ASVS v5.0.0-13.1.4). Each is far above what a
+// scrape of this sampler costs — 1.3 ms over a connection of its own (INFRA-1208, measured
+// 2026-11-05) — so none of them can cut a reader that is working off.
+const (
+	// readHeaderTimeout is how long a connection has to send the request line and its headers.
+	readHeaderTimeout = 10 * time.Second
+	// writeTimeout bounds one answer, from the end of the request's headers: the exposition is
+	// written as one body of known length, so this is a reader that has stopped reading.
+	writeTimeout = 30 * time.Second
+	// idleTimeout is how long a kept-alive connection may sit between requests. It is above
+	// the 30 s a collector scrapes at, so a collector's connection is reused rather than
+	// closed between two scrapes, and a peer that has gone away is let go of all the same.
+	idleTimeout = 2 * time.Minute
+)
 
 // Options is everything the sampler's process runs with: where it serves, which of the two
 // collectors it runs — exactly one of Pod and Node, which is the mode — and where its own lines
@@ -172,7 +191,12 @@ func Run(ctx context.Context, opts Options) error {
 	s := &service{opts: opts, collector: collector, registry: collector.registry()}
 	// The guard's own reader, where it had to make one, is released with the run it guarded.
 	defer s.release()
-	server := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{
+		Handler:           s.handler(),
+		ReadHeaderTimeout: readHeaderTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
 	defer func() {

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // contractPath is docs/sampler-metrics.md from this package's directory: the contract a person
@@ -196,9 +198,10 @@ type documented struct {
 // modes each table's metrics are served in. A table under any other heading is a failure: a
 // metric a reader finds in the document has to be one the sampler serves.
 var contractTables = map[string]Mode{
-	"The series an issue pod serves":             ModePod,
-	"The series node mode serves":                ModeNode,
-	"The series the sampler serves about itself": bothModes,
+	"The series an issue pod serves":                                 ModePod,
+	"The series node mode serves":                                    ModeNode,
+	"The series the sampler serves about itself":                     bothModes,
+	"The deferral series, which an issue pod's sampler alone serves": ModePod,
 }
 
 // readContract is every metric docs/sampler-metrics.md names, read from its tables.
@@ -373,7 +376,7 @@ func TestTheServedSetIsTheDocumentedSet(t *testing.T) {
 
 // fillPod gives a registry one reading of every series an issue pod serves.
 func fillPod(r *Registry) {
-	pair := r.Pair("implement", KindBuild)
+	pair := r.Pair("implement", samplerwire.KindBuild)
 	totals := r.Totals()
 	r.AddCPUSeconds(pair, 3)
 	r.SetAnonymousBytes(pair, 2<<20)
@@ -388,8 +391,8 @@ func fillPod(r *Registry) {
 // fillNode gives a registry one reading of every series node mode serves.
 func fillNode(r *Registry) {
 	pod := GradePod{Pod: "grade-7", Namespace: "grade", Queue: "grade-queue", Owner: "lean"}
-	r.AddCPUSeconds(r.GradeKind(pod, KindBuild), 12)
-	r.SetResidentBytes(r.GradeKind(pod, KindBuild), 64<<20)
+	r.AddCPUSeconds(r.GradeKind(pod, samplerwire.KindBuild), 12)
+	r.SetResidentBytes(r.GradeKind(pod, samplerwire.KindBuild), 64<<20)
 	r.SetTotalMemoryBytes(r.GradeTotals(pod), 128<<20)
 	r.SetTotalCPUSeconds(r.GradeTotals(pod), 41)
 }
@@ -410,9 +413,9 @@ func fillSelf(r *Registry) {
 func TestAPeakRisesWithTheValueAndIsResetByAScrape(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
-	pair := registry.Pair("implement", KindTest)
+	pair := registry.Pair("implement", samplerwire.KindTest)
 	totals := registry.Totals()
-	labels := []string{"INFRA", "INFRA-1208", "implement", string(KindTest)}
+	labels := []string{"INFRA", "INFRA-1208", "implement", string(samplerwire.KindTest)}
 
 	registry.SetResidentBytes(pair, 100)
 	registry.SetResidentBytes(pair, 300)
@@ -469,8 +472,8 @@ func TestAGradePodsPeakIsResetByAScrape(t *testing.T) {
 	at := newClock()
 	registry := NewNodeRegistry(at.now)
 	pod := GradePod{Pod: "grade-7", Namespace: "grade", Queue: "grade-queue", Owner: "lean"}
-	labels := []string{"grade-7", "grade", string(KindBuild), "grade-queue", "lean"}
-	kind := registry.GradeKind(pod, KindBuild)
+	labels := []string{"grade-7", "grade", string(samplerwire.KindBuild), "grade-queue", "lean"}
+	kind := registry.GradeKind(pod, samplerwire.KindBuild)
 	totals := registry.GradeTotals(pod)
 
 	registry.SetResidentBytes(kind, 900)
@@ -500,8 +503,8 @@ func TestAGradePodsPeakIsResetByAScrape(t *testing.T) {
 func TestAPairLeavesTheOutputAnHourAfterItsLastProcess(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
-	old := registry.Pair("implement", KindBuild)
-	recent := registry.Pair("implement", KindAgent)
+	old := registry.Pair("implement", samplerwire.KindBuild)
+	recent := registry.Pair("implement", samplerwire.KindAgent)
 
 	registry.AddCPUSeconds(old, 30)
 	registry.SetResidentBytes(old, 1<<20)
@@ -510,28 +513,28 @@ func TestAPairLeavesTheOutputAnHourAfterItsLastProcess(t *testing.T) {
 
 	at.advance(30 * time.Minute)
 	read := scrape(t, registry)
-	if !read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(KindBuild)) {
+	if !read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(samplerwire.KindBuild)) {
 		t.Error("a pair whose process ran exactly an hour ago is not served, and the window is the hour itself")
 	}
 
 	at.advance(time.Nanosecond)
 	read = scrape(t, registry)
 	for _, id := range []metricID{cpuSecondsTotal, memoryResidentBytes, memoryResidentPeakBytes} {
-		if read.has(id, "INFRA", "INFRA-1208", "implement", string(KindBuild)) {
+		if read.has(id, "INFRA", "INFRA-1208", "implement", string(samplerwire.KindBuild)) {
 			t.Errorf("%s is still served for a pair no process of which has run for an hour", metrics[id].name)
 		}
 	}
-	if !read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(KindAgent)) {
+	if !read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(samplerwire.KindAgent)) {
 		t.Error("a pair whose process ran half an hour ago is not served")
 	}
 
 	at.advance(31 * time.Minute)
 	registry.AddCPUSeconds(old, 5)
 	read = scrape(t, registry)
-	if got := read.value(t, cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(KindBuild)); got != 5 {
+	if got := read.value(t, cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(samplerwire.KindBuild)); got != 5 {
 		t.Errorf("a pair that returned after the window is served %v seconds, not the 5 it has spent since", got)
 	}
-	if read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(KindAgent)) {
+	if read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(samplerwire.KindAgent)) {
 		t.Error("the other pair is still served an hour after its last process")
 	}
 }
@@ -541,12 +544,12 @@ func TestAGradePodsKindLeavesTheOutputAfterAnHour(t *testing.T) {
 	at := newClock()
 	registry := NewNodeRegistry(at.now)
 	pod := GradePod{Pod: "grade-7", Namespace: "grade", Queue: "grade-queue", Owner: "lean"}
-	registry.AddCPUSeconds(registry.GradeKind(pod, KindBuild), 12)
+	registry.AddCPUSeconds(registry.GradeKind(pod, samplerwire.KindBuild), 12)
 	registry.SetTotalMemoryBytes(registry.GradeTotals(pod), 1<<20)
 
 	at.advance(time.Hour + time.Second)
 	read := scrape(t, registry)
-	if read.has(gradeCPUSecondsTotal, "grade-7", "grade", string(KindBuild), "grade-queue", "lean") {
+	if read.has(gradeCPUSecondsTotal, "grade-7", "grade", string(samplerwire.KindBuild), "grade-queue", "lean") {
 		t.Error("a kind of a grade pod is still served an hour after its last process")
 	}
 	if !read.has(gradePodMemoryBytes, "grade-7", "grade", "grade-queue", "lean") {
@@ -577,7 +580,7 @@ func TestTheCapDropsTheOldestPairsFirstAndCountsThem(t *testing.T) {
 	// Forty pairs of five series each, one minute apart, is 200 droppable series beside the
 	// eighteen the cap may never drop and the one volume.
 	for i := range 40 {
-		pair := registry.Pair("implement", Kind("k"+strconv.Itoa(100+i)))
+		pair := registry.Pair("implement", samplerwire.Kind("k"+strconv.Itoa(100+i)))
 		registry.AddCPUSeconds(pair, 1)
 		registry.SetAnonymousBytes(pair, 1<<20)
 		registry.SetResidentBytes(pair, 2<<20)
@@ -632,7 +635,7 @@ func TestTheCapDropsVolumesLastAndNeverTheTotals(t *testing.T) {
 	registry.SetProcessMemoryBytes(totals, 700<<20)
 	registry.SetSharedMemoryBytes(totals, 57344)
 
-	pair := registry.Pair("implement", KindBuild)
+	pair := registry.Pair("implement", samplerwire.KindBuild)
 	registry.AddCPUSeconds(pair, 1)
 	registry.SetResidentBytes(pair, 2<<20)
 	at.advance(time.Minute)
@@ -646,7 +649,7 @@ func TestTheCapDropsVolumesLastAndNeverTheTotals(t *testing.T) {
 	if got := read.value(t, seriesDropped); got != 11 {
 		t.Errorf("the cap removed %v series, not the three of the pair and the eight oldest volumes", got)
 	}
-	if read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(KindBuild)) {
+	if read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(samplerwire.KindBuild)) {
 		t.Error("the pair is served while volumes were dropped, and every pair goes before the first volume")
 	}
 	for i := range 8 {
@@ -686,7 +689,7 @@ func TestTheCapIsPerGradePod(t *testing.T) {
 		pod := GradePod{Pod: "grade-" + strconv.Itoa(100+i), Namespace: "grade", Queue: "q", Owner: "lean"}
 		registry.SetTotalMemoryBytes(registry.GradeTotals(pod), 1<<20)
 		registry.SetTotalCPUSeconds(registry.GradeTotals(pod), 1)
-		for _, kind := range []Kind{KindBuild, KindTest, KindOther} {
+		for _, kind := range []samplerwire.Kind{samplerwire.KindBuild, samplerwire.KindTest, samplerwire.KindOther} {
 			registry.AddCPUSeconds(registry.GradeKind(pod, kind), 1)
 			registry.SetResidentBytes(registry.GradeKind(pod, kind), 1<<20)
 		}
@@ -696,9 +699,16 @@ func TestTheCapIsPerGradePod(t *testing.T) {
 	if got := read.value(t, seriesDropped); got != 0 {
 		t.Errorf("the cap removed %v series from a node whose pods are each far under it", got)
 	}
-	// Forty pods of twelve series, and the sampler's own twelve.
-	if served := len(read.series); served != 492 {
-		t.Errorf("%d series are served, not the 492 of forty grade pods and the sampler itself", served)
+	// Forty pods of twelve series, and the sampler's own nine: its three readings of itself, one
+	// read-error count for each of the four sources, the restart count and the dropped count. The
+	// three deferral series are an issue pod's alone and a node serves none of them.
+	if served := len(read.series); served != 489 {
+		t.Errorf("%d series are served, not the 489 of forty grade pods and the sampler itself", served)
+	}
+	for _, id := range []metricID{smapsDeferred, totalsDeferred, walkDeferred} {
+		if read.has(id) {
+			t.Errorf("%s is served on a node, and the deferral series are an issue pod's alone", metrics[id].name)
+		}
 	}
 }
 
@@ -713,7 +723,7 @@ func TestTheExpositionIsSortedAndStable(t *testing.T) {
 		registry.SetVolumeBytes(registry.Volume(name, "memory", RoleShared), 1<<20)
 	}
 	for _, role := range []string{"review", "implement", "plan"} {
-		for _, kind := range []Kind{KindTool, KindAgent, KindBuild} {
+		for _, kind := range []samplerwire.Kind{samplerwire.KindTool, samplerwire.KindAgent, samplerwire.KindBuild} {
 			registry.AddCPUSeconds(registry.Pair(role, kind), 1)
 			registry.SetResidentBytes(registry.Pair(role, kind), 1<<20)
 		}
@@ -785,9 +795,9 @@ func TestALabelValueIsEscaped(t *testing.T) {
 func TestACounterIsNeverServedLowerThanBefore(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
-	pair := registry.Pair("implement", KindBuild)
+	pair := registry.Pair("implement", samplerwire.KindBuild)
 	totals := registry.Totals()
-	labels := []string{"INFRA", "INFRA-1208", "implement", string(KindBuild)}
+	labels := []string{"INFRA", "INFRA-1208", "implement", string(samplerwire.KindBuild)}
 
 	registry.AddCPUSeconds(pair, 10)
 	registry.SetTotalCPUSeconds(totals, 100)
@@ -869,7 +879,7 @@ func livePodRegistry() *Registry {
 	r := NewPodRegistry("INFRA", "INFRA-1208", nil)
 	fillSelf(r)
 	fillPod(r)
-	tool := r.Pair("implement", KindTool)
+	tool := r.Pair("implement", samplerwire.KindTool)
 	r.AddCPUSeconds(tool, 16458.18)
 	r.SetAnonymousBytes(tool, 142483456)
 	r.SetResidentBytes(tool, 187703296)

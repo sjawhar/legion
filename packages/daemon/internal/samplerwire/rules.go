@@ -1,13 +1,9 @@
-// Package sampler is Legion's resource sampler (INFRA-1208): the CPU and memory a pod's processes
-// spend, read through internal/procread and served as Prometheus series — in an issue pod split by
-// role and by the kind of work each process does, on a node split by pod.
-//
 // This file is the kind rules, the one place that decides from a process's program and arguments
 // alone whether it is build work, test work or a tool. It reads a command line and answers a Kind:
-// nothing it reads leaves this package, which is how dispatch://INFRA-1208/spec#b-a-noargs — no
-// series carries a command line, an argument or an environment value — stays true of a sampler
-// that must read command lines to do its job at all.
-package sampler
+// nothing a rule reads of a process leaves the sampler, which is how
+// dispatch://INFRA-1208/spec#b-a-noargs — no series carries a command line, an argument or an
+// environment value — stays true of a sampler that must read command lines to do its job at all.
+package samplerwire
 
 import (
 	"errors"
@@ -36,7 +32,10 @@ const (
 	KindTool Kind = "tool"
 	// KindOther is node mode's word for work that is neither build nor test. A node's sampler
 	// knows nothing of roles and splits a pod's processes three ways
-	// (dispatch://INFRA-1208/spec#b-a-node), where an issue pod's splits them by role.
+	// (dispatch://INFRA-1208/spec#b-a-node), where an issue pod's splits them by role. No rule
+	// answers it either: node mode counts as `other` every process no rule named, so a rule that
+	// said `other` would add nothing there, and an issue pod, whose vocabulary has no such word,
+	// would serve a kind it does not know.
 	KindOther Kind = "other"
 	// KindShared is the launcher, the sampler itself and the test Postgres: a process in no
 	// role's subtree, which the sampler reports under the role `shared` and the kind `shared`
@@ -46,10 +45,9 @@ const (
 )
 
 // ruleKinds are the kinds a rule may answer: the ones a program and its arguments can tell on
-// their own. KindAgent and KindShared are not among them, because neither is a property of a
-// command line — a process is an agent's or shared by where it sits in the process tree, which
-// the walk reads and a rule cannot.
-var ruleKinds = []Kind{KindBuild, KindTest, KindTool, KindOther}
+// their own, and that both modes serve. KindAgent, KindShared and KindOther are not among them,
+// for the reasons their own lines give.
+var ruleKinds = []Kind{KindBuild, KindTest, KindTool}
 
 // patternCharacters are the characters a glob or a regular expression is written with. A rule is
 // matched literally, whole word for whole word, so a pattern holding one of these could match
@@ -106,26 +104,31 @@ func (r Rule) matches(words []string) bool {
 }
 
 // validate refuses a rule this engine could not match as its author meant it, naming the rule.
+//
+// A refusal carries no prefix of its own: each caller adds the one its reader needs — the daemon
+// configuration the key an operator edits (runtime.kubernetes.sampler_rules), `legion sampler`
+// its own name — and a message that named this package would have to be cut back out of the
+// first by hand (dispatch://INFRA-1208, the review of pull request 2786).
 func (r Rule) validate() error {
 	if r.Program == "" {
-		return errors.New("sampler: a rule with no program")
+		return errors.New("a rule with no program")
 	}
 	if strings.Contains(r.Program, "/") {
-		return fmt.Errorf("sampler: rule %q names a program by its path: name its last path element alone, %q", r, path.Base(r.Program))
+		return fmt.Errorf("rule %q names a program by its path: name its last path element alone, %q", r, path.Base(r.Program))
 	}
 	if err := r.validateWord(r.Program); err != nil {
 		return err
 	}
 	for _, argument := range r.Arguments {
 		if argument == "" {
-			return fmt.Errorf("sampler: rule %q has an empty argument", r)
+			return fmt.Errorf("rule %q has an empty argument", r)
 		}
 		if err := r.validateWord(argument); err != nil {
 			return err
 		}
 	}
 	if !slices.Contains(ruleKinds, r.Kind) {
-		return fmt.Errorf("sampler: rule %q has kind %q: a rule answers one of %s", r, r.Kind, namedKinds(ruleKinds))
+		return fmt.Errorf("rule %q has kind %q: a rule answers one of %s", r, r.Kind, namedKinds(ruleKinds))
 	}
 	return nil
 }
@@ -133,10 +136,10 @@ func (r Rule) validate() error {
 // validateWord refuses a program or an argument that is not one whole word matched literally.
 func (r Rule) validateWord(word string) error {
 	if strings.ContainsFunc(word, unicode.IsSpace) {
-		return fmt.Errorf("sampler: rule %q holds %q, which is more than one word: name the program and then each argument of the run on its own", r, word)
+		return fmt.Errorf("rule %q holds %q, which is more than one word: name the program and then each argument of the run on its own", r, word)
 	}
 	if strings.ContainsAny(word, patternCharacters) {
-		return fmt.Errorf("sampler: rule %q holds %q: a rule matches a whole word literally, never a glob or a regular expression", r, word)
+		return fmt.Errorf("rule %q holds %q: a rule matches a whole word literally, never a glob or a regular expression", r, word)
 	}
 	return nil
 }
@@ -210,7 +213,8 @@ type Rules struct{ operator []Rule }
 //
 // It refuses a rule whose kind is not one a rule may answer, and two rules with the same program
 // and the same arguments, naming the rule in each case: the second of two such rules can never be
-// reached, and when their kinds differ the configuration says two things at once.
+// reached, and when their kinds differ the configuration says two things at once. Each refusal is
+// the caller's to prefix, as Rule.validate's are.
 func NewRules(operator []Rule) (Rules, error) {
 	seen := make(map[string]bool, len(operator))
 	for _, rule := range operator {
@@ -218,7 +222,7 @@ func NewRules(operator []Rule) (Rules, error) {
 			return Rules{}, err
 		}
 		if seen[rule.String()] {
-			return Rules{}, fmt.Errorf("sampler: rule %q twice", rule)
+			return Rules{}, fmt.Errorf("rule %q twice", rule)
 		}
 		seen[rule.String()] = true
 	}

@@ -145,6 +145,13 @@ const providersDSNFile = ProvidersDir + "/" + ompsessions.DSNFileName
 // the database in it, and the IAM login the pod signs in as.
 var sessionProxyFlagNames = [3]string{"--session-instance", "--session-database", "--session-user"}
 
+// roleVolumePrefixes are the volumes one launcher role owns alone, each named `<prefix>-<role>`
+// (roleVolume): its launcher token, its private credential directory, its state, its gh
+// configuration and, where the pod enrolls with the secrets broker, its agent-secrets key
+// directory. The reserved names below and the owner of each volume the sampler is told
+// (Runtime.volumes) are both read from this one list.
+var roleVolumePrefixes = []string{"launcher", "private", stateVolume, ghVolume, agentSecretsKeyVolume}
+
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
 // probe's, whose names the operator's volumes may not take: the shared ones, the role homes, the
 // test database's, and each launcher role's private ones. The agent-secrets volumes are reserved
@@ -156,8 +163,9 @@ func legionVolumeNames() []string {
 		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume, roleProbeVolume, testPGVolume,
 	}
 	for _, role := range launcherRoles {
-		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
-			roleVolume(agentSecretsKeyVolume, role))
+		for _, prefix := range roleVolumePrefixes {
+			names = append(names, roleVolume(prefix, role))
+		}
 	}
 	slices.Sort(names)
 	return names
@@ -647,7 +655,7 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 		NodeSelector:      r.nodeSelector(),
 		Tolerations:       r.tolerations(),
 		PriorityClassName: r.scheduling.PriorityClass,
-		Volumes:           volumes,
+		Volumes:           volumes.all,
 		InitContainers:    l.kind.initContainers(r, l),
 		Containers:        []corev1.Container{r.launcherContainer(l, providersMounts, volumes)},
 	}
@@ -675,8 +683,9 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 // generations when the deployment keeps sessions there (sessionProxyFlags); the per-generation
 // worker-shim argv and plain environment arrive in the launcher's start command, while values the
 // kubelet must resolve (the downward API, the operator's secret refs) are set on the container.
-// volumes is the pod's own volume list, which an issue pod's container renders for its sampler.
-func (r *Runtime) launcherContainer(l launch, providersMounts []corev1.VolumeMount, volumes []corev1.Volume) corev1.Container {
+// volumes is the pod's own volume list with the owner of each role's volumes, which an issue pod's
+// container renders for its sampler.
+func (r *Runtime) launcherContainer(l launch, providersMounts []corev1.VolumeMount, volumes podVolumes) corev1.Container {
 	resolved, _ := r.launchEnvironment(l)
 	return l.kind.launcherContainer(r, l, resolved, providersMounts, volumes)
 }
@@ -713,10 +722,17 @@ func kubeletEscape(text string) string {
 // projection with no items would project every key of the Secret, the launcher token among them.
 // Then the volumes its kind's one container alone mounts (podKind.mainVolumes), the agent-secrets
 // volumes, the providers and the operator's.
-func (r *Runtime) volumes(l launch) []corev1.Volume {
+//
+// The answer carries the role each role-owned volume belongs to as well as the list, because the
+// name is this builder's to give and only this builder knows it: the sampler charges a volume to
+// its owner from that map (samplerVolumes), where reading a role out of a `-<role>` suffix would
+// charge an operator's `cache-tester` to the tester (dispatch://INFRA-1208, the review of pull
+// request 2786).
+func (r *Runtime) volumes(l launch) podVolumes {
 	providers, _ := r.providers()
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
 	roleVolumes := make([]corev1.Volume, 0, len(l.roles)*4)
+	owners := make(map[string]claim.Role, len(l.roles)*len(roleVolumePrefixes))
 	ghItems := make([]corev1.KeyToPath, 0, 2*len(l.gitHubOwners))
 	for _, owner := range l.gitHubOwners {
 		ghItems = append(ghItems,
@@ -725,6 +741,11 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 		)
 	}
 	for _, role := range l.roles {
+		// Every volume of this role, the agent-secrets key directory the enrolled pod adds
+		// below included, is named for it and owned by it.
+		for _, prefix := range roleVolumePrefixes {
+			owners[roleVolume(prefix, role)] = role
+		}
 		roleVolumes = append(roleVolumes,
 			corev1.Volume{Name: roleVolume("launcher", role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 				SecretName: roleSecretName(l.name, role), Items: []corev1.KeyToPath{{Key: LauncherTokenFile, Path: LauncherTokenFile}},
@@ -746,8 +767,17 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 	_, disk := l.kind.disk(r, l)
 	volume := corev1.Volume{Name: issueVolume, VolumeSource: disk}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
-	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
-		l.kind.mainVolumes(r), r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
+	return podVolumes{owners: owners, all: slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
+		l.kind.mainVolumes(r), r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)}
+}
+
+// podVolumes is the pod's whole volume list and the role that owns each of the volumes one role
+// owns alone, which Runtime.volumes records as it names them. A volume no single role owns — the
+// pod's disk, the config home, the role homes, the providers, the operator's own — stands in all
+// and in no owner, and the sampler serves it under the role `shared`.
+type podVolumes struct {
+	all    []corev1.Volume
+	owners map[string]claim.Role
 }
 
 // agentSecretsVolumes are, for a pod the runtime enrolls with the secrets broker

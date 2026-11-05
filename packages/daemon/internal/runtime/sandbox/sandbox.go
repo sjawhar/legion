@@ -55,7 +55,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -99,7 +99,7 @@ type Runtime struct {
 	agent                          []string
 	setup                          []string
 	testPostgres                   bool
-	samplerRules                   []sampler.Rule
+	samplerRules                   []samplerwire.Rule
 	bootTimeout                    time.Duration
 	registrationIntervals          int
 	busyBackoff                    time.Duration

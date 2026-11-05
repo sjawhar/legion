@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 )
 
 // This file is the series registry and the exposition: the one place that decides what the
@@ -281,16 +283,21 @@ var metrics = [metricCount]metric{
 		name: "legion_sampler_series_dropped", typ: gaugeType, modes: bothModes,
 		help: "Series the 200-series cap removed at the last scrape",
 	},
+	// The three deferral series are an issue pod's alone: the cap they report is the cap on
+	// what the sampler costs the pod it reads, and a node's sampler reads no pod of its own
+	// and defers nothing, so serving them there would be three numbers that are always zero.
+	// The first is a level — how many processes this window carried into the next — and the
+	// other two are counts that only rise, which is what a counter is for.
 	smapsDeferred: {
-		name: "legion_sampler_smaps_deferred", typ: gaugeType, modes: bothModes,
+		name: "legion_sampler_smaps_deferred", typ: gaugeType, modes: ModePod,
 		help: "Processes the smaps budget carried into the next window",
 	},
 	totalsDeferred: {
-		name: "legion_sampler_totals_deferred", typ: gaugeType, modes: bothModes,
+		name: "legion_sampler_totals_deferred", typ: counterType, modes: ModePod,
 		help: "Memory-total reads the sampler's own cap has deferred",
 	},
 	walkDeferred: {
-		name: "legion_sampler_walk_deferred", typ: gaugeType, modes: bothModes,
+		name: "legion_sampler_walk_deferred", typ: counterType, modes: ModePod,
 		help: "Walk passes the sampler's own cap has deferred",
 	},
 }
@@ -545,7 +552,7 @@ func newRegistry(mode Mode, project, issue string, now func() time.Time) *Regist
 // Pair is the series of one role's work of one kind in an issue pod, which carries the pod's
 // project and issue beside the two. It counts against the sampler's own pod, which is the one
 // the cap is held over there.
-func (r *Registry) Pair(role string, kind Kind) Series {
+func (r *Registry) Pair(role string, kind samplerwire.Kind) Series {
 	return r.series(ModePod, shapeWork, "", r.project, r.issue, role, string(kind))
 }
 
@@ -563,7 +570,7 @@ func (r *Registry) Totals() Series {
 // GradeKind is the series of one grade pod's work of one kind in node mode, which carries the
 // pod's own four labels beside the kind. It counts against that pod and not against the node, so
 // a node serving thirty pods is not capped as though the thirty were one.
-func (r *Registry) GradeKind(pod GradePod, kind Kind) Series {
+func (r *Registry) GradeKind(pod GradePod, kind samplerwire.Kind) Series {
 	return r.series(ModeNode, shapeWork, gradeKey(pod),
 		pod.Pod, pod.Namespace, string(kind), pod.Queue, pod.Owner)
 }
@@ -905,7 +912,7 @@ func (r *Registry) exposition() []byte {
 	now := r.now()
 	r.expire(now)
 
-	fixed := newFixedSamples()
+	fixed := newFixedSamples(r.mode)
 	r.addSelf(fixed)
 	r.addTotals(fixed)
 	kept, dropped := applyCap(r.droppable(), fixed.counts)
@@ -944,23 +951,26 @@ func (r *Registry) resetPeaks() {
 }
 
 // fixedSamples are the series of one scrape that the cap never drops: the samples themselves,
-// how many of them stand against each pod's cap, and where the dropped count sits, since that
-// number is only known once the cap has run over everything else.
+// how many of them stand against each pod's cap, where the dropped count sits, since that number
+// is only known once the cap has run over everything else, and the mode this scrape is of, which
+// decides which of them are served at all.
 type fixedSamples struct {
 	samples   []sample
 	counts    map[string]int
 	droppedAt int
+	mode      Mode
 }
 
-func newFixedSamples() *fixedSamples {
-	return &fixedSamples{counts: map[string]int{}, droppedAt: -1}
+func newFixedSamples(mode Mode) *fixedSamples {
+	return &fixedSamples{counts: map[string]int{}, droppedAt: -1, mode: mode}
 }
 
 // add holds one series that the cap never drops, counted against the pod named by owner. A
-// metric the registry's mode does not serve is passed over, which is how a grade pod's totals
-// hold no reading of a /proc/meminfo no node reads.
+// metric the registry's mode does not serve is passed over — as noMetric is, which is how a grade
+// pod's totals hold no reading of a /proc/meminfo no node reads, and as a metric whose own row
+// belongs to the other mode is, which is how a node serves no deferral series.
 func (s *fixedSamples) add(owner string, id metricID, value float64, labels ...string) {
-	if id == noMetric {
+	if id == noMetric || metrics[id].modes&s.mode == 0 {
 		return
 	}
 	one := sample{metric: id, value: value}
@@ -969,9 +979,10 @@ func (s *fixedSamples) add(owner string, id metricID, value float64, labels ...s
 	s.counts[owner]++
 }
 
-// addSelf holds the series the sampler reports about itself, which both modes serve and the cap
-// never drops. In an issue pod they count against that pod's 200; in node mode they belong to
-// the node's sampler and to no grade pod.
+// addSelf holds the series the sampler reports about itself, which the cap never drops. In an
+// issue pod they count against that pod's 200; in node mode they belong to the node's sampler and
+// to no grade pod. The deferral series below are an issue pod's alone and add passes over them in
+// node mode, which is why the dropped count's place is read after the series before it.
 func (r *Registry) addSelf(s *fixedSamples) {
 	s.add("", selfCPUSecondsTotal, r.self.cpuSeconds.value)
 	s.add("", selfMemoryAnonymousBytes, r.self.anonymous)

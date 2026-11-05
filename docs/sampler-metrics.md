@@ -75,11 +75,21 @@ Both modes serve these, and they carry no `project` or `issue`.
 | `legion_sampler_read_errors_total` | counter | `source` | reads of this source that failed: `proc`, `cgroup`, `volume` or `kubernetes` |
 | `legion_sampler_restarts_total` | counter | — | times the launcher has started the sampler again, a count the launcher keeps and hands over |
 | `legion_sampler_series_dropped` | gauge | — | series the 200-series cap removed at the last scrape |
-| `legion_sampler_smaps_deferred` | gauge | — | processes the `smaps` budget carried into the next window |
-| `legion_sampler_totals_deferred` | gauge | — | readings of the pod's memory totals the sampler's own cap has deferred, a count that only rises |
-| `legion_sampler_walk_deferred` | gauge | — | walk passes the sampler's own cap has deferred, a count that only rises |
 
 All four sources of `legion_sampler_read_errors_total` are served from the first scrape, at zero, so a rate over one of them answers on a sampler that has never failed a read.
+
+### The deferral series, which an issue pod's sampler alone serves
+
+These three say what the cap on the sampler's own cost made it put off, and only an issue pod's sampler serves them:
+the cap is over what the sampler costs the pod it reads, and a node's sampler reads no pod of its own and defers nothing, so a node that served them would serve three numbers that are always zero.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `legion_sampler_smaps_deferred` | gauge | — | processes the `smaps` budget carried into the next window: a level, how many are waiting now |
+| `legion_sampler_totals_deferred` | counter | — | readings of the pod's memory totals the sampler's own cap has deferred, a count that only rises |
+| `legion_sampler_walk_deferred` | counter | — | walk passes the sampler's own cap has deferred, a count that only rises |
+
+The two counts carry no `_total` suffix, which the 0.0.4 text format does not require, because dispatch://INFRA-1208's spec gives these names and the dashboards of dispatch://INFRA-1141 pin them.
 
 The cap on what the sampler costs the pod it reads is 3% of one CPU over any minute, whether or not the pod's CPUs are saturated,
 over the whole of its own work and not over one pass of it.
@@ -186,7 +196,8 @@ Node mode: `build`, `test` and `other`.
 A node's sampler knows nothing of roles, so everything that is neither a build nor a test is `other`.
 
 A rule list decides `build` and `test` from a process's program and its arguments, and a process under a `build` or a `test` process takes that kind.
-The rules are in `packages/daemon/internal/sampler/rules.go`, and a deployment adds its own with the daemon configuration key `runtime.kubernetes.sampler_rules`.
+A rule answers one of `build`, `test` and `tool` and no other word: `agent` and `shared` are decided by where a process sits in the process tree, and `other` is node mode's answer for the work no rule named, which an issue pod has no word for.
+The rules are in `packages/daemon/internal/samplerwire/rules.go`, and a deployment adds its own with the daemon configuration key `runtime.kubernetes.sampler_rules`.
 
 An issue pod's sampler reads a process's command line on the second pass that finds it and not the first, since a build makes thousands of processes that are gone before the next pass and reading each one costs the pod more than the kind it would give:
 a process the sampler has not read a command line for carries the kind of its nearest ancestor that has one, and takes its own from the pass that reads it.

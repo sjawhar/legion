@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/sampler"
+	"github.com/sjawhar/legion/daemon/internal/samplerwire"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -110,16 +111,17 @@ func (s *samplerStub) await(count int) []samplerStart {
 	}
 }
 
-// samplerTestConfig is a pod's sampler as the daemon passes it: a port of its own, the pod's
-// project and issue, one volume and one rule of the deployment's.
+// samplerTestConfig is a pod's sampler as the daemon passes it: the pod's project and issue, one
+// volume and one rule of the deployment's. The port is no part of it — samplerwire.Port is the
+// one value that decides it — so what the command line below names is that constant.
 func samplerTestConfig() *SamplerConfig {
 	return &SamplerConfig{
-		Port: 9500, Project: "INFRA", Issue: "INFRA-1208",
-		Volumes: []sampler.Volume{
+		Project: "INFRA", Issue: "INFRA-1208",
+		Volumes: []samplerwire.Volume{
 			{Name: "workspace-tester", Paths: []string{"/home/legion/workspace"}, Medium: "disk", Role: "tester"},
 			{Name: "cache", Paths: []string{"/var/cache/legion"}, Medium: "memory"},
 		},
-		Rules: []sampler.Rule{{Program: "bun", Arguments: []string{"test"}, Kind: sampler.KindTest}},
+		Rules: []samplerwire.Rule{{Program: "bun", Arguments: []string{"test"}, Kind: samplerwire.KindTest}},
 	}
 }
 
@@ -131,13 +133,13 @@ func shortenSamplerInterval(t *testing.T) {
 }
 
 // readSamplerRoles is the roles file as the sampler reads it.
-func readSamplerRoles(t *testing.T, rolesDir string) sampler.Roles {
+func readSamplerRoles(t *testing.T, rolesDir string) samplerwire.Roles {
 	t.Helper()
 	raw, err := os.ReadFile(samplerRolesPath(rolesDir))
 	if err != nil {
 		t.Fatalf("the launcher wrote no roles file: %v", err)
 	}
-	var roles sampler.Roles
+	var roles samplerwire.Roles
 	if err := json.Unmarshal(raw, &roles); err != nil {
 		t.Fatalf("the roles file %q is no map of role to process id: %v", raw, err)
 	}
@@ -145,9 +147,9 @@ func readSamplerRoles(t *testing.T, rolesDir string) sampler.Roles {
 }
 
 // The launcher runs the pod's sampler as this binary's own command, with everything that pod's
-// series need and the launcher alone knows: the port the daemon chose, the pod's project and
-// issue, the two files the launcher writes, the deployment's own kind rules and the number of
-// times the sampler has been started again, which is none on the first start.
+// series need and the launcher alone knows: the one port the sampler is served on, the pod's
+// project and issue, the two files the launcher writes, the deployment's own kind rules and the
+// number of times the sampler has been started again, which is none on the first start.
 func TestTheLauncherStartsTheSamplerWithThePodsOwnFlags(t *testing.T) {
 	stub := stubSampler(t)
 	// The sampler lingers, so this is the one start, and the interval is never reached.
@@ -160,7 +162,7 @@ func TestTheLauncherStartsTheSamplerWithThePodsOwnFlags(t *testing.T) {
 	t.Cleanup(func() { cancel(); <-done })
 	want := []string{
 		"sampler",
-		"--listen", "0.0.0.0:9500",
+		"--listen", fmt.Sprintf("0.0.0.0:%d", samplerwire.Port),
 		"--project", "INFRA",
 		"--issue", "INFRA-1208",
 		"--roles-file", filepath.Join(rolesDir, SamplerDirName, samplerRolesName),
@@ -318,11 +320,11 @@ func TestTheVolumesFileIsWrittenOnceWithWhatTheConfigurationCarried(t *testing.T
 	if err != nil {
 		t.Fatalf("the launcher wrote no volumes file: %v", err)
 	}
-	var volumes []sampler.Volume
+	var volumes []samplerwire.Volume
 	if err := json.Unmarshal(raw, &volumes); err != nil {
 		t.Fatalf("the volumes file %q is no list of volumes: %v", raw, err)
 	}
-	if !slices.EqualFunc(volumes, cfg.Sampler.Volumes, func(got, want sampler.Volume) bool {
+	if !slices.EqualFunc(volumes, cfg.Sampler.Volumes, func(got, want samplerwire.Volume) bool {
 		return got.Name == want.Name && got.Medium == want.Medium && got.Role == want.Role && slices.Equal(got.Paths, want.Paths)
 	}) {
 		t.Fatalf("the volumes file holds %#v, want %#v", volumes, cfg.Sampler.Volumes)

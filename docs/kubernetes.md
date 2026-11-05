@@ -2597,11 +2597,12 @@ architect, planner, implementer, tester, reviewer, merger):
    2) is reported with that exit as it is.
 
 **The pod's resource sampler.**
-The `roles` container declares one port, `sampler`, numbered 9464, and its launcher runs `legion sampler` as a child of its own, started again whenever it exits.
+The `roles` container declares one port, `sampler`, numbered 9464, and its launcher runs `legion sampler` as a child of its own on that same port, started again whenever it exits.
+That number is one value in the code, `samplerwire.Port`, which the container's declared port and the launcher's command line both read, so no two of them can name different ports.
 The sampler serves the pod's CPU and memory at `GET /metrics` on that port, split by role and by the kind of work each process does, with each volume's used bytes and the pod's own totals;
 `docs/sampler-metrics.md` is the list of series, their labels and the rules behind them.
-The daemon hands the whole of it over on one flag, `--sampler <json>` (`samplerFlag`, `podkind.go`):
-the port, the `project` and `issue` every series carries, which are the pod's own `legion.dev/project` and `legion.dev/issue` label values, the volumes to measure — each volume the pod declares that the `roles` container mounts, with that container's own paths for it, the medium the pod spec declares (`memory` for a memory `emptyDir`, a Secret or a projected volume, `disk` for the rest) and the role its name names — and the deployment's own kind rules (`runtime.kubernetes.sampler_rules`).
+The daemon hands the rest of it over on one flag, `--sampler <json>` (`samplerFlag`, `podkind.go`):
+the `project` and `issue` every series carries, which are the pod's own `legion.dev/project` and `legion.dev/issue` label values, the volumes to measure — each volume the pod declares that the `roles` container mounts, with that container's own paths for it, the medium the pod spec declares (`memory` for a memory `emptyDir`, a Secret or a projected volume, `disk` for the rest) and the role that owns it, which is the role the pod builder named it for and never a `-<role>` suffix read back out of the name, so an operator's own `cache-tester` is charged to no role — and the deployment's own kind rules (`runtime.kubernetes.sampler_rules`).
 The launcher writes the sampler two files under `/var/run/legion/roles/sampler/`:
 `volumes.json`, the volume list above, written once before any role starts, and `roles.json`, each running role's generation's `role-init` process id, rewritten whenever one of them starts or ends.
 Both are under the roles directory, which every role's namespace covers, so no role can rewrite the map of process ids the sampler reads its roles from.
@@ -4802,11 +4803,12 @@ each issue's pod (every role of it alike) and the image probe's.
   Its README lists what an operator supplies and how `pod` and `provider_keys` compose.
 
 - **`runtime.kubernetes.sampler_rules`** adds this deployment's own rules to the resource sampler every issue pod runs ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), which decide what a process's CPU and memory are counted as.
-  Each entry is a `program`, an optional run of `arguments` that must follow it, and a `kind`, one of `build`, `test`, `tool` and `other`:
+  Each entry is a `program`, an optional run of `arguments` that must follow it, and a `kind`, one of `build`, `test` and `tool`:
   `{ program: cargo, arguments: [test], kind: test }` counts a `cargo test` and everything under it as test work.
+  Those three are the kinds a command line can tell on its own: `agent` and `shared` are decided by where a process sits in the process tree, and `other` is node mode's word for the work no rule named, which no issue pod serves.
   A pattern is one whole word matched literally, never a substring, a glob or a regular expression, and a program is named by its last path element alone;
   load refuses a rule that is written any other way, a kind no rule may answer, and the same program and arguments twice, naming the key and the rule.
-  The deployment's rules are tried before the sampler's built-in list (`packages/daemon/internal/sampler/rules.go`), so one of them overrides a built-in rule rather than waiting behind it.
+  The deployment's rules are tried before the sampler's built-in list (`packages/daemon/internal/samplerwire/rules.go`), so one of them overrides a built-in rule rather than waiting behind it.
   A file that sets no rule gets the built-in list alone.
   `docs/sampler-metrics.md` lists the kinds and the series they label.
 
