@@ -79,8 +79,19 @@ const (
 // The one refusal of Parse that stays a refusal of nothing here is markdown nested past
 // maxNesting or maxTypedNesting: the guard declines the opener, which is then the paragraph text
 // the browser's tokenizer reads it as, so there is no refusal left to answer.
+//
+// The text is read with line feeds alone (LineFeeds), as every write of caller text is, since a
+// text stored before that was true of a message or a comment still holds the carriage returns it
+// was sent with. CR LF and a lone carriage return each end a line for the browser's reader
+// (micromark's rule, proof-editor's typed-block-drawing.ts), so a read that ended a line at the
+// line feed alone showed a reader lines run together where that reader's browser draws them one
+// under the other: goldmark leaves the stray carriage return on the line, which is enough for a
+// directive opener to be refused, and leaves a lone carriage return inside a text node, which
+// HTML draws as no break at all. Normalizing here, above every split, is what keeps the whole
+// read - the parse, the fence lines it draws and the literal text it falls back to - seeing one
+// line ending.
 func ReadForDisplay(markdown string, mode DisplayMode) *Node {
-	doc := displayDocument(markdown)
+	doc := displayDocument(LineFeeds(markdown))
 	if mode == DisplayLatest {
 		StripServerOwnedAttrs(doc)
 	}
@@ -295,10 +306,22 @@ func displayParts(text string) []string {
 }
 
 // displayLiteral is text as one paragraph's inline content: each of its lines a text node, with a
-// hard break between them, so the paragraph shows the markdown exactly as it is written.
+// hard break between them, so the paragraph shows the markdown exactly as it is written. The text
+// reaches it with line feeds alone (ReadForDisplay), so a line ends here where it ends for the
+// browser's reader.
+//
+// The room is counted line by line rather than reckoned as twice their number, which is a
+// multiplication a reader of the allocation cannot see a bound on: the count is exact, and a sum
+// of a text's lines and its line breaks can no more overflow than the text itself can.
 func displayLiteral(text string) []*Node {
 	lines := strings.Split(text, "\n")
-	children := make([]*Node, 0, 2*len(lines)-1)
+	room := len(lines) - 1
+	for _, line := range lines {
+		if line != "" {
+			room++
+		}
+	}
+	children := make([]*Node, 0, room)
 	for index, line := range lines {
 		if index > 0 {
 			children = append(children, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
