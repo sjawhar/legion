@@ -1,4 +1,5 @@
-// Package notify publishes persisted workflow notices through the Envoy listener.
+// Package notify is the daemon's client for the Envoy listener: it publishes persisted workflow
+// notices through its publish route, and ends a session's registration through its session route.
 package notify
 
 import (
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -21,16 +23,50 @@ const requestTimeout = 10 * time.Second
 const refusalBodyLimit = 4096
 
 // ErrNoHolder is a role publish the listener refused because no live session holds the role: nobody
-// claimed it, or its holder's registration lapsed (writeRoleHolderError,
+// claimed it, or its holder's registration lapsed past the gone horizon (writeRoleHolderError,
 // packages/envoy/cmd/listener/api.go). Every listener release answers it, 404 with one of
 // roleHolderReasons. It is the ordinary state before a role's session claims it, not a broken
 // publish path, so a caller can hold what it published until one does.
 var ErrNoHolder = errors.New("no live session holds the role")
 
+// ErrHolderUnresponsive is a role publish the listener refused 404 `holder_lapsed` naming a holder
+// whose `holder_state` is `unresponsive`: its last registration is past the listener's live window
+// but still inside its gone horizon, so the session is not dead. It keeps its role claim and its
+// issue claims, nothing is released for it and no replacement is started, and a box under load is
+// the ordinary cause (dispatch://INFRA-392). The caller holds what it published and sends it
+// again rather than acting on a death: the session answers for itself once its heartbeats land.
+var ErrHolderUnresponsive = errors.New("the role's holder is unresponsive")
+
 // roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
 // (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
 // an older listener lacks — and never ErrNoHolder.
-var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
+var roleHolderReasons = []string{"unclaimed", ReasonHolderLapsed}
+
+// ReasonHolderLapsed is the listener's 404 reason for a role whose holder is past its live window,
+// and StateUnresponsive the `holder_state` it carries while that holder is inside the gone horizon
+// (writeRoleHolderError, packages/envoy/cmd/listener/api.go). A 404 that names no `holder_state` is
+// an older listener's, whose lapsed holder is no holder at all. They are declared here, with the
+// rest of the listener's wire words this daemon reads, so the publisher and the controller's
+// liveness probe read one copy of them.
+const (
+	ReasonHolderLapsed = "holder_lapsed"
+	StateUnresponsive  = "unresponsive"
+)
+
+// RoleRefusal is the body the listener writes when it refuses a role publish or a role lookup
+// (writeRoleHolderError and the publish route's refusals, packages/envoy/cmd/listener). Each
+// reader takes the members its own decision needs and ignores the rest; a listener of an earlier
+// release leaves some of them out, which decodes as their zero values.
+type RoleRefusal struct {
+	Error       string `json:"error"`
+	Reason      string `json:"reason"`
+	Holder      string `json:"holder"`
+	HolderState string `json:"holder_state"`
+	// LastSeen is the holder's last registration in unix milliseconds, absent when the listener
+	// can no longer name one.
+	LastSeen *int64 `json:"last_seen"`
+	EventID  string `json:"event_id"`
+}
 
 // The reasons of a role publish the listener answers 504 (ErrNotDelivered). ReasonReceiptTimeout
 // says the last forward reached the NATS server and the holder's session sent no receipt for it,
@@ -200,16 +236,13 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
 		refusal := fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
-		var answer struct {
-			Error   string `json:"error"`
-			Reason  string `json:"reason"`
-			Holder  string `json:"holder"`
-			EventID string `json:"event_id"`
-		}
+		var answer RoleRefusal
 		if json.Unmarshal(body, &answer) != nil {
 			return refusal
 		}
 		switch {
+		case response.StatusCode == http.StatusNotFound && answer.Reason == ReasonHolderLapsed && answer.HolderState == StateUnresponsive:
+			return fmt.Errorf("%w: %w", refusal, ErrHolderUnresponsive)
 		case response.StatusCode == http.StatusNotFound && slices.Contains(roleHolderReasons, answer.Reason):
 			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
 		case response.StatusCode == http.StatusGatewayTimeout && (answer.Reason == ReasonReceiptTimeout || answer.Reason == ReasonDeliveryFailed):
@@ -222,4 +255,65 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		return refusal
 	}
 	return nil
+}
+
+// SessionDeleted is what the listener did with a conditional clean stop: Deleted is false only
+// for a registration the listener kept because the condition the stop carried refused it, and
+// Reason is the listener's own words for why (deleteSessionResponse,
+// packages/envoy/cmd/listener/api.go). A listener of an earlier release, which judges no
+// condition and answers 200 with no body, deleted the registration and says nothing, which reads
+// as Deleted with an empty Reason.
+type SessionDeleted struct {
+	Deleted bool
+	Reason  string
+}
+
+// DeleteSession removes session's registration from the listener's registry (DELETE
+// /v1/sessions/<session>), the clean stop the daemon sends for a Legion role whose agent process
+// is gone. The listener then reads the session `gone` at once rather than at the end of its live
+// window, so the role claim it held is released and its issue claims are free without the wait a
+// stopped process would otherwise cost (dispatch://INFRA-392). A registry that holds no record
+// for the session answers 404: it is already gone, which is the outcome asked for, so that is no
+// failure.
+//
+// goneAt is the moment the stop belongs to — when the daemon's probe judged the agent process
+// gone — and rides as if_not_registered_after, the condition the listener deletes under: a
+// registration written after it belongs to the process that replaced the dead one, and the
+// listener keeps it and says so (SessionDeleted.Deleted false). Without that condition a stop
+// slow to land would take a live session's registration, which is the loss this clean stop
+// exists to prevent.
+func (p *HTTPPublisher) DeleteSession(ctx context.Context, session string, goneAt time.Time) (SessionDeleted, error) {
+	target := fmt.Sprintf("%s/v1/sessions/%s?if_not_registered_after=%d",
+		p.baseURL, url.PathEscape(session), goneAt.UnixMilli())
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, target, nil)
+	if err != nil {
+		return SessionDeleted{}, fmt.Errorf("build the session delete for %s: %w", session, err)
+	}
+	if p.token != "" {
+		request.Header.Set("Authorization", "Bearer "+p.token)
+	}
+	response, err := p.client.Do(request)
+	if err != nil {
+		return SessionDeleted{}, fmt.Errorf("delete session %s: %w", session, err)
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusOK:
+		// Only an answer that says whether it deleted is read as one: a 200 with no body at
+		// all is the unconditional delete of a listener that judges no condition, which
+		// removed the registration, and so is any other body this route never writes.
+		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
+		var kept struct {
+			Deleted *bool  `json:"deleted"`
+			Reason  string `json:"reason"`
+		}
+		if json.Unmarshal(body, &kept) == nil && kept.Deleted != nil {
+			return SessionDeleted{Deleted: *kept.Deleted, Reason: kept.Reason}, nil
+		}
+		return SessionDeleted{Deleted: true}, nil
+	case http.StatusNoContent, http.StatusNotFound:
+		return SessionDeleted{Deleted: true}, nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
+	return SessionDeleted{}, fmt.Errorf("delete session %s: listener returned %s: %s", session, response.Status, strings.TrimSpace(string(body)))
 }
