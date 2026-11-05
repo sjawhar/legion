@@ -733,13 +733,27 @@ func TestAReleasesMarkRecordsTheClaimsItsStopsSuspended(t *testing.T) {
 // by a wake that was over before it began.
 func TestAWakeTakenAfterTheMarkCancelsTheRelease(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		woken bool
-		want  ReleaseAct
-		cause ReleaseCause
+		name string
+		// woken is a wake of the architect taken after this release's mark; late holds this
+		// release's own pod_releases row back until after that wake, as the lane's order does,
+		// and unrecorded leaves it unwritten, as a failed record does.
+		woken      bool
+		late       bool
+		unrecorded bool
+		want       ReleaseAct
+		cause      ReleaseCause
 	}{
 		{name: "no wake since the mark", want: ReleaseActs},
 		{name: "a wake for a claim an earlier release left released", woken: true,
+			want: ReleaseCancel, cause: ReleaseCauseOvertaken},
+		// The lane records a release's own row last, after the roles are stopped and the Sandbox
+		// suspended, and a write that fails is only logged. So a wake between the stop and that
+		// row, and a wake of a release whose row the lane never wrote, reach a record where the
+		// newest release is the one before this one - the shape that refused every wake of a role
+		// the previous release had woken.
+		{name: "a wake before the release's own row is recorded", woken: true, late: true,
+			want: ReleaseCancel, cause: ReleaseCauseOvertaken},
+		{name: "a wake of a release whose record the lane never wrote", woken: true, unrecorded: true,
 			want: ReleaseCancel, cause: ReleaseCauseOvertaken},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -759,7 +773,9 @@ func TestAWakeTakenAfterTheMarkCancelsTheRelease(t *testing.T) {
 			}
 
 			first, boundary, last := releaseThroughTheStore(t, st)
-			recordRelease(t, st, at)
+			if !tc.late && !tc.unrecorded {
+				recordRelease(t, st, at)
+			}
 			if err := st.ReleaseSuspendedClaim(ctx, "legion", rootIssue, claim.RoleImplementer, boundary); err != nil {
 				t.Fatalf("record the implementer's suspension: %v", err)
 			}
@@ -768,6 +784,9 @@ func TestAWakeTakenAfterTheMarkCancelsTheRelease(t *testing.T) {
 					pods.WakeDelivery, "row-7", at); err != nil || !taken {
 					t.Fatalf("take the wake after the mark = %t, %v; want it taken", taken, err)
 				}
+			}
+			if tc.late {
+				recordRelease(t, st, at)
 			}
 
 			stop, err := st.IssueReleaseStop(ctx, "legion", rootIssue, boundary)
