@@ -724,6 +724,8 @@ export interface ArtifactReview {
   readonly ask_id: string | null;
   readonly kind?: ArtifactReviewKind;
   readonly created_at: string;
+  readonly content_sha256: string | null;
+  readonly content_sha256_source: "insert" | "backfill" | null;
 }
 
 /** The document's approval as of its latest version: `draft` has never been reviewed or
@@ -747,6 +749,8 @@ export interface ArtifactApproval {
   readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
+  readonly content_sha256?: string;
+  readonly content_sha256_source?: "insert" | "backfill";
   readonly requested_by?: Actor;
   /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
    *  version moved it past the one its agent last handed to the human, or a reply left it with the
@@ -958,6 +962,7 @@ export interface Version {
    *  Absent on a document version from a server that predates it. */
   readonly size?: number;
   readonly mime?: string;
+  /** The stored bytes' hash; present on a document version read as well as a file version. */
   readonly sha256?: string;
 }
 
@@ -2576,6 +2581,8 @@ export interface ArtifactReviewEventPayload {
   readonly actor: Actor;
   readonly reason: string | null;
   readonly ask_id: string | null;
+  readonly content_sha256?: string;
+  readonly content_sha256_source?: "insert" | "backfill";
 }
 
 /** Whether a recorded result still speaks for the work as it stands: `current` at the commit the
@@ -3704,6 +3711,8 @@ export const ArtifactReviewEventPayloadSchema = z.object({
   actor: z.object({ kind: z.string(), id: z.string() }).passthrough().optional(),
   reason: z.string().nullish(),
   ask_id: z.string().nullish(),
+  content_sha256: z.string().optional(),
+  content_sha256_source: z.enum(["insert", "backfill"]).optional(),
 });
 
 const askEventPayloadFields = {

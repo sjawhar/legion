@@ -3,6 +3,13 @@
 This file is history: every entry after the last section below stays as a fragment file under
 `.changes/unreleased/`, since this package has no release of its own to carry it.
 
+## [main@f06073fb9ef4] - 2026-11-05
+
+### Changed
+
+- The worker's MCP server declares daemon API contract 49, which adds each issue's tree memory
+  draw to the state.
+
 ## [main@804d3695e12e] - 2026-11-05
 
 ### Added

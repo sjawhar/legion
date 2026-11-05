@@ -6,6 +6,17 @@ releases, one per `pi-legion-v*` tag.
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.9.0] - 2026-11-05
+
+### Changed
+
+- The plugin declares daemon API contract 49, which adds each issue's tree memory draw to the
+  state. A daemon below 49 is refused by the boot gate, as it is for every contract change.
+
+### Fixed
+
+- A pod whose plugin is one daemon contract behind no longer loses every `legion` tool call to one field the daemon added: the reader this plugin bundles ignores a key it does not name. Every worker and architect is also told, beside the update task it already reads, not to retry a `legion` call its plugin refused because the daemon's answer is not the shape it reads: it pushes what it wants kept and ends the turn, and a turn answering an update task still calls `ready_for_update` with the round the task named, when its tool has that operation, before it ends.
+
 ## [18.8.0] - 2026-11-05
 
 ### Changed

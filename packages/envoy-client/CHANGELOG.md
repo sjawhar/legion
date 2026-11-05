@@ -3,6 +3,12 @@
 This file is history: every entry after the last section below stays as a fragment file under
 `.changes/unreleased/`, since this package has no release of its own to carry it.
 
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- Document reads print the version's content SHA-256 and the approval's pinned hash. Approvals hashed after they were recorded are labeled as such; older servers keep the existing output when they do not report hashes.
+
 ## [main@804d3695e12e] - 2026-11-05
 
 ### Added

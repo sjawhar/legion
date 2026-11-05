@@ -36336,7 +36336,9 @@ var ArtifactReviewEventPayloadSchema = object({
   version: number2().int().optional(),
   actor: object({ kind: string2(), id: string2() }).passthrough().optional(),
   reason: string2().nullish(),
-  ask_id: string2().nullish()
+  ask_id: string2().nullish(),
+  content_sha256: string2().optional(),
+  content_sha256_source: _enum2(["insert", "backfill"]).optional()
 });
 var askEventPayloadFields = {
   id: string2().optional(),
@@ -47935,17 +47937,18 @@ function approvalLine(artifact) {
   const approval = artifact.approval;
   if (approval === undefined || approval.state === "draft")
     return;
+  const content = approval.content_sha256 === undefined ? "" : `, content sha256:${approval.content_sha256}${approval.content_sha256_source === "backfill" ? " (hashed after approval)" : ""}`;
   switch (approval.state) {
     case "awaiting": {
       const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
       return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
     }
     case "approved":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}${content}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}${content}`;
     case "changes_requested":
-      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
+      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}${content}`;
   }
 }
 function componentsLine(components) {
@@ -49662,6 +49665,7 @@ Document token: ${listed.token}`,
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
+        ..."sha256" in document && document.sha256 !== undefined ? [`Content: sha256:${document.sha256}`] : [],
         ...approval === undefined ? [] : [approval]
       ];
       return {
@@ -50992,17 +50996,17 @@ var LEGION_CLAIM_STATES = [
   "retired"
 ];
 var legionLocator = discriminatedUnion("runtime", [
-  strictObject({
+  object({
     runtime: literal("tmux"),
     claim: nonEmptyString,
     incarnation: nonEmptyString,
-    tmux: strictObject({ window: nonEmptyString, pane: nonEmptyString })
+    tmux: object({ window: nonEmptyString, pane: nonEmptyString })
   }),
-  strictObject({
+  object({
     runtime: literal("sandbox"),
     claim: nonEmptyString,
     incarnation: nonEmptyString,
-    sandbox: strictObject({
+    sandbox: object({
       namespace: nonEmptyString,
       name: nonEmptyString,
       podUid: nonEmptyString,
@@ -51011,13 +51015,13 @@ var legionLocator = discriminatedUnion("runtime", [
     })
   })
 ]);
-var legionCapabilityReportView = strictObject({
+var legionCapabilityReportView = object({
   measuredAt: timestamp,
   incarnation: string2(),
   ok: array(nonEmptyString),
-  open: array(strictObject({ name: nonEmptyString, detail: nonEmptyString }))
+  open: array(object({ name: nonEmptyString, detail: nonEmptyString }))
 });
-var legionClaimView = strictObject({
+var legionClaimView = object({
   session: string2(),
   state: _enum2(LEGION_CLAIM_STATES),
   locator: legionLocator.optional(),
@@ -51026,17 +51030,17 @@ var legionClaimView = strictObject({
   updateRound: nonEmptyString.optional(),
   updateHead: nonEmptyString.optional()
 });
-var legionHandoffRecordView = strictObject({
+var legionHandoffRecordView = object({
   id: nonEmptyString,
   version: number2().int().positive()
 });
-var legionPhaseView = strictObject({
+var legionPhaseView = object({
   claim: legionClaimView,
   handoffCommit: nonEmptyString.optional(),
   handoffRecord: legionHandoffRecordView.optional(),
   rounds: number2().int().nonnegative()
 });
-var legionPullRequestView = strictObject({
+var legionPullRequestView = object({
   repo: nonEmptyString,
   number: number2().int().positive(),
   head: nonEmptyString,
@@ -51045,22 +51049,22 @@ var legionPullRequestView = strictObject({
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: number2().int().nonnegative()
 });
-var legionGateView = strictObject({
+var legionGateView = object({
   artifactId: nonEmptyString,
   currentVersion: number2().int().positive(),
   approvedVersion: number2().int().positive().nullable()
 });
-var legionSlotView = strictObject({
+var legionSlotView = object({
   index: number2().int().nonnegative(),
   admittedAt: timestamp,
   lentTo: issueKey.optional()
 });
-var legionCheckWakeView = strictObject({
+var legionCheckWakeView = object({
   kind: nonEmptyString,
   detail: string2(),
   at: timestamp
 });
-var legionCheckView = strictObject({
+var legionCheckView = object({
   repo: nonEmptyString,
   pullRequest: number2().int().positive(),
   mergeCommit: string2(),
@@ -51087,8 +51091,8 @@ var legionWaitTimes = {
   answeredBy: _enum2(LEGION_WAIT_ANSWERS).optional()
 };
 var legionWaitingOn = discriminatedUnion("kind", [
-  strictObject({ kind: literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
-  strictObject({
+  object({ kind: literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
+  object({
     kind: literal("gate"),
     gateVersion: number2().int().positive(),
     artifactId: nonEmptyString,
@@ -51097,26 +51101,26 @@ var legionWaitingOn = discriminatedUnion("kind", [
 ]).refine((wait) => wait.answeredAt === undefined === (wait.answeredBy === undefined), {
   message: "answeredAt and answeredBy appear together"
 });
-var legionPendingStatusWrite = strictObject({
+var legionPendingStatusWrite = object({
   issue: nonEmptyString,
   payload: record(string2(), unknown()),
   attempts: number2().int().nonnegative(),
   nextAt: timestamp,
   lastError: string2().optional()
 });
-var legionStrandedClaim = strictObject({
+var legionStrandedClaim = object({
   issue: issueKey,
   role: _enum2(LEGION_ROLES),
   state: _enum2(["suspended", "failed"])
 });
-var legionHeldOutboxRow = strictObject({
+var legionHeldOutboxRow = object({
   id: number2().int().positive(),
   kind: nonEmptyString,
   issue: nonEmptyString,
   waitedSeconds: number2().int().nonnegative(),
   waitsOn: number2().int().positive()
 });
-var legionIssue = strictObject({
+var legionIssue = object({
   key: nonEmptyString,
   generation: number2().int().nonnegative(),
   phase: _enum2(LEGION_PHASES),
@@ -51125,42 +51129,45 @@ var legionIssue = strictObject({
   defaultBranch: nonEmptyString.optional(),
   holdReason: literal("escalated").optional(),
   architect: legionClaimView.optional(),
-  workers: partialRecord(_enum2(LEGION_ROLES), legionPhaseView),
+  workers: partialRecord(string2(), legionPhaseView),
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   slot: legionSlotView.optional(),
   waitingOn: legionWaitingOn.optional(),
-  check: legionCheckView.optional()
+  check: legionCheckView.optional(),
+  memoryGroup: _enum2(["memory", "none"]).optional(),
+  memoryDrawMode: _enum2(["off", "on", "random"]).optional(),
+  memoryDrawnAt: timestamp.optional()
 });
-var daemonInfo = strictObject({
+var daemonInfo = object({
   project: nonEmptyString,
   schemaVersion: number2().int().nonnegative(),
   boots: number2().int().nonnegative(),
   firstBootAt: timestamp,
   startedAt: timestamp
 });
-var legionBlockedIssue = strictObject({
+var legionBlockedIssue = object({
   issue: issueKey,
   blockedBy: array(issueKey)
 });
-var legionAdmission = strictObject({
+var legionAdmission = object({
   cap: number2().int().nonnegative(),
   active: array(nonEmptyString),
   waiting: array(nonEmptyString),
   blocked: array(legionBlockedIssue),
   free: number2().int().nonnegative().optional()
 });
-var legionControllerLocator = strictObject({
+var legionControllerLocator = object({
   runtime: _enum2(["tmux", "kubernetes"]),
   external: literal(true),
   sessionId: nonEmptyString,
   registeredAt: timestamp,
   pluginContract: number2().int().nonnegative()
 });
-var legionAgentSecretsLoginView = strictObject({
+var legionAgentSecretsLoginView = object({
   state: string2()
 });
-var legionCapabilityState = strictObject({
+var legionCapabilityState = object({
   name: nonEmptyString,
   status: _enum2(["present", "unchecked", "withheld", "decided", "open"]),
   detail: nonEmptyString,
@@ -51172,7 +51179,7 @@ var legionSettings = looseObject({
   max_fix_attempts: number2().int().positive(),
   worker_boot_timeout_seconds: number2().int().positive()
 });
-var legionCacheView = strictObject({
+var legionCacheView = object({
   repo: nonEmptyString,
   sandbox: nonEmptyString,
   state: _enum2(["starting", "cloning", "ready", "failing", "refused"]),
@@ -51185,18 +51192,18 @@ var legionCacheView = strictObject({
   healthError: nonEmptyString.optional(),
   retainedUntil: timestamp.optional()
 });
-var legionRepositories = strictObject({
+var legionRepositories = object({
   owners: array(nonEmptyString),
-  mapped: array(strictObject({
+  mapped: array(object({
     repo: nonEmptyString,
     default: boolean2(),
     cache: legionCacheView.optional()
   })),
-  refused: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
-  withoutWebhookApp: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  refused: array(object({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: array(object({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: array(legionCacheView)
 });
-var legionConsumerLag = strictObject({
+var legionConsumerLag = object({
   name: nonEmptyString,
   waiting: number2().int().nonnegative(),
   oldestAt: timestamp.nullable(),
@@ -51205,7 +51212,7 @@ var legionConsumerLag = strictObject({
   stalled: boolean2(),
   unavailable: nonEmptyString.optional()
 });
-var LegionStateResponse = strictObject({
+var LegionStateResponse = object({
   daemon: daemonInfo,
   admission: legionAdmission,
   issues: record(string2(), legionIssue),
@@ -51219,7 +51226,7 @@ var LegionStateResponse = strictObject({
   settings: legionSettings,
   consumers: array(legionConsumerLag)
 });
-var LegionRegisterResponse = strictObject({
+var LegionRegisterResponse = object({
   claimToken: nonEmptyString,
   tree: nonEmptyString,
   issue: nonEmptyString,
@@ -51259,7 +51266,7 @@ var LegionActivityRequest = strictObject({
   secret: nonEmptyString,
   activity: LegionSessionActivity
 });
-var legionReleaseRecord = strictObject({
+var legionReleaseRecord = object({
   id: number2().int().positive(),
   issue: issueKey,
   generation: number2().int().nonnegative(),
@@ -51267,7 +51274,7 @@ var legionReleaseRecord = strictObject({
   at: timestamp,
   bundleBytes: number2().int().nonnegative()
 });
-var legionResumeRecord = strictObject({
+var legionResumeRecord = object({
   id: number2().int().positive(),
   release: number2().int().nonnegative(),
   issue: issueKey,
@@ -51278,7 +51285,7 @@ var legionResumeRecord = strictObject({
   firstTurnAt: timestamp.optional(),
   stuck: boolean2()
 });
-var legionHoldRecord = strictObject({
+var legionHoldRecord = object({
   id: number2().int().positive(),
   issue: issueKey,
   reason: nonEmptyString,
@@ -51292,23 +51299,23 @@ var LegionReleaseRecordsRequest = strictObject({
   secret: nonEmptyString,
   since: timestamp
 });
-var LegionReleaseRecordsResponse = strictObject({
+var LegionReleaseRecordsResponse = object({
   releases: array(legionReleaseRecord),
   resumes: array(legionResumeRecord),
   holds: array(legionHoldRecord)
 });
-var LegionControllerRegisterResponse = strictObject({
+var LegionControllerRegisterResponse = object({
   claimToken: nonEmptyString,
   role: literal("controller"),
   generation: number2().int().positive(),
   secret: nonEmptyString
 });
-var LegionControllerSecretResponse = strictObject({
+var LegionControllerSecretResponse = object({
   secret: nonEmptyString,
   designGate: _enum2(["root-issues", "off"])
 });
-var LegionControllerCredentialResponse = strictObject({
-  owners: record(nonEmptyString, strictObject({
+var LegionControllerCredentialResponse = object({
+  owners: record(nonEmptyString, object({
     hosts: nonEmptyString,
     config: nonEmptyString
   })),
@@ -51316,11 +51323,11 @@ var LegionControllerCredentialResponse = strictObject({
   app: _enum2(["implement", "review"]),
   expiresAt: timestamp
 });
-var LegionErrorResponse = union([
-  strictObject({ error: nonEmptyString }),
-  strictObject({ code: nonEmptyString, error: nonEmptyString })
-]);
-var legionDeliveryView = strictObject({
+var LegionErrorResponse = object({
+  error: nonEmptyString,
+  code: nonEmptyString.optional()
+});
+var legionDeliveryView = object({
   id: nonEmptyString,
   task: nonEmptyString,
   phase: _enum2(LEGION_WORKFLOW_PHASES).optional(),
@@ -51329,7 +51336,7 @@ var legionDeliveryView = strictObject({
   confirmedAt: timestamp.optional(),
   interrupted: literal(true).optional()
 });
-var LegionOperatorClaimResponse = strictObject({
+var LegionOperatorClaimResponse = object({
   token: nonEmptyString,
   tree: nonEmptyString,
   issue: nonEmptyString,
@@ -51341,7 +51348,7 @@ var LegionOperatorClaimResponse = strictObject({
   forgottenSession: nonEmptyString.optional(),
   forgottenSessionFile: nonEmptyString.optional(),
   locator: legionLocator.optional(),
-  budgets: strictObject({
+  budgets: object({
     launchFailures: number2().int().nonnegative(),
     deaths: number2().int().nonnegative(),
     promptFailures: number2().int().nonnegative(),
@@ -51355,18 +51362,27 @@ var LegionOperatorClaimResponse = strictObject({
   updateRound: nonEmptyString.optional(),
   updateHead: nonEmptyString.optional()
 });
-var LegionOperatorClaimsResponse = strictObject({
-  claims: array(LegionOperatorClaimResponse)
+var legionPodUpdateRounds = object({
+  swept: boolean2(),
+  max_open_rounds: number2().int().nullable(),
+  rounds_per_minute: number2().int().nullable(),
+  in_round: array(nonEmptyString),
+  waiting_on_max_open_rounds: array(nonEmptyString),
+  waiting_on_rounds_per_minute: array(nonEmptyString)
 });
-var LegionGrantResponse = strictObject({
+var LegionOperatorClaimsResponse = object({
+  claims: array(LegionOperatorClaimResponse),
+  pod_update_rounds: legionPodUpdateRounds
+});
+var LegionGrantResponse = object({
   grantId: nonEmptyString,
   expiresAt: timestamp
 });
-var LegionEmptyResponse = strictObject({});
-var LegionHandoffCompleteResponse = strictObject({
+var LegionEmptyResponse = object({});
+var LegionHandoffCompleteResponse = object({
   note: nonEmptyString.optional()
 });
-var LegionWaveReleaseResponse = strictObject({
+var LegionWaveReleaseResponse = object({
   released: array(nonEmptyString),
   started: array(issueKey),
   held: array(legionBlockedIssue)
@@ -51560,7 +51576,7 @@ async function retryWhileDaemonRestarts(label, call, options = {}) {
     }
   }
 }
-function parseStrictly(schema, body) {
+function parseBody(schema, body) {
   let json;
   try {
     json = JSON.parse(body);
@@ -51588,16 +51604,15 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     const text = await response.text();
     if (response.ok)
       return { status: response.status, text };
-    const refusal = parseStrictly(LegionErrorResponse, text);
+    const refusal = parseBody(LegionErrorResponse, text);
     if ("value" in refusal) {
-      const code = "code" in refusal.value && typeof refusal.value.code === "string" ? refusal.value.code : undefined;
-      throw new LegionDaemonApiError(method, path, response.status, code, refusal.value.error);
+      throw new LegionDaemonApiError(method, path, response.status, refusal.value.code, refusal.value.error);
     }
     throw new LegionDaemonApiError(method, path, response.status, undefined, `${JSON.stringify(text)} is not the daemon's refusal shape (${refusal.problem})`);
   };
   const read = async (method, path, schema, body, signal) => {
     const { status, text } = await call(method, path, body, signal);
-    const parsed = parseStrictly(schema, text);
+    const parsed = parseBody(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
     }
@@ -54130,7 +54145,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 48
+  daemonApiVersion: 49
 };
 
 // src/channel-forwarder.ts
