@@ -109,7 +109,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
-	if err := refuseAgentDecisionChanges(ctx, tx, artifactID, actor, tree); err != nil {
+	prior, err := decisionPriorTree(latest.markdown, tree)
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("read rebuild's prior version for decision guards: %w", err)
+	}
+	if err := refuseAgentDecisionChanges(ctx, tx, artifactID, actor, tree, prior); err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
 	// A closed issue's document shows its asks as the close left them, and the tree read from the
@@ -140,15 +144,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		if err := weighRendering("", canonical); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
-		// Supplied markdown is a caller's write, so a block pointer it introduces over the
-		// latest version is checked. That version is read back only when the schema declares a
-		// pointer attribute; one that does not read back holds no pointer.
-		var prior *pmdoc.Node
-		if pmdoc.HasLinkKinds() {
-			if latestTree, err := pmdoc.ParseRendering(latest.markdown); err == nil {
-				prior = latestTree
-			}
-		}
+		// Supplied markdown checks introduced pointers against the latest immutable version.
 		if err := refuseBlockPointers(ctx, tx, artifactID, tree, prior, offsets); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
@@ -188,9 +184,10 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, err
 	}
 	written, err := s.writeVersionTx(ctx, tx, artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor, &versionWrite{
-		authors:       actorSlice(capture.authors),
-		capture:       &capture,
-		priorMarkdown: latest.markdown,
+		authors:        actorSlice(capture.authors),
+		capture:        &capture,
+		priorMarkdown:  latest.markdown,
+		decisionClaims: introducedDecisionClaims(tree, prior),
 	})
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err

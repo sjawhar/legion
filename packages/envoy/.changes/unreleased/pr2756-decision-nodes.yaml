@@ -1,5 +1,5 @@
 kind: Changed
-body: Read Decisions from native decision and ask nodes, preserve answered asks, and convert separate decision documents with stable links and an independent section-and-Keep comparison. Converted sources retain their names, slugs and content for legacy reads and uploads until cutover. Check personal attribution against the signed-in writer or the authoritative answer row before indexing any version, including browser edits. Limit from to document asks and from_ask to asks of the same issue or an ancestor.
+body: Read Decisions from native decision and ask nodes, preserve answered asks, and convert separate decision documents with stable links and an independent section-and-Keep comparison. Converted sources retain their names, slugs and content for legacy reads and uploads until cutover. Validate introduced personal attribution against its signed-in writer, not the latest editor, and allow other writers to preserve it. Check answered attribution against its authoritative row on every version path, including unchanged uploads. Limit from to document asks and from_ask to asks of the same issue or an ancestor. Refuse invalid browser pointers without failing their room, so later valid edits can settle.
 time: 2026-11-04T10:40:00Z
 custom:
   Issue: pr2756

@@ -51,6 +51,12 @@ type roomState struct {
 	askBlocks         map[string]struct{}
 	askAuthors        map[string]model.Actor
 	pendingAskAuthors map[string]model.Actor
+	// decisionClaims records whether the update introducing each current person pointer was
+	// authorized. A later editor cannot authorize an earlier browser's claim.
+	decisionClaims map[string]decisionClaim
+	// decisionOrigins pins the writer until a peer update's synchronous observers finish.
+	// Ambiguous updates stay unauthenticated if a peer disconnects before their drain.
+	decisionOrigins map[any]*model.Actor
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
 	// connected peer of a browser edit. A version lists its authors, so a settlement that runs
 	// after an edit's own version was committed would otherwise attribute the block asks it

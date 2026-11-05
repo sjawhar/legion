@@ -34,6 +34,7 @@ type versionWrite struct {
 	capture          *authorCapture
 	docUpdateVersion *int64
 	priorMarkdown    string
+	decisionClaims   map[string]string
 }
 
 // mergeInto copies src into *dst, allocating *dst if it is nil and src holds anything; a nil or
@@ -371,10 +372,11 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		return err
 	}
 	if contentChanged {
-		if err := refuseAgentDecisionChanges(ctx, op.tx, artifactID, actor, tree.Node()); err != nil {
+		if err := refuseAgentDecisionChanges(ctx, op.tx, artifactID, actor, tree.Node(), weighedFrom); err != nil {
 			return err
 		}
 	}
+	introducedClaims := introducedDecisionClaims(tree.Node(), weighedFrom)
 	// The tree before the write has served every use it has, so it is let go before the record's
 	// decode check (LEGION-504).
 	before, weighedFrom = pmdoc.ValidDocument{}, nil
@@ -390,6 +392,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err := s.recordLiveOperation(ctx, &op, actor, renderedTree{tree: tree.Node(), markdown: markdown, offsets: offsets}, contentChanged, rendering, weak.Pointer[crdt.Doc]{}); err != nil {
 		return err
 	}
+	mergeInto(&op.write.decisionClaims, introducedClaims)
 	// A server lifecycle write (withLifecycleWrite) is no edit of the document: it credits no
 	// pending author and leaves the document's latest edit source as it was.
 	if contentChanged && !isLifecycleWrite(ctx) {
@@ -549,7 +552,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err := weighRendering("", canonical); err != nil {
 		return "", err
 	}
-	if err := refuseDecisionPersonClaim(tree, actor); err != nil {
+	if err := refuseDecisionPersonClaim(tree, nil, actor); err != nil {
 		return "", err
 	}
 	// A new document holds no pointer before this write, so every pointer it seeds is checked.
@@ -579,7 +582,8 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 // ReplaceText replaces the entire live document tree so connected clients
 // receive document uploads as a regular server-side transaction.
 func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
-	if _, joined := txFromContext(ctx); !joined {
+	tx, joined := txFromContext(ctx)
+	if !joined {
 		return "", errUnjoined
 	}
 	anchors, err := s.openAnchoredMarks(ctx, s.queryFrom(ctx), artifactID)
@@ -629,7 +633,28 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		} else if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
-		if canonical, err = renderTree(target); err != nil {
+		var offsets []pmdoc.BlockOffset
+		if canonical, offsets, err = renderTreeWithOffsets(target); err != nil {
+			return err
+		}
+		latest, err := latestVersion(ctx, tx, artifactID)
+		if err != nil {
+			return err
+		}
+		prior, err := decisionPriorTree(latest.markdown, target)
+		if err != nil {
+			return fmt.Errorf("read upload's prior version for decision guards: %w", err)
+		}
+		if err := refuseDecisionPersonClaim(target, current, actor); err != nil {
+			return err
+		}
+		if err := s.refuseVersionDecisionClaims(ctx, artifactID, target, prior, introducedDecisionClaims(target, current)); err != nil {
+			return err
+		}
+		if err := refuseUnbackedAnsweredAttribution(ctx, tx, artifactID, target); err != nil {
+			return err
+		}
+		if err := refuseBlockPointers(ctx, tx, artifactID, target, prior, offsets); err != nil {
 			return err
 		}
 		if !repairing && currentMarkdown == canonical {
@@ -2008,15 +2033,17 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	if write == nil {
 		return versionWriteResult{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
 	}
-	// Request guards run before their live fork is persisted. This final guard also covers
-	// browser settlement and standalone snapshots, whose rendered tree can include newer edits.
-	if err := refuseDecisionPersonClaim(tree, actor); err != nil {
+	// Immutable versions check the pointer's introducer, not the room's latest editor.
+	prior, err := decisionPriorTree(write.priorMarkdown, tree)
+	if err != nil {
+		return versionWriteResult{}, fmt.Errorf("read prior version for decision guards: %w", err)
+	}
+	if err := s.refuseVersionDecisionClaims(ctx, artifactID, tree, prior, write.decisionClaims); err != nil {
 		return versionWriteResult{}, err
 	}
 	if err := refuseUnbackedAnsweredAttribution(ctx, tx, artifactID, tree); err != nil {
 		return versionWriteResult{}, err
 	}
-	prior, _ := pmdoc.ParseRendering(write.priorMarkdown)
 	if err := refuseBlockPointers(ctx, tx, artifactID, tree, prior, rendered.offsets); err != nil {
 		return versionWriteResult{}, err
 	}

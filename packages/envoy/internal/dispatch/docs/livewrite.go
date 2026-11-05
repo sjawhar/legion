@@ -163,6 +163,8 @@ type liveWrite struct {
 	addedAskBlockIDs   map[string]struct{}
 	renamedAskBlockIDs map[string]struct{}
 	carriedAskAuthors  map[string]model.Actor
+	// decisionClaims are the introduced person pointers validated by this transaction.
+	decisionClaims map[string]string
 	// loss records what this write's latest batch of operations inserted, so a merge with the
 	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
 	// of the same transaction that inserts nothing an operation claims - an accept's margin

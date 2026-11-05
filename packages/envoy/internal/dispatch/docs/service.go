@@ -1404,8 +1404,15 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// stoppedShort is the outcome of a settlement that stopped short with err having written
 	// nothing into the room: a retry, unless parent has ended or Shutdown refused the write.
 	stoppedShort := func(err error) settleOutcome {
+		var attribution *ErrDecisionAttribution
 		next := settleRetry
 		switch {
+		case errors.Is(err, pmdoc.ErrBlockPointer):
+			// Invalid browser content is a write refusal, not a room failure. A later edit
+			// or target change may make it valid; repeated retries cannot repair it.
+			next = settleEnded
+		case errors.As(err, &attribution):
+			next = settleEnded
 		case parent.Err() != nil:
 			next = settleOutOfBudget
 		case s.shuttingDown(room) && errors.Is(err, ErrServiceUnavailable):
@@ -1573,6 +1580,24 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	beforeMarkdown, beforeOffsets, beforeRenderErr := renderTreeWithOffsets(read)
 	if s.afterSettleRead != nil {
 		s.afterSettleRead(room)
+	}
+	// Check pointer policy before stamping ids or repairing asks in the shared room. A policy
+	// refusal must not turn those server writes into a failed room and discard the live edit.
+	if beforeRenderErr == nil && len(pmdoc.BlockPointers(read)) > 0 {
+		latest, err := latestVersion(ctx, tx, room)
+		if err != nil {
+			return stoppedShort(err)
+		}
+		prior, err := decisionPriorTree(latest.markdown, read)
+		if err != nil {
+			return stoppedShort(err)
+		}
+		if err := s.refuseVersionDecisionClaims(ctx, room, read, prior, nil); err != nil {
+			return stoppedShort(err)
+		}
+		if err := refuseBlockPointers(ctx, tx, room, read, prior, beforeOffsets); err != nil {
+			return stoppedShort(err)
+		}
 	}
 
 	// slots holds a suppression slot for each update this settlement writes into the room, in the

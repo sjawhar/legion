@@ -30,7 +30,7 @@ func (e *ErrDecisionAttribution) Error() string {
 	return fmt.Sprintf("block %q has unauthorized attribution to %q. Decisions may name only their writing person. Answered asks must match their authoritative rows", e.BlockID, e.Decider)
 }
 
-func refuseDecisionPersonClaim(target *pmdoc.Node, actor model.Actor) error {
+func refuseDecisionPersonClaim(target, prior *pmdoc.Node, actor model.Actor) error {
 	// A settlement without one credited writer represents no person's authority.
 	if actor.Kind == "system" && actor.ID != SettlementActor.ID {
 		return nil
@@ -39,12 +39,13 @@ func refuseDecisionPersonClaim(target *pmdoc.Node, actor model.Actor) error {
 	if actor.Kind == "user" && actor.Act == nil {
 		login = model.CanonicalLogin(actor.ID)
 	}
+	held := decisionPersonClaims(prior)
 	var attribution *ErrDecisionAttribution
 	pmdoc.Walk(target, func(node *pmdoc.Node) bool {
 		if node.Type == "decision" {
 			decider, _ := node.Attrs["decided_by"].(string)
-			if decider != "" && decider != login {
-				block, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			block, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			if decider != "" && decider != held[block] && model.CanonicalLogin(decider) != login {
 				attribution = &ErrDecisionAttribution{BlockID: block, Decider: decider}
 			}
 		}
@@ -119,8 +120,8 @@ func refuseUnbackedAnsweredAttribution(ctx context.Context, tx pgx.Tx, artifactI
 	return rows.Err()
 }
 
-func refuseAgentDecisionChanges(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor, target *pmdoc.Node) error {
-	if err := refuseDecisionPersonClaim(target, actor); err != nil {
+func refuseAgentDecisionChanges(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor, target, prior *pmdoc.Node) error {
+	if err := refuseDecisionPersonClaim(target, prior, actor); err != nil {
 		return err
 	}
 	if actor.Kind == "system" || actor.Kind == "user" && actor.Act == nil {
@@ -146,4 +147,109 @@ func refuseAgentDecisionChanges(ctx context.Context, tx pgx.Tx, artifactID strin
 		}
 	}
 	return rows.Err()
+}
+
+// decisionPersonClaims retains only the person pointers, not the rest of a live tree.
+func decisionPersonClaims(tree *pmdoc.Node) map[string]string {
+	var claims map[string]string
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type == "decision" {
+			if decider, _ := node.Attrs["decided_by"].(string); decider != "" {
+				if claims == nil {
+					claims = make(map[string]string)
+				}
+				block, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+				claims[block] = decider
+			}
+		}
+		return true
+	})
+	return claims
+}
+
+type decisionClaim struct {
+	person     string
+	authorized bool
+}
+
+// A browser claim is authorized by the update that introduced its value, never by a later
+// editor. Published request writes have already checked that update's introduced claims.
+func (s *Service) observeDecisionClaims(room string, claims map[string]string, origin any) {
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	_, published := origin.(*liveWriteOrigin)
+	writer, ambiguous := soleConnectedActor(state.connected)
+	if captured, exists := state.decisionOrigins[origin]; exists {
+		writer, ambiguous = captured, captured == nil
+	}
+	if len(claims) == 0 {
+		state.decisionClaims = nil
+		return
+	}
+	if state.decisionClaims == nil {
+		state.decisionClaims = make(map[string]decisionClaim, len(claims))
+	}
+	for block := range state.decisionClaims {
+		if _, held := claims[block]; !held {
+			delete(state.decisionClaims, block)
+		}
+	}
+	for block, person := range claims {
+		if previous, held := state.decisionClaims[block]; held && previous.person == person {
+			continue
+		}
+		authorized := published || !s.originCreditsNoOne(origin) && !ambiguous && writer != nil &&
+			writer.Kind == "user" && writer.Act == nil && model.CanonicalLogin(writer.ID) == model.CanonicalLogin(person)
+		state.decisionClaims[block] = decisionClaim{person: person, authorized: authorized}
+	}
+}
+
+func introducedDecisionClaims(target, prior *pmdoc.Node) map[string]string {
+	claims, held := decisionPersonClaims(target), decisionPersonClaims(prior)
+	for block, person := range claims {
+		if held[block] == person {
+			delete(claims, block)
+		}
+	}
+	return claims
+}
+
+// An immutable version may include browser content a request did not introduce. Its room's
+// per-value authorization is required unless this transaction itself validated that value.
+func (s *Service) refuseVersionDecisionClaims(ctx context.Context, artifactID string, target, prior *pmdoc.Node, approved map[string]string) error {
+	claims := introducedDecisionClaims(target, prior)
+	if len(claims) == 0 {
+		return nil
+	}
+	if ledger := ledgerFrom(ctx); ledger != nil {
+		if write := ledger.liveWriteFor(artifactID); write != nil {
+			for block, person := range claims {
+				if write.decisionClaims[block] == person {
+					delete(claims, block)
+				}
+			}
+		}
+	}
+	state := s.lockState(artifactID)
+	defer s.unlockState(artifactID, state)
+	for block, person := range claims {
+		if approved[block] == person {
+			continue
+		}
+		claim, found := state.decisionClaims[block]
+		if !found || claim.person != person || !claim.authorized {
+			return &ErrDecisionAttribution{BlockID: block, Decider: person}
+		}
+	}
+	return nil
+}
+
+// A version without pointers needs no prior pointer baseline. Some historic renderings do not
+// read back; when a pointer comparison is needed, report that parse failure instead of treating
+// every existing pointer as newly introduced.
+func decisionPriorTree(markdown string, target *pmdoc.Node) (*pmdoc.Node, error) {
+	if len(pmdoc.BlockPointers(target)) == 0 {
+		return nil, nil
+	}
+	return pmdoc.ParseRendering(markdown)
 }

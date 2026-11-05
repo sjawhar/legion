@@ -170,6 +170,12 @@ func TestABrowserWrittenPointerToADisallowedTypeIsNotVersioned(t *testing.T) {
 	if versions != 1 {
 		t.Fatalf("settlement wrote %d versions, want only the version before the invalid browser pointer", versions)
 	}
+	state.mu.Lock()
+	failed, failures := state.failed, state.settleFailures
+	state.mu.Unlock()
+	if failed != nil || failures != 0 {
+		t.Fatalf("invalid browser pointer poisoned its room: failed=%v settleFailures=%d", failed, failures)
+	}
 	var stored []pointerRow
 	for _, row := range pointerRowsOf(t, database, checks) {
 		stored = append(stored, pointerRow{BlockID: row.BlockID, Kind: row.Kind, ToKind: row.ToKind, ToID: row.ToID, ToTypes: row.ToTypes, CreatedVersion: row.CreatedVersion})

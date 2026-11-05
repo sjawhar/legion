@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -632,6 +633,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// (releaseIfUnusedLocked).
 	state := s.lockState(room)
 	state.closed = !open
+	// Loaded live content has no per-update proof; only attribution already in an immutable
+	// version is trusted until a newly observed write authorizes a changed value.
+	state.decisionClaims = nil
+	for block, person := range decisionPersonClaims(tree) {
+		if state.decisionClaims == nil {
+			state.decisionClaims = make(map[string]decisionClaim)
+		}
+		state.decisionClaims[block] = decisionClaim{person: person}
+	}
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
 	if askBlocks == nil {
@@ -671,6 +681,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	replica := s.keepReplica(doc, doc.OpenUpdateLog(), loaded)
 	instance := s.keepInstance(room, doc)
 	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks func() map[string]struct{}) (bool, bool) {
+		if contentChanged && replica.rendering != nil {
+			var claims map[string]string
+			if strings.Contains(replica.rendering.markdown, "decided_by=") {
+				if tree, err := treeOf(replica.doc); err == nil {
+					claims = decisionPersonClaims(tree)
+				}
+			}
+			s.observeDecisionClaims(room, claims, logged.Origin)
+		}
 		return s.classifyDrained(room, instance, logged, seq, contentChanged, asks)
 	}
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -724,6 +743,21 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 // a settlement holding that lock.
 // An unbounded apply can fail after parking bytes, so its error does not skip the durable append.
 func (s *Service) onPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
+	state := s.lockState(info.Room)
+	writer, ambiguous := soleConnectedActor(state.connected)
+	if ambiguous {
+		writer = nil
+	}
+	if state.decisionOrigins == nil {
+		state.decisionOrigins = make(map[any]*model.Actor)
+	}
+	state.decisionOrigins[info.Origin] = writer
+	s.unlockState(info.Room, state)
+	defer func() {
+		state := s.lockState(info.Room)
+		delete(state.decisionOrigins, info.Origin)
+		s.unlockState(info.Room, state)
+	}()
 	err := apply()
 	s.storeParked(info.Room)
 	return err

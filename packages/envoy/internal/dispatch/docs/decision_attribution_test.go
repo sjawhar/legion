@@ -67,10 +67,35 @@ func TestDecisionUncreditedSettlementCannotAuthorizePersonAttribution(t *testing
 		t.Fatal(err)
 	}
 	var refused *ErrDecisionAttribution
-	if err := refuseDecisionPersonClaim(tree, SettlementActor); !errors.As(err, &refused) {
+	if err := refuseDecisionPersonClaim(tree, nil, SettlementActor); !errors.As(err, &refused) {
 		t.Fatalf("uncredited settlement authorized a person claim: %v", err)
 	}
-	if err := refuseDecisionPersonClaim(tree, conversionActor); err != nil {
+	if err := refuseDecisionPersonClaim(tree, nil, conversionActor); err != nil {
 		t.Fatalf("trusted system conversion lost existing attribution: %v", err)
+	}
+}
+
+func TestDecisionUnchangedAttributionAllowsOtherWriters(t *testing.T) {
+	for _, actor := range []model.Actor{{Kind: "user", ID: "bob"}, {Kind: "session", ID: "agent"}} {
+		t.Run(actor.Kind, func(t *testing.T) {
+			database, service := blockIndexService(t)
+			source := writeIndexedDocument(t, database, service, "source", ":::decision{#d1 decided_by=\"alice\"}\nAlice's choice.\n:::\n")
+			if err := joinedWrite(service, func(ctx context.Context) error {
+				if _, err := service.ApplyOps(ctx, source, []model.EditOp{{Op: "insert", After: "end", Markdown: "An unrelated edit.\n"}}, actor, nil); err != nil {
+					return err
+				}
+				_, err := service.SnapshotVersion(ctx, source, actor)
+				return err
+			}); err != nil {
+				t.Fatalf("unchanged attribution refused %s: %v", actor.Kind, err)
+			}
+			if got := latestVersionNumber(t, service, source); got != 2 {
+				t.Fatalf("version = %d, want 2", got)
+			}
+			rows := pointerRowsOf(t, database, source)
+			if len(rows) != 1 || rows[0].ToID != "alice" {
+				t.Fatalf("unrelated writer changed attribution: %#v", rows)
+			}
+		})
 	}
 }
