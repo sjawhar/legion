@@ -20,11 +20,12 @@ import (
 // issue's key>` was written on. It is read project-wide, which is what makes the answer a fact of
 // the project rather than of a window (tree.go).
 //
-// worksIssue is that title rule, which this package does not state: it answers whether a session
-// titled title is a Legion role working issue (legion/metrics's RoleSessionWorks). The titles are
+// The title rule is this package's own (RoleSessionWorks, session_title.go), and the titles are
 // resolved the one way Dispatch resolves them, each session's newest
-// (delivery.ResolveSessionTitles).
-func PhaseWorkKeys(ctx context.Context, pool *store.Pool, worksIssue func(title, issue string) bool) (map[string]struct{}, error) {
+// (delivery.ResolveSessionTitles). Every reader of the fact comes through here, so a session
+// renamed after it wrote, or an event that carried no title of its own, moves the board and the
+// metrics together.
+func PhaseWorkKeys(ctx context.Context, pool *store.Pool) (map[string]struct{}, error) {
 	keys := map[string]struct{}{}
 	if err := readHandoffIssues(ctx, pool, keys); err != nil {
 		return nil, err
@@ -38,7 +39,7 @@ func PhaseWorkKeys(ctx context.Context, pool *store.Pool, worksIssue func(title,
 		return nil, fmt.Errorf("resolve the session titles of the Legion phase work: %w", err)
 	}
 	for _, one := range written {
-		if worksIssue(titles[one.session], one.issue) {
+		if RoleSessionWorks(titles[one.session], one.issue) {
 			keys[one.issue] = struct{}{}
 		}
 	}

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
-	"github.com/sjawhar/envoy/internal/dispatch/legion/metrics"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
@@ -373,11 +372,12 @@ func (h *deliveryHub) receive(event model.Event) {
 // under. A view whose read is under way also keeps the issue and the title (deliveryHeard), since
 // the issues and sessions its read names are not known until the read lands.
 //
-// It also grows the set of issues that carry Legion phase work, which a Legion board's tree walk
-// reads (legion_phase_work.go): a handoff recorded, or an event of a session titled
-// `Legion <role> · <that issue's key>`. That set is the hub's one other piece of state kept from
-// the events, beside the P0 issues, and it only grows: phase work is never lost. It is held
-// under the set's own lock, taken here under the hub's, never the other way round.
+// It also marks the set of issues that carry Legion phase work stale, which a Legion board's
+// tree walk reads (legion_phase_work.go): a handoff recorded, or any event of a session, can
+// move what that one read answers, since the rule reads each session's newest title. The hub
+// states no rule of its own here — a second reading of a title is how the board and the metrics
+// came to put one issue in two trees — and the next board read makes the read again. The mark
+// is taken under the set's own lock, taken here under the hub's, never the other way round.
 func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 	switch event.kind {
 	case "issue.created", "issue.updated", "issue.closed":
@@ -407,7 +407,7 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 	case "handoff.recorded":
 		// A handoff is Legion phase work, which the board's tree walk reads
 		// (legion_phase_work.go). It moves no card of its own, so it marks no view.
-		h.server.legionPhaseWork.add(event.issueKey)
+		h.server.legionPhaseWork.invalidate()
 	}
 	if event.actor.Kind == "session" && event.actor.ID != "" {
 		// The title delivery.ResolveSessionTitles reads: the newest event's, or the id when it
@@ -416,11 +416,10 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 		if origin := event.actor.Origin; origin != nil && origin.SessionTitle != "" {
 			title = origin.SessionTitle
 		}
-		// An event of a session titled `Legion <role> · <this issue's key>` is Legion phase work
-		// of that issue, the other half of what the board's tree walk reads.
-		if metrics.RoleSessionWorks(title, event.issueKey) {
-			h.server.legionPhaseWork.add(event.issueKey)
-		}
+		// An event of a session can move which issues the phase-work read answers: the title it
+		// carries is that session's newest, and the rule reads it against every issue the
+		// session has written on.
+		h.server.legionPhaseWork.invalidate()
 		for _, view := range h.views {
 			if shown, ok := view.sessions[event.actor.ID]; ok && shown != title {
 				h.markDirtyLocked(view, now, deliveryCauseChange)

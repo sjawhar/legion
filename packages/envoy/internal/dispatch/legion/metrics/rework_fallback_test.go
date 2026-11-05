@@ -1,6 +1,10 @@
 package metrics
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/legion"
+)
 
 // The three tests here are dispatch://INFRA-1077's acceptance A2, which ran the shipped metrics
 // over a copy of production Dispatch's INFRA events (dispatch://INFRA-979's
@@ -137,7 +141,7 @@ func TestAFilingUnderAGrandchildOfTheFilersRootIsInTheTree(t *testing.T) {
 	population.Filed = []Filed{
 		// Filed under the filer's child, after the filer's first implementer event, with the
 		// empty ancestor list Dispatch's own event carries.
-		{Key: "INFRA-3", At: hour(10), Filer: SessionTitle{Role: "architect", Issue: "INFRA-1"}, Parent: "INFRA-2", Ancestors: nil},
+		{Key: "INFRA-3", At: hour(10), Filer: legion.SessionTitle{Role: "architect", Issue: "INFRA-1"}, Parent: "INFRA-2", Ancestors: nil},
 	}
 
 	report := Compute(population, ScopeAll, hour(48))

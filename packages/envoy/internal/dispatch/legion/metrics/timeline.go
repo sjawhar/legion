@@ -23,26 +23,14 @@ func (s Span) Duration() time.Duration {
 	return s.To.Sub(s.From)
 }
 
-// The phases a timeline names. Twelve are the daemon's own, named once in internal/dispatch/legion
-// (packages/daemon/internal/phase), and two are this package's reading of `admitted`, which the
-// daemon does not split: an admitted issue holding a slot is its architect's design ("Design:
-// roots that hold a slot while their phase is still `admitted`"), and an admitted issue holding
-// none is the waiting line, whose time is on no bar ("Time in the queue is on no bar").
+// The two phases this package adds to the daemon's own, which are named once in
+// internal/dispatch/legion (legion.PhaseAdmitted and the rest, mirroring
+// packages/daemon/internal/phase) and read from there. They are its reading of `admitted`,
+// which the daemon does not split: an admitted issue holding a slot is its architect's design
+// ("Design: roots that hold a slot while their phase is still `admitted`"), and an admitted
+// issue holding none is the waiting line, whose time is on no bar ("Time in the queue is on no
+// bar").
 const (
-	phaseAdmitted       = legion.PhaseAdmitted
-	phaseAwaitingPerson = legion.PhaseAwaitingPerson
-	phasePlanning       = legion.PhasePlanning
-	phaseImplementing   = legion.PhaseImplementing
-	phaseTesting        = legion.PhaseTesting
-	phaseReviewing      = legion.PhaseReviewing
-	phaseAccepting      = legion.PhaseAccepting
-	phaseRetro          = legion.PhaseRetro
-	phaseMerging        = legion.PhaseMerging
-	phaseAwaitingMerge  = legion.PhaseAwaitingMerge
-	phaseDone           = legion.PhaseDone
-	phaseHeld           = legion.PhaseHeld
-
-	// queued and design are this package's own split of `admitted`, which no daemon reports.
 	phaseQueued = "queued"
 	phaseDesign = "design"
 )
@@ -50,8 +38,8 @@ const (
 // childWorkingPhases are the phases "from planning to awaiting merge": a root with a child in one
 // of them is waiting on its children (segment 4).
 var childWorkingPhases = []string{
-	phasePlanning, phaseImplementing, phaseTesting, phaseReviewing, phaseAccepting,
-	phaseRetro, phaseMerging, phaseAwaitingMerge,
+	legion.PhasePlanning, legion.PhaseImplementing, legion.PhaseTesting, legion.PhaseReviewing,
+	legion.PhaseAccepting, legion.PhaseRetro, legion.PhaseMerging, legion.PhaseAwaitingMerge,
 }
 
 // parkedStatuses are the statuses whose time the work time subtracts: the daemon writes `backlog`
@@ -78,8 +66,8 @@ var sentBackStatuses = []string{statusTesting, statusNeedsReview}
 // daemon's table moves an issue through. One rule reads it: a role's first event starts that
 // role's phase only where the issue has not reached that phase already (phaseSteps).
 var phaseOrder = []string{
-	phaseDesign, phasePlanning, phaseImplementing, phaseTesting, phaseReviewing, phaseAccepting,
-	phaseRetro,
+	phaseDesign, legion.PhasePlanning, legion.PhaseImplementing, legion.PhaseTesting,
+	legion.PhaseReviewing, legion.PhaseAccepting, legion.PhaseRetro,
 }
 
 // rolePhase is the phase each role works, which its first event on the issue starts. The merger's
@@ -88,11 +76,11 @@ var phaseOrder = []string{
 // bar holds all three.
 var rolePhase = map[string]string{
 	"architect":   phaseDesign,
-	"planner":     phasePlanning,
-	"implementer": phaseImplementing,
-	"tester":      phaseTesting,
-	"reviewer":    phaseReviewing,
-	"merger":      phaseRetro,
+	"planner":     legion.PhasePlanning,
+	"implementer": legion.PhaseImplementing,
+	"tester":      legion.PhaseTesting,
+	"reviewer":    legion.PhaseReviewing,
+	"merger":      legion.PhaseRetro,
 }
 
 // handoffStarts is the phase each handoff word starts, as the daemon's phase.Handoff pairs them:
@@ -102,10 +90,10 @@ var rolePhase = map[string]string{
 // handoff ends the phase it names and leaves no hour between the two. Retro, the merger's READY
 // and the architect's sign-off write none, and a word Legion never writes names no phase.
 var handoffStarts = map[string]string{
-	"plan":      phaseImplementing,
-	"implement": phaseTesting,
-	"test":      phaseReviewing,
-	"review":    phaseAccepting,
+	"plan":      legion.PhaseImplementing,
+	"implement": legion.PhaseTesting,
+	"test":      legion.PhaseReviewing,
+	"review":    legion.PhaseAccepting,
 }
 
 // PhaseSpan is one stretch of one phase.
@@ -151,7 +139,7 @@ func (p *Population) observedPhases(issue *Issue) []PhaseSpan {
 		if span.Duration() == 0 {
 			continue
 		}
-		if phase != phaseAdmitted {
+		if phase != legion.PhaseAdmitted {
 			timeline = append(timeline, PhaseSpan{Phase: phase, Span: span})
 			continue
 		}
@@ -348,11 +336,11 @@ func phaseRank(phase string) int {
 func statusPhase(previous, status string) (string, bool) {
 	switch status {
 	case statusTesting:
-		return phaseTesting, true
+		return legion.PhaseTesting, true
 	case statusNeedsReview:
-		return phaseReviewing, true
+		return legion.PhaseReviewing, true
 	case statusRetro:
-		return phaseRetro, true
+		return legion.PhaseRetro, true
 	case statusImplementing:
 		// The workflow writes `in_progress` twice over: once where it admits an issue out of the
 		// queue or out of parked, and once for every send-back to implementing, whatever phase
@@ -360,7 +348,7 @@ func statusPhase(previous, status string) (string, bool) {
 		// TriggerReviewRejected and TriggerChecksRed all write it). Only the send-back, a move
 		// out of `testing` or `needs_review`, names a phase.
 		if slices.Contains(sentBackStatuses, previous) {
-			return phaseImplementing, true
+			return legion.PhaseImplementing, true
 		}
 		return "", false
 	}

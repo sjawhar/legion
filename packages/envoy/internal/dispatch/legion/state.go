@@ -107,9 +107,12 @@ type Worker struct {
 type PullRequest struct {
 	State         string `json:"state"`
 	ChecksVerdict string `json:"checksVerdict,omitempty"`
-	// RequiresChecks is kept as the bytes the daemon sent, with no shape assumed: no daemon
-	// released today carries it, and Dispatch records it the moment one does rather than
-	// guessing now whether it is a boolean, a list or an object.
+	// RequiresChecks is kept as the bytes the daemon sent, so an observation records whatever a
+	// daemon writes and a shape no reader expects is stored rather than dropped. One reader
+	// reads it, and it reads a boolean: the CI-wait segment takes true as "the base branch
+	// requires a check" and anything else as no check at all
+	// (legion/metrics/segments.go's requiresChecks, mirroring `legionPullRequestView` in
+	// packages/contracts/src/legion-api.ts).
 	RequiresChecks json.RawMessage `json:"requiresChecks,omitempty"`
 }
 

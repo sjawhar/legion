@@ -14,6 +14,12 @@ func TestTreeRootWalksWhileTheIssueAboveIsLegions(t *testing.T) {
 		// Under a tracking issue the population holds but that carries no Legion work.
 		"ACME-7": {Legion: false},
 		"ACME-8": {Parent: "ACME-7", Legion: true},
+		// A Legion issue over a tracking issue over a Legion issue: the walk stops below the
+		// first issue above it that is not Legion's, rather than climbing over the gap to the
+		// Legion issue above that.
+		"ACME-10": {Legion: true},
+		"ACME-11": {Parent: "ACME-10", Legion: false},
+		"ACME-12": {Parent: "ACME-11", Legion: true},
 		// Under an issue the population does not hold at all.
 		"ACME-9": {Parent: "ACME-404", Legion: true},
 		// A daemon that named the tree itself, from anywhere in the chain.
@@ -28,6 +34,7 @@ func TestTreeRootWalksWhileTheIssueAboveIsLegions(t *testing.T) {
 		{"ACME-1", "ACME-1"},
 		{"ACME-3", "ACME-1"},
 		{"ACME-8", "ACME-8"},
+		{"ACME-12", "ACME-12"},
 		{"ACME-9", "ACME-9"},
 		{"ACME-20", "ACME-1"},
 		{"ACME-404", "ACME-404"},

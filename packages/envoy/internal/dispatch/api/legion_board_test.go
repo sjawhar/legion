@@ -512,18 +512,20 @@ func closeLegionIssue(t *testing.T, database *store.Store, key string, at time.T
 	legionExec(t, database, `update issues set status = 'done', closed_at = $2 where key = $1`, key, at)
 }
 
-// seedLegionRoleEvent writes one event of a session titled `Legion <role> · <issue>` on the
+// seedLegionRoleEvent writes one event of a session titled `Legion <role> · <titled>` on the
 // issue, the way Dispatch learns a session's title: the actor's origin carries it
 // (delivery/agents.go's ResolveSessionTitles reads the newest). It is Legion phase work with no
-// observation behind it.
-func seedLegionRoleEvent(t *testing.T, database *store.Store, issue, session, role string, at time.Time) {
+// observation behind it where titled is the issue's own key; where it names another issue the
+// event is a Legion role writing on an issue it does not work — a tracking issue it reports
+// under — which is no phase work of this issue at all.
+func seedLegionRoleEvent(t *testing.T, database *store.Store, issue, session, role, titled string, at time.Time) {
 	t.Helper()
 	legionExec(t, database, `insert into events (issue_key, seq, type, actor, payload, notify, created_at)
 		select $1, coalesce(max(seq), 0) + 1, 'message.created',
 			jsonb_build_object('kind', 'session', 'id', $2::text,
 				'origin', jsonb_build_object('session_title', $3::text)),
 			'{}', false, $4
-		from events where issue_key = $1`, issue, session, "Legion "+role+" · "+issue, at)
+		from events where issue_key = $1`, issue, session, "Legion "+role+" · "+titled, at)
 }
 
 // seedLegionHandoff records one handoff of the issue, the other kind of Legion phase work
@@ -568,7 +570,7 @@ func TestTheBoardClimbsThroughAnIssueWithOnlyPhaseWork(t *testing.T) {
 		closeLegionIssue(t, database, fmt.Sprintf("INFRA-%d", chain.closed), hourAgo)
 	}
 	seedLegionHandoff(t, database, "INFRA-801", "implement", hourAgo)
-	seedLegionRoleEvent(t, database, "INFRA-811", "s-811", "tester", hourAgo)
+	seedLegionRoleEvent(t, database, "INFRA-811", "s-811", "tester", "INFRA-811", hourAgo)
 	seedLegionRead(t, database, "INFRA", now.Add(-time.Minute), "")
 
 	board := legionBoardOf(t, handler, "INFRA")
@@ -606,6 +608,142 @@ func TestTheBoardClimbsThroughAnIssueWithOnlyPhaseWork(t *testing.T) {
 			t.Errorf("%s is in tree %q on the board and %q in the metrics", key, card.Tree, root)
 		}
 	}
+}
+
+// TestTheBoardAndTheMetricsStopBelowAnIssueThatIsNoLegionIssue: the walk stops below the first
+// issue above it that is neither reported by the daemon nor carrying Legion phase work
+// (dispatch://INFRA-1077's spec, "The top issue of a tree"), rather than passing over it to the
+// Legion issue above. One chain, bottom to top: a closed issue, so the metrics' window reaches
+// the chain; a bottom the daemon reports; a middle in neither half of the rule, which an event
+// of a session titled for another issue does not put in either; and a top the daemon reports.
+// Both readers answer the bottom its own root, and the top roots nothing below the gap.
+func TestTheBoardAndTheMetricsStopBelowAnIssueThatIsNoLegionIssue(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedLegionProjects(t, handler, "INFRA")
+	nameLegionDaemon(t, handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	hourAgo := now.Add(-time.Hour)
+	for _, issue := range []struct {
+		number   int
+		title    string
+		rank     string
+		parent   string
+		reported bool
+	}{
+		{840, "The top, which the daemon reports", "a", "", true},
+		{841, "The tracking issue in neither half of the rule", "b", "INFRA-840", false},
+		{842, "The bottom, which the daemon reports", "c", "INFRA-841", true},
+		{843, "Its closed child, which brings the chain into the window", "d", "INFRA-842", false},
+	} {
+		key := seedLegionIssue(t, database, "INFRA", issue.number, issue.title, issue.rank, nil, issue.parent)
+		if issue.reported {
+			seedLegionObservation(t, database, "INFRA", key, legion.FieldPhase, `"implementing"`, hourAgo)
+		}
+	}
+	// The middle carries an event of a Legion role, titled for the issue that role works and
+	// not for this one: a tracking issue a worker reports under is written on by Legion
+	// sessions and carries no phase work of its own.
+	seedLegionRoleEvent(t, database, "INFRA-841", "s-842", "implementer", "INFRA-842", hourAgo)
+	closeLegionIssue(t, database, "INFRA-843", hourAgo)
+	seedLegionRead(t, database, "INFRA", now.Add(-time.Minute), "")
+
+	board := legionBoardOf(t, handler, "INFRA")
+	population, err := metrics.Read(t.Context(), database.Pool, nil, "INFRA", now.Add(-14*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("read the metrics population: %v", err)
+	}
+	if root := population.TreeRoot("INFRA-842"); root != "INFRA-842" {
+		t.Errorf("the metrics put INFRA-842 in tree %q, want INFRA-842: the issue above it is no Legion issue", root)
+	}
+	if root := population.TreeRoot("INFRA-840"); root != "INFRA-840" {
+		t.Errorf("the metrics put INFRA-840 in tree %q, want itself", root)
+	}
+	cards := map[string]legionBoardCard{}
+	for _, column := range board.Columns {
+		for _, card := range column.Cards {
+			cards[card.Key] = card
+		}
+	}
+	if tree := cards["INFRA-842"].Tree; tree != "INFRA-842" {
+		t.Errorf("the board puts INFRA-842 in tree %q, want INFRA-842, as the metrics do", tree)
+	}
+	for key, card := range cards {
+		if key != "INFRA-840" && card.Tree == "INFRA-840" {
+			t.Errorf("the board roots %s at INFRA-840, which is above an issue that is no Legion issue", key)
+		}
+		if root := population.TreeRoot(key); root != card.Tree {
+			t.Errorf("%s is in tree %q on the board and %q in the metrics", key, card.Tree, root)
+		}
+	}
+}
+
+// TestTheLiveBoardReadsPhaseWorkAsTheOneReadDoesAfterARename: the issues that carry Legion phase
+// work are one read (legion.PhaseWorkKeys), which takes each session's newest title the one way
+// Dispatch resolves a title (delivery.ResolveSessionTitles). A session renamed after it wrote is
+// where a second rule built from each event's own title answers differently: it kept the issue
+// the session wrote on under the title it wrote under, while the one read no longer names it at
+// all. The live board, whose set the event feed keeps, and the route's own read must still place
+// the issue below it in the same tree as the metrics.
+func TestTheLiveBoardReadsPhaseWorkAsTheOneReadDoesAfterARename(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedLegionProjects(t, rig.handler, "INFRA")
+	nameLegionDaemon(t, rig.handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	hourAgo := now.Add(-time.Hour)
+	for _, issue := range []struct {
+		number   int
+		title    string
+		rank     string
+		parent   string
+		reported bool
+	}{
+		{860, "The top, which the daemon reports", "a", "", true},
+		{861, "The tracking issue the renamed session wrote on", "b", "INFRA-860", false},
+		{862, "The bottom, which the daemon reports", "c", "INFRA-861", true},
+		{863, "Its closed child, which brings the chain into the window", "d", "INFRA-862", false},
+	} {
+		key := seedLegionIssue(t, rig.database, "INFRA", issue.number, issue.title, issue.rank, nil, issue.parent)
+		if issue.reported {
+			seedLegionObservation(t, rig.database, "INFRA", key, legion.FieldPhase, `"implementing"`, hourAgo)
+		}
+	}
+	closeLegionIssue(t, rig.database, "INFRA-863", hourAgo)
+	seedLegionRead(t, rig.database, "INFRA", now.Add(-time.Minute), "")
+
+	// One session, two events: it wrote on the tracking issue under that issue's own title, and
+	// was renamed to the issue it went on to work. Its newest title is the only title Dispatch
+	// resolves, so no issue carries phase work by the first event any more.
+	seedLegionRoleEvent(t, rig.database, "INFRA-861", "s-860", "implementer", "INFRA-861", hourAgo)
+	seedLegionRoleEvent(t, rig.database, "INFRA-862", "s-860", "implementer", "INFRA-862", now.Add(-30*time.Minute))
+	var newest int64
+	if err := rig.database.Pool.QueryRow(t.Context(), `select max(id) from events`).Scan(&newest); err != nil {
+		t.Fatalf("read the newest event: %v", err)
+	}
+	start := rig.mark()
+	notifyChannel(t, rig.database, EventsChannel, "")
+	rig.waitFor(t, start, eventFeedWait, "the catch-up over the two events", func(note deliveryHubNote) bool {
+		return note.what == "events caught up" && note.through >= newest
+	})
+
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("b", legionView("INFRA")))
+	snapshot := conn.snapshot(t, 5*time.Second, "b")
+	var live legionBoardResponse
+	if err := json.Unmarshal(snapshot.Body, &live); err != nil {
+		t.Fatalf("read the live board: %v", err)
+	}
+	population, err := metrics.Read(t.Context(), rig.database.Pool, nil, "INFRA", now.Add(-14*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("read the metrics population: %v", err)
+	}
+	if root := population.TreeRoot("INFRA-862"); root != "INFRA-862" {
+		t.Errorf("the metrics put INFRA-862 in tree %q, want INFRA-862: no session titled for INFRA-861 wrote on it", root)
+	}
+	if tree := legionCard(t, live, "INFRA-862").Tree; tree != "INFRA-862" {
+		t.Errorf("the live board puts INFRA-862 in tree %q, want INFRA-862, as the metrics do", tree)
+	}
+	requireSameBody(t, "the board the event feed kept", snapshot.Body,
+		getBody(t, rig.handler, windowTarget(t, legionBoardView, snapshot.Body, "")))
 }
 
 // TestAnUnstartedChildIsCountedOnTheNearestCardAndNeverLosesItsOwn: a card an issue would carry
@@ -690,7 +828,7 @@ func TestTheMetricsClimbThroughPhaseWorkOutsideTheirWindow(t *testing.T) {
 		}
 	}
 	seedLegionHandoff(t, database, "INFRA-831", "implement", hourAgo)
-	seedLegionRoleEvent(t, database, "INFRA-831", "s-831", "reviewer", hourAgo)
+	seedLegionRoleEvent(t, database, "INFRA-831", "s-831", "reviewer", "INFRA-831", hourAgo)
 	seedLegionRead(t, database, "INFRA", now.Add(-time.Minute), "")
 
 	board := legionBoardOf(t, handler, "INFRA")

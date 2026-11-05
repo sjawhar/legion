@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
+	"github.com/sjawhar/envoy/internal/dispatch/legion"
 )
 
 // Scope is which of a project's Legion issues an answer counts, the Legion section's own toggle.
@@ -44,13 +45,13 @@ var bars = []struct {
 	Role   string
 	Phases []string
 }{
-	{"architect", []string{phaseDesign, phaseAccepting}},
-	{"planner", []string{phasePlanning}},
-	{"implementer", []string{phaseImplementing}},
-	{"tester", []string{phaseTesting}},
-	{"reviewer", []string{phaseReviewing}},
-	{"merger", []string{phaseRetro, phaseMerging, phaseAwaitingMerge}},
-	{barNoRole, []string{phaseAwaitingPerson, phaseHeld}},
+	{"architect", []string{phaseDesign, legion.PhaseAccepting}},
+	{"planner", []string{legion.PhasePlanning}},
+	{"implementer", []string{legion.PhaseImplementing}},
+	{"tester", []string{legion.PhaseTesting}},
+	{"reviewer", []string{legion.PhaseReviewing}},
+	{"merger", []string{legion.PhaseRetro, legion.PhaseMerging, legion.PhaseAwaitingMerge}},
+	{barNoRole, []string{legion.PhaseAwaitingPerson, legion.PhaseHeld}},
 }
 
 // The four classes of issue a Legion session filed (metric 4).
@@ -498,8 +499,8 @@ func (c *computation) rework(finished []*Issue) Rework {
 		row := ReworkIssue{Key: issue.Key, ReviewRounds: reviewRounds(issue, phases), SentBack: sentBackOnce(issue, phases)}
 		if at, reviewed := firstReview(issue, phases); reviewed {
 			after := intersect(c.barSpansOf(issue), []Span{{From: at, To: c.population.issueEnd(issue)}})
-			row.ImplementingHoursAfterFirst = hours(totalOf(intersect(phaseSpansOf(timeline, phaseImplementing), after)))
-			row.TestingHoursAfterFirst = hours(totalOf(intersect(phaseSpansOf(timeline, phaseTesting), after)))
+			row.ImplementingHoursAfterFirst = hours(totalOf(intersect(phaseSpansOf(timeline, legion.PhaseImplementing), after)))
+			row.TestingHoursAfterFirst = hours(totalOf(intersect(phaseSpansOf(timeline, legion.PhaseTesting), after)))
 		}
 		if row.SentBack {
 			sentBack++
@@ -529,7 +530,7 @@ func reviewRounds(issue *Issue, timeline phaseTimeline) int {
 	}
 	rounds := 0
 	for index, span := range timeline.spans {
-		if span.Phase == phaseReviewing && (index == 0 || timeline.spans[index-1].Phase != phaseReviewing) {
+		if span.Phase == legion.PhaseReviewing && (index == 0 || timeline.spans[index-1].Phase != legion.PhaseReviewing) {
 			rounds++
 		}
 	}
@@ -545,11 +546,11 @@ func sentBackOnce(issue *Issue, timeline phaseTimeline) bool {
 		return statusMoved(issue, sentBackStatuses, statusImplementing)
 	}
 	for index := 1; index < len(timeline.spans); index++ {
-		if timeline.spans[index].Phase != phaseImplementing {
+		if timeline.spans[index].Phase != legion.PhaseImplementing {
 			continue
 		}
 		switch timeline.spans[index-1].Phase {
-		case phaseTesting, phaseReviewing, phaseAccepting:
+		case legion.PhaseTesting, legion.PhaseReviewing, legion.PhaseAccepting:
 			return true
 		}
 	}
@@ -574,7 +575,7 @@ func firstReview(issue *Issue, timeline phaseTimeline) (time.Time, bool) {
 	if !timeline.observed {
 		return firstStatusEntry(issue, statusNeedsReview)
 	}
-	return firstEntry(timeline.spans, phaseReviewing)
+	return firstEntry(timeline.spans, legion.PhaseReviewing)
 }
 
 // splitting is metric 4: each issue a Legion session created in the window, by the parent it had

@@ -121,7 +121,7 @@ type Filed struct {
 	Title     string
 	At        time.Time
 	Session   string
-	Filer     SessionTitle
+	Filer     legion.SessionTitle
 	Parent    string
 	Ancestors []string
 }
@@ -290,7 +290,7 @@ func (p *Population) readFiled(ctx context.Context, pool *store.Pool, project st
 		return err
 	}
 	for _, one := range filed {
-		parsed, ok := ParseSessionTitle(titles[one.Session])
+		parsed, ok := legion.ParseSessionTitle(titles[one.Session])
 		if !ok || !parsed.OfProject(project) {
 			continue
 		}
@@ -385,7 +385,7 @@ func (p *Population) readRoleEvents(ctx context.Context, pool *store.Pool, keys 
 		return err
 	}
 	for _, one := range found {
-		parsed, ok := ParseSessionTitle(titles[one.session])
+		parsed, ok := legion.ParseSessionTitle(titles[one.session])
 		if !ok || !parsed.Works(one.issue) {
 			continue
 		}
@@ -490,7 +490,7 @@ func (p *Population) readAskTurns(ctx context.Context, pool *store.Pool, keys []
 			if event.actorKind != "session" {
 				continue
 			}
-			title, isLegion := ParseSessionTitle(titles[event.session])
+			title, isLegion := legion.ParseSessionTitle(titles[event.session])
 			if !isLegion {
 				continue
 			}
@@ -602,11 +602,6 @@ func (p *Population) readObservations(ctx context.Context, pool *store.Pool, pro
 			continue
 		}
 		issue.Observed[field] = append(issue.Observed[field], Mark{At: at, Value: value})
-		if field == legion.FieldTree {
-			if tree := legion.JSONString([]byte(value)); tree != "" {
-				issue.Tree = tree
-			}
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read the Legion observations of %s: %w", project, err)
@@ -650,20 +645,16 @@ func (p *Population) readReported(ctx context.Context, pool *store.Pool, project
 	return nil
 }
 
-// fillReportedTrees gives each issue the `tree` the daemon named for it where the window's own
-// observation read did not reach it. The scoped read took the same newest row for the issues it
-// covers (readObservations), so a tree it already set stands; outside its keys this is the only
-// read that carries one, and an issue the daemon named no tree for keeps none. It runs before
-// linkTrees, which is the first reader of a tree.
+// fillReportedTrees gives each issue the `tree` the daemon named for it. That is the newest
+// `tree` row of the whole project (readReported), the one row the Legion view reads too, and it
+// is the only writer of Issue.Tree: the window's own observation read carries the same rows for
+// the issues it covers, and a second writer taking the newest non-empty one of those answered a
+// tree where the newest row is empty — a daemon that stopped naming one — while this read
+// answered none. An issue the daemon named no tree for keeps none. It runs before linkTrees,
+// which is the first reader of a tree.
 func (p *Population) fillReportedTrees() {
 	for _, key := range p.Keys {
-		issue := p.Issues[key]
-		if issue.Tree != "" {
-			continue
-		}
-		if tree := p.reported[key]; tree != "" {
-			issue.Tree = tree
-		}
+		p.Issues[key].Tree = p.reported[key]
 	}
 }
 
@@ -785,23 +776,22 @@ func (p *Population) TreeRoot(key string) string {
 }
 
 // isLegionIssue answers legion.TreeNode's Legion for this population, which states the rule: the
-// daemon reports the issue — it is in the project's reported set, or this read carried an
-// observation of it, which is that set narrowed to the window and is all a fixture built with no
-// reported set holds — or it carries Legion phase work. Both the reported set (readReported) and
-// the phase-work keys (readPhaseWork) are read for the whole project, so the answer does not
-// move with the window being computed, which is what makes it the view's: the Legion view reads
-// the same two facts (api/legion_board.go's treeRoot).
+// daemon reports the issue — it is in the project's reported set (readReported) — or it carries
+// Legion phase work (readPhaseWork). Both sets are read for the whole project, so the answer
+// does not move with the window being computed, which is what makes it the view's: the Legion
+// view reads the same two facts (api/legion_board.go's treeRoot). A fixture states the rule by
+// filling the two sets, as a read does.
 func (p *Population) isLegionIssue(issue *Issue) bool {
 	_, reported := p.reported[issue.Key]
 	_, worked := p.phaseWork[issue.Key]
-	return reported || worked || len(issue.Observed) > 0 || p.hasPhaseWork(issue)
+	return reported || worked
 }
 
 // readPhaseWork reads the issues that carry Legion phase work, over the whole project
 // (legion.PhaseWorkKeys). It places an issue in a tree and nothing else: what a metric counts
 // reads the window's own role events and handoffs (hasPhaseWork).
 func (p *Population) readPhaseWork(ctx context.Context, pool *store.Pool) error {
-	keys, err := legion.PhaseWorkKeys(ctx, pool, RoleSessionWorks)
+	keys, err := legion.PhaseWorkKeys(ctx, pool)
 	if err != nil {
 		return err
 	}

@@ -5,12 +5,17 @@
 //
 // The one read of that fact is legion.PhaseWorkKeys, which the metrics make too
 // (legion/metrics/population.go's readPhaseWork), so both readers answer the rule from the same
-// rows. The board is recomputed on every event burst of every open page, so making that read
-// again each time is what this set exists to avoid: an issue gains phase work and never loses
-// it, so a set of keys that grows is exact. It is seeded by one read — at the live hub's start,
-// and at the first board read of a process whose hub never started — and grows by a key per
-// event after it, from the feed the live hub already reacts to
-// (delivery_live_hub_intake.go's applyEventLocked).
+// rows and no second rule states it here. A session's title is its newest, so phase work is not
+// only gained: a session renamed to another issue takes the work of the issue it wrote on with
+// it, and an event that carried no title of its own is read through the session's newest title
+// all the same. Only that one read can say which issues carry it.
+//
+// The board is recomputed on every event burst of every open page, so this keeps the read's
+// answer rather than making it again each time. It is filled by one read — at the live hub's
+// start, and at the first board read of a process whose hub never started — and the feed the
+// live hub already reacts to marks it stale, never edits it: a handoff, or any event of a
+// session, can move what the read answers (delivery_live_hub_intake.go's applyEventLocked). The
+// next board read fills it again.
 //
 // The set holds the issues' bare keys, of every project: a board walks only the chain of its own
 // issues, and nothing here is scoped to one.
@@ -18,25 +23,29 @@ package api
 
 import (
 	"context"
-	"maps"
 	"sync"
 
 	"github.com/sjawhar/envoy/internal/dispatch/legion"
-	"github.com/sjawhar/envoy/internal/dispatch/legion/metrics"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // legionPhaseWork is every issue key that carries Legion phase work. Its zero value is a usable
-// empty set, which is what a server a test builds directly holds.
+// empty set no read has filled, which is what a server a test builds directly holds.
 type legionPhaseWork struct {
-	// reading is held across the seed read alone, so two board reads at start-up make one read
-	// and not two. mu guards the set and is never held across a query; the live hub's intake
+	// reading is held across the read alone, so two board reads at start-up make one read and
+	// not two. mu guards the fields and is never held across a query; the live hub's intake
 	// takes it while it holds the hub's own lock, so the order is the hub's lock and then this
 	// one, and nothing here takes the hub's.
 	reading sync.Mutex
 	mu      sync.Mutex
-	seeded  bool
-	keys    map[string]struct{}
+	// filled is whether a read ever answered this set, and dirtied counts the events that have
+	// marked it stale since: a read answers the rows as they stood before it began, so one
+	// marked stale while it ran is stale still.
+	filled  bool
+	dirtied uint64
+	// read is the value of dirtied the newest read started at.
+	read uint64
+	keys map[string]struct{}
 }
 
 // has is whether the issue carries Legion phase work. A nil set answers false: a population built
@@ -51,62 +60,56 @@ func (w *legionPhaseWork) has(key string) bool {
 	return held
 }
 
-// add takes the key of an issue an event just gave phase work. An event that names no issue adds
-// nothing.
-func (w *legionPhaseWork) add(key string) {
-	if key == "" {
-		return
-	}
+// invalidate marks the set stale: an event the one read may answer differently for was written,
+// so the next board read makes that read again.
+func (w *legionPhaseWork) invalidate() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.keys == nil {
-		w.keys = map[string]struct{}{}
-	}
-	w.keys[key] = struct{}{}
+	w.dirtied++
 }
 
-// ensure seeds the set once, which is what a board read in a process whose live hub never started
-// stands on. A read that fails leaves the set unseeded, so the next board read reads again.
+// ensure fills the set where no read has, or where an event has marked it stale since the last
+// one. A read that fails leaves it as it was, so the next board read reads again.
 func (w *legionPhaseWork) ensure(ctx context.Context, pool *store.Pool) error {
-	if w.isSeeded() {
+	if w.isCurrent() {
 		return nil
 	}
 	w.reading.Lock()
 	defer w.reading.Unlock()
-	if w.isSeeded() {
+	if w.isCurrent() {
 		return nil
 	}
-	return w.seed(ctx, pool)
+	return w.fill(ctx, pool)
 }
 
-// reseed reads the set again whatever it holds: the live hub's intake grows it from the event log
-// above the cursor it starts on, so the seed belongs beside that cursor (seedEvents), at the
-// hub's start and after a reset of the event log.
+// reseed fills the set again whatever it holds: the live hub's intake marks it stale from the
+// event log above the cursor it starts on, so the fill belongs beside that cursor (seedEvents),
+// at the hub's start and after a reset of the event log.
 func (w *legionPhaseWork) reseed(ctx context.Context, pool *store.Pool) error {
 	w.reading.Lock()
 	defer w.reading.Unlock()
-	return w.seed(ctx, pool)
+	return w.fill(ctx, pool)
 }
 
-func (w *legionPhaseWork) isSeeded() bool {
+// isCurrent is whether a read has filled the set and nothing has marked it stale since.
+func (w *legionPhaseWork) isCurrent() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.seeded
+	return w.filled && w.read == w.dirtied
 }
 
-// seed reads the whole set and merges it into what the set already holds: phase work is never
-// lost, so a key an event added while the read ran stays.
-func (w *legionPhaseWork) seed(ctx context.Context, pool *store.Pool) error {
-	keys, err := legion.PhaseWorkKeys(ctx, pool, metrics.RoleSessionWorks)
+// fill reads the whole set and takes it as it stands. It replaces what the set held: an issue
+// whose only phase work was a session since renamed carries none now, and only this read says so.
+func (w *legionPhaseWork) fill(ctx context.Context, pool *store.Pool) error {
+	w.mu.Lock()
+	at := w.dirtied
+	w.mu.Unlock()
+	keys, err := legion.PhaseWorkKeys(ctx, pool)
 	if err != nil {
 		return err
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.keys == nil {
-		w.keys = make(map[string]struct{}, len(keys))
-	}
-	maps.Copy(w.keys, keys)
-	w.seeded = true
+	w.keys, w.filled, w.read = keys, true, at
 	return nil
 }

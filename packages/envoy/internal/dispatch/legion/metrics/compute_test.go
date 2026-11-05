@@ -604,10 +604,10 @@ func TestEachClassOfFiledIssue(t *testing.T) {
 	filed := newIssue("INFRA-4")
 	population := fixture(hour(-24), hour(48), root, atDesign, later, outside, filed)
 	population.Filed = []Filed{
-		{Key: "INFRA-2", At: hour(1), Filer: SessionTitle{Role: "architect", Issue: "INFRA-1"}, Parent: "INFRA-1", Ancestors: []string{"INFRA-1"}},
-		{Key: "INFRA-3", At: hour(6), Filer: SessionTitle{Role: "implementer", Issue: "INFRA-1"}, Parent: "INFRA-1", Ancestors: []string{"INFRA-1"}},
-		{Key: "CORE-9", At: hour(7), Filer: SessionTitle{Role: "implementer", Issue: "INFRA-1"}},
-		{Key: "INFRA-4", At: hour(8), Filer: SessionTitle{Role: "controller", Project: "INFRA", Controller: true}},
+		{Key: "INFRA-2", At: hour(1), Filer: legion.SessionTitle{Role: "architect", Issue: "INFRA-1"}, Parent: "INFRA-1", Ancestors: []string{"INFRA-1"}},
+		{Key: "INFRA-3", At: hour(6), Filer: legion.SessionTitle{Role: "implementer", Issue: "INFRA-1"}, Parent: "INFRA-1", Ancestors: []string{"INFRA-1"}},
+		{Key: "CORE-9", At: hour(7), Filer: legion.SessionTitle{Role: "implementer", Issue: "INFRA-1"}},
+		{Key: "INFRA-4", At: hour(8), Filer: legion.SessionTitle{Role: "controller", Project: "INFRA", Controller: true}},
 	}
 	report := Compute(population, ScopeAll, hour(48))
 	classOf := map[string]string{}
@@ -622,7 +622,7 @@ func TestEachClassOfFiledIssue(t *testing.T) {
 	if !reflect.DeepEqual(classOf, want) {
 		t.Fatalf("the filings are classed %v, want %v", classOf, want)
 	}
-	if phaseOf["INFRA-3"] != phaseImplementing {
+	if phaseOf["INFRA-3"] != legion.PhaseImplementing {
 		t.Errorf("the later filing names the filer's phase %q, want implementing", phaseOf["INFRA-3"])
 	}
 	if len(report.Splitting.Weeks) != 1 {
@@ -662,34 +662,6 @@ func TestAMedianInterpolatesBetweenTheClosestRanks(t *testing.T) {
 			}
 			if got := quantile(one.values, 0.9); got != one.p90 {
 				t.Errorf("p90 of %v = %g, want %g", one.values, got, one.p90)
-			}
-		})
-	}
-}
-
-// TestASessionTitleNamesARoleAndItsIssue is the title parsing every rule reads a Legion session
-// through (packages/pi-legion/src/session-title.ts).
-func TestASessionTitleNamesARoleAndItsIssue(t *testing.T) {
-	for _, one := range []struct {
-		title string
-		want  SessionTitle
-		ok    bool
-	}{
-		{"Legion implementer · INFRA-1077", SessionTitle{Role: "implementer", Issue: "INFRA-1077"}, true},
-		{"Legion architect · INFRA-979", SessionTitle{Role: "architect", Issue: "INFRA-979"}, true},
-		{"Legion controller · INFRA", SessionTitle{Role: "controller", Project: "INFRA", Controller: true}, true},
-		{"Legion gardener · INFRA-1", SessionTitle{}, false},
-		{"Legion architect", SessionTitle{}, false},
-		{"A person's session", SessionTitle{}, false},
-		{"", SessionTitle{}, false},
-	} {
-		t.Run(one.title, func(t *testing.T) {
-			got, ok := ParseSessionTitle(one.title)
-			if ok != one.ok || got != one.want {
-				t.Fatalf("ParseSessionTitle(%q) = %+v, %t; want %+v, %t", one.title, got, ok, one.want, one.ok)
-			}
-			if ok && !got.OfProject("INFRA") {
-				t.Errorf("%q is not read as INFRA's", one.title)
 			}
 		})
 	}

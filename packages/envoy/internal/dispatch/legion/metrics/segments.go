@@ -137,7 +137,7 @@ func (v *issueView) claims(index int) []Span {
 // ask for its root and for every sibling.
 func waitingOnPersonSpans(view *issueView) []Span {
 	spans := markSpans(view.root.Observed[legion.FieldPhase], view.population.issueEnd(view.root), func(value string) bool {
-		return legion.JSONString([]byte(value)) == phaseAwaitingPerson
+		return legion.JSONString([]byte(value)) == legion.PhaseAwaitingPerson
 	})
 	answered := answeredAts(view.root)
 	for _, turn := range view.issue.AskTurns {

@@ -1,6 +1,11 @@
-package metrics
+package legion
 
 import "strings"
+
+// session_title.go holds the one reading of a Legion session's title. Both halves of the rule
+// that places an issue in a tree ask it — the project-wide read of the issues that carry phase
+// work (PhaseWorkKeys, which the Legion view and the metrics both stand on) and the metrics'
+// own window reads — so it lives here, beside the walk, rather than in either reader.
 
 // roles are Legion's six worker types, in the order the workflow runs them. The daemon's
 // claim.Roles is the same list in the daemon's own module (packages/daemon/internal/claim/
@@ -17,7 +22,7 @@ const (
 )
 
 // SessionTitle is what a session's title says the session is: one of the six roles working one
-// issue, or a project's controller. Anything else is not a Legion session.
+// issue, or a project's controller.
 type SessionTitle struct {
 	Role string
 	// Issue is the issue the role works; a root architect's is its tree's root.
@@ -63,8 +68,8 @@ func (t SessionTitle) Works(issue string) bool {
 
 // RoleSessionWorks is whether a session titled title is a Legion role working issue. It is the
 // title half of what makes an issue carry Legion phase work, which the project-wide read asks
-// for every (issue, session) pair it finds (legion.PhaseWorkKeys) and this package's own window
-// read asks for the pairs of its scope (readRoleEvents).
+// for every (issue, session) pair it finds (PhaseWorkKeys) and the metrics' own window read asks
+// for the pairs of its scope (metrics.readRoleEvents).
 func RoleSessionWorks(title, issue string) bool {
 	parsed, ok := ParseSessionTitle(title)
 	return ok && parsed.Works(issue)

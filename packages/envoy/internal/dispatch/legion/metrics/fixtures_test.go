@@ -69,11 +69,25 @@ func (i *Issue) asked(from, to time.Time) *Issue {
 
 // fixture is a population of hand-built issues over [from, to), with its trees linked as Read
 // links them.
+//
+// It fills the two sets the tree rule reads (Population.isLegionIssue) as a read fills them: an
+// issue the fixture gave an observation of is one the daemon reports, with the `tree` it last
+// named, and an issue the fixture gave a role event or a handoff carries Legion phase work.
+// They are the project's own facts, which no fixture states twice.
 func fixture(from, to time.Time, issues ...*Issue) *Population {
-	population := &Population{Project: "INFRA", From: from, To: to, Issues: map[string]*Issue{}}
+	population := &Population{
+		Project: "INFRA", From: from, To: to, Issues: map[string]*Issue{},
+		reported: map[string]string{}, phaseWork: map[string]struct{}{},
+	}
 	for _, issue := range issues {
 		population.Issues[issue.Key] = issue
 		population.Keys = append(population.Keys, issue.Key)
+		if len(issue.Observed) > 0 {
+			population.reported[issue.Key] = issue.Tree
+		}
+		if len(issue.FirstRoleEvent) > 0 || len(issue.Handoffs) > 0 {
+			population.phaseWork[issue.Key] = struct{}{}
+		}
 	}
 	slices.Sort(population.Keys)
 	population.linkTrees()

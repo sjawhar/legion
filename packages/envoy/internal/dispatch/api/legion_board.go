@@ -241,10 +241,11 @@ type legionBoardIssue struct {
 	checksVerdict string
 	// roles are the roles of the issue whose claim state is `working`, sorted.
 	roles []string
-	// title, priority and parent are Dispatch's, empty for an issue Dispatch does not hold.
+	// title and priority are Dispatch's, empty for an issue Dispatch does not hold; the parent
+	// Dispatch records is p.parents, which holds every issue of the project and not only the
+	// ones the daemon reports.
 	title    string
 	priority *int
-	parent   string
 }
 
 // readLegionBoard reads one project's board. A project with no Legion setting is legion's
@@ -411,7 +412,7 @@ func (p *legionBoardPopulation) readIssues(ctx context.Context, pool *store.Pool
 		p.ranked = append(p.ranked, key)
 		p.parents[key] = parent
 		if issue := p.issues[key]; issue != nil {
-			issue.title, issue.priority, issue.parent = title, priority, parent
+			issue.title, issue.priority = title, priority
 		}
 	}
 	return rows.Err()
@@ -452,7 +453,7 @@ func (p *legionBoardPopulation) treeNode(key string) (legion.TreeNode, bool) {
 	}
 	node := legion.TreeNode{Parent: parent, Legion: reported || p.phaseWork.has(key)}
 	if reported {
-		node.Tree, node.Parent = issue.tree, issue.parent
+		node.Tree = issue.tree
 	}
 	return node, true
 }
