@@ -17,7 +17,7 @@ func TestMentionPlansAndCensusOnRealisticRecordedVolume(t *testing.T) {
 	_, err := database.Pool.Exec(ctx, `insert into projects(key,name) values ('VOL','Volume');
  insert into issues(key,project_key,number,title,created_by,rank) values ('VOL-1','VOL',1,'Mentions','{"kind":"user","id":"alice"}','U');
  insert into comments(id,issue_key,author,body) select md5(n::text)::uuid,'VOL-1','{"kind":"user","id":"bob"}',case when n>10000 then 'Volume dispatch://people/alice' else 'Volume explicit mention' end from generate_series(1,20000) n;
- insert into comments(issue_key,author,body) values ('VOL-1','{"kind":"session","id":"reader","owner":"alice"}','Verified session');
+ insert into comments(issue_key,author,body) values ('VOL-1','{"kind":"session","id":"reader","owner":"alice","session_verified":true}','Verified session');
  insert into comment_mentions(comment_id,target,delivery,resolved_session_id) select md5(n::text)::uuid,'session:reader','steer','reader' from generate_series(1,10000) n;
  insert into identity_mentions(owner_kind,owner_id,from_kind,from_id,to_kind,to_id) select 'comment',md5(n::text)::uuid::text,'comment',md5(n::text)::uuid::text,'person','alice' from generate_series(10001,20000) n;
  insert into events(issue_key,seq,type,actor,notify,payload) select 'VOL-1',n,'issue.updated','{"kind":"session","id":"volume"}',false,'{}' from generate_series(1,100000) n;
@@ -30,7 +30,7 @@ func TestMentionPlansAndCensusOnRealisticRecordedVolume(t *testing.T) {
 		args      []any
 	}{
 		{"existing point", `select * from graph_edges where from_kind='comment' and from_id=$1`, []any{"c4ca4238-a0b9-2382-0dcc-509a6f75849b"}},
-		{"person including mentions", personNodesQuery, []any{"alice", 50, 0}},
+		{"person including mentions", personNodesQuery, []any{"alice", 50, 0, time.Now().Add(-30 * 24 * time.Hour), []string{"reader"}}},
 	} {
 		var raw []byte
 		if err := database.Pool.QueryRow(ctx, `explain(analyze,buffers,format json) `+query.sql, query.args...).Scan(&raw); err != nil {
@@ -120,7 +120,7 @@ func TestSparseMentionPlansStayWithinBudget(t *testing.T) {
 		t.Fatalf("sparse mentions = %d, %v; want one of 20000 comments", len(items), err)
 	}
 	var raw []byte
-	if err := database.Pool.QueryRow(ctx, `explain(analyze,buffers,format json) `+personNodesQuery, "alice", 50, 0).Scan(&raw); err != nil {
+	if err := database.Pool.QueryRow(ctx, `explain(analyze,buffers,format json) `+personNodesQuery, "alice", 50, 0, time.Now().Add(-30*24*time.Hour), []string{}).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var plans []struct {

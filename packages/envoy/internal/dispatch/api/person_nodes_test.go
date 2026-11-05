@@ -207,8 +207,15 @@ func TestPersonNodesBoundsReceiptsWithoutLimitingAuthorship(t *testing.T) {
 		var titles []string
 		for _, row := range page.Rows {
 			titles = append(titles, row.Title)
-			if row.Title != "Old authored" && !slices.Equal(row.Relations, []string{"delivered_to"}) {
-				t.Fatalf("receipt lost its relation: %+v", row)
+			wantRelations := []string{"delivered_to"}
+			switch row.Title {
+			case "Old authored":
+				wantRelations = []string{"authored_by"}
+			case "Sent comment":
+				wantRelations = []string{"delivered_to", "mentions"}
+			}
+			if !slices.Equal(row.Relations, wantRelations) {
+				t.Fatalf("relations for %q = %v, want %v", row.Title, row.Relations, wantRelations)
 			}
 		}
 		slices.Sort(titles)

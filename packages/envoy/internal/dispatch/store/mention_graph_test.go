@@ -18,7 +18,7 @@ func TestMentionGraphUsesRecordedTargetsAndResolvedSessions(t *testing.T) {
 		insert into issues (key,project_key,number,title,rank,created_by) values ('CORE-1','CORE',1,'Mentions','U','{"kind":"user","id":"bob"}');
 		insert into comments (id,issue_key,author,body) values
 		('00000000-0000-0000-0000-000000000001','CORE-1','{"kind":"user","id":"bob"}','No body reparse'),
-		('00000000-0000-0000-0000-000000000002','CORE-1','{"kind":"session","id":"reader","owner":" Alice "}','Verified ownership');
+		('00000000-0000-0000-0000-000000000002','CORE-1','{"kind":"session","id":"reader","owner":" Alice ","session_verified":true}','Verified ownership');
 		insert into refs(from_kind,from_id,to_kind,to_id) values
 		('comment','00000000-0000-0000-0000-000000000001','issue','CORE-1');
 		insert into comment_mentions (comment_id,target,delivery,resolved_session_id) values
@@ -63,5 +63,44 @@ func TestMentionGraphUsesRecordedTargetsAndResolvedSessions(t *testing.T) {
 	}
 	if legacy != "issue:CORE-1" {
 		t.Fatalf("ordinary graph_edges reference changed: %s", legacy)
+	}
+}
+
+func TestMentionGraphDoesNotTrustAnUnverifiedSessionsClaimedOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor string
+	}{
+		{"verification absent", `{"kind":"session","id":"reader","owner":"alice"}`},
+		{"verification false", `{"kind":"session","id":"reader","owner":"alice","session_verified":false}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := openEmptyTestStore(t)
+			ctx := context.Background()
+			if err := database.Migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Pool.Exec(ctx, `
+				insert into projects(key,name) values ('CORE','Core');
+				insert into issues(key,project_key,number,title,rank,created_by) values ('CORE-1','CORE',1,'Mentions','U','{"kind":"user","id":"bob"}');
+				insert into comments(id,issue_key,author,body) values
+				('00000000-0000-0000-0000-000000000081','CORE-1','{"kind":"user","id":"bob"}','Explicit session mention'),
+				('00000000-0000-0000-0000-000000000083','CORE-1','{"kind":"session","id":"proved-other-session","owner":"alice","session_verified":true}','Alice owns a different proved session');
+				insert into comment_mentions(comment_id,target,delivery,resolved_session_id) values
+				('00000000-0000-0000-0000-000000000081','session:reader','steer','reader');
+			`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Pool.Exec(ctx, `insert into comments(id,issue_key,author,body) values ('00000000-0000-0000-0000-000000000082','CORE-1',$1,'Caller-chosen ownership')`, tc.actor); err != nil {
+				t.Fatal(err)
+			}
+			var sessions, people int
+			if err := database.Pool.QueryRow(ctx, `select count(*) filter (where to_kind='session' and to_id='reader'), count(*) filter (where to_kind='person' and to_id='alice') from graph_mention_edges where from_kind='comment' and from_id='00000000-0000-0000-0000-000000000081'`).Scan(&sessions, &people); err != nil {
+				t.Fatal(err)
+			}
+			if sessions != 1 || people != 0 {
+				t.Fatalf("unverified session mention expanded to a person: sessions=%d people=%d", sessions, people)
+			}
+		})
 	}
 }

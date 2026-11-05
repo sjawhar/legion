@@ -19,7 +19,7 @@ func TestMentionCensusDetectsMissingAndUnexpectedRecordedResolutions(t *testing.
  insert into issues(key,project_key,number,title,rank,created_by) values ('CORE-1','CORE',1,'Mentions','U','{"kind":"user","id":"alice"}');
  insert into comments(id,issue_key,author,body) values
  ('00000000-0000-0000-0000-000000000001','CORE-1','{"kind":"user","id":"bob"}','See dispatch://people/alice'),
- ('00000000-0000-0000-0000-000000000002','CORE-1','{"kind":"session","id":"reader","owner":"alice"}','Empty mention set');
+ ('00000000-0000-0000-0000-000000000002','CORE-1','{"kind":"session","id":"reader","owner":"alice","session_verified":true}','Empty mention set');
  insert into comment_mentions(comment_id,target,delivery,resolved_session_id) values ('00000000-0000-0000-0000-000000000001','role:reviewer','steer','reader');
  insert into messages(id,issue_key,author,body,target) values ('00000000-0000-0000-0000-000000000003','CORE-1','{"kind":"user","id":"bob"}','Message dispatch://sessions/reader','session:reader');
  insert into messages(author,body,target,created_at) values ('{"kind":"user","id":"bob"}','Old','session:reader',now()-interval '31 days');`)

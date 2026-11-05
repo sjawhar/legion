@@ -36,19 +36,34 @@ const personAliasesQuery = `
 	from person_aliases where person = $1 and alias_kind in ('login', 'session')`
 
 const personNodesQuery = `
-	with related as (
+	with reached as materialized (
+		select case e.type when 'comment.created' then 'comment' when 'ask.answered' then 'ask' else 'message' end as from_kind,
+		       e.payload->>'id' as from_id, e.created_at
+		from events e
+		where e.type in ('ask.answered', 'comment.created', 'message.created', 'message.answered')
+		  and e.payload->>'id' <> '' and e.created_at >= $4
+		  and e.published_destinations && array(select 'notifications.agent.' || unnest($5::text[]))
+	), related as (
 		select from_kind, from_id, array_agg(distinct kind order by kind) as relations, min(created_at) as related_at from (
-			select g.from_kind, g.from_id, g.kind, g.created_at from ` + refs.AllEdgesSQL + ` g
+			select g.from_kind, g.from_id, g.kind, g.created_at from graph_person_edges g
 			where g.kind = 'authored_by' and g.to_kind = 'person' and g.to_id = $1
 			  and g.from_kind in ('comment', 'message', 'ask')
 			union all
-			select g.from_kind, g.from_id, g.kind, g.created_at from person_aliases a
-			join ` + refs.AllEdgesSQL + ` g on g.to_kind = 'session' and g.to_id = a.alias and g.kind = 'delivered_to'
-			where a.person = $1 and a.alias_kind = 'session' and g.from_kind in ('comment', 'message', 'ask')
+			select from_kind, from_id, 'delivered_to', created_at from reached
 			union all
-			select g.from_kind, g.from_id, g.kind, g.created_at from ` + refs.MentionEdgesSQL + ` g
-			where g.kind = 'mentions' and g.to_kind = 'person' and g.to_id = $1
-			  and g.from_kind in ('comment', 'message', 'block')
+			select 'message', d.message_id::text, 'delivered_to', d.created_at
+			from message_deliveries d
+			where d.session_id = any($5) and d.state = 'sent' and d.created_at >= $4
+			union all
+			select 'comment', d.comment_id::text, 'delivered_to', d.created_at
+			from comment_deliveries d
+			where d.session_id = any($5) and d.state = 'sent' and d.created_at >= $4
+			union all
+			select r.from_kind, r.from_id, 'mentions', r.created_at from graph_mention_resolutions r
+			where r.to_kind = 'person' and r.to_id = $1 and r.from_kind in ('comment', 'message', 'block')
+			union all
+			select r.from_kind, r.from_id, 'mentions', r.created_at from graph_mention_resolutions r
+			where r.to_kind = 'session' and r.to_id = any($5) and r.from_kind in ('comment', 'message', 'block')
 		) edges group by from_kind, from_id
 	), items as (
 		select 'comment' as kind, c.id::text as id, c.body as title, c.created_at, r.relations,
