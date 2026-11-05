@@ -359,20 +359,29 @@ func (r *handoffRecordsLive) a3Accepted() {
 func (r *handoffRecordsLive) a7DaemonSessionRecord() {
 	t := r.t
 	tester := r.claimant(claim.RoleTester, r.a7, "ses_a7_tester")
-	body := []byte(fmt.Sprintf("{\n  \"schemaVersion\": 1,\n  \"phase\": \"test\",\n  \"issue\": %q,\n  \"verdict\": \"pass\",\n  \"implementerProof\": [\"A7\"]\n}\n", r.a7))
-	seeded := r.write(dispatch.DaemonSession(r.a7), r.a7, "test", body)
-	r.note("handoff-write as the daemon's own session %s: %s", dispatch.DaemonSession(r.a7), seeded.line)
+	body := r.smallBody(r.a7, "test", "written under the daemon's session before handoffs moved to Dispatch")
+	// The seed goes to Dispatch's own route with the daemon's session as its actor, as the daemon
+	// writes one: the `dispatch` CLI is this harness's worker side and refuses a session id with a
+	// colon in it, which legion-daemon:<PROJECT> has.
+	daemonSession := dispatch.DaemonSession(r.a7)
+	status, answer := r.dispatch.agentPost("/api/v1/issues/"+r.a7+"/handoffs/test", map[string]any{
+		"actor": map[string]string{"kind": "session", "id": daemonSession}, "body": string(body),
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("the write of %s's test handoff under %s = %d %s, want 201", r.a7, daemonSession, status, answer)
+	}
+	r.note("POST /api/v1/issues/%s/handoffs/test as session %s: %d", r.a7, daemonSession, status)
 	daemonRecord := r.dispatch.latest(r.a7, "test")
-	if daemonRecord.Author.Kind != "session" || daemonRecord.Author.ID != dispatch.DaemonSession(r.a7) || daemonRecord.Body != string(body) {
-		t.Fatalf("the test record of %s = %+v, want the body written under %s", r.a7, daemonRecord, dispatch.DaemonSession(r.a7))
+	if daemonRecord.Author.Kind != "session" || daemonRecord.Author.ID != daemonSession || daemonRecord.Body != string(body) {
+		t.Fatalf("the test record of %s = %+v, want the body written under %s", r.a7, daemonRecord, daemonSession)
 	}
 	r.note("Dispatch's test record of %s: version %d (id %s) by session %s, the body written byte for byte", r.a7, daemonRecord.Version, daemonRecord.ID, daemonRecord.Author.ID)
 
 	status, failure := tester.complete(api.HandoffCompleteRequest{Summary: "tested", Verdict: "pass", HandoffID: daemonRecord.ID, HandoffVersion: daemonRecord.Version})
 	if status != http.StatusForbidden || failure.Code != "HANDOFF_SESSION_MISMATCH" ||
-		!strings.Contains(failure.Error, dispatch.DaemonSession(r.a7)) || !strings.Contains(failure.Error, tester.session) {
+		!strings.Contains(failure.Error, daemonSession) || !strings.Contains(failure.Error, tester.session) {
 		t.Fatalf("the tester's completion naming the daemon session's record = %d %+v, want 403 HANDOFF_SESSION_MISMATCH naming %s and %s",
-			status, failure, dispatch.DaemonSession(r.a7), tester.session)
+			status, failure, daemonSession, tester.session)
 	}
 	r.note("POST /legion/v1/handoff/complete as %s naming the daemon session's record: %d %s: %s", tester.session, status, failure.Code, failure.Error)
 	r.holdPhase(r.a7, phase.Testing)

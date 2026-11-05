@@ -229,22 +229,19 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		return unreviewed("%s answered no file list, so what changed above the approved head is unknown", compared)
 	}
 	files := *compare.Files
-	// An entry whose every path is under .legion/ is skipped (underLegion), whatever GitHub says
-	// the change did to it: .legion/ is where Legion's handoffs lived before they moved to the
-	// Dispatch issue, and nothing writes or reads a path there now, so it is reviewed by nobody.
-	// A rename with one name outside .legion/ is no such entry and keeps both names, and every
-	// other path the change touches, a rename's old name included, must be retro's.
-	above := make([]githubrest.ChangedFile, 0, len(files))
-	for _, file := range files {
-		if underLegion(file) {
+	// A rename with one name outside .legion/ is no exempt entry (underLegion) and keeps both its
+	// names, and every other path the change touches, a rename's old name included, must be
+	// retro's.
+	var outside []string
+	for i := range files {
+		paths := githubrest.ChangedPaths(files[i : i+1])
+		if underLegion(paths) {
 			continue
 		}
-		above = append(above, file)
-	}
-	var outside []string
-	for _, path := range githubrest.ChangedPaths(above) {
-		if !strings.HasPrefix(path, "docs/solutions/") {
-			outside = append(outside, path)
+		for _, path := range paths {
+			if !strings.HasPrefix(path, "docs/solutions/") {
+				outside = append(outside, path)
+			}
 		}
 	}
 	if len(outside) > 0 {
@@ -264,12 +261,12 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 	return nil
 }
 
-// underLegion is whether every path of compare entry file is under .legion/: its name, and a
-// rename's previous name too, which githubrest.ChangedPaths of that one entry gives. The entry's
-// status is read no more, so an entry that adds, modifies, removes or renames within .legion/
-// answers true, and a rename whose other name is outside .legion/ answers false.
-func underLegion(file githubrest.ChangedFile) bool {
-	for _, path := range githubrest.ChangedPaths([]githubrest.ChangedFile{file}) {
+// underLegion is whether every path of one compare entry (githubrest.ChangedPaths of that entry:
+// its name, and a rename's previous name too) is under .legion/. The entry's status is read no
+// more, so an entry that adds, modifies, removes or renames within .legion/ answers true, and a
+// rename whose other name is outside .legion/ answers false.
+func underLegion(paths []string) bool {
+	for _, path := range paths {
 		if !strings.HasPrefix(path, ".legion/") {
 			return false
 		}

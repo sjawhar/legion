@@ -205,7 +205,7 @@ func TestNoComposedPromptCommitsAHandoff(t *testing.T) {
 	retired := []string{"No role pushes a `.legion/` deletion", "No role removes `.legion/`", "nobody removes it before the merge", "strips whatever `.legion/`", "still carries `.legion/`",
 		"Retro then commits only `docs/solutions/`", "no file changes above the approved head", "the same sha when retro added nothing", "Retro's `docs/solutions/` commit is never",
 		"'~(docs/solutions | .legion/<issue>)'", ".legion/<issue>/<phase>.json", "record handoff", "handoff-only", "Retro's last commit removes",
-		"committed handoff"}
+		"committed handoff", "handoffs are on its Dispatch issue now"}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
 		text := composedText(t, composer, role, false)
 		for _, phrase := range retired {

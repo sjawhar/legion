@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -96,16 +97,17 @@ func TestHandoffCompleteReadyRefusesAChangeAboveTheApprovedHeadNoReviewApproved(
 	}
 	file := func(name string) string { return fmt.Sprintf(`{"filename":%q,"status":"modified"}`, name) }
 	retro := []string{file("docs/solutions/legion/retro-LEGION-208.md"), `{"filename":".legion/LEGION-208/review.json","status":"removed"}`}
-	many := make([]string, 300)
-	for i := range many {
-		many[i] = file(fmt.Sprintf("docs/solutions/legion/note-%03d.md", i))
+	// cut is a compare of CompareFilesLimit entries under dir, the most GitHub lists. manyLegion
+	// is that cut with every entry under .legion/: the exemption leaves nothing to name, and the
+	// refusal still counts the whole list GitHub answered with.
+	cut := func(dir string) []string {
+		entries := make([]string, githubrest.CompareFilesLimit)
+		for i := range entries {
+			entries[i] = file(fmt.Sprintf("%snote-%03d.md", dir, i))
+		}
+		return entries
 	}
-	// manyLegion is the same cut with every entry under .legion/: the exemption leaves nothing to
-	// name, and the refusal still counts the whole list GitHub answered with.
-	manyLegion := make([]string, 300)
-	for i := range manyLegion {
-		manyLegion[i] = file(fmt.Sprintf(".legion/LEGION-208/note-%03d.md", i))
-	}
+	many, manyLegion := cut("docs/solutions/legion/"), cut(".legion/LEGION-208/")
 	const code = "READY_UNREVIEWED_CHANGE: "
 	for _, tc := range []struct {
 		name, compare string
