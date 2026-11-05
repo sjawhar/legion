@@ -1235,12 +1235,15 @@ interface MyReplyRowBase {
   readonly subject: string;
   readonly reply: MyReplyReply;
   /** Whether the row still holds a write the caller has not read: always true under
-   *  `state=unread`, either way under `state=all`. */
+   *  `state=unread`, either way under `state=inbox` and `state=dismissed`. */
   readonly unread: boolean;
   /** How many writes in the thread the caller has not read: for a Reply row the comments,
    *  messages and answers somebody else wrote after `read_through`, for an Agent row the session
    *  replies in `unread_reply_ids`. */
   readonly unread_count: number;
+  /** When the caller dismissed the thread out of their Inbox, absent on a thread that is in it.
+   *  It is the order `state=dismissed` answers in and the cursor it resumes from. */
+  readonly dismissed_at?: string;
 }
 
 /** A Reply row: an ask's thread, a comment thread by its root, or an issue message thread by its
@@ -1280,6 +1283,9 @@ export interface MyReplyAgentRow extends MyReplyRowBase {
  *  shape's own fields are always sent for it. */
 export type MyReplyRow = MyReplyThreadRow | MyReplyAgentRow;
 
+/** `GET /api/v1/me/replies`'s answer in one state. `unread` and `inbox` answer every matching row
+ *  when the caller names no `limit`, which is what the Inbox reads; `dismissed` answers
+ *  `INBOX_DISMISSED_PAGE` rows at a time and names where the next page resumes in `next_cursor`. */
 export interface MyRepliesResponse {
   readonly rows: MyReplyRow[];
   readonly total: number;
@@ -1289,7 +1295,22 @@ export interface MyRepliesResponse {
   /** The database time of the one snapshot every row was read in, which a mark-all passes back as
    *  its read mark. */
   readonly as_of: string;
+  /** Where the next `state=dismissed` page resumes, as its `?cursor=`: sent by a page that filled,
+   *  absent on the last one. Following it may answer no row, when the rows it names have been
+   *  restored since. */
+  readonly next_cursor?: string;
 }
+
+/** The states `GET /api/v1/me/replies`'s `?state=` reads the caller's threads in: `unread`, the
+ *  default and the Inbox count's own read, which answers the rows somebody else has written in
+ *  since they read them; `inbox`, every row in their Inbox, read or not, less what they have
+ *  dismissed; and `dismissed`, what they dismissed out of it, newest dismissal first. A thread
+ *  stays in the Inbox, read or not, until it is dismissed (`InboxDismissRequest` below). */
+export const INBOX_LIST_STATES = ["unread", "inbox", "dismissed"] as const;
+export type InboxListState = (typeof INBOX_LIST_STATES)[number];
+
+/** How many rows one `state=dismissed` page answers, and how many `?cursor=` reads again. */
+export const INBOX_DISMISSED_PAGE = 200;
 
 /** The two kinds of thread row the Inbox holds, as `GET /api/v1/me/replies`'s `?kind=` and the
  *  Mark all read body below both name them: a Reply row, a thread the reader wrote in where
@@ -1334,6 +1355,55 @@ export interface MarkInboxReadRequest {
  *  0 and announces nothing. */
 export interface MarkInboxReadResponse {
   readonly marked: number;
+}
+
+/** A row id `POST /api/v1/me/inbox/dismiss` names a thread by, as the Inbox draws its rows: a Reply
+ *  row is `reply:<thread id>` and an Agent row `agent:<root message id>`, each id a uuid. An Ask
+ *  row, the third kind the Inbox draws, has no Dismiss at all, and naming `ask:<id>` is
+ *  400 INVALID_QUERY; the Reply row of an open ask's thread is an ordinary `reply:` id. */
+export const INBOX_DISMISS_ROW_PREFIXES = { reply: "reply:", agent: "agent:" } as const;
+
+/** The body of `POST /api/v1/me/inbox/dismiss`, which takes a thread out of the Inbox and puts it
+ *  back. A thread stays in the Inbox, read or not, until it is dismissed, as an email stays until
+ *  it is archived: reading it and `POST /api/v1/me/inbox/read` leave it there.
+ *
+ *  A request names either `threads`, the row ids to change, or the list's own narrowing with
+ *  `dismiss_through`, never both (400 INVALID_QUERY). Under the narrowing it changes exactly the
+ *  threads `GET /api/v1/me/replies` answers under it whose newest reply, or whose dismissal, is at
+ *  or before that mark, which is the list's own `as_of`, as Mark all read reads `read_through`.
+ *
+ *  Dismissing marks a thread read as well, so a dismissed thread never counts as unread. A later
+ *  write by somebody else brings a dismissed thread back unread; the caller's own reply does not,
+ *  so a reply sent from the Dismissed view leaves the thread there. */
+export interface InboxDismissRequest {
+  /** The rows to change, as `INBOX_DISMISS_ROW_PREFIXES` spells them. With any narrowing field,
+   *  `dismiss_through` included, it is 400 INVALID_QUERY. */
+  readonly threads?: string[];
+  /** RFC3339; stored as no later than now. Required when the request names the narrowing rather
+   *  than `threads`: missing, unparsable or more than a minute ahead of the server is
+   *  400 INVALID_STATE. */
+  readonly dismiss_through?: string;
+  /** True clears the marks instead of writing them, so the threads are in the Inbox again, drawn
+   *  as they were read. */
+  readonly restore?: boolean;
+  /** Both kinds by default, as Mark all read reads them. */
+  readonly kind?: InboxThreadKind[];
+  readonly priority?: MarkInboxReadPriority[];
+  readonly urgency?: (AskUrgency | "none")[];
+  /** Project keys, and `none` for a thread with no project. */
+  readonly project?: string[];
+  /** One issue's threads. With `artifact` it is 400 INVALID_QUERY. */
+  readonly issue?: string;
+  /** One project document's threads, by document id. With `issue`, or when it is not a document
+   *  id, it is 400 INVALID_QUERY. */
+  readonly artifact?: string;
+}
+
+/** `POST /api/v1/me/inbox/dismiss`'s answer: how many threads it changed - the Reply threads whose
+ *  mark it wrote or cleared plus the Agent threads whose dismissal row it wrote or deleted. A
+ *  request that changes nothing answers 0 and announces nothing. */
+export interface InboxDismissResponse {
+  readonly dismissed: number;
 }
 
 /** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per

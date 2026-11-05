@@ -1514,7 +1514,7 @@ type MyReplyRow struct {
 	// an Agent row, whose replies are read by id rather than by a mark.
 	ReadThrough *time.Time `json:"read_through,omitempty"`
 	// Unread says whether the row still holds a write the caller has not read: always true under
-	// state=unread, either way under state=all.
+	// state=unread, either way under state=inbox and state=dismissed.
 	Unread bool `json:"unread"`
 	// UnreadCount is how many writes in the thread the caller has not read: for a Reply row the
 	// comments, messages and answers somebody else wrote after ReadThrough, for an Agent row the
@@ -1526,17 +1526,22 @@ type MyReplyRow struct {
 	Anchor *Anchor `json:"anchor,omitempty"`
 	// Session is the agent session an Agent row's thread was sent to.
 	Session *MyReplySession `json:"session,omitempty"`
+	// DismissedAt is when the caller dismissed the thread out of their Inbox, absent on a thread
+	// that is in it. It is the order state=dismissed answers in and the cursor it resumes from.
+	DismissedAt *time.Time `json:"dismissed_at,omitempty"`
 }
 
-// MyRepliesResponse is the caller's Inbox threads, newest reply first, and how many there are in
-// all. AsOf is the database time of the one snapshot every row was read in, which is what a
-// mark-all passes back as its read mark.
+// MyRepliesResponse is the caller's Inbox threads in one state's own order, and how many there are
+// in all. AsOf is the database time of the one snapshot every row was read in, which is what a
+// mark-all passes back as its read mark. NextCursor is where the next state=dismissed page
+// resumes, empty when the page that answered it was the last.
 type MyRepliesResponse struct {
-	Rows   []MyReplyRow `json:"rows"`
-	Total  int          `json:"total"`
-	Limit  int          `json:"limit"`
-	Offset int          `json:"offset"`
-	AsOf   time.Time    `json:"as_of"`
+	Rows       []MyReplyRow `json:"rows"`
+	Total      int          `json:"total"`
+	Limit      int          `json:"limit"`
+	Offset     int          `json:"offset"`
+	AsOf       time.Time    `json:"as_of"`
+	NextCursor string       `json:"next_cursor,omitzero"`
 }
 
 // SessionAnswer kinds: an ask's current answer (its ID is the ask's), a comment, or a message.

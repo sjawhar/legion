@@ -1,0 +1,22 @@
+-- 20261105093504_drop_user_threads_login_replied.up.sql
+--
+-- INFRA-450: user_threads_login_replied (20261103071942) was built for one read,
+-- `GET /api/v1/me/replies?state=all`, which this change removes: the Inbox list reads
+-- `state=inbox` through user_threads_inbox (20261105093502) and the Dismissed view reads
+-- `state=dismissed` through user_threads_dismissed (20261105093503), and `state=unread`, the
+-- count's own read, still reads user_threads_unread (0095). Nothing else ever named it, so the
+-- index would only cost every write to user_threads one more index to maintain.
+--
+-- Both the index and its only reader are this branch's own and unreleased, so no running build
+-- reads it: the branch that added it removes `state=all` in the same change.
+--
+-- drop index takes ACCESS EXCLUSIVE on user_threads, which conflicts with every reader and every
+-- writer. It is brief but not nothing: the statement unlinks the index's files and writes the
+-- catalogue, independent of the table's size, while every Inbox read and every comment, answer and
+-- issue message on that table waits. The census answers 0: no row is read, rewritten or refused.
+--
+-- Measured on this pod's test database: user_threads held 24 rows after the api suite's Inbox
+-- seeds, the largest any one test's database held while
+-- `go test ./internal/dispatch/api/ -run 'InboxRead|Replies|InboxRows'` ran (sampled every 0.3 s).
+-- The window does not grow with that count: a drop reads no row of the table it locks.
+drop index user_threads_login_replied;

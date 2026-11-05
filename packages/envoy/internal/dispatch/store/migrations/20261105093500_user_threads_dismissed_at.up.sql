@@ -1,0 +1,23 @@
+-- 20261105093500_user_threads_dismissed_at.up.sql
+--
+-- INFRA-450: a thread stays in a person's Inbox, read or not, until they dismiss it, as an email
+-- stays until it is archived. dismissed_at is that mark, beside the row's read mark: the thread is
+-- dismissed for them while the mark is at or after the newest write somebody else made in it
+-- (replied_at). 20261105093501 makes the trigger's own function clear the mark when a newer write
+-- by somebody else lands, so "dismissed" is exactly `dismissed_at is not null` for a Reply row and
+-- no read has to compare the two columns. The Agent half has no trigger, so it keeps its own table
+-- (20261105093505) and compares the two marks itself.
+--
+-- The column is nullable with no default and no backfill, so Postgres writes the catalogue row and
+-- nothing else: the table is not rewritten and no existing row is read. The statement takes ACCESS
+-- EXCLUSIVE on user_threads for that catalogue write, which conflicts with every reader and every
+-- writer, so the window is the catalogue write alone - microseconds, independent of the table's
+-- size - and the census answers 0. A row that exists before this migration carries a null mark,
+-- which is exactly "not dismissed", so every thread stays in its Inbox.
+--
+-- Measured on this pod's test database: user_threads held 24 rows after the api suite's Inbox
+-- seeds, the largest any one test's database held while
+-- `go test ./internal/dispatch/api/ -run 'InboxRead|Replies|InboxRows'` ran (sampled every 0.3 s).
+-- The window does not grow with that count, since no row is read or rewritten; a production table
+-- of any size takes the same catalogue write.
+alter table user_threads add column dismissed_at timestamptz;

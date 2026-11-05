@@ -59,11 +59,11 @@ const inboxReadAgentRest = `
 	where r.replied_at <= least($4::text::timestamptz, now())
 	order by r.root_id`
 
-// inboxReadAgentThreads is the list route's own Agent read with that select over it: the head,
-// the "a reply this login has not read" narrowing and the roots are myAgentHead, myAgentUnread
-// and myAgentRoots, the constants myAgentRowsQuery is built from (api/replies.go), so a change
-// to either moves the list and this button together.
-const inboxReadAgentThreads = myAgentHead + myAgentUnread + myAgentRoots + inboxReadAgentRest
+// inboxReadAgentThreads is the list route's own Agent read with that select over it: the head and
+// the roots holding a reply this login has not read are myAgentHead and myAgentUnreadRoots, the
+// constants myAgentRowsQuery is built from (api/replies.go), so a change to either moves the list
+// and this button together.
+const inboxReadAgentThreads = myAgentHead + myAgentUnreadRoots + inboxReadAgentRest
 
 // The lock statements of this transaction, which it takes in the order markInboxReadThreads
 // writes down: the owner rows of the threads it marks `for share`, then the caller's own

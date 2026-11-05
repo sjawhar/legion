@@ -228,9 +228,9 @@ func TestInboxRowsMergeReplyAndAgentRowsNewestFirst(t *testing.T) {
 	}
 }
 
-// state=all lists a thread the caller has read, drawn as read, of either kind; state=unread lists
-// neither.
-func TestInboxRowsUnderStateAllListReadThreads(t *testing.T) {
+// state=inbox lists a thread the caller has read, drawn as read, of either kind - a thread stays in
+// the Inbox until it is dismissed - while state=unread lists neither.
+func TestInboxRowsUnderStateInboxListReadThreads(t *testing.T) {
 	handler, _, _, _, _ := directConversationFrom(t, "alice")
 	issue := createInteractionIssue(t, handler, "TEST", "Read", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Ready?"}, "alice")
@@ -249,15 +249,21 @@ func TestInboxRowsUnderStateAllListReadThreads(t *testing.T) {
 	if unread := getMyReplies(t, handler, "alice", "?kind=reply,agent"); unread.Total != 0 || len(unread.Rows) != 0 {
 		t.Fatalf("unread page = %#v, want nothing once both are read", unread)
 	}
-	all := getMyReplies(t, handler, "alice", "?kind=reply,agent&state=all")
-	if all.Total != 2 || len(all.Rows) != 2 {
-		t.Fatalf("state=all page = %#v, want both read threads", all)
+	inbox := getMyReplies(t, handler, "alice", "?kind=reply,agent&state=inbox")
+	if inbox.Total != 2 || len(inbox.Rows) != 2 {
+		t.Fatalf("state=inbox page = %#v, want both read threads", inbox)
 	}
-	if row := replyRow(t, all, root.ID); row.Unread || row.UnreadCount != 0 {
-		t.Fatalf("read Reply row = %#v, want it drawn as read", row)
+	if row := replyRow(t, inbox, root.ID); row.Unread || row.UnreadCount != 0 || row.DismissedAt != nil {
+		t.Fatalf("read Reply row = %#v, want it drawn as read and undismissed", row)
 	}
-	if row := replyRow(t, all, agentRoot.ID); row.Unread || row.UnreadCount != 0 || len(row.UnreadReplyIDs) != 0 || row.Reply.ID != agentReply.ID {
-		t.Fatalf("read Agent row = %#v, want it drawn as read with its newest reply", row)
+	if row := replyRow(t, inbox, agentRoot.ID); row.Unread || row.UnreadCount != 0 ||
+		len(row.UnreadReplyIDs) != 0 || row.Reply.ID != agentReply.ID || row.DismissedAt != nil {
+		t.Fatalf("read Agent row = %#v, want it drawn as read and undismissed with its newest reply", row)
+	}
+	// state=all was this branch's own spelling of the Inbox read; it is no state now.
+	refused := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/replies?state=all", nil, "alice")
+	if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"INVALID_QUERY"`) {
+		t.Fatalf("state=all: status=%d body=%s, want 400 INVALID_QUERY", refused.Code, refused.Body.String())
 	}
 }
 
