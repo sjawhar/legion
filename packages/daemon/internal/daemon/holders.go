@@ -64,7 +64,7 @@ func (b liveBudgets) Timeouts() supervise.Timeouts {
 // probe, the repository caches, the pod at an address — asks through it, so a rebuild of the
 // runtime moves the answer with it.
 func sandboxOf(rt runtime.Runtime) (*sandbox.Runtime, bool) {
-	if holder, ok := rt.(*runtimeHolder); ok {
+	if holder, held := rt.(heldRuntime); held {
 		rt = holder.get()
 	}
 	sandboxed, ok := rt.(*sandbox.Runtime)

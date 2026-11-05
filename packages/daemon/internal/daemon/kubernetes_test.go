@@ -212,8 +212,9 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 		t.Fatalf("boot = %v, want the image probe's refusal", err)
 	}
 	// The probe is handed the runtime behind its holder, which is what every reader of the
-	// runtime holds now (runtimeHolder): what it asks of the Sandbox runtime it asks through it.
-	if holder, held := probed.(*runtimeHolder); !held || holder.get() != rt {
+	// runtime holds now (runtimeHolder, and the issueResourceHolder shape in front of a Sandbox
+	// runtime): what it asks of the Sandbox runtime it asks through it.
+	if holder, held := probed.(heldRuntime); !held || holder.get() != rt {
 		t.Errorf("the probe was handed %v, want the holder over the runtime the daemon built", probed)
 	}
 	if count, _ := boots(t, cfg); count != 0 {

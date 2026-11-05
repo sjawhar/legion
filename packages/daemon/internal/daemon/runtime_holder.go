@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -62,14 +64,55 @@ type servedRuntime struct {
 
 var _ runtime.Runtime = (*runtimeHolder)(nil)
 
+// runtimeHolding is the runtime behind its holder as the daemon holds it: the runtime itself,
+// and the holder the settings observer registers and rebuilds.
+//
+// newRuntimeHolder answers one of two shapes, because a Go type either implements an interface
+// or it does not, and three readers of `deps.Runtime` ask it for one the core runtime.Runtime
+// does not carry: a closed issue's own resources (runtime.IssueSuspender, outbox's
+// record.IssueSuspend and its release save), the unpushed work of a released workspace
+// (runtime.WorkspaceBundler) and whether an issue's pod runs the configured image
+// (issuePodImages, which attachIdleRelease asks before it starts the idle tick). The holder in
+// front of a runtime that answers them answers them too; the one in front of a runtime that
+// answers none of them answers none, so a tmux deployment's readers take the same miss they
+// took before the holder existed.
+type runtimeHolding interface {
+	runtime.Runtime
+	rebuilt
+}
+
+// heldRuntime is the runtime a holder holds now, whichever shape the holder has (sandboxOf).
+type heldRuntime interface {
+	get() runtime.Runtime
+}
+
 // newRuntimeHolder holds rt, which stop ends, and builds its replacements with build.
-func newRuntimeHolder(rt runtime.Runtime, stop context.CancelFunc, log *slog.Logger, build func(cfg config.Config) (runtime.Runtime, context.CancelFunc, error)) *runtimeHolder {
+func newRuntimeHolder(rt runtime.Runtime, stop context.CancelFunc, log *slog.Logger, build func(cfg config.Config) (runtime.Runtime, context.CancelFunc, error)) runtimeHolding {
 	if log == nil {
 		log = slog.Default()
 	}
 	h := &runtimeHolder{build: build, log: log, serving: &servedRuntime{stop: stop}}
 	h.current.Store(&rt)
+	if answersIssueResources(rt) {
+		return &issueResourceHolder{runtimeHolder: h}
+	}
 	return h
+}
+
+// answersIssueResources is whether rt answers any of the three interfaces an issue-resource
+// holder forwards. The Sandbox runtime answers all three and the tmux runtime none, and a
+// runtime that answered some of them is held by that holder too: each of its three methods
+// answers a runtime that does not carry the interface exactly as the reader's own missed type
+// assertion did (issueResourceHolder).
+func answersIssueResources(rt runtime.Runtime) bool {
+	if _, suspends := rt.(runtime.IssueSuspender); suspends {
+		return true
+	}
+	if _, bundles := rt.(runtime.WorkspaceBundler); bundles {
+		return true
+	}
+	_, reads := rt.(issuePodImages)
+	return reads
 }
 
 func (h *runtimeHolder) holder() string { return config.HolderRuntime }
@@ -295,4 +338,62 @@ func (h *runtimeHolder) CleanupTree(ctx context.Context, tree string) error {
 	rt, left := h.enter()
 	defer left()
 	return rt.CleanupTree(ctx, tree)
+}
+
+// issueResourceHolder is the holder in front of a runtime that answers what a deployment with
+// resources of its own per issue is asked: the Sandbox runtime, whose Sandbox, pod and disk a
+// closed issue's suspension deletes, whose shim bundles the unpushed work of a released
+// workspace, and which knows whether an issue's pod runs the image the configuration names.
+// Three readers of `deps.Runtime` ask for each by a type assertion (outbox's record.IssueSuspend
+// and bundleIssueWorkspace, workflow's attachIdleRelease), and a holder that answered none of
+// them took those three behaviours out of every Kubernetes deployment while every other test of
+// this package passed.
+//
+// Each call enters the runtime it runs on as every other forwarded call does, so a rebuild waits
+// for it rather than ending the runtime under it. A runtime that does not carry the interface —
+// which the `runtime` selector being fixed for the process makes impossible under a rebuild, and
+// which a runtime answering two of the three would be — is answered exactly as the reader's own
+// missed assertion answered: nothing to delete, nothing to bundle, no pod image read.
+type issueResourceHolder struct {
+	*runtimeHolder
+}
+
+var (
+	_ runtimeHolding           = (*issueResourceHolder)(nil)
+	_ runtime.IssueSuspender   = (*issueResourceHolder)(nil)
+	_ runtime.WorkspaceBundler = (*issueResourceHolder)(nil)
+	_ issuePodImages           = (*issueResourceHolder)(nil)
+)
+
+// SuspendIssue deletes the issue's own resources through the runtime that holds them, under the
+// authorization the caller passes: the Sandbox, the pod and the disk of a closed issue.
+func (h *issueResourceHolder) SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error {
+	rt, left := h.enter()
+	defer left()
+	suspender, suspends := rt.(runtime.IssueSuspender)
+	if !suspends {
+		return nil
+	}
+	return suspender.SuspendIssue(ctx, issue, tree, authorize)
+}
+
+// BundleWorkspace asks the live role's process to bundle the unpushed work of the issue's
+// workspace. A runtime that bundles none answers the error the reader turns into the release's
+// own hold, as its missed assertion did.
+func (h *issueResourceHolder) BundleWorkspace(ctx context.Context, issue string, role claim.Role) (runtime.WorkspaceBundle, error) {
+	rt, left := h.enter()
+	defer left()
+	bundler, bundles := rt.(runtime.WorkspaceBundler)
+	if !bundles {
+		return runtime.WorkspaceBundle{}, errors.New("the runtime bundles no workspace")
+	}
+	return bundler.BundleWorkspace(ctx, issue, role)
+}
+
+// IssuePodRunsConfiguredImage is whether the issue's pod runs the image the configuration names.
+// It takes no context and reaches no cluster — the Sandbox runtime answers it from the pod it
+// already watches — so it reads the runtime the holder holds now rather than entering it.
+func (h *issueResourceHolder) IssuePodRunsConfiguredImage(issue string) bool {
+	images, reads := h.get().(issuePodImages)
+	return reads && images.IssuePodRunsConfiguredImage(issue)
 }
