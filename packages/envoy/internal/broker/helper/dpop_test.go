@@ -16,6 +16,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 // dpopClaims is the payload of a DPoP proof the test server read.
@@ -85,7 +86,7 @@ func TestTheDPoPTransportSignsEachTokenRequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	client := &http.Client{Transport: NewDPoPTransport(key, srv.Client().Transport)}
+	client := &http.Client{Transport: brokerclient.NewDPoPTransport(key, srv.Client().Transport)}
 	tokenURL := srv.URL + "/v1/oauth/token"
 	post := func(u string) *http.Response {
 		t.Helper()

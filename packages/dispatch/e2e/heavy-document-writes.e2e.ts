@@ -1,26 +1,28 @@
 // What a heavy body costs the server when it is written as a document: the API answers every one
-// of these shapes in under a second, stored or refused, and the cost grows with the body rather
-// than faster than it. The same shapes drawn in a browser are `heavy-bodies.e2e.ts`, and both
-// specs read them from one module, so the two measure the very same bytes. This one drives no
-// browser, so it runs in one Playwright project and nowhere else: every project of a run shares
-// the one server process, so a second project would time these writes against a server that
-// already holds what each shape touches, and what the row says below about the first document
-// write of its shape would be false there (sjawhar/legion#2519). That project is
-// `chromium-alone` (e2e/playwright.config.ts), which Playwright starts only once every other
-// project has finished and which runs one row at a time: a second read from the wall clock is a
-// second only where nothing else holds the machine (sjawhar/legion#2612).
+// of these shapes in under a second, stored or refused. That the cost grows with the body rather
+// than faster than it is held in Go over these same shapes, in CPU time
+// (`packages/envoy/internal/dispatch/pmdoc/heavy_bodies_test.go`). The same shapes drawn in a
+// browser are `heavy-bodies.e2e.ts`, and both specs read them from one module, so the two measure
+// the very same bytes. This one drives no browser, so it runs in one Playwright project and
+// nowhere else: every project of a run shares the one server process, so a second project would
+// time these writes against a server that already holds what each shape touches, and what the row
+// says below about the first document write of its shape would be false there
+// (sjawhar/legion#2519). That project is `chromium-alone` (e2e/playwright.config.ts), which
+// Playwright starts only once every other project has finished and which runs one row at a time:
+// a second read from the wall clock is a second only where nothing else holds the machine
+// (sjawhar/legion#2612).
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { expect, test } from "@playwright/test";
 import { createIssue, createIssueArtifact, createProject } from "./api";
 import {
-  bracketRunSizes,
+  bracketRun,
   calloutBracketRun,
   lazyListItem,
   lazyQuote,
   markerChain,
-  nested49ThenBlankLinesSizes,
+  nested49ThenBlankLines,
   nestedThenBlankLines,
-  plainListSizes,
+  plainList,
 } from "./heavy-bodies";
 import { resetDatabase } from "./seed";
 
@@ -43,20 +45,13 @@ interface HeavyDocument {
   readonly body: string;
   /** What the row is called, in its assertions and in its annotations. */
   readonly name: string;
+  /** Whether the API stores a write of this body, or refuses it as invalid markdown. */
+  readonly stored: boolean;
   /** The one shape whose first write in a server process pays for the memory it touches rather
    *  than for the parse, which the row writes once before it measures anything (the table's own
    *  comment below). */
   readonly warm?: true;
 }
-
-/** A row carries `half` where its write is the parse: the same shape at half the count its body
- *  holds, built by the one generator that built the body (`atBothSizes`). The write row times
- *  that write too and holds the body's own write against it, so a parse that grows faster than
- *  the body it reads is caught whatever the node costs a write. Which rows carry one, and why
- *  the others carry none, is on the write row. */
-type DocumentRow =
-  | (HeavyDocument & { readonly half?: string; readonly stored: true })
-  | (HeavyDocument & { readonly half?: undefined; readonly stored: false });
 
 /** Each heavy shape written as an issue document through the API, with the verdict Go gives it:
  *  stored, or refused as invalid markdown because it nests past `pmdoc/nesting.go`'s bound.
@@ -71,24 +66,13 @@ type DocumentRow =
  *  is 316-343 ms once the process has done it and up to about 1.3 s the first time. The row
  *  writes such a body once to warm the process, records that first write's time, and holds the
  *  bound against the second, which is the steady state a reader's writes meet. */
-const documentRows: readonly DocumentRow[] = [
-  {
-    body: plainListSizes.full,
-    half: plainListSizes.half,
-    name: "8,000 list items",
-    stored: true,
-  },
+const documentRows: readonly HeavyDocument[] = [
+  { body: plainList, name: "8,000 list items", stored: true },
   { body: lazyQuote, name: "a quote followed by lines without its marker", stored: true },
   { body: lazyListItem, name: "a list item followed by lines without its marker", stored: true },
+  { body: bracketRun, name: "15,000 opening brackets then 15,000 closing ones", stored: true },
   {
-    body: bracketRunSizes.full,
-    half: bracketRunSizes.half,
-    name: "15,000 opening brackets then 15,000 closing ones",
-    stored: true,
-  },
-  {
-    body: nested49ThenBlankLinesSizes.full,
-    half: nested49ThenBlankLinesSizes.half,
+    body: nested49ThenBlankLines,
     name: "49 list markers on one line then blank lines",
     stored: true,
     warm: true,
@@ -175,78 +159,57 @@ interface Written {
  * One write at a time, with the server otherwise idle: each write starts from an emptied
  * database and an issue of its own (`anIdleServer` above), so neither the settlement nor the
  * deferred block index the write before it left can run beside the one being timed - the
- * warming write and the half-size write included - and what the bounds below hold is one write
- * alone. The twenty runs quoted further down were measured while the row waited that work out
- * instead, and a block-index tick could still land on a write there.
+ * warming write included - and what the bound below holds is one write alone.
  *
  * So what a write costs while another document of the same server settles beside it is not
  * measured here: measured with these writes back to back it reached 1,322 ms, which
  * sjawhar/legion#2519 names under Not proven / risk.
  *
- * Two bounds hold each body, and the row asserts both of them. The absolute bound is that the
- * write answers in under 1,000 ms: it is asserted on every row, stored or refused, under no
- * condition, and it is never skipped, widened or stood down for a slow node, because a second is
- * what the writer waits and CI's runners are where that is judged. What it is held against is
- * the round trip itself, which is what a writer waits: the row runs with the machine to itself
- * (`Written` above), so no share of it is read and nothing is corrected for, and the round trip
- * is annotated beside the bound either way. The second bound is linearity: for each shape whose
- * write is its parse, the row writes that same shape at half its count, times that write exactly
- * as it times the body, and holds the body's write to no more than 3.5x it, so a parse whose cost
- * grows faster than the body it reads reds this row on any node, the fast ones CI runs on
- * included, where the body alone would still answer in time. The ratio stands on a machine that
- * is not idle, which is what it was for: they are two writes of one shape seconds apart on one
- * machine, so a machine that holds both back by the same share leaves their ratio where it was -
- * 2.16x for the 8,000 items at four lanes on this pod, in the run whose 2,779 ms red the absolute
- * bound back when this row ran beside the other lanes. Both numbers and the ratio between them
- * are annotated before either bound is asserted, so a run that reds reports what the body cost
- * beside its half, whichever of the two bounds it
- * was. The absolute bound is asserted first, because a write the node itself stalled - 1,986 ms
- * for a body that costs 750 ms here - is no measurement of how the cost grows, and reading
- * linearity out of one would name a regression that is not there.
+ * One bound holds each body: the write answers in under 1,000 ms. It is asserted on every row,
+ * stored or refused, under no condition, and it is never skipped, widened or stood down for a
+ * slow node, because a second is what the writer waits and CI's runners are where that is
+ * judged. What it is held against is the round trip itself, which is what a writer waits: the
+ * row runs with the machine to itself (`Written` above), so no share of it is read and nothing
+ * is corrected for. The round trip is annotated before the bound is asserted, so a run that
+ * reds reports the number it read.
  *
- * The body is written before its half on each of the three rows held to the ratio. On the two
- * that carry no `warm` - the 8,000 items and the bracket run - that body is the first document
- * write of its shape in the server process, which is what the absolute bound has always measured
- * over them, with nothing but an emptied database before it. It is not the first parse of those
+ * That the cost grows with the body rather than faster than it is held in Go instead, over
+ * these same shapes at an eightfold step and in the CPU time the work itself spends
+ * (`TestHeavyBodiesAtTheBodyCapParseAndEncodeInTimeProportionalToTheirLength`,
+ * `packages/envoy/internal/dispatch/pmdoc/heavy_bodies_test.go`). This row used to write three
+ * of the shapes at half their count as well and hold the body's write to 3.5x that half. That
+ * bound could not separate the two things it was asked to tell apart, whatever the machine was
+ * doing: over eight `dispatch` CI jobs the server's own `elapsed_ms` for these writes read
+ * 1.90x to 2.36x on the honest runs and 3.57x on the one that red, while a parse gone quadratic
+ * reads about 3.5x to 4.0x at a 2x step (`growthStep`,
+ * `packages/envoy/internal/dispatch/pmdoc/linear_test.go`, has that arithmetic). Giving the row
+ * the machine to itself (sjawhar/legion#2612) did not close that gap: it red again at 5.44x in
+ * run 41921860163, out of the merge queue, taking a whole batch with it. Two wall times a
+ * doubling apart cannot separate a regression from a runner's own noise; eight times the input,
+ * measured in CPU time, can (INFRA-985).
+ *
+ * On every row but the 49-marker one the write the bound reads is the first document write of
+ * its shape in the server process, which is what the bound has always measured over them, with
+ * nothing but an emptied database before it. On two of them it is not the first parse of those
  * bytes: in the one project this spec runs in, `heavy-bodies.e2e.ts` runs first on the same
- * server (one worker, files in name order) and creates comments holding the same two bodies,
- * whose create parses each of them once. The 49-marker row is the exception: `warm`
- * has the row write that shape once before the pair, so the write the absolute bound reads there
- * is the second of its shape - the steady state every later writer of such a body meets - and
- * the first write's own time is annotated beside it and held to no bound (the table above). A
- * first write pays for the memory its shape touches, about 200 ms on this pod whichever size
- * pays it, so the half that follows runs warm and a linear path reads around 2x: 1.22x to 3.11x
- * over twenty runs of this row here, every one of which held this bound, and 3.4x to 3.6x where
- * the node stalled the body's write past 1,100 ms and red the absolute bound first - against the
- * 1.99x the same halving costs the server-side write path at this head and 2.06x at
- * `main@origin` (sjawhar/legion#2519). The bound is 3.5x: above every ratio twenty runs have
- * shown, with room for a two-core node's jitter, and below the 4x a parse quadratic in its body
- * costs - nearer 5x once that warm-up is counted into it - so the bound still names the
- * regression this row was written for.
- *
- * The ratio is asserted on the three rows whose write is its parse: the 8,000 items, the bracket
- * run and the 49 markers, whose bodies cost 630-1,000 ms of this server's own work here. The two
- * lazy rows carry no half body, because their whole write is 88-274 ms, nearly all of it the
- * round trip and the document's own row, so a ratio over them measures jitter - 1.05x, 1.65x,
- * 1.73x and 2.64x for one and the same shape, measured while they carried one - and nothing of
- * a parse. A refused body is further from the claim still: two of the three are turned away
- * before any parse of them finishes (20-41 ms for the 15,999 markers, 6-18 ms for the callout,
- * on a pod that is not stalling), and the third, 100 items nested by indentation, is parsed
- * before its nesting is refused (406-1,746 ms here) but is refused at every size, so no reader
- * ever stores it. Every row keeps the absolute bound all the same.
+ * server (one worker, files in name order) and creates comments holding the 8,000 items and the
+ * bracket run, whose create parses each of them once. The 49-marker row is the exception:
+ * `warm` has the row write that shape once before the write the bound reads, so what the bound
+ * reads there is the second write of its shape - the steady state every later writer of such a
+ * body meets, with the page faults of a first parse out of it - and the first write's own time
+ * is annotated beside it and held to no bound (the table above).
  */
-// SLOW(>=2s): twelve real writes, eleven of them held to a second of their own and the warming
-// write to none, cost 5.2 s together on this pod - 0.6 to 1.2 s for each of the heaviest four.
-// What the row proves is what one such write costs a writer, so no write can come out of it.
-// What could is gone: it used to wait out two ticks of the block-index reconciliation, 41 s of
-// the 50 s it took here (`anIdleServer`).
+// SLOW(>=2s): nine real writes, eight of them held to a second of their own and the warming
+// write to none, on this pod - 0.6 to 1.2 s for each of the heaviest four. What the row proves
+// is what one such write costs a writer, so no write can come out of it. What could is gone: it
+// used to wait out two ticks of the block-index reconciliation, 41 s of the 50 s it took here
+// (`anIdleServer`), and to write three of the shapes a second time at half their count.
 test("a document write of each heavy body answers in under a second, stored or refused", async () => {
-  // Twelve writes - one of every body, the warming write, and a half-size one after each of the
-  // three bodies held to the ratio - are about 5 s of measured writing, and the emptied database
-  // and fresh issue each of them starts from are about 100 ms more apiece: 6.6 to 7.6 s in
-  // Chromium on this pod with the machine to itself, which is what this row now always has
-  // (`Written` above). The deadline is the room a node slower than this one needs; nothing the
-  // row waits for is a tick of the server's own any more.
+  // Nine writes - one of every body and the warming write - are about 4 s of measured writing,
+  // and the emptied database and fresh issue each of them starts from are about 100 ms more
+  // apiece, in Chromium on this pod with the machine to itself, which is what this row always
+  // has (`Written` above). The deadline is the room a node slower than this one needs; nothing
+  // the row waits for is a tick of the server's own.
   test.setTimeout(90_000);
 
   /** Writes one body as a document of its own, into a fresh issue on a server left with no
@@ -281,23 +244,11 @@ test("a document write of each heavy body answers in under a second, stored or r
       });
     }
     const { refusal, took } = await write(row.body, `heavy-${index}.md`);
-    let half: number | undefined;
-    if (row.half !== undefined) {
-      // This row's own shape at half its count, written and timed as the body above it was, and
-      // waited out the same way: the two together are the growth the ratio holds.
-      const smaller = await write(row.half, `heavy-${index}-half.md`);
-      expect(smaller.refusal, `${row.name}: the half-size body was refused`).toBeUndefined();
-      half = smaller.took;
-    }
-    // Every measurement is the run's evidence, kept on the result even when the row passes: what
-    // the write cost a writer and the growth the ratio holds, so a reader of a CI run sees the
-    // shape of the cost and not only that the row passed.
+    // The measurement is the run's evidence, kept on the result even when the row passes: what
+    // the write cost a writer, so a reader of a CI run sees the number and not only that the
+    // row passed.
     test.info().annotations.push({
-      description:
-        half === undefined
-          ? `${Math.round(took)} ms`
-          : `${Math.round(half)} ms at half this shape, ${Math.round(took)} ms whole, ` +
-            `${(took / half).toFixed(2)}x`,
+      description: `${Math.round(took)} ms`,
       type: `${row.name}: what the write cost`,
     });
 
@@ -310,12 +261,5 @@ test("a document write of each heavy body answers in under a second, stored or r
       expect(message, row.name).toContain('"code":"INVALID_MARKDOWN"');
     }
     expect(took, `${row.name}: the write took ${Math.round(took)} ms`).toBeLessThan(1_000);
-    if (half !== undefined) {
-      expect(
-        took,
-        `${row.name}: ${Math.round(took)} ms for the body and ${Math.round(half)} ms for half ` +
-          `of it, ${(took / half).toFixed(2)}x`
-      ).toBeLessThanOrEqual(half * 3.5);
-    }
   }
 });

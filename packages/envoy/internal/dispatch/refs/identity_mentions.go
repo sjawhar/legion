@@ -132,4 +132,3 @@ func replaceDocumentIdentityMentions(
 // the source's own kind and its blocks are two reconciliations of one id, each replacing only its
 // own rows.
 func blockOwnerKind(sourceKind string) string { return sourceKind + "_blocks" }
-

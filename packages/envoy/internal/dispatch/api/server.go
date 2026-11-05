@@ -428,11 +428,14 @@ type warnedProductionRun struct {
 	applyStep string
 }
 
-// queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
-// serves both the plain-read and in-transaction paths.
+// queryer is the pgx surface shared by *store.Pool and pgx.Tx, so one loader
+// serves both the plain-read and in-transaction paths. A loader that reads
+// several statements at once queues them in one batch on it (loadArtifactDetails,
+// loadAskDetails) rather than spending a round trip on each.
 type queryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
 }
 
 // Register mounts every native-workspace route on mux. The routes live in routes_table.go; the
@@ -610,10 +613,16 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		}
 		if route.Method != http.MethodGet {
 			// Outside the keyed layer and the upload's spool, so a write to another project's
-			// object, or into another session's own rows, claims no idempotency key and costs
-			// no body (withinProjectScope, withinSessionScope).
+			// object, into another session's own rows, or by a credential that names no person
+			// claims no idempotency key and costs no body (withinProjectScope,
+			// withinSessionScope, writeNeedsASignedInPerson).
 			handler = s.withinProjectScope(route, handler)
 			handler = s.withinSessionScope(route, handler)
+			// Outermost of the three, so a caller that may make no write at all is told that
+			// rather than which session the write it tried belongs to. The project check has
+			// nothing to tell it: a token naming a service is held to no one project
+			// (broker_token.go).
+			handler = s.writeNeedsASignedInPerson(handler)
 			handler = s.refuseChangedLogin(handler)
 		}
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)

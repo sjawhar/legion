@@ -56,6 +56,9 @@ type testServerOptions struct {
 	// counts the statements a request issues. The test's own *store.Store is untraced, so
 	// seeding and direct reads are not counted: everything the tracer sees is the handler's.
 	queryTracer pgx.QueryTracer
+	// store is the database the server runs on; nil opens one of its own (storetest.Open). A
+	// test that counts a read's round trips passes a traced store (storetest.Traced).
+	store *store.Store
 	// app and githubAPIBase wire the GitHub App access-check client at a fake
 	// GitHub; both nil/empty leaves the client in its "no app credentials"
 	// state (every check answers ErrNoAppKey).
@@ -201,7 +204,10 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if lifetime == nil {
 		lifetime = t.Context()
 	}
-	database := storetest.Open(t)
+	database := options.store
+	if database == nil {
+		database = storetest.Open(t)
+	}
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
 	if options.persistence != nil {
