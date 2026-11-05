@@ -895,6 +895,90 @@ func TestTheRoomBudgetClosesARoomTheServerOpenedOverItOnceUnusedAndNeverABrowser
 	}
 }
 
+// settlementOwed is whether the document still owes a settlement, which the settlement that has
+// read every one of its updates deletes as it commits (clearSettlementPending).
+func settlementOwed(t *testing.T, service *Service, room string) bool {
+	t.Helper()
+	var owed bool
+	if err := service.store.Pool.QueryRow(context.Background(),
+		`select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, room).Scan(&owed); err != nil {
+		t.Fatalf("read the document's pending settlement: %v", err)
+	}
+	return owed
+}
+
+// A committed write to a document no room holds publishes into no room while the rooms already
+// open leave the budget no opening for one (roomBudget.openServerRoom): the budget's charges
+// stand where they stood, and the write is applied all the same, its update and its version
+// having been durable before the publish began. The settlement it leaves owed is what cannot do
+// without a room, so it waits for the budget's one opening whatever the charges read
+// (awaitServerRoom), warms its room over the full budget and settles the document, and the
+// budget closes that room as soon as the settlement has ended (closeIfOpenedOverBudget). With an
+// opening to be had, a publish opens its room as such a publish always has.
+//
+// Before the opening every such publish loaded its room whatever the budget held, charged it to a
+// budget already full, and left it charged until the settlement the write armed had run: a burst
+// of three hundred of them over a full budget took the pod 713,885,218 bytes past its Go memory
+// limit (cmd/dispatch, TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory).
+func TestAWritePublishesIntoNoRoomWhileTheBudgetHasNoOpeningForOne(t *testing.T) {
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	service.measurer.interval = noInterval
+	// Long enough that the settlement the write owes does not run while the publish is weighed;
+	// the test runs it itself below (SettleNow).
+	service.settle = time.Minute
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	ids := createDocuments(t, database, 3)
+	held, cold, opened := ids[0], ids[1], ids[2]
+
+	// One room a browser holds, which no sweep may close, and a budget its charge fills exactly.
+	browser := connectBrowser(t, httpServer.URL, held, "alice")
+	t.Cleanup(browser.Close)
+	waitFor(t, 10*time.Second, "the browser's room to be charged", func() bool { return budgetUsed(service) > 0 })
+	service.measurer.waitIdle()
+	limit := service.SetRoomBudgetForTest(budgetUsed(service))
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+
+	appendThroughAPI(t, service, cold)
+	if service.srv.GetDoc(cold) != nil {
+		t.Fatal("the publish of a write to a document no room holds opened its room while the budget had no opening for one")
+	}
+	if used := budgetUsed(service); used != limit {
+		t.Fatalf("the open rooms are charged %d bytes of the %d-byte budget after the write, want the charges left where they stood", used, limit)
+	}
+	// The paragraph the write appended beside the one the document was created holding, in the
+	// store, which held both before the publish began.
+	if stored, want := storedMarkdown(t, database, cold), 2; strings.Count(stored, "Room cap probe.") != want {
+		t.Fatalf("the written document reads %q, want the %d paragraphs of a write that was applied though it opened no room", stored, want)
+	}
+	if !settlementOwed(t, service, cold) {
+		t.Fatal("the written document owes no settlement, want the write to have armed the one its publish could not")
+	}
+
+	// The settlement takes the budget's opening though the budget is full, settles the document,
+	// and the room it warmed is closed once it has: it was opened over the limit, so the budget
+	// owes it that close.
+	service.SettleNow(cold)
+	waitFor(t, 30*time.Second, "the document to settle in the room its settlement warms", func() bool {
+		return !settlementOwed(t, service, cold)
+	})
+	waitFor(t, 30*time.Second, "the budget to close the room its settlement opened over it", func() bool {
+		return service.srv.GetDoc(cold) == nil
+	})
+	waitFor(t, 30*time.Second, "the budget's charges to fall back to what the browser's room holds", func() bool {
+		return budgetUsed(service) == limit
+	})
+
+	// A write with an opening to be had publishes into the room it opens, as every such write did
+	// before the budget booked openings at all.
+	service.SetRoomBudgetForTest(0)
+	appendThroughAPI(t, service, opened)
+	if service.srv.GetDoc(opened) == nil {
+		t.Fatal("the publish of a write to a document no room holds opened no room, want the room such a publish opens while the budget has an opening for one")
+	}
+}
+
 // While the budget is full, a delete-only update is admitted while its structure keeps the
 // charges within the limit and the pressure reserve beyond it, and charged; past the reserve it is
 // refused with the transient close, never applied, and charged nothing. An insert is refused

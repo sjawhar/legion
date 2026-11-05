@@ -82,9 +82,20 @@ var errRoomBudgetFull = errors.New("the open documents fill their memory budget"
 // budget, and a measured weight per entry, here a room's (roomCharge) and each admission's
 // reservation before its room loads (roomReservation). It charges every room whoever opened it,
 // and refuses only a browser's socket at its admission (reserveRoom): never Server.Apply, so the
-// server's own work - an API write, which opens its room from the store (publishLiveWrite), the
-// unrecorded-mark sweep, settlement's repair - opens its room over the budget, and a room so
-// opened is closed once nothing holds it (closeOnceUnused, Service.closeIfOpenedOverBudget).
+// server's own work - an API write's publish, which opens its room from the store
+// (publishLiveWrite), settlement's warm-up and repair, the unrecorded-mark sweep - opens its
+// room over the budget, and a room so opened is closed once nothing holds it (closeOnceUnused,
+// Service.closeIfOpenedOverBudget).
+//
+// What bounds that work is not a refusal but an opening (openServerRoom): it loads a room the
+// budget does not charge only while the charges stand under the limit and no other such load is
+// under way, so the charges can stand no further past the limit than the one room an opening
+// makes. Without it a burst of that work - three hundred API writes to documents no browser
+// holds, each publishing into a room of its own, none of them closable until the settlement its
+// write arms has run - took the pod 713,885,218 bytes past its Go memory limit over a full
+// budget (cmd/dispatch, TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory). A publish the
+// opening refuses leaves its room closed, which loses nothing (publishedWithoutARoom); a
+// settlement waits for one, and is armed again where none came (settleNoRoom).
 //
 // Over the budget, or short of what the admissions waiting on it need (wanted), the rooms that
 // hold nothing outlasting them are closed (sweepRooms), and an admission that finds the budget
@@ -136,6 +147,10 @@ type roomBudget struct {
 	full atomic.Bool
 	// stored holds the counts admissions made of the stored versions (storedRoomReservation).
 	stored storedCounts
+	// opening is the one room the server's own work is loading that the budget does not yet
+	// charge (openServerRoom). Another such load waits for it, or gives up and leaves its room
+	// closed.
+	opening bool
 }
 
 // budgetedRoom is what the budget holds for one document: charges, the instances of its room ygo
@@ -293,6 +308,99 @@ func (b *roomBudget) await(ctx context.Context, deadline time.Time, weight int64
 		}
 	}
 	return true
+}
+
+// openServerRoom books the budget's one opening, the one room the server's own work may be
+// loading that the budget does not yet charge (roomBudget), and reports whether it booked it:
+// the charges stand under the limit and no other opening stands. The caller gives it back once
+// it is done opening the room (closeServerRoom), by when the budget charges the room it made and
+// the next opening is weighed against that charge.
+//
+// Those two conditions together are what bounds the server's own work, and neither does it
+// alone. The limit alone would not: a room the budget has not weighed cannot be refused by
+// arithmetic - the work that opens it holds no count of the stored document, and a publish may
+// take no pooled connection to make one (storedRoomReservation, publishLiveUpdate) - so three
+// hundred of them would read the same headroom at the same moment and all pass. One at a time
+// alone would not either, for a caller that gives the opening back while its room stands: a room
+// outlives the load that opened it, by the settlement the write armed in it and then by the
+// minute ygo leaves it idle, so openings taken in turn would still pile rooms up. With both, the
+// charges can stand no further past the limit than the one room an opening makes, since the next
+// opening is weighed once that room's charge is in.
+//
+// A caller refused here opens no room, which is the one thing a publish of a committed write can
+// do without: its update is durable before it publishes, no browser holds a document no room
+// holds, and the room that loads next reads the store, which holds the write
+// (publishLiveWrite). A caller that cannot do without one waits instead (awaitServerRoom). A
+// budget with no limit is a budget no service built, a test's, which bounds nothing and opens
+// whatever it is asked for, as its admissions are never refused (await).
+func (b *roomBudget) openServerRoom() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.opening || !(b.limit <= 0 || b.used < b.limit) {
+		return false
+	}
+	b.opening = true
+	return true
+}
+
+// awaitServerRoom books that opening for a caller that cannot do without its room - a
+// settlement's warm-up (settleRoomWithin) - waiting until no other opening stands, and reports
+// whether it booked one. It waits until deadline passes or ctx ends; the opening before it being
+// given back wakes it, as does every other change to the budget (unlock).
+//
+// The limit is no condition here, where it is one for a publish. A settlement is the one thing
+// that must still happen on a budget its browsers have filled past its limit: it is what writes
+// the document's version, reconciles its ask blocks and clears its pending-settlement row, and a
+// document whose settlement waited for a charge to fall would wait as long as those browsers
+// stayed (TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks drives exactly that server). What
+// bounds it instead is the opening alone, held from before the warm-up until the settlement has
+// let the room go, so one such room stands at a time whatever the charges read.
+//
+// It counts as an admission waiting on the budget while it waits (waiters) and starts a sweep,
+// wanting nothing of its own: the room an opening before it loaded is closed once the work that
+// opened it is done with it (Service.closeIfOpenedOverBudget), and a sweep started here is what
+// closes the rooms a burst of this work has left behind. A caller it refuses loses nothing and
+// gives nothing up for good: the settlement is armed again (settleNoRoom), and the document's
+// pending-settlement row outlives every process.
+func (b *roomBudget) awaitServerRoom(ctx context.Context, deadline time.Time) bool {
+	b.mu.Lock()
+	defer b.unlock()
+	for {
+		if !b.opening {
+			b.opening = true
+			return true
+		}
+		wait := time.Until(deadline)
+		if wait <= 0 || ctx.Err() != nil {
+			return false
+		}
+		b.waiting++
+		b.waiters.Store(int32(b.waiting))
+		b.sweepAgainLocked()
+		if b.changed == nil {
+			b.changed = make(chan struct{})
+		}
+		changed := b.changed
+		b.mu.Unlock()
+		timer := time.NewTimer(wait)
+		select {
+		case <-changed:
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+		timer.Stop()
+		b.mu.Lock()
+		b.waiting--
+		b.waiters.Store(int32(b.waiting))
+	}
+}
+
+// closeServerRoom gives the opening back, whether its load made a room or not, and wakes whatever
+// waits for one (unlock).
+func (b *roomBudget) closeServerRoom() {
+	b.mu.Lock()
+	defer b.unlock()
+	b.opening = false
 }
 
 // release returns reservation, unless its room's charge already replaced it. Nil releases nothing.
@@ -513,16 +621,16 @@ func (b *roomBudget) setLimit(limit int64) {
 // refuses growth to can now grow; over it, with full down, a sweep is started, since a charge has
 // just passed the limit. With full up a change does not sweep: the last sweep found nothing to
 // close, and what can change that is a room becoming closable, which starts a sweep of its own
-// (unlockState). The admissions waiting on the budget are woken to weigh it again (await).
+// (unlockState). Whatever waits on the budget is woken to weigh it again: the admissions
+// (await), and the server's own work waiting for an opening (awaitServerRoom). Only a waiter
+// leaves a channel to close (wakeLocked), so this costs a change nobody waits on nothing.
 func (b *roomBudget) unlock() {
 	if b.used <= b.limit {
 		b.full.Store(false)
 	} else if !b.full.Load() {
 		b.startSweepLocked()
 	}
-	if b.waiting > 0 {
-		b.wakeLocked()
-	}
+	b.wakeLocked()
 	b.mu.Unlock()
 }
 

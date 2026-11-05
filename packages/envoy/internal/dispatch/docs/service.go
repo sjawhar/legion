@@ -1435,6 +1435,13 @@ const (
 	// Nothing retries it or counts it as a failure: the document's pending-settlement row leaves it
 	// to resume.
 	settleOutOfBudget
+	// settleNoRoom is a settlement whose document no room holds that the room budget had no
+	// opening to load one through (roomBudget.awaitServerRoom): the rooms already open fill the
+	// budget and none of them became closable while it waited. It is armed again a settle delay
+	// later and counted no failure - nothing is wrong with the room or the document, and the
+	// openings fall free as the rooms the budget charges are closed - and the pending-settlement
+	// row stands meanwhile, so a process that ends here leaves the settlement to resume.
+	settleNoRoom
 	// settleRefusedInShutdown is a settlement that had to write into a room Shutdown has begun
 	// closing, which refused the write (allowInject, ErrServiceUnavailable). The pending-settlement
 	// row leaves it to resume too.
@@ -1468,13 +1475,19 @@ func (s *Service) settleRoom(room string, generation uint64) {
 }
 
 // followUpSettlement does what follows a settlement the timer or Shutdown ran, by how it ended
-// (settleNext): it runs one that stopped short again a settle delay later, and logs one that a
-// shutdown's budget or closing room cut short, which the document's pending-settlement row leaves
-// to resume. Every other ending needs nothing more.
+// (settleNext): it runs one that stopped short again a settle delay later, arms again one the
+// room budget had no opening for, and logs one that a shutdown's budget or closing room cut
+// short, which the document's pending-settlement row leaves to resume. Every other ending needs
+// nothing more.
 func (s *Service) followUpSettlement(room string, outcome settleOutcome) {
 	switch outcome.next {
 	case settleRetry:
 		s.retrySettle(room, outcome.generation, outcome.err)
+	case settleNoRoom:
+		// Armed again rather than retried: the budget's openings fall free as the rooms it
+		// charges are closed, and nothing here is a fault of this room's to count against it
+		// (retrySettleLocked, maxSettleFailures).
+		s.scheduleSettle(room)
 	case settleOutOfBudget:
 		slog.Warn("dispatch: document settlement stopped at the shutdown budget", "room", room, "error", outcome.err)
 	case settleRefusedInShutdown:
@@ -1520,6 +1533,16 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	state.settling++
 	s.unlockState(room, state)
+	// The room budget's opening, where this settlement warms a room of its own below. Registered
+	// before the release of this settlement's hold on the room, so it runs after it: the opening
+	// is given back only once the room is closable and the close the budget owes it has begun
+	// (closeIfOpenedOverBudget), and so only one room the budget had not weighed ever stands.
+	opened := false
+	defer func() {
+		if opened {
+			s.budget.closeServerRoom()
+		}
+	}()
 	defer func() {
 		state.mu.Lock()
 		state.settling--
@@ -1529,6 +1552,25 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return settleOutcome{}
 	}
 	if s.srv.GetDoc(room) == nil {
+		// The warm-up loads the room, which the room budget must have an opening for: it charges
+		// every room whoever opened it and refuses the server's own work none, so a burst of
+		// settlements of documents no browser holds - the one each write to such a document
+		// leaves owed - would otherwise load a room for each of them at once and take the pod
+		// past its memory (roomBudget, awaitServerRoom). This one waits for its turn, since
+		// unlike a publish it cannot do without the room, and is armed again where no opening
+		// came free within the wait (settleNoRoom): the pending-settlement row stands until a
+		// settlement commits, so nothing is lost by waiting or by giving up.
+		//
+		// It waits as a browser's admission does (admissionWait, reserveRoom), and holds no
+		// pooled connection while it waits: its transaction opens below.
+		opened = s.budget.awaitServerRoom(parent, time.Now().Add(s.admissionWait))
+		if !opened {
+			return settleOutcome{
+				next:       settleNoRoom,
+				err:        fmt.Errorf("%w: no opening for the room this settlement must warm", errRoomBudgetFull),
+				generation: generation,
+			}
+		}
 		state.mu.Lock()
 		state.settleWarming = true
 		s.unlockState(room, state)

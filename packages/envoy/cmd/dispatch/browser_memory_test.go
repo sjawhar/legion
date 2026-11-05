@@ -2063,8 +2063,13 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 			t.Errorf("after the shrinks the budget charged %d bytes, %d past its %d-byte limit, want within the %d-byte pressure reserve", after.charged, after.charged-after.limit, after.limit, pressureReserveBytesForTest)
 		}
 
-		// An API write to a document no room holds opens its room over the full budget, and the
-		// room is closed once the write's settlement has ended.
+		// An API write to a document no room holds is applied on the full server and opens no
+		// room for it: the budget has no opening for one while its charges stand past the limit
+		// (docs' openServerRoom), so the publish writes into no room (docs'
+		// publishedWithoutARoom). The settlement the write leaves owed is the one that cannot do
+		// without a room, so it waits for the budget's one opening whatever the charges read
+		// (docs' awaitServerRoom), warms the room over the full budget, and the budget closes it
+		// once that settlement has ended.
 		written := fleet.copies[next+1]
 		for _, room := range []string{written, unheld} {
 			if server.roomLive(t, room) {
@@ -2076,7 +2081,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 		} else if !strings.Contains(server.text(t, written), "Paragraph 3 now holds") {
 			t.Error("an API write on the full server answered 200, and the document does not read it")
 		}
-		requireClosedOnceSettled(t, memory, server, written, "the room an API write opened on the full server")
+		requireClosedOnceSettled(t, memory, server, written, "the room an API write's settlement opened on the full server")
 		// So does one to the document whose stored mark no room has seen: its settlement finds the
 		// mark, which the sweep then removes a minute later, in a room the server opens for it.
 		if answer := server.edit(t, unheld, map[string]any{"op": "replace", "find": "Paragraph 5 holds", "with": "Paragraph 5 now holds"}); answer.status != http.StatusOK {
@@ -3518,26 +3523,31 @@ const liveWriteDeadline = 60 * time.Second
 // usual warm path and the decode's grant alone for the cold one, and nothing pod-wide made two
 // hundred forks take turns (INFRA-179).
 //
-// Measured on 2026-11-05 on a two-processor pod, 320 writes to documents of a mebibyte of prose,
-// 12 of them resident (the budget holds 36, and the fill leaves burstOpens of those for the rooms
-// the burst's own writes open): the fill charged 1,166 MiB of the pod's 4,096 and the burst 3,691,
-// holding 3,798,709,944 bytes of what the 3,865,470,566-byte Go limit bounds, 66,760,622 under it.
-// The burst took 1 m 34 s: 21 writes applied, 50 were refused 503 for the bound, and 249 were
-// answered where their caller's deadline found them - 192 of those in the transaction they had not
-// yet begun, waiting for a connection of the shared pool. Of the applied, the slowest took 1 m
-// 30.2 s and the median 1 m 21.4 s, and five landed before the first refusal. The copy bound's
-// grants waited up to 56.4 s and were held up to 10.5 s.
+// Measured on 2026-11-05 on a two-processor pod, 320 writes to documents of a mebibyte of prose
+// over a budget filled to its brim, all 36 of the rooms it holds resident: the fill charged 3,452
+// MiB of the pod's 4,096, holding 3,549,898,376 bytes of what the 3,865,470,566-byte Go limit
+// bounds, 315,572,190 under it, and the burst charged 3,681, holding 3,789,993,656 bytes,
+// 75,476,910 under it. The burst took 1 m 26 s: 11 writes applied, 62 were refused 503 for the
+// bound, and 247 were answered where their caller's deadline found them. Of the applied, the
+// slowest took 1 m 12.8 s and the median 36.5 s, and ten landed before the first refusal. The
+// copy bound's grants waited up to 56.971 s and were held up to 11.515 s, and the room budget
+// closed the one room the server's own work had opened over it.
 //
-// The same burst with the grant patched out - liveWrite.coverFork made to return at once, the shape
-// before INFRA-179 - ran every fork the shared pool let it: 26 writes applied and 294 were answered
-// where their caller's deadline found them, none refused for a bound that no longer held them, and
-// no grant was logged at a fork's weight, which is the check below that tells the two apart. It
-// charged 3,756 MiB and held 3,865,466,584 bytes, 3,982 under the limit: the forks it no longer
-// weighed went to the collector, which spent the whole limit on them where the granted run stayed
-// 66,760,622 bytes inside it. What else it cost was time and answers - 2 m 30 s for its 26 applies,
-// the slowest 2 m 27.3 s against 1 m 30.2 s, and a copy grant of a room's load waiting 1 m 36.7 s
-// where the granted run's longest wait was 56.4 s - and that a write the bound would have refused
-// at its caller's deadline is instead applied at leisure or answered 500.
+// The same fill before the budget booked an opening for the server's own rooms (docs'
+// roomBudget.openServerRoom) took the pod past its memory: each applied cold write's publish
+// loaded the room it published into, which no sweep could close while the settlement the write
+// armed held it, and the burst charged 4,435 MiB of the pod's 4,096 and held 713,885,218 bytes
+// past the Go limit, with no room closed over the whole window. The same burst over a fill that
+// left the budget 24 rooms free - as this drive filled it until the opening was added - charged
+// 3,854 and held 104,124,530 past the limit, which is why the fill was short of the brim: with
+// nothing refusing the server's own rooms, only a fill that kept room for them stayed inside the
+// pod.
+//
+// The grant itself is told from its absence the same way it always was. With it patched out -
+// liveWrite.coverFork made to return at once, the shape before INFRA-179 - no grant is logged at a
+// fork's weight, which is the check below; over the earlier fill that run applied 26 writes
+// against 21, refused none for a bound that no longer held them, held 3,865,466,584 bytes against
+// 3,798,709,944, and left a copy grant of a room's load waiting 1 m 36.7 s against 56.4 s.
 //
 // The burst is what a swarm of agents makes: writes to documents of many owners, all at once. Two
 // things of the pod bound how far such a burst gets before this bound is reached at all, and the
@@ -3545,10 +3555,11 @@ const liveWriteDeadline = 60 * time.Second
 //
 //   - The room budget bounds how many of these documents can be resident, since each reserves what
 //     its elements are priced at, at both copies (storedShape, roomBudgetBytesForTest): 36 of a
-//     mebibyte of prose. The drive opens browsers of as many of them as its arithmetic leaves
-//     beside the rooms the burst itself will open (burstOpens) and writes to the rest cold - a
-//     write to a document no room holds reads the stored history and decodes it into its fork
-//     (docs' coldFork), which is the path that holds those bytes while it waits for its grant.
+//     mebibyte of prose. The drive opens browsers of every one of them, so the budget is full
+//     before the burst begins and has no room for any room the burst would open, and writes to
+//     the rest cold - a write to a document no room holds reads the stored history and decodes it
+//     into its fork (docs' coldFork), which is the path that holds those bytes while it waits for
+//     its grant.
 //   - The shared pool bounds how many of them are live writes at any moment, since each write's
 //     handler holds one of its connections from the transaction it opens to the commit or rollback
 //     that ends it (api's begin, editArtifact), so a write past sharedPoolSizeForTest waits for a
@@ -3589,22 +3600,21 @@ const liveWriteDeadline = 60 * time.Second
 //     wait - in a query, a lock or a slot - is answered 500 rather than 503. The drive counts the
 //     answers the server logged by status, how many of the writes it applied it answered past their
 //     caller's deadline, and what each handler failure was.
-//   - The rooms the cold writes' own publishes open can take the budget past its limit, and while
-//     it is past it every update that inserts anything is refused in every room with the transient
-//     4503 DOC_BUSY, the person's keystrokes among them (docs' refusedUnderPressure, and
-//     TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks). The drive records how far the person got
-//     and that what stopped them, where anything did, was that refusal and nothing else.
-//   - One keystroke of that person's waits far longer than the percentile: 10.9 to 11.0 s at this
-//     fill, and 1 m 5.795 s over a fill that left the budget nothing for the burst's own rooms,
-//     behind the burst's own queue for the copy bound, which the work their room owes waits in
-//     beside the writes' forks. The drive logs every percentile and the worst of them.
+//   - A cold write's publish opens the room it publishes into only while the room budget has an
+//     opening for one (docs' roomBudget.openServerRoom), and over this fill it has none, so those
+//     writes publish into no room (docs' publishedWithoutARoom) and the settlements they leave
+//     owed take the budget's one opening in turn once the browsers' rooms are closed. The drive
+//     records how many rooms the budget closed in the window and that every document settled.
+//   - While the charges stand past the limit every update that inserts anything is refused in
+//     every room with the transient 4503 DOC_BUSY, the person's keystrokes among them (docs'
+//     refusedUnderPressure, and TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks). The drive
+//     records how far the person got and that what stopped them, where anything did, was that
+//     refusal and nothing else.
+//   - One keystroke of that person's waits far longer than the percentile, behind the burst's own
+//     queue for the copy bound, which the work their room owes waits in beside the writes' forks.
+//     The drive logs every percentile and the worst of them.
 func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
 	const writes, find, with = 320, "Section 0", "Section Zero"
-	// burstOpens is how many rooms of the budget the fill leaves free for the burst's own cold
-	// writes to open: nineteen to twenty-three of these writes applied inside a burst over the
-	// runs of 2026-11-05, each of them loading the room it published into, so this is a little
-	// past the most of them.
-	const burstOpens = 24
 	building := time.Now()
 	memory := newMemoryHarness(t)
 	memory.env = append(memory.env, podServerEnv()...)
@@ -3613,26 +3623,23 @@ func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
 	typedIDs, _ := memory.smallDocuments(t, 1)
 	typed := memory.storedShape(t, "the ordinary document a person types in", typedIDs[0])
 	typedGrowth := int64(typingKeystrokes * keystrokeChargeForTest)
-	// What the budget holds of these documents beside the room a person types in and what their
-	// keystrokes can add to it, less the rooms the burst's own cold writes will open: a cold
-	// write's publish loads its document's room, from the store, which by then holds the write
-	// (docs' coldFork says why it loads then rather than before), and that room is charged to
-	// this same budget and cannot be closed while the settlement the write arms still holds it
-	// (closeIfOpenedOverBudget). A fill to the whole of the budget therefore measures the pod
-	// going past its memory for those rooms rather than for the forks this drive weighs: filled to
-	// the whole 37 of them on 2026-11-05, the burst charged 4,435 MiB of the pod's 4,096 and held
-	// 713,885,218 bytes past the Go limit, where the same burst over a fill that keeps burstOpens
-	// rooms free charged 3,854 and held 104,124,530 past it.
-	holds := int((roomBudgetBytesForTest-typed.reserved-typedGrowth)/source.reserved) - 1
-	full := holds - burstOpens
+	// Every room the budget holds of these documents beside the room a person types in and what
+	// their keystrokes can add to it: the brim, with nothing left over for a room the burst would
+	// open. A cold write's publish loads its document's room, from the store, which by then holds
+	// the write (docs' coldFork says why it loads then rather than before), and that room is
+	// charged to this same budget and cannot be closed while the settlement the write arms still
+	// holds it (closeIfOpenedOverBudget). So this is the fill that asks whether the budget bounds
+	// the server's own rooms at all, and the answer is the opening it books for them (docs'
+	// roomBudget.openServerRoom): a publish that cannot have one publishes into no room.
+	full := int((roomBudgetBytesForTest-typed.reserved-typedGrowth)/source.reserved) - 1
 	if full < 2 || full >= writes {
-		t.Fatalf("the %d-byte budget holds %d documents reserving %d bytes each beside the typed room's %d and its typing's %d, which leaves %d once %d are kept free for the burst's own rooms; want at least two and fewer than the %d documents written",
-			roomBudgetBytesForTest, holds, source.reserved, typed.reserved, typedGrowth, full, burstOpens, writes)
+		t.Fatalf("the %d-byte budget holds %d documents reserving %d bytes each beside the typed room's %d and its typing's %d; want at least two and fewer than the %d documents written",
+			roomBudgetBytesForTest, full, source.reserved, typed.reserved, typedGrowth, writes)
 	}
 	copies := memory.projectDocumentCopies(t, sourceID, writes)
 	grant := min(int64(len(state))*liveWriteHeapPerByteForTest, copyHeapBoundForTest)
-	t.Logf("%d documents of a mebibyte of prose, %d bytes of stored state each: the budget holds %d of them resident, of which %d are made resident here and %d are left for the rooms the burst's own cold writes open; the fill reserves %d of the %d-byte budget beside the typed room's %d and its typing's %d, and %d documents are written cold; they took %s to build",
-		writes, len(state), holds, full, burstOpens, int64(full)*source.reserved, roomBudgetBytesForTest, typed.reserved, typedGrowth, writes-full, time.Since(building).Round(time.Second))
+	t.Logf("%d documents of a mebibyte of prose, %d bytes of stored state each: the budget holds %d of them resident and every one of them is made resident here, which fills it to the brim; the fill reserves %d of the %d-byte budget beside the typed room's %d and its typing's %d, and %d documents are written cold; they took %s to build",
+		writes, len(state), full, int64(full)*source.reserved, roomBudgetBytesForTest, typed.reserved, typedGrowth, writes-full, time.Since(building).Round(time.Second))
 	t.Logf("the bound: a fork of %d bytes of state is granted %d bytes of the %d-byte copy bound at %d a byte, so %d forks of them stand at once; at most %d of the %d writes are live writes at any moment, one for each connection of the shared pool, and each cold fork waiting for its grant holds the %d stored bytes it read, %d bytes for all of them",
 		len(state), grant, copyHeapBoundForTest, liveWriteHeapPerByteForTest, copyHeapBoundForTest/grant, sharedPoolSizeForTest, writes, len(state), sharedPoolSizeForTest*len(state))
 	t.Logf("the drive's %d documents owe the server no block index, so the only reads of them are the drive's own", memory.oweNoBlockIndex(t))
@@ -3659,7 +3666,7 @@ func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
 			t.Fatalf("document %s is not resident after its browser opened it, so the burst's writes to it would not fork warm", room)
 		}
 	}
-	t.Logf("the budget is filled to what the burst's own rooms leave of it: the room a person types in and %d rooms of a mebibyte of prose, in %s; %d MiB resident now",
+	t.Logf("the budget is filled to its brim: the room a person types in and %d rooms of a mebibyte of prose, in %s; %d MiB resident now",
 		full, time.Since(step).Round(time.Second), server.resident(t, "VmRSS")>>20)
 	if refusals := budgetRefusalsByRoom(t, server); len(refusals) != 0 {
 		t.Errorf("the room budget refused %d of the browsers that fill it (%+v), want room for every one of them", len(refusals), refusals)
@@ -3691,7 +3698,10 @@ func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
 		group.Wait()
 		// The writes that applied are settled once the settle delay after them has passed, a
 		// render and a version of each, and a load of every room the burst wrote cold, which the
-		// peak counts too.
+		// peak counts too. Over this fill each of those loads waits for the budget's one opening
+		// and for the room before it to close (docs' awaitServerRoom, settleNoRoom), so they
+		// take their turns rather than standing at once, which is the whole of what this fill
+		// asks of them.
 		for _, room := range copies {
 			memory.waitForSettled(t, room)
 		}
@@ -3705,9 +3715,11 @@ func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
 	switch {
 	case typingErr == nil:
 	case strings.Contains(typingErr.Error(), contracts.DocumentBusyCloseReason):
-		// The rooms the cold writes' own publishes open take the budget past its limit, and while
-		// it is past it every update that inserts anything is refused in every room with the
-		// transient close, the person's keystroke among them (docs' refusedUnderPressure, and
+		// A cold write's publish opens no room while the budget has no opening for one, but the
+		// settlements those writes leave owed each open one in turn, and a room opened over a
+		// budget its browsers already fill takes the charges past the limit while it stands.
+		// While they are past it every update that inserts anything is refused in every room with
+		// the transient close, the person's keystroke among them (docs' refusedUnderPressure, and
 		// TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks, which holds that refusal of a
 		// browser's own growth). The editor shows it and retries; the drive records how far the
 		// person got before the burst's own pressure refused them.
@@ -3719,18 +3731,27 @@ func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
 	if len(keys) == 0 {
 		t.Errorf("the person typed nothing during the burst, want a keystroke every %s", typingInterval)
 	}
-	// Most keystrokes are answered as promptly as an unloaded room answers them, and one is not:
-	// the worst waits behind the burst's own queue for the copy bound, since the work the typed
-	// room owes - its settlement's fold, its replica's build - waits there with the writes'
-	// forks, and the room's next apply waits behind that work. Measured on 2026-11-05 over five
-	// runs: p50 8 to 164 ms, p90 56 to 444 ms, p99 183 ms to 1.966 s, and a worst keystroke of
-	// 10.9 to 11.3 s, of 17.022 s with the fork's grant patched out, and of 1 m 5.795 s over a fill
-	// that left the budget nothing for the burst's own rooms - against the p99 under 2 s and none
-	// over 5 s an ordinary room answers in beside the heaviest applies
-	// (TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory). So the drive
-	// holds the percentile a person feels as typing and records the worst, which is bounded by
-	// that queue and not by a figure of its own; a keystroke the room never answers is the
-	// typist's own error above (browserAnswerWithin).
+	// Most keystrokes are answered as promptly as an unloaded room answers them, and one is not.
+	// What the worst one waits on is the pod, not a bound of its own: the keystroke's own path
+	// takes no part of the copy bound (the one holder in it, the replica's build from a base,
+	// takes only what is free at once and never waits, docs' holdFreeCopy), no part of the apply
+	// bound (an insert of one character is far under docs' unweighedApplyHeapBytes, so it is
+	// never held, docs' weighPeerUpdate) and no pooled connection (its durable append is the
+	// room's own persistence worker's, handed over a buffered channel, and that worker's
+	// connection is taken off this goroutine, docs' withRoomLock). What it waits for is two
+	// processors running 64 writers' forks and renders, and the collector working at a heap near
+	// its limit. Measured on 2026-11-05 over two runs of this fill: p50 37 to 76 ms, p90 241 to
+	// 379 ms, p99 698 ms to 1.37 s and a worst keystroke of 11.015 to 12.87 s; 10.9 to 11.3 s
+	// over five runs of the fill that kept rooms free for the burst's own, and 17.022 s with the
+	// fork's grant patched out. The same brim fill
+	// before the budget booked an opening for the server's own rooms, whose heap stood
+	// 713,885,218 bytes past the Go limit, answered its worst keystroke in 1 m 5.795 s: the
+	// collector assists every allocating goroutine there, and a keystroke's apply allocates. All
+	// of them are against the p99 under 2 s and none over 5 s an ordinary room answers in beside
+	// the heaviest applies (TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory). So
+	// the drive holds the percentile a person feels as typing and records the worst, which is
+	// bounded by the pod's own work and not by a figure of its own; a keystroke the room never
+	// answers is the typist's own error above (browserAnswerWithin).
 	if latency.p99 >= 5*time.Second {
 		t.Errorf("keystrokes in an ordinary room during the burst were answered in p99 %s, at most %s, want a 99th percentile under 5 s: typing waited behind the writes further than any burst has made it",
 			latency.p99, latency.max)
@@ -3823,9 +3844,10 @@ func TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory(t *testing.T) {
 	}
 
 	// The grants the writes' forks held, which is what made them wait, and what the budget did
-	// with the rooms the writes to cold documents left open: a cold write's publish loads the
-	// document's room, which the budget then closes, since the browsers of the fill hold it full
-	// (closeIfOpenedOverBudget, sweepRooms).
+	// with the rooms of the documents written cold: a publish over this fill opens none (docs'
+	// publishedWithoutARoom), and the settlement each such write leaves owed opens one in its
+	// turn and gives it back, which the budget closes as soon as that settlement is done with it
+	// since the browsers of the fill hold it full (closeIfOpenedOverBudget, sweepRooms).
 	grants := heapGrants(t, window)
 	forks := 0
 	for _, logged := range grants {

@@ -967,6 +967,24 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 		s.checkRendering("publish", write)
 	}
 	write.releaseFork()
+	if len(write.updates) > 0 && !s.roomHoldsDocument(write.artifactID) {
+		// This publish is what would load the room, from the store, which by then holds the
+		// write. It loads one only while the room budget has an opening for it
+		// (roomBudget.openServerRoom): a burst of writes to documents no browser holds would
+		// otherwise open a room for each of them at once, every one of them charged to a budget
+		// that refuses the server's own work nothing, and none of them closable until the
+		// settlement the write arms has run (closeIfOpenedOverBudget) - 320 such writes over a
+		// full budget took the pod 713,885,218 bytes past its Go memory limit
+		// (cmd/dispatch, TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory). Where the
+		// budget has no opening the write is published into no room at all, which loses nothing
+		// (publishedWithoutARoom). The opening is held across the whole publish and given back
+		// here: the load is the first update's, and what follows it is short beside it.
+		if !s.budget.openServerRoom() {
+			s.publishedWithoutARoom(write)
+			return
+		}
+		defer s.budget.closeServerRoom()
+	}
 	for index, update := range write.updates {
 		var shadow *roomShadow
 		if index == len(write.updates)-1 {
@@ -986,6 +1004,37 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 		return
 	}
 	s.recordPublishedLoss(write)
+}
+
+// publishedWithoutARoom ends a publish that opened no room for its write: no room held the
+// document and the room budget had no opening for one (roomBudget.openServerRoom). Nothing of the
+// write is lost by it, and nothing of it is left half-made.
+//
+// Every update it would have applied is durable - the transaction appended and committed all of
+// them before this publish began (coldFork says why the room is loaded here rather than before) -
+// so the room that loads next decodes the store, which holds them. No browser was to be told:
+// ygo holds no room for the document, loaded or loading (roomHoldsDocument), and a document no
+// room holds has no peer. And the document's settlement is armed here in place of the one the
+// room's update observer would have armed as it drained the published update (classifyDrained),
+// so the document is versioned, its ask blocks reconciled and its pending-settlement row cleared
+// as a published write's always are - by a settlement that warms a room of its own, through the
+// budget's opening in its turn (settleRoomWithin).
+//
+// The verdict the write carries is the empty one, "nothing was lost", which is the statement
+// recordPublishedLoss makes for every write that wrote nothing a concurrent change could remove:
+// what this write's operations risked losing is a change that landed between its version's render
+// and this publish (LEGION-269's second window), and with no room holding the document there was
+// no browser in it to make one.
+func (s *Service) publishedWithoutARoom(write *liveWrite) {
+	write.lost, write.lostVerdict = nil, true
+	state := write.state
+	state.mu.Lock()
+	// Deferred rather than armed: the write still holds the room's writer slot, and a settlement
+	// asked for while a writer holds it is armed by the end of that write
+	// (scheduleSettleAfterLocked, finishLiveWrite), which is where every settlement a write owes
+	// is armed.
+	state.settleDeferred = true
+	s.unlockState(write.artifactID, state)
 }
 
 // recordPublishedLoss reads the room the write has just reached and records which of the write's
