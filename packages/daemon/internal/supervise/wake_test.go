@@ -251,6 +251,47 @@ func TestASuspendWhileTheWakeWaitsLandsAtItsTurn(t *testing.T) {
 	h.wantStarts(secondToken, 0)
 }
 
+// R2 of dispatch://INFRA-976/spec: a wake that waits blocks nothing and loses nothing, and its
+// claim "still decides a suspend, a stop, a tree close". A roll or a restart puts hundreds of
+// claims in the queue, so a claim far down it waits tens of minutes, and an operator's drain of
+// such a claim must not wait with it: the claim records no process, so the suspension has no
+// process to protect and nothing to wait for. It must be decided where it arrives, and written,
+// since the hold lives in memory alone (holdSuspension) and no outbox row carries an operator's
+// suspend — a restart inside the wait would forget it and the boot would relaunch the claim it
+// was told to drain. The wakes behind it keep the turns they already hold, as they do behind
+// every other wake the pacing drops.
+func TestASuspendOfAWaitingProcesslessClaimIsDecidedWhereItArrives(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	second := h.machineFor(wakeClaim(secondToken, StateSuspended))
+	third := h.machineFor(wakeClaim(thirdToken, StateQueued))
+
+	h.must(RequestSpawn{Claim: h.token})
+	h.mustPostTo(second, RequestRuleResume{Claim: secondToken, Reason: "it owns its issue's phase"})
+	h.mustPostTo(third, RequestSpawn{Claim: thirdToken})
+
+	err := h.postTo(second, RequestSuspend{Claim: secondToken, Reason: "the operator drains the daemon", By: SuspendedByOperator})
+
+	if suspensionHeld(err) || err != nil {
+		t.Fatalf("the suspension of a waiting claim answered %v, want nil: the claim decides it while its wake waits", err)
+	}
+	if got := second.Claim(); got.State != StateSuspended || got.SuspendedBy != SuspendedByOperator {
+		t.Fatalf("the claim is %s suspended by %q, want %s by %q while its wake still waits",
+			got.State, got.SuspendedBy, StateSuspended, SuspendedByOperator)
+	}
+	if stored := h.store.load(secondToken); stored.State != StateSuspended || stored.SuspendedBy != SuspendedByOperator {
+		t.Fatalf("the stored claim is %s suspended by %q, want %s by %q: a restart must not relaunch a drained claim",
+			stored.State, stored.SuspendedBy, StateSuspended, SuspendedByOperator)
+	}
+
+	h.clock.Advance(2*wakeInterval + 2*wakePart)
+	second.Wait()
+	third.Wait()
+
+	h.wantStarts(secondToken, 0)
+	h.wantStarts(thirdToken, 1)
+	h.wantWakeLine(thirdToken, "waitedFor="+(2*wakeInterval+2*wakePart).String())
+}
+
 // The operator's resume never waits: it drops the wake the pacing holds, launches the claim at
 // once, and takes nothing from the rate — the claim behind it keeps the turn it already holds.
 func TestAnExemptResumeOfAWaitingClaimLaunchesAtOnce(t *testing.T) {
