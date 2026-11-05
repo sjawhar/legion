@@ -1031,3 +1031,20 @@ func TestADecisionNodeCarriesItsAuthorsUncertainty(t *testing.T) {
 		}
 	}
 }
+
+func TestInterpretationSchemaRoundTripsItsDecisionPointer(t *testing.T) {
+	if SchemaVersion() != 5 {
+		t.Fatalf("interpretation schema version = %d, want 5", SchemaVersion())
+	}
+	const markdown = ":::interpretation{#reading interprets=\"dispatch://CORE-1/spec#b-choice\"}\nAn agent's reading.\n:::\n"
+	tree, err := ParseRendering(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree.Children) != 1 || tree.Children[0].Type != "interpretation" {
+		t.Fatalf("interpretation parsed as %#v", tree.Children)
+	}
+	if got, err := Render(tree); err != nil || got != markdown {
+		t.Fatalf("interpretation round-trip = %q (%v), want %q", got, err, markdown)
+	}
+}

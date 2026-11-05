@@ -157,7 +157,7 @@ func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 }
 
 func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t *testing.T) {
-	for _, schemaVersion := range []string{"0", ""} {
+	for _, schemaVersion := range []string{"0", "4", ""} {
 		t.Run(schemaVersion, func(t *testing.T) {
 			service, artifactID := newTestService(t)
 			request := httptest.NewRequest(

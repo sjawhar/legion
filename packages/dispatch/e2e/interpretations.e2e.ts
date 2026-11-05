@@ -65,9 +65,9 @@ test("agent interpretations appear under the original person's decision, with tr
     ],
   });
   await expect(decision.getByTestId("decision-interpretation")).toHaveCount(2);
-  await expect(
-    decision.getByTestId("decision-interpretation").filter({ hasText: "author not recorded" })
-  ).toContainText("A second reading");
+  const handmade = decision.getByTestId("decision-interpretation").filter({ hasText: "A second reading" });
+  await expect(handmade).toContainText("A second reading");
+  await expect(handmade.locator("p").first()).toHaveText("Interpretation");
   await expect(decision.getByTestId("decision-answer")).toHaveText("My exact answer.");
   await expect(page.locator("[data-decision]")).toHaveCount(1);
 });

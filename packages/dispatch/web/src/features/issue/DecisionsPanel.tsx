@@ -229,11 +229,11 @@ function Interpretations({
   const items = read.data.filter((item) => item.decision_ref === decisionRef);
   if (items.length === 0) return null;
   return (
-    <ul aria-label="Agent interpretations" className="space-y-2 border-l-2 pl-3">
+    <ul aria-label="Interpretations" className="space-y-2 border-l-2 pl-3">
       {items.map((item) => (
         <li data-testid="decision-interpretation" key={item.ref}>
           <p className={`break-words text-xs ${textSecondaryOnSurface}`}>
-            Agent interpretation — {item.author?.id ?? "author not recorded"}
+            {item.author ? `Agent interpretation — ${item.author.id}` : "Interpretation"}
           </p>
           <MarkdownBody markdown={item.text} />
         </li>

@@ -26,7 +26,7 @@ const choice: Decision = {
   waiting_review: true,
 };
 
-test("interpretations are labelled by their trusted author or explicitly unrecorded, under their decision only", async () => {
+test("interpretations name a trusted agent author without attributing handmade text to an agent", async () => {
   const view: IssueDecisions = {
     decisions: [choice],
     document: "dispatch://CORE-1/spec",
@@ -67,9 +67,9 @@ test("interpretations are labelled by their trusted author or explicitly unrecor
         </QueryClientProvider>
       </MemoryRouter>
     );
-    const children = await screen.findByRole("list", { name: "Agent interpretations" });
+    const children = await screen.findByRole("list", { name: "Interpretations" });
     expect(within(children).getByText("Agent interpretation — reading-agent")).toBeDefined();
-    expect(within(children).getByText("Agent interpretation — author not recorded")).toBeDefined();
+    expect(within(children).getByText("Interpretation", { exact: true })).toBeDefined();
     expect(within(children).getAllByTestId("decision-interpretation")).toHaveLength(2);
     expect(screen.queryByText("Another issue's interpretation.")).toBeNull();
     expect(rendered.container.querySelectorAll("[data-decision]")).toHaveLength(1);

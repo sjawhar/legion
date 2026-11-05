@@ -33,7 +33,7 @@ func TestBlockSchemaRouteServesEmbeddedSchema(t *testing.T) {
 	for index, typ := range schema.Types {
 		names[index] = typ.Name
 	}
-	if schema.Version != 4 || !slices.Equal(names, []string{"callout", "ask", "decision", "interpretation", "requirement", "plan_task", "check"}) {
-		t.Fatalf("schema = version %d, types %v; want version 4 and callout, ask, decision, interpretation, requirement, plan_task, check", schema.Version, names)
+	if schema.Version != 5 || !slices.Equal(names, []string{"callout", "ask", "decision", "interpretation", "requirement", "plan_task", "check"}) {
+		t.Fatalf("schema = version %d, types %v; want version 5 and callout, ask, decision, interpretation, requirement, plan_task, check", schema.Version, names)
 	}
 }
