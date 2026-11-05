@@ -29,7 +29,13 @@ func (s *server) listArtifactAsks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, askReads(asks, wantsDisplayTrees(r)))
+	trees := wantsDisplayTrees(r)
+	var texts []string
+	if trees {
+		texts = askReadDisplayTexts(nil, asks...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("id"), texts)()
+	WriteJSON(w, http.StatusOK, askReads(asks, trees))
 }
 
 func (s *server) createArtifactAsk(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +62,13 @@ func (s *server) listArtifactComments(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, commentReads(comments, wantsDisplayTrees(r)))
+	trees := wantsDisplayTrees(r)
+	var texts []string
+	if trees {
+		texts = commentDisplayTexts(nil, comments...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("id"), texts)()
+	WriteJSON(w, http.StatusOK, commentReads(comments, trees))
 }
 
 func (s *server) createArtifactComment(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +100,12 @@ func (s *server) listArtifactEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	attachEventTrees(events, wantsDisplayTrees(r))
+	trees := wantsDisplayTrees(r)
+	var texts []string
+	if trees {
+		texts = eventDisplayTexts(nil, events...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("id"), texts)()
+	attachEventTrees(events, trees)
 	WriteJSON(w, http.StatusOK, events)
 }

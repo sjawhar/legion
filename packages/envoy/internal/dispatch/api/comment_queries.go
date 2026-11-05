@@ -28,7 +28,13 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, commentReads(comments, wantsDisplayTrees(r)))
+	trees := wantsDisplayTrees(r)
+	var texts []string
+	if trees {
+		texts = commentDisplayTexts(nil, comments...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("key"), texts)()
+	WriteJSON(w, http.StatusOK, commentReads(comments, trees))
 }
 
 func (s *server) loadOwnerComments(ctx context.Context, q queryer, owner owner, artifactFilter string) ([]model.Comment, error) {
@@ -97,6 +103,11 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trees := wantsDisplayTrees(r)
+	var texts []string
+	if trees {
+		texts = commentDisplayTexts(commentDisplayTexts(nil, comments[0]), replies...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, comment.ID, texts)()
 	WriteJSON(w, http.StatusOK, struct {
 		Comment commentRead   `json:"comment"`
 		Replies []commentRead `json:"replies"`

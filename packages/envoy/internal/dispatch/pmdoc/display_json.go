@@ -60,6 +60,27 @@ func DisplayTreeToStore(markdown string, mode DisplayMode) json.RawMessage {
 	return tree
 }
 
+// PutStoredDisplayTree puts a tree this process did not read - the text_trees row of markdown in
+// mode, read back by a reader that is about to answer it (texttrees) - into the display cache,
+// so the DisplayJSON that follows answers these bytes and reads no markdown.
+//
+// The cache is the first of two levels: the trees this process has already served stand in front
+// of the table, so a hot list - an issue's comments re-read on every event of it - costs neither
+// a query nor a read, and only a text no reader of this process has seen yet costs the query.
+//
+// It counts no build (DisplayTreeBuilds): whichever process stored the row did the reading, and
+// this one copied the bytes. That is what lets a test assert that a comment list read after a
+// restart built nothing.
+//
+// An empty text has no tree and no key, and a row holding no bytes is no tree either; both are
+// ignored, so nothing a caller passes can shadow a reading with nothing.
+func PutStoredDisplayTree(markdown string, mode DisplayMode, tree json.RawMessage) {
+	if markdown == "" || len(tree) == 0 {
+		return
+	}
+	displayCache.Put(displayCacheKey{sum: sha256.Sum256([]byte(markdown)), mode: mode}, tree)
+}
+
 // displayTreeBuilds counts what DisplayTreeBuilds answers.
 var displayTreeBuilds atomic.Uint64
 

@@ -592,6 +592,9 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int, trees bool) (mod
 			result.Artifact = &model.SearchArtifact{Slug: *slug, Name: *name}
 		}
 		result.Snippet = markSnippet(*headline)
+		// A snippet's tree is no stored tree and is never primed from the table or stored in it:
+		// it is one query's own headline, cut and marked for this search alone
+		// (pmdoc.DisplaySnippetJSON), so there is nothing two readers would share.
 		if trees {
 			result.SnippetTree = pmdoc.DisplaySnippetJSON(*headline, markStart, markEnd)
 		}

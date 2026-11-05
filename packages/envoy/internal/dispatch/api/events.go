@@ -38,7 +38,13 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	attachEventTrees(events, wantsDisplayTrees(r))
+	trees := wantsDisplayTrees(r)
+	var texts []string
+	if trees {
+		texts = eventDisplayTexts(nil, events...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("key"), texts)()
+	attachEventTrees(events, trees)
 	WriteJSON(w, http.StatusOK, events)
 }
 

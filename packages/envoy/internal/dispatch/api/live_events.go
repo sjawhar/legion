@@ -254,6 +254,11 @@ func liveEventsStart(sub string, since int64, replayComplete bool) LiveEventsSta
 // Its trees ride in the envelope's own `trees` map, always: a browser cannot set
 // Dispatch-Trees on a socket, and a page reads every event it is handed the same way whether it
 // arrived here or through a REST read.
+//
+// A frame builds its trees and copies none: it is one event on its way to the sockets watching
+// now, with no request behind it to take a connection from, and the text it carries was written
+// a moment ago, so the table is the slower of the two ways to the same bytes. The build leaves
+// them in this process's cache for the reads that follow.
 func liveEventFrame(sub string, event model.Event) (LiveEventFrame, error) {
 	event.Trees = eventDisplayTrees(event)
 	data, err := json.Marshal(event)

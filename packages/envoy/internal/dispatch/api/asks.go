@@ -737,6 +737,11 @@ func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trees := wantsDisplayTrees(r)
+	var texts []string
+	if trees {
+		texts = askReadDisplayTexts(nil, asks...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("key"), texts)()
 	rows := make([]issueAskRow, len(asks))
 	for index := range asks {
 		rows[index] = issueAskRow{askRead: newAskRead(asks[index], trees)}
@@ -769,6 +774,20 @@ func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow, 
 	if err != nil {
 		return err
 	}
+	// The answers this list merges are its own read: loadAskThreads reads none, so the only one
+	// already primed is the single answer each ask row carries, and an ask answered twice shows
+	// the superseded one here.
+	var texts []string
+	if trees {
+		for _, byAsk := range answers {
+			texts = askAnswerDisplayTexts(texts, byAsk)
+		}
+	}
+	var subject string
+	if len(askIDs) > 0 {
+		subject = askIDs[0]
+	}
+	defer s.readDisplayTrees(ctx, trees, subject, texts)()
 	for index := range rows {
 		thread := threads[rows[index].ID]
 		thread.Answers = askAnswerReads(answers[rows[index].ID], trees)
@@ -851,6 +870,16 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	// The single-ask read is a thread with the ask beside it, so it and every Inbox or ask-list
 	// thread serialise through one definition and carry the same keys.
 	trees := wantsDisplayTrees(r)
+	// The ask, its replies, the wordings it went through and every answer it was given are one
+	// read of the table: the whole page the dashboard draws from this route in one query.
+	var texts []string
+	if trees {
+		texts = askReadDisplayTexts(nil, ask)
+		texts = commentDisplayTexts(texts, replies...)
+		texts = askEditDisplayTexts(texts, edits)
+		texts = askAnswerDisplayTexts(texts, answers)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, ask.ID, texts)()
 	WriteJSON(w, http.StatusOK, struct {
 		Ask askRead `json:"ask"`
 		askThread

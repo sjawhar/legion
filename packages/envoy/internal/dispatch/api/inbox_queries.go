@@ -122,6 +122,18 @@ func (s *server) loadAskThreads(ctx context.Context, askIDs []string, trees bool
 	if err != nil {
 		return nil, err
 	}
+	// Both the Inbox and an issue's ask list shape their threads here, so this is where the
+	// replies' and the edits' trees are taken from the table and what it did not hold is stored
+	// back. The read runs on the pool and never inside a transaction, as the comment above says,
+	// so the store takes a connection of its own.
+	var texts []string
+	if trees {
+		for _, askID := range askIDs {
+			texts = commentDisplayTexts(texts, replies[askID]...)
+			texts = askEditDisplayTexts(texts, edits[askID])
+		}
+	}
+	defer s.readDisplayTrees(ctx, trees, askIDs[0], texts)()
 	for askID, thread := range threads {
 		thread.Replies = commentReads(replies[askID], trees)
 		thread.Edits = askEditReads(edits[askID], trees)

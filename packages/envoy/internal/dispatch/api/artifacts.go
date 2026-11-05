@@ -758,7 +758,12 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 	// The tree is built only for a caller that asked for one: the command line and the agent
 	// clients read this route for its markdown, and a tree they discard would cost them the
 	// read and evict from the cache what a browser is reading.
+	//
+	// This markdown is a document version's own text, which the ledger stored the tree of behind
+	// the commit that wrote it (docs.Ledger.storeVersionTrees), so a browser opening a document
+	// this process has not served since it started copies those bytes.
 	if wantsDisplayTrees(r) {
+		defer s.readDisplayTrees(r.Context(), true, artifact.ID, []string{markdown})()
 		if tree := displayTree(markdown); tree != nil {
 			answer["markdown_tree"] = tree
 		}
@@ -886,6 +891,13 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		}
 		// A past version's text is read in the version mode: the attributes the server wrote
 		// into that text are part of what that version said (pmdoc.DisplayVersion).
+		//
+		// No write stores that mode - every writer stores the latest one, and the two modes read
+		// one text into two different trees - so this read is where a version's tree first
+		// reaches the table: it primes from the table, and stores what the table did not hold
+		// once the answer is written. A version is read again far more often than it is written,
+		// which is what makes the first read's store worth its one statement.
+		defer s.readVersionDisplayTrees(r.Context(), wantsDisplayTrees(r), artifact.ID, []string{markdown})()
 		answer := struct {
 			Markdown     string          `json:"markdown"`
 			MarkdownTree json.RawMessage `json:"markdown_tree,omitempty"`
