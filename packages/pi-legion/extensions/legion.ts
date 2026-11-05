@@ -13,6 +13,7 @@ import {
 } from "@legion/envoy-client/session-settings";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import { currentSessionID } from "@legion/pi-shared/dispatch-session-id";
 import { findPushedBranchHead, paneHandoffReport } from "@legion/pi-shared/handoff-record";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -178,10 +179,15 @@ export default function legionExtension(pi: PiApi): void {
         const envoy = sessionEnvoySettings(sessionConfigFile("omp", process.env), process.env, {
           cwd: process.cwd(),
           nats: false,
+          session: currentSessionID,
         });
         architectPublisher = {
           publish: envoy.enabled
-            ? createEnvoyClient({ baseUrl: envoy.url, token: envoy.token, fetch }).publish
+            ? createEnvoyClient({
+                baseUrl: envoy.url,
+                credential: envoy.credential,
+                fetch,
+              }).publish
             : undefined,
         };
       }
@@ -518,7 +524,8 @@ export default function legionExtension(pi: PiApi): void {
           paneHandoffReport(
             sessionConfigFile("omp", process.env),
             process.env,
-            process.cwd()
+            process.cwd(),
+            currentSessionID()
           )(phase, role),
         branchHead: () => findPushedBranchHead({ env: process.env }),
         resolveDocument: async (issue, reference) => {
@@ -526,6 +533,7 @@ export default function legionExtension(pi: PiApi): void {
           const config = activeDispatchSettings(
             sessionDispatchSettings(sessionConfigFile("omp", process.env), process.env, {
               cwd: process.cwd(),
+              session: currentSessionID,
             }).dispatch
           );
           if (config === null) {
@@ -535,7 +543,7 @@ export default function legionExtension(pi: PiApi): void {
           }
           try {
             return await resolveIssueDocumentId(
-              new DispatchClient(config.url, config.token, fetch),
+              new DispatchClient(config.url, config.credential, fetch),
               issue,
               reference
             );

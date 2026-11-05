@@ -59,16 +59,15 @@ func (s *server) lookupMachineLogin(w http.ResponseWriter, r *http.Request, _ st
 type launcherCredentialResp struct {
 	// The launcher credential's id, which the revoke route takes.
 	CredentialID string `json:"credential_id"`
-	// The machine's host name, as a person's machine login named it; for a service's token login,
-	// its ServiceAccount's <namespace>/<name>, or a VM's <project>/<zone>/<instance name>.
+	// The machine's host name, as a person's machine login named it; for a token login, its
+	// ServiceAccount's <namespace>/<name>, or a machine's <project>/<zone>/<instance name>.
 	Host string `json:"host"`
-	// The service a service's login is for (legion-daemon), whose sessions are its pods or its VMs;
-	// null for a person's own machine.
+	// The service a service's login is for (legion-daemon), whose sessions are its pods, or the
+	// fleet a machine belongs to; null for a person's own machine.
 	Service *string `json:"service"`
-	// What a service's token login proved: its ServiceAccount
-	// (system:serviceaccount:<namespace>:<name>), or a VM's runtime id
-	// (<service account email>@<project>/<zone>/<instance id>); null for every login a person
-	// approved.
+	// What a token login proved: its ServiceAccount
+	// (system:serviceaccount:<namespace>:<name>), or a machine as the token exchange names it
+	// (exchange.MachineSubject); null for every login a person approved.
 	Subject *string `json:"subject"`
 	// The login of the person who approved the login (anyone signed in may have approved a service's
 	// login before token logins); "" for a service's token login, which no person approves.
