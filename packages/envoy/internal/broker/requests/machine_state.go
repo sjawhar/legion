@@ -448,8 +448,10 @@ const DefaultGrantLifetime = 12 * time.Hour
 // DefaultHumanGrantLifetime is how long a grant lasts when its request names no lifetime and any
 // name it grants is human tier. A person approves such a request by the action its reason names,
 // and the broker enforces only the duration, so a long default hands every later action of that
-// session the same approval; fifteen minutes is about one named action, and a second action asks
-// again. A session that needs longer says so with --ttl, which the approver reads on the card.
+// session the same approval. Fifteen minutes is the window in which the broker releases and reuses
+// that credential, not a count of actions: a release inside it is still unasked, and a value
+// already in a process is beyond the broker. A session that needs longer says so with --ttl, which
+// the approver reads on the card.
 const DefaultHumanGrantLifetime = 15 * time.Minute
 
 // defaultLifetime is the lifetime a request's grant lasts: the one it signed, else nil (until its

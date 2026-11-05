@@ -417,8 +417,11 @@ reason of at most 400 characters. The broker evaluates every name
 A granted request yields a **grant**: the session's right to read those values until the grant
 ends. A grant lasts the lifetime its request asks for
 (`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), counted from
-the moment it is granted. A request that names no lifetime gets 12 hours, or, when every secret it
-names carries the tag `default-grant=session`, a grant that lasts until its session ends. A grant
+the moment it is granted. A request that names no lifetime gets 15 minutes when any secret it names is human tier and 12
+hours otherwise, or, when every secret it names carries the tag `default-grant=session`, a grant
+that lasts until its session ends. The short human-tier default is the window in which the broker
+releases and reuses that credential, so a session that needs it for longer names a `--ttl`, which
+the approver reads on the card before deciding. A grant
 also always ends with its session. Any other value of `default-grant` is refused
 (`default-grant-malformed`). A secret with `max-grant` requires that shorter
 lifetime and bounds it. The approver sees the lifetime the request asked for before deciding it.

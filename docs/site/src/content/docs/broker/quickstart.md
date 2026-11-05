@@ -94,7 +94,7 @@ The page prints the broker's own record of the request:
 | Secrets | The secrets asked for: `DEMO_API_KEY` |
 | Requested by (verified by the broker) | The enrollment asking, as kind, operator and runtime id: `session · example-host-build:2150654:335907311 · ada@example.com` |
 | Reason | The `--reason` the agent gave: Deploy the example service |
-| Lasts once approved | How long a grant would last: 12 hours, the `--ttl` the agent asked for, or until the session ends for a secret tagged `default-grant=session` |
+| Lasts once approved | How long a grant would last: the `--ttl` the agent asked for; with none, 15 minutes when any secret is human tier and 12 hours otherwise, or until the session ends for a secret tagged `default-grant=session` |
 | Requested, Expires | When it was asked, and when it [expires](/legion/broker/concepts/#approvals) undecided |
 | Approver | `ada@example.com` |
 | State | pending, or how it was decided, by whom and when |
@@ -114,8 +114,9 @@ agent-secrets: DEMO_API_KEY from the broker AGENT_SECRETS_URL names (AWS Secrets
 deploying with a 18-character key
 ```
 
-The grant outlives the command: it lasts 12 hours (or until the session ends for a secret tagged
-`default-grant=session`), unless the agent asked for another lifetime with `--ttl`. Meanwhile the same session asking for exactly the same secrets gets it again without
+The grant outlives the command: it lasts 15 minutes for a human-tier secret such as this one and
+12 hours otherwise (or until the session ends for a secret tagged `default-grant=session`), unless
+the agent asked for another lifetime with `--ttl`. Meanwhile the same session asking for exactly the same secrets gets it again without
 asking anyone; `agent-secrets self` lists the session's live grants, and the broker and kind of
 store they are at:
 
