@@ -403,6 +403,19 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		}
 	}
 
+	chatTokenClassName := s.hostname + "-chat-token"
+	if s.answerer.place == dispatchAnswererEndpoint {
+		tokenPath := refuseDispatchSeed(args.ChatTokenSecret, dispatch, "chatTokenSecret").ApplyT(func(secret string) string {
+			return strings.TrimSuffix(secret, "/") + "/versions/latest"
+		}).(pulumi.StringOutput)
+		if _, err := apiextensions.NewCustomResource(ctx, chatTokenClassName, &apiextensions.CustomResourceArgs{
+			ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(chatTokenClassName),
+			OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": tokenPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: token\n" }).(pulumi.StringOutput)}}},
+		}, child...); err != nil {
+			return err
+		}
+	}
+
 	// Every pod reaches the listener, and in the SOCKS5 mode the front door's proxy, over the
 	// network, at their Services, since each workload runs in pods of its own and each scales by
 	// its own replica count. With natsInCluster no proxy runs: the empty socks5Proxy is what leaves
@@ -680,7 +693,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		// run time (GKE SecretSync), so the Deployment does not wait on it.
 		appEnv = append(appEnv, valueEnv("DISPATCH_APP_CLIENT_ID", s.appClientID), valueEnv("DISPATCH_APP_ID", s.appID), secretEnv("DISPATCH_APP_PEM_B64", s.appKeySecretName, s.appKeySecretKey))
 	}
-	if s.azure.enabled() {
+	if s.azure.embedder {
 		// Meaning search embeds on Azure AI Foundry. The endpoint, and the deployment when given,
 		// are Inputs, rendered once they resolve, with a seed refused then.
 		appEnv = append(appEnv, valueEnv("DISPATCH_EMBEDDER", "azure"),
@@ -698,11 +711,43 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		appVolumes = append(appVolumes, corev1.VolumeArgs{Name: pulumi.String("azure-embed-key"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(azureKeyClassName)}}})
 		appGrants = append(appGrants, database.azureKeyAccessor)
 	}
+	if s.answerer.place == dispatchAnswererAzure {
+		// The server generates text on an Azure AI Foundry chat deployment. The endpoint and the
+		// deployment are Inputs, rendered once they resolve, with a seed refused then; the
+		// api-version and the scope render only when their inputs are set, where Dispatch
+		// otherwise sends no api-version and asks for the scope the embedder asks for. The sign-in
+		// is the shared keyless credential below, which this form takes no API key beside.
+		appEnv = append(appEnv, valueEnv("DISPATCH_ANSWERER", dispatchAnswererAzure),
+			corev1.EnvVarArgs{Name: pulumi.String("DISPATCH_AZURE_CHAT_ENDPOINT"), Value: refuseDispatchSeed(args.AzureChatEndpoint, dispatch, "azureChatEndpoint")},
+			corev1.EnvVarArgs{Name: pulumi.String("DISPATCH_AZURE_CHAT_DEPLOYMENT"), Value: refuseDispatchSeed(args.AzureChatDeployment, dispatch, "azureChatDeployment")},
+			valueEnv("DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE", strconv.Itoa(s.answerer.tokensPerMinute)))
+		if s.answerer.apiVersion != "" {
+			appEnv = append(appEnv, valueEnv("DISPATCH_AZURE_CHAT_API_VERSION", s.answerer.apiVersion))
+		}
+		if s.answerer.scope != "" {
+			appEnv = append(appEnv, valueEnv("DISPATCH_AZURE_CHAT_SCOPE", s.answerer.scope))
+		}
+	}
+	if s.answerer.place == dispatchAnswererEndpoint {
+		// The other form: an OpenAI-shaped service whose bearer token is read at run time from
+		// Secret Manager through its own SecretProviderClass and volume, as the Azure embedder's
+		// key is, and the pods wait for its grant. DISPATCH_CHAT_TOKEN_FILE names the mounted
+		// file, which Dispatch re-reads on every call, so a rotation needs no restart.
+		appEnv = append(appEnv, valueEnv("DISPATCH_ANSWERER", dispatchAnswererEndpoint),
+			corev1.EnvVarArgs{Name: pulumi.String("DISPATCH_CHAT_ENDPOINT"), Value: refuseDispatchSeed(args.ChatEndpoint, dispatch, "chatEndpoint")},
+			valueEnv("DISPATCH_CHAT_MODEL", s.answerer.model),
+			valueEnv("DISPATCH_CHAT_TOKEN_FILE", "/var/run/secrets/chat-token/token"))
+		appMounts = append(appMounts, corev1.VolumeMountArgs{Name: pulumi.String("chat-token"), MountPath: pulumi.String("/var/run/secrets/chat-token"), ReadOnly: pulumi.Bool(true)})
+		appVolumes = append(appVolumes, corev1.VolumeArgs{Name: pulumi.String("chat-token"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(chatTokenClassName)}}})
+		appGrants = append(appGrants, database.chatTokenAccessor)
+	}
 	if s.azure.keyless {
-		// The keyless form: the kubelet projects a service-account token for the federation's
-		// audience into the pod and rotates it before its hour runs out; Dispatch re-reads the
-		// file on every exchange with Entra, whose federated credential trusts the token's issuer
-		// and subject (the serviceAccountIssuer and serviceAccountSubject outputs).
+		// The shared sign-in, rendered whenever either feature is on Azure: the embedder in its
+		// keyless form, the answerer in its only form. The kubelet projects a service-account token
+		// for the federation's audience into the pod and rotates it before its hour runs out;
+		// Dispatch re-reads the file on every exchange with Entra, whose federated credential
+		// trusts the token's issuer and subject (the serviceAccountIssuer and
+		// serviceAccountSubject outputs).
 		appEnv = append(appEnv,
 			corev1.EnvVarArgs{Name: pulumi.String("DISPATCH_AZURE_TENANT_ID"), Value: refuseDispatchSeed(args.AzureTenantId, dispatch, "azureTenantId")},
 			corev1.EnvVarArgs{Name: pulumi.String("DISPATCH_AZURE_CLIENT_ID"), Value: refuseDispatchSeed(args.AzureClientId, dispatch, "azureClientId")},

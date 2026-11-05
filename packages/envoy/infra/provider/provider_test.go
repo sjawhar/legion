@@ -216,6 +216,20 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
 	require.NotContains(t, dispatch.InputProperties, "azureEmbedKey")
+	// The answerer's inputs are references and identifiers too, with one exception: chatTokenSecret
+	// names a Secret Manager secret whose value is a bearer token, so it carries provider:"secret".
+	// The Azure chat form takes no key at all.
+	for _, input := range []string{
+		"azureChatEndpoint", "azureChatDeployment", "azureChatApiVersion", "azureChatScope",
+		"azureChatTokensPerMinute", "chatEndpoint", "chatModel",
+	} {
+		require.Contains(t, dispatch.InputProperties, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
+	require.True(t, dispatch.InputProperties["chatTokenSecret"].Secret)
+	require.NotContains(t, dispatch.RequiredInputs, "chatTokenSecret")
+	require.NotContains(t, dispatch.InputProperties, "chatToken")
 	// The profiler's port is an optional plain integer.
 	require.Equal(t, "integer", dispatch.InputProperties["pprofPort"].Type)
 	require.False(t, dispatch.InputProperties["pprofPort"].Secret)
