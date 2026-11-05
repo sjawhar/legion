@@ -88,6 +88,50 @@ func TestASendBackIsCountedFromTheStatusHistoryBeforeObservations(t *testing.T) 
 	}
 }
 
+// TestARetroSendBackCountsAsOneAndMarksImplementing: `retro` is the third status a send-back
+// moves out of (spec version 20), because the daemon writes `in_progress` over a retro when the
+// head's CI goes red (workflow/table.go's TriggerChecksRed), exactly as it does over testing and
+// needs_review. Before observations that write is read off the status history, so it counts the
+// issue as sent back and marks the hours after it as implementing rather than as the merger's.
+func TestARetroSendBackCountsAsOneAndMarksImplementing(t *testing.T) {
+	fromRetro := newIssue("INFRA-1").worked("implementer", hour(0)).closedAt(hour(9)).
+		statusAt(hour(0), "in_progress").
+		statusAt(hour(2), "testing").
+		statusAt(hour(3), "needs_review").
+		// The architect accepted it, and the head's CI went red in retro.
+		statusAt(hour(4), "retro").
+		statusAt(hour(5), "in_progress").
+		statusAt(hour(7), "testing").
+		statusAt(hour(9), "done")
+	straight := newIssue("INFRA-2").worked("implementer", hour(0)).closedAt(hour(9)).
+		statusAt(hour(0), "in_progress").
+		statusAt(hour(2), "testing").
+		statusAt(hour(3), "needs_review").
+		statusAt(hour(4), "retro").
+		statusAt(hour(9), "done")
+
+	report := Compute(fixture(hour(-24), hour(24), fromRetro, straight), ScopeAll, hour(24))
+
+	for _, row := range report.Rework.Issues {
+		want := row.Key == "INFRA-1"
+		if row.SentBack != want {
+			t.Errorf("%s sent_back = %t, want %t: only the issue whose retro was written over counts", row.Key, row.SentBack, want)
+		}
+	}
+	if report.Rework.SentBackShare != 0.5 {
+		t.Errorf("sent-back share = %g, want 0.5", report.Rework.SentBackShare)
+	}
+	// The two hours between that `in_progress` and the next `testing` are implementing, not the
+	// merger's: an `in_progress` after retro names a phase where an admission's does not.
+	hours := map[string]float64{}
+	for _, bar := range report.PhaseTime.Bars {
+		hours[bar.Role] = bar.Hours
+	}
+	if hours["implementer"] < 2 {
+		t.Errorf("the implementer's bar holds %g h, want at least the two hours after the send-back from retro", hours["implementer"])
+	}
+}
+
 // TestTheHoursAfterTheFirstReviewReadTheStatusHistoryBeforeObservations: metric 3's table "adds
 // the hours of implementing and testing after the first review". Those hours are read off the
 // phase timeline, and the pre-observation fallback places one span per phase in workflow order,

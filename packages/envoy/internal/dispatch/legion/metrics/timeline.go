@@ -57,10 +57,11 @@ const (
 )
 
 // sentBackStatuses are the statuses a send-back moves out of before observations exist:
-// `needs_review` is the status of both reviewing and accepting, and `testing` is its own, so
-// those are the words "a move from `testing`, `reviewing` or `accepting` to `implementing`" is
-// read by.
-var sentBackStatuses = []string{statusTesting, statusNeedsReview}
+// `needs_review` is the status of both reviewing and accepting, `testing` is its own, and
+// `retro` is the merger's, which a red check sends back to implementing like any other
+// (workflow/table.go's TriggerChecksRed). Those are the words the spec's "an `in_progress`
+// after `testing`, `needs_review` or `retro` (a send-back) is implementing" is read by.
+var sentBackStatuses = []string{statusTesting, statusNeedsReview, statusRetro}
 
 // phaseOrder is the workflow's order of the phases a fallback timeline names, the order the
 // daemon's table moves an issue through. One rule reads it: a role's first event starts that
@@ -346,7 +347,7 @@ func statusPhase(previous, status string) (string, bool) {
 		// queue or out of parked, and once for every send-back to implementing, whatever phase
 		// the issue comes back from (workflow/table.go's TriggerTesterFailed,
 		// TriggerReviewRejected and TriggerChecksRed all write it). Only the send-back, a move
-		// out of `testing` or `needs_review`, names a phase.
+		// out of `testing`, `needs_review` or `retro`, names a phase.
 		if slices.Contains(sentBackStatuses, previous) {
 			return legion.PhaseImplementing, true
 		}
