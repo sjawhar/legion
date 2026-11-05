@@ -549,28 +549,30 @@ func TestTheRolesContainerOutOfMemoryEndIsMarkedOnTheRolesItCut(t *testing.T) {
 			RestartCount: 1, LastTerminationState: corev1.ContainerState{Terminated: &end},
 		}
 	}
-	podStatus := func(container corev1.ContainerStatus) corev1.PodStatus {
-		return corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{container}}
+	podStatus := func(phase corev1.PodPhase, container corev1.ContainerStatus) corev1.PodStatus {
+		return corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{container}}
 	}
 	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels),
-		podObject(name, recorded, sandboxUID, labels, podStatus(ended(outOfMemoryEnd)))}, withoutController())
+		podObject(name, recorded, sandboxUID, labels, podStatus(corev1.PodRunning, ended(outOfMemoryEnd)))}, withoutController())
 	for _, tc := range []struct {
 		name      string
+		phase     corev1.PodPhase
 		container corev1.ContainerStatus
 		launcher  *shimwire.LauncherState
 		want      bool
 	}{
-		{"the container was ended OOMKilled", ended(outOfMemoryEnd), nil, true},
-		{"the kubelet restarted it and the role's launcher reports no child", restarted(outOfMemoryEnd), &shimwire.LauncherState{}, true},
-		{"the role's launcher reports the recorded generation's own exit", restarted(outOfMemoryEnd),
+		{"the container was ended OOMKilled", corev1.PodRunning, ended(outOfMemoryEnd), nil, true},
+		{"the kubelet restarted it and the role's launcher reports no child", corev1.PodRunning, restarted(outOfMemoryEnd), &shimwire.LauncherState{}, true},
+		{"the pod itself ended with its container OOMKilled", corev1.PodFailed, ended(outOfMemoryEnd), nil, true},
+		{"the role's launcher reports the recorded generation's own exit", corev1.PodRunning, restarted(outOfMemoryEnd),
 			&shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 1}}, false},
-		{"the container was ended with reason Error at the same exit code", ended(erroredEnd), nil, false},
+		{"the container was ended with reason Error at the same exit code", corev1.PodRunning, ended(erroredEnd), nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g.update(g.pod(name), func(p *corev1.Pod) { p.Status = podStatus(tc.container) })
+			g.update(g.pod(name), func(p *corev1.Pod) { p.Status = podStatus(tc.phase, tc.container) })
 			g.eventually("the pod store to see "+tc.name, func() bool {
 				pod := g.r.storedPod(name)
-				if pod == nil {
+				if pod == nil || pod.Status.Phase != tc.phase {
 					return false
 				}
 				status := containerStatus(pod, runtime.IssuePodContainer)
@@ -588,6 +590,70 @@ func TestTheRolesContainerOutOfMemoryEndIsMarkedOnTheRolesItCut(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The mark is the issue pod's one container's end and no other's, because the note it sends is
+// written for a role of an issue pod: it says the container ran every role of the issue, that
+// another role's work may have filled the pod, and that an issue pod runs no heavy build. An init
+// container's out-of-memory end cut no turn off, since it ended before any role's process
+// started; and the project controller's own pod runs the controller alone in a container of its
+// own, sharing its memory with nobody and reading no worker guide. Both are Gone, and neither is
+// marked.
+func TestAnOutOfMemoryEndOutsideTheRolesContainerIsNotMarked(t *testing.T) {
+	outOfMemory := &corev1.ContainerStateTerminated{ExitCode: 128, Reason: "OOMKilled"}
+	t.Run("an init container", func(t *testing.T) {
+		g := newRig(t, nil)
+		loc := g.spawn(workerSpec(t))
+		g.update(g.pod(loc.Sandbox.Name), func(p *corev1.Pod) {
+			p.Status.Phase = corev1.PodPending
+			p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+				Name: initContainer, State: corev1.ContainerState{Terminated: outOfMemory},
+			}}
+		})
+		g.eventually("the pod store to see the failed init", func() bool {
+			p := g.r.storedPod(loc.Sandbox.Name)
+			if p == nil {
+				return false
+			}
+			_, failed := failedInit(p)
+			return failed != nil
+		})
+		obs, err := g.r.Probe(g.ctx, loc)
+		if err != nil {
+			t.Fatalf("Probe: %v", err)
+		}
+		if obs.Kind != runtime.Gone || obs.OutOfMemory {
+			t.Fatalf("%s OutOfMemory=%t %q, want Gone unmarked: the init container ran before any role's process", obs.Kind, obs.OutOfMemory, obs.Detail)
+		}
+	})
+	t.Run("the controller's own container", func(t *testing.T) {
+		g := newRig(t, nil)
+		loc := g.spawn(controllerSpec(t))
+		g.update(g.pod(loc.Sandbox.Name), func(p *corev1.Pod) {
+			p.Status.Phase = corev1.PodRunning
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: runtime.ControllerPodContainer, State: corev1.ContainerState{Terminated: outOfMemory},
+			}}
+		})
+		g.eventually("the pod store to see the controller's container ended", func() bool {
+			p := g.r.storedPod(loc.Sandbox.Name)
+			if p == nil {
+				return false
+			}
+			status := containerStatus(p, runtime.ControllerPodContainer)
+			return status != nil && status.State.Terminated != nil
+		})
+		// Its launcher reports no child, as one that came up with a restarted container does, so
+		// the verdict is read off the container's own end rather than off a running generation.
+		g.reportLauncher(controllerToken, shimwire.LauncherState{})
+		obs, err := g.r.Probe(g.ctx, loc)
+		if err != nil {
+			t.Fatalf("Probe: %v", err)
+		}
+		if obs.Kind != runtime.Gone || obs.OutOfMemory {
+			t.Fatalf("%s OutOfMemory=%t %q, want Gone unmarked: the controller's pod runs no role of an issue", obs.Kind, obs.OutOfMemory, obs.Detail)
+		}
+	})
 }
 
 // A Gone's quote of the shared log is the role's newest lines, read through the pod's log as the

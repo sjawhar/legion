@@ -100,13 +100,16 @@ func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState
 // message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
 // died in a turn of it, and behind outOfMemoryTask between the two when that death was the pod
 // running out of memory — the agent reads that its turn was interrupted, then why, then the task.
+// The note is read only under Interrupted, the flag written with it: the previous release's
+// upsert carries no out_of_memory column, so a row this release marked keeps that mark through a
+// rollback's re-puts, and the note must not outlive the interruption it describes.
 func (d Delivery) message() string {
 	var prefix string
 	if d.Interrupted {
 		prefix = interruptedTask
-	}
-	if d.OutOfMemory {
-		prefix += outOfMemoryTask
+		if d.OutOfMemory {
+			prefix += outOfMemoryTask
+		}
 	}
 	return prefix + d.Task
 }

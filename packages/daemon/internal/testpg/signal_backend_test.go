@@ -25,10 +25,11 @@ func TestTheDSNRoleMayTerminateAnotherRolesBackend(t *testing.T) {
 	}
 	defer conn.Close(t.Context())
 
+	// pg_has_role's 'usage' is has_privs_of_role, which answers true for a superuser before it
+	// looks at any membership, so this one read covers both ways the right can be held.
 	var mayTerminate bool
 	if err := conn.QueryRow(t.Context(),
-		`select pg_has_role(current_user, 'pg_signal_backend', 'usage')
-			or coalesce((select rolsuper from pg_roles where rolname = current_user), false)`,
+		`select pg_has_role(current_user, 'pg_signal_backend', 'usage')`,
 	).Scan(&mayTerminate); err != nil {
 		t.Fatalf("read whether the login may terminate a backend: %v", err)
 	}

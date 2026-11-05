@@ -239,10 +239,7 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 		detail, ranOutOfMemory := r.ended(ctx, v, container, role, initName, initExit)
 		ended := observe(runtime.Gone, "%s", detail)
 		ended.initFailed = initExit != nil && pod.DeletionTimestamp == nil
-		// An init container the kubelet ended for running out of memory cut no turn off: it ran
-		// before any role's process started. Only the pod's one container, which every role runs
-		// in, ends a turn that way.
-		ended.OutOfMemory = initExit == nil && ranOutOfMemory
+		ended.OutOfMemory = ranOutOfMemory
 		return ended
 	}
 	if scheduled := podCondition(pod, corev1.PodScheduled); pod.Status.Phase == corev1.PodPending && scheduled != nil &&
@@ -294,7 +291,7 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 	if ended := status.State.Terminated; ended != nil {
 		gone := observe(runtime.Gone, "pod %s (uid %s) container %s terminated (%s, exit code %d); last lines of %s:\n%s",
 			name, pod.UID, container, ended.Reason, ended.ExitCode, role, r.roleLog(ctx, name, container, role))
-		gone.OutOfMemory = outOfMemory(ended)
+		gone.OutOfMemory = outOfMemory(container, ended)
 		return gone
 	}
 	if !connected {
@@ -324,8 +321,8 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 		// last exit in memory (internal/launcher/launcher.go) and this side makes a fresh, empty
 		// state for each connection (accept) — so the container did not end under it, and the
 		// role's process ended on its own.
-		gone := observe(runtime.Gone, "pod %s (uid %s) role %s's launcher reports no child", name, pod.UID, role)
-		gone.OutOfMemory = outOfMemory(status.LastTerminationState.Terminated)
+		gone := observe(runtime.Gone, "pod %s (uid %s) role %s's launcher reports no child%s", name, pod.UID, role, containerRestarts(status))
+		gone.OutOfMemory = outOfMemory(container, status.LastTerminationState.Terminated)
 		return gone
 	}
 }
@@ -375,8 +372,9 @@ func podAbsent(v view) string {
 // init container's log, or role's own lines of the container's (roleLog). A pod of the layout
 // before one container (movedLayout) that ended before this daemon replaced it has no `roles`
 // container: role's own container there is what ended, and its log is role's alone. It reports,
-// beside the detail, whether the state it resolved is an out-of-memory end (outOfMemory), so that
-// state is resolved here alone and its caller decides whose end it speaks for.
+// beside the detail, whether the end it resolved is one the out-of-memory note is for
+// (outOfMemory), which it decides from the container it resolved: an init container's end and an
+// old-layout container's are neither.
 func (r *Runtime) ended(ctx context.Context, v view, container string, role claim.Role, initName string, initExit *corev1.ContainerStateTerminated) (string, bool) {
 	pod := v.pod
 	kind, state := "container", initExit
@@ -409,15 +407,21 @@ func (r *Runtime) ended(ctx context.Context, v view, container string, role clai
 	} else {
 		fmt.Fprintf(&detail, "; last lines of %s:\n%s", role, r.roleLog(ctx, pod.Name, container, role))
 	}
-	return detail.String(), outOfMemory(state)
+	return detail.String(), outOfMemory(container, state)
 }
 
-// outOfMemory reports whether a container instance was ended by the kubelet for running out of
-// memory. The reason is what says so and the exit code never does: a pod still running shows
-// OOMKilled with exit code 128, and plenty of other ends carry 128 too. A nil state is no end at
-// all, so it is no out-of-memory one.
-func outOfMemory(state *corev1.ContainerStateTerminated) bool {
-	return state != nil && state.Reason == "OOMKilled"
+// outOfMemory reports whether container's instance was ended by the kubelet for running out of
+// memory, and whether that end is one the note is for. The reason is what says the end was an
+// out-of-memory one and the exit code never does: a pod shows OOMKilled with exit code 128, and
+// plenty of other ends carry 128 too. A nil state is no end at all, so it is no out-of-memory one.
+// The container decides whose end it is, and only the issue pod's one container (every role of
+// the issue runs in it) counts: an init container's end cut no turn off, since it ran before any
+// role's process started; the controller's own pod runs the controller alone, which shares its
+// memory with nobody and reads no worker guide; and a pod of the layout before one container ran
+// the role in a container of its own. Those three reach this through the container they resolved
+// to, so the rule holds wherever the mark is set.
+func outOfMemory(container string, state *corev1.ContainerStateTerminated) bool {
+	return container == runtime.IssuePodContainer && state != nil && state.Reason == "OOMKilled"
 }
 
 // fetchCacheState is what a failed workspace-fetch's detail says of the repository cache it fills

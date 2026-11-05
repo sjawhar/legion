@@ -60,6 +60,40 @@ func TestATaskInterruptedByADeathIsResentToTheRelaunchedAgent(t *testing.T) {
 	}
 }
 
+// The note names the end that cut the task's last turn off, so it goes when a later end of the
+// same task was something else: interrupted writes OutOfMemory on every take-back, true or false,
+// rather than only when true. A task left marked would tell an agent its pod ran out of memory
+// after a turn that ended for an unrelated reason, and send it to the worker guide for nothing.
+func TestAnInterruptedTasksNoteIsTheEndThatCutItsLastTurn(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	h.must(StreamTurnStart{Claim: testToken})
+
+	h.must(RuntimeObservation{Observation: runtime.Observation{
+		Locator: h.locator(), Kind: runtime.Gone, At: h.clock.Now(), OutOfMemory: true,
+	}})
+	h.relaunched()
+	if want := interruptedTask + outOfMemoryTask + "implement the plan"; h.wantPrompts(2)[1].Message != want {
+		t.Fatalf("after the out-of-memory end the task was re-sent as %q, want %q", h.wantPrompts(2)[1].Message, want)
+	}
+	if p := h.store.load(testToken).Pending; p == nil || !p.OutOfMemory {
+		t.Fatalf("stored task %+v, want the out-of-memory mark kept for the relaunch", p)
+	}
+
+	h.must(StreamTurnStart{Claim: testToken})
+	h.wantState(StateWorking)
+	h.observe(runtime.Gone)
+	h.relaunched()
+	if want := interruptedTask + "implement the plan"; h.wantPrompts(3)[2].Message != want {
+		t.Fatalf("after the ordinary end the task was re-sent as %q, want %q: the note describes no end of this turn",
+			h.wantPrompts(3)[2].Message, want)
+	}
+	if p := h.store.load(testToken).Pending; p == nil || p.OutOfMemory {
+		t.Fatalf("stored task %+v, want the out-of-memory mark taken back", p)
+	}
+}
+
 // The interrupted turn ran, so the agent read its task, and the task keeps that read mark while it
 // waits for the relaunch: for a claim that has served no run, it is what attributes a completion
 // reported before the re-send's acknowledgement to the task's run (ServingRun), where a task that
