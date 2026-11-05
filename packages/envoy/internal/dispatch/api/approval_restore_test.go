@@ -204,18 +204,20 @@ func approveThenOthersAnswer(t *testing.T, handler http.Handler, title string) a
 	return approvedDocument{issueKey: issue.Key, artifactID: issue.PrimaryArtifactID, asks: asks}
 }
 
-// The approved text is not the approved document once a decision block in it was decided since:
-// bob answered the block alice approved open, and the agent deletes the block and inserts its
-// approved markdown again. Version 4 is version 1 byte for byte, but its block shows open while
-// its row holds bob's answer, which settlement writes back next. The restore holds each block to
-// its row as the answer carry does, so nothing is carried: no review in alice's name, and the
-// approval request the agent opened at version 2 stays open.
+// Bob answered the block Alice approved open; Alice then deletes it, and the agent restores its
+// approved markdown. Agents cannot delete answered blocks. Version 4 matches version 1, but its
+// open block disagrees with Bob's authoritative answer. No approval carries, and the approval
+// request opened at version 2 stays open.
 func TestTheApprovedTextOverABlockDecidedSinceCarriesNothing(t *testing.T) {
 	handler := approvalCarryHandler(t)
 	document := approveThenOthersAnswer(t, handler, "Approved text over a decided block")
 	request := requestApproval(t, handler, document.artifactID)
 
-	agentEdit(t, handler, document.artifactID, 3, map[string]string{"op": "delete", "block": "wave"})
+	deleted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+document.artifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "delete", "block": "wave"}},
+	}, "alice")
+	adviceFromResponse(t, deleted.Code, deleted.Body.String())
+	waitForArtifactVersion(t, handler, document.artifactID, 3)
 	agentEdit(t, handler, document.artifactID, 4, map[string]string{"op": "insert", "after": "end", "markdown": waveAsk})
 	if restored, approved := versionMarkdown(t, handler, document.artifactID, 4), versionMarkdown(t, handler, document.artifactID, 1); restored != approved {
 		t.Fatalf("version 4 = %q, want version 1's text %q", restored, approved)

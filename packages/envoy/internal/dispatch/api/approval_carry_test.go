@@ -514,18 +514,11 @@ func TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry(t *testing.T) {
 	requireCarriedReview(t, handler, issue.PrimaryArtifactID, 5, 2, nil)
 }
 
-// Stale: a server-owned attribute forged on a decided block in the version the human's answer
-// writes - each attribute settlement writes from the row (askServerAttributeNames), forged alone.
-// The human answered the first block and approved; the agent added a second, which the human
-// answers, and at once a write through the server's own live attribute path - the one the answer
-// route writes an answer with - puts another value on the first block, leaving every other
-// attribute as the row has it; the agent then names a version, in the route's own transaction,
-// while the answer still waits for its settlement, so one version holds both. The cut leaves both
-// blocks out and every block is his, but the first is not as settlement would write it from its
-// row: a block's whole server-attribute set must be as settlement's writer leaves it, so nothing
-// is carried. Settlement then writes the row back over the forgery, and that version - the one he
-// approved plus his answer to the second block - carries; for `invalid`, which no rendering writes,
-// settlement's repair changes no markdown and versions nothing, so the approval stays stale.
+// A forged answerer is refused before versioning. Other server-owned attributes forged on a
+// decided block stale the approval, even beside the human's newer answer to a second block.
+// Settlement repairs the forged value from its authoritative row, and the repaired version
+// carries the approval. The non-rendered `invalid` attribute is repaired without a version, so
+// that approval stays stale until the human approves again.
 func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
 	for _, tc := range []struct {
 		attribute string
@@ -556,6 +549,20 @@ func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
 			answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
 			setLiveBlockAttributes(t, database, documents, issue.PrimaryArtifactID, "region", map[string]any{tc.attribute: tc.forged})
 			named := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]any{"summary": "Name the forged " + tc.attribute, "actor": sessionActor()})
+			if tc.attribute == "answered_by" {
+				expectRefusal(t, "a version naming a forged answerer", named, http.StatusConflict,
+					"DECISION_ATTRIBUTION", "region", "mallory")
+				if version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions/4", nil, "alice"); version.Code != http.StatusNotFound {
+					t.Fatalf("forged answerer wrote version 4: status=%d body=%s", version.Code, version.Body.String())
+				}
+				requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+				settledVersion(t, handler, documents, issue.PrimaryArtifactID, 4)
+				if repaired := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4); strings.Count(repaired, `answered_by="alice"`) != 2 || strings.Contains(repaired, `answered_by="mallory"`) {
+					t.Fatalf("version 4 = %s, want both authoritative answers and no forged answerer", repaired)
+				}
+				requireCarriedReview(t, handler, issue.PrimaryArtifactID, 4, 2, nil)
+				return
+			}
 			if named.Code != http.StatusCreated {
 				t.Fatalf("name the version holding the forged %s: status=%d body=%s", tc.attribute, named.Code, named.Body.String())
 			}
@@ -776,14 +783,10 @@ func TestAnAnswerAfterABlockHeApprovedWasRemovedDoesNotCarry(t *testing.T) {
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 }
 
-// The agent deletes a block the human answered and approved, then inserts it again with its id and
-// wording. Its row stays answered - settlement retracts only an open ask - so the row says the
-// block he answered is back, with no action of his. The inserted block shows open until
-// settlement writes the row's answer back into it, and a block that shows other than its row's
-// state carries nothing: that version stays stale. Once settlement writes the answer back, the
-// version holds every block as the approved version held it, which is no answer of his, so the
-// answer carry carries nothing; but its text is then the approved version's again, and that
-// carries the approval (approval_restore_test.go).
+// The human deletes a block they answered and approved, then the agent inserts its id and
+// wording again. Agents cannot delete answered blocks. The ask row stays answered, but the
+// inserted block shows open and carries nothing until settlement restores its answer. That
+// version matches the approved text exactly, so it carries the approval by text restoration.
 func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(t *testing.T) {
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answered block restored", "Context\n\n"+regionAsk)
@@ -791,10 +794,9 @@ func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(
 	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
 	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
-	deleted := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-		"actor": sessionActor(),
-		"ops":   []map[string]string{{"op": "delete", "block": "region"}},
-	})
+	deleted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "delete", "block": "region"}},
+	}, "alice")
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete the answered block: status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
@@ -826,9 +828,9 @@ func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(
 }
 
 // Stale: a block the human answered before his approval, which the approved version did not
-// hold. The human answered the block; the agent deleted it; the human approved the document
-// without it; the agent inserts the block's markdown again. Its row stayed answered - settlement
-// retracts only an open ask - so settlement writes his answer back into the inserted block, and
+// hold. The human answered the block, deleted it and approved the document without it; the agent
+// inserts the block's markdown again. Agents cannot delete answered blocks. Its row stayed
+// answered - settlement retracts only an open ask - so settlement writes the answer back, and
 // the version it writes holds a block the approved version did not, answered by him: not as the
 // approved version held it, and his. But the answer predates his approval, so no action of his
 // since it put the block there: a changed block's answer must be newer than the approval it would
@@ -839,10 +841,9 @@ func TestARestoredBlockAnsweredBeforeTheApprovalCarriesNothing(t *testing.T) {
 	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
 	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
 	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
-	deleted := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-		"actor": sessionActor(),
-		"ops":   []map[string]string{{"op": "delete", "block": "region"}},
-	})
+	deleted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "delete", "block": "region"}},
+	}, "alice")
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete the answered block: status=%d body=%s", deleted.Code, deleted.Body.String())
 	}

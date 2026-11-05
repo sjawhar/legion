@@ -239,10 +239,9 @@ func TestAWriteRefusesABlockPointerOutsideItsIssueOrDocument(t *testing.T) {
 	}
 }
 
-// A browser's write is never refused: a settled browser tree whose pointer names a block no
-// document holds writes its version and stores the pointer, which stays an unresolved reference,
-// as any citation of an absent block is.
-func TestABrowserWritePointingAtAMissingBlockIsSavedAndUnresolved(t *testing.T) {
+// A browser's live update may hold a missing pointer, but settlement writes no immutable version
+// or edge until its target exists. Adding that target lets the same browser update settle.
+func TestABrowserWritePointingAtAMissingBlockIsNotVersionedUntilTheTargetExists(t *testing.T) {
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	documents, handler, database := browserDocumentService(t)
 	issue, _ := pointerSpec(t, handler)
@@ -266,6 +265,19 @@ func TestABrowserWritePointingAtAMissingBlockIsSavedAndUnresolved(t *testing.T) 
 	if !owed {
 		t.Fatal("checks.md owes no settlement, want the upload's still owed")
 	}
+	if err := documents.SettleIssueDocuments(context.Background(), issue.Key); !errors.Is(err, pmdoc.ErrBlockPointer) {
+		t.Fatalf("settle a browser pointer to a missing block: %v, want a pointer refusal", err)
+	}
+	if after := readChecks(t, database, issue.Key); !reflect.DeepEqual(after, checks) {
+		t.Fatalf("refused browser settlement left checks.md %+v, want %+v unchanged", after, checks)
+	}
+	requireReferenceNotFound(t, handler, url.Values{"to": {missing}}, `no block "nowhere" in dispatch://`+issue.Key+"/spec")
+	added := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": ":::requirement{#nowhere}\nThe target exists.\n:::\n"}},
+	}, "alice")
+	if added.Code != http.StatusOK {
+		t.Fatalf("add the browser pointer's target: status=%d body=%s", added.Code, added.Body.String())
+	}
 	if err := documents.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
 		t.Fatalf("settle the issue's documents: %v", err)
 	}
@@ -277,7 +289,6 @@ func TestABrowserWritePointingAtAMissingBlockIsSavedAndUnresolved(t *testing.T) 
 	if len(stored) != 1 || stored[0].BlockID != "c1" || stored[0].Kind != "serves" || stored[0].ToID != issue.Key+"/spec#nowhere" {
 		t.Fatalf("block_refs of checks.md = %#v, want c1's serves row at the missing block", stored)
 	}
-	requireReferenceNotFound(t, handler, url.Values{"to": {missing}}, `no block "nowhere" in dispatch://`+issue.Key+"/spec")
 }
 
 // setBlockAttributes writes typed-block state through the live room's own service call, as the
