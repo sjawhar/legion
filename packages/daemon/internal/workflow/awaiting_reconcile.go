@@ -187,9 +187,9 @@ func (e *Engine) leaveGateOff(ctx context.Context, tx pgx.Tx, root record.Issue,
 
 // gateOffAnswer ends the detail of a gate wait the gates.design: off rule answered (leaveGateOff).
 // That answer is recorded, and shown on the API, as AnsweredByApproval: the contract's answeredBy
-// enum, which strict readers check, has no value of its own for it. But no person approved
-// anything, so the detail tells the resume (resumeTask) never to say so, should the gate be on
-// again by then.
+// enum, which refuses a value it does not list, has no value of its own for it. But no person
+// approved anything, so the detail tells the resume (resumeTask) never to say so, should the gate
+// be on again by then.
 const gateOffAnswer = ", answered with the design gate off"
 
 // act is what ReconcileAwaiting does with one root.

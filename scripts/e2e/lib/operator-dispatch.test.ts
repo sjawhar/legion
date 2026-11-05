@@ -38,6 +38,17 @@ writeFileSync(
   })
 );
 
+// A session whose Dispatch credential is the secrets broker's: DISPATCH_TOKEN_BROKER says this
+// machine's own identity is the credential, so no bearer is read from any file or variable and
+// what resolves is a DPoP-bound access token this command can hand on nothing of.
+const brokerEnv = {
+  HOME: home,
+  DISPATCH_TOKEN_BROKER: "1",
+  AGENT_SECRETS_URL: "http://broker.internal.example",
+  AGENT_SECRETS_MACHINE_IDENTITY: "kubernetes",
+  AGENT_SECRETS_MACHINE_TOKEN_FILE: "/var/run/secrets/exchange/token",
+};
+
 describe("operatorDispatch", () => {
   test("the neutral file's own server, with its own bearer", () => {
     expect(operatorDispatch({ HOME: home }, cwd)).toEqual({
@@ -68,6 +79,16 @@ describe("operatorDispatch", () => {
       file: join(dir, "empty-home", ".config", "legion", "envoy.json"),
       notice: `no envoy.json at ${join(dir, "empty-home", ".config", "legion", "envoy.json")}: Dispatch is off`,
     });
+  });
+
+  test("the secrets broker's credential is refused by name, the file's bearer being passed over", () => {
+    expect(() => operatorDispatch(brokerEnv, cwd)).toThrow(
+      "this machine's Dispatch credential is the access token it trades its own identity for at the secrets broker"
+    );
+    expect(() => operatorDispatch(brokerEnv, cwd)).toThrow(
+      `set DISPATCH_TOKEN, or write dispatch.token in ${join(home, ".config", "legion", "envoy.json")}, with DISPATCH_TOKEN_BROKER unset`
+    );
+    expect(() => operatorDispatch(brokerEnv, cwd)).not.toThrow(/neutral-1/);
   });
 });
 
@@ -114,6 +135,14 @@ describe("bun lib/operator-dispatch.ts <bearer file>", () => {
     expect(over.exitCode).toBe(1);
     expect(JSON.parse(over.stdout.toString()).error).toContain(planted);
     expect(readFileSync(planted, "utf-8")).toBe("");
+  });
+
+  test("writes no file for the secrets broker's credential, naming it in the error", () => {
+    const held = mkdtempSync(join(dir, "held."));
+    const run = cli([join(held, "bearer")], brokerEnv);
+    expect(run.exitCode).toBe(1);
+    expect(JSON.parse(run.stdout.toString()).error).toContain("the secrets broker");
+    expect(readdirSync(held)).toEqual([]);
   });
 
   test("refuses to run without the file's path", () => {

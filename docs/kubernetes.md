@@ -287,6 +287,9 @@ Then:
   So that the role it makes can log in, `pg_hba.conf` trusts every role on loopback, and the line before that rejects the cluster's superuser over TCP:
   a test that creates a role and connects as it works in the pod as it does in CI, and no login over the DSN's port
   — the superuser's own name included — reaches the superuser, so the trust the created roles need cannot be turned into `COPY … TO PROGRAM`.
+  The role is also granted `pg_signal_backend`, which `drop database … with (force)` needs to end the backends still attached to the database it drops
+  — an autovacuum worker among them — and which reaches nothing else: it signals a backend and gives no read, no command and no database the role is not already in.
+  Without it `packages/daemon/internal/workflow`'s tests fail in the pod alone, at a different three each run, with `permission denied to terminate process` (SQLSTATE 42501), and pass in CI, whose login is a superuser.
 
 - `ensure` is idempotent and cheap when the server is up:
   it returns after one connection through the DSN itself (`psql … select 1`, with a connect timeout), and otherwise initialises and starts under `flock -o`.
@@ -1477,7 +1480,7 @@ Do these steps in this order:
      `capabilities`, `production_check_hours`, `worker_backends` and `role_config_files`;
 
    - under `projects.<KEY>`, the `repo` the earlier release requires (`projects.<KEY>.repo must
-     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `deploys`, `merge` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
+     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `deploys`, `memory`, `merge` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
 
    - `tree_volume` where this release's file sets `issue_volume` (`unknown key
      runtime.kubernetes.issue_volume`, `members` in `internal/config/config.go` at that tag), one `resources.<role>` entry per workflow role where it sets `resources.issue` (`runtime.kubernetes.resources key "issue" must be a role (architect, planner, implementer,
@@ -1864,6 +1867,34 @@ The records themselves stay on their Dispatch issues.
 The `20261101144900` is the identifier of `20261101144900_handoff_records.up.sql`; where that file carries another identifier in the release you roll back from, use that one.
 The SQL was run on 2026-10-26 against PostgreSQL 17 on a scratch schema holding `phases` and `schema_version` after that migration (then numbered 0055, later 0060, 0061, 0062 and 0065):
 the first run dropped both columns and the row, and a second printed the two notices and changed nothing.
+
+**Each issue's memory group in the state (daemon API contract 49).**
+A release at contract 49 carries, on every issue of `GET /legion/v1/state`, the memory group of that issue's tree:
+`memoryGroup` (`memory` or `none`), `memoryDrawMode` (the `projects.<KEY>.memory.mode` in force at the draw) and `memoryDrawnAt`, the three absent together while nothing has drawn for the tree.
+A caller in a pod whose claims record a contract below 49 is served the state without the three, so a pod of the release before this one reads it as it always did.
+Store migration 20261104073148_issue_memory_group adds the three columns they are read from to `issues` — `memory_group`, `memory_draw_mode` and `memory_drawn_at` — written once, when the tree's lifecycle row is first created, and backfilled for no row.
+Store migration 20261104153554_issue_memory_carried adds `memory_carried` beside them, the hand-over's own answer about a root handed over out of another tree, which no caller of the state reads.
+It backfills the hand-overs the release before it recorded: a row whose `handed_over_from` names a tree that holds a `tree_lifecycles` row of the project's normalized token, and that carries no draw of its own, is marked carried.
+Those old trees ran with no memory, the setting having not existed then, so the mark is written and no group with it, which is the answer `record.Store.CarryMemory` writes at a hand-over made from now on.
+A child handed over out of a tree nothing ever opened keeps the column's default, false, and is drawn at its own first open like any other new tree.
+
+To roll this release back to contract 48, put `legion.yaml` back without `projects.<KEY>.memory`, which the earlier release refuses as a key it does not know, and re-pin it.
+A rollback past 48 also crosses idle release, whose own steps come first ([Rolling back idle release](#rolling-back-idle-release)).
+There is no SQL to run and no column to drop:
+the earlier release names every column it reads and writes on `issues` (`issueColumns` and `PutIssue` in `internal/record/store.go`), so it boots with the three in place, reads none of them and writes none of them, and an upgrade back to this release reads the draws it left.
+What the rollback costs is the draws it does not make:
+a tree the earlier release opens carries no group, and this release draws for no tree whose lifecycle row already exists, so every such tree runs without memory for its whole life.
+A child handed over out of such a tree is settled at the hand-over, with the answer that tree has, which is no group.
+A hand-over the earlier release makes while the rollback holds is settled by nothing: that release writes `handed_over_from` and knows no `memory_carried`, and 20261104153554's backfill ran before the rollback, so such a child is drawn at its first open after the upgrade back.
+To settle those hand-overs as this release would have, run the backfill once more against the daemon's database with no daemon of the project running, after the earlier release stops and before this release starts again; the column is still there from the first upgrade, and the statement touches only rows with no draw:
+
+```sql
+update issues set memory_carried = true
+where handed_over_from <> '' and memory_drawn_at is null
+  and exists (select 1 from tree_lifecycles l
+              where l.project = regexp_replace(lower(issues.project), '[^a-z0-9]', '', 'g')
+                and l.tree = issues.handed_over_from);
+```
 
 ### Contract discipline
 
@@ -2651,6 +2682,8 @@ The roles share the pod's network namespace, the workspace path and the Oh My Pi
 Each role is judged by its own launcher connection's state: one role's process exiting is that role's `gone` alone.
 The `roles` container ending — its PID 1 exiting, `OOMKilled`, an eviction
 — ends every role of the issue: each is `gone`, its detail naming the container's reason and exit code and quoting that role's own last 20 prefixed lines, then the container's last 20 unprefixed lines, which are no role's (`roleLog`, `observe.go`), and the supervisor relaunches each as it relaunches any `gone` role.
+When that reason is `OOMKilled`, each role whose turn the end cut off gets its task again behind a note that its pod ran out of memory and a pointer to `skill://legion-worker/references/tools.md` (`Observation.OutOfMemory`, then `outOfMemoryTask` in `internal/supervise/delivery.go`, kept on the delivery across a daemon restart);
+a role that was in no turn gets nothing, and neither an init container's end nor the controller's pod gives the note.
 
 Every container carries a reservation, a cpu and memory limit with a request no greater than it, and an ephemeral-storage limit over a smaller request:
 the `roles` container and both init containers the issue pod's one reservation (`runtime.kubernetes.resources.issue`, or the daemon's default).
@@ -2702,7 +2735,7 @@ The one Kubernetes service-account token this runtime projects for a role is the
 Dispatch can verify a projected token minted for its own audience (`DISPATCH_OIDC_AUDIENCE` in `packages/envoy/cmd/dispatch/settings.go`, checked by `serviceTokenActor` in `packages/envoy/internal/dispatch/api/server.go`), and the runtime projects none.
 The operator's own pod volumes are outside this statement: the operator controls them.
 An operator-launched controller can differ:
-`legion controller start` points `DISPATCH_TOKEN_FILE` at the controller file's own `dispatch_token_file` (`controllerEnvironment`, `packages/daemon/cmd/legion/controller.go`), so it presents the token that file holds, which need not be the daemon's.
+`legion controller start` points `DISPATCH_TOKEN_FILE` at the controller file's own `dispatch_token_file` (`controllerEnvironment`, `packages/daemon/cmd/legion/controller.go`), so it presents the token that file holds, which need not be the daemon's; under `dispatch_token_broker: true` in its place, the session is handed no bearer at all and trades this machine's identity at the broker for a DPoP-bound token of its own, and the start drops an inherited `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`, which it would otherwise present instead.
 What the broker can already issue is [The Dispatch identity the broker can issue](#the-dispatch-identity-the-broker-can-issue).
 `dispatch://INFRA-267` is where Legion's pods and its daemon get tokens of their own, and `dispatch://INFRA-264` is where Dispatch accepts one.
 
@@ -4230,7 +4263,7 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   disconnected; container roles waiting (CrashLoopBackOff: …); container roles restarted 5 times,
   its last instance terminated (Error, exit code 2 at …)`), so one crash-looping `roles` container that holds every role `unknown` says why.
   Otherwise the connected launcher's remaining answers:
-  a child of another generation is **dead (not the recorded process)**, a last-reported exit matching the recorded generation is **dead (gone)**, a last exit of another generation is again **dead (not the recorded process)**, and no child ever reported is **dead (gone)**;
+  a child of another generation is **dead (not the recorded process)**, a last-reported exit matching the recorded generation is **dead (gone)**, a last exit of another generation is again **dead (not the recorded process)**, and no child ever reported is **dead (gone)**, its detail adding the container's restart count and last instance's reason, which marks the end out of memory when that reason is `OOMKilled`;
 
 - phase `Unknown` → **unknown**;
 
@@ -4900,6 +4933,67 @@ each issue's pod (every role of it alike) and the image probe's.
   The capability report's `model-fallback` row reads the operator's overlays alone:
   a deployment that turns fallback on only for some roles, as here, reports the row open, and records that with `capabilities.decided.model-fallback: "<reason>"`.
 
+- **`projects.<KEY>.memory`** gives every role of a tree the project opens the same Oh My Pi overlays and the same block of prompt text, or gives it none, by one draw made for the whole tree.
+  `mode` is `off`, `on` or `random`: `off` gives no tree a memory group and is what a project with no `memory` block gets, `on` gives every new tree one, and `random` draws a fair coin (`crypto/rand`) for each new tree.
+  `config_files` are the overlays a memory-group tree's roles name, absolute paths in the operator's mounts as `role_config_files`' are, and at least one is required while the mode is not `off`.
+  `instructions` is optional, and is one markdown file on the daemon's own disk rather than in a mount:
+  the daemon reads it at boot, refuses a file it cannot read or that holds nothing, and puts its text into each memory-group role's system prompt itself, so no pod reads it.
+
+  ```yaml
+  # memory.yml: kubectl -n legion create configmap legion-operator-memory --from-file=memory.yml
+  runtime:
+    kubernetes:
+      pod:
+        volumes:
+          - {name: operator-memory, config_map: {name: legion-operator-memory}}
+        volume_mounts:
+          - {volume: operator-memory, mount_path: /etc/legion-memory}
+  projects:
+    WIDGETS:
+      memory:
+        mode: random
+        config_files: [/etc/legion-memory/memory.yml]
+        instructions: /etc/legion-daemon/memory-instructions.md
+  ```
+
+  (beside the block's other volumes and mounts).
+
+- **The draw is the tree's, and is made once.**
+  It is made when the tree's lifecycle row is first created, in that row's own transaction, on both paths that open a tree — admission's own and the operator's `POST /legion/v1/operator/claims` — and is kept on the tree's root issue record with the mode it was drawn under and the time of the draw.
+  A re-admission, a new generation and the next epoch after a cleanup keep it, since none of them creates that row again, and a child its finished root hands over as a tree of its own is settled at the hand-over, with the answer of the tree it leaves: that tree's draw, the draw time included, where it had one.
+  Every issue of a tree carries its root's group, so a child is never drawn for.
+  A tree first opened before this release has no group and runs without memory, and nothing draws for it later:
+  a change of a project's mode, and turning the block on at all, reach only the trees opened after the change, and a child handed over out of such a tree is never drawn for either, since the hand-over gives it that tree's answer whether it is a draw or none.
+  A root out of a tree the daemon never opened — one with no lifecycle row, whose work never ran — takes no answer with it, so its own first open draws it like any other new tree.
+  The hand-over decides both, in the transaction that records it, so which of the two roots is promoted first changes nothing.
+  An operator's spawn whose tree has no issue record records no draw and runs without memory; nothing is refused and no record is invented.
+
+- **What a memory-group role is given.**
+  Its `PI_CONFIG_FILES` is the `pod.env` value, then its own files (`role_config_files`), then the project's memory overlays, which outrank both;
+  its one `--append-system-prompt` value ends with the memory instructions, after the deployment's own.
+  The controller is in no memory group whatever the mode says, since a memory group is a tree's and the controller runs in none;
+  a role of a tree drawn `none` is told exactly what it was told before the block existed; and a block with no `instructions` appends nothing.
+  The launch follows the record, not the mode:
+  a tree the daemon drew into the memory group keeps its overlays and its instructions while the block still names them, whatever the mode is now, so `mode: off` stops new draws and takes memory from no tree already running with it.
+  Taking the files away is removing them from the block.
+  The memory overlays take part in everything `role_config_files` takes part in:
+  the mount check at load (a file under no `pod.volume_mounts` mount is refused, naming `projects.<KEY>.memory.config_files`), the image probe's per-role value (they are passed for every workflow role and never for the controller, and a file the probe cannot read refuses the boot), the pod drift, and what a kept pod's role is told.
+
+- **Turning it on:** a pod created before the operator added the memory overlay's volume and mount is handled as it is for an overlay of `role_config_files` ("Rolling it out" above), with two differences.
+  The drift is reported `memory.config_files <file>`, and it replaces every issue pod of the deployment rather than the memory-group trees' pods alone, since any tree may be drawn into the group;
+  the controller's pod is never replaced for it, since the controller names these files in no list.
+  A role of a memory-group tree started into a pod the launch keeps is told only the memory overlays that pod holds, as it is told only the role's own files that it holds, so it starts, pushes its work and answers the update round that replaces the pod.
+
+- **What is refused, and where the group shows.**
+  The loader refuses a `mode` that is no word of the three, a mode other than `off` that names no `config_files`, a block that names `config_files` while `worker_backends` puts an issue role on Claude Code (which reads no `PI_CONFIG_FILES`) whatever the mode, and an overlay under no `pod.volume_mounts` mount, also whatever the mode;
+  boot refuses an `instructions` file it cannot read or that holds nothing.
+  `legion start --check-config` makes every one of them.
+  `mode: off` with `config_files` and `instructions` still set keeps them as written, so a project moved to `on` moves one key — and they are not inert there:
+  a tree already drawn into the memory group names them, which is why the mount check and the readability check hold at `off` too.
+  A project with no block at all is the pod every deployment built before the block existed.
+  Every issue of `GET /legion/v1/state` carries its tree's `memoryGroup` (`memory` or `none`), `memoryDrawMode` and `memoryDrawnAt`, the three absent together while nothing has drawn for the tree (daemon API contract 49);
+  `settings` carries the project's block; and `legion state` prints one `memory:` line counting the issues drawn under each group and mode, naming no issue, since the state names no tree and a handed-over tree carries its old tree's draw verbatim.
+
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker (the broker design's pod-enrollment plan), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only that pod generation's grants.
   `url` is the broker's base URL (https, or http to a loopback address;
   an ASCII host), and `token_file` (required, absolute) is where the daemon's own pod mounts its projected ServiceAccount token for the broker's audience, `agent-secrets`, with an `expirationSeconds` of at most 3600:
@@ -4979,7 +5073,7 @@ each issue's pod (every role of it alike) and the image probe's.
 
 - **Settings order.**
   Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones before it and all of them outranking a repository's `.omp/config.yml`.
-  Legion writes no overlay at all: the list a role reads is the operator's own overlays with that role's own (`role_config_files`) after them, composed by the runtime that starts the role, and the shim passes it through untouched.
+  Legion writes no overlay at all: the list a role reads is the operator's own overlays, then that role's own (`role_config_files`), then the project's memory overlays (`projects.<KEY>.memory.config_files`) where the role's tree was drawn into the memory group, composed by the runtime that starts the role, and the shim passes it through untouched.
   So nothing of Legion's holds a repository's settings off — they reach a pod's agent as they reach any agent session, under the operator's overlay — and nothing of Legion's turns a pinned binary's own defaults off either: background work (`async.enabled`, `bash.autoBackground.enabled`) is on for every role, as it is for `--mode rpc`.
   The pod sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` on the agent where the pod leaves them unset, which an operator's pod may not set, since they decide where Oh My Pi keeps the session a resume reads.
 
@@ -5015,8 +5109,8 @@ each issue's pod (every role of it alike) and the image probe's.
 #### The Dispatch identity the broker can issue
 
 The secrets broker also serves an RFC 8693 token exchange at `POST /v1/oauth/token`, which every caller reaches with `client_id=dispatch-token-exchange` (`ExchangeClientID`, `packages/envoy/internal/broker/oauthwire`).
-It takes three kinds of subject token, each under its own `subject_token_type`:
-a pod's projected Kubernetes service-account token, minted for the exchange's own audience (`SubjectTokenTypeKubernetes`), a GitHub Actions workflow run's token (`SubjectTokenTypeGitHub`), and a machine login's own access token (`SubjectTokenTypeAccessToken`).
+It takes five kinds of subject token, each under its own `subject_token_type`:
+a pod's projected Kubernetes service-account token, minted for the exchange's own audience (`SubjectTokenTypeKubernetes`), a GitHub Actions workflow run's token (`SubjectTokenTypeGitHub`), a machine's Google identity token (`SubjectTokenTypeGoogle`), a person's own Google identity token, carried with the machine's as the actor token (`SubjectTokenTypePerson`, with `ActorTokenTypeMachine`), and a machine login's own access token (`SubjectTokenTypeAccessToken`).
 
 The exchange answers with an opaque Dispatch access token, bound to the key the request's DPoP proof names (`exchangeGrant`, `packages/envoy/internal/broker/oauth/exchange.go`).
 The token lives `BROKER_ACCESS_TOKEN_SECONDS`, 900 seconds by default (`packages/envoy/internal/broker/config/config.go`).
@@ -5026,27 +5120,40 @@ An issued token carries these claims and no others:
 
 - `person` — the person the session acts for.
 
+- `service` — the service a token that names no person is, and nothing for a token that names one.
+
+- `machine` — the machine a person signed in on acted through, the Google account its actor token named.
+  Every other kind of subject token carries none.
+
 - `project_scope` — `named` or `person`, which says what `project` means.
 
 - `project` — the one project key a `named` token may write.
   A `person` token carries none.
 
+- `credential_id` — the launcher credential the exchange minted for a machine presenting its Google identity token, which that machine enrols its session under.
+  That credential names the machine's fleet and no person, whatever the fleet's entry says, so the sessions it enrols read the secrets that service owns and no person's.
+  Every other kind of subject token carries none.
+
 The subject token's own kind decides those claims (`packages/envoy/internal/broker/exchange/exchange.go`).
 A pod's token needs an entry for its service account, which gives the project and the person and may fix the session, and Kubernetes must have bound that token to a pod (`Set.Pod`).
 A workflow run's token needs an entry for its repository, its workflow path and its ref (`Set.Workflow`).
+A machine's Google identity token needs an entry for the account its `email` claim names (`BROKER_VM_SERVICES`, `Set.Google`), which gives the service, may pin the Compute Engine project and instance names the machine may carry (`BROKER_VM_PROJECTS`, `BROKER_VM_INSTANCES`), and may give a person and a project as a pod's entry does (`BROKER_VM_EXCHANGE_ACCOUNTS`);
+an entry that gives neither mints a token that names its service and no person at all.
 A machine login's token needs no entry at all: the person is the login's approver, the scope is `person`, and the token names no project (`Set.Machine`).
-A session name belongs to one principal — the service account, the workflow, or the person
+A person's own Google identity token needs the machine's own as the actor token, of an account an entry lists (`Set.Person`):
+the person's `hd` claim must name the Workspace domain `BROKER_SIGNIN_DOMAIN` gives, the scope is `person`, and the token names that person and that machine.
+A session name belongs to one principal — the service account, the workflow, the Google account, or the person
 — and the broker refuses `invalid_grant` to another principal that names it (`claimSession`, `packages/envoy/internal/broker/oauth/exchange.go`).
 A claim holds the name for `oauthstore.SessionRetention`, 90 days, past the expiry of the token the claim was made for (`BindSession`, `packages/envoy/internal/broker/oauthstore/exchange.go`).
 A name an entry fixes is held for that entry with no expiry:
 the broker reserves it for the entry unless another principal holds it (`ReserveSessions`, the same file), and the entry's own exchange takes it from any other holder.
 
 A resource server reads such a token back with `POST /v1/oauth/introspect` (`packages/envoy/internal/broker/api/handlers_introspect.go`).
-It authenticates with its own Kubernetes service-account token, of an account the broker lists in `BROKER_API_ACCOUNTS`.
-The answer carries `active` and, for a live token, the four claims, `exp`, `client_id` and `jkt` (`Introspection`, `packages/envoy/internal/broker/oauth/introspect.go`).
+It authenticates with its own Kubernetes service-account token, or, on a machine that holds no Kubernetes token, with that machine's own Google identity token, of an account the broker lists in `BROKER_API_ACCOUNTS` (`<caller>=system:serviceaccount:<namespace>:<name>`, or `<caller>=google:<service account email>`).
+The answer carries `active` and, for a live token, those claims, `exp`, `client_id` and `jkt` (`Introspection`, `packages/envoy/internal/broker/oauth/introspect.go`).
 
-A broker that sets neither `BROKER_EXCHANGE_K8S_AUDIENCE` nor `BROKER_EXCHANGE_GITHUB_ISSUER` accepts no pod's token and no workflow run's token, and says so at boot with the log line `token exchange state=unconfigured`.
-With either one set it logs `token exchange state=on`, naming which issuers it accepts and how many entries it holds (`packages/envoy/cmd/broker/main.go`).
+A broker that sets none of `BROKER_EXCHANGE_K8S_AUDIENCE`, `BROKER_EXCHANGE_GITHUB_ISSUER` and `BROKER_GOOGLE_OIDC_AUDIENCE` accepts no pod's token, no workflow run's token and no machine's identity token, and says so at boot with the log line `token exchange state=unconfigured`.
+With any one of them set it logs `token exchange state=on`, naming which issuers it accepts and how many entries it holds, machine entries included (`packages/envoy/cmd/broker/main.go`).
 A machine login's access token is exchanged in both cases, because its subject type is always registered (`ExchangeConfig.tokenTypes`, `packages/envoy/internal/broker/oauth/exchange.go`).
 For the settings themselves, read the broker's generated configuration reference, which `docs/site/generators/broker-reference.sh` writes from the doc comments in `packages/envoy/internal/broker/config/config.go`, and the walk-through in `docs/site/src/content/docs/broker/guides/run-locally.md`, its section "Exchange a pod's token".
 
@@ -5452,12 +5559,14 @@ It is read once at boot, and is never an environment variable or a flag.
 **The operator-side file.**
 `legion controller start` reads a small file of its own, never the daemon's `legion.yaml`, whose loader would run both GitHub Apps' `private_key_command` on your machine and demand keys the controller never uses.
 `deploy/kubernetes/daemon/controller.yaml.example` is the complete shape:
-the same key names as `legion.yaml`, only the thirteen the controller needs (`project`, `daemon_url`, `operator_token_file`, `envoy_url`, `envoy_token_file`, `nats_urls`, `nats_nkey_seed_file`, `dispatch_url`, `dispatch_token_file`, `instructions`, `omp_invocation`, `omp_launch_prefix`, `state_dir`;
+the same key names as `legion.yaml`, only the fourteen the controller needs (`project`, `daemon_url`, `operator_token_file`, `envoy_url`, `envoy_token_file`, `nats_urls`, `nats_nkey_seed_file`, `dispatch_url`, `dispatch_token_file`, `dispatch_token_broker`, `instructions`, `omp_invocation`, `omp_launch_prefix`, `state_dir`;
 `nats_nkey_seed_file` is the Go CLI's alone, which the TypeScript CLI refuses as unknown).
 Any other key is refused naming it and the example (`unknown key "runtime" in the
 controller configuration; legion controller start reads only … — see
 deploy/kubernetes/daemon/controller.yaml.example`);
-`nats_urls` is required; `dispatch_url` and `dispatch_token_file` go together; and relative paths resolve against the file's own directory, with no `~`.
+`nats_urls` is required;
+`dispatch_url` goes with exactly one Dispatch credential — `dispatch_token_file`, the bearer a file holds, or `dispatch_token_broker: true`, this machine's own identity traded at the secrets broker — and the load refuses the two together and either with no `dispatch_url`, while a `dispatch_url` naming neither is the start's refusal, since the loader reads no environment and only a trade proves the broker route (`dispatch_url is configured with no Dispatch credential: …`);
+and relative paths resolve against the file's own directory, with no `~`.
 The operator token and the NATS nkey seed each sit in a file only you can read (mode 0600):
 a group- or world-readable one is refused naming the path and mode (`… is readable by its group or
 others (mode 0640); chmod 0600 it`).
@@ -5470,7 +5579,7 @@ In order, and keeping nothing until the daemon has answered, the command:
 1. reads the file and refuses as above, the operator token file others can read included;
    then refuses a stdin that is not a terminal (``stdin is not a terminal: Oh My Pi would run headless
    print mode, …; run `legion controller start` at a terminal``), since given step 6's positional word with no terminal Oh My Pi runs headless print mode, which would run the start command only after step 3's mint had revoked the running controller;
-   then a blank or unreadable Envoy or Dispatch token file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that does not resolve;
+   then a `dispatch_url` whose file names neither Dispatch credential, a blank or unreadable Envoy or Dispatch token file, a secrets broker that refuses this machine under `dispatch_token_broker` (which also refuses a machine proving no identity and a deployment naming no broker), a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that does not resolve;
 
 2. reads the project's repositories from the daemon's unauthenticated `GET /legion/v1/state` (`repositories`), since the controller's addressing names them, and refuses a daemon that does not answer, a body with no `repositories` object, and a mapped entry that is not `owner/name`;
    an empty mapping, or one whose every repository the daemon leaves out, launches the controller all the same, its addressing saying `The daemon maps no repository to this project now` with each repository left out and why.

@@ -49,24 +49,26 @@ type client struct {
 // terminalRenewal is the closed set of renewal refusals `agent-secrets renew` stops on, exiting
 // exitRenewRefused (76) so the worker shim does not restart it; every other refusal keeps the retry
 // backoff. Each member is an answer no retry can change: POD_TOKEN_REQUIRED is a pod enrollment's
-// renewal that carried no token and VM_TOKEN_REQUIRED a vm enrollment's, VM_NOT_LISTED a VM its
-// fleet's broker settings no longer allow (only an operator's change of them can), and
+// renewal that carried no token, and
 // ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or never existed. A broker that predates
 // ENROLLMENT_NOT_LIVE answers an ended enrollment
 // PROOF_INVALID with a message saying "not live" (its renew handler's "enrollment is not live" and
 // its proof check's "proof invalid: not live"), which no recoverable proof failure says.
 // POD_IDENTITY_MISMATCH is not a member: the broker also answers it for a token it could not
 // verify while its issuer or key set was unreachable, and a real mismatch ends with the lease,
-// after which the next renewal is ENROLLMENT_NOT_LIVE. VM_IDENTITY_MISMATCH and VM_TOKEN_EXPIRED
-// are not members for the same reason as their pod counterparts.
+// after which the next renewal is ENROLLMENT_NOT_LIVE.
 var terminalRenewal = struct {
 	Codes                     []string
 	LegacyCode, LegacyMessage string
 }{
-	Codes:         []string{"POD_TOKEN_REQUIRED", "VM_TOKEN_REQUIRED", "VM_NOT_LISTED", "ENROLLMENT_NOT_LIVE"},
+	Codes:         []string{"POD_TOKEN_REQUIRED", enrollmentEndedCode},
 	LegacyCode:    "PROOF_INVALID",
 	LegacyMessage: "not live",
 }
+
+// enrollmentEndedCode is the renew route's own answer to a proof naming an enrollment the broker
+// no longer holds, written once here and read by terminalRenewal and by enrollmentEnded.
+const enrollmentEndedCode = "ENROLLMENT_NOT_LIVE"
 
 // newClient is the HTTP client every agent-secrets call goes out on, renewals among them. Its
 // whole-call timeout is leasetime.RenewClientTimeout, the same figure the broker's lease bound
@@ -91,13 +93,19 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("%s (%s)", e.Message, e.Code)
 }
 
-// Permanent reports whether this refusal is one of terminalRenewal's: a code it lists, or its
-// legacy code with a message naming the ended enrollment.
+// enrollmentEnded reports whether this refusal is the broker's answer to a proof naming an
+// enrollment it no longer holds: the lease lapsed, or it was revoked. Only the renew route
+// answers ENROLLMENT_NOT_LIVE; every other session route says PROOF_INVALID with "not live" in
+// its message, which no recoverable proof failure (iat skew, key, URL) says.
+func (e *apiError) enrollmentEnded() bool {
+	return e.Code == enrollmentEndedCode ||
+		(e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage))
+}
+
+// Permanent reports whether this refusal is one of terminalRenewal's: a code it lists, or the
+// ended enrollment its legacy code spells (enrollmentEnded).
 func (e *apiError) Permanent() bool {
-	if slices.Contains(terminalRenewal.Codes, e.Code) {
-		return true
-	}
-	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
+	return slices.Contains(terminalRenewal.Codes, e.Code) || e.enrollmentEnded()
 }
 
 // unreachableError is a broker call that did not complete. Its host might not resolve, nothing
@@ -234,6 +242,21 @@ func (c *client) doStatus(ctx context.Context, method, url string, body []byte, 
 // errNothingSent is the cause of a call this client could not even build a request for.
 var errNothingSent = errors.New("nothing was sent")
 
+// reenroller is a signer that can replace an enrollment the broker no longer holds: a person's
+// sign-in on this box, and a machine that registered its own session here (proofsource.go).
+// Nothing else is one — a box or pod its launcher enrolled is the launcher's to enrol again,
+// and a launcher proof names no enrollment at all.
+type reenroller interface {
+	Reenroll(ctx context.Context) error
+}
+
+// enrollmentNotLive reports whether err is a refusal (*apiError) naming an enrollment the broker
+// no longer holds, which is enrollmentEnded's question asked of an error.
+func enrollmentNotLive(err error) bool {
+	var refusal *apiError
+	return errors.As(err, &refusal) && refusal.enrollmentEnded()
+}
+
 // doProof signs the request with signer.Sign against exactly this method and URL (no query
 // string appended after signing), the shape proof.Verifier.Verify compares htm/htu against.
 func (c *client) doProof(ctx context.Context, signer proofSigner, method, path string, body []byte) ([]byte, error) {
@@ -242,7 +265,29 @@ func (c *client) doProof(ctx context.Context, signer proofSigner, method, path s
 }
 
 // doProofStatus is doProof, also answering the 2xx status (doStatus).
+//
+// A signer that can register itself again (reenroller) gets exactly one retry when the broker
+// says the enrollment its proof named is not live. Nothing renews a sign-in's or a machine's own
+// session enrollment otherwise, so after BROKER_LEASE_SECONDS every call on that box would fail
+// with the dead id still in its record, and only signing in again would cure it — making a
+// second box key and a second sign-in on the person's list. One retry, because a second refusal
+// is the broker saying no to the enrollment this call just made, which no further retry changes.
 func (c *client) doProofStatus(ctx context.Context, signer proofSigner, method, path string, body []byte) (int, []byte, error) {
+	status, data, err := c.proofCall(ctx, signer, method, path, body)
+	again, ok := signer.(reenroller)
+	if !ok || !enrollmentNotLive(err) {
+		return status, data, err
+	}
+	if reErr := again.Reenroll(ctx); reErr != nil {
+		return status, data, fmt.Errorf("%w; registering this session again: %v", err, reErr)
+	}
+	return c.proofCall(ctx, signer, method, path, body)
+}
+
+// proofCall is one signed call, which is all `renew` may make: its whole contract is to report
+// the enrollment the broker no longer holds (terminalRenewal, exit 76) rather than quietly
+// register another.
+func (c *client) proofCall(ctx context.Context, signer proofSigner, method, path string, body []byte) (int, []byte, error) {
 	url := c.baseURL + path
 	token, err := signer.Sign(method, url)
 	if err != nil {
@@ -456,21 +501,20 @@ func (c *client) Self(ctx context.Context, signer Signer) (SelfResult, []byte, e
 
 // RenewEnrollment is the one Signer-taking method that still needs enrollmentID explicitly: the
 // broker route is /v1/enrollments/{id}/renew, so the id is in the URL path, not just the signed
-// payload. A pod's renewal carries its current projected token as pod_token and a VM's its
-// current metadata token as vm_token; an empty field or token sends no body at all, a box's
-// renewal.
-func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, tokenField, token string) (time.Time, error) {
+// payload. A pod's renewal carries its current projected token as pod_token; an empty podToken
+// sends no body at all, which is every other session's renewal.
+func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, podToken string) (time.Time, error) {
 	if err := pathID("an enrollment id", enrollmentID); err != nil {
 		return time.Time{}, err
 	}
 	var body []byte
-	if tokenField != "" && token != "" {
+	if podToken != "" {
 		var err error
-		if body, err = json.Marshal(map[string]string{tokenField: token}); err != nil {
+		if body, err = json.Marshal(map[string]string{"pod_token": podToken}); err != nil {
 			return time.Time{}, err
 		}
 	}
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
+	_, raw, err := c.proofCall(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
 	if err != nil {
 		return time.Time{}, err
 	}
