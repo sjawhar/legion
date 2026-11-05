@@ -193,6 +193,8 @@ func applyApprovals(
 			approval.Reason = review.Reason
 			approval.AskID = review.AskID
 			approval.Kind = review.Kind
+			approval.ContentSHA256 = review.ContentSHA256
+			approval.ContentSHA256Source = review.ContentSHA256Source
 			switch {
 			case review.State == "changes_requested":
 				approval.State = "changes_requested"

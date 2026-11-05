@@ -7,6 +7,7 @@ import {
   type AnchorInput,
   type AnswerAskInput,
   type ArtifactBlock,
+  ArtifactReviewEventPayloadSchema,
   type ArtifactText,
   type Ask,
   type AskAnsweredEventPayload,
@@ -59,6 +60,23 @@ import {
   type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
+
+test("review event validation preserves approved byte hashes and their provenance", () => {
+  for (const source of ["insert", "backfill"] as const) {
+    expect(
+      ArtifactReviewEventPayloadSchema.parse({
+        artifact_id: "doc-1",
+        version: 3,
+        content_sha256: "a".repeat(64),
+        content_sha256_source: source,
+      })
+    ).toMatchObject({ content_sha256: "a".repeat(64), content_sha256_source: source });
+  }
+  expect(ArtifactReviewEventPayloadSchema.parse({ artifact_id: "doc-1", version: 2 })).toEqual({
+    artifact_id: "doc-1",
+    version: 2,
+  });
+});
 
 test("delivery modes are exactly the closed capability list", () => {
   expect([...DELIVERY_CAPABILITIES]).toEqual(["aside", "btw", "steer"]);

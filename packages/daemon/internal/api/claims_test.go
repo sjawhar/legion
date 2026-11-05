@@ -105,7 +105,7 @@ func TestRegisterRecordsThePluginContractAndTheOperatorViewShowsIt(t *testing.T)
 }
 
 // A daemon given no task agents answers an empty `promptAgents` list, never null: the plugin's
-// strict reader takes an array, and a role whose prompts dispatch no agent measures none.
+// reader takes an array, and a role whose prompts dispatch no agent measures none.
 func TestRegisterAnswersAnEmptyPromptAgentsListWhenTheDaemonHasNone(t *testing.T) {
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
