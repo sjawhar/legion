@@ -16,6 +16,7 @@ import {
 } from "../../theme/classes";
 import { ComponentPicker } from "../architecture/ComponentPicker";
 import { buildIssuePath } from "../refs/routes";
+import { authorText } from "./page-structure";
 import { useIssueComponents } from "./useIssueComponents";
 
 /**
@@ -39,11 +40,17 @@ export function IssueComponentsLine({
   const { components } = issue;
   const sources = useQuery(projectArchitectureSourcesQuery(issue.project));
   const [pickerOpen, setPickerOpen] = useState(false);
+  // The architecture names each component the issue is attached to, and the page draws a name
+  // where a name belongs rather than the model's own id (dispatch://INFRA-1196 R21), so the
+  // tree is read once this issue has a component to name - the same read, under the same key,
+  // that the picker opens with.
   const tree = useQuery({
     queryKey: ["architecture", issue.project],
     queryFn: () => api.getArchitecture(issue.project),
-    enabled: pickerOpen,
+    enabled: pickerOpen || (components.mode === "explicit" && components.ids.length > 0),
   });
+  const componentName = (id: string) =>
+    tree.data?.components.find((component) => component.id === id)?.title ?? id;
   const write = useIssueComponents(issue);
   const inheritedFrom =
     components.inherited_from === null ? null : (
@@ -59,7 +66,7 @@ export function IssueComponentsLine({
     );
   return (
     <div
-      className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}
+      className={`flex min-w-0 flex-wrap items-center gap-2 text-sm ${textSecondaryOnSurface}`}
       data-testid="issue-components"
     >
       <span className="font-medium">Components:</span>
@@ -73,8 +80,9 @@ export function IssueComponentsLine({
             <span
               className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ${badgePrimary.bg} ${badgePrimary.text}`}
               key={id}
+              {...authorText}
             >
-              {id}
+              {componentName(id)}
             </span>
           ))}
           {components.unknown.map((id) => (

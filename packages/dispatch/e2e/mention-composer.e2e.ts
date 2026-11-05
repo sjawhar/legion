@@ -306,7 +306,9 @@ test("a docked send out when its issue closes keeps the draft and shows the refu
     await expect(field).toBeDisabled();
 
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
-    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    // A closed issue says so in its identity block; reopening it is behind that block's one
+    // actions control (dispatch://INFRA-1196 R11).
+    await expect(page.getByText("This issue is closed.", { exact: true })).toBeVisible();
     await expect(field).toHaveValue("Before the close");
     await expect(field).toBeDisabled();
 
@@ -405,9 +407,13 @@ test("an issue closed and reopened under a docked send leaves that send's compos
 
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
     await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
-    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    // A closed issue says so in its identity block; reopening it is behind that block's one
+    // actions control (dispatch://INFRA-1196 R11).
+    await expect(page.getByText("This issue is closed.", { exact: true })).toBeVisible();
     await patchIssue(issue.key, { status: "backlog" }, { login: "bob" });
     await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
+    // Close is behind the identity block's actions control now (dispatch://INFRA-1196 R11).
+    await page.getByRole("button", { name: "Issue actions" }).click();
     await expect(page.getByRole("button", { name: "Close issue" })).toBeVisible();
     await expect(field).toHaveValue("Through the close");
     await expect(field).toBeDisabled();

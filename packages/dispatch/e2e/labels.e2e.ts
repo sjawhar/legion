@@ -109,7 +109,7 @@ test("edits issue labels from a searchable multi-select and filters project issu
   }
 });
 
-test("eight thirty-character labels scroll inside the header's details line without widening the page", async ({
+test("eight thirty-character labels wrap inside the identity block without widening the page", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -120,7 +120,7 @@ test("eight thirty-character labels scroll inside the header's details line with
     const title = page
       .getByTestId("issue-header")
       .getByRole("heading", { level: 1, name: "Long labels" });
-    const rail = page.getByTestId("issue-metadata-rail");
+    const labels = page.getByTestId("issue-labels");
     for (const [width, height] of [
       [1280, 900],
       [390, 844],
@@ -137,17 +137,21 @@ test("eight thirty-character labels scroll inside the header's details line with
       await page.reload();
       await expect(page.getByText("label-7-".padEnd(30, "x"), { exact: true })).toBeVisible();
 
-      // The title box is untouched and the details line is the scroll container: it overflows
-      // sideways inside the card while the document itself is no wider than the window.
+      // The title box is untouched, and the labels take as many lines as they need inside row
+      // three rather than a sideways scroll: the rail that scrolled is gone, and nothing on this
+      // page is reached by dragging a row (dispatch://INFRA-1196 R11, R17).
       expect(await title.boundingBox()).toEqual(titleBefore);
-      const metrics = await rail.evaluate((element) => ({
+      const metrics = await labels.evaluate((element) => ({
         clientWidth: element.clientWidth,
+        height: element.getBoundingClientRect().height,
         overflowX: getComputedStyle(element).overflowX,
         scrollWidth: element.scrollWidth,
       }));
-      expect(metrics.overflowX).toBe("auto");
-      expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
+      expect(metrics.overflowX).toBe("visible");
+      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
       expect(metrics.clientWidth).toBeLessThanOrEqual(width);
+      // Eight long labels do not fit one line at either width, so they wear more than one.
+      expect(metrics.height).toBeGreaterThan(44);
       const pageWidths = await page.evaluate(() => ({
         clientWidth: document.documentElement.clientWidth,
         scrollWidth: document.documentElement.scrollWidth,

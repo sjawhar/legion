@@ -641,7 +641,10 @@ type RelatedCheckTiming struct {
 
 // IssueChild is a child item embedded in an issue detail response. The subtree counts
 // include the child itself, every status (icebox included); done is `status = 'done'`.
-// ActiveAt is the newest updated_at anywhere in the child's subtree.
+// ActiveAt is the newest updated_at anywhere in the child's subtree. BlockedBy and Claim are
+// the child's own, in Issue's shapes and under Issue's names, so a page reads one shape for an
+// issue and for a child: the sorted keys it waits on, empty when it waits on none, and the
+// claim holding it, nil when nobody holds it.
 type IssueChild struct {
 	Key           string         `json:"key"`
 	Title         string         `json:"title"`
@@ -650,6 +653,8 @@ type IssueChild struct {
 	SubtreeTotal  int            `json:"subtree_total"`
 	ActiveAt      time.Time      `json:"active_at"`
 	ExternalLinks []ExternalLink `json:"external_links"`
+	BlockedBy     []string       `json:"blocked_by"`
+	Claim         *IssueClaim    `json:"claim"`
 }
 
 // ArchitectureTree is GET /api/v1/projects/{key}/architecture: the project's
@@ -2102,11 +2107,14 @@ type ReferenceVia struct {
 	ID   string `json:"id"`
 }
 
-// ReferenceMember is one artifact in an issue's reference closure.
+// ReferenceMember is one artifact in an issue's reference closure. ViaBlocks names the blocks of
+// Via that cite it, sorted; it is null for a member no block cites — a structural edge, an
+// attachment, or an item citing the document from its body rather than from one of its blocks.
 type ReferenceMember struct {
-	Artifact Artifact     `json:"artifact"`
-	Depth    int          `json:"depth"`
-	Via      ReferenceVia `json:"via"`
+	Artifact  Artifact     `json:"artifact"`
+	Depth     int          `json:"depth"`
+	Via       ReferenceVia `json:"via"`
+	ViaBlocks []string     `json:"via_blocks"`
 }
 
 // IssueReferences is an issue's artifact reference closure.
@@ -2216,6 +2224,24 @@ type GraphEdge struct {
 type GraphReferences struct {
 	Node  GraphNode   `json:"node"`
 	Edges []GraphEdge `json:"edges"`
+}
+
+// ReferenceTarget is what one reference of a batched reference read points at: Ref, the
+// reference as the request named it, Kind, the kind of node it names (a GraphNode kind), Name,
+// the words a reader is shown for the target in place of its text (refs.TargetNames), and Gone,
+// whether nothing answers to that reference now. A gone target carries no name: its node was
+// deleted, so there is nothing left to name it by.
+type ReferenceTarget struct {
+	Ref  string `json:"ref"`
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+	Gone bool   `json:"gone"`
+}
+
+// ReferenceTargets is GET /api/v1/reference-targets: one member per ?ref= the request named, in
+// the request's order, a reference named twice answered twice.
+type ReferenceTargets struct {
+	Targets []ReferenceTarget `json:"targets"`
 }
 
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,

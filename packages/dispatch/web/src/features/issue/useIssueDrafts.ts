@@ -3,7 +3,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Issue } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 
-export type IssueUpdateInput = Partial<Pick<Issue, "parent" | "route" | "status" | "title">>;
+/** What one write of the issue's own fields may carry. The three the header holds a draft of -
+ *  the title, the route and the parent - and the issues it waits on, which the identity block's
+ *  add control reaches and its editor saves whole. */
+export type IssueUpdateInput = Partial<
+  Pick<Issue, "blocked_by" | "parent" | "route" | "status" | "title">
+>;
 
 export interface IssueUpdateMutation {
   mutate: (input: IssueUpdateInput) => void;

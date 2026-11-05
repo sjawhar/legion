@@ -1,0 +1,2562 @@
+{
+  "commit": "11f73ee874ce7306df918ef8d568afaec93ff362",
+  "recordedAtHead": "892b3d979338bca844dbe5927b3571cbd85ee03b",
+  "recordedAt": "2026-11-05T10:30:22.851Z",
+  "open-1440": [
+    {
+      "name": "1 references on block",
+      "role": "button"
+    },
+    {
+      "name": "Add a note or answer in your own words",
+      "role": "button"
+    },
+    {
+      "name": "All",
+      "role": "button"
+    },
+    {
+      "name": "Change",
+      "role": "button"
+    },
+    {
+      "name": "Change answer",
+      "role": "button"
+    },
+    {
+      "name": "Close issue",
+      "role": "button"
+    },
+    {
+      "name": "Closed",
+      "role": "button"
+    },
+    {
+      "name": "Copy issue key LAY-2 · Ctrl-click copies the reference",
+      "role": "button"
+    },
+    {
+      "name": "Copy link to block",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/background-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/decisions-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/notes-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/plan-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/shot-png",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/verification-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/ask/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/comment/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/message/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/spec",
+      "role": "button"
+    },
+    {
+      "name": "Edit components of LAY-2",
+      "role": "button"
+    },
+    {
+      "name": "Edit labels",
+      "role": "button"
+    },
+    {
+      "name": "Edit parent issue",
+      "role": "button"
+    },
+    {
+      "name": "Expand thread",
+      "role": "button"
+    },
+    {
+      "name": "Hide margin",
+      "role": "button"
+    },
+    {
+      "name": "Hide sidebar",
+      "role": "button"
+    },
+    {
+      "name": "Keep",
+      "role": "button"
+    },
+    {
+      "name": "Messages default to Planner (issue layout)",
+      "role": "button"
+    },
+    {
+      "name": "Name version",
+      "role": "button"
+    },
+    {
+      "name": "New issue c",
+      "role": "button"
+    },
+    {
+      "name": "Open",
+      "role": "button"
+    },
+    {
+      "name": "Peek at the inbox without leaving this page",
+      "role": "button"
+    },
+    {
+      "name": "Pin",
+      "role": "button"
+    },
+    {
+      "name": "Reaches 3",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by (1)",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by (14)",
+      "role": "button"
+    },
+    {
+      "name": "Release the claim on LAY-2",
+      "role": "button"
+    },
+    {
+      "name": "Reply",
+      "role": "button"
+    },
+    {
+      "name": "Search Ctrl K",
+      "role": "button"
+    },
+    {
+      "name": "Send",
+      "role": "button"
+    },
+    {
+      "name": "Show fields",
+      "role": "button"
+    },
+    {
+      "name": "Sign out",
+      "role": "button"
+    },
+    {
+      "name": "Subscribers: 3",
+      "role": "button"
+    },
+    {
+      "name": "This requirement is the one the tree reads first.",
+      "role": "button"
+    },
+    {
+      "name": "Thread 1 opens here. Its second paragraph is a block of its own. 2 replies · last reply <time>",
+      "role": "button"
+    },
+    {
+      "name": "Thread 2 opens here. Its second paragraph is a block of its own. 1 reply · last reply <time>",
+      "role": "button"
+    },
+    {
+      "name": "Unpin",
+      "role": "button"
+    },
+    {
+      "name": "Unpin issue",
+      "role": "button"
+    },
+    {
+      "name": "Upload",
+      "role": "button"
+    },
+    {
+      "name": "Upload artifact",
+      "role": "button"
+    },
+    {
+      "name": "Write a reply",
+      "role": "button"
+    },
+    {
+      "name": "Assignee of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Priority of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Repository of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Status",
+      "role": "combobox"
+    },
+    {
+      "name": "Version",
+      "role": "combobox"
+    },
+    {
+      "name": "Block references",
+      "role": "complementary"
+    },
+    {
+      "name": "Navigation",
+      "role": "complementary"
+    },
+    {
+      "name": "Review margin",
+      "role": "complementary"
+    },
+    {
+      "name": "Comment composer",
+      "role": "form"
+    },
+    {
+      "name": "— The fold budget counts no question.",
+      "role": "link"
+    },
+    {
+      "name": "— Which is why the deepest question is still on the first screen.",
+      "role": "link"
+    },
+    {
+      "name": "#11 acme/issue-layout",
+      "role": "link"
+    },
+    {
+      "name": "Agents",
+      "role": "link"
+    },
+    {
+      "name": "At which width does the identity block condense?",
+      "role": "link"
+    },
+    {
+      "name": "background.md",
+      "role": "link"
+    },
+    {
+      "name": "Block r1",
+      "role": "link"
+    },
+    {
+      "name": "Block r2",
+      "role": "link"
+    },
+    {
+      "name": "Block r3",
+      "role": "link"
+    },
+    {
+      "name": "Block r4",
+      "role": "link"
+    },
+    {
+      "name": "Block r5",
+      "role": "link"
+    },
+    {
+      "name": "decisions.md",
+      "role": "link"
+    },
+    {
+      "name": "Delivery Deploys, merges, and pipeline failures",
+      "role": "link"
+    },
+    {
+      "name": "Dispatch",
+      "role": "link"
+    },
+    {
+      "name": "Download version 1",
+      "role": "link"
+    },
+    {
+      "name": "Download version 2",
+      "role": "link"
+    },
+    {
+      "name": "Draw a document under the block that cites it",
+      "role": "link"
+    },
+    {
+      "name": "Draw the tree from one read",
+      "role": "link"
+    },
+    {
+      "name": "Every property of the issue that carries a value is visible …",
+      "role": "link"
+    },
+    {
+      "name": "Inbox Needs you 1",
+      "role": "link"
+    },
+    {
+      "name": "Keep every address the old page answered",
+      "role": "link"
+    },
+    {
+      "name": "LAY Issue layout 1",
+      "role": "link"
+    },
+    {
+      "name": "LAY-1",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 plan-md block",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 spec block",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 The issue page draws one ordered body 1",
+      "role": "link"
+    },
+    {
+      "name": "LAY-3 · Child 1 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-4 · Child 2 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-5 · Child 3 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-6 · Child 4 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-7 · Child 5 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-8 · Child 6 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-9 · Child 7 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "notes.md",
+      "role": "link"
+    },
+    {
+      "name": "Open in document",
+      "role": "link"
+    },
+    {
+      "name": "Open live conversation with Planner (issue layout)",
+      "role": "link"
+    },
+    {
+      "name": "Pipeline CI and deploy step timings",
+      "role": "link"
+    },
+    {
+      "name": "plan.md",
+      "role": "link"
+    },
+    {
+      "name": "Planner (issue layout)",
+      "role": "link"
+    },
+    {
+      "name": "Put every remaining property in one panel",
+      "role": "link"
+    },
+    {
+      "name": "Replies",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 2 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 3 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 4 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 5 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 6 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 7 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 8 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "session:e2e-seed…",
+      "role": "link"
+    },
+    {
+      "name": "Settings",
+      "role": "link"
+    },
+    {
+      "name": "shot.png",
+      "role": "link"
+    },
+    {
+      "name": "Skip to content",
+      "role": "link"
+    },
+    {
+      "name": "spec.md",
+      "role": "link"
+    },
+    {
+      "name": "Task 1 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 2 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 3 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 4 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 5 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 6 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 7 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 8 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 9 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "The ask it answers",
+      "role": "link"
+    },
+    {
+      "name": "verification.md",
+      "role": "link"
+    },
+    {
+      "name": "view",
+      "role": "link"
+    },
+    {
+      "name": "View in document",
+      "role": "link"
+    },
+    {
+      "name": "Which addresses must the new page still answer?",
+      "role": "link"
+    },
+    {
+      "name": "",
+      "role": "main"
+    },
+    {
+      "name": "Navigation",
+      "role": "navigation"
+    },
+    {
+      "name": "Open decisions",
+      "role": "navigation"
+    },
+    {
+      "name": "acme/issue-layout",
+      "role": "option"
+    },
+    {
+      "name": "alice",
+      "role": "option"
+    },
+    {
+      "name": "Backlog",
+      "role": "option"
+    },
+    {
+      "name": "Current version",
+      "role": "option"
+    },
+    {
+      "name": "Icebox",
+      "role": "option"
+    },
+    {
+      "name": "In progress",
+      "role": "option"
+    },
+    {
+      "name": "Inherit",
+      "role": "option"
+    },
+    {
+      "name": "Needs review",
+      "role": "option"
+    },
+    {
+      "name": "P0",
+      "role": "option"
+    },
+    {
+      "name": "P1",
+      "role": "option"
+    },
+    {
+      "name": "P2",
+      "role": "option"
+    },
+    {
+      "name": "P3",
+      "role": "option"
+    },
+    {
+      "name": "Retro",
+      "role": "option"
+    },
+    {
+      "name": "Testing",
+      "role": "option"
+    },
+    {
+      "name": "Todo",
+      "role": "option"
+    },
+    {
+      "name": "Triage",
+      "role": "option"
+    },
+    {
+      "name": "Unassigned",
+      "role": "option"
+    },
+    {
+      "name": "Unset",
+      "role": "option"
+    },
+    {
+      "name": "Version 1",
+      "role": "option"
+    },
+    {
+      "name": "Version 2",
+      "role": "option"
+    },
+    {
+      "name": "1024 px the phone layout begins there anyway.",
+      "role": "radio"
+    },
+    {
+      "name": "1280 px the preset row keeps its labels above that width.",
+      "role": "radio"
+    },
+    {
+      "name": "Other",
+      "role": "radio"
+    },
+    {
+      "name": "Activity",
+      "role": "region"
+    },
+    {
+      "name": "Anchored comments",
+      "role": "region"
+    },
+    {
+      "name": "Conversation",
+      "role": "region"
+    },
+    {
+      "name": "Decisions",
+      "role": "region"
+    },
+    {
+      "name": "Document editor",
+      "role": "region"
+    },
+    {
+      "name": "Margin review items",
+      "role": "region"
+    },
+    {
+      "name": "Open questions",
+      "role": "region"
+    },
+    {
+      "name": "Recipients",
+      "role": "region"
+    },
+    {
+      "name": "Replaced",
+      "role": "region"
+    },
+    {
+      "name": "Replies",
+      "role": "region"
+    },
+    {
+      "name": "Waiting for your review",
+      "role": "region"
+    },
+    {
+      "name": "Your decisions",
+      "role": "region"
+    },
+    {
+      "name": "Filter artifacts",
+      "role": "searchbox"
+    },
+    {
+      "name": "Activity",
+      "role": "tab"
+    },
+    {
+      "name": "Artifacts (7)",
+      "role": "tab"
+    },
+    {
+      "name": "Children",
+      "role": "tab"
+    },
+    {
+      "name": "Comments",
+      "role": "tab"
+    },
+    {
+      "name": "Conversation",
+      "role": "tab"
+    },
+    {
+      "name": "Decisions",
+      "role": "tab"
+    },
+    {
+      "name": "Pinned",
+      "role": "tab"
+    },
+    {
+      "name": "Plan",
+      "role": "tab"
+    },
+    {
+      "name": "Spec",
+      "role": "tab"
+    },
+    {
+      "name": "Verification",
+      "role": "tab"
+    },
+    {
+      "name": "Comment",
+      "role": "textbox"
+    },
+    {
+      "name": "Document editor",
+      "role": "textbox"
+    }
+  ],
+  "open-390": [
+    {
+      "name": "",
+      "role": "banner"
+    },
+    {
+      "name": "1 references on block",
+      "role": "button"
+    },
+    {
+      "name": "Add a note or answer in your own words",
+      "role": "button"
+    },
+    {
+      "name": "All",
+      "role": "button"
+    },
+    {
+      "name": "Change",
+      "role": "button"
+    },
+    {
+      "name": "Change answer",
+      "role": "button"
+    },
+    {
+      "name": "Close issue",
+      "role": "button"
+    },
+    {
+      "name": "Closed",
+      "role": "button"
+    },
+    {
+      "name": "Copy issue key LAY-2 · Ctrl-click copies the reference",
+      "role": "button"
+    },
+    {
+      "name": "Copy link to block",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/background-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/decisions-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/notes-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/plan-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/shot-png",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/verification-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/ask/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/comment/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/message/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/spec",
+      "role": "button"
+    },
+    {
+      "name": "Edit components of LAY-2",
+      "role": "button"
+    },
+    {
+      "name": "Edit labels",
+      "role": "button"
+    },
+    {
+      "name": "Edit parent issue",
+      "role": "button"
+    },
+    {
+      "name": "Expand thread",
+      "role": "button"
+    },
+    {
+      "name": "Keep",
+      "role": "button"
+    },
+    {
+      "name": "Messages default to Planner (issue layout)",
+      "role": "button"
+    },
+    {
+      "name": "Name version",
+      "role": "button"
+    },
+    {
+      "name": "Open",
+      "role": "button"
+    },
+    {
+      "name": "Open inbox, needs you 1",
+      "role": "button"
+    },
+    {
+      "name": "Open navigation",
+      "role": "button"
+    },
+    {
+      "name": "Open review panel (1 open ask)",
+      "role": "button"
+    },
+    {
+      "name": "Pin",
+      "role": "button"
+    },
+    {
+      "name": "Reaches 3",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by (1)",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by (14)",
+      "role": "button"
+    },
+    {
+      "name": "Release the claim on LAY-2",
+      "role": "button"
+    },
+    {
+      "name": "Reply",
+      "role": "button"
+    },
+    {
+      "name": "Send",
+      "role": "button"
+    },
+    {
+      "name": "Show fields",
+      "role": "button"
+    },
+    {
+      "name": "Subscribers: 3",
+      "role": "button"
+    },
+    {
+      "name": "This requirement is the one the tree reads first.",
+      "role": "button"
+    },
+    {
+      "name": "Thread 1 opens here. Its second paragraph is a block of its own. 2 replies · last reply <time>",
+      "role": "button"
+    },
+    {
+      "name": "Thread 2 opens here. Its second paragraph is a block of its own. 1 reply · last reply <time>",
+      "role": "button"
+    },
+    {
+      "name": "Unpin",
+      "role": "button"
+    },
+    {
+      "name": "Unpin issue",
+      "role": "button"
+    },
+    {
+      "name": "Upload",
+      "role": "button"
+    },
+    {
+      "name": "Upload artifact",
+      "role": "button"
+    },
+    {
+      "name": "Write a reply",
+      "role": "button"
+    },
+    {
+      "name": "Assignee of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Priority of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Repository of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Status",
+      "role": "combobox"
+    },
+    {
+      "name": "Version",
+      "role": "combobox"
+    },
+    {
+      "name": "Block references",
+      "role": "complementary"
+    },
+    {
+      "name": "Review panel",
+      "role": "complementary"
+    },
+    {
+      "name": "Comment composer",
+      "role": "form"
+    },
+    {
+      "name": "— The fold budget counts no question.",
+      "role": "link"
+    },
+    {
+      "name": "— Which is why the deepest question is still on the first screen.",
+      "role": "link"
+    },
+    {
+      "name": "#11 acme/issue-layout",
+      "role": "link"
+    },
+    {
+      "name": "At which width does the identity block condense?",
+      "role": "link"
+    },
+    {
+      "name": "background.md",
+      "role": "link"
+    },
+    {
+      "name": "Block r1",
+      "role": "link"
+    },
+    {
+      "name": "Block r2",
+      "role": "link"
+    },
+    {
+      "name": "Block r3",
+      "role": "link"
+    },
+    {
+      "name": "Block r4",
+      "role": "link"
+    },
+    {
+      "name": "Block r5",
+      "role": "link"
+    },
+    {
+      "name": "decisions.md",
+      "role": "link"
+    },
+    {
+      "name": "Dispatch",
+      "role": "link"
+    },
+    {
+      "name": "Download version 1",
+      "role": "link"
+    },
+    {
+      "name": "Download version 2",
+      "role": "link"
+    },
+    {
+      "name": "Every property of the issue that carries a value is visible …",
+      "role": "link"
+    },
+    {
+      "name": "LAY-1",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 plan-md block",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 spec block",
+      "role": "link"
+    },
+    {
+      "name": "LAY-3 · Child 1 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-4 · Child 2 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-5 · Child 3 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-6 · Child 4 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-7 · Child 5 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-8 · Child 6 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-9 · Child 7 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "notes.md",
+      "role": "link"
+    },
+    {
+      "name": "Open in document",
+      "role": "link"
+    },
+    {
+      "name": "Open live conversation with Planner (issue layout)",
+      "role": "link"
+    },
+    {
+      "name": "plan.md",
+      "role": "link"
+    },
+    {
+      "name": "Planner (issue layout)",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 2 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 3 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 4 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 5 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 6 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 7 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 8 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "session:e2e-seed…",
+      "role": "link"
+    },
+    {
+      "name": "shot.png",
+      "role": "link"
+    },
+    {
+      "name": "Skip to content",
+      "role": "link"
+    },
+    {
+      "name": "spec.md",
+      "role": "link"
+    },
+    {
+      "name": "Task 1 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 2 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 3 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 4 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 5 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 6 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 7 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 8 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 9 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "The ask it answers",
+      "role": "link"
+    },
+    {
+      "name": "verification.md",
+      "role": "link"
+    },
+    {
+      "name": "view",
+      "role": "link"
+    },
+    {
+      "name": "View in document",
+      "role": "link"
+    },
+    {
+      "name": "Which addresses must the new page still answer?",
+      "role": "link"
+    },
+    {
+      "name": "",
+      "role": "main"
+    },
+    {
+      "name": "Open decisions",
+      "role": "navigation"
+    },
+    {
+      "name": "acme/issue-layout",
+      "role": "option"
+    },
+    {
+      "name": "alice",
+      "role": "option"
+    },
+    {
+      "name": "Backlog",
+      "role": "option"
+    },
+    {
+      "name": "Current version",
+      "role": "option"
+    },
+    {
+      "name": "Icebox",
+      "role": "option"
+    },
+    {
+      "name": "In progress",
+      "role": "option"
+    },
+    {
+      "name": "Inherit",
+      "role": "option"
+    },
+    {
+      "name": "Needs review",
+      "role": "option"
+    },
+    {
+      "name": "P0",
+      "role": "option"
+    },
+    {
+      "name": "P1",
+      "role": "option"
+    },
+    {
+      "name": "P2",
+      "role": "option"
+    },
+    {
+      "name": "P3",
+      "role": "option"
+    },
+    {
+      "name": "Retro",
+      "role": "option"
+    },
+    {
+      "name": "Testing",
+      "role": "option"
+    },
+    {
+      "name": "Todo",
+      "role": "option"
+    },
+    {
+      "name": "Triage",
+      "role": "option"
+    },
+    {
+      "name": "Unassigned",
+      "role": "option"
+    },
+    {
+      "name": "Unset",
+      "role": "option"
+    },
+    {
+      "name": "Version 1",
+      "role": "option"
+    },
+    {
+      "name": "Version 2",
+      "role": "option"
+    },
+    {
+      "name": "1024 px the phone layout begins there anyway.",
+      "role": "radio"
+    },
+    {
+      "name": "1280 px the preset row keeps its labels above that width.",
+      "role": "radio"
+    },
+    {
+      "name": "Other",
+      "role": "radio"
+    },
+    {
+      "name": "Activity",
+      "role": "region"
+    },
+    {
+      "name": "Conversation",
+      "role": "region"
+    },
+    {
+      "name": "Document editor",
+      "role": "region"
+    },
+    {
+      "name": "Open questions",
+      "role": "region"
+    },
+    {
+      "name": "Recipients",
+      "role": "region"
+    },
+    {
+      "name": "Replaced",
+      "role": "region"
+    },
+    {
+      "name": "Waiting for your review",
+      "role": "region"
+    },
+    {
+      "name": "Your decisions",
+      "role": "region"
+    },
+    {
+      "name": "Filter artifacts",
+      "role": "searchbox"
+    },
+    {
+      "name": "Activity",
+      "role": "tab"
+    },
+    {
+      "name": "Artifacts (7)",
+      "role": "tab"
+    },
+    {
+      "name": "Children",
+      "role": "tab"
+    },
+    {
+      "name": "Conversation",
+      "role": "tab"
+    },
+    {
+      "name": "Decisions",
+      "role": "tab"
+    },
+    {
+      "name": "Plan",
+      "role": "tab"
+    },
+    {
+      "name": "Spec",
+      "role": "tab"
+    },
+    {
+      "name": "Verification",
+      "role": "tab"
+    },
+    {
+      "name": "Comment",
+      "role": "textbox"
+    },
+    {
+      "name": "Document editor",
+      "role": "textbox"
+    }
+  ],
+  "closed-1440": [
+    {
+      "name": "1 references on block",
+      "role": "button"
+    },
+    {
+      "name": "All",
+      "role": "button"
+    },
+    {
+      "name": "Change answer",
+      "role": "button"
+    },
+    {
+      "name": "Closed",
+      "role": "button"
+    },
+    {
+      "name": "Copy issue key LAY-2 · Ctrl-click copies the reference",
+      "role": "button"
+    },
+    {
+      "name": "Copy link to block",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/background-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/decisions-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/notes-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/plan-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/shot-png",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/verification-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/ask/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/comment/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/message/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/spec",
+      "role": "button"
+    },
+    {
+      "name": "Edit components of LAY-2",
+      "role": "button"
+    },
+    {
+      "name": "Edit labels",
+      "role": "button"
+    },
+    {
+      "name": "Edit parent issue",
+      "role": "button"
+    },
+    {
+      "name": "Expand thread",
+      "role": "button"
+    },
+    {
+      "name": "Hide margin",
+      "role": "button"
+    },
+    {
+      "name": "Hide sidebar",
+      "role": "button"
+    },
+    {
+      "name": "Messages default to Planner (issue layout)",
+      "role": "button"
+    },
+    {
+      "name": "Name version",
+      "role": "button"
+    },
+    {
+      "name": "New issue c",
+      "role": "button"
+    },
+    {
+      "name": "Open",
+      "role": "button"
+    },
+    {
+      "name": "Peek at the inbox without leaving this page",
+      "role": "button"
+    },
+    {
+      "name": "Pin",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by (1)",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by (14)",
+      "role": "button"
+    },
+    {
+      "name": "Reopen issue",
+      "role": "button"
+    },
+    {
+      "name": "Search Ctrl K",
+      "role": "button"
+    },
+    {
+      "name": "Show fields",
+      "role": "button"
+    },
+    {
+      "name": "Sign out",
+      "role": "button"
+    },
+    {
+      "name": "Subscribers: 3",
+      "role": "button"
+    },
+    {
+      "name": "This requirement is the one the tree reads first.",
+      "role": "button"
+    },
+    {
+      "name": "Thread 1 opens here. Its second paragraph is a block of its own. 2 replies · last reply <time>",
+      "role": "button"
+    },
+    {
+      "name": "Thread 2 opens here. Its second paragraph is a block of its own. 1 reply · last reply <time>",
+      "role": "button"
+    },
+    {
+      "name": "Unpin",
+      "role": "button"
+    },
+    {
+      "name": "Unpin issue",
+      "role": "button"
+    },
+    {
+      "name": "Upload",
+      "role": "button"
+    },
+    {
+      "name": "Upload artifact",
+      "role": "button"
+    },
+    {
+      "name": "Write a reply",
+      "role": "button"
+    },
+    {
+      "name": "Assignee of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Priority of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Repository of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Status",
+      "role": "combobox"
+    },
+    {
+      "name": "Version",
+      "role": "combobox"
+    },
+    {
+      "name": "Block references",
+      "role": "complementary"
+    },
+    {
+      "name": "Navigation",
+      "role": "complementary"
+    },
+    {
+      "name": "Review margin",
+      "role": "complementary"
+    },
+    {
+      "name": "— The fold budget counts no question.",
+      "role": "link"
+    },
+    {
+      "name": "— Which is why the deepest question is still on the first screen.",
+      "role": "link"
+    },
+    {
+      "name": "#11 acme/issue-layout",
+      "role": "link"
+    },
+    {
+      "name": "Agents",
+      "role": "link"
+    },
+    {
+      "name": "background.md",
+      "role": "link"
+    },
+    {
+      "name": "Block r1",
+      "role": "link"
+    },
+    {
+      "name": "Block r2",
+      "role": "link"
+    },
+    {
+      "name": "Block r3",
+      "role": "link"
+    },
+    {
+      "name": "Block r4",
+      "role": "link"
+    },
+    {
+      "name": "Block r5",
+      "role": "link"
+    },
+    {
+      "name": "decisions.md",
+      "role": "link"
+    },
+    {
+      "name": "Delivery Deploys, merges, and pipeline failures",
+      "role": "link"
+    },
+    {
+      "name": "Dispatch",
+      "role": "link"
+    },
+    {
+      "name": "Download version 1",
+      "role": "link"
+    },
+    {
+      "name": "Download version 2",
+      "role": "link"
+    },
+    {
+      "name": "Draw a document under the block that cites it",
+      "role": "link"
+    },
+    {
+      "name": "Draw the tree from one read",
+      "role": "link"
+    },
+    {
+      "name": "Every property of the issue that carries a value is visible …",
+      "role": "link"
+    },
+    {
+      "name": "Inbox",
+      "role": "link"
+    },
+    {
+      "name": "Keep every address the old page answered",
+      "role": "link"
+    },
+    {
+      "name": "LAY Issue layout",
+      "role": "link"
+    },
+    {
+      "name": "LAY-1",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 plan-md block",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 spec block",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 The issue page draws one ordered body",
+      "role": "link"
+    },
+    {
+      "name": "LAY-3 · Child 1 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-4 · Child 2 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-5 · Child 3 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-6 · Child 4 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-7 · Child 5 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-8 · Child 6 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-9 · Child 7 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "notes.md",
+      "role": "link"
+    },
+    {
+      "name": "Open live conversation with Planner (issue layout)",
+      "role": "link"
+    },
+    {
+      "name": "Pipeline CI and deploy step timings",
+      "role": "link"
+    },
+    {
+      "name": "plan.md",
+      "role": "link"
+    },
+    {
+      "name": "Planner (issue layout)",
+      "role": "link"
+    },
+    {
+      "name": "Put every remaining property in one panel",
+      "role": "link"
+    },
+    {
+      "name": "Replies",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 2 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 3 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 4 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 5 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 6 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 7 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 8 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "session:e2e-seed…",
+      "role": "link"
+    },
+    {
+      "name": "Settings",
+      "role": "link"
+    },
+    {
+      "name": "shot.png",
+      "role": "link"
+    },
+    {
+      "name": "Skip to content",
+      "role": "link"
+    },
+    {
+      "name": "spec.md",
+      "role": "link"
+    },
+    {
+      "name": "Task 1 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 2 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 3 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 4 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 5 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 6 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 7 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 8 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 9 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "The ask it answers",
+      "role": "link"
+    },
+    {
+      "name": "verification.md",
+      "role": "link"
+    },
+    {
+      "name": "view",
+      "role": "link"
+    },
+    {
+      "name": "View in document",
+      "role": "link"
+    },
+    {
+      "name": "Which addresses must the new page still answer?",
+      "role": "link"
+    },
+    {
+      "name": "",
+      "role": "main"
+    },
+    {
+      "name": "Navigation",
+      "role": "navigation"
+    },
+    {
+      "name": "acme/issue-layout",
+      "role": "option"
+    },
+    {
+      "name": "alice",
+      "role": "option"
+    },
+    {
+      "name": "Backlog",
+      "role": "option"
+    },
+    {
+      "name": "Current version",
+      "role": "option"
+    },
+    {
+      "name": "Done",
+      "role": "option"
+    },
+    {
+      "name": "Icebox",
+      "role": "option"
+    },
+    {
+      "name": "In progress",
+      "role": "option"
+    },
+    {
+      "name": "Inherit",
+      "role": "option"
+    },
+    {
+      "name": "Needs review",
+      "role": "option"
+    },
+    {
+      "name": "P0",
+      "role": "option"
+    },
+    {
+      "name": "P1",
+      "role": "option"
+    },
+    {
+      "name": "P2",
+      "role": "option"
+    },
+    {
+      "name": "P3",
+      "role": "option"
+    },
+    {
+      "name": "Retro",
+      "role": "option"
+    },
+    {
+      "name": "Testing",
+      "role": "option"
+    },
+    {
+      "name": "Todo",
+      "role": "option"
+    },
+    {
+      "name": "Triage",
+      "role": "option"
+    },
+    {
+      "name": "Unassigned",
+      "role": "option"
+    },
+    {
+      "name": "Unset",
+      "role": "option"
+    },
+    {
+      "name": "Version 1",
+      "role": "option"
+    },
+    {
+      "name": "Version 2",
+      "role": "option"
+    },
+    {
+      "name": "Activity",
+      "role": "region"
+    },
+    {
+      "name": "Anchored comments",
+      "role": "region"
+    },
+    {
+      "name": "Conversation",
+      "role": "region"
+    },
+    {
+      "name": "Decisions",
+      "role": "region"
+    },
+    {
+      "name": "Document editor",
+      "role": "region"
+    },
+    {
+      "name": "Margin review items",
+      "role": "region"
+    },
+    {
+      "name": "Open questions",
+      "role": "region"
+    },
+    {
+      "name": "Replaced",
+      "role": "region"
+    },
+    {
+      "name": "Waiting for your review",
+      "role": "region"
+    },
+    {
+      "name": "Your decisions",
+      "role": "region"
+    },
+    {
+      "name": "Filter artifacts",
+      "role": "searchbox"
+    },
+    {
+      "name": "Activity",
+      "role": "tab"
+    },
+    {
+      "name": "Artifacts (7)",
+      "role": "tab"
+    },
+    {
+      "name": "Children",
+      "role": "tab"
+    },
+    {
+      "name": "Comments",
+      "role": "tab"
+    },
+    {
+      "name": "Conversation",
+      "role": "tab"
+    },
+    {
+      "name": "Decisions",
+      "role": "tab"
+    },
+    {
+      "name": "Pinned",
+      "role": "tab"
+    },
+    {
+      "name": "Plan",
+      "role": "tab"
+    },
+    {
+      "name": "Spec",
+      "role": "tab"
+    },
+    {
+      "name": "Verification",
+      "role": "tab"
+    },
+    {
+      "name": "Document editor",
+      "role": "textbox"
+    }
+  ],
+  "closed-390": [
+    {
+      "name": "",
+      "role": "banner"
+    },
+    {
+      "name": "1 references on block",
+      "role": "button"
+    },
+    {
+      "name": "All",
+      "role": "button"
+    },
+    {
+      "name": "Change answer",
+      "role": "button"
+    },
+    {
+      "name": "Closed",
+      "role": "button"
+    },
+    {
+      "name": "Copy issue key LAY-2 · Ctrl-click copies the reference",
+      "role": "button"
+    },
+    {
+      "name": "Copy link to block",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/background-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/decisions-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/notes-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/plan-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/shot-png",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/artifact/verification-md",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/ask/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/comment/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/message/<id>",
+      "role": "button"
+    },
+    {
+      "name": "Copy reference dispatch://LAY-2/spec",
+      "role": "button"
+    },
+    {
+      "name": "Edit components of LAY-2",
+      "role": "button"
+    },
+    {
+      "name": "Edit labels",
+      "role": "button"
+    },
+    {
+      "name": "Edit parent issue",
+      "role": "button"
+    },
+    {
+      "name": "Expand thread",
+      "role": "button"
+    },
+    {
+      "name": "Messages default to Planner (issue layout)",
+      "role": "button"
+    },
+    {
+      "name": "Name version",
+      "role": "button"
+    },
+    {
+      "name": "Open",
+      "role": "button"
+    },
+    {
+      "name": "Open inbox",
+      "role": "button"
+    },
+    {
+      "name": "Open navigation",
+      "role": "button"
+    },
+    {
+      "name": "Open review panel (0 open asks)",
+      "role": "button"
+    },
+    {
+      "name": "Pin",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by (1)",
+      "role": "button"
+    },
+    {
+      "name": "Referenced by (14)",
+      "role": "button"
+    },
+    {
+      "name": "Reopen issue",
+      "role": "button"
+    },
+    {
+      "name": "Show fields",
+      "role": "button"
+    },
+    {
+      "name": "Subscribers: 3",
+      "role": "button"
+    },
+    {
+      "name": "This requirement is the one the tree reads first.",
+      "role": "button"
+    },
+    {
+      "name": "Thread 1 opens here. Its second paragraph is a block of its own. 2 replies · last reply <time>",
+      "role": "button"
+    },
+    {
+      "name": "Thread 2 opens here. Its second paragraph is a block of its own. 1 reply · last reply <time>",
+      "role": "button"
+    },
+    {
+      "name": "Unpin",
+      "role": "button"
+    },
+    {
+      "name": "Unpin issue",
+      "role": "button"
+    },
+    {
+      "name": "Upload",
+      "role": "button"
+    },
+    {
+      "name": "Upload artifact",
+      "role": "button"
+    },
+    {
+      "name": "Write a reply",
+      "role": "button"
+    },
+    {
+      "name": "Assignee of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Priority of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Repository of LAY-2",
+      "role": "combobox"
+    },
+    {
+      "name": "Status",
+      "role": "combobox"
+    },
+    {
+      "name": "Version",
+      "role": "combobox"
+    },
+    {
+      "name": "Block references",
+      "role": "complementary"
+    },
+    {
+      "name": "Review panel",
+      "role": "complementary"
+    },
+    {
+      "name": "— The fold budget counts no question.",
+      "role": "link"
+    },
+    {
+      "name": "— Which is why the deepest question is still on the first screen.",
+      "role": "link"
+    },
+    {
+      "name": "#11 acme/issue-layout",
+      "role": "link"
+    },
+    {
+      "name": "background.md",
+      "role": "link"
+    },
+    {
+      "name": "Block r1",
+      "role": "link"
+    },
+    {
+      "name": "Block r2",
+      "role": "link"
+    },
+    {
+      "name": "Block r3",
+      "role": "link"
+    },
+    {
+      "name": "Block r4",
+      "role": "link"
+    },
+    {
+      "name": "Block r5",
+      "role": "link"
+    },
+    {
+      "name": "decisions.md",
+      "role": "link"
+    },
+    {
+      "name": "Dispatch",
+      "role": "link"
+    },
+    {
+      "name": "Download version 1",
+      "role": "link"
+    },
+    {
+      "name": "Download version 2",
+      "role": "link"
+    },
+    {
+      "name": "Every property of the issue that carries a value is visible …",
+      "role": "link"
+    },
+    {
+      "name": "LAY-1",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 plan-md block",
+      "role": "link"
+    },
+    {
+      "name": "LAY-2 spec block",
+      "role": "link"
+    },
+    {
+      "name": "LAY-3 · Child 1 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-4 · Child 2 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-5 · Child 3 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-6 · Child 4 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-7 · Child 5 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-8 · Child 6 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "LAY-9 · Child 7 of the redesign",
+      "role": "link"
+    },
+    {
+      "name": "notes.md",
+      "role": "link"
+    },
+    {
+      "name": "Open live conversation with Planner (issue layout)",
+      "role": "link"
+    },
+    {
+      "name": "plan.md",
+      "role": "link"
+    },
+    {
+      "name": "Planner (issue layout)",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 2 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 3 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 4 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 5 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 6 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 7 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "Requirement 8 of the redesign stands on a row of its own.",
+      "role": "link"
+    },
+    {
+      "name": "session:e2e-seed…",
+      "role": "link"
+    },
+    {
+      "name": "shot.png",
+      "role": "link"
+    },
+    {
+      "name": "Skip to content",
+      "role": "link"
+    },
+    {
+      "name": "spec.md",
+      "role": "link"
+    },
+    {
+      "name": "Task 1 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 2 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 3 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 4 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 5 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 6 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 7 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 8 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "Task 9 of the redesign is one step of the build.",
+      "role": "link"
+    },
+    {
+      "name": "The ask it answers",
+      "role": "link"
+    },
+    {
+      "name": "verification.md",
+      "role": "link"
+    },
+    {
+      "name": "view",
+      "role": "link"
+    },
+    {
+      "name": "View in document",
+      "role": "link"
+    },
+    {
+      "name": "Which addresses must the new page still answer?",
+      "role": "link"
+    },
+    {
+      "name": "",
+      "role": "main"
+    },
+    {
+      "name": "acme/issue-layout",
+      "role": "option"
+    },
+    {
+      "name": "alice",
+      "role": "option"
+    },
+    {
+      "name": "Backlog",
+      "role": "option"
+    },
+    {
+      "name": "Current version",
+      "role": "option"
+    },
+    {
+      "name": "Done",
+      "role": "option"
+    },
+    {
+      "name": "Icebox",
+      "role": "option"
+    },
+    {
+      "name": "In progress",
+      "role": "option"
+    },
+    {
+      "name": "Inherit",
+      "role": "option"
+    },
+    {
+      "name": "Needs review",
+      "role": "option"
+    },
+    {
+      "name": "P0",
+      "role": "option"
+    },
+    {
+      "name": "P1",
+      "role": "option"
+    },
+    {
+      "name": "P2",
+      "role": "option"
+    },
+    {
+      "name": "P3",
+      "role": "option"
+    },
+    {
+      "name": "Retro",
+      "role": "option"
+    },
+    {
+      "name": "Testing",
+      "role": "option"
+    },
+    {
+      "name": "Todo",
+      "role": "option"
+    },
+    {
+      "name": "Triage",
+      "role": "option"
+    },
+    {
+      "name": "Unassigned",
+      "role": "option"
+    },
+    {
+      "name": "Unset",
+      "role": "option"
+    },
+    {
+      "name": "Version 1",
+      "role": "option"
+    },
+    {
+      "name": "Version 2",
+      "role": "option"
+    },
+    {
+      "name": "Activity",
+      "role": "region"
+    },
+    {
+      "name": "Conversation",
+      "role": "region"
+    },
+    {
+      "name": "Document editor",
+      "role": "region"
+    },
+    {
+      "name": "Open questions",
+      "role": "region"
+    },
+    {
+      "name": "Replaced",
+      "role": "region"
+    },
+    {
+      "name": "Waiting for your review",
+      "role": "region"
+    },
+    {
+      "name": "Your decisions",
+      "role": "region"
+    },
+    {
+      "name": "Filter artifacts",
+      "role": "searchbox"
+    },
+    {
+      "name": "Activity",
+      "role": "tab"
+    },
+    {
+      "name": "Artifacts (7)",
+      "role": "tab"
+    },
+    {
+      "name": "Children",
+      "role": "tab"
+    },
+    {
+      "name": "Conversation",
+      "role": "tab"
+    },
+    {
+      "name": "Decisions",
+      "role": "tab"
+    },
+    {
+      "name": "Plan",
+      "role": "tab"
+    },
+    {
+      "name": "Spec",
+      "role": "tab"
+    },
+    {
+      "name": "Verification",
+      "role": "tab"
+    },
+    {
+      "name": "Document editor",
+      "role": "textbox"
+    }
+  ],
+  "renames": {}
+}

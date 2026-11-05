@@ -20,6 +20,7 @@ import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { IssuePage } from "./IssuePage";
+import { HELP_LINES } from "./page-structure";
 
 const issue: IssueDetails = {
   route_status: null,
@@ -234,13 +235,28 @@ async function openSubscribedAgents(count: number) {
   return screen.findByRole("region", { name: "Subscribed agents" });
 }
 
+/** Who opened the issue, where the redesigned page draws it: the panel's People section, with
+ *  the label beside the name as text rather than the tooltip the metadata rail carried
+ *  (dispatch://INFRA-1196 R11). */
 async function expectCreator(label: string): Promise<HTMLElement> {
-  const rail = await screen.findByTestId("issue-metadata-rail");
-  // `AgentName` draws the name; the span around it carries the whole label as its `title`.
-  const creator = await within(rail).findByTitle(label);
+  const panel = await screen.findByTestId("issue-margin");
+  const openedBy = await within(panel).findByText("Opened by:");
+  const row = openedBy.parentElement as HTMLElement;
+  expect(row.textContent).toBe(`Opened by:${label}`);
+  const creator = row.querySelector<HTMLElement>("[data-author-text]") as HTMLElement;
   expect(creator.textContent).toBe(label);
-  expect(creator.parentElement?.textContent).toBe(`Opened by:${label}`);
   return creator;
+}
+
+/** Opens the identity block's one actions control, which is where close, reopen and the control
+ *  that sets the parent live now (R11: row one holds the actions, never a property). */
+async function openIssueActions(): Promise<void> {
+  const control = await screen.findByRole("button", { name: "Issue actions" });
+  // The control is a toggle and a press inside it closes the group, so this opens it only while
+  // it is closed: two calls in a row leave the actions on screen, not hidden again.
+  if (control.getAttribute("aria-expanded") !== "true") {
+    fireEvent.click(control);
+  }
 }
 
 test("IssuePage shows a session creator's live title and personal-token owner", async () => {
@@ -306,7 +322,7 @@ test("IssuePage omits creator metadata for historical issues", async () => {
   const view = renderIssuePage();
 
   try {
-    await screen.findByText(issue.title);
+    await screen.findByRole("heading", { level: 1, name: issue.title });
     expect(screen.queryByText(/^Opened by/)).toBeNull();
   } finally {
     view.unmount();
@@ -315,11 +331,12 @@ test("IssuePage omits creator metadata for historical issues", async () => {
 });
 
 test("IssuePage's header warns when nobody holds the route, and adds nothing when it is live", async () => {
-  // The warning sits in the wrapping state row, not the metadata rail, which clips at every width.
+  // The warning sits in row four of the identity block, beside the route it speaks for: both
+  // wrap, so neither is ever reached by scrolling a row sideways (dispatch://INFRA-1196 R11).
   const stateRow = async () => {
-    const rail = await screen.findByTestId("issue-metadata-rail");
-    await within(rail).findByRole("button", { name: "Messages default to role:sre" });
-    return screen.getByTestId("issue-state-actions");
+    const row = await screen.findByTestId("issue-work-row");
+    await within(row).findByRole("button", { name: "Messages default to role:sre" });
+    return row;
   };
 
   const unheld = stubIssuePage({ ...issue, route: "role:sre", route_status: "no_holder" });
@@ -369,7 +386,7 @@ test("IssuePage omits creator metadata when an issue response omits it", async (
   const view = renderIssuePage();
 
   try {
-    await screen.findByText(issue.title);
+    await screen.findByRole("heading", { level: 1, name: issue.title });
     expect(screen.queryByText(/^Opened by/)).toBeNull();
   } finally {
     view.unmount();
@@ -464,7 +481,7 @@ test("IssuePage hides the Subscribed agents header when there are no subscribers
   const view = renderIssuePage();
 
   try {
-    await screen.findByText(issue.title);
+    await screen.findByRole("heading", { level: 1, name: issue.title });
     await waitFor(() =>
       expect(screen.queryByRole("region", { name: "Subscribed agents" })).toBeNull()
     );
@@ -606,7 +623,7 @@ test("IssuePage shows a retryable error and hides the section when the subscribe
   const view = renderIssuePage();
 
   try {
-    await screen.findByText(issue.title);
+    await screen.findByRole("heading", { level: 1, name: issue.title });
     await waitFor(() =>
       expect(screen.queryByRole("region", { name: "Subscribed agents" })).toBeNull()
     );
@@ -1115,11 +1132,9 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
 
     try {
       fireEvent.click(await screen.findByRole("button", { name: "Messages default to no route" }));
-      expect(
-        await screen.findByText(
-          "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim."
-        )
-      ).toBeDefined();
+      // What a route is, and what it is not: text beside the editor now, where the rail carried
+      // it as a tooltip no phone could raise (dispatch://INFRA-1196 R11).
+      expect(await screen.findByText(HELP_LINES.route)).toBeDefined();
       const routeInput = await screen.findByLabelText("Message route");
       fireEvent.change(routeInput, { target: { value: "role:not-saved-draft" } });
       await screen.findByDisplayValue("role:not-saved-draft");
@@ -1730,7 +1745,9 @@ test("IssuePage keeps state actions available while approval awaits", async () =
     ).not.toBeNull();
     expect(within(stateActions).getByRole("button", { name: "Awaiting approval" })).not.toBeNull();
     expect(within(stateActions).getByRole("button", { name: "Approve" })).not.toBeNull();
-    expect(within(stateActions).getByRole("button", { name: "Close issue" })).not.toBeNull();
+    // Close is an action, not a property, so it sits behind row one's one actions control.
+    await openIssueActions();
+    expect(screen.getByRole("button", { name: "Close issue" })).not.toBeNull();
   } finally {
     view.unmount();
     restore();
@@ -1861,11 +1878,13 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
     const openStatus = (await screen.findByLabelText("Status")) as HTMLSelectElement;
     expect([...openStatus.options].map((option) => option.value)).not.toContain("done");
 
+    await openIssueActions();
     fireEvent.click(screen.getByRole("button", { name: "Close issue" }));
     await waitFor(() =>
       expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }, keyedAttempt)
     );
     // While the write is in flight the control is disabled: no second close can be queued.
+    await openIssueActions();
     expect(
       (screen.getByRole("button", { name: "Close issue" }) as HTMLButtonElement).disabled
     ).toBe(true);
@@ -1879,10 +1898,12 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
     expect(closedStatus.disabled).toBe(true);
     expect(closedStatus.value).toBe("done");
 
+    await openIssueActions();
     fireEvent.click(screen.getByRole("button", { name: "Reopen issue" }));
     await waitFor(() =>
       expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
+    await openIssueActions();
     expect(
       (screen.getByRole("button", { name: "Reopen issue" }) as HTMLButtonElement).disabled
     ).toBe(true);

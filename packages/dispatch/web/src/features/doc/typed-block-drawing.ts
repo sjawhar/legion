@@ -10,6 +10,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
+import { blockAttributeLabel, nodeTypeName } from "../issue/page-words";
 import { buildReferencePath, parseNodeReference, shortForm } from "../refs/routes";
 
 /**
@@ -112,6 +113,15 @@ function drawnAttributes(
  * rule reads. In the read-only text engine (a comment, ask or message body) it is the schema's
  * `toDOM`, through the headless engine's `renderBlock` option; the parse rule still reads only
  * the content hole `[data-proof-block-content]`, so a paste of a body stays exact.
+ *
+ * Every word the reader sees here is the page's own (`features/issue/page-words.ts`): the
+ * eyebrow is that type's plain name and each `<dt>` is that attribute's plain label, so no
+ * schema token is drawn where a name belongs. A type or an attribute the module does not
+ * declare falls back to its own token with each underscore as a space, which a person can read;
+ * the fallback is not the answer, because `page-words.test.ts` reads the block schema and fails
+ * until the module declares it. Every `data-` attribute keeps the schema's own name
+ * (`data-proof-block-type`, `data-proof-block-attribute`): a test names a block and its state by
+ * them, and a reader never sees them.
  */
 export function renderTypedBlock(
   node: ProseMirrorNode,
@@ -149,7 +159,7 @@ export function renderTypedBlock(
             "dl",
             { "data-proof-block-attributes": "" },
             ...rest.flatMap(({ children, name }) => [
-              ["dt", {}, name],
+              ["dt", {}, blockAttributeLabel(name)],
               ["dd", { "data-proof-block-attribute": name }, ...children],
             ]),
           ],
@@ -163,7 +173,7 @@ export function renderTypedBlock(
     [
       "header",
       { contenteditable: "false", "data-proof-block-summary": "" },
-      ["span", { "data-proof-block-name": "" }, node.type.name],
+      ["span", { "data-proof-block-name": "" }, nodeTypeName(node.type.name)],
       ...badge,
       ...heading,
       ...others,

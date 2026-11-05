@@ -91,6 +91,7 @@ import type {
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
+  ReferenceTargets,
   RepoProject,
   SearchResponse,
   SignInsResponse,
@@ -193,6 +194,11 @@ export class UnreadableAnswerError extends Error {
  *  policy, as a dropped connection is. A body that keeps moving, either way, goes on however long
  *  it takes: the deadline is on the silence, not the transfer. */
 export const REQUEST_DEADLINE_MS = 30_000;
+
+/** How many references one `getReferenceTargets` may name, which is the server's own cap
+ *  (`referenceTargetsMax`, `packages/envoy/internal/dispatch/api/reference_targets.go:29`): past
+ *  it the read is refused `400 CAP_EXCEEDED`, so a caller holding more reads them in batches. */
+export const REFERENCE_TARGETS_MAX = 256;
 
 /** A request Dispatch went silent on for its deadline, which the page then aborted. It is no
  *  refusal: the request may still have reached Dispatch, so only a read, or a write made again
@@ -1438,6 +1444,17 @@ export class DispatchApiClient {
   getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {
     return this.json<GraphReferences>(
       pathWithQuery("/api/v1/references", { kind: options.kind, to: reference })
+    );
+  }
+
+  /** What many `dispatch://` references point at, in one read: one member per `ref` in the
+   *  request's order, each `{ref, kind, name, gone}`. The issue page's tree resolves every chip
+   *  on the page through this rather than one `getReferences` per pointer, which is what keeps
+   *  its first load to one request however many nodes it draws (dispatch://INFRA-1196 R20). At
+   *  most `REFERENCE_TARGETS_MAX` references: past that the server answers `400 CAP_EXCEEDED`. */
+  getReferenceTargets(refs: readonly string[]): Promise<ReferenceTargets> {
+    return this.json<ReferenceTargets>(
+      pathWithQuery("/api/v1/reference-targets", { ref: [...refs] })
     );
   }
 

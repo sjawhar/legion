@@ -575,6 +575,10 @@ export interface IssueChild {
   /** The newest `updated_at` anywhere in the child's subtree (RFC3339). */
   readonly active_at: string;
   readonly external_links: ExternalLink[];
+  /** The sorted keys the child waits on, as `Issue.blocked_by`; empty when it waits on none. */
+  readonly blocked_by: string[];
+  /** The claim holding the child, as `Issue.claim`; `null` when nobody holds it. */
+  readonly claim: IssueClaim | null;
 }
 
 /**
@@ -2367,7 +2371,12 @@ export interface ReferenceVia {
 export interface ReferenceMember {
   readonly artifact: Artifact;
   readonly depth: number;
+  /** The document, comment, message or ask the member was reached through. */
   readonly via: ReferenceVia;
+  /** The ids of `via`'s blocks that cite the member, sorted, so a reader can put the document
+   *  under the block citing it; `null` when no block cites it — a structural edge, an
+   *  attachment, or an item citing it from its body rather than from one of its blocks. */
+  readonly via_blocks: string[] | null;
 }
 
 // IssueReferences is the answer of GET /api/v1/issues/{key}/references. With `?versions=latest`
@@ -2505,6 +2514,27 @@ export interface GraphEdge {
 export interface GraphReferences {
   readonly node: GraphNode;
   readonly edges: GraphEdge[];
+}
+
+// ReferenceTarget is what one reference of GET /api/v1/reference-targets points at: `ref`, the
+// reference as the request wrote it, `kind`, the kind of node it names, `name`, the words a
+// reader is shown for the target in place of its text (an issue's title, a document's name, an
+// ask's question, a comment's or a message's body, a component's title, a block's text, each cut
+// as an edge's excerpt is), and `gone`, whether nothing answers to that reference now. A gone
+// target carries no name: its node was deleted, so nothing is left to name it by. No reference
+// names a session, the one node kind with no address.
+export interface ReferenceTarget {
+  readonly ref: string;
+  readonly kind: "issue" | "artifact" | "block" | "ask" | "comment" | "message" | "component";
+  readonly name: string;
+  readonly gone: boolean;
+}
+
+// ReferenceTargets is GET /api/v1/reference-targets?ref=<dispatch ref>&ref=…: one member per
+// `ref` the request named, in the request's order, a reference named twice answered twice, under
+// an ETag over the whole answer. It answers no edges: GET /api/v1/references reads one node's.
+export interface ReferenceTargets {
+  readonly targets: ReferenceTarget[];
 }
 
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,

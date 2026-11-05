@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { issueResultsQuery } from "../../api/queries";
-import type { Artifact, CheckBlock, CheckResult, CheckResultCurrency } from "../../api/types";
+import type { Artifact, CheckBlock, CheckResult } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { pillClassName, pillShapeClassName } from "../../components/Pill";
 import {
@@ -14,6 +14,13 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import {
+  CHECK_WHEN_WORDS,
+  type CheckState,
+  EMPTY_STATE_LINES,
+  NODE_STATE_WORDS,
+  RESULT_CURRENCY_WORDS,
+} from "../issue/page-words";
 import { BlockReferences } from "../refs/ReferencedBy";
 import { ReferenceLink } from "../refs/ReferenceLink";
 import { Timestamp } from "../refs/Timestamp";
@@ -24,10 +31,9 @@ import { Timestamp } from "../refs/Timestamp";
  * work as it stands says nothing about whether the check passes now, and `unknown` currency
  * means Dispatch could not read the repository to decide, which is not the same as a stale
  * result. A currency the server left out - one written before it judged currency - reads as
- * `unknown` for the same reason: nothing judged it.
+ * `unknown` for the same reason: nothing judged it. The five states and the word each draws
+ * are `NODE_STATE_WORDS.check`'s (`features/issue/page-words.ts`).
  */
-type CheckState = "passed" | "failed" | "older" | "no-result" | "unmarked";
-
 function checkState(check: Pick<CheckBlock, "results">): CheckState {
   const latest = check.results[0];
   if (latest === undefined) {
@@ -42,27 +48,14 @@ function checkState(check: Pick<CheckBlock, "results">): CheckState {
   return latest.verdict === "pass" ? "passed" : "failed";
 }
 
-const CHECK_STATE_LABELS: Record<CheckState, string> = {
-  failed: "Failed",
-  "no-result": "No result",
-  older: "Older",
-  passed: "Passed",
-  unmarked: "Unmarked",
-};
-
+/** The colour each state draws its word in. The words themselves are the page's own
+ *  (`NODE_STATE_WORDS.check`), so only the colour lives here. */
 const CHECK_STATE_TEXT: Record<CheckState, string> = {
   failed: dangerText,
   "no-result": textMutedOnSurface,
   older: textMutedOnSurface,
   passed: successText,
   unmarked: textMutedOnSurface,
-};
-
-/** The two currency marks as a reader sees them, beside `Pass` and `Fail` and the check-state
- *  labels above; `unknown` draws no mark at all, so it has no label. */
-const CURRENCY_LABELS: Record<Exclude<CheckResultCurrency, "unknown">, string> = {
-  current: "Current",
-  older: "Older",
 };
 
 /** One name/value row of a check or a result. A value the writer left blank still shows its
@@ -108,7 +101,7 @@ function Result({ result }: { result: CheckResult }): ReactNode {
         </span>
         {marked === undefined ? null : (
           <span className={pillClassName("label")} data-testid="verification-result-currency">
-            {CURRENCY_LABELS[marked]}
+            {RESULT_CURRENCY_WORDS[marked]}
           </span>
         )}
         <span data-testid="verification-result-role">{result.role}</span>
@@ -168,13 +161,13 @@ function Check({ check }: { check: CheckBlock }): ReactNode {
           className={`${pillShapeClassName} ${surfaceMutedBg} ${CHECK_STATE_TEXT[state]}`}
           data-testid="verification-check-state"
         >
-          {CHECK_STATE_LABELS[state]}
+          {NODE_STATE_WORDS.check[state]}
         </span>
         <span className="font-medium">{check.text}</span>
       </div>
       <dl className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
         <Fact label="When" testId="verification-check-when">
-          {check.when}
+          {CHECK_WHEN_WORDS[check.when]}
         </Fact>
         <Fact label="Surface" testId="verification-check-surface">
           {check.surface}
@@ -189,7 +182,7 @@ function Check({ check }: { check: CheckBlock }): ReactNode {
       <BlockReferences reference={check.ref} />
       {check.results.length === 0 ? (
         <p className={`text-sm ${textMutedOnSurface}`} data-testid="verification-check-no-results">
-          No result recorded against this check.
+          {EMPTY_STATE_LINES.check_result}
         </p>
       ) : (
         <ul

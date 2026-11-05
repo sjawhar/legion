@@ -207,6 +207,8 @@ export type {
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
+  ReferenceTarget,
+  ReferenceTargets,
   RepoProject,
   RequirementCoverage,
   SearchArtifactRef,
