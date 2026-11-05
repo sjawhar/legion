@@ -71,8 +71,8 @@ const (
 	// the wait before its one retry (contracts.ListenerCallTimeout and
 	// contracts.ListenerCallRetryDelay, generated from LISTENER_CALL_TIMEOUT_MS and
 	// LISTENER_CALL_RETRY_DELAY_MS in packages/contracts).
-	serverChangeAttemptTimeout = 5 * time.Second
-	serverChangeRetryDelay     = 250 * time.Millisecond
+	serverChangeAttemptTimeout = contracts.ListenerCallTimeout
+	serverChangeRetryDelay     = contracts.ListenerCallRetryDelay
 	// serverChangeReplayTimeout is envoy-client's replay call timeout (REPLAY_TIMEOUT_MS).
 	serverChangeReplayTimeout = 10 * time.Second
 	// serverChangeReplayMaxMessages is the most messages the stand-in asks one replay call for, the

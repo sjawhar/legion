@@ -419,9 +419,9 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 // resolveRoleHolder applies for the role lane and the publish route's attempts: the entry
 // heartbeated within session.ClaimStaleAfter as of now (roles.Fresh, the test Dispatch's outbox
 // makes too), read at each test, so the cached entry and the entry read again from the bucket are
-// each judged at the moment they are checked. The plugin heartbeats every 90 seconds
-// (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts), so three missed heartbeats
-// means the claiming process is very likely gone.
+// each judged at the moment they are checked. The plugin heartbeats every
+// contracts.SessionHeartbeat, so three missed heartbeats means the claiming process is very
+// likely gone.
 func laneHolderFresh(entry session.SessionEntry) bool {
 	return roles.Fresh(entry, time.Now())
 }

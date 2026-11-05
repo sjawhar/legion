@@ -65,7 +65,9 @@ console.log(SESSION_HEARTBEAT_MS, SESSION_RECORD_LIFETIME_MS);')" ||
 [[ "$contracts_timing" =~ ^[0-9]+[[:space:]][0-9]+$ ]] ||
   refuse "@legion/contracts answered \"${contracts_timing}\" for SESSION_HEARTBEAT_MS and SESSION_RECORD_LIFETIME_MS, which is not two whole numbers"
 read -r default_heartbeat_ms record_lifetime_ms <<<"$contracts_timing"
-record_lifetime_s=$((record_lifetime_ms / 1000))
+# Rounded up, as the refresh interval below is: record_lifetime_s is a budget the session must
+# outlive, so a lifetime with a sub-second remainder must not be waited out short.
+record_lifetime_s=$(((record_lifetime_ms + 999) / 1000))
 readonly contracts_timing default_heartbeat_ms record_lifetime_ms record_lifetime_s
 note "read from @legion/contracts: refresh interval ${default_heartbeat_ms} ms (SESSION_HEARTBEAT_MS), record lifetime ${record_lifetime_s}s (SESSION_RECORD_LIFETIME_MS)"
 

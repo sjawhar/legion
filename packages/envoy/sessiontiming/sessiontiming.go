@@ -23,7 +23,10 @@ import "github.com/sjawhar/envoy/internal/contracts"
 // unrefreshed before a reader treats its holder as gone. CallTimeout is how long one listener
 // call attempt waits, CallRetryDelay the pause before the next attempt, and CallAttempts how many
 // attempts one call makes. Each is the generated contracts constant itself, so a caller outside
-// this module weighs the same numbers the listener does.
+// this module weighs the same numbers the listener does. The daemon's own code reads the first
+// three; the three call numbers are here because the rule that holds them all together - three
+// refreshes and one whole call strictly inside the record lifetime - is weighed in the daemon's
+// own test, where three of the four copies it checks are unexported.
 const (
 	Heartbeat      = contracts.SessionHeartbeat
 	RecordLifetime = contracts.SessionRecordLifetime

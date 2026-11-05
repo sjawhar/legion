@@ -307,9 +307,9 @@ const SessionHeartbeat = 90000 * time.Millisecond
 const SessionRecordLifetime = 300000 * time.Millisecond
 
 // SessionClaimStale is how long a session's role claim may go unrefreshed before a reader treats
-// the process that wrote it as gone: three missed heartbeats. Generated from
-// SESSION_CLAIM_STALE_MS in packages/contracts so every reader of a claim, in either language,
-// counts the same misses before dropping a holder.
+// the process that wrote it as gone, which allows three missed heartbeats at SessionHeartbeat.
+// Generated from SESSION_CLAIM_STALE_MS in packages/contracts so every reader of a claim, in
+// either language, counts the same misses before dropping a holder.
 const SessionClaimStale = 300000 * time.Millisecond
 
 // ListenerCallTimeout is how long one attempt of an envoy-client call waits for the listener,
