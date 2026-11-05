@@ -123,19 +123,22 @@ ARG AWS_CLI_SHA256=10ab32a95b27138d7cc1c1ac4ebb4d3acab60cd0a0df2fc37c4e2c440ed40
 # bump repeats both checks.
 ARG KUBECTL_VERSION=1.35.9
 ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
-# mikefarah's yq, the YAML processor: model-gateway/apply_test.sh of theorem-labs/agent-infra runs
-# it, and no package runner in the image reaches it. Debian's `yq` is a different program —
-# kislyuk's Python wrapper over jq, 3.4.3 in trixie, whose command language is another one — so this
-# is a pinned fetch, and an apt package must never take its place. The pin is the SHA-256 of
-# yq_linux_amd64 as the release's own signed `checksums` file gives it: field 19 of that file's
-# yq_linux_amd64 row, because line 18 of the `checksums_hashes_order` published beside it reads
-# SHA-256. That file was taken only once its signature verified. The command, run on 2026-11-05, was
+# mikefarah's yq, the YAML processor: model-gateway/apply_test.sh of theorem-labs/agent-infra, and
+# the `apply` program it tests, call the bare name `yq` on PATH. A package runner does reach yq —
+# `go run github.com/mikefarah/yq/v4@v4.54.1` works with this image's Go — but it could supply that
+# bare name only through a file called `yq` on the role's own PATH, which
+# skills/legion-worker/references/tools.md forbids, and `go run` costs seconds per call against the
+# 309 calls one run of that test makes. Debian's `yq` is a different program — kislyuk's Python
+# wrapper over jq, 3.4.3 in trixie, whose command language is another one — so this is a pinned
+# fetch, and an apt package must never take its place. The pin is the SHA-256 of yq_linux_amd64 as
+# the release's own signed `checksums` file gives it: field 19 of that file's yq_linux_amd64 row,
+# because line 18 of the `checksums_hashes_order` published beside it reads SHA-256. That file was
+# taken only once its signature verified. The command, run on 2026-11-05, was
 # `go run github.com/sigstore/cosign/v2/cmd/cosign@v2.6.0 verify-blob --bundle checksums.bundle
-# --certificate-identity-regexp 'https://github.com/mikefarah/yq/' --certificate-oidc-issuer
-# https://token.actions.githubusercontent.com checksums`, and it printed `Verified OK`; the bundle's
-# certificate carries the keyless identity
-# https://github.com/mikefarah/yq/.github/workflows/release.yml@refs/tags/v4.54.1, issued by
-# https://token.actions.githubusercontent.com. A version bump repeats that check.
+# --certificate-identity 'https://github.com/mikefarah/yq/.github/workflows/release.yml@refs/tags/v4.54.1'
+# --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums`, and it printed
+# `Verified OK`; that identity is a release workflow of that repository at the v4.54.1 tag. A
+# version bump repeats that check.
 ARG YQ_VERSION=4.54.1
 ARG YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
 # The language servers Oh My Pi's LSP tools start for TypeScript and Python install from the

@@ -87,15 +87,14 @@ Two programs beside those five ride in the image for a role's own work, and neit
 a service. Like the five, they are on a role's `PATH` only once its deployment pins a digest at or
 after the change that added them; `command -v unzip yq` says whether yours has them.
 
-- `unzip` — Debian trixie's, at `/usr/bin/unzip`: the archive a role has to unpack, which no
-  package runner in the image unpacks for it.
+- `unzip` — Debian trixie's, at `/usr/bin/unzip`: a script calls the `unzip` command by name, and
+  no package runner in the image provides that program.
 - `yq` — mikefarah's `yq` 4, at `/usr/local/bin/yq`, a pinned release the build fetches and checks
   against a pinned SHA-256: a role's work that reads or rewrites YAML. Debian's `yq` is a different
   program — kislyuk's Python wrapper over `jq`, 3.4.3 in trixie — so an expression written for one
   does not run on the other, and a recipe you found may be written for the other one.
 
-`model-gateway/apply_test.sh` of theorem-labs/agent-infra calls both. Neither is a client, so the
-list above stays five.
+`model-gateway/apply_test.sh` of theorem-labs/agent-infra calls both.
 
 ## Why a tool the image lacks is an image change, not an install
 
