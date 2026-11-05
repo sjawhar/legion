@@ -471,9 +471,18 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 		c.events.push(TurnEnd{Claim: c.claim})
 	case shimwire.PromptResult:
 		if delivery := promptDelivery(frame.ID); delivery != "" {
-			c.events.push(PromptResult{
+			event := PromptResult{
 				Claim: c.claim, DeliveryID: delivery, AgentInvoked: frame.AgentInvoked, Error: frame.Reason(),
-			})
+			}
+			if frame.Error != nil {
+				// The whole of Oh My Pi's error object, not the message alone: the structured
+				// members are what a failure is judged on.
+				event.Retryable = frame.Error.Retryable
+				event.HTTPStatus = frame.Error.HTTPStatus
+				event.Provider = frame.Error.Provider
+				event.Model = frame.Error.Model
+			}
+			c.events.push(event)
 		}
 	case shimwire.Response:
 		c.answer(frame)

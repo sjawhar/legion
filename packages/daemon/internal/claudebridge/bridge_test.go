@@ -49,7 +49,10 @@ func TestMain(m *testing.M) {
 //   - "held <name>": the re-emission only once the test releases name (rig.release);
 //   - "wait <name>": an assistant message "done" only once the test releases name;
 //   - "die": exits, never re-emitting it;
-//   - "fail <text>": an assistant message of text, then an error_during_execution result;
+//   - "fail <text>": an assistant message of text, then an error_during_execution result that
+//     names no api_error_status, as a result that failed on nothing the provider gave a status
+//     for does;
+//   - "fail-529 <text>": the same, with the result naming api_error_status 529;
 //   - "replay <file>": no init of the fake's own — the lines of testdata/<file>, a recorded Claude
 //     Code stream, written as they were recorded, the last held back until the gate opens;
 //   - anything else: an assistant message "done".
@@ -77,6 +80,16 @@ func fakeClaude() int {
 	text := func(t string) map[string]any { return map[string]any{"type": "text", "text": t} }
 	result := func(subtype string, isError bool) {
 		emit(map[string]any{"type": "result", "subtype": subtype, "is_error": isError})
+	}
+	// failed is the result of a step Claude Code could not finish; status is the HTTP status it
+	// names, and zero names none at all.
+	failed := func(status int) {
+		line := map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
+			"errors": []string{"API Error: 529 overloaded"}}
+		if status != 0 {
+			line["api_error_status"] = status
+		}
+		emit(line)
 	}
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -126,10 +139,13 @@ func fakeClaude() int {
 			assistant(text("completed"))
 		case strings.HasPrefix(body, "say "):
 			assistant(text(strings.TrimPrefix(body, "say ")))
+		case strings.HasPrefix(body, "fail-529 "):
+			assistant(text(strings.TrimPrefix(body, "fail-529 ")))
+			failed(529)
+			continue
 		case strings.HasPrefix(body, "fail "):
 			assistant(text(strings.TrimPrefix(body, "fail ")))
-			emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
-				"errors": []string{"API Error: 529 overloaded"}})
+			failed(0)
 			continue
 		case strings.HasPrefix(body, "wait "):
 			released(strings.TrimPrefix(body, "wait "))
@@ -492,6 +508,45 @@ func TestAFailedStepIsOhMyPisFailedMessage(t *testing.T) {
 		t.Errorf("errorMessage %q names neither the result's subtype nor its error", got)
 	}
 	r.expect("agent_end", nil)
+}
+
+// The prompt_result of a turn that failed carries the failure, as Oh My Pi's does
+// (shimwire.PromptError): a result with no error object is a turn that ended well, and the
+// daemon retires the task on one. The message is Claude Code's own words, and the status is
+// there only when Claude Code named one.
+func TestAFailedTurnsPromptResultCarriesTheError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+		status any
+	}{
+		{"a failure Claude Code gave a status", "fail-529 WAITING on the provider", float64(529)},
+		{"a failure it named no status for", "fail WAITING on the provider", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, "-p", "--resume", sessionID)
+			r.prompt("p1", tc.script)
+			r.expect("agent_start", nil)
+			r.expect("message_end", nil)
+			r.expect("agent_end", nil)
+			frame := r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+			failure, _ := frame["error"].(map[string]any)
+			if failure == nil {
+				t.Fatalf("the failed turn's prompt_result is %v, want an error object", frame)
+			}
+			if got, _ := failure["message"].(string); !strings.Contains(got, "error_during_execution") ||
+				!strings.Contains(got, "API Error: 529 overloaded") {
+				t.Errorf("the error's message %q is not Claude Code's own subtype and error", got)
+			}
+			// False for every failure of the bridge's: it knows nothing that says one can clear.
+			if failure["retryable"] != false {
+				t.Errorf("retryable = %v, want false", failure["retryable"])
+			}
+			if failure["httpStatus"] != tc.status {
+				t.Errorf("httpStatus = %v, want %v", failure["httpStatus"], tc.status)
+			}
+		})
+	}
 }
 
 // An Envoy delivery during a turn is the turn's next user message; one between turns starts a turn.

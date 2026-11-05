@@ -50,11 +50,22 @@ type StreamTurnEnd struct{ Claim claim.Token }
 // AgentInvoked is false for a prompt that ran no turn at all — one a slash command or an
 // extension answered locally — which is the definitive form of what the wait for the turn
 // (TimerTurn) otherwise only times out on.
+//
+// Error is Oh My Pi's message for the failure, and Retryable, HTTPStatus, Provider and Model the
+// rest of its error object: Oh My Pi's own word for a failure that may succeed on a later try,
+// the status of the provider request that failed (zero when it had none, as a content-filter
+// refusal does), and the provider and the model that request went to. The message is prose of
+// the provider's and is never parsed; what a failure means is read from the four structured
+// members and from what the agent itself reports (stream.PromptResult).
 type StreamPromptResult struct {
 	Claim        claim.Token
 	DeliveryID   string
 	AgentInvoked bool
 	Error        string
+	Retryable    bool
+	HTTPStatus   int
+	Provider     string
+	Model        string
 }
 
 // StreamClosed is the claim's connection closing. It says nothing about the process by itself.

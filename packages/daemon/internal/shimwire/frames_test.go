@@ -220,6 +220,18 @@ func TestAPromptResultDecodesTheBinarysOwnLineWhole(t *testing.T) {
 			PromptResult{ID: "d1.XYZ", AgentInvoked: false, Error: &PromptError{Message: "no model"}},
 		},
 		{
+			// A refusal of the provider's content filter: Oh My Pi sets retryable for its own
+			// transient class alone, so this failure is not retryable and names no status at
+			// all, where the same words from a 400 would carry one.
+			"a turn the provider's content filter refused",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true,"status":"error",` +
+				`"error":{"message":"Output blocked by content filtering policy","provider":"anthropic","model":"claude-opus-4-5","retryable":false},` +
+				`"sessionSettled":true}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: true, Error: &PromptError{
+				Message: "Output blocked by content filtering policy", Provider: "anthropic", Model: "claude-opus-4-5",
+			}},
+		},
+		{
 			// `id` is optional in the schema, and a result that names no request names no
 			// delivery either; it still decodes, and the daemon drops it downstream.
 			"a result of no request of the daemon's",
@@ -242,6 +254,29 @@ func TestAPromptResultDecodesTheBinarysOwnLineWhole(t *testing.T) {
 			}
 			if result.Reason() != reason {
 				t.Fatalf("Reason() = %q, want %q", result.Reason(), reason)
+			}
+			// Each member of the error object by itself: the daemon decides what a failed turn
+			// means from the four beside the message, so one dropped here is a failure it reads
+			// as something else.
+			if want := tc.want.Error; want != nil {
+				got := result.Error
+				if got == nil {
+					t.Fatalf("Decode(%s) dropped the whole error object", tc.line)
+				}
+				for _, member := range []struct {
+					name      string
+					got, want any
+				}{
+					{"message", got.Message, want.Message},
+					{"provider", got.Provider, want.Provider},
+					{"model", got.Model, want.Model},
+					{"httpStatus", got.HTTPStatus, want.HTTPStatus},
+					{"retryable", got.Retryable, want.Retryable},
+				} {
+					if member.got != member.want {
+						t.Errorf("error %s = %v, want %v", member.name, member.got, member.want)
+					}
+				}
 			}
 		})
 	}

@@ -473,6 +473,12 @@ func (b *bridge) fromClaude(line []byte) {
 		RequestID string          `json:"request_id"`
 		IsError   bool            `json:"is_error"`
 		Errors    []string        `json:"errors"`
+		// APIErrorStatus is the HTTP status of the provider request a result failed on, read raw
+		// because it is `null` on a result that did not fail
+		// (testdata/background-turn.jsonl:12) and because a value of an unexpected shape must
+		// cost the status alone: a result line the decode refused whole would be a turn whose
+		// end the daemon never learns.
+		APIErrorStatus json.RawMessage `json:"api_error_status"`
 	}
 	if err := json.Unmarshal(line, &head); err != nil {
 		b.log.Printf("ignoring a line from Claude Code that is not JSON (%d bytes)", len(line))
@@ -496,8 +502,19 @@ func (b *bridge) fromClaude(line []byte) {
 		b.writeClaude(map[string]any{"type": "control_response", "response": map[string]string{
 			"subtype": "error", "request_id": head.RequestID, "error": "the Legion Claude Code bridge serves no control request"}})
 	case "result":
-		b.result(head.Subtype, head.IsError, head.Errors)
+		b.result(head.Subtype, head.IsError, head.Errors, httpStatusOf(head.APIErrorStatus))
 	}
+}
+
+// httpStatusOf is the HTTP status a result's api_error_status holds, and zero for one that holds
+// no number: the member is absent or `null` on every result of the recordings
+// (testdata/background-turn.jsonl:12), and a shape this does not expect costs the status alone.
+func httpStatusOf(raw json.RawMessage) int {
+	var status int
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return 0
+	}
+	return status
 }
 
 // systemInit acts on the `init` line Claude Code writes at the start of every turn and at no other
@@ -579,7 +596,7 @@ func answerAll(deliveries []delivery, err error) {
 // turn's ends that turn, no step of the bridge's being open in it, and the next Envoy delivery
 // then starts a turn of the bridge's own. A delivery the step sent that Claude Code ended it
 // without taking never will be.
-func (b *bridge) result(subtype string, isError bool, errs []string) {
+func (b *bridge) result(subtype string, isError bool, errs []string, httpStatus int) {
 	if b.seeding {
 		b.seeding = false
 		if isError {
@@ -605,10 +622,11 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 	b.stepping = false
 	answerAll(b.taking, errNotTaken)
 	b.taking = nil
+	failure := ""
 	if isError {
 		// Oh My Pi reports a failed step as the assistant message that ends it, stopReason "error";
 		// the daemon reads neither, so the log line is what puts the failure on the pane.
-		failure := "Claude Code: " + subtype + " " + strings.Join(errs, "; ")
+		failure = "Claude Code: " + subtype + " " + strings.Join(errs, "; ")
 		b.log.Printf("the turn failed: %s", failure)
 		b.emitRaw(map[string]any{"type": "message_end", "message": map[string]any{
 			"role": "assistant", "stopReason": "error", "errorMessage": failure}})
@@ -623,8 +641,20 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		// The turn that ran the daemon's prompt is over, and this is what says it was that
 		// prompt's: an agent_end names no prompt, and a turn Claude Code started by itself when a
 		// background task finished ends with one just like it.
+		//
+		// A turn that ended in an error says so here as Oh My Pi does, in the frame's error
+		// object: a prompt_result without one is a turn that ended well, and the daemon would
+		// retire the task on it. The message is Claude Code's own words, the same the
+		// message_end above carries, and the status is the one Claude Code named, zero when it
+		// named none. Retryable stays false: nothing Claude Code reports says the error can
+		// clear, and the daemon reads a failure that claims nothing as one that may, so the task
+		// is sent again rather than the issue held on it.
 		b.promptRun = ""
-		b.emit(shimwire.PromptResult{ID: prompt, AgentInvoked: true})
+		result := shimwire.PromptResult{ID: prompt, AgentInvoked: true}
+		if failure != "" {
+			result.Error = &shimwire.PromptError{Message: failure, HTTPStatus: httpStatus}
+		}
+		b.emit(result)
 	}
 	if len(b.queue) > 0 {
 		b.sendQueued()

@@ -340,8 +340,9 @@ func TestAPromptResultNamesTheDeliveryItsRequestIDCarries(t *testing.T) {
 // the pinned binary's own shape, written verbatim rather than through the Go frame, so this test
 // reads what Oh My Pi writes however this package models it. The daemon must take it: a result
 // it drops is a prompt the supervisor waits on for the life of the process, and the next task
-// for that claim is refused as pending behind it. So the result reaches the supervisor with its
-// reason, and the connection takes the next delivery.
+// for that claim is refused as pending behind it. So the result reaches the supervisor whole —
+// the message and the four members a later decision reads, never the message parsed — and the
+// connection takes the next delivery.
 func TestATurnThatEndedInAProviderErrorStillReportsItsResult(t *testing.T) {
 	h := startListener(t, harnessOptions{})
 	p := h.connect(testToken)
@@ -356,7 +357,8 @@ func TestATurnThatEndedInAProviderErrorStillReportsItsResult(t *testing.T) {
 		"\"sessionSettled\":true}\n")
 	for _, want := range []Event{
 		TurnEnd{Claim: testClaim},
-		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", AgentInvoked: true, Error: "429 Too Many Requests"},
+		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", AgentInvoked: true, Error: "429 Too Many Requests",
+			Retryable: true, HTTPStatus: 429, Provider: "anthropic", Model: "claude-opus-4-5"},
 	} {
 		if got := h.next(); got != want {
 			t.Fatalf("event = %#v, want %#v", got, want)
