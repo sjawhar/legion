@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/lookpath"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -45,6 +46,21 @@ func (gate DesignGate) OrDefault() DesignGate {
 // Gates contains the workflow gates the daemon enforces.
 type Gates struct {
 	Design DesignGate
+}
+
+// Steps is the design-gate steps the deployment gates, in the order a root's architect takes
+// them: the one step spec under `root-issues` and under no `gates.design` at all, and no step
+// under `off`. The daemon keeps one gate record for each step, and every reader of the gate asks
+// this list (classify.RequiredSteps).
+//
+// A deployment that gates nothing answers an empty slice that is not nil, so a caller can tell it
+// from a configuration that names no policy, whose zero Gates this method never sees but whose
+// zero workflow.Config does (workflow.Config.Steps).
+func (g Gates) Steps() []record.DesignStep {
+	if g.Design.OrDefault() == DesignGateOff {
+		return []record.DesignStep{}
+	}
+	return []record.DesignStep{record.DesignStepSpec}
 }
 
 // Project is a Dispatch project prefix's configuration: its optional merge-queue role, merge rules,

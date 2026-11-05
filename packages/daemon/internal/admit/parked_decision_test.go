@@ -353,7 +353,7 @@ func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
 			ctx := context.Background()
 			pool := migratedPool(t)
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-				Clock: func() time.Time { return fixedNow }, DesignGate: tc.gate}, nil)
+				Clock: func() time.Time { return fixedNow }, Steps: config.Gates{Design: tc.gate}.Steps()}, nil)
 			admission := New(record.NewStore(), engine, 1, testProject, nil)
 			admission.now = func() time.Time { return fixedNow }
 			parkedRoot(t, pool)
@@ -383,8 +383,8 @@ func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
 			}
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
-				if gate, err := records.Gate(ctx, tx, "LEGION-ROOT"); err != nil || gate != nil {
-					t.Fatalf("gate after the re-admission = %#v, %v; want it cleared with the old generation", gate, err)
+				if gates, err := records.GatesOf(ctx, tx, "LEGION-ROOT"); err != nil || len(gates) != 0 {
+					t.Fatalf("gates after the re-admission = %#v, %v; want them cleared with the old generation", gates, err)
 				}
 				wantApproved, wantLatest := 3, 4
 				if tc.approved == 4 || tc.gate == config.DesignGateOff {
@@ -422,7 +422,7 @@ func TestAReadmissionKeepsOrDropsTheApprovalAnEarlierKept(t *testing.T) {
 			ctx := context.Background()
 			pool := migratedPool(t)
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-				Clock: func() time.Time { return fixedNow }, DesignGate: tc.policy}, nil)
+				Clock: func() time.Time { return fixedNow }, Steps: config.Gates{Design: tc.policy}.Steps()}, nil)
 			admission := New(record.NewStore(), engine, 1, testProject, nil)
 			admission.now = func() time.Time { return fixedNow }
 			parkedRoot(t, pool)
@@ -461,7 +461,7 @@ func TestARootReadmittedTwiceWithNoStartDeliveredIsStillToldBothVersions(t *test
 	ctx := context.Background()
 	pool := migratedPool(t)
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		Clock: func() time.Time { return fixedNow }, DesignGate: config.DesignGateRootIssues}, nil)
+		Clock: func() time.Time { return fixedNow }, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps()}, nil)
 	admission := New(record.NewStore(), engine, 1, testProject, nil)
 	admission.now = func() time.Time { return fixedNow }
 	parkedRoot(t, pool)
@@ -505,7 +505,7 @@ func assertGateNotice(t *testing.T, pool *pgxpool.Pool, key string, kind record.
 func TestAGateOpenedByPolicyNamesNoPerson(t *testing.T) {
 	pool := migratedPool(t)
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		Clock: func() time.Time { return fixedNow }, DesignGate: config.DesignGateOff}, nil)
+		Clock: func() time.Time { return fixedNow }, Steps: config.Gates{Design: config.DesignGateOff}.Steps()}, nil)
 	admission := New(record.NewStore(), engine, 1, testProject, nil)
 	admission.now = func() time.Time { return fixedNow }
 	seedSlotted(t, pool, "LEGION-ROOT", "A")

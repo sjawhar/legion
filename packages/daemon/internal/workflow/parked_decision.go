@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -86,7 +85,7 @@ func (e *Engine) treeRoot(ctx context.Context, tx pgx.Tx, key string) (*record.I
 // (Store.ForgetKeptDecisions) and a start's task tells it at the confirmation of the delivery the
 // claim queued it as; one that reached no architect hands it over (HandOverKept). Both results are
 // zero when there was nothing.
-func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue) (string, *record.KeptDecisions, error) {
+func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, root record.Issue) (string, *record.KeptDecisions, error) {
 	decisions, approved, latest, err := store.UnclaimedKept(ctx, tx, root.Key)
 	if err != nil {
 		return "", nil, err
@@ -96,7 +95,7 @@ func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, gate
 		kept.Decisions = append(kept.Decisions, record.DecisionMark{Ref: d.Ref, At: d.At, Issue: d.Issue,
 			Decision: d.Decision, Actor: d.Actor})
 	}
-	if approved > 0 && gate != config.DesignGateOff {
+	if approved > 0 && len(steps) > 0 {
 		kept.Approved, kept.Latest = approved, latest
 	}
 	task := KeptDecisionsTask(root.Key, kept)
@@ -130,9 +129,9 @@ func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
 	return strings.Join(parts, " ")
 }
 
-// ParkedDecisionTask is ParkedDecisionTask over the engine's store and design gate.
+// ParkedDecisionTask is ParkedDecisionTask over the engine's store and gated steps.
 func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.Issue) (string, *record.KeptDecisions, error) {
-	return ParkedDecisionTask(ctx, tx, e.store, e.cfg.DesignGate, root)
+	return ParkedDecisionTask(ctx, tx, e.store, e.cfg.Steps, root)
 }
 
 // EnqueueNaming enqueues payload for issue, due at, a root-architect start or a catch-up notice
@@ -186,12 +185,12 @@ func (e *Engine) EnqueueNaming(ctx context.Context, tx pgx.Tx, issue, tree strin
 // nobody either, and what the ending releases waits for that architect's next launch, whose ready
 // names every unclaimed decision. A receipt timeout that draws a copy neither tells nor hands
 // over: the re-held copy carries the claims on (Store.MoveKeptClaims).
-func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, from int64, now time.Time) error {
+func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, from int64, now time.Time) error {
 	trees, err := store.ReleaseKeptClaims(ctx, tx, from)
 	if err != nil || len(trees) == 0 {
 		return err
 	}
-	return CatchUpTheTreesOwed(ctx, tx, store, gate, trees, now)
+	return CatchUpTheTreesOwed(ctx, tx, store, steps, trees, now)
 }
 
 // CatchUpTheTreesOwed writes a fresh catch-up to the architect of each of trees that has one to
@@ -201,7 +200,7 @@ func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 // tree root, lingering, out of the workflow, or waiting in `todo` for its slot — is written
 // nothing, and what it is owed waits KEPT for its next start or ready to name, since a catch-up
 // queued for nobody would only be dropped by the ready that follows.
-func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, trees []string, now time.Time) error {
+func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, trees []string, now time.Time) error {
 	launches, err := store.ArchitectLaunches(ctx, tx, trees)
 	if err != nil {
 		return err
@@ -221,7 +220,7 @@ func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, gat
 		if !hears {
 			continue
 		}
-		if err := QueueCatchUp(ctx, tx, store, gate.OrDefault(), *root, launches[key], now); err != nil {
+		if err := QueueCatchUp(ctx, tx, store, steps, *root, launches[key], now); err != nil {
 			return err
 		}
 	}
@@ -242,9 +241,13 @@ func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root rec
 	return !waits, err
 }
 
-// DesignGateOff says whether the engine runs with gates.design off, which asks no person to
-// approve a spec.
-func (e *Engine) DesignGateOff() bool { return e.cfg.DesignGate == config.DesignGateOff }
+// DesignGateOff says whether the engine runs with a design gate that gates no step, which asks
+// no person to approve anything.
+func (e *Engine) DesignGateOff() bool { return len(e.cfg.Steps) == 0 }
+
+// GatedSteps is the design-gate steps the deployment gates, in the order it names them, which
+// admission reads to decide a re-admitted root's kept approval (Admission.keepStaleApproval).
+func (e *Engine) GatedSteps() []record.DesignStep { return e.cfg.Steps }
 
 // specRef is the Dispatch reference of an issue's spec, the document its gate reviews.
 func specRef(key string) string { return "dispatch://" + key + "/spec" }

@@ -21,6 +21,7 @@ func TestLiveIssuesReadsTheRecordsOfTheProjectThatAreNotFinished(t *testing.T) {
 	issue := func(key, project string, at phase.Phase, status string) Issue {
 		recorded := issueFixture(key)
 		recorded.Project, recorded.Phase, recorded.Status, recorded.Parent, recorded.ReadyPendingVersion = project, at, status, nil, nil
+		recorded.ReadyPendingStep = nil
 		return recorded
 	}
 	inTx(t, st, func(tx pgx.Tx) {

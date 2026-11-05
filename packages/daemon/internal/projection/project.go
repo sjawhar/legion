@@ -173,10 +173,11 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			}
 		}
 
-		gate, err := s.Gate(ctx, tx, issue.Key)
+		gates, err := s.GatesOf(ctx, tx, issue.Key)
 		if err != nil {
 			return api.State{}, err
 		}
+		gate := record.SpecGate(gates)
 		if gate != nil {
 			view.DesignGate = &api.GateView{
 				ArtifactID:      gate.ArtifactID,

@@ -47,7 +47,7 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 
 	engine := New(store, Config{
 		Project:        "LEGION",
-		DesignGate:     config.DesignGateOff,
+		Steps:          config.Gates{Design: config.DesignGateOff}.Steps(),
 		ReviewRoundCap: 3,
 		MaxFixAttempts: 3,
 		Linger:         time.Hour,
@@ -145,8 +145,9 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	if err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
 	}
-	if result.Refusal == nil || result.Refusal.Status != 409 || result.Refusal.Message != "READY refused: approve design version 4 before requesting READY." {
-		t.Fatalf("READY refusal = %#v, want committed version-4 refusal", result.Refusal)
+	if result.Refusal == nil || result.Refusal.Status != 409 || result.Refusal.Code != "DESIGN_GATE_CLOSED" ||
+		result.Refusal.Message != "READY refused: approve design version 4 of the tree's spec document before requesting READY." {
+		t.Fatalf("READY refusal = %#v, want a DESIGN_GATE_CLOSED refusal naming the spec step's version 4", result.Refusal)
 	}
 	var pending int
 	if err := pool.QueryRow(ctx, "select ready_pending_version from issues where key = $1", "LEGION-208").Scan(&pending); err != nil {
@@ -957,7 +958,7 @@ const testReviewApp = "legion-reviewer[bot]"
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+		Project: "LEGION", Steps: config.Gates{Design: policy}.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }
@@ -989,8 +990,8 @@ func gateState(t *testing.T, pool *pgxpool.Pool, issue string) record.DesignGate
 	t.Helper()
 	var gate *record.DesignGate
 	seedRecord(t, pool, func(tx pgx.Tx) error {
-		var err error
-		gate, err = record.NewStore().Gate(t.Context(), tx, issue)
+		gates, err := record.NewStore().GatesOf(t.Context(), tx, issue)
+		gate = record.SpecGate(gates)
 		return err
 	})
 	if gate == nil {

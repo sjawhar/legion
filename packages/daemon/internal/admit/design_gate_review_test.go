@@ -35,10 +35,11 @@ func storedGate(t *testing.T, pool *pgxpool.Pool, key string) *record.DesignGate
 	t.Helper()
 	var gate *record.DesignGate
 	inTx(t, pool, func(tx pgx.Tx) {
-		var err error
-		if gate, err = record.NewStore().Gate(context.Background(), tx, key); err != nil {
+		gates, err := record.NewStore().GatesOf(context.Background(), tx, key)
+		if err != nil {
 			t.Fatalf("read gate: %v", err)
 		}
+		gate = record.SpecGate(gates)
 	})
 	if gate == nil {
 		t.Fatalf("issue %s has no design gate", key)
@@ -339,13 +340,13 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 	}{
 		{
 			name: "an approval older than the changes request the gate records",
-			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepSpec, ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: newer},
 			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: superseded},
 		},
 		{
 			name: "a changes request older than the approval the gate records",
-			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepSpec, ArtifactID: "artifact-root", LatestVersion: 4,
 				ApprovedVersion: new(4), ApprovedMark: newer},
 			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 				Version: 4, Reason: "name the rollback path", Mark: superseded},

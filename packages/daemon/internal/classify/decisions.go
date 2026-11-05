@@ -1348,7 +1348,52 @@ func ApprovalFollows(gate record.DesignGate, version int, mark record.EventMark)
 	return approved > version || approved == version && !mark.After(gate.ApprovedMark)
 }
 
-// DesignGateOpen reports whether a human approved the gate's current document version.
+// DesignGateOpen reports whether a human approved the gate's current document version. It answers
+// one step's question; the deployment's whole list is DesignGatesOpen.
 func DesignGateOpen(gate record.DesignGate) bool {
 	return gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion
+}
+
+// RequiredSteps is the steps a root must hold an open gate at before its tree works: the steps
+// the deployment gates, in the order it names them, or the single step spec when it gates none.
+//
+// The empty list keeps its own hold. A deployment that gates no step asks no person to approve
+// anything, and its registration opens the gate at once; but the registration itself is still
+// what says the architect has written the spec, and a rule reading "every gated step is open"
+// would be true of a tree whose architect had registered nothing and would start it. So the
+// empty list requires the spec step's record, which the registration writes and opens in one act.
+func RequiredSteps(configured []record.DesignStep) []record.DesignStep {
+	if len(configured) == 0 {
+		return []record.DesignStep{record.DesignStepSpec}
+	}
+	return configured
+}
+
+// DesignGatesOpen reports whether gates, every design gate an issue holds by its step, lets the
+// tree's work run: each required step (RequiredSteps) holds a row a human approved at its current
+// version. A required step with no row holds the work, as an unregistered gate always has, and
+// since a root always requires at least one step, an issue holding no row at all is held too. A
+// row of a step the deployment does not require is read by nothing here: it is kept as the record
+// of a step gated before, and holds nothing.
+func DesignGatesOpen(configured []record.DesignStep, gates map[record.DesignStep]record.DesignGate) bool {
+	for _, step := range RequiredSteps(configured) {
+		if gate, ok := gates[step]; !ok || !DesignGateOpen(gate) {
+			return false
+		}
+	}
+	return true
+}
+
+// FirstClosedStep is the first required step (RequiredSteps) whose gate is not open, in the
+// configured order, with the row it holds — the zero row when it holds none, which is the step
+// nobody has registered. ok is false when every required step is open, which is DesignGatesOpen.
+// It names the one step a refusal, a hold or a person's wait is about: the step the work stands
+// on now.
+func FirstClosedStep(configured []record.DesignStep, gates map[record.DesignStep]record.DesignGate) (record.DesignStep, record.DesignGate, bool) {
+	for _, step := range RequiredSteps(configured) {
+		if gate, ok := gates[step]; !ok || !DesignGateOpen(gate) {
+			return step, gate, true
+		}
+	}
+	return "", record.DesignGate{}, false
 }

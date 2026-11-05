@@ -322,8 +322,8 @@ func (b BlockedIssue) MarshalJSON() ([]byte, error) {
 // task, or only with the decisions kept for it. It is the tree as the daemon records it then: the
 // root's generation, the launch of the architect's claim it was written for, whether a hand-over
 // created the root at this generation with its child's phase and pull request (HandedOver) and
-// whether its old root's gate came with them (Carried), the design gate policy and the root's
-// gate, and every issue of the tree. A handed-over root's workers already run their phases, so its
+// whether its old root's gate came with them (Carried), the design gate step by step (Gates),
+// and every issue of the tree. A handed-over root's workers already run their phases, so its
 // architect decomposes nothing anew; one that carried no gate registers its own spec. Decided names
 // what a person decided on the tree while nobody in it could hear it and the start did not name (a
 // decision made while the architect's claim had ended, before this relaunch), in the words of
@@ -336,20 +336,31 @@ type CatchUp struct {
 	Launch     uint64         `json:"launch"`
 	HandedOver bool           `json:"handed_over,omitempty"`
 	Carried    bool           `json:"carried,omitempty"`
-	Gate       CatchUpGate    `json:"gate"`
+	Gates      []CatchUpGate  `json:"gates"`
 	Issues     []CatchUpIssue `json:"issues"`
 	Decided    string         `json:"decided,omitempty"`
 	Kept       *KeptDecisions `json:"kept,omitempty"`
 }
 
-// CatchUpGate is the design gate as a catch-up states it: the project's policy (gates.design,
-// root-issues or off) and, once the architect has registered one, the root's registered document,
-// its latest version, and whether that version is approved.
+// CatchUpGate is one design-gate step as a catch-up states it: the step, whether a person must
+// approve its document (Gated) and, once the architect has registered it, the document, its
+// latest version, the version a person approved, if any, and whether the step is open.
+// Unregistered says the root holds no record of the step at all, which is the step its architect
+// has still to register.
+//
+// A catch-up carries one entry for each step the root must hold open before its tree works
+// (classify.RequiredSteps), so a deployment that gates nothing carries the one spec entry with
+// Gated false: that registration opens the step at once and asks no person, which is what the
+// policy word `off` said. The list replaced that word, because one word cannot name a list and
+// each entry now says its own step's part of it.
 type CatchUpGate struct {
-	Policy   string `json:"policy"`
-	Artifact string `json:"artifact,omitempty"`
-	Version  int    `json:"version,omitempty"`
-	Open     bool   `json:"open"`
+	Step         DesignStep `json:"step"`
+	Gated        bool       `json:"gated"`
+	Unregistered bool       `json:"unregistered,omitempty"`
+	Artifact     string     `json:"artifact,omitempty"`
+	Version      int        `json:"version,omitempty"`
+	Approved     int        `json:"approved,omitempty"`
+	Open         bool       `json:"open"`
 }
 
 // CatchUpIssue is one issue of the tree as a catch-up lists it.
@@ -482,10 +493,14 @@ type SuperviseRequest struct {
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
 
-// GateSeed records the design document version that starts a gate.
+// GateSeed records the design document version that starts a gate, and the step whose row it
+// starts: the seed reads that document from Dispatch and applies what it finds there.
 type GateSeed struct {
 	ArtifactID string `json:"artifactId"`
-	Version    int    `json:"version"`
+	// Step is the design-gate step the registered document is that of. A row written before a
+	// deployment could name a list carries none, and the facts its seed builds name no step.
+	Step    DesignStep `json:"step,omitempty"`
+	Version int        `json:"version"`
 	// Generation is the issue generation that registered the gate; the seed's fact is that
 	// generation's.
 	Generation uint64 `json:"generation"`

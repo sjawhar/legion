@@ -934,8 +934,8 @@ func TestTheGateSeedResetsAGateAboveTheVersionDispatchHolds(t *testing.T) {
 			}
 			var gate *record.DesignGate
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				var err error
-				gate, err = records.Gate(ctx, tx, "LEGION-208")
+				gates, err := records.GatesOf(ctx, tx, "LEGION-208")
+				gate = record.SpecGate(gates)
 				return err
 			}); err != nil || gate == nil {
 				t.Fatalf("read the gate: %#v, %v", gate, err)

@@ -375,6 +375,7 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 		return nil, err
 	}
 	issue.Phase, issue.Hold, issue.ReadyPendingVersion = row.To, nil, nil
+	issue.ReadyPendingStep = nil
 	if status != "" {
 		issue.Status = status
 	}

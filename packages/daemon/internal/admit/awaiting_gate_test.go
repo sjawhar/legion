@@ -1340,10 +1340,11 @@ func TestASeededChangesRequestAnswersAWaitAndClosesAGateARaceOpened(t *testing.T
 		applyFact(t, pool, admission, "seed-changes-v4", seeded)
 		var gate *record.DesignGate
 		inTx(t, pool, func(tx pgx.Tx) {
-			var err error
-			if gate, err = record.NewStore().Gate(context.Background(), tx, "LEGION-100"); err != nil {
+			gates, err := record.NewStore().GatesOf(context.Background(), tx, "LEGION-100")
+			if err != nil {
 				t.Fatalf("read gate: %v", err)
 			}
+			gate = record.SpecGate(gates)
 		})
 		if gate == nil || gate.ApprovedVersion != nil || gate.LatestVersion != 4 {
 			t.Fatalf("gate after the seed read a changes request = %#v, want closed at version 4", gate)

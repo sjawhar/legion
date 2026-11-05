@@ -1809,7 +1809,8 @@ func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testi
 // submits the merge on the architect's word once the gate opens, already knows a person merges it.
 func TestHandoffCompleteReadyKeepsTheByHandNoteInADesignGateRefusal(t *testing.T) {
 	github := byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`)
-	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "DESIGN_GATE_CLOSED", Message: "READY refused: approve design version 4 before requesting READY."})
+	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "DESIGN_GATE_CLOSED",
+		Message: "READY refused: approve design version 4 of the tree's spec document before requesting READY."})
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)
 	seedPullRequest(t, h, "LEGION-208", headSHA)
 	seedApproval(t, h, "LEGION-208", approvedSHA)

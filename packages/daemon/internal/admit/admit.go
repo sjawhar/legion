@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -919,11 +920,11 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	orphan := carry && !claim.IsTreeRoot(stored.Key, stored.Tree)
 	oldTree, oldGeneration := stored.Tree, stored.Generation
-	var gate *record.DesignGate
+	var gates map[record.DesignStep]record.DesignGate
 	var pr *record.PullRequest
 	var err error
 	if orphan {
-		gate, err = a.store.Gate(ctx, tx, oldTree)
+		gates, err = a.store.GatesOf(ctx, tx, oldTree)
 		if err != nil {
 			return fmt.Errorf("read gate of re-admitted orphan %s: %w", stored.Key, err)
 		}
@@ -947,7 +948,8 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	// among them, stays its own tree (workflow's RanAsRoot) and records no chain to be held under.
 	stored.Ancestry = nil
 	if !orphan {
-		stored.Phase, stored.Hold, stored.Awaiting, stored.ReadyPendingVersion = phase.Admitted, nil, nil, nil
+		stored.Phase, stored.Hold, stored.Awaiting = phase.Admitted, nil, nil
+		stored.ReadyPendingVersion, stored.ReadyPendingStep = nil, nil
 		// Another tree's work arriving without its run: the run it had was that tree's.
 		if !claim.IsTreeRoot(stored.Key, oldTree) {
 			stored.TakenBack = false
@@ -1009,17 +1011,19 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		}
 		// Every root a hand-over created is recorded as one, so its architect's catch-up says it was
 		// handed over and decomposes nothing anew; it is marked as carrying a gate, which tells the
-		// architect never to register its own spec, only when its old root had one. A root reopened
-		// in its linger has its gate cleared with the generation, so a second close hands its
-		// children over with none: such a child keeps its phase and pull request, and its architect
-		// registers its spec as a fresh root's does, the gate its READY needs.
-		if gate != nil {
+		// architect never to register its own spec, only when its old root had one. The carry takes
+		// every step's row, each keeping its own step, so a tree gated on several steps arrives
+		// approved on each of them as the old root was. A root reopened in its linger has its gate
+		// cleared with the generation, so a second close hands its children over with none: such a
+		// child keeps its phase and pull request, and its architect registers its spec as a fresh
+		// root's does, the gate its READY needs.
+		for _, gate := range gates {
 			gate.Issue = stored.Key
-			if err := a.store.PutGate(ctx, tx, *gate); err != nil {
+			if err := a.store.PutGate(ctx, tx, gate); err != nil {
 				return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
 			}
 		}
-		return a.store.PutHandedOverRoot(ctx, tx, record.HandedOverRoot{Issue: stored.Key, Generation: stored.Generation, GateCarried: gate != nil})
+		return a.store.PutHandedOverRoot(ctx, tx, record.HandedOverRoot{Issue: stored.Key, Generation: stored.Generation, GateCarried: len(gates) > 0})
 	}
 	// Only the old tree's own root coming back cancels its pending hand-overs; an orphan of that
 	// tree admitted by a person leaves its siblings' fences standing.
@@ -1037,29 +1041,40 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 }
 
 // keepStaleApproval keeps, for the architect start of the root key re-admission is clearing, the
-// person's approval its gate holds of a version the spec has since moved past: the new
-// generation's architect registers its spec again on a cleared gate, and its start task
-// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. Under
-// gates.design off, which asks no person, nothing is kept and any pair an earlier re-admission kept
-// is dropped: no start names one there, so no delivery would forget it. Under an armed gate, a gate
-// that holds no stale approval drops an earlier pair, which this gate has since outgrown; a root
-// with no gate at all (an earlier re-admission cleared it and nothing has registered since) keeps
-// the earlier pair, which no start has delivered yet.
+// person's approval a gate of its holds of a version its document has since moved past: the new
+// generation's architect registers each step again on a cleared gate, and its start task
+// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. One
+// pair is kept, read from the first required step whose approved version sits below its latest,
+// because readmitted_approvals keeps one row for each root.
+//
+// Where the deployment gates no step, which asks no person, nothing is kept and any pair an
+// earlier re-admission kept is dropped: no start names one there, so no delivery would forget
+// it. Otherwise a root whose required steps hold no stale approval drops an earlier pair, which
+// its gates have since outgrown; a root with a required step it holds no gate for (an earlier
+// re-admission cleared it and nothing has registered since) keeps the earlier pair, which no
+// start has delivered yet.
 func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string) error {
 	if a.engine.DesignGateOff() {
 		return a.store.DropReadmittedApproval(ctx, tx, key)
 	}
-	gate, err := a.store.Gate(ctx, tx, key)
+	gates, err := a.store.GatesOf(ctx, tx, key)
 	if err != nil {
 		return fmt.Errorf("read the gate of re-admitted %s: %w", key, err)
 	}
-	switch {
-	case gate == nil:
-		return nil
-	case gate.ApprovedVersion == nil || *gate.ApprovedVersion >= gate.LatestVersion:
-		return a.store.DropReadmittedApproval(ctx, tx, key)
+	unregistered := false
+	for _, step := range classify.RequiredSteps(a.engine.GatedSteps()) {
+		gate, ok := gates[step]
+		switch {
+		case !ok:
+			unregistered = true
+		case gate.ApprovedVersion != nil && *gate.ApprovedVersion < gate.LatestVersion:
+			return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
+		}
 	}
-	return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
+	if unregistered {
+		return nil
+	}
+	return a.store.DropReadmittedApproval(ctx, tx, key)
 }
 
 // releaseReturnedSlots gives back the slots of roots that no longer need one: a completed root or

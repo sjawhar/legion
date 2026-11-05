@@ -139,6 +139,7 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 		}
 		member.Tree, member.Project, member.Generation, member.Phase = root.Tree, root.Project, next, phase.Done
 		member.LingerUntil, member.Hold, member.ReadyPendingVersion, member.Ancestry = nil, nil, nil, nil
+		member.ReadyPendingStep = nil
 		if err := e.store.PutIssue(ctx, tx, member); err != nil {
 			return err
 		}
@@ -153,7 +154,7 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 		return err
 	}
 	if len(decisions) > 0 || approved > 0 {
-		if err := CatchUpTheTreesOwed(ctx, tx, e.store, e.cfg.DesignGate, []string{root.Tree}, e.now()); err != nil {
+		if err := CatchUpTheTreesOwed(ctx, tx, e.store, e.cfg.Steps, []string{root.Tree}, e.now()); err != nil {
 			return err
 		}
 	}

@@ -67,6 +67,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	}
 	if issue.Phase != phase.Done {
 		issue.Phase, issue.Hold, issue.ReadyPendingVersion = phase.Done, nil, nil
+		issue.ReadyPendingStep = nil
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
@@ -148,6 +149,7 @@ func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.
 	e.logOnCommit(ctx, "workflow: a waiting root left the workflow while the operator runs a tree under its key; the operator's tree is left alone",
 		"issue", root.Key, "tree", root.Tree, "status", status)
 	root.Phase, root.Hold, root.Awaiting, root.ReadyPendingVersion = phase.Done, nil, nil, nil
+	root.ReadyPendingStep = nil
 	return e.store.PutIssue(ctx, tx, root)
 }
 

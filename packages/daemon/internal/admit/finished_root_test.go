@@ -199,7 +199,8 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 			}
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
-				gate, err := records.Gate(context.Background(), tx, child)
+				gates, err := records.GatesOf(context.Background(), tx, child)
+				gate := record.SpecGate(gates)
 				if err != nil || gate == nil || gate.ArtifactID != artifact || gate.LatestVersion != 2 || gate.ApprovedVersion == nil || *gate.ApprovedVersion != 2 {
 					t.Fatalf("carried gate = %#v, %v", gate, err)
 				}
@@ -266,8 +267,8 @@ func TestAHandedOverChildWithNoGateToCarryIsNotMarkedCarried(t *testing.T) {
 	}
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		if gate, err := records.Gate(context.Background(), tx, child); err != nil || gate != nil {
-			t.Fatalf("gate = %#v, %v; want none, since the old root had none", gate, err)
+		if gates, err := records.GatesOf(context.Background(), tx, child); err != nil || len(gates) != 0 {
+			t.Fatalf("gates = %#v, %v; want none, since the old root had none", gates, err)
 		}
 		if pr, err := records.PullRequest(context.Background(), tx, child); err != nil || pr == nil || pr.HeadSHA != "head-42" || pr.Generation != 2 {
 			t.Fatalf("pull request = %#v, %v; want it carried at generation 2", pr, err)
@@ -643,9 +644,9 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 		if err != nil || handedRoot != nil {
 			t.Fatalf("unstarted orphan's handed-over record = %#v, %v; want none: it was admitted fresh", handedRoot, err)
 		}
-		gate, err := records.Gate(ctx, tx, unstarted.Key)
-		if err != nil || gate != nil {
-			t.Fatalf("unstarted orphan gate = %#v, %v; want none copied from the old root", gate, err)
+		gates, err := records.GatesOf(ctx, tx, unstarted.Key)
+		if err != nil || len(gates) != 0 {
+			t.Fatalf("unstarted orphan gates = %#v, %v; want none copied from the old root", gates, err)
 		}
 	})
 	if starts := architectStarts(t, pool, unstarted.Key); starts != 1 {
@@ -679,7 +680,7 @@ func seedFinishingTree(t *testing.T) (*pgxpool.Pool, *Admission, intake.Handler)
 	t.Helper()
 	pool := migratedPool(t)
 	admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedSlotted(t, pool, finishedRoot, "A")
 	parent := finishedRoot
 	child := func(key string, at phase.Phase, status string) record.Issue {
@@ -800,9 +801,9 @@ func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
 				if err != nil || handedRoot != nil {
 					t.Fatalf("handed-over record = %#v, %v; want none: it was admitted fresh", handedRoot, err)
 				}
-				gate, err := records.Gate(ctx, tx, "LEGION-209")
-				if err != nil || gate != nil {
-					t.Fatalf("gate = %#v, %v; want none copied", gate, err)
+				gates, err := records.GatesOf(ctx, tx, "LEGION-209")
+				if err != nil || len(gates) != 0 {
+					t.Fatalf("gates = %#v, %v; want none copied", gates, err)
 				}
 			})
 			if fence := handoverOf(t, pool, "LEGION-209"); fence != nil {
@@ -937,11 +938,12 @@ func seedByHandREADYUnderLingeringRoot(t *testing.T, pool *pgxpool.Pool) {
 	const root, child = "LEGION-208", "LEGION-209"
 	until := fixedNow.Add(time.Hour)
 	parent, pending := root, 2
+	step := record.DesignStepSpec
 	inTx(t, pool, func(tx pgx.Tx) {
 		records, ctx := record.NewStore(), context.Background()
 		for _, put := range []error{
 			records.PutIssue(ctx, tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-			records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending}),
+			records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending, ReadyPendingStep: &step}),
 			records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 2, ApprovedVersion: new(1)}),
 			records.PutPullRequest(ctx, tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head", Generation: 1, State: record.PullRequestOpen}),
 			records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger-claim", HandoffCommit: "head", Summary: carriedPacket, MergeNote: byHandNote}),

@@ -56,7 +56,12 @@ type Issue struct {
 	LingerUntil         *time.Time
 	Hold                *Hold
 	LastDispatchSeq     int64
+	// ReadyPendingVersion is the document version a READY the design gate refused waits to see
+	// approved, and ReadyPendingStep the step whose document that version is. The two are one
+	// fact and the stored row holds both or neither, so everything that writes the refusal writes
+	// the pair, and everything that voids it clears the pair.
 	ReadyPendingVersion *int
+	ReadyPendingStep    *DesignStep
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
@@ -801,6 +806,32 @@ const (
 	CheckNotRun CheckOutcome = "not_run"
 )
 
+// DesignStep names one document of the root issue, and a deployment's design gate is the list of
+// steps it holds the tree's work on. DesignStepDecisions names the issue's decisions document,
+// DesignStepCriteria its Verification document, and DesignStepSpec its primary document. The
+// record keeps one DesignGate for each step a deployment gates, keyed by the issue and the step.
+//
+// The type lives in this package rather than beside the `gates.design` list that declares it,
+// because internal/classify answers the questions the steps raise and may import no package of
+// this module but this one (TestProductionImportsArePure in internal/classify).
+type DesignStep string
+
+const (
+	// DesignStepDecisions is the root issue's decisions document.
+	DesignStepDecisions DesignStep = "decisions"
+	// DesignStepCriteria is the root issue's Verification document.
+	DesignStepCriteria DesignStep = "criteria"
+	// DesignStepSpec is the root issue's primary document, the one document the gate held before a
+	// deployment could name a list of steps.
+	DesignStepSpec DesignStep = "spec"
+)
+
+// Valid says whether step is one of the three steps. The stored column admits those three names
+// alone, so a value this refuses is one no record can hold.
+func (step DesignStep) Valid() bool {
+	return step == DesignStepDecisions || step == DesignStepCriteria || step == DesignStepSpec
+}
+
 // DesignGate records the current document version, the version a human approved, if any, with
 // where Dispatch recorded that approval (ApprovedMark, zero when the read that carried it gave
 // none), and the changes request the architect has been told of, if any: its document version, the
@@ -811,7 +842,10 @@ const (
 // marks never stand together: the one that is set is the gate's newest applied review
 // (classify.LatestReview).
 type DesignGate struct {
-	Issue              string
+	Issue string
+	// Step is the document of Issue this gate holds, and the second half of the record's key: one
+	// issue holds one gate for each step its deployment gates.
+	Step               DesignStep
 	ArtifactID         string
 	LatestVersion      int
 	ApprovedVersion    *int
@@ -819,6 +853,17 @@ type DesignGate struct {
 	ToldChangesVersion *int
 	ToldChangesReason  string
 	ToldChangesMark    EventMark
+}
+
+// SpecGate is the DesignStepSpec row of gates, nil when the issue holds none. Every reader that
+// still asks one question of one gate takes this entry: a deployment resolves `root-issues` to the
+// single step spec, so that row is the gate those readers mean.
+func SpecGate(gates map[DesignStep]DesignGate) *DesignGate {
+	gate, ok := gates[DesignStepSpec]
+	if !ok {
+		return nil
+	}
+	return &gate
 }
 
 // RootAsk is the daemon's mirror of Dispatch's state of one ask of a root, written from the ask's
@@ -877,20 +922,29 @@ const (
 // WithHuman says whether the ask is open and waits on the person.
 func (a RootAsk) WithHuman() bool { return a.Open && a.WaitingOn != "agent" }
 
-// GateRequestOf says whether the ask is an approval request of gateArtifact, the document a design
-// gate of the root is registered on.
-func (a RootAsk) GateRequestOf(gateArtifact string) bool {
-	return a.Kind == AskApproval && a.Artifact != "" && a.Artifact == gateArtifact
+// GateRequestOf says whether the ask is an approval request of one of gateArtifacts, the
+// documents design gates of the root are registered on. A root holds one gate for each step its
+// deployment gates, so a caller that means one step passes that step's document alone.
+func (a RootAsk) GateRequestOf(gateArtifacts ...string) bool {
+	if a.Kind != AskApproval || a.Artifact == "" {
+		return false
+	}
+	for _, artifact := range gateArtifacts {
+		if a.Artifact == artifact {
+			return true
+		}
+	}
+	return false
 }
 
 // PersonActSeq is the newest act of a person on the ask that would answer a root waiting on that
 // person, 0 for none: every act PersonSeq records, and an answer of the ask unless it is an
-// approval request of gateArtifact, the document the root's design gate is registered on ("" for
-// none), whose answer is a review that answers through its own artifact.* event. It reads the row's
-// own facts and the gate's document as they stand, so it gives the same whatever order the ask's
-// events, the gate's registration and its reviews arrive in.
-func (a RootAsk) PersonActSeq(gateArtifact string) int64 {
-	if a.GateRequestOf(gateArtifact) {
+// approval request of one of gateArtifacts, the documents the root's design gates are registered
+// on (none for a root with no gate), whose answer is a review that answers through its own
+// artifact.* event. It reads the row's own facts and those documents as they stand, so it gives
+// the same whatever order the ask's events, the gates' registrations and their reviews arrive in.
+func (a RootAsk) PersonActSeq(gateArtifacts ...string) int64 {
+	if a.GateRequestOf(gateArtifacts...) {
 		return a.PersonSeq
 	}
 	return max(a.PersonSeq, a.PersonAnswerSeq)
@@ -1141,14 +1195,19 @@ type Store interface {
 	// commit an earlier generation reported is never new again.
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error
-	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
-	// Gates is the design gate of each of issues, by issue, in one read: the gates of the trees
-	// whose held children one look judges (workflow's StartUnblockedChildren), rather than a read
-	// per tree under the fact lock. An issue with no gate has no entry.
-	Gates(ctx context.Context, tx pgx.Tx, issues []string) (map[string]DesignGate, error)
+	// GatesOf is every design gate issue holds, by step: one entry for each step the issue's
+	// architect has registered. An issue with no gate at all gives an empty map, and a step with
+	// no row has no entry.
+	GatesOf(ctx context.Context, tx pgx.Tx, issue string) (map[DesignStep]DesignGate, error)
+	// Gates is the design gates of each of issues, by issue and then step, in one read: the gates
+	// of the trees whose held children one look judges (workflow's StartUnblockedChildren), rather
+	// than a read per tree under the fact lock. An issue with no gate has no entry.
+	Gates(ctx context.Context, tx pgx.Tx, issues []string) (map[string]map[DesignStep]DesignGate, error)
 	// GatesForArtifact is every gate registered on artifactID, in issue order: the document owner's
-	// gate and each copy a hand-over carried to a child of its tree.
+	// gate and each copy a hand-over carried to a child of its tree. Each row carries its own step.
 	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
+	// PutGate writes one gate row, keyed by its issue and its step. A gate built with no step is
+	// written as DesignStepSpec (Postgres.PutGate).
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
 	// RootAsk is the mirror row of ask on issue, nil when it has none.
 	RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*RootAsk, error)

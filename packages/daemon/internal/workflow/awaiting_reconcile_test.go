@@ -27,6 +27,13 @@ func awaitRootView() awaitView {
 	}
 }
 
+// specGates is gate as the one row an issue holds, under the spec step: what a deployment that
+// resolves `root-issues` to the single step spec records.
+func specGates(gate record.DesignGate) map[record.DesignStep]record.DesignGate {
+	gate.Step = record.DesignStepSpec
+	return map[record.DesignStep]record.DesignGate{record.DesignStepSpec: gate}
+}
+
 // decideAwait is the whole rule for whether a root waits on a person, checked in one order and
 // from the record alone. Each row below is one reason it does not, and the last is the wait.
 func TestDecideAwaitsTable(t *testing.T) {
@@ -73,12 +80,12 @@ func TestDecideAwaitsTable(t *testing.T) {
 		{"a person who already acted after the hand-back", func(v *awaitView) { v.Asks[0].PersonSeq = 7 }, actTellInPlace, "already acted"},
 		{"a person who acted before it", func(v *awaitView) { v.Asks[0].PersonSeq = 4 }, actEnter, "awaiting an answer"},
 		{"a person's answer of the gate's approval request after it", func(v *awaitView) {
-			v.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 1}
+			v.Gates = specGates(record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 1})
 			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: gateDoc, Seq: 7,
 				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7})
 		}, actEnter, "awaiting an answer"},
 		{"a person's answer of another document's approval request after it", func(v *awaitView) {
-			v.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 1}
+			v.Gates = specGates(record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 1})
 			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-plan", Kind: record.AskApproval, Artifact: "artifact-plan", Seq: 7,
 				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7})
 		}, actTellInPlace, "already acted"},
@@ -116,8 +123,8 @@ func TestDecideAwaitsOnTheGate(t *testing.T) {
 	gateView := func() awaitView {
 		view := awaitRootView()
 		view.Asks = []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Open: true, WaitingOn: "human", Seq: 5}}
-		view.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4}
-		view.Armed = true
+		view.Gates = specGates(record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+		view.Steps = []record.DesignStep{record.DesignStepSpec}
 		return view
 	}
 	for _, tc := range []struct {
@@ -131,13 +138,19 @@ func TestDecideAwaitsOnTheGate(t *testing.T) {
 			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, WaitingOn: "human", ByTree: true, Seq: 3})
 		}, actEnter, "spec version 4"},
 		{"the request on the agent's turn", func(v *awaitView) { v.Asks[0].WaitingOn = "agent" }, actTakeIn, "still with the person"},
-		{"the request of a gate already open", func(v *awaitView) { v.Gate.ApprovedVersion = &approved }, actTakeIn, "still with the person"},
-		{"the request with the design gate off", func(v *awaitView) { v.Armed = false }, actTakeIn, "still with the person"},
+		{"the request of a gate already open", func(v *awaitView) {
+			gate := v.Gates[record.DesignStepSpec]
+			gate.ApprovedVersion = &approved
+			v.Gates = specGates(gate)
+		}, actTakeIn, "still with the person"},
+		{"the request where the deployment gates no step", func(v *awaitView) { v.Steps = nil }, actTakeIn, "still with the person"},
 		{"an approval request of another document", func(v *awaitView) { v.Asks[0].Artifact = "artifact-other" }, actTakeIn, "still with the person"},
 		{"a person's reply on the request after the hand-back", func(v *awaitView) { v.Asks[0].PersonSeq = 7 }, actTellInPlace, "already acted"},
 		{"a changes request the gate already told after the hand-back", func(v *awaitView) {
 			reason := "say more"
-			v.Gate.ToldChangesVersion, v.Gate.ToldChangesReason, v.Gate.ToldChangesMark = &approved, reason, record.EventMark{Seq: 7}
+			gate := v.Gates[record.DesignStepSpec]
+			gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = &approved, reason, record.EventMark{Seq: 7}
+			v.Gates = specGates(gate)
 		}, actEnter, "spec version 4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

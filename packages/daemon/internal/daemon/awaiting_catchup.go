@@ -41,16 +41,17 @@ import (
 // saw an event of — has the request Dispatch shows open on its document mirrored, which declares
 // the architect's hand-back when the request waits on the person (workflow's gateRequestFound).
 
-// catchUpRoot is one root the boot's catch-up reads: its record, its design gate (nil for none),
-// its cursor (cursor, and whether it has one at all), and whether the mirror holds an approval
-// request of its gate's document (mirrored).
+// catchUpRoot is one root the boot's catch-up reads: its record, the design gates it holds, one
+// for each step registered (gates, in step order, empty for none), its cursor (cursor, and
+// whether it has one at all), and the documents whose approval request the mirror already holds
+// (mirrored).
 type catchUpRoot struct {
 	issue     record.Issue
-	gate      *record.DesignGate
+	gates     []record.DesignGate
 	cursor    int64
 	hasCursor bool
-	// mirrored says whether the asks' mirror holds an approval request of the gate's document.
-	mirrored bool
+	// mirrored holds each gate document the asks' mirror already holds an approval request of.
+	mirrored map[string]bool
 }
 
 // catchUpAttempts is how many times the boot's catch-up of one root reads Dispatch again when
@@ -151,20 +152,30 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 			if !w.catchesUp(issue, slotted) {
 				continue
 			}
-			root := catchUpRoot{issue: issue}
-			if root.gate, err = w.records.Gate(listing, tx, issue.Key); err != nil {
+			root := catchUpRoot{issue: issue, mirrored: map[string]bool{}}
+			gates, err := w.records.GatesOf(listing, tx, issue.Key)
+			if err != nil {
 				return err
+			}
+			for _, step := range []record.DesignStep{record.DesignStepDecisions, record.DesignStepCriteria, record.DesignStepSpec} {
+				if gate, ok := gates[step]; ok {
+					root.gates = append(root.gates, gate)
+				}
 			}
 			if root.cursor, root.hasCursor, err = w.records.CaughtUpSeq(listing, tx, issue.Key); err != nil {
 				return err
 			}
-			if root.gate != nil {
+			if len(root.gates) > 0 {
 				asks, err := w.records.RootAsks(listing, tx, []string{issue.Key})
 				if err != nil {
 					return err
 				}
 				for _, ask := range asks[issue.Key] {
-					root.mirrored = root.mirrored || ask.GateRequestOf(root.gate.ArtifactID)
+					for _, gate := range root.gates {
+						if ask.GateRequestOf(gate.ArtifactID) {
+							root.mirrored[gate.ArtifactID] = true
+						}
+					}
 				}
 			}
 			roots = append(roots, root)
@@ -323,23 +334,31 @@ func catchUpFrom(root catchUpRoot) (int64, bool) {
 	return root.issue.HandoutSeq, true
 }
 
-// bindGateRequest reads the approval of a root's gate whose document has no approval request in the
-// mirror and, when Dispatch shows one open, applies it (intake.GateRequestFound) at since, the
-// issue's sequence read before it.
+// bindGateRequest reads, for each gate of a root whose document has no approval request in the
+// mirror, Dispatch's approval of that document and, when Dispatch shows a request open, applies
+// it (intake.GateRequestFound) at since, the issue's sequence read before it.
 func (w *workflowRuntime) bindGateRequest(ctx context.Context, root catchUpRoot, since int64) error {
-	if root.gate == nil || root.mirrored || since <= 0 {
+	if since <= 0 {
 		return nil
 	}
-	approval, err := w.dispatch.Approval(ctx, root.gate.ArtifactID)
-	if err != nil {
-		return fmt.Errorf("read the approval of %s for %s: %w", root.gate.ArtifactID, root.issue.Key, err)
+	for _, gate := range root.gates {
+		if root.mirrored[gate.ArtifactID] {
+			continue
+		}
+		approval, err := w.dispatch.Approval(ctx, gate.ArtifactID)
+		if err != nil {
+			return fmt.Errorf("read the approval of %s for %s: %w", gate.ArtifactID, root.issue.Key, err)
+		}
+		if approval.AskID == "" {
+			continue
+		}
+		fact := intake.GateRequestFound{Issue: root.issue.Key, Generation: root.issue.Generation, ArtifactID: gate.ArtifactID,
+			RequestAsk: approval.AskID, WaitsOnAgent: approval.WaitingOn == "agent", Since: since}
+		if err := w.applyCatchUp(ctx, fmt.Sprintf("gate-request:%s:%d:%s:%d", root.issue.Key, root.issue.Generation, approval.AskID, since), fact); err != nil {
+			return err
+		}
 	}
-	if approval.AskID == "" {
-		return nil
-	}
-	fact := intake.GateRequestFound{Issue: root.issue.Key, Generation: root.issue.Generation, ArtifactID: root.gate.ArtifactID,
-		RequestAsk: approval.AskID, WaitsOnAgent: approval.WaitingOn == "agent", Since: since}
-	return w.applyCatchUp(ctx, fmt.Sprintf("gate-request:%s:%d:%s:%d", root.issue.Key, root.issue.Generation, approval.AskID, since), fact)
+	return nil
 }
 
 // catchUpWindow applies every ask event (an ask.edited one when it moved an approval request),

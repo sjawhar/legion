@@ -77,8 +77,8 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 			issue := record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"}
 			if tc.readyPending {
-				pending := 4
-				issue.ReadyPendingVersion = &pending
+				pending, step := 4, record.DesignStepSpec
+				issue.ReadyPendingVersion, issue.ReadyPendingStep = &pending, &step
 			}
 			seedIssue(t, pool, issue)
 			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
@@ -1014,7 +1014,7 @@ func TestAHeadTheBranchReturnsToIsHeldAndDecidedAgain(t *testing.T) {
 			var logged bytes.Buffer
 			at := func(d time.Duration) *Engine {
 				return New(record.NewStore(), Config{
-					Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: "merge-queue", Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+					Project: "LEGION", Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), MergeQueueRole: "merge-queue", Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 					Clock: func() time.Time { return start.Add(d) },
 				}, slog.New(slog.NewTextHandler(&logged, nil)))
 			}

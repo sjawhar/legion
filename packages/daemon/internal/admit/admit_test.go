@@ -677,13 +677,14 @@ func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) 
 func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const key, artifact = "LEGION-LINGER", "4f2a9c1e-8b3d-4e7f-9a60-2c5d8e1b7f34"
 	until, pending, approved := fixedNow.Add(time.Hour), 1, 1
-	putIssue(t, pool, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "lingering", Tree: key, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, ReadyPendingVersion: &pending})
+	step := record.DesignStepSpec
+	putIssue(t, pool, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "lingering", Tree: key, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, ReadyPendingVersion: &pending, ReadyPendingStep: &step})
 	const child = "LEGION-2"
 	parent := key
-	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "child", Tree: key, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending})
+	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "child", Tree: key, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending, ReadyPendingStep: &step})
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		ctx := context.Background()
@@ -714,8 +715,8 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		if pr, err := records.PullRequest(context.Background(), tx, key); err != nil || pr != nil {
 			t.Fatalf("generation 2 pull request = %#v, %v; want none", pr, err)
 		}
-		if gate, err := records.Gate(context.Background(), tx, key); err != nil || gate != nil {
-			t.Fatalf("generation 2 gate = %#v, %v; want none until its architect registers", gate, err)
+		if gates, err := records.GatesOf(context.Background(), tx, key); err != nil || len(gates) != 0 {
+			t.Fatalf("generation 2 gates = %#v, %v; want none until its architect registers", gates, err)
 		}
 		rows, err := records.Phases(context.Background(), tx, key)
 		if err != nil {
@@ -774,7 +775,7 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child, artifact = "LEGION-1", "LEGION-2", "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26"
 			approved := 1
 			seedSlotted(t, pool, root, "A")
@@ -946,12 +947,12 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		gate, err := records.Gate(context.Background(), tx, "LEGION-CHILD")
+		gates, err := records.GatesOf(context.Background(), tx, "LEGION-CHILD")
 		if err != nil {
 			t.Fatalf("read the child's gate: %v", err)
 		}
-		if gate != nil {
-			t.Errorf("the child kept the last generation's design gate: %#v", gate)
+		if len(gates) != 0 {
+			t.Errorf("the child kept the last generation's design gate: %#v", gates)
 		}
 		phases, err := records.Phases(context.Background(), tx, "LEGION-CHILD")
 		if err != nil {

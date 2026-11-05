@@ -614,10 +614,11 @@ func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		gate, err := records.Gate(ctx, tx, "CAPTURE-100")
+		gates, err := records.GatesOf(ctx, tx, "CAPTURE-100")
 		if err != nil {
 			return err
 		}
+		gate := record.SpecGate(gates)
 		if got.Phase != phase.Planning || !classify.DesignGateOpen(*gate) {
 			t.Errorf("Dispatch shows version 4 approved; recovered phase=%s gate=%#v, want planning with the gate open", got.Phase, gate)
 		}

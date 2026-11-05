@@ -36,7 +36,12 @@ type Config struct {
 	// one spelling of the project and a wake can file no row under another. Nil, as in every
 	// engine built without the pod tables, wakes nothing and records no listener report.
 	Pods           Pods
-	DesignGate     config.DesignGate
+	// Steps are the design-gate steps the deployment gates (config.Gates.Steps), in the order a
+	// root's architect takes them. Every hold the gate puts on a tree's work reads the whole list
+	// (classify.DesignGatesOpen), and the empty list gates no step, which is `gates.design: off`.
+	// A nil list takes the shipped default, the one step spec, as the unset policy word did
+	// (New).
+	Steps          []record.DesignStep
 	ReviewRoundCap int
 	MaxFixAttempts int
 	Linger         time.Duration
@@ -89,7 +94,9 @@ var _ intake.Handler = (*Engine)(nil)
 
 // New constructs a workflow engine with the shipped review and fix caps when callers omit them.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
-	cfg.DesignGate = cfg.DesignGate.OrDefault()
+	if cfg.Steps == nil {
+		cfg.Steps = []record.DesignStep{record.DesignStepSpec}
+	}
 	if cfg.ReviewRoundCap <= 0 {
 		cfg.ReviewRoundCap = 3
 	}
@@ -509,11 +516,11 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 			"issue", child.Key, "tree", child.Tree, "blockers", waits)
 		return nil
 	}
-	gate, err := e.store.Gate(ctx, tx, root.Key)
+	gates, err := e.store.GatesOf(ctx, tx, root.Key)
 	if err != nil {
 		return err
 	}
-	if gate != nil && classify.DesignGateOpen(*gate) && !root.AwaitingPerson() {
+	if classify.DesignGatesOpen(e.cfg.Steps, gates) && !root.AwaitingPerson() {
 		return e.gateOpened(ctx, tx, child)
 	}
 	return nil
@@ -604,21 +611,22 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
 	case phase.Merging:
-		gate, err := e.gateForIssue(ctx, tx, *issue)
+		gates, err := e.store.GatesOf(ctx, tx, issue.Tree)
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if gate == nil || !classify.DesignGateOpen(*gate) {
-			// With a gate, the refusal records the version a human must approve, and the approval
-			// of that version advances the merge without a second READY. With no gate there is no
-			// version to wait for: the issues table takes only a positive one, and writing zero
-			// failed the whole fact on its check constraint instead of committing this refusal.
-			message := "READY refused: no design version is approved; register and approve the tree's spec before requesting READY."
+		if step, gate, closed := classify.FirstClosedStep(e.cfg.Steps, gates); closed {
+			// The refusal names the step the READY waits on and, when that step is registered,
+			// the version a human must approve; the approval of that version advances the merge
+			// without a second READY. An unregistered step has no version to wait for: the issues
+			// table takes only a positive one, and writing zero failed the whole fact on its check
+			// constraint instead of committing this refusal.
+			message := fmt.Sprintf("READY refused: no design version of the tree's %s document is approved; register and approve it before requesting READY.", step)
 			version := 0
-			if gate != nil {
+			if gate.LatestVersion > 0 {
 				version = gate.LatestVersion
-				issue.ReadyPendingVersion = &version
-				message = fmt.Sprintf("READY refused: approve design version %d before requesting READY.", version)
+				issue.ReadyPendingVersion, issue.ReadyPendingStep = &version, &step
+				message = fmt.Sprintf("READY refused: approve design version %d of the tree's %s document before requesting READY.", version, step)
 			}
 			if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 				return intake.Result{}, err
@@ -879,7 +887,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// A READY the gate refused belongs to the merging phase it was sent in: leaving that phase by
 	// any trigger voids it, so a later approval never advances the next merger's phase on it.
 	if from == phase.Merging {
-		issue.ReadyPendingVersion = nil
+		issue.ReadyPendingVersion, issue.ReadyPendingStep = nil, nil
 	}
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err
@@ -979,7 +987,9 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 	return Row{}, false
 }
 
-// advanceAdmittedTree starts every member of root's tree the opening of its design gate releases.
+// advanceAdmittedTree starts every member of root's tree the opening of its design gates
+// releases: gates is every gate the root holds by its step, and every step the deployment
+// requires must be open (classify.DesignGatesOpen) before any member starts.
 // A child that waits on an unfinished Dispatch issue is not one of them (blockers.Holds): the
 // gate it was held by is its tree's, the issues it waits on are its own, and only
 // StartUnblockedChildren, when the last of them closes, starts it.
@@ -989,8 +999,8 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 // its tree runs, and a blocker added to a tree already running never re-checks it. Held here, it
 // would hold its slot with nothing left to start it — StartUnblockedChildren starts children, and
 // the state's `blocked` names no slotted root — so it would be neither started nor reported.
-func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gate record.DesignGate) error {
-	if root.AwaitingPerson() || !classify.DesignGateOpen(gate) {
+func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gates map[record.DesignStep]record.DesignGate) error {
+	if root.AwaitingPerson() || !classify.DesignGatesOpen(e.cfg.Steps, gates) {
 		return nil
 	}
 	members, err := e.treeMembers(ctx, tx, root)
@@ -1115,8 +1125,7 @@ func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []
 	}
 	starts := make(map[string]bool, len(trees))
 	for _, tree := range open {
-		gate, held := gates[tree]
-		starts[tree] = held && classify.DesignGateOpen(gate)
+		starts[tree] = classify.DesignGatesOpen(e.cfg.Steps, gates[tree])
 	}
 	return starts, nil
 }
@@ -1227,10 +1236,6 @@ func (e *Engine) ownPullRequest(ctx context.Context, tx pgx.Tx, pr *record.PullR
 // never from the project's whole record.
 func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) ([]record.Issue, error) {
 	return e.store.TreeIssues(ctx, tx, root.Tree)
-}
-
-func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
-	return e.store.Gate(ctx, tx, issue.Tree)
 }
 
 func phaseIndex(value phase.Phase) int {

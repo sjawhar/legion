@@ -46,7 +46,7 @@ func (s projectionStore) Phases(_ context.Context, _ pgx.Tx, issue string) ([]re
 func (s projectionStore) PullRequest(_ context.Context, _ pgx.Tx, issue string) (*record.PullRequest, error) {
 	return s.pullRequests[issue], nil
 }
-func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate, error) {
+func (projectionStore) GatesOf(context.Context, pgx.Tx, string) (map[record.DesignStep]record.DesignGate, error) {
 	return nil, nil
 }
 func (s projectionStore) OpenProductionChecks(context.Context, pgx.Tx) ([]record.ProductionCheck, error) {
