@@ -96,10 +96,22 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// MarkWait is how long a mark the browser says it wrote is waited for before the server
+	// answers that the document does not hold it, zero for the document service's own 1 s; only
+	// DISPATCH_TEST_MARK_WAIT, under the test hooks, sets it.
+	MarkWait time.Duration
+	// UnrecordedMarkTTL is how long a mark no row records is kept before the settlement sweep
+	// expires it, zero for the document service's own minute; only
+	// DISPATCH_TEST_UNRECORDED_MARK_TTL, under the test hooks, sets it.
+	UnrecordedMarkTTL time.Duration
 	// RouteRosterTTL is how long a stored listener answer serves issue reads' route_status, zero
 	// for the server's own five seconds; only DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks,
 	// sets it.
 	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow is how long a sender keeps trying a listener that is being replaced,
+	// zero for the server's own twelve seconds; only DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW, under
+	// the test hooks, sets it.
+	ListenerTakeoverWindow time.Duration
 	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
@@ -108,6 +120,10 @@ type bootConfig struct {
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
 	ListenerRosterUncached bool
+	// EmbedderOff builds no embedder, whatever DISPATCH_EMBEDDER and the AWS SDK's own variables
+	// would have built: meaning search answers keyword-only and the embedding queue does nothing.
+	// Only DISPATCH_TEST_EMBEDDER_OFF=1, under the test hooks, sets it.
+	EmbedderOff bool
 	// ReconcileAtStart makes the delivery reconcile run one pass as it starts rather than only after
 	// its jittered first tick; only DISPATCH_TEST_RECONCILE_AT_START=1, under the test hooks, sets
 	// it.
@@ -266,6 +282,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// document_search (migration 20261101182447) holds each document's latest search vector,
+	// 20261101182454's trigger keeps it in step from the deploy on, and this fills it for the
+	// documents stored before that. It runs here, in committed batches, rather than as migration
+	// 20261101182501: one transaction over artifact_versions measured 35.5 s on a
+	// production-shaped database, and 20261101182454's trigger makes every concurrent version
+	// write to a document the pass has already written wait that whole transaction out
+	// (20261101182501's comment holds the measurement).
+	//
+	// A failure stops the boot, unlike the count below: this release's search reads
+	// document_search alone, so a process that served with the table unfilled would answer a
+	// search with documents missing. The rolling deploy keeps that correct - the release
+	// before this one serves every request until this process has filled the table and begins
+	// serving.
+	if filled, err := database.FillDocumentSearch(ctx); err != nil {
+		slog.Error("dispatch: fill document_search for the documents stored before this release", "error", err)
+		os.Exit(1)
+	} else if filled > 0 {
+		slog.Info("dispatch: filled document_search for the documents stored before this release", "rows", filled)
+	}
+
 	// asks_anchor_artifact_id (migration 0148) indexes the anchors whose artifact_id is a
 	// lower-case document id, the form every server-written anchor carries. A row an earlier
 	// release stored with another spelling is left out, and settlement records no mark for it:
@@ -335,12 +371,14 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
-		Store:           database,
-		Events:          broker,
-		Identity:        requestIdentity,
-		ServerURL:       serverURL,
-		Settle:          boot.SettleDelay,
-		EditNoticeQuiet: boot.EditNoticeQuiet,
+		Store:             database,
+		Events:            broker,
+		Identity:          requestIdentity,
+		ServerURL:         serverURL,
+		Settle:            boot.SettleDelay,
+		MarkWait:          boot.MarkWait,
+		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
+		EditNoticeQuiet:   boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
@@ -364,10 +402,18 @@ func main() {
 	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
 	// the default place, finds no AWS region/credentials at boot - a CI job or a devbox with no
 	// AWS_REGION set - which newEmbedder logs as a warning rather than a reason to refuse to boot.
-	embedder, err := newEmbedder(ctx, boot.Embedder)
-	if err != nil {
-		slog.Error("dispatch: build the embedder", "error", err)
-		os.Exit(1)
+	// DISPATCH_TEST_EMBEDDER_OFF=1 is the same nil without that check, for a test process that
+	// does have the variables and no model service to spend them on.
+	var embedder embed.Embedder
+	if boot.EmbedderOff {
+		slog.Warn("dispatch: meaning search unavailable", "error", "DISPATCH_TEST_EMBEDDER_OFF=1")
+	} else {
+		client, err := newEmbedder(ctx, boot.Embedder)
+		if err != nil {
+			slog.Error("dispatch: build the embedder", "error", err)
+			os.Exit(1)
+		}
+		embedder = client
 	}
 
 	built := routes.AppContextOptions{
@@ -902,24 +948,27 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		target *time.Duration
 	}{
 		{"DISPATCH_TEST_SETTLE_DELAY", &boot.SettleDelay},
+		{"DISPATCH_TEST_MARK_WAIT", &boot.MarkWait},
+		{"DISPATCH_TEST_UNRECORDED_MARK_TTL", &boot.UnrecordedMarkTTL},
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
+		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
 			return bootConfig{}, err
 		}
 	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_ROSTER_UNCACHED")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED")
+	for _, setting := range []struct {
+		name   string
+		target *bool
+	}{
+		{"DISPATCH_TEST_ROSTER_UNCACHED", &boot.ListenerRosterUncached},
+		{"DISPATCH_TEST_EMBEDDER_OFF", &boot.EmbedderOff},
+		{"DISPATCH_TEST_RECONCILE_AT_START", &boot.ReconcileAtStart},
+	} {
+		if err := testHookBool(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
+			return bootConfig{}, err
 		}
-		boot.ListenerRosterUncached = raw == "1"
-	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_RECONCILE_AT_START")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_RECONCILE_AT_START")
-		}
-		boot.ReconcileAtStart = raw == "1"
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
@@ -1286,6 +1335,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
 	built.RouteRosterTTL = boot.RouteRosterTTL
+	built.ListenerTakeoverWindow = boot.ListenerTakeoverWindow
 	built.ListenerRosterUncached = boot.ListenerRosterUncached
 	built.DevSignIn = boot.DevSignIn
 	return built
@@ -1570,6 +1620,22 @@ func testHookDuration(env settingValues, name string, testHooksEnabled bool, tar
 		return fmt.Errorf("%s=%q (expected a positive Go duration)", name, raw)
 	}
 	*target = value
+	return nil
+}
+
+// testHookBool reads the test-only yes/no setting name into target, leaving target as it is when
+// the setting is unset. Such a setting is refused without DISPATCH_TEST_HOOKS=1; set, only "1"
+// turns the hook on, so a value meant as a yes in another spelling leaves it off rather than
+// quietly changing the server a test reads.
+func testHookBool(env settingValues, name string, testHooksEnabled bool, target *bool) error {
+	raw := strings.TrimSpace(env.get(name))
+	if raw == "" {
+		return nil
+	}
+	if !testHooksEnabled {
+		return fmt.Errorf("DISPATCH_TEST_HOOKS=1 required with %s", name)
+	}
+	*target = raw == "1"
 	return nil
 }
 

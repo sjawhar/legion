@@ -1,10 +1,22 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
+
 import { createAsk, createIssue, createProject } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const session = { actor: { id: "e2e-nav", kind: "session" as const }, as: "agent" as const };
+
+/** Counts the answers to `path` the page took that were not ok, so a row can wait for a refusal
+ *  the page has had before it runs the clock over that refusal's retry wait. */
+function failedReads(page: Page, path: string): () => number {
+  let refused = 0;
+  page.on("response", (response) => {
+    if (new URL(response.url()).pathname === path && !response.ok()) refused += 1;
+  });
+  return () => refused;
+}
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -90,6 +102,7 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
   const page = await context.newPage();
 
   try {
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
     await expect(page).toHaveTitle(`${issue.key} · ${issue.title} · Dispatch`);
     await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
@@ -121,7 +134,15 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
     await expect(page.getByRole("tab", { name: "Decisions" })).toBeFocused();
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/decisions$`));
 
+    // A read the server answers 404 is asked again twice, QUERY_RETRY_DELAY_MS apart
+    // (web/src/api/query-client.ts), before the page says the issue is missing: the clock runs
+    // those two waits once the page has taken each refusal.
+    const missing = failedReads(page, "/api/v1/issues/CORE-999");
     await page.goto("/issues/CORE-999");
+    for (const refusal of [1, 2]) {
+      await expect.poll(missing, { intervals: [50, 50, 100, 200, 500] }).toBe(refusal);
+      await page.clock.runFor(QUERY_RETRY_DELAY_MS + 50);
+    }
     await expect(page.getByRole("heading", { name: "Issue not found" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Back to inbox" })).toBeVisible();
 
@@ -161,6 +182,30 @@ test("the needs-you count is the same badge in the phone top bar and the drawer 
     const drawer = page.getByRole("link", { name: /Inbox/ }).getByText("Needs you 1");
     await expect(drawer).toBeVisible();
     expect(topBarFill).toBe(await fill(drawer));
+  } finally {
+    await context.close();
+  }
+});
+
+test("the rail's New issue button opens the create dialog, preselecting the page's project", async ({
+  browser,
+}) => {
+  // ARC sorts first in the project list the dialog falls back to, so only the route's own
+  // project can make the selector read CORE.
+  await createProject({ key: "ARC", name: "Archive" });
+  await createProject({ key: "CORE", name: "Core" });
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE");
+    await page
+      .getByRole("complementary", { name: "Navigation" })
+      .getByRole("button", { name: "New issue" })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Create issue" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Title" })).toBeFocused();
+    await expect(dialog.getByRole("combobox", { name: "Project" })).toHaveValue("CORE");
   } finally {
     await context.close();
   }

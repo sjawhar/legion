@@ -66,6 +66,14 @@ export const REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
 /** The listener refuses a replay of more subjects than this with a 400. */
 const REPLAY_MAX_SUBJECTS = 32;
 
+/**
+ * How long `startCursors` waits for the stream's position. A read with no `after` returns no
+ * messages, so a listener that answers at all answers well within this; one that does not is
+ * treated as a failed read, which falls back safely, rather than hold up the registration behind
+ * it for the 10 s a full replay page may take.
+ */
+const START_CURSORS_TIMEOUT_MS = 2_000;
+
 /** The dedupe key the listener's role arbiter marks a role-lane forward with. */
 const ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
 
@@ -85,11 +93,15 @@ export type ReplayLedgerEntry = z.infer<typeof ReplayLedgerEntrySchema>;
 /**
  * A followed subject's place in the stream: `since`, the sequence the session started following
  * it at, and `after`, the last sequence handled. Both are absent until the first sweep that reads
- * the subject after it was followed.
+ * the subject after it was followed. `from_start`, when the engine's clock read it, marks the
+ * session's own agent subject whose start could not be read when the session registered
+ * (`startCursors`): its first sweep reads it from the oldest message the stream holds, and its
+ * cursor starts there.
  */
 export const ReplayCursorSchema = z.object({
   since: z.number().int().nonnegative().optional(),
   after: z.number().int().nonnegative().optional(),
+  from_start: z.number().int().nonnegative().optional(),
 });
 
 export type ReplayCursor = z.infer<typeof ReplayCursorSchema>;
@@ -334,6 +346,28 @@ export interface ReplayEngine {
    * at once, so an unfollow survives a restart that comes before the next sweep.
    */
   followedChanged(): Promise<void>;
+  /**
+   * Starts at the stream's end, now, the cursor of every followed subject that has none, reading
+   * no message and changing no cursor already set. A session that registers while it cannot open
+   * its subscriptions (NATS down) calls it first: the listener stores what is sent to it then and
+   * pushes nothing, and those messages come after the cursors, so the first sweep once the session
+   * is open shows them. Unlike a sweep it drops no cursor of a subject not followed now. A subject
+   * the listener refuses keeps no cursor, as a sweep leaves it. It runs one at a time with sweeps
+   * and never rejects.
+   *
+   * A read that fails marks the session's own agent subject, if it has no cursor, `from_start`, and
+   * writes that at once: everything the stream holds on it is the session's (a fresh session id has
+   * no older messages), so its first sweep reads it from the oldest one rather than from the
+   * stream's end. A followed topic gets no such mark: nothing tells which of its messages came
+   * before the session followed it, so the first sweep starts it at the stream's end, as before.
+   */
+  startCursors(): Promise<void>;
+  /**
+   * Whether a followed subject still waits for the first sweep that reads it from the stream's
+   * oldest message (`from_start`). While one does, the host asks for no consumer delivery: a
+   * consumer seeded from the cursors would start past what the sweep owes.
+   */
+  startPending(): boolean;
   /** Whether the ledger holds the frame: a live repeat of it after a restart is dropped. */
   delivered(frame: DedupeIdentity): boolean;
   /**
@@ -504,6 +538,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       subjects[subject] = {
         ...(cursor.since === undefined ? {} : { since: cursor.since }),
         ...(!afters || cursor.after === undefined ? {} : { after: cursor.after }),
+        ...(cursor.from_start === undefined ? {} : { from_start: cursor.from_start }),
       };
     }
     return JSON.stringify({
@@ -753,7 +788,11 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     syncFollowed();
     const readings = new Map<string, Reading>();
     for (const [subject, cursor] of cursors) {
-      readings.set(subject, { read: cursor.after, more: true });
+      // A subject marked `from_start` is read from the stream's oldest message (`after` 0).
+      readings.set(subject, {
+        read: cursor.from_start === undefined ? cursor.after : 0,
+        more: true,
+      });
     }
     const buffer = new Map<number, Buffered>();
     const holes = new Map<string, number>();
@@ -860,6 +899,24 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       }
 
       for (const [, reading] of asking) reading.more = false;
+      // A subject marked `from_start` starts its cursor just before the oldest message the stream
+      // holds. The stream drops messages only by age (its age limit is the duplicate window; a full
+      // stream refuses new ones rather than drop stored ones), so a mark younger than that window
+      // lost nothing to retention: what lies below the oldest message predates the session, and
+      // no gap is noticed. An older mark may have lost a message stored after it, and its reading
+      // is left at 0 for the gap check below, which notices it as any other gap.
+      // The mark is gone from here on, and the change is written with this page's cursors.
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        const markedAt = cursors.get(result.subject)?.from_start;
+        if (reading === undefined || markedAt === undefined || result.refused !== undefined) {
+          continue;
+        }
+        const start = Math.max(0, stream.first_seq - 1);
+        cursors.set(result.subject, { since: start, after: start });
+        cursorStarts.set(result.subject, now());
+        if (now() - markedAt < DELIVERY_DUPLICATE_WINDOW_MS) reading.read = start;
+      }
       // Retention dropped messages below `first_seq` before a cursor read them. Nothing below it
       // can be read on any subject, so each such cursor moves to just before it, skipping nothing,
       // and that move is written with the notice pending before it is raised: a resume neither
@@ -972,8 +1029,82 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     return rerun;
   };
 
+  // Whether a cursor already has a start: a place in the stream, or the `from_start` mark, which
+  // starts early enough and keeps that start.
+  const started = (cursor: ReplayCursor | undefined): boolean =>
+    cursor?.after !== undefined || cursor?.from_start !== undefined;
+
+  const startOnce = async (): Promise<void> => {
+    const binding = bind();
+    if (binding === undefined) return;
+    const { sessionID, alive } = binding;
+    // The followed subjects are read, never synced: a topic restored from the transcript is
+    // followed again only once its subscription reopens, and its cursor must still be there then.
+    const unstarted = [...new Set(host.followedSubjects())].filter(
+      (subject) => !started(cursors.get(subject))
+    );
+    let changed = false;
+    for (let index = 0; index < unstarted.length; index += REPLAY_MAX_SUBJECTS) {
+      let response: ReplayResult;
+      try {
+        response = await transport.replay({
+          sessionID,
+          subjects: unstarted
+            .slice(index, index + REPLAY_MAX_SUBJECTS)
+            .map((subject): ReplaySubjectInput => ({ subject })),
+          timeoutMs: START_CURSORS_TIMEOUT_MS,
+        });
+      } catch (error) {
+        if (!alive()) return;
+        // The session registers all the same. What is stored for it from now on must still reach
+        // it: its own agent subject holds only messages for this session, so it is read from the
+        // stream's oldest message once the session is open. A followed topic has no such bound.
+        const own = `${AGENT_TOPIC_PREFIX}${sessionID}`;
+        const marked = unstarted.includes(own) && !started(cursors.get(own));
+        if (marked) {
+          cursors.set(own, { from_start: now() });
+          changed = true;
+        }
+        log(
+          marked
+            ? `replay: could not read the stream's position for ${own} before registering while the session's NATS connection is down; its first sweep once the connection is back reads it from the stream's oldest message, so what is stored for it meanwhile is shown`
+            : "replay: could not read the stream's position before registering while the session's NATS connection is down; the first sweep starts the cursors instead",
+          error
+        );
+        break;
+      }
+      if (!alive()) return;
+      const { stream } = response;
+      // A stream that replaced the one the cursors were read on is the first sweep's to handle.
+      if (streamReplaced(stream)) break;
+      streamID = stream.id ?? streamID;
+      streamCreated = stream.created;
+      const at = now();
+      for (const result of response.subjects) {
+        if (result.refused !== undefined || started(cursors.get(result.subject))) continue;
+        cursors.set(result.subject, { since: result.next_after, after: result.next_after });
+        cursorStarts.set(result.subject, at);
+        changed = true;
+      }
+    }
+    if (changed) await flush(alive, true);
+  };
+
+  const startCursors = async (): Promise<void> => {
+    // In the sweeps' one slot: a sweep queued meanwhile runs after it, as after another sweep.
+    while (running !== undefined) await running;
+    running = startOnce()
+      .catch((error: unknown) => log("replay: starting the cursors failed", error))
+      .finally(() => {
+        running = undefined;
+      });
+    await running;
+  };
+
   return {
     sweep,
+    startCursors,
+    startPending: () => [...cursors.values()].some((cursor) => cursor.from_start !== undefined),
     setConsumerMode(on) {
       consumerMode = on;
     },
