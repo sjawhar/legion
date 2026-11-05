@@ -9,17 +9,13 @@
 # run; `why` says which. Every script reads this file with `jq -L .github/scripts 'include
 # "ci-ok"; …'`.
 #
-# `reports` and `posted` are the one reading of the two artifact names that action uploads, given
-# the run's artifact names: the job's result, `ci-ok-<job>-<run attempt>-<success|failure|
-# cancelled>`, uploaded before anything is posted, and the marker `ci-ok-posted-<job>-<run
-# attempt>`, uploaded only once that job's ci-ok post succeeded. ci-ok-report.sh reads every
-# job's report out of the list to tell whether it is the run's last job, and
-# merge-group-report.sh reads one job's, with the marker, to tell a failure whose verdict is
-# posted from one whose post never happened. The names themselves are written in
+# `reports` is the one reading of the artifact name that action uploads, given the run's
+# artifact names: the job's result, `ci-ok-<job>-<run attempt>-<success|failure|cancelled>`,
+# uploaded before anything is posted. ci-ok-report.sh reads every job's report out of the list
+# to tell whether it is the run's last job. The name itself is written in
 # .github/actions/ci-ok-report/action.yml, which no jq here can read while a run is going, so
-# ci-ok.test.sh holds that file's two `name:` lines to these two defs: a rename that only one
-# side followed would leave every follower reading `absent` and ci-ok waiting for reports it
-# cannot see.
+# ci-ok.test.sh holds that file's `name:` line to this def: a rename that only one side
+# followed would leave ci-ok waiting for reports it cannot see.
 def selection($job; $map; $out; $pr; $event):
   $map[$job] as $output
   | ($out[$output] // "unset") as $value
@@ -36,7 +32,3 @@ def selection($job; $map; $out; $pr; $event):
 def reports($names):
   $names | map(capture("^ci-ok-(?<job>.+)-(?<attempt>[0-9]+)-(?<status>success|failure|cancelled)$") // empty);
 
-# posted($names): every posted marker in that list, as {job, attempt}. A report name ends with a
-# result word and a marker name with the attempt, so neither def reads the other's names.
-def posted($names):
-  $names | map(capture("^ci-ok-posted-(?<job>.+)-(?<attempt>[0-9]+)$") // empty);

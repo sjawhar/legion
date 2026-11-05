@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The one retry ladder the ci-ok scripts beside this file use for a GitHub call: the artifact and
-# jobs lists of ci-ok-report.sh, the check-run post of post-check-run.sh and the artifact list of
-# merge-group-report.sh. GitHub refuses a call now and then — a 502, a secondary rate limit — and
-# a single refusal must decide nothing here: ci-ok is the check main's ruleset requires, and the
-# scripts that post it and the follower that reads it all act on what one API call answered.
+# jobs lists of ci-ok-report.sh and the check-run post of post-check-run.sh. GitHub refuses a
+# call now and then — a 502, a secondary rate limit — and a single refusal must decide nothing
+# here: ci-ok is the check main's ruleset requires, and the scripts that post it act on what one
+# API call answered.
 #
 # Sourced, never run: `source "$(dirname "${BASH_SOURCE[0]}")/gh-read.sh"`.
 #

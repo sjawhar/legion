@@ -16,22 +16,19 @@ name: CI
 # deploy, are docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held
 # to the docs filter below.
 #
-# A new job joins the router in seven places: a filter in `changes` that names every file the job
+# A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
 # output carrying the term that skips it on a re-run attempt of a merge-group run (the comment
 # above `changes` says why every job needs its own), an entry in CI_OK_SELECTED_BY (this file's
 # env) mapping the job to that output (and in
 # CI_OK_PULL_REQUEST_ONLY when its `if:` admits only pull_request), the ci-ok-report step as the
 # job's last step (a job that calls a workflow passes `ci-ok-changes` to it, and that workflow's
-# job ends with the step, as docs-site.yaml's and worker-image.yaml's do), a `cancel-<job>`
-# follower named in CI_OK_EXEMPT (the comment above `cancel-started` says what it does; a job the
-# queue never runs takes none), and a gate in
+# job ends with the step, as docs-site.yaml's and worker-image.yaml's do), and a gate in
 # .github/scripts/ci_job_reads.py. An output an event must force is written in `changes`' outputs
 # rather than left to its filter, as every output's workflow_dispatch case is, and so is one an
 # event must hold back, as the nine slow suites' pull-request case is (the comment on them
 # below). The ci-filters job's .github/scripts/check-ci-filters.sh holds the filter to that gate,
-# CI_OK_SELECTED_BY to the `if:`s, the report step to every job, the re-run term to every job and
-# a follower to every job that needs one.
+# CI_OK_SELECTED_BY to the `if:`s, the report step to every job and the re-run term to every job.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no job of this workflow saves an Actions cache entry. setup-go caches nothing here
@@ -144,48 +141,16 @@ env:
       "worker-image": "worker_image"
     }
   CI_OK_PULL_REQUEST_ONLY: '["worker-image"]'
-  # The jobs outside ci-ok's accounting: each exists only to stop a merge-group run the queue has
+  # The one job outside ci-ok's accounting: it exists only to stop a merge-group run the queue has
   # already thrown away, so it runs only on `merge_group`, holds `actions: write`, runs no
   # dependency code, reports no result to ci-ok and is no job any verdict waits for.
   # check-ci-filters.sh asks none of the ci-ok rules of a job named here, and refuses one that
   # carries the ci-ok-report step: ci-ok.sh fails a result for a job CI_OK_SELECTED_BY cannot map.
-  # The 32 of them are `cancel-started`, `cancel-changes` and one follower per job ci-ok waits
-  # for on a merge-group run, written as CI_OK_SELECTED_BY above is, a JSON array over lines
-  # rather than one long one.
+  # `cancel-started` is the one of them, written as CI_OK_SELECTED_BY above is, a JSON array over
+  # lines rather than one long one.
   CI_OK_EXEMPT: |
     [
-      "cancel-started",
-      "cancel-changes",
-      "cancel-lint",
-      "cancel-ci-images",
-      "cancel-typecheck",
-      "cancel-test",
-      "cancel-docs",
-      "cancel-contracts",
-      "cancel-conflicts-script",
-      "cancel-envoy-client",
-      "cancel-pi-shared",
-      "cancel-pi-envoy",
-      "cancel-pi-legion",
-      "cancel-dispatch-ui",
-      "cancel-dispatch",
-      "cancel-dispatch-browser-multiprocess",
-      "cancel-claude-envoy",
-      "cancel-envoy-go-checks",
-      "cancel-envoy-go",
-      "cancel-envoy-infra-go",
-      "cancel-envoy-go-race",
-      "cancel-envoy-go-race-pmdoc",
-      "cancel-envoy-go-race-api",
-      "cancel-envoy-go-race-docs",
-      "cancel-dispatch-memory",
-      "cancel-dispatch-multiprocess",
-      "cancel-listener-server-change",
-      "cancel-broker-multiprocess",
-      "cancel-envoy-smoke",
-      "cancel-envoy-e2e-local",
-      "cancel-envoy-session-stall",
-      "cancel-ci-filters"
+      "cancel-started"
     ]
 
 jobs:
@@ -194,16 +159,16 @@ jobs:
   #
   # Also skipped on a re-run attempt of a merge-group run, by a term every job of this file
   # carries: `(github.event_name != 'merge_group' || github.run_attempt == '1')` in a job that
-  # runs on more than one event, and `github.run_attempt == '1'` in the cancel jobs, which run
+  # runs on more than one event, and `github.run_attempt == '1'` in `cancel-started`, which runs
   # on merge_group alone. No job may lean on this one's skip instead: `gh run rerun --failed`
   # leaves out a `changes` that succeeded and hands the attempt that job's outputs again, so an
   # `if:` testing only `needs.changes.outputs.<x> == 'true'` would run the job again in full,
   # and its report step would post a ci-ok on the dead group's head.
   # .github/scripts/check-ci-filters.sh holds every job to its term. A group is tested once:
   # the queue tests a pull request it removed again when it is added again, and a merge-group
-  # run this file's cancel acts (the comment above `cancel-started`) force-cancelled has
-  # descendants they already cancelled, so a passing re-run of it would leave those groups
-  # waiting for a ci-ok that never comes. A re-run must therefore do nothing and post nothing.
+  # run `cancel-started` or .github/workflows/dequeued.yaml force-cancelled tests a group the
+  # queue has thrown away, so a passing re-run of it would post a ci-ok on a head no queue entry
+  # waits for. A re-run must therefore do nothing and post nothing.
   changes:
     if: ${{ !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
     runs-on: ubuntu-24.04
@@ -3907,80 +3872,42 @@ jobs:
     with:
       ci-ok-changes: ${{ toJSON(needs.changes) }}
 
-  # The merge queue's cancel acts. Main's queue builds each group on top of the group below it,
-  # so when a group fails, every group built on it can no longer merge: the queue rebuilds them,
-  # while their ci.yaml merge-group runs, which nothing cancelled, run to the end and decide
-  # nothing. A doomed run's runner time is what these jobs take back. Both acts are decided by
-  # .github/scripts/merge-group-cancels.sh, which makes no GitHub call and prints, in the order
-  # to act on them, one `cancel <run id>` line per run to force-cancel, this run's own id last
-  # when the act must end it; its header says what it reads and why:
+  # The merge queue's cancel act. Main's queue builds each group on top of the group below it,
+  # so when a group fails, every group built on it can no longer merge: the queue takes that
+  # pull request out and rebuilds the groups above it. That removal is a dequeue, so
+  # .github/workflows/dequeued.yaml force-cancels the removed group's own run, and the groups
+  # built on the failed one keep their runners until the queue rebuilds them.
   #
-  #   * `cancel-started` runs at the start of every merge-group run, with no `needs:` so that it
-  #     starts at once. It cancels the older groups of the same pull request the queue has
-  #     replaced, and ends this run when its chain of parents reaches a group whose ci-ok failed.
-  #   * one follower per job ci-ok waits for, and one for `changes` (`cancel-<job>`), which
-  #     `needs:` its job and runs when that job's result is `failure` or `cancelled`.
-  #     `cancelled` is the result a job cut off by its `timeout-minutes` reports to its
-  #     follower, and the follower does run: measured on probe run 41961238050, where a job
-  #     with `timeout-minutes: 1` was cut off, reported `cancelled`, and the follower carrying
-  #     the condition below ran and succeeded. A force-cancelled run leaves no follower
-  #     running at all, so there is no third case to tell apart. It cancels every unfinished
-  #     merge-group run built on this group, the nearest descendant first, and then this run.
-  #     That result is the trigger and not the decision: the act then reads what that job
-  #     recorded for this run — its own report, and whether its ci-ok went up — so a job whose
-  #     own work passed and whose report step alone failed cancels nothing, and a job that
-  #     uploaded no report, or whose failing ci-ok was never posted, leaves this run alive to
-  #     post the group's verdict (.github/actions/merge-group-cancel says what each answer
-  #     does).
+  # `cancel-started` runs at the start of every merge-group run, with no `needs:` so that it
+  # starts at once, and it has one act: it cancels the groups of the same pull request the
+  # queue has replaced, which test a tree that will not land. Its own queue branch names that
+  # pull request (`gh-readonly-queue/<base>/pr-<n>-<parent sha>`), and
+  # .github/scripts/merge-group-cancels.sh decides from it and the run list which runs those
+  # are: the script makes no GitHub call and prints one `cancel <run id>` line per run to
+  # force-cancel, in the order to act on them; its header says what it reads and why.
   #
-  # Every follower's `if:` opens with `!cancelled()`, and one of them must name a status-check
-  # function: a job `if:` that names none is given an implicit `success()`, which at job level
-  # asks that every job in `needs:` succeeded — false in exactly the two results these
-  # conditions ask for, so such a follower is skipped in every run it exists for (measured on
-  # probe run 41953780019: of two followers of a job that failed, the one whose condition named
-  # no function was skipped, and the one behind `!cancelled()` succeeded; run 41961238050 shows
-  # the same pair over a job its own time limit cut off). `!cancelled()` is the function that
-  # admits those two results and nothing more. `failure()` would not admit a job its own
-  # `timeout-minutes` cancelled, since no job of `needs:` failed then. `cancelled()` is the
-  # whole run's state and not one job's, so a job its own limit cut off leaves it false and the
-  # follower runs, while a cancelled run leaves it true and every follower is skipped.
+  # Each cancel is `POST /repos/{owner}/{repo}/actions/runs/{id}/force-cancel`, acted on in that
+  # order. A force-cancel bypasses `if: always()` — the step of a running job is left skipped,
+  # not run, measured on a probe run of this repository — so a force-cancelled run posts no
+  # ci-ok, which is what this act wants: a failing ci-ok on a group the queue still holds could
+  # take an innocent pull request out of the queue. The run of a group whose own job failed
+  # posts that group's failing ci-ok from that job itself, through the merge-group branch of
+  # .github/scripts/ci-ok-report.sh, so the queue reads the verdict and rebuilds the groups
+  # above it without waiting for the rest of that run.
   #
-  # `always()` would run the follower on a run a person cancelled by hand as well, and that run
-  # needs none: its report step posts the failing ci-ok all the same, the queue takes that pull
-  # request out and rebuilds the groups above it, and the start act of each rebuilt group
-  # cancels the older run of its own pull request. So the descendants of a hand-cancelled run
-  # stop at the rebuild rather than at the cancel, and no follower has to fire there.
-  # `cancel-started` needs no such function: it has no `needs:` at all, so the implicit
-  # `success()` has no ancestor job to be false about.
-  #
-  # Each cancel is `POST /repos/{owner}/{repo}/actions/runs/{id}/force-cancel`, acted on in the
-  # order the script printed, and this run's own id LAST: cancelling this run first would kill the
-  # job before it had cancelled the descendants. A force-cancel bypasses `if: always()` — the
-  # step of a running job is left skipped, not run (measured on the same probe run) — so a
-  # force-cancelled run posts no ci-ok, which is what these acts want: a failing ci-ok on a group
-  # the queue still holds could take an innocent pull request out of the queue. The run whose job
-  # failed does post its own failing ci-ok first, from the merge-group branch of
-  # .github/scripts/ci-ok-report.sh, which posts at once instead of waiting for the reports the
-  # follower is about to cancel — and the follower force-cancels that run only once that post
-  # has gone up, so a verdict GitHub refused leaves the run alive to post it later rather than
-  # the group with no ci-ok at all.
-  #
-  # Every job of both acts follows the same rules:
+  # The job follows these rules:
   #   * it runs only on `merge_group` and only on attempt 1 (the comment above `changes` says why
   #     a re-run attempt does nothing);
-  #   * `permissions:` is `actions: write` and nothing else. `gh run list`, the force-cancel and
-  #     a follower's read of this run's artifacts need it (a scope granted `write` grants its read);
-  #     the checkout needs no `contents: read`, because this repository is public and
-  #     GitHub serves a public repository's git data to any valid token — measured here with
-  #     `git ls-remote` over https against a public repository the token holds no grant on at
-  #     all, which succeeded;
+  #   * `permissions:` is `actions: write` and nothing else. `gh run list` and the force-cancel
+  #     need it (a scope granted `write` grants its read); the checkout needs no
+  #     `contents: read`, because this repository is public and GitHub serves a public
+  #     repository's git data to any valid token — measured here with `git ls-remote` over https
+  #     against a public repository the token holds no grant on at all, which succeeded;
   #   * it carries no ci-ok-report step and reports nothing to ci-ok, so its id is in
   #     CI_OK_EXEMPT in this file's env, outside ci-ok's accounting;
   #   * it runs this repository's own .github/scripts/merge-group-cancels.sh out of the run's own
   #     checkout and nothing else: no bun, no go, no node, no installed dependency, no npm or
-  #     bunx tool. The followers run it through .github/actions/merge-group-cancel, the composite
-  #     action that holds the one step they all share, which calls the script out of that same
-  #     checkout. A merge-group run checks out the queued tree, so the script it runs is the
+  #     bunx tool. A merge-group run checks out the queued tree, so the script it runs is the
   #     queued change's copy, which that change's review has read;
   #   * its step's token is ${{ github.token }}, and its time limit is short: the act is a
   #     handful of API calls.
@@ -3995,591 +3922,26 @@ jobs:
     permissions:
       actions: write
     steps:
-      # The job reads nothing of the tree but .github/scripts/merge-group-cancels.sh and the
-      # ci-ok-conclusion.sh beside it (a follower reads merge-group-cancels.sh,
-      # merge-group-report.sh, gh-read.sh and ci-ok.jq, through the composite action beside
-      # them), so the .github cone is the whole checkout it needs.
+      # The job reads nothing of the tree but .github/scripts/merge-group-cancels.sh, so the
+      # .github cone is the whole checkout it needs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: .github
           persist-credentials: false
       - env:
-          ACT: started
           GH_TOKEN: ${{ github.token }}
           HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
         run: |
+          # The `--limit` is 100 because the queue builds up to 20 groups at once and this pull
+          # request's own groups are among them: gh's default of 20 runs could leave an older
+          # group of it out of the list, and so out of the act.
           RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+            --limit 100 --json databaseId,headBranch,status,createdAt)
           export RUNS
-          # CI_OK holds the ci-ok of every head the walk could reach, read one check run at a
-          # time, so only the heads worth reading are read: a run that completed `success` is no
-          # failed group, and a head this leaves out carries no ci-ok here, which dooms nothing.
-          # So the reads are bounded by the runs that did not complete `success` — 17 of the 61
-          # merge-group runs this repository had when this was written — and never by every
-          # merge-group run there has ever been. A run still in progress is read too: a run whose
-          # job failed posts its failing ci-ok before it ends, and that is the doom this act
-          # looks for. The `--limit` is 100 for the same reason the walk needs depth: the queue
-          # builds up to 20 groups at once, and gh's default of 20 runs would cut the chain off.
-          #
-          # A head GitHub refuses to answer for leaves a warning and no entry, as a force-cancel
-          # that fails does, rather than ending the step on the first 422, 403 or 502: a head
-          # left out of CI_OK carries no ci-ok here, which dooms nothing
-          # (.github/scripts/merge-group-cancels.sh's header says so), so one refused read costs
-          # this act at most the groups below that head, and the cancels it can still prove are
-          # made. The warnings are printed here rather than inside the command substitution that
-          # gathers CI_OK, whose stdout is the map itself.
-          #
-          # `filter=all`, as in main-bypass-check.yaml's read of the same check run: the
-          # default, `latest`, returns one check run per name, and a commit can carry two — a
-          # failing ci-ok from the run whose job failed, and a passing one from a later run of
-          # the same group. Which conclusion a page of them gives this map is
-          # .github/scripts/ci-ok-conclusion.sh's, the file merge-group-cancels.test.sh runs
-          # over pages of its own, so the reading here is the one that test holds: a `success`
-          # among them wins, since a head that carries one is no failed group, and nothing below
-          # it is doomed by it.
-          heads=$(jq -r '[.[] | select(.conclusion != "success") | .headSha] | unique[]' <<<"$RUNS")
-          readings=$(mktemp)
-          trap 'rm -f "$readings"' EXIT
-          while read -r sha; do
-            [ -n "$sha" ] || continue
-            if page=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100"); then
-              conclusion=$(.github/scripts/ci-ok-conclusion.sh <<<"$page")
-              [ -z "$conclusion" ] ||
-                jq -nc --arg sha "$sha" --arg conclusion "$conclusion" '{($sha): $conclusion}' >>"$readings"
-            else
-              echo "::warning::the ci-ok check run of $sha could not be read, so that head carries no ci-ok here and dooms nothing"
-            fi
-          done <<<"$heads"
-          CI_OK=$(jq -s -c 'add // {}' "$readings")
-          export CI_OK
           acts=$(.github/scripts/merge-group-cancels.sh)
           while read -r act id; do
             [ "$act" = cancel ] || continue
             gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
               echo "::warning::force-cancel of run $id failed; it may have completed already"
           done <<<"$acts"
-
-  # The followers, one per job ci-ok waits for on a merge-group run and one for `changes`, in
-  # this file's order. Each is the same act on a different job, and each is written in the same
-  # text: the job it follows is named in `needs:` and nowhere else, `contains(needs.*.result,
-  # …)` reads the result of that one job, and the step hands the action `toJSON(needs)`, from
-  # which it reads the job's id and then, with .github/scripts/merge-group-report.sh, what that
-  # job recorded for this run. The comment above
-  # `cancel-started` says what the act is and why, and
-  # .github/scripts/merge-group-cancels.sh's header says what that report decides — including
-  # what leaving this run alive trades for, which is written there and nowhere else.
-  # .github/scripts/check-ci-filters.sh holds this set equal to the jobs ci-ok waits for on a
-  # merge group plus `changes`, and holds every follower to that one condition.
-  #
-  # `changes` is no job ci-ok waits for a report from — ci-ok reads its result through
-  # `needs.changes` — and it needs a follower all the same: a merge-group run whose `changes`
-  # failed, or whose `changes` its own time limit cut off, still runs lint, typecheck and
-  # test, ci-ok-report posts the failing verdict from the first of them to report, and nothing
-  # would cancel the groups already built on this one. `changes` carries no ci-ok-report step,
-  # so it uploads no report at all, and the act reads that absence as "this group is doomed and
-  # its ci-ok is still unposted": it cancels those groups and leaves this run running, so that
-  # one of the three jobs that do report can post the ci-ok. It needs no input of its own to
-  # say so.
-  #
-  # `worker-image` has none: its `if:` admits only pull_request (CI_OK_PULL_REQUEST_ONLY names
-  # it), so the queue never runs it and a follower of it could never fire — and a job that
-  # `needs:` it would sit behind the worker_image filter, which
-  # .github/scripts/check-image-trigger-paths.sh then stops proving matches only
-  # the files that image build reads, since the filter would gate a job that is no image build.
-  cancel-changes:
-    needs: changes
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-lint:
-    needs: lint
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-ci-images:
-    needs: ci-images
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-typecheck:
-    needs: typecheck
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-test:
-    needs: test
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-docs:
-    needs: docs
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-contracts:
-    needs: contracts
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-conflicts-script:
-    needs: conflicts-script
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-client:
-    needs: envoy-client
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-pi-shared:
-    needs: pi-shared
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-pi-envoy:
-    needs: pi-envoy
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-pi-legion:
-    needs: pi-legion
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-dispatch-ui:
-    needs: dispatch-ui
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-dispatch:
-    needs: dispatch
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-dispatch-browser-multiprocess:
-    needs: dispatch-browser-multiprocess
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-claude-envoy:
-    needs: claude-envoy
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-go-checks:
-    needs: envoy-go-checks
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-go:
-    needs: envoy-go
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-infra-go:
-    needs: envoy-infra-go
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-go-race:
-    needs: envoy-go-race
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-go-race-pmdoc:
-    needs: envoy-go-race-pmdoc
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-go-race-api:
-    needs: envoy-go-race-api
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-go-race-docs:
-    needs: envoy-go-race-docs
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-dispatch-memory:
-    needs: dispatch-memory
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-dispatch-multiprocess:
-    needs: dispatch-multiprocess
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-listener-server-change:
-    needs: listener-server-change
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-broker-multiprocess:
-    needs: broker-multiprocess
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-smoke:
-    needs: envoy-smoke
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-e2e-local:
-    needs: envoy-e2e-local
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-envoy-session-stall:
-    needs: envoy-session-stall
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-
-  cancel-ci-filters:
-    needs: ci-filters
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github
-          persist-credentials: false
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}

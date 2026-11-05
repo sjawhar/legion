@@ -33,7 +33,7 @@ with the `ci-ok-report` step, and the last job of the run to finish posts `ci-ok
 section on `ci-ok` below). The deployment repository keeps its own router guide for its own
 workflows; this page covers this repository only.
 
-## The seven places a job joins
+## The six places a job joins
 
 1. **A filter in `changes`** that names every file the job reads (the method is below).
 2. **An output of `changes`** for that filter.
@@ -72,12 +72,7 @@ workflows; this page covers this repository only.
    every job the map says `changes` selected and fails one the map does not name, and
    `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test, or a
    job outside `CI_OK_EXEMPT` lacks the report step (the section on `ci-ok` below says why).
-6. **A `cancel-<job>` follower**, and that follower's id in `CI_OK_EXEMPT`.
-   It is the same job every time: `needs: <job>`, the one condition every follower carries, a sparse checkout of `.github` and `.github/actions/merge-group-cancel` with `needs: ${{ toJSON(needs) }}`.
-   The merge-queue section below says what it does.
-   A job `ci-ok` waits for that has none leaves every group built on a failed one running to its end, and `check-ci-filters.sh` fails it.
-   A job that runs only on a pull request takes no follower, since the queue never runs it.
-7. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
+6. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
    `.github/scripts/check-ci-filters.sh` holds the filter to (the section on the check below).
 
 A Go job also restores its caches the way the section on caches below says.
@@ -336,9 +331,8 @@ site on a push trigger of its own.
 Two things a group's run alone carries.
 Every job of a re-run attempt skips, so a merge-group run is never re-run: a group is tested once, and the pull request is tested again when it is queued again.
 Each job carries the term that does it, which step 3 above gives.
-And the run of a group that can no longer merge is force-cancelled by jobs of the workflow itself — `cancel-started` and one follower per job `ci-ok` waits for, plus one for `changes` — which run only on `merge_group`, report nothing and are therefore named in `CI_OK_EXEMPT` rather than in `CI_OK_SELECTED_BY`.
-A follower reads what its job recorded for the run — the report it uploaded before it ended, and whether its `ci-ok` went up — so it force-cancels the run only when that job's own work failed and the group's failing `ci-ok` is already posted: a job whose tests passed and whose `ci-ok-report` step alone failed cancels nothing, and a job that uploaded no report, or whose verdict GitHub refused, leaves this run alive to post the group's `ci-ok`.
-Step 6 above is the follower a new job takes with it.
+And the run of a group the queue has replaced is force-cancelled by a job of the workflow itself — `cancel-started`, which runs only on `merge_group`, reports nothing and is therefore named in `CI_OK_EXEMPT` rather than in `CI_OK_SELECTED_BY` — which cancels the groups of its own pull request the queue built before it.
+A group that can no longer merge because the group below it failed is the queue's own to rebuild: a selected job that fails posts the failing `ci-ok` at once, the queue takes that pull request out, and the groups above it are built again.
 
 ## Drafts run no test job
 
@@ -356,7 +350,7 @@ must also carry `!github.event.pull_request.draft`.
 A newer push to a pull request cancels its older run. A merge group is a concurrency group of its
 own per commit and is never cancelled that way: the queue waits for its `ci-ok`, and a cancelled
 run would leave the tree it tests unjudged. A dispatched run keys on the commit it runs at and is
-never cancelled either. Only two acts stop such a run, both deliberate: the cancel jobs above,
-when the group can no longer merge, and `.github/workflows/dequeued.yaml`, when the group's pull
-request leaves the queue. Keep a new job inside the workflow's group; do not give it a
-`concurrency:` of its own.
+never cancelled either. Only two acts stop such a run, both deliberate: `cancel-started` above,
+when a newer group of the same pull request replaces it, and `.github/workflows/dequeued.yaml`,
+when the group's pull request leaves the queue. Keep a new job inside the workflow's group; do
+not give it a `concurrency:` of its own.

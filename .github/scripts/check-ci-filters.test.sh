@@ -9,8 +9,7 @@
 # each job's if: tests, every job but changes and those CI_OK_EXEMPT names must end with the ci-ok
 # report step and no job may be named for a required check, and a PUSH_WORKFLOWS workflow's
 # on.push.paths must equal its filter, no `if:` of ci.yaml may test for a push event or compare
-# github.ref with a branch ref, every job a merge-group run runs must have a follower cancel job
-# carrying the one follower condition, every job's if: must hold the term that skips it on a
+# github.ref with a branch ref, every job's if: must hold the term that skips it on a
 # re-run attempt of a merge-group run, ci-caches.yaml's save of a cache family must carry
 # the key and the paths ci.yaml's restore of that family names, its own restores being lookups,
 # and ci_job_reads.py's WORKSPACES must name exactly the workspaces of the root package.json.
@@ -97,7 +96,7 @@ on: [pull_request]
 env:
   CI_OK_SELECTED_BY: '{"app": "app", "image": "image"}'
   CI_OK_PULL_REQUEST_ONLY: '["image"]'
-  CI_OK_EXEMPT: '["cancel-changes", "cancel-app"]'
+  CI_OK_EXEMPT: '[]'
 jobs:
   changes:
     if: (github.event_name != 'merge_group' || github.run_attempt == '1')
@@ -152,26 +151,6 @@ jobs:
         with:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
-  cancel-changes:
-    needs: changes
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: write
-    steps:
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
-  cancel-app:
-    needs: app
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: write
-    steps:
-      - uses: ./.github/actions/merge-group-cancel
-        with:
-          needs: ${{ toJSON(needs) }}
 YAML
   cat > "$root/.github/workflows/site.yaml" <<'YAML'
 name: Site
@@ -403,8 +382,8 @@ YAML
 echo "case: a job CI_OK_EXEMPT names passes without the ci-ok report step"
 root=$(fixture ci-ok-exempt)
 cancel_job "$root"
-replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"cancel-changes\", \"cancel-app\"]'" \
-  "CI_OK_EXEMPT: '[\"cancel-changes\", \"cancel-app\", \"cancel\"]'"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[]'" \
+  "CI_OK_EXEMPT: '[\"cancel\"]'"
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it checked" "$(contains "$out" 'every ci.yaml filter matches every file its job reads (1 gates)')"
@@ -416,26 +395,6 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and what its last step must be" \
   "$(contains "$out" "job cancel's last step is not \`uses: ./.github/actions/ci-ok-report\` with \`if: always()\`")"
-
-echo "case: a job a merge-group run runs with no follower, and a follower of a job it never runs"
-root=$(fixture follower-set)
-replace "$root/.github/workflows/ci.yaml" $'  cancel-app:\n    needs: app' $'  cancel-app:\n    needs: image'
-run_check "$root"
-check "fails" "$(is "$status" 1)"
-check "names the job left without one" \
-  "$(contains "$out" "job app can run on a merge group and has no follower, so nothing cancels the groups built on this one when it fails")"
-check "names the follower that could never fire" \
-  "$(contains "$out" "job cancel-app follows image, which is no job a merge-group run of this file runs outside the cancel jobs")"
-
-echo "case: a follower whose condition is not the one every follower carries"
-root=$(fixture follower-if)
-replace "$root/.github/workflows/ci.yaml" \
-  "&& (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}" \
-  "&& (needs.changes.result == 'failure' || needs.changes.result == 'cancelled') }}"
-run_check "$root"
-check "fails" "$(is "$status" 1)"
-check "names the follower and the one text" \
-  "$(contains "$out" "job cancel-changes's if: is not the one every follower carries")"
 
 echo "case: a job with no term holding it back on a re-run attempt of a merge-group run"
 root=$(fixture rerun-guard)

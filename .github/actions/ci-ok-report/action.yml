@@ -6,15 +6,10 @@ description: >-
   ci-ok needs no job, and no runner, of its own. Call it with `if: always()`, so a failed,
   timed-out or cancelled job reports too. The job needs `actions: read` and `checks: write`.
 
-  Two artifacts come out of it, both named once in .github/scripts/ci-ok.jq and read twice: the
-  job's result, `ci-ok-<job>-<run attempt>-<success|failure|cancelled>`, uploaded before
-  anything is posted, and `ci-ok-posted-<job>-<run attempt>`, uploaded only once this job's
-  ci-ok post succeeded. .github/scripts/ci-ok-report.sh below reads the first to tell whether
-  every job that runs has reported, and, on a merge group, the follower cancel job of this job
-  (.github/actions/merge-group-cancel) reads both: the first says whether this job's own work
-  failed, and the second whether the failing ci-ok of this group is already posted. It
-  force-cancels this run only when it is, since a run whose verdict never went up is the only
-  run that can still post one.
+  One artifact comes out of it, named once in .github/scripts/ci-ok.jq: the job's result,
+  `ci-ok-<job>-<run attempt>-<success|failure|cancelled>`, uploaded before anything is posted.
+  .github/scripts/ci-ok-report.sh below reads every job's to tell whether every job that runs
+  has reported.
 
   A fork pull request's run gets a read-only token, which can post no check run, so on one this
   action does nothing and the pull request gets no ci-ok: this repository takes no fork pull
@@ -63,20 +58,4 @@ runs:
         CHANGES: ${{ inputs.changes }}
         EVENT: ${{ github.event_name }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        POSTED_FILE: ${{ runner.temp }}/ci-ok-posted
       run: '"$GITHUB_ACTION_PATH/../../scripts/ci-ok-report.sh"'
-
-    # The marker the step above leaves only when it posted ci-ok, which this job's merge-group
-    # follower waits for. `if-no-files-found: ignore` is what makes the absence of that file the
-    # absence of the artifact: no file matched, no artifact created, and the follower then reads
-    # this job's report as a verdict that never went up. `always()`, because the jobs this marker
-    # matters for are a job whose earlier steps failed and a job cancelled gracefully, which
-    # ci-ok-report.sh still posts for, and a step with no `if:` is skipped on either: without it
-    # a post that succeeded there would leave no marker at all.
-    - if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id)
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: ci-ok-posted-${{ inputs.job }}-${{ github.run_attempt }}
-        path: ${{ runner.temp }}/ci-ok-posted
-        retention-days: 1
-        if-no-files-found: ignore

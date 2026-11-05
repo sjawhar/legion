@@ -742,7 +742,7 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
 
 # The jobs ci-ok.sh holds to success on every run, so CI_OK_SELECTED_BY maps neither.
 ALWAYS_RUN = ("changes", "lint")
-# ci.yaml's env entry naming the jobs the merge queue never runs, which take no follower.
+# ci.yaml's env entry naming the jobs the merge queue never runs.
 PULL_REQUEST_ONLY_LIST = "CI_OK_PULL_REQUEST_ONLY"
 # ci-ok.sh's lists of CI_OK_SELECTED_BY jobs whose if: admits only some events, as ci.yaml's env
 # names them: per list, the if: term that puts a job on it, what that term admits, and the events
@@ -763,10 +763,7 @@ REQUIRED_CHECKS = ("ci-ok", "pr-title")
 # doomed merge-group run, which runs only on merge_group, holds `actions: write`, runs no
 # dependency code, reports no result to ci-ok and is no job a verdict waits for.
 EXEMPT_LIST = "CI_OK_EXEMPT"
-# The cancel jobs EXEMPT_LIST names are held by ci_workflow_rules.check_followers, which reads
-# EXEMPT_LIST and PULL_REQUEST_ONLY_LIST, the one list of this module's EVENT_LISTS, from the
-# same env and imports both names from here. ENV_ALLOWED above and ci-ok-report.sh's yq read
-# write the same keys again.
+# ENV_ALLOWED above and ci-ok-report.sh's yq read write the same keys again.
 
 
 def check_ci_ok(document: dict, problems: list) -> None:
@@ -778,8 +775,7 @@ def check_ci_ok(document: dict, problems: list) -> None:
     a workflow must hand that workflow `ci-ok-changes` for its job's report step. No job may be
     named for a required check. A job EXEMPT_LIST names is outside all of that: it is no job of
     CI_OK_SELECTED_BY, it needs no report step, and it must carry none, since ci-ok.sh fails a
-    result for a job CI_OK_SELECTED_BY cannot map. Whether each name it holds is the follower
-    cancel job of a job that needs one is ci_workflow_rules.check_followers'."""
+    result for a job CI_OK_SELECTED_BY cannot map."""
     jobs = document.get("jobs") or {}
     env = document.get("env") or {}
     try:
@@ -972,7 +968,6 @@ def main() -> int:
     check_ci_ok(document, problems)
     rules.check_push_conditions(document, problems)
     rules.check_rerun_guard(document, problems)
-    rules.check_followers(document, problems)
     rules.check_cache_round_trip(document, problems)
     rules.check_workspace_table(data.WORKSPACES, problems)
     expander = Expander(files)

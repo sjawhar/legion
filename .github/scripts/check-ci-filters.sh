@@ -94,22 +94,15 @@
 #      nothing: the workflow asks only whether that exact key is already there, no step of it
 #      reads a restored entry, and a prefix hit would answer for an older key and skip the build
 #      that fills this one, leaving it empty.
-#  12. a job of ci.yaml that a merge-group run can run and that CI_OK_EXEMPT does not name -
-#      the jobs ci-ok waits for there, plus `changes` - with no follower cancel job of its own,
-#      a follower that follows no such job or more than one, and a follower whose `if:` is not
-#      the one text every follower carries. A follower names the job it follows in `needs:` and
-#      nowhere else, since .github/actions/merge-group-cancel reads that id out of
-#      `toJSON(needs)` to find the job's own report; a job with no follower leaves every group
-#      built on this one running to its end when it fails, and a condition written out by hand
-#      31 times drifts.
+#  12. is gone: ci.yaml's merge-group cancel jobs are `cancel-started` alone now, and the rule
+#      that held one cancel job to every job a merge-group run can run went with the others.
 #  13. a job of ci.yaml whose `if:` lacks `(github.event_name != 'merge_group' ||
 #      github.run_attempt == '1')`, or, for a job whose `if:` admits merge_group alone (the
-#      cancel jobs, rule 12's followers among them), `github.run_attempt == '1'`: a group is
+#      one cancel job, `cancel-started`), `github.run_attempt == '1'`: a group is
 #      tested once, and `gh run rerun --failed` leaves out a `changes` that succeeded and hands
 #      the attempt that job's outputs again, so a job gated on `needs.changes.outputs.<x>`
 #      alone runs in full on a re-run attempt of a merge-group run and posts a ci-ok on a head
-#      the queue has thrown away. Each job needs the one term, so rules 12 and 13 never ask one
-#      job for two.
+#      the queue has thrown away. Each job needs the one term and never both.
 #  14. a workspace of the root package.json that ci_job_reads.py's WORKSPACES does not name, or a
 #      WORKSPACES entry the root manifest does not list, naming the workspace. A frozen
 #      `bun install` reads every workspace manifest, so the table declares each of them a read of
@@ -190,7 +183,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # The engine (ci_filter_coverage.py), its data (ci_job_reads.py), the rules that read no filter
-# and no go command (ci_workflow_rules.py: rules 10, 11, 12, 13 and 14 above, the last of them
+# and no go command (ci_workflow_rules.py: rules 10, 11, 13 and 14 above, the last of them
 # given that data's WORKSPACES by main() rather than importing the data itself) and the path
 # model (workflow_paths.py) sit beside this script in the repository it checks. The engine is
 # imported, not run as a script, so the data's `from ci_filter_coverage import ...` binds the

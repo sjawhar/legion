@@ -4,8 +4,9 @@ name: CI (dequeued pull request)
 # on top of the group below it, and a pull request that leaves the queue takes its group with it —
 # while that group's ci.yaml merge-group run, which nothing cancels, keeps its runners to the end
 # and decides nothing. That runner time is what this workflow takes back, for the one case
-# ci.yaml's own cancel acts cannot see: a removal is no job failure, so no follower job of that run
-# ever fires (the comment above ci.yaml's `cancel-started` says what those acts do).
+# ci.yaml's own cancel act cannot see: that act cancels the older groups of the pull request a
+# new group of it replaced (the comment above ci.yaml's `cancel-started` says what it does), and
+# a pull request that left the queue builds no new group.
 #
 # Why pull_request_target. `dequeued` is an activity type of that event alone, and GitHub runs the
 # base branch's copy of the workflow with the base branch's token, so a fork's pull request and one
@@ -43,7 +44,7 @@ name: CI (dequeued pull request)
 #   * it has no concurrency group: two removals cancel two different runs, and a removal that
 #     waited behind another would cancel nothing while its run went on burning runners.
 #
-# The cancel is `force-cancel`, the call ci.yaml's cancel acts make: it leaves a running job's
+# The cancel is `force-cancel`, the call ci.yaml's cancel act makes: it leaves a running job's
 # `if: always()` steps skipped, so the cancelled run posts no ci-ok, and a failing ci-ok on a
 # commit the queue still holds could take an innocent pull request out of the queue. A cancel that
 # fails leaves a warning rather than a red job: the run may have completed between the list and the
@@ -60,8 +61,8 @@ jobs:
     timeout-minutes: 5
     # `gh run list` and the force-cancel need `actions: write`, and nothing here needs another
     # scope: there is no checkout, and the GraphQL read is of a public repository's pull request,
-    # which GitHub serves to any valid token — the same ground on which ci.yaml's cancel acts hold
-    # `actions: write` alone and still check out and read check runs.
+    # which GitHub serves to any valid token — the same ground on which ci.yaml's `cancel-started`
+    # holds `actions: write` alone and still checks out.
     permissions:
       actions: write
     steps:

@@ -5,9 +5,6 @@
 # it, a re-run's report replaces the earlier
 # attempt's, the verdict is ci-ok.sh's, an artifact list GitHub refuses posts nothing, and a
 # jobs list it refuses posts the verdict all the same once a merge-group run is decided.
-# POSTED_FILE is here too: the marker a job leaves only once its verdict went up, which the
-# ci-ok-report action uploads and this job's merge-group follower waits for before it
-# force-cancels the run.
 #
 # Each case writes the run's artifact names, which are the jobs' reports, and the `changes` the
 # reporting job saw, and runs the real scripts with a stand-in `gh` first on PATH: it answers the
@@ -66,7 +63,7 @@ selects='{"result": "success", "outputs": {"typecheck": "true", "envoy_client": 
 # report <artifact name>...: the run's artifacts, which other jobs' uploads leave beside the reports.
 report() {
   printf '%s\n' pi-envoy-pr "$@" > "$work/artifacts"
-  rm -f "$work"/posted.*.json "$work/list-fails" "$work/post-fails" "$work/jobs" "$work/marker"
+  rm -f "$work"/posted.*.json "$work/list-fails" "$work/post-fails" "$work/jobs"
 }
 
 # jobs <name>=<status>[/<conclusion>]...: the run's jobs as the jobs route lists them, one JSON
@@ -87,16 +84,13 @@ run_report() {
   out=$(PATH="$work/bin:$PATH" GH_TOKEN=t GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=41 \
     GITHUB_SERVER_URL=https://github.com GH_RETRY_SECONDS=0 JOB=typecheck CHANGES=$1 \
     EVENT=${2:-pull_request} HEAD_SHA=abc123 CI_OK_WORKFLOW=${3:-$work/ci.yaml} \
-    POSTED_FILE=$work/marker "$script_dir/ci-ok-report.sh" 2>&1)
+    "$script_dir/ci-ok-report.sh" 2>&1)
   status=$?
   set -e
 }
 
 posted() { find "$work" -maxdepth 1 -name 'posted.*.json' | wc -l | tr -d ' '; }
 field() { jq -r "$1" "$work/posted.0.json"; }
-# The marker the ci-ok-report action uploads as ci-ok-posted-<job>-<run attempt>, which this
-# job's merge-group follower waits for: its conclusion, or nothing when no verdict went up.
-marker() { cat "$work/marker" 2>/dev/null || true; }
 
 echo "case: a job changes selected has not reported"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success
@@ -122,7 +116,6 @@ check "completed" "$(is "$(field .status)" completed)"
 check "passing" "$(is "$(field .conclusion)" success)"
 check "linking the run" "$(is "$(field .details_url)" https://github.com/o/r/actions/runs/41)"
 check "summarising ci-ok.sh's verdict" "$(contains "$(field .output.summary)" '^envoy-client: skipped (not selected')"
-check "leaves the posted marker its action uploads, holding the conclusion" "$(is "$(marker)" success)"
 
 echo "case: a selected job reported failure"
 report ci-ok-lint-1-success ci-ok-typecheck-1-failure ci-ok-worker-image-1-success
@@ -192,8 +185,6 @@ check "says the failing job decided it" \
   "$(contains "$(field .output.summary)" 'Decided by typecheck, whose failure decides this merge-group run')"
 check "titles it with the job whose result decided the run" \
   "$(contains "$(field .output.title)" '^typecheck decided this merge-group run: ')"
-check "leaves the posted marker, which lets its follower force-cancel the run" \
-  "$(is "$(marker)" failure)"
 
 echo "case: the same shape on a pull_request run waits"
 report ci-ok-typecheck-1-failure
@@ -232,10 +223,9 @@ check "fails" "$(is "$(field .conclusion)" failure)"
 check "titled with changes' failure" "$(contains "$(field .output.title)" '^changes ended failure')"
 
 echo "case: a merge_group run whose changes its own time limit cancelled"
-# `cancel-changes` fires on `cancelled` as it does on `failure`, and `changes` uploads no
-# report, so its follower cancels the groups built on this one and leaves this run alive. The
-# verdict is decided all the same, and the first of lint, typecheck and test to report posts
-# it rather than the last of them.
+# `changes` carries no report step and uploads no report at all, and its own time limit cuts
+# it off as `cancelled`, which decides the group as a failure does. The verdict is posted all
+# the same, by the first of lint, typecheck and test to report rather than by the last of them.
 report ci-ok-typecheck-1-success
 jobs typecheck=completed/success lint=in_progress envoy-client=queued
 run_report '{"result": "cancelled", "outputs": {}}' merge_group
@@ -254,7 +244,6 @@ run_report "$selects"
 check "fails the step" "$(is "$status" 1)"
 check "posts nothing" "$(is "$(posted)" 0)"
 check "says why" "$(contains "$out" "GitHub refused the run's artifact list three times")"
-check "leaves no posted marker, so a follower of this job force-cancels nothing" "$(is "$(marker)" "")"
 
 echo "case: GitHub refuses the post"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success ci-ok-worker-image-1-success
@@ -263,8 +252,6 @@ run_report "$selects"
 check "fails the step" "$(is "$status" 1)"
 check "tried three times" "$(is "$(posted)" 3)"
 check "says so" "$(contains "$out" 'GitHub refused the ci-ok check run on abc123 three times')"
-check "leaves no posted marker either: no verdict went up, and the run must stay alive to post one" \
-  "$(is "$(marker)" "")"
 
 echo "case: CHANGES is not toJSON(needs.changes)"
 report ci-ok-lint-1-success
@@ -279,12 +266,12 @@ check "reads it and posts" "$(is "$(posted)" 1)"
 check "passes" "$(is "$(field .conclusion)" success)"
 
 echo "case: a merge_group run whose reporting job its timeout-minutes cancelled"
-# ci.yaml's followers fire on `failure` or `cancelled`, and ci.yaml's own comment on them says
-# the `cancelled` branch is there for a job cut off by its `timeout-minutes` (measured on probe
-# run 41869007039). That follower then force-cancels the run, and a force-cancel leaves every
-# `if: always()` step skipped, so no later job of the run ever reports: this reporting job is
-# the run's last chance to post ci-ok, and a group that gets none sits in the queue until
-# GitHub's 180-minute check timeout removes it.
+# `cancelled` is what a job cut off by its `timeout-minutes` reports (measured on probe run
+# 41869007039), and it decides the group as a failure does. The queue takes the pull request
+# out on the verdict this job posts and dequeued.yaml force-cancels the run, and a force-cancel
+# leaves every `if: always()` step skipped, so no later job of the run ever reports: this
+# reporting job is the run's last chance to post ci-ok, and a group that gets none sits in the
+# queue until GitHub's 180-minute check timeout removes it.
 report ci-ok-typecheck-1-cancelled
 jobs typecheck=completed/cancelled lint=in_progress envoy-client=queued
 run_report "$group_selects" merge_group
@@ -294,9 +281,9 @@ check "failing" "$(is "$(field .conclusion)" failure)"
 
 echo "case: a decided merge_group run whose jobs route GitHub refuses posts its verdict all the same"
 # The artifact list above it is read three times before the script gives up, and the jobs route
-# is read three times too. On a decided merge-group run nothing posts later: the reporting job
-# uploaded its own `failure` report before this step ran, so its follower reads REPORT=failure
-# and force-cancels the whole run, and a force-cancel leaves every `if: always()` step skipped.
+# is read three times too. On a decided merge-group run nothing this job waits for can help:
+# the queue takes the pull request out on this verdict and dequeued.yaml force-cancels the run,
+# and a force-cancel leaves every `if: always()` step skipped.
 # A run that waited for a read it could not make would carry no ci-ok at all and hold the queue
 # until GitHub's 180-minute check timeout dropped its pull request — the outcome this file's own
 # header names as the one to prevent. So every job still unreported is recorded `unread`, which

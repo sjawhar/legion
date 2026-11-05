@@ -144,13 +144,12 @@ check "fails" "$(is "$status" 1)"
 check "names it as absent" "$(contains "$out" '^::error::envoy-client is absent from NEEDS')"
 check "prints it" "$(contains "$out" '^envoy-client: absent ')"
 
-echo "case: the artifact names ci-ok.jq reads are the names the report action uploads"
-# ci-ok.jq holds the one reading of both, for ci-ok-report.sh (every job's report) and
-# merge-group-report.sh (one job's, with its posted marker). The names themselves are written in
-# .github/actions/ci-ok-report/action.yml, which no jq of a run can read, so the two are held
-# together here: a rename only one side followed would leave every follower reading `absent` and
-# ci-ok waiting for reports it cannot see. The action's expressions are filled in for a
-# typecheck job of attempt 2 that ended `failure`.
+echo "case: the artifact name ci-ok.jq reads is the name the report action uploads"
+# ci-ok.jq holds the one reading of it, for ci-ok-report.sh (every job's report). The name
+# itself is written in .github/actions/ci-ok-report/action.yml, which no jq of a run can read,
+# so the two are held together here: a rename only one side followed would leave ci-ok waiting
+# for reports it cannot see. The action's expressions are filled in for a typecheck job of
+# attempt 2 that ended `failure`.
 uploaded() { # uploaded <n>: the name: of the action's n-th upload-artifact step, filled in
   yq -r '[.runs.steps[] | select((.uses // "") | test("actions/upload-artifact")) | .with.name]' \
     "$script_dir/../actions/ci-ok-report/action.yml" |
@@ -165,25 +164,7 @@ reading() { # reading <jq filter> <artifact name>...: that filter of ci-ok.jq ov
     "include \"ci-ok\"; $filter"
 }
 report_name=$(uploaded 0)
-posted_name=$(uploaded 1)
 check "the report artifact's name reads back as that job's result" \
   "$(is "$(reading 'reports($names)[0] | "\(.job) \(.attempt) \(.status)"' "$report_name")" "typecheck 2 failure")"
-check "the posted marker's name reads back as that job's posted verdict" \
-  "$(is "$(reading 'posted($names)[0] | "\(.job) \(.attempt)"' "$posted_name")" "typecheck 2")"
-check "the marker is no report" "$(is "$(reading 'reports($names) | length' "$posted_name")" 0)"
-check "the report is no marker" "$(is "$(reading 'posted($names) | length' "$report_name")" 0)"
-
-echo "case: the marker the report action uploads is the file ci-ok-report.sh writes"
-# The marker's path is two literals of .github/actions/ci-ok-report/action.yml: the POSTED_FILE
-# the post step hands ci-ok-report.sh, and the `path:` its upload reads. That upload carries
-# `if-no-files-found: ignore`, which is what makes a drift between them silent — no red step and
-# no artifact — where the report upload's `error` would redden every job at once. A silent drift
-# leaves every failing job's follower reading `unposted` for ever, so no merge-group run is
-# force-cancelled again and nothing in any log says why.
-action=$script_dir/../actions/ci-ok-report/action.yml
-posted_written=$(yq -r '[.runs.steps[] | select(has("env")) | .env.POSTED_FILE | select(. != null)] | unique | join(", ")' "$action")
-posted_uploaded=$(yq -r '[.runs.steps[] | select(((.uses // "") | test("actions/upload-artifact")) and ((.with.name // "") | test("ci-ok-posted"))) | .with.path] | join(", ")' "$action")
-check "the post step hands the script one marker path" "$(is "$(printf '%s' "$posted_written" | grep -c ',')" 0)"
-check "the marker's upload reads the path the script writes" "$(is "$posted_uploaded" "$posted_written")"
 
 summary "ci-ok.sh fails unless every job changes selected succeeded"
