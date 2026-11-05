@@ -3,6 +3,17 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.7.0] - 2026-11-05
+
+### Fixed
+
+- The Legion plugin's Dispatch client, its listener publisher and the production-Dispatch reader
+  of `scripts/skill-scenarios/` present the one credential a resolved section carries rather than
+  a bearer string, so they work on a machine whose Dispatch token is the secrets broker's
+  DPoP-bound access token instead of being refused with a bare `401`. `handoff_complete` reports
+  through that credential too, under the session the pane is acting as: it used to read the
+  resolution's bearer field, which is empty on the broker's route, and failed on every such pane.
+
 ## [18.6.0] - 2026-11-05
 
 ### Changed

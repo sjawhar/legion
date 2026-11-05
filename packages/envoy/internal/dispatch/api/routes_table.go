@@ -72,7 +72,7 @@ const (
 
 // writeClasses is the class of every mutating route, by "<method> <pattern>". It stands beside
 // the table rather than in each row because Go leaves no field out of a positional composite
-// literal: a sixth value on the row would have to be written on all 151 rows, every GET row
+// literal: a sixth value on the row would have to be written on all 154 rows, every GET row
 // included, and a GET row needs no class. routes() stamps it onto the row, so apiRoute.Scope is
 // what every reader of a route sees, and undecidableWrites holds the two in exact correspondence
 // — a mutating row this table does not name, and a name that is no mutating row, each fail
@@ -169,6 +169,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/credential-requests/machine-lookup":      scopeDeployment,
 	"POST /api/v1/credential-grants/{id}/revoke":           scopeDeployment,
 	"POST /api/v1/machine-logins/{id}/revoke":              scopeDeployment,
+	"POST /api/v1/signins/{id}/revoke":                     scopeDeployment,
 	"POST /api/v1/live/_test/disconnect":                   scopeDeployment,
 	"POST /api/v1/live/_test/rotate":                       scopeDeployment,
 	"POST /api/v1/artifacts/_test/quiesce":                 scopeDeployment,
@@ -182,7 +183,7 @@ type routeScopeSet []string
 
 // routeScopes is the set each route needs, by "<method> <pattern>", and it stands beside the
 // table for the reason writeClasses does: Go leaves no field out of a positional composite
-// literal, so a sixth value on the row would have to be written on all 151 rows, and most rows
+// literal, so a sixth value on the row would have to be written on all 154 rows, and most rows
 // need no scope. routes() stamps it onto the row, so apiRoute.OAuthScopes is what every reader
 // of a route sees — GET /api/v1 and `envoy-dispatch routes` among them — and
 // scopedRoutesNotMounted holds the map to the table, a name that is no row refusing to mount
@@ -190,10 +191,11 @@ type routeScopeSet []string
 //
 // These are the routes Dispatch refused every bearer token on until INFRA-1017, and two scopes
 // decide them now: `person`, "this credential acts as its person", which every row here needs,
-// and `approve`, the right to settle what a person settles, which the nine rows below that
-// decide a credential, a review or a token need as well. A person's browser, their personal
-// tokens and their machine logins hold both; the shared token, a pod's service-account token
-// and a project-scoped session's token hold neither.
+// and `approve`, the right to settle what a person settles, which the ten rows below that
+// decide a credential, a sign-in, a review or a token need as well. A person's browser, their
+// personal tokens and their machine logins hold both; the shared token, a pod's service-account
+// token, a project-scoped session's token and a broker-issued token that names a service and no
+// person hold neither.
 var routeScopes = map[string]routeScopeSet{
 	// The rows that read or write what belongs to the calling person: their inbox, their own
 	// answers and replies, their read marks, their conversations with sessions, and the people
@@ -233,6 +235,8 @@ var routeScopes = map[string]routeScopeSet{
 	"GET /api/v1/credential-requests":                        {model.ScopePerson},
 	"GET /api/v1/credential-grants":                          {model.ScopePerson},
 	"GET /api/v1/machine-logins":                             {model.ScopePerson},
+	"GET /api/v1/signins":                                    {model.ScopePerson},
+	"GET /api/v1/credentials/capabilities":                   {model.ScopePerson},
 	"POST /api/v1/agents/{session_id}/stream/_test/publish":  {model.ScopePerson},
 
 	// The rows that settle what a person settles: a document's review, a credential's fate, and
@@ -243,6 +247,7 @@ var routeScopes = map[string]routeScopeSet{
 	"POST /api/v1/credential-requests/machine-lookup": {model.ScopePerson, model.ScopeApprove},
 	"POST /api/v1/credential-grants/{id}/revoke":      {model.ScopePerson, model.ScopeApprove},
 	"POST /api/v1/machine-logins/{id}/revoke":         {model.ScopePerson, model.ScopeApprove},
+	"POST /api/v1/signins/{id}/revoke":                {model.ScopePerson, model.ScopeApprove},
 	"POST /api/v1/me/agent-tokens":                    {model.ScopePerson, model.ScopeApprove},
 	"PATCH /api/v1/me/agent-tokens/{id}":              {model.ScopePerson, model.ScopeApprove},
 	"DELETE /api/v1/me/agent-tokens/{id}":             {model.ScopePerson, model.ScopeApprove},
@@ -347,7 +352,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPatch, "/api/v1/me/agent-tokens/{id}", authAny, "Set the scopes of one of the caller's personal agent tokens {scopes}: the whole set it is to hold, with the mint's refusals, answering the updated token. A token of another person's, or none, is 404 NOT_FOUND.", s.updateAgentTokenScopes},
 		{http.MethodDelete, "/api/v1/me/agent-tokens/{id}", authAny, "Revoke a personal agent token.", s.revokeAgentToken},
 		{http.MethodGet, "/api/v1/users", authAny, "Everyone who has signed in, by lowercase email: the assignee picker's options.", s.listUsers},
-		{http.MethodGet, "/api/v1/whoami", authAny, "Who the server takes the caller for: {kind: user, login, scopes} (login is the person's lowercase email) or {kind: agent, owner, service, session, project, scopes} (owner is a personal token's owner by lowercase email, null for the shared token; service is a verified service-account token's Kubernetes subject, null otherwise; session is the session the caller's credential proved, null for a credential that proves none, which every one but an access token the secrets broker issued is; project is the one project key that credential lets the caller write, null where it names none). scopes is the OAuth scopes the credential holds, an empty array for one that holds none: person acts as the person on every route the dashboard reaches, and approve settles what a person settles.", s.whoami},
+		{http.MethodGet, "/api/v1/whoami", authAny, "Who the server takes the caller for: {kind: user, login, scopes} (login is the person's lowercase email) or {kind: agent, owner, service, session, project, scopes} (owner is a personal token's owner or a broker-issued token's person by lowercase email, null for the shared token and for a broker-issued token that names a service; service is a verified service-account token's Kubernetes subject, or the fleet a broker-issued token naming no person belongs to, null for every other credential; session is the session the caller's credential proved, null for a credential that proves none, which every one but an access token the secrets broker issued is; project is the one project key that credential lets the caller write, null where it names none). scopes is the OAuth scopes the credential holds, an empty array for one that holds none: person acts as the person on every route the dashboard reaches, and approve settles what a person settles.", s.whoami},
 		{http.MethodGet, "/api/v1/dashboard/builds", authAny, "Which dashboard builds are served: {serving, live}, serving the entry chunk (/assets/index-*.js) of the build this process serves (empty when none), live the distinct entry chunks of the builds every live server process serves, sorted. A tab offers its reload notice only when live holds exactly one entry and it is not the tab's own.", s.getDashboardBuilds},
 		{http.MethodGet, "/api/v1/issues", authAny, fmt.Sprintf("List issues; filters project, status, parent, label, priority (repeatable: 0-3, or none for unset), open, updated_since, route_status (live, no_holder or unknown; open issues only); ?pinned=true needs the person scope, since the pins are one person's. Each issue carries progress: {tasks, children}, its spec's task-list items and its direct children as {done, total}, each null when it has none. Pages with limit (1-%d) and offset (0 or more; alone it pages %d): a paged answer is {issues, total, limit, offset}, total counting every issue the filters match; without either it is every matching issue as an array. cursor is 400 INVALID_QUERY.", contracts.MaxIssuePageLimit, contracts.DefaultIssuePageLimit), s.listIssues},
 		{http.MethodPost, "/api/v1/issues", authAny, fmt.Sprintf("Create an issue (native, or from a GitHub owner/repo#n ref); assignee defaults to the creating person, the personal token's owner, the parent's assignee, or the project's default assignee when that still names a person who has signed in. A title over %d characters is 400 CAP_EXCEEDED. After the write commits, a related-item check searches the project by meaning and by its rarest words and waits at most 5 seconds; the response's advice.suggestions says whether it found related items (outcome found, none or not_made with the reason in missing), how it searched (search, search_note), the three items most like the new issue, one per owner, with each ask item's answer state, any answered ask that settles it, words to search with by hand (search_query), and under force the title overlaps forced past (title_matches).", contracts.IssueTitleMax), s.createIssue},
@@ -469,6 +474,9 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/credential-grants/{id}/revoke", authAny, "Revoke a credential grant as the caller, its approver or its enrollment's operator.", s.revokeCredentialGrant},
 		{http.MethodGet, "/api/v1/machine-logins", authAny, "List the machine logins the caller may revoke that can still reach a secret: the secrets broker's launcher credentials for every service's login, whoever approved it, and for the caller's own machines, unexpired or expired with a session still running, each naming who approved it.", s.listMachineLogins},
 		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authAny, "Revoke a machine login, expired or not, ending every session it enrolled, a service's pods included: anyone signed in revokes a service's login, and only the person who approved a person's machine login revokes that one.", s.revokeMachineLogin},
+		{http.MethodGet, "/api/v1/signins", authAny, "List the caller's own sign-ins on their machines (`agent-secrets login`), one per box key they have not revoked, each naming the machine's account, the key's thumbprint, when the person signed in there and when that machine last used it. Nobody lists another person's: Dispatch names the person from its own session.", s.listSignIns},
+		{http.MethodPost, "/api/v1/signins/{id}/revoke", authAny, "End one of the caller's own sign-ins: that machine trades no token for them again and every access token already minted under it ends, while their sign-ins on other machines keep working. A sign-in of anyone else is an unknown id.", s.revokeSignIn},
+		{http.MethodGet, "/api/v1/credentials/capabilities", authAny, "What the credential pages may offer against this deployment's secrets broker, relayed from the broker's own RFC 8414 metadata rather than from any Dispatch setting: machine_code_page says whether the broker still serves the device grant, so whether a machine ever prints a code for a person to type.", s.getCredentialCapabilities},
 	}
 	// The live-socket disconnect, live-socket rotate, quiesce and publish hooks (the 1st, 2nd, 3rd
 	// and 5th below) act on every process serving the database, answering once each has

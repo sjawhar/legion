@@ -8,6 +8,7 @@ import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
+import { MachineLoginRoute } from "./features/credentials/MachineLoginRoute";
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
@@ -141,11 +142,7 @@ const DeliveryPage = lazy(() =>
 const PipelinePage = lazy(() =>
   import("./features/delivery/PipelinePage").then((module) => ({ default: module.PipelinePage }))
 );
-const MachineLoginPage = lazy(() =>
-  import("./features/credentials/MachineLoginPage").then((module) => ({
-    default: module.MachineLoginPage,
-  }))
-);
+
 const AnswersPage = lazy(() =>
   import("./features/answers/AnswersPage").then((module) => ({ default: module.AnswersPage }))
 );
@@ -833,7 +830,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<ProjectPage />} path="/projects/:key/documents" />
                 <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
                 <Route element={<InboxPage />} path="/credentials/*" />
-                <Route element={<MachineLoginPage />} path="/credentials/machine" />
+                <Route element={<MachineLoginRoute />} path="/credentials/machine" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<DeliveryPage />} path="/delivery" />
                 <Route element={<PipelinePage />} path="/pipeline" />

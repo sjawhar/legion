@@ -1,5 +1,16 @@
 # Changelog
 
+## [main@804d3695e12e] - 2026-11-05
+
+### Added
+
+- `DISPATCH_SIGN_IN_REQUIRED` is the code of the `403` Dispatch answers a write by an access
+  token the secrets broker issued that names a session and a service and no person: the machine
+  holding it has signed nobody in, so there is nobody to record the write under. Reads are
+  unaffected, and the refusal's message names `agent-secrets login`. It is generated into Go as
+  `contracts.DispatchSignInRequired`, as `DISPATCH_LOGIN_CHANGED` is, so the server's refusal
+  and every client's reading of it cannot drift apart.
+
 ## [main@27c52d310319] - 2026-11-05
 
 ### Added
