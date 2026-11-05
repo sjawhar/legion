@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -944,6 +945,152 @@ func TestALoneUpdateAndABatchHoldingItStoreItOnce(t *testing.T) {
 				t.Fatalf("evict the room: %v", err)
 			}
 			waitForNoLiveDocument(t, service, artifactID)
+		})
+	}
+}
+
+// strandPruneCheckpoint leaves the document the checkpoint row a prune whose process died between
+// its two transactions leaves behind (PruneAfter): the rows above ceiling are still stored, and
+// every reader counts ceiling as the head (headVersion) until an append finishes the prune.
+func strandPruneCheckpoint(t *testing.T, database *store.Store, artifactID string, ceiling int64) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into doc_checkpoints (artifact_id, ceiling, state) values ($1, $2, null)
+	`, artifactID, ceiling); err != nil {
+		t.Fatalf("strand a prune checkpoint at %d: %v", ceiling, err)
+	}
+}
+
+// standingCheckpoints is how many prune checkpoints the document holds, none once an append has
+// finished the prune one of them began.
+func standingCheckpoints(t *testing.T, database *store.Store, artifactID string) int {
+	t.Helper()
+	var standing int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from doc_checkpoints where artifact_id = $1
+	`, artifactID).Scan(&standing); err != nil {
+		t.Fatalf("count the document's prune checkpoints: %v", err)
+	}
+	return standing
+}
+
+// A standing prune checkpoint is the head every reader counts (headVersion), so a room that loads
+// while one stands loads at its ceiling, with the rows above that ceiling still stored. The first
+// keystroke typed into that room is the append that finishes the prune: its opening pipeline takes
+// the checkpoint and reads the head with those rows still there, and the pipeline that deletes them
+// reads the head again (appendRoomTx), so the gate decides on the head the prune leaves. Without
+// that second read the keystroke is refused as behind the head and the room fails, with nothing
+// wrong with the room or with what the browser typed.
+func TestTheFirstKeystrokeOfARoomLoadedOnAStrandedPruneFinishesIt(t *testing.T) {
+	const ceiling = 3
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	// The rows are stored before any room of this process holds the document, as the rows a prune
+	// crashed on were: they come from a store of its own, which no room here shares.
+	writer := newProofHistory(t, 606)
+	appendUpdates(t, NewPgVersioned(storetest.SecondProcess(t, database)), artifactID,
+		writer.write("one\n"), writer.write("one\n\ntwo\n"), writer.write("one\n\ntwo\n\nthree\n"),
+		writer.write("one\n\ntwo\n\nthree\n\nfour\n"), writer.write("one\n\ntwo\n\nthree\n\nfour\n\nfive\n"))
+	if head := storedHead(t, database, artifactID); head <= ceiling {
+		t.Fatalf("the document stands at %d, want rows stored above the ceiling %d the prune stopped at", head, ceiling)
+	}
+	strandPruneCheckpoint(t, database, artifactID, ceiling)
+
+	service, _ := newTestServiceInstance(t, database)
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	cursor := service.cursorOf(service.srv.GetDoc(artifactID))
+	if cursor == nil {
+		t.Fatal("the resident room lists no cursor")
+	}
+	if through := cursor.heldThrough(); through != ceiling {
+		t.Fatalf("the room loaded at %d, want the standing checkpoint's ceiling %d", through, ceiling)
+	}
+	typeInRoom(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "alice"}, appendBlocks(t, "Typed.\n"))
+	waitForLandedAppends(t, service, artifactID)
+
+	if failure := service.roomFailure(artifactID); failure != nil {
+		t.Fatalf("the room failed on the keystroke that found the prune: %v", failure)
+	}
+	versions := storedVersionsAfter(t, database, artifactID, 0)
+	want := []int64{1, 2, 3, ceiling + 1}
+	if !slices.Equal(versions, want) {
+		t.Errorf("the document holds versions %v, want %v: the prune's rows gone and the keystroke on the head it left", versions, want)
+	}
+	if markdown := storedMarkdown(t, database, artifactID); markdown != "one\n\ntwo\n\nthree\n\nTyped.\n" {
+		t.Errorf("the stored document reads %q, want the keystroke typed onto the prune's head", markdown)
+	}
+	if standing := standingCheckpoints(t, database, artifactID); standing != 0 {
+		t.Errorf("%d prune checkpoints stand after the keystroke, want the append to have taken the one it found", standing)
+	}
+}
+
+// An append that finds a prune its crash left half done - a checkpoint at ceiling 3 over five
+// stored rows - finishes that prune before it stores: rows 4 and 5 go, the checkpoint goes, and
+// the append's own update is stored at version 4, on the head the prune leaves, with the rows
+// under the ceiling exactly as they were stored. Both ways an update reaches the store do it: a
+// room's batch, whose pipelines carry the recovery (appendRoomTx), and a caller's transaction,
+// which runs it statement by statement (recoverPruneTx, appendUpdatesTx).
+func TestAnAppendFinishesAStrandedPruneAndStoresOnTheHeadItLeaves(t *testing.T) {
+	const ceiling = 3
+	for _, path := range []string{"batch", "transaction"} {
+		t.Run(path, func(t *testing.T) {
+			ctx := context.Background()
+			database, versioned, artifactID := newHeldCompactionDocument(t)
+			before := storedRows(t, database, artifactID)
+			if len(before) != 5 {
+				t.Fatalf("the document holds %d rows, want 5", len(before))
+			}
+			strandPruneCheckpoint(t, database, artifactID, ceiling)
+			writer := newProofHistory(t, 202)
+			update := writer.write("six\n")
+
+			var version persistence.Version
+			switch path {
+			case "batch":
+				stored, err := versioned.AppendUpdatesWithCredit(ctx, artifactID, []BrowserUpdate{{Update: update, ContentChanged: true}})
+				if err != nil {
+					t.Fatalf("append on a stranded prune: %v", err)
+				}
+				version = stored
+			case "transaction":
+				tx, err := database.Pool.Begin(ctx)
+				if err != nil {
+					t.Fatalf("begin the appending transaction: %v", err)
+				}
+				defer tx.Rollback(ctx)
+				stored, err := versioned.AppendUpdateTx(ctx, tx, artifactID, update, true)
+				if err != nil {
+					t.Fatalf("append on a stranded prune: %v", err)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					t.Fatalf("commit the append: %v", err)
+				}
+				version = stored
+			}
+
+			after := storedRows(t, database, artifactID)
+			versions := make([]int64, len(after))
+			for index, row := range after {
+				versions[index] = row.version
+			}
+			standing := standingCheckpoints(t, database, artifactID)
+			if version != ceiling+1 || !slices.Equal(versions, []int64{1, 2, 3, ceiling + 1}) || standing != 0 {
+				t.Fatalf("the append stored version %d, leaving versions %v and %d checkpoints; want the prune finished (versions 1 to %d, no checkpoint) and the append at %d",
+					version, versions, standing, ceiling, ceiling+1)
+			}
+			for index := range ceiling {
+				if after[index].version != before[index].version || after[index].xmin != before[index].xmin ||
+					!bytes.Equal(after[index].update, before[index].update) {
+					t.Fatalf("row %d is %+v, want %+v as the prune left it stored", index+1, after[index], before[index])
+				}
+			}
+			if !bytes.Equal(after[ceiling].update, update) {
+				t.Fatalf("version %d holds another update than the append's", ceiling+1)
+			}
 		})
 	}
 }

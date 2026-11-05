@@ -161,7 +161,8 @@ func (p *PgVersioned) appendUpdates(ctx context.Context, room string, updates []
 
 // appendRoomTx is the transaction a room's updates are stored in: it holds the room's in-process
 // lock and a connection of the room-appends pool (store.Pool.RoomAppends) throughout, and sends its
-// statements as pgx pipelines, three round trips from the document's session lock to its release:
+// statements as pgx pipelines, three round trips from the document's session lock to its
+// release, and four on the rare append that finds a prune's checkpoint:
 //
 //  1. pg_advisory_lock, begin, pg_advisory_xact_lock, the prune checkpoint's read
 //     (takePruneCheckpointStatement) and the gate's read (queueAppendGate), with one more round
@@ -251,10 +252,10 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	}
 	if checkpoint.found {
 		// A prune its crash left half done: the rest of it, and the gate read again on the head
-		// that leaves, cost this append one more round trip (recoverPruneTx says why the first
-		// pipeline does not hold the delete).
+		// that leaves, cost this append one more round trip (takePruneCheckpointStatement's
+		// comment says why the first pipeline does not hold the delete).
 		finishing := &pgx.Batch{}
-		store.QueueExec(finishing, "recover pruned document updates", finishPruneStatement, room, checkpoint.ceiling)
+		store.QueueExec(finishing, finishPruneWhat, finishPruneStatement, room, checkpoint.ceiling)
 		gate = queueAppendGate(finishing, room, appendBrowser)
 		if err := send(ctx, finishing); err != nil {
 			return 0, fmt.Errorf("finish the document's prune: %w", err)

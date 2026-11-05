@@ -623,13 +623,19 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 // lock before its gate reads the head: recoverPruneTx in a caller's transaction, and a room's
 // batch in its first pipeline (appendRoomTx). It names doc_checkpoints alone. A statement that
 // names a delete from doc_updates takes that table's ROW EXCLUSIVE lock whether or not it deletes a
-// row, so folding finishPruneStatement into it would put every append's doc_updates lock ahead of
-// its insert on every append rather than only on the rare one that finishes a prune.
+// row, so folding finishPruneStatement into it would take that lock ahead of the insert on every
+// append rather than only on the rare one that finishes a prune.
 const takePruneCheckpointStatement = `delete from doc_checkpoints where artifact_id = $1 returning ceiling`
 
 // finishPruneStatement deletes the updates of the room $1 names above $2, the ceiling a prune's
 // checkpoint recorded (takePruneCheckpointStatement): the rest of the prune that checkpoint began.
 const finishPruneStatement = `delete from doc_updates where artifact_id = $1 and version > $2`
+
+// finishPruneWhat is what a finishPruneStatement the database refuses is reported as, at both
+// sites that run it: recoverPruneTx in a caller's transaction, and a room's batch in the pipeline
+// it sends on finding a checkpoint (appendRoomTx), so one half-done prune reads alike however the
+// append that met it reached the store.
+const finishPruneWhat = "recover pruned document updates"
 
 // pruneCheckpoint is what takePruneCheckpointStatement read: whether the room had a checkpoint, and
 // its ceiling.
@@ -663,7 +669,7 @@ func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string
 		return false, nil
 	}
 	if _, err := tx.Exec(ctx, finishPruneStatement, room, checkpoint.ceiling); err != nil {
-		return false, fmt.Errorf("recover pruned document updates: %w", err)
+		return false, fmt.Errorf("%s: %w", finishPruneWhat, err)
 	}
 	return true, nil
 }
