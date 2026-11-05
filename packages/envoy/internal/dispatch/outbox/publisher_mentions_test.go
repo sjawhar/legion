@@ -49,11 +49,11 @@ func seedMentionDelivery(t *testing.T, database *store.Store, commentID, session
 		t.Fatalf("seed mentioning comment: %v", err)
 	}
 	if _, err := database.Pool.Exec(ctx, `
-		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, created_at, claimed_at)
+		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, error, created_at, claimed_at)
 		values (
 			$1, 'session:' || $2,
 			(select coalesce(max(attempt), 0) + 1 from comment_deliveries where comment_id = $1 and target = 'session:' || $2),
-			'steer', $2, $3, now() - $4::interval, now() - $4::interval
+			'steer', $2, $3, case when $3 = 'failed' then 'envoy listener: connection refused' end, now() - $4::interval, now() - $4::interval
 		)
 	`, commentID, sessionID, state, age); err != nil {
 		t.Fatalf("seed %s delivery of the mention of %s: %v", outcome, sessionID, err)

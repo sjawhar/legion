@@ -858,10 +858,14 @@ func eventDestinations(event model.Event, ownerTopic string, routing routing, lo
 		return d.list, d.mentionPending, err
 	}
 	if event.Type == "comment.created" {
-		if mentioned == nil && len(d.mentions.indexed) > 0 {
-			mentioned = make(map[string]struct{}, len(d.mentions.indexed))
+		for _, ref := range text.Extract(payloadString(event.Payload, "body"), "") {
+			if ref.Kind == "session" {
+				if mentioned == nil {
+					mentioned = map[string]struct{}{}
+				}
+				mentioned[text.TargetID(ref)] = struct{}{}
+			}
 		}
-		maps.Copy(mentioned, d.mentions.indexed)
 		for _, sessionID := range slices.Sorted(maps.Keys(mentioned)) {
 			if !event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) && !d.leftToMention(sessionID) {
 				d.addSessions([]string{sessionID}, "publish mention fallback to")

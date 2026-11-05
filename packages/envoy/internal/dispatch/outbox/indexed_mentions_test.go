@@ -24,10 +24,10 @@ func TestIndexedSessionMentionNotifiesOnceAlongsideExplicitMentions(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			id := []string{"00000000-0000-0000-0000-000000000021", "00000000-0000-0000-0000-000000000022", "00000000-0000-0000-0000-000000000023"}[i]
-			if _, err := database.Pool.Exec(ctx, `with written as (insert into comments(id,issue_key,author,body) values ($1,'T-1','{"kind":"session","id":"writer"}','Stored resolution, not a reparse') returning id) insert into refs(from_kind,from_id,to_kind,to_id) select 'comment',id::text,'session_mention','reader' from written`, id); err != nil {
+			if _, err := database.Pool.Exec(ctx, `insert into comments(id,issue_key,author,body) values ($1,'T-1','{"kind":"session","id":"writer"}','Body dispatch://sessions/reader')`, id); err != nil {
 				t.Fatal(err)
 			}
-			payload := map[string]any{"id": id, "body": "Stored resolution, not a reparse"}
+			payload := map[string]any{"id": id, "body": "Body dispatch://sessions/reader"}
 			if tc.explicit {
 				payload["mentions"] = mentionsOf("reader")
 				seedMentionDelivery(t, database, id, "reader", tc.outcome)

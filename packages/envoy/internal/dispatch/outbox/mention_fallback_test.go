@@ -22,7 +22,7 @@ func TestAnExplicitCommentMentionNotifiesASessionOutsideEveryOtherRoute(t *testi
 	}{
 		{"failed agent mention", "failed", false, model.Actor{Kind: "session", ID: "writer"}, true, false},
 		{"no attempt", "", false, model.Actor{Kind: "session", ID: "writer"}, true, false},
-		{"abandoned", "abandoned", true, model.Actor{Kind: "user", ID: "alice"}, true, false},
+		{"lapsed pending", "abandoned", true, model.Actor{Kind: "user", ID: "alice"}, false, true},
 		{"sent", "sent", true, model.Actor{Kind: "user", ID: "alice"}, false, false},
 		{"pending", "pending", false, model.Actor{Kind: "session", ID: "writer"}, false, true},
 		{"self", "failed", false, model.Actor{Kind: "session", ID: "reader"}, false, false},

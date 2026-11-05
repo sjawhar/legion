@@ -31,20 +31,14 @@ type lookup interface {
 	mentionDeliveries(commentID string) (mentionDeliveries, error)
 }
 
-// mentionDeliveries is what a new comment's mentions did for the sessions they resolved to, read
-// from comment_deliveries when the event is published (loadMentionDeliveries). A mention resolved
-// at write time names only a candidate: its send runs after the comment commits and can fail - the
-// listener does not know the session, the receipt times out, the handler is cancelled, the session
-// lacks the delivery mode - and a session whose mention failed has no copy but the outbox's.
+// mentionDeliveries records sessions left to the explicit delivery path. Pending attempts
+// belong to their sender or the sweeper, even after a claim lapses. Receipt timeouts may
+// already have delivered; policy and capability refusals must not be overridden.
 type mentionDeliveries struct {
-	// sent holds each session some attempt of a mention reached.
+	// sent includes successful, possibly delivered, and deliberately refused attempts.
 	sent map[string]struct{}
-	// pending holds each session no attempt reached yet whose send is still live: an attempt is
-	// pending and its claim, or its creation when no sender has claimed it yet, is younger than
-	// model.DeliveryClaimLapse.
+	// pending includes every unsettled attempt, regardless of the sender's claim age.
 	pending map[string]struct{}
-	// indexed is the comment body's session targets, resolved by its existing ref indexer.
-	indexed map[string]struct{}
 }
 
 // wanted is the lookup a batch's first pass over its events runs: it answers nothing and records
@@ -470,28 +464,24 @@ func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string) (
 	return loadKeyedSessions(ctx, db, "load document session authors", documentSessionAuthorsQuery, ids)
 }
 
-// mentionDeliveryQuery groups every comment's mention attempts by the comment and the session each
-// was sent to. An attempt pending for longer than model.DeliveryClaimLapse - by its claim, or by
-// its creation when no sender ever claimed it - is abandoned, the same lease the API's claimLapsed
-// gives a sender (internal/dispatch/api), so it no longer holds the outbox's copy back.
-var mentionDeliveryQuery = `
-	select comment_id, session_id, bool_or(sent), bool_or(pending), bool_or(indexed)
-	from (
-		select comment_id::text, session_id, state = 'sent' as sent,
-		       state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + ` as pending,
-		       false as indexed
-		from comment_deliveries
-		where comment_id = any($1::text[]::uuid[]) and session_id is not null
-		union all
-		select from_id, to_id, false, false, true from refs
-		where from_kind = 'comment' and from_id = any($1::text[]) and to_kind = 'session_mention'
-	) resolutions
-	group by comment_id, session_id
+// mentionDeliveryQuery groups attempts by their pinned session, or their requested session
+// before the pin is written. Only a known transport failure permits fallback. The sweeper
+// resumes pending attempts with their original idempotency key after a claim lapses.
+const mentionDeliveryQuery = `
+	with attempts as (
+		select comment_id, coalesce(session_id, case when starts_with(target, 'session:') then substring(target from 9) end) as session_id,
+		       state, coalesce(error, resolve_error, '') as failure
+		from comment_deliveries where comment_id = any($1::text[]::uuid[])
+	)
+	select comment_id::text, session_id,
+	       bool_or(state = 'sent' or (state = 'failed' and not (
+	         starts_with(failure, 'envoy listener: ') or starts_with(failure, 'no live session ')
+	       ))), bool_or(state = 'pending')
+	from attempts where session_id is not null group by comment_id, session_id
 `
 
-// loadMentionDeliveries reads indexed session targets and explicit delivery outcomes for new
-// comments. Edits, resolutions and reopenings neither send a body mention nor suppress a route.
-// A comment with no attempts suppresses nothing, but its indexed body targets still notify.
+// loadMentionDeliveries reads explicit outcomes only. Body recipients come from the
+// creation event's own body, not the mutable reference index.
 func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found *lookups) error {
 	if len(ids) == 0 {
 		return nil
@@ -501,15 +491,12 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 		return fmt.Errorf("load the batch's mention deliveries: %w", err)
 	}
 	var commentID, sessionID string
-	var sent, pending, indexed bool
-	_, err = pgx.ForEachRow(rows, []any{&commentID, &sessionID, &sent, &pending, &indexed}, func() error {
+	var sent, pending bool
+	_, err = pgx.ForEachRow(rows, []any{&commentID, &sessionID, &sent, &pending}, func() error {
 		deliveries, ok := found.mentions[commentID]
 		if !ok {
-			deliveries = mentionDeliveries{sent: map[string]struct{}{}, pending: map[string]struct{}{}, indexed: map[string]struct{}{}}
+			deliveries = mentionDeliveries{sent: map[string]struct{}{}, pending: map[string]struct{}{}}
 			found.mentions[commentID] = deliveries
-		}
-		if indexed {
-			deliveries.indexed[sessionID] = struct{}{}
 		}
 		switch {
 		case sent:
