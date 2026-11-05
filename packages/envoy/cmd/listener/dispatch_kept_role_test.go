@@ -447,11 +447,20 @@ func TestTheOutboxHandsACopyOverPastTheCursorTheListenersDrainWrote(t *testing.T
 		return publishedEventAt(t, database, second.ID) != nil
 	})
 	secondKey := fmt.Sprintf("dispatch-%d", second.ID)
+	// The holder's agent subject carries the drain's forward of the first copy as well as the
+	// handover's of this one: the lane's stand-in publishes what it records, as the real
+	// forwardRole does (newKeptLaneUnderClaim), and a drain's forward reached that subject here
+	// before the handover's did. Taking the first frame was an artifact of a stub that published
+	// nothing, not part of what this test holds, so the handover's copy is selected by the event
+	// it carries and every assertion below is made of that frame.
 	var handed contracts.Envelope
-	select {
-	case handed = <-taken:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("the holder was handed nothing on its agent subject within 30s; the listener log says what the handover read:\n%s", harness.logs.String())
+	deadline := time.After(30 * time.Second)
+	for handed.EventID != secondKey {
+		select {
+		case handed = <-taken:
+		case <-deadline:
+			t.Fatalf("the holder was handed no forward of %s on its agent subject within 30s; the listener log says what the handover read:\n%s", secondKey, harness.logs.String())
+		}
 	}
 	if handed.EventID != secondKey || handed.DedupeKey != roleForwardDedupePrefix+secondKey {
 		t.Fatalf("the holder was handed event %q under dedupe key %q, want the role forward of the kept %q",

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -49,6 +50,15 @@ type keptLaneUnderClaim struct {
 // newKeptLaneUnderClaim builds the lane over harness. forward stands in for the holder: it is
 // called with the number of the forward being attempted, counting from 1, the session it is
 // addressed to and the envelope, and a forward it fails is one the drain could not make.
+//
+// A forward it does not fail is published on the holder's agent subject, through the harness's
+// own client and under the Nats-Msg-Id this records, before it is recorded: that is what the
+// real forward does (startRoleForward), and a test about what the holder's host is handed - the
+// comment under one key, and under which - can read it nowhere else, the recorded handover
+// saying only what the drain meant to send. The holder's receipt is not waited for, the stand-in
+// being the holder here, so the publish costs the drain one round trip to the stream and no
+// receipt window; the stream collapses two forwards of one message to one holder, as it does in
+// production, since they carry one id.
 func newKeptLaneUnderClaim(t *testing.T, harness listenerDeliveryHarness, forward func(attempt int, holder string, item contracts.Envelope) error) *keptLaneUnderClaim {
 	t.Helper()
 	lane := &keptLaneUnderClaim{harness: harness, forwards: make(chan keptHandover, 64)}
@@ -58,6 +68,15 @@ func newKeptLaneUnderClaim(t *testing.T, harness listenerDeliveryHarness, forwar
 		holder := strings.TrimPrefix(subject, contracts.AgentTopicPrefix)
 		if err := forward(int(attempts.Add(1)), holder, item); err != nil {
 			return err
+		}
+		body, err := json.Marshal(item)
+		if err != nil {
+			return fmt.Errorf("marshal the forward to %s: %w", holder, err)
+		}
+		if err := harness.client.Conn.PublishMsg(&natsgo.Msg{
+			Subject: subject, Data: body, Header: natsgo.Header{natsgo.MsgIdHdr: []string{msgID}},
+		}); err != nil {
+			return fmt.Errorf("publish the forward to %s: %w", holder, err)
 		}
 		handed := keptHandover{holder: holder, key: item.DedupeKey, msgID: msgID}
 		lane.mu.Lock()

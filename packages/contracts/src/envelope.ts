@@ -27,6 +27,20 @@ export const EnvelopeSchema = z.object({
    * judge how old the message is.
    */
   kept_at: z.number().int().optional(),
+  /**
+   * `mention_dedupe_keys` holds, per mentioned session id, the dedupe key that session's own
+   * send of this comment went under - the key `agent.<session>.<comment>:<target>:<the mention's
+   * mode>` its host claimed when the mention's send landed - for every session of the comment
+   * whose mention attempt then failed.
+   *
+   * Dispatch's outbox writes it, on a copy it keeps on a role's kept lane, and only there; both
+   * forwarders of that lane read it - the handover behind the keep and the drain that hands the
+   * lane to the role's next holder - and key the copy they hand a holder by that holder's own
+   * entry. The holder a kept copy reaches is unknown when it is kept, and a host drops only a
+   * dedupe key it has claimed itself, so one stored key shows the comment twice to every other
+   * mentioned session that claims the role.
+   */
+  mention_dedupe_keys: z.record(z.string(), z.string()).optional(),
   payload_summary: z.string().min(1),
   payload: z.string().optional(),
   payload_ref: z.string().optional(),
