@@ -1,0 +1,5 @@
+kind: Added
+body: Shared dispatch identity addresses for people, sessions and roles, and mentioned document blocks on person node lists.
+time: 2026-11-04T09:20:03.066620919Z
+custom:
+    Issue: pr2760

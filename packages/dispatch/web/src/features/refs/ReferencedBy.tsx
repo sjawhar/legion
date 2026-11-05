@@ -28,6 +28,8 @@ const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
   component: "Component",
   issue: "Issue",
   message: "Message",
+  person: "Person",
+  role: "Role",
   session: "Session",
 };
 

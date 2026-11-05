@@ -85,6 +85,19 @@ func (s *server) inboxAssigneeFilter(ctx context.Context, raw string, caller mod
 	}
 }
 
+// These fragments are also the reference side of the own-inbox comparison.
+const inboxOwnerJoins = `
+		left join issues i on i.key = a.issue_key
+		left join artifacts ar on ar.id = a.artifact_id`
+
+const inboxOpenAskFilter = `
+		where a.state = 'open'
+		  and (i.key is null or i.closed_at is null)
+		  and ($1 = '' or coalesce(i.project_key, ar.project_key) = $1)
+		  and ($2 = ''
+		       or ($2 = 'unassigned' and (i.key is null or i.assignee is null))
+		       or ($2 = 'login' and i.assignee = $3))`
+
 func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.actingPerson(w, r)
 	if !ok {
@@ -104,15 +117,9 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		       i.key, i.title, i.assignee, i.priority, ar.project_key, ar.slug, ar.name,
 		       sn.snoozed_until
 		`+askReadFrom+`
-		left join issues i on i.key = a.issue_key
-		left join artifacts ar on ar.id = a.artifact_id
+		`+inboxOwnerJoins+`
 		left join user_ask_snooze sn on sn.ask_id = a.id and sn.login = $4
-		where a.state = 'open'
-		  and (i.key is null or i.closed_at is null)
-		  and ($1 = '' or coalesce(i.project_key, ar.project_key) = $1)
-		  and ($2 = ''
-		       or ($2 = 'unassigned' and (i.key is null or i.assignee is null))
-		       or ($2 = 'login' and i.assignee = $3))
+		`+inboxOpenAskFilter+`
 		order by i.priority asc nulls last, waiting_on desc,
 		         coalesce(lr.created_at, a.created_at) desc, a.id desc
 	`, project, assigneeMode, assigneeLogin, model.CanonicalLogin(caller.ID))

@@ -91,6 +91,15 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// Reading an identity's references is reading what belongs to a person, and only part of
+	// this route needs it, so the check sits in the handler rather than in routeScopes.
+	if ref.Kind == "person" || ref.Kind == "session" || ref.Kind == "role" {
+		if !s.callerHoldsScope(r, model.ScopePerson) {
+			writeError(w, "REFERENCE_FORBIDDEN", http.StatusForbidden,
+				"a person, session or role reference is read with the person scope")
+			return
+		}
+	}
 	var node model.GraphNode
 	if ref.Kind == "block" {
 		if ref.Item != "" {
@@ -352,6 +361,9 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	// The node as graph_edges stores it: an ask's part and a comment's or message's block under
 	// its storage kind.
 	target, _ := refs.TargetOf(ref)
+	if strings.HasSuffix(target.Kind, "_mention") {
+		target.Kind = ref.Kind
+	}
 	query := refs.Query{Direction: direction, Kind: target.Kind, ID: target.ID}
 	if kinds := strings.TrimSpace(values.Get("kind")); kinds != "" {
 		linkKinds := pmdoc.LinkKinds()

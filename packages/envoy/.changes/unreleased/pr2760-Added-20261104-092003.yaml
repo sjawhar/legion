@@ -1,0 +1,5 @@
+kind: Added
+body: Identity mentions link comments, messages and document blocks to people, sessions and roles; the person page shows Mentioned in and the opt-in inbox reads the same edges. A session addressed in a comment body receives a notification, deduplicated with explicit mentions; a failed explicit send falls back to that notification. The read-only census --mentions compares recorded resolutions.
+time: 2026-11-04T09:20:03.170784064Z
+custom:
+    Issue: pr2760

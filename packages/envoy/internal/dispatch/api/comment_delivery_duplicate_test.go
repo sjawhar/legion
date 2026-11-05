@@ -74,6 +74,10 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	if len(comment.Deliveries) != 1 || comment.Deliveries[0].State != "failed" {
 		t.Fatalf("first attempt = %#v, want it recorded failed once every try missed its receipt", comment.Deliveries)
 	}
+	// Publishing the queued creation event must not turn this uncertain receipt
+	// into a generic notification under a different listener idempotency key.
+	(&answersFixture{database: database}).publishOutbox(t)
+	assertNoMentionFallback(t, database, comment.ID, "s1")
 	listenerState.Lock()
 	listenerState.answering = true
 	listenerState.Unlock()

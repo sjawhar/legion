@@ -88,6 +88,10 @@ function narrowIssue(details: IssueDetails): Issue {
 
 function stubIssueApi() {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueLinks = spyOn(api, "getIssueLinks").mockResolvedValue({
+    edges: [],
+    node: { kind: "issue", id: issue.key },
+  });
   const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue([]);
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
@@ -110,6 +114,7 @@ function stubIssueApi() {
     patchIssue,
     restore: () => {
       getIssue.mockRestore();
+      getIssueLinks.mockRestore();
       getIssueEvents.mockRestore();
       getInbox.mockRestore();
       getIssueSubscribers.mockRestore();

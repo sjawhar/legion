@@ -1616,6 +1616,26 @@ A result for an `after_merge` or `default_branch` check is current only at such 
 A yes is kept for good, since a commit on the default branch never leaves it, and a no is re-read after five minutes, since a commit merges later.
 A new table, as above; its census answers `0`.
 
+Migration `20261104074751_person_graph` creates the derived views `person_aliases` and `graph_person_edges`, without altering `graph_edges` or any table.
+The graph is both edge views together (`refs.AllEdgesSQL`), while old builds keep their existing results and query plans.
+The alias view uses `user_threads_login` for canonical person ids and stores no identity mapping of its own.
+A stored session actor's `owner` is always the credential's own, but its session id is the request body's on every bearer but a broker-issued token, so a session alias is taken only from an actor carrying `session_verified`, which the server sets where the credential itself proved the session.
+No record establishes a role alias, and the view mints none.
+Expression indexes on each scalar actor source and on people's canonical logins serve identity lookups; partial topic and time indexes serve recorded event deliveries.
+Index builds read the existing tables under `SHARE`, blocking writers while each index builds; the migration rewrites and refuses no row, and its census answers `0` while reporting those tables' sizes and locks.
+
+The inbox graph migration creates `graph_inbox_edges` and three observation-only tables without altering an existing table or view.
+No source row is rewritten, no index is created, and its migration census answers `0`.
+
+
+Migration `20261104090147_issue_edges` adds nullable `issues.filed_from` and derives `graph_issue_edges`, leaving `graph_edges` unchanged.
+The create path is the only writer of filing provenance: `filed_from` names an existing public message, ask or comment on an issue or project document in the same project.
+No historical source record reliably records filing provenance, so existing issues remain null rather than guessing from citations.
+`duplicate_of` is derived from a closed issue's latest explicit `Duplicate of dispatch://KEY` message or comment at or before closure.
+The migration rewrites no row; its census answers `0`.
+`GET /api/v1/issues/{key}/links` returns the issue's outgoing edges in `GraphReferences` form, including the new kinds.
+`GET /api/v1/issues/{key}/links/shadow` compares common edge rows with the legacy sources in one snapshot and returns `{issue, legacy, graph, mismatches}`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
 On success it backfills each artifact's project and generated `ref_key`.
@@ -1643,6 +1663,17 @@ as a Kubernetes Job from the new image, or by hand with the `kubectl run` recipe
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch census
 ```
+
+`envoy-dispatch census --deliveries` is a separate post-deploy read, not the migration census below.
+It compares the graph's `delivered_to` sets with recorded outbox topics and sent message/comment attempts for every comment, message and ask created in the last 30 days, including an empty recipient set.
+It prints JSON counts (`checked`, `by_kind`, `mismatched`, `missing` by source, `unexpected`), never message content, from one read-only repeatable-read snapshot, and never runs migrations.
+Exit `0` means a nonempty census with no mismatches, `1` means mismatches or no items to check, and `2` means the check could not run.
+
+`envoy-dispatch census --mentions` reparses comment and message bodies and current document content from the last 30 days, comparing identity mentions independently of the reference indexes, with explicit comment mention resolutions included.
+It prints `checked`, `recorded`, `mismatched`, `by_kind`, `missing` and `unexpected` counts from one read-only snapshot, without migrating or returning content.
+It exits `1` on a difference or no recorded mentions, and `2` if it cannot run.
+Identity addresses use `dispatch://people/<login>`, `dispatch://sessions/<id>` and `dispatch://roles/<name>` in text, indexed by the same writer as citation references.
+Identity mentions live in their own table, which an older writer does not reconcile, so they retain their source events across a rolling deploy or rollback.
 
 The census is one `repeatable read, read only` transaction over the migrations this binary carries that the database has not applied:
 every migration whose version `schema_migrations` does not record, the rule the runner applies them by (a database without that table records none, so everything is pending).
@@ -2005,6 +2036,11 @@ The search leaves out everything the write's owner holds
 — so nothing is ever suggested that the writer already has.
 A hit on an issue that is `done` ranks below every hit on an open owner, since keyword search otherwise puts an issue already closed as a duplicate above the open issue it was closed into.
 `GET` and `POST /api/v1/projects/{key}/related` (`dispatch related`) run the same check on a title and a text and write nothing.
+The additive `graph_related` list independently ranks up to three same-project issues sharing cited nodes, components, blockers or a parent, with each shared target listed in `shared`.
+It reads the complete graph relation, including issue-owned documents and conversation items, never direct messages.
+The new issue, or `exclude_issue` on the no-write route, supplies its existing neighbourhood beside references parsed from the input text.
+Open issues sort before closed ones, then more shared targets sort first.
+`graph_missing` reports a graph query that failed or exceeded its one-second allowance inside the existing five-second check; the text fields retain their existing meaning.
 
 Every check of a write is recorded in `related_checks` (`0139`):
 its outcome, how it searched, the reason, the words, and its keyword, meaning and total milliseconds.
@@ -2384,6 +2420,40 @@ Each item below names a path with its method and identity, then its purpose.
   Move the caller's read mark on one thread forward to `{read_through}`;
   it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`.
   Answers `204`, writing nothing for a thread the caller never wrote in.
+
+- `/api/v1/me/inbox?limit=&offset=&mentions=true` (GET; cookie, trusted header, or bearer; needs the `person` scope)
+
+  Opt-in graph read of the caller's default Inbox, unread Replies and unread direct/broadcast replies, newest first.
+  Reads the private current-membership `graph_inbox_edges` rows addressed `delivered_to -> person`, minus existing read state; `user_threads` remains the thread index.
+  The response is `{person, rows, total, limit, offset, horizon, expansions}`; a row has `cause`, `kind`, `id`, `thread_id`, `created_at`, `body`, `author`, `href`, `subject` and `snoozed_until`.
+  `limit` is 1–200 (default 50), `offset` is nonnegative, and an empty page retains `total`.
+  Identity and assignee selectors are refused with `400 OWN_INBOX_ONLY`.
+  `mentions=true` enables a separate bounded expansion of mentioned issue/document nodes; it is off by default and does not expose issue-less direct messages.
+  The snapshot is taken after observing the server's shared event Horizon, so every event at that horizon already has its synchronously derived node, and later committed writes remain visible.
+  Existing Inbox, Replies and CLI reads do not change.
+
+- `/api/v1/me/inbox/shadow` (GET; cookie, trusted header, or bearer; needs the `person` scope)
+
+  Read-only observation counts from the background comparison, not inbox content; GET never runs or writes a pass.
+  Every person who has signed in is checked, including inactive people, once a minute in the background.
+  The graph membership is compared independently with the existing routes' own SQL: the Inbox's default viewer filter, unread Replies and unread direct replies.
+  `mismatched`, `missing` and `unexpected` are global membership differences by `ask`, `thread_reply` and `direct_reply`; `errors` and `uncovered_users` prevent missing observations from looking green.
+  `users` contains only the caller's own row; every other count is a global total. `expansions.mention` is additional public mention membership and never a mismatch.
+  `daily_mismatched` retains a bad observation after a later comparison returns to zero.
+  `ready` requires three complete UTC days without differences or errors for every person, with full-day coverage, at least 720 samples per person-day and no gap longer than two minutes, plus a fresh clean current comparison.
+  This gate covers asks and replies only, not pending credential requests, and does not cut over automatically.
+  Any cutover must retain the Credential requests section and its contribution to Needs you and the blocked-on-you banner.
+  The sweep exports `envoy_dispatch_inbox_shadow_duration_seconds` and `envoy_dispatch_inbox_shadow_failures_total` on `/metrics`.
+  `/inbox/shadow` displays it and links to `/inbox/unified`, the opt-in view.
+
+- `/api/v1/people/{login}/nodes?limit=&offset=&since=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
+
+  List comments, messages and asks the person authored or their proved session aliases received, through the derived person graph, newest first by creation time, kind and id.
+  Received nodes default to deliveries in the last 30 days; `since` is an optional RFC3339 lower bound on deliveries, not on authorship.
+  `limit` is 1–200 (default 50), `offset` is nonnegative, and the page is `{person, rows, total, limit, offset}`.
+  Each row has `kind`, `id`, `relations`, `title` (the first line), `created_at`, `ref` and `href`.
+  A direct message has no `ref`; its `href` opens the targeted session's conversation.
+  A credential without the `person` scope is refused `403 OAUTH_SCOPE_REQUIRED` before the handler runs; an unknown person is `404 PERSON_NOT_FOUND`.
 
 - `/api/v1/agents` (GET; cookie, trusted header, or bearer)
 

@@ -48,6 +48,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		External   string          `json:"external"`
 		Force      bool            `json:"force"`
 		Spec       *string         `json:"spec"`
+		FiledFrom  string          `json:"filed_from"`
 		Labels     []string        `json:"labels"`
 		Priority   json.RawMessage `json:"priority"`
 		Assignee   json.RawMessage `json:"assignee"`
@@ -318,10 +319,15 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	issueRank := rank.Between(lastRank, "")
 
+	filedFrom, err := s.filingSource(r.Context(), tx, input.Project, input.FiledFrom)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if _, err := tx.Exec(r.Context(), `
-		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee, repo)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee, repo); err != nil {
+		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee, repo, filed_from)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee, repo, filedFrom); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

@@ -1,5 +1,17 @@
 [
   {
+    "body": "For dispatch://people/%20ALICE%40example.com%20, dispatch://sessions/worker-1 and dispatch://roles/reviewer.",
+    "refs": [
+      "dispatch://people/alice%40example.com",
+      "dispatch://sessions/worker-1",
+      "dispatch://roles/reviewer"
+    ]
+  },
+  {
+    "body": "Not identities: dispatch://people/%00 dispatch://sessions/a%2Fb dispatch://roles/a/b",
+    "refs": []
+  },
+  {
     "body": "Tied to dispatch://CORE-1 here.",
     "refs": [
       "dispatch://CORE-1"

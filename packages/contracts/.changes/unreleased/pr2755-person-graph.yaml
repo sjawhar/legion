@@ -1,0 +1,5 @@
+kind: Added
+body: Person graph node and paginated response types, with authored_by and delivered_to edge kinds.
+time: 2026-11-04T08:33:12Z
+custom:
+  Issue: pr2755

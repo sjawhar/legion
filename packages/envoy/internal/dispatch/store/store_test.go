@@ -212,6 +212,9 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"event_horizon",
 		"user_issue_state",
 		"user_agent_state",
+		"inbox_shadow_control",
+		"inbox_shadow_days",
+		"inbox_shadow_latest",
 		"document_blocks",
 		"block_refs",
 		"document_block_versions",
@@ -282,6 +285,25 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"asks_issue_key",
 		"messages_issue_roots",
 		"document_search_vector",
+		"comments_session_owner",
+		"messages_session_owner",
+		"asks_session_owner",
+		"events_session_owner",
+		"comments_person_author",
+		"messages_person_author",
+		"asks_person_author",
+		"comments_created_text_id",
+		"messages_created_text_id",
+		"document_blocks_changed_at",
+		"comment_mentions_comment_id_text",
+		"comment_deliveries_comment_id_text",
+		"message_deliveries_message_id_text",
+		"identity_mentions_target",
+		"identity_mentions_source",
+		"events_participation_answer_person",
+		"asks_issue_key",
+		"messages_issue_roots",
+		"document_search_vector",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
@@ -300,7 +322,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		select viewname
 		from pg_views
 		where schemaname = current_schema()
-	`, []string{"graph_edges"})
+	`, []string{"graph_edges", "graph_inbox_edges", "graph_mention_edges", "graph_mention_resolutions", "graph_person_edges", "graph_thread_participation", "graph_thread_edges", "person_aliases"})
 
 	// Every search column is filled by its table's BEFORE trigger (0057-0061), never by application code.
 	assertDatabaseObjects(t, ctx, store.Pool, `

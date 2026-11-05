@@ -1,0 +1,5 @@
+kind: Added
+body: An inbox comparison page reports missing questions and replies, checked people and the three-day cutover gate. A unified inbox preview is opt-in; existing Inbox, Replies and CLI behavior stay unchanged.
+time: 2026-11-04T10:00:00Z
+custom:
+  Issue: pr2762

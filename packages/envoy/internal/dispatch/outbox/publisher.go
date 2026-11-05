@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -36,11 +37,9 @@ const (
 	// loadCommentRecipients so a malformed cycle (comments.reply_to has no acyclicity constraint)
 	// cannot spin the recursive query and stall the outbox scan.
 	maxCommentThreadDepth = 32
-	// mentionPendingDelay is how long an event waits when a session route held its copy back for
-	// a mention whose send is still undecided (destinations.leftToMention): long enough for the
-	// handler that holds the send to settle it, short enough that the copy follows a failed send
-	// promptly. The wait is bounded: a pending attempt counts as undecided only for
-	// model.DeliveryClaimLapse, the minute its sender's claim holds (mentionDeliveryQuery).
+	// mentionPendingDelay is how long an event waits before rereading an explicit
+	// mention's pending attempt. The sender or the delivery sweeper owns that copy,
+	// including after its claim lapses; the outbox must never race either sender.
 	mentionPendingDelay = 2 * time.Second
 	// recordTimeout bounds the write of a batch's outcome (recordBatch), which a stopping process
 	// still makes after its context has ended: one statement, which a healthy database answers in
@@ -803,12 +802,15 @@ func (d *destinations) addSessions(sessionIDs []string, label string) {
 // comment's mentions resolved to: it reports whether the route leaves that session's copy to the
 // mention. A mention that reached the session delivered the comment, so the copy is skipped. A
 // mention still being sent may yet, so the copy is held back and the event marked mentionPending,
-// to be decided again when it is next read (settleEvent blocks it). Any other session - every
-// attempt failed or was abandoned, or none was recorded - is published to as if it had not been
-// mentioned. Callers ask only about a session their payload names as mentioned; a session no
-// mention delivers to is in neither set, so it is never skipped.
+// to be decided again when it is next read (settleEvent blocks it). A failed attempt
+// permits a copy only for a known transport failure; an uncertain receipt or a refusal
+// is left to the explicit delivery path. A session with no attempt is not suppressed.
 func (d *destinations) leftToMention(sessionID string) bool {
 	if _, ok := d.mentions.sent[sessionID]; ok {
+		return true
+	}
+	if d.mentions.unpinnedPending {
+		d.mentionPending = true
 		return true
 	}
 	if _, ok := d.mentions.pending[sessionID]; ok {
@@ -821,16 +823,17 @@ func (d *destinations) leftToMention(sessionID string) bool {
 // eventDestinations lists event's destinations in the order they are sent and recorded: its
 // owner's topic (ownerTopic), then - for an event that notifies and is not a targeted message - its
 // owner's route, its claimant route, its primary document's sessions and its author routes, then
-// its follower routes and the previous claimant's notice. mentionPending reports a session's copy
-// held back for a mention still being sent (destinations.leftToMention). The mention deliveries of
-// a new comment whose mentions resolved to a session are read before anything else, so a lookup of
-// them that fails leaves the event with no destination. Any other lookup that fails, or a route
+// its follower routes, explicit/body mention fallbacks and the previous claimant's notice.
+// mentionPending holds back a copy while its explicit send is still pending. New comments
+// read explicit delivery outcomes first; a failed lookup leaves no destination. Any
+// other lookup that fails, or a route
 // that does not parse, ends the list there: the destinations before it are returned with the
 // error, which backs the event off once they are sent. So a recipient read the batch has no answer
 // for (unansweredRecipients) still lets the owner topic, the route and the claimant go first.
 func eventDestinations(event model.Event, ownerTopic string, routing routing, look lookup) (list []destination, mentionPending bool, err error) {
 	d := &destinations{seen: map[string]struct{}{}}
-	if event.Type == "comment.created" && len(payloadMentionedSessions(event.Payload)) > 0 {
+	mentioned := payloadMentionedSessions(event.Payload)
+	if event.Type == "comment.created" && (len(mentioned) > 0 || uuid.Validate(payloadString(event.Payload, "id")) == nil) {
 		if d.mentions, err = look.mentionDeliveries(payloadString(event.Payload, "id")); err != nil {
 			return nil, false, err
 		}
@@ -854,6 +857,21 @@ func eventDestinations(event model.Event, ownerTopic string, routing routing, lo
 	}
 	if err := addFollowerRoutes(event, look, d); err != nil {
 		return d.list, d.mentionPending, err
+	}
+	if event.Type == "comment.created" {
+		for _, ref := range text.Extract(payloadString(event.Payload, "body"), "") {
+			if ref.Kind == "session" {
+				if mentioned == nil {
+					mentioned = map[string]struct{}{}
+				}
+				mentioned[text.TargetID(ref)] = struct{}{}
+			}
+		}
+		for _, sessionID := range slices.Sorted(maps.Keys(mentioned)) {
+			if !event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) && !d.leftToMention(sessionID) {
+				d.addSessions([]string{sessionID}, "publish mention fallback to")
+			}
+		}
 	}
 	addPreviousClaimant(event, d)
 	return d.list, d.mentionPending, nil

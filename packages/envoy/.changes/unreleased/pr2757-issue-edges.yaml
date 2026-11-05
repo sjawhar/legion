@@ -1,0 +1,5 @@
+kind: Added
+body: Issue Links reads typed edges, including duplicate closure and explicit filing provenance; issue related-item checks run graph and text searches together, and Links shadow comparisons include component membership.
+time: 2026-11-04T09:01:47Z
+custom:
+  Issue: pr2757

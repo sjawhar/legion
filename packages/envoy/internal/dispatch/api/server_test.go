@@ -52,6 +52,10 @@ func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
 type testServerOptions struct {
 	defaultProject string
 	testHooks      bool
+	// queryTracer, when set, puts the server's own pool behind storetest.Traced, so a test
+	// counts the statements a request issues. The test's own *store.Store is untraced, so
+	// seeding and direct reads are not counted: everything the tracer sees is the handler's.
+	queryTracer pgx.QueryTracer
 	// store is the database the server runs on; nil opens one of its own (storetest.Open). A
 	// test that counts a read's round trips passes a traced store (storetest.Traced).
 	store *store.Store
@@ -224,8 +228,14 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if options.identity != nil {
 		people = options.identity
 	}
+	// handlerStore is what the handlers read through: the test's own database, or a traced
+	// pool on it when the test counts the statements a request issues.
+	handlerStore := database
+	if options.queryTracer != nil {
+		handlerStore = &store.Store{Pool: storetest.Traced(t, database.Pool, options.queryTracer, nil)}
+	}
 	deps, err := NewDeps(DepsInput{
-		Store:                  database,
+		Store:                  handlerStore,
 		Identity:               people,
 		AgentTokens:            sharedAgentTokens(t, "agent-token"),
 		DefaultProject:         options.defaultProject,

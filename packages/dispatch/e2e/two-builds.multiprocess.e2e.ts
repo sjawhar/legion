@@ -302,6 +302,16 @@ function visits(seed: Seeded): readonly Visit[] {
   return [
     { route: "/", shows: (page) => [heading(page, "Inbox")], url: "/" },
     {
+      route: "/inbox/unified",
+      shows: (page) => [heading(page, "Unified inbox · preview")],
+      url: "/inbox/unified",
+    },
+    {
+      route: "/inbox/shadow",
+      shows: (page) => [heading(page, "Does the new inbox miss anything?")],
+      url: "/inbox/shadow",
+    },
+    {
       route: "/answers",
       shows: (page) => [
         heading(page, "Answered by you"),
@@ -317,6 +327,8 @@ function visits(seed: Seeded): readonly Visit[] {
       ],
       url: "/replies",
     },
+    { route: "/people/:login", shows: (page) => [heading(page, "alice")], url: "/people/alice" },
+    { route: "/threads", shows: (page) => [heading(page, "My threads")], url: "/threads" },
     { route: "/agents", shows: (page) => [heading(page, "Agents")], url: "/agents" },
     {
       // The preview is the headless renderer's: without it the bold is literal asterisks.

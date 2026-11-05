@@ -1,3 +1,4 @@
+import { parseIdentityReference } from "@legion/contracts";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
@@ -21,6 +22,18 @@ export function ReferenceLink({
   reference: string;
   testId?: string;
 }): ReactNode {
+  const identity = parseIdentityReference(reference);
+  if (identity !== undefined) {
+    return (
+      <Link
+        className={`underline ${linkText} ${linkHoverText}`}
+        data-testid={testId}
+        to={identity.href}
+      >
+        {label ?? identity.id}
+      </Link>
+    );
+  }
   const route = parseNodeReference(reference);
   if (route === undefined) {
     return <span data-testid={testId}>{reference}</span>;

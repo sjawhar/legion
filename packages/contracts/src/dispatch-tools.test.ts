@@ -133,6 +133,17 @@ function schemaFor(name: keyof typeof validCalls) {
   return dispatchToolSchema(specFor(name), schemaApi);
 }
 
+test("issue tools refuse filing provenance rather than sending an undeployed server field", () => {
+  const schema = dispatchToolSchema(specFor("dispatch_issue"), schemaApi, { strict: true });
+  expect(
+    schema.safeParse({
+      project: "DSP",
+      title: "A distinct defect",
+      filed_from: "dispatch://DSP-1/message/message-1",
+    }).success
+  ).toBe(false);
+});
+
 const ISSUE_UPDATE_FIELDS_RULE =
   "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 const ISSUE_UPDATE_DONE_RULE =

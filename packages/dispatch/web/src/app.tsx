@@ -149,8 +149,22 @@ const AnswersPage = lazy(() =>
 const RepliesPage = lazy(() =>
   import("./features/replies/RepliesPage").then((module) => ({ default: module.RepliesPage }))
 );
+const PersonPage = lazy(() =>
+  import("./features/people/PersonPage").then((module) => ({ default: module.PersonPage }))
+);
+const UnifiedInboxPage = lazy(() =>
+  import("./features/inbox/UnifiedInboxPage").then((module) => ({
+    default: module.UnifiedInboxPage,
+  }))
+);
+const InboxShadowPage = lazy(() =>
+  import("./features/inbox/InboxShadowPage").then((module) => ({ default: module.InboxShadowPage }))
+);
 const SettingsPage = lazy(() =>
   import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage }))
+);
+const MyThreadsPage = lazy(() =>
+  import("./features/threads/MyThreadsPage").then((module) => ({ default: module.MyThreadsPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -224,6 +238,9 @@ function InboxPage(): ReactNode {
         <h1 className="text-[22px] font-semibold tracking-tight">Inbox</h1>
         <Link className={`text-sm ${linkText} ${linkHoverText}`} to={ANSWERS_PATH}>
           Answered by you
+        </Link>
+        <Link className={`text-sm ${linkText} ${linkHoverText}`} to="/inbox/shadow">
+          Inbox comparison
         </Link>
       </div>
       <Inbox />
@@ -376,7 +393,19 @@ function NavigationContents({
       {/* Identity is chrome: who you are and how to leave are read once, while the navigation
           above is read on every visit, so the footer sits under it rather than over it. */}
       <div className={`mt-auto border-t pt-4 ${railBorder}`}>
-        <p className={`px-2 text-sm ${railMutedText}`}>Signed in as {user.login}</p>
+        <p className={`px-2 text-sm ${railMutedText}`}>
+          {user.kind === "user" ? (
+            <Link
+              className={`inline-flex min-h-11 items-center ${railAccentText} ${railAccentHoverText}`}
+              onClick={onClose}
+              to={`/people/${encodeURIComponent(user.login)}`}
+            >
+              Signed in as {user.login}
+            </Link>
+          ) : (
+            <>Signed in as {user.login}</>
+          )}
+        </p>
         <button
           className={`mt-1 px-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
           disabled={signOutPending}
@@ -805,7 +834,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </aside>
         )}
         <main
-          className={`min-w-0 flex-1 p-6 outline-none xl:order-2 ${fillsViewport ? "flex min-h-0 flex-col" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
+          className={`min-w-0 flex-1 p-6 outline-none xl:order-2 ${fillsViewport ? "flex min-h-0 flex-col" : location.pathname === "/inbox/shadow" ? "pb-6" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
           data-shell-layout={fullWidth ? "full-width" : "standard"}
           data-testid="main-content"
           id="main-content"
@@ -816,8 +845,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <Suspense fallback={<IssuePageFallback />}>
               <Routes>
                 <Route element={<InboxPage />} path="/" />
+                <Route element={<UnifiedInboxPage />} path="/inbox/unified" />
+                <Route element={<InboxShadowPage />} path="/inbox/shadow" />
                 <Route element={<AnswersPage />} path={ANSWERS_PATH} />
                 <Route element={<RepliesPage />} path={REPLIES_PATH} />
+                <Route element={<MyThreadsPage />} path="/threads" />
+                <Route element={<PersonPage />} path="/people/:login" />
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />

@@ -64,6 +64,7 @@ import { ClaimChip } from "./ClaimChip";
 import { GitHubLink } from "./GitHubLink";
 import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
+import { IssueLinks } from "./IssueLinks";
 import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
@@ -848,6 +849,7 @@ export function IssueHeader({
           />
         )
       ) : null}
+      <IssueLinks issueKey={issue.key} version={issue.last_seq} />
     </header>
   );
 }

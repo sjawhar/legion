@@ -70,6 +70,7 @@ import type {
   Handoff,
   HandoffSummary,
   InboxRow,
+  InboxShadowReport,
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
@@ -88,6 +89,8 @@ import type {
   MessageRead,
   MyAnswersResponse,
   MyRepliesResponse,
+  MyThreads,
+  PersonNodes,
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
@@ -96,6 +99,7 @@ import type {
   SignInsResponse,
   Subscriber,
   Suggestions,
+  UnifiedInboxPage,
   UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
@@ -1092,6 +1096,24 @@ export class DispatchApiClient {
     return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
   }
 
+  listUnifiedInbox(page: {
+    limit: number;
+    offset: number;
+    mentions?: boolean;
+  }): Promise<UnifiedInboxPage> {
+    return this.json<UnifiedInboxPage>(pathWithQuery("/api/v1/me/inbox", page));
+  }
+
+  getInboxShadow(): Promise<InboxShadowReport> {
+    return this.json<InboxShadowReport>("/api/v1/me/inbox/shadow");
+  }
+
+  listPersonNodes(login: string, page: { limit: number; offset: number }): Promise<PersonNodes> {
+    return this.json<PersonNodes>(
+      pathWithQuery(`/api/v1/people/${pathSegment(login)}/nodes`, page)
+    );
+  }
+
   /** `GET /api/v1/me/replies`: the threads the signed-in person wrote in where someone else has
    *  written since they last read it, newest reply first; `issue` or `artifact` narrows to one
    *  owner. Needs the `person` scope. */
@@ -1102,6 +1124,10 @@ export class DispatchApiClient {
     offset?: number;
   }): Promise<MyRepliesResponse> {
     return this.json<MyRepliesResponse>(pathWithQuery("/api/v1/me/replies", page));
+  }
+
+  listMyThreads(page: { limit: number; offset: number }): Promise<MyThreads> {
+    return this.json<MyThreads>(pathWithQuery("/api/v1/me/threads", page));
   }
 
   /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread
@@ -1426,6 +1452,10 @@ export class DispatchApiClient {
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
   }
+  getIssueLinks(key: string): Promise<GraphReferences> {
+    return this.json<GraphReferences>(`/api/v1/issues/${pathSegment(key)}/links`);
+  }
+
   /** The edges at a node; `kind` keeps those of one kind - `part_of` lists a document's blocks,
    *  which a document's read otherwise leaves out. */
   getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {

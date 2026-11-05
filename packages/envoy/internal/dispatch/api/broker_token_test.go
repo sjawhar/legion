@@ -8,6 +8,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -309,6 +310,16 @@ func TestABrokerTokenWritesAsTheSessionItProves(t *testing.T) {
 	}))
 	if noActor.Code != http.StatusCreated {
 		t.Fatalf("comment with no actor in the body: status=%d body=%s", noActor.Code, noActor.Body.String())
+	}
+
+	var provedAlias bool
+	if err := rig.database.Pool.QueryRow(context.Background(), `
+		select exists (select 1 from person_aliases where person = $1 and alias_kind = 'session' and alias = $2)
+	`, brokerTestPerson, brokerTestSession).Scan(&provedAlias); err != nil {
+		t.Fatal(err)
+	}
+	if !provedAlias {
+		t.Fatal("the session the credential proved has no person alias")
 	}
 
 	listed := rig.serve(withPerson(brokerRequest(t, http.MethodGet, "/api/v1/issues/"+key+"/events", nil, "", ""), brokerTestPerson))
