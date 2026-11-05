@@ -790,6 +790,115 @@ test("a session nobody answers for is told so, and recovers when a responder app
   }
 });
 
+/** The live view's own text for a session that answers nothing, word for word as a reader meets
+ *  it: `emptyText` in `web/src/features/agent-view/AgentConversationPage.tsx`. */
+const NOT_ANSWERING =
+  "This session is not answering the live view: its plugin does not stream its conversation, or the session is no longer running. Nothing appears here until it answers.";
+
+/** What this page said about Claude Code until INFRA-1026, in the empty transcript ("Claude Code
+ *  sessions don't" stream) and beside the composer (a session "takes messages only when it was
+ *  started with its Envoy channel"). A Claude Code session streams its conversation and takes a
+ *  person's message now, so no sentence of this view may send its reader after a client or a
+ *  channel flag. Naming each phrase is what keeps the absence check from being vacuous. */
+const CLIENT_EXCUSES = [/Claude Code/i, /Envoy channel/i, /--channels/];
+
+/** The one sentence the Claude Code plugin publishes in a `reasoning` part where Claude Code sent
+ *  a thinking block with no text: `CLAUDE_THINKING_HIDDEN` in
+ *  `packages/claude-envoy/src/agent-stream-claude.ts`. Spelled out here rather than imported, as
+ *  every frame in this suite is spelled as the wire carries it, so the row holds the text a
+ *  reader gets; whoever edits one of the two must edit the other. */
+const CLAUDE_THINKING_HIDDEN_TEXT =
+  "Claude Code hides what the model thought here: it sends the thinking text only when the terminal session turns on the showThinkingSummaries setting.";
+
+// The reader of a session that answers nothing is told what is true of the session - its plugin
+// does not stream its conversation, or it has ended - and nothing about which client it runs.
+// Before INFRA-1026 the same view named Claude Code twice and sent its reader after an Envoy
+// channel, which is now neither true nor anything they can act on.
+test("a session that answers nothing is told what is true of the session, and the view names no client", async ({
+  browser,
+}) => {
+  // A session in the registry that advertises no delivery mode and answers no replay: both of
+  // the view's client sentences are then on screen at once - the empty transcript's and
+  // `agent-takes-no-messages`'s - so the absence check has both to fail against.
+  const silent: FakeSession = {
+    ...planner,
+    capabilities: [],
+    session_id: "01a0e0c1-0000-7000-8000-000000001026",
+    title: "Quiet",
+  };
+  await setLiveSessions([planner, silent]);
+  await setAgentStreamResponder(silent.session_id, false);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${silent.session_id}/live`);
+    await expect(page.getByTestId("agent-thread-empty")).toHaveText(NOT_ANSWERING);
+    await expect(page.getByTestId("agent-takes-no-messages")).toBeVisible();
+
+    // The view's own visible text, not the document's: the shell's navigation, the Agents list
+    // behind it and the page title are no reading of this session.
+    const shown = await page.getByTestId("agent-conversation").innerText();
+    expect(shown).toContain(NOT_ANSWERING);
+    for (const excuse of CLIENT_EXCUSES) {
+      expect(shown).not.toMatch(excuse);
+    }
+  } finally {
+    await context.close();
+  }
+});
+
+// Claude Code sends a thinking block with no text unless the terminal session turned on its
+// thinking summaries, and the plugin publishes one fixed sentence in a `reasoning` part in its
+// place. The reader meets it where the turn's thinking goes, above the answer, so a step that
+// thought reads as one rather than as a gap nobody can explain.
+test("a turn whose thinking Claude Code hid reads as the turn's thinking, beside its answer", async ({
+  browser,
+}) => {
+  const thinker: FakeSession = {
+    ...planner,
+    session_id: "01a0e0c1-0000-7000-8000-000000001027",
+    title: "Thinker",
+  };
+  await setLiveSessions([planner, thinker]);
+  await publishAgentStreamFrame(
+    thinker.session_id,
+    {
+      frames: [
+        {
+          kind: "message",
+          message: {
+            at: 4_000,
+            id: "a4000",
+            parts: [
+              { text: CLAUDE_THINKING_HIDDEN_TEXT, type: "reasoning" },
+              { text: "The release notes name two changes.", type: "text" },
+            ],
+            role: "assistant",
+            streaming: false,
+          },
+          seq: 1,
+          v: 1,
+        },
+      ],
+      session_id: thinker.session_id,
+      v: 1,
+    },
+    "replay"
+  );
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${thinker.session_id}/live`);
+    const turn = page.getByTestId("agent-message-assistant");
+    await expect(turn.getByTestId("agent-reasoning")).toHaveText(CLAUDE_THINKING_HIDDEN_TEXT);
+    await expect(turn).toContainText("The release notes name two changes.");
+  } finally {
+    await context.close();
+  }
+});
+
 test("on a phone the live view never scrolls the page, keeps its header and composer on screen, and follows the keyboard @phone", async ({
   browser,
 }, testInfo) => {
