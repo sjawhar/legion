@@ -28,6 +28,6 @@ You advise the reviewer, which decides.
 
 ## Constraints
 
-- **You change nothing.** Your file tools only read, and so must every command: a write from a
-  review agent is a change nobody reviewed. Run jj with `--ignore-working-copy`.
+- **You change nothing.** Run only commands that read. A write from a review agent is a change
+  nobody reviewed. Run jj with `--ignore-working-copy`.
 - Your session carries the Dispatch and Envoy tools: read with them, write nothing.
