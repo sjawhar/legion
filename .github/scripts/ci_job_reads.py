@@ -338,37 +338,22 @@ def go_notices_runs():
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
 mkdir -p "$RUNNER_TEMP/go-test-json"
-lane() {
-  name=$1
-  dsn=$2
-  shift 2
-  DISPATCH_TEST_DATABASE_URL="$dsn" BROKER_TEST_DATABASE_URL="$dsn" \\
-    go test -json -count=1 -p 8 -parallel 12 -timeout 20m "$@" \\
-    > "$RUNNER_TEMP/go-test-json/unit-$name.json"
-}
-go list ./... |
-  grep -Ev '/internal/integration$|/internal/dispatch/(routes|docs|api)$' \\
-  > "$RUNNER_TEMP/rest-packages.txt"
-lane rest "$DISPATCH_TEST_DATABASE_URL" $(cat "$RUNNER_TEMP/rest-packages.txt") &
+go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
+  xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
 rest=$!
-lane routes "$HORIZON_TEST_DATABASE_URL" ./internal/dispatch/routes &
+DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \\
+  go test -json -count=1 -parallel 12 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
 routes=$!
-lane docs "$DOCS_TEST_DATABASE_URL" ./internal/dispatch/docs &
-docs=$!
-lane api "$API_TEST_DATABASE_URL" ./internal/dispatch/api &
-api=$!
-s=0
-for pid in "$rest" "$routes" "$docs" "$api"; do
-  lane_status=0
-  wait "$pid" || lane_status=$?
-  if [ "$s" -eq 0 ]; then s=$lane_status; fi
-done
-streams="$RUNNER_TEMP/go-test-json/unit-rest.json $RUNNER_TEMP/go-test-json/unit-routes.json"
-streams="$streams $RUNNER_TEMP/go-test-json/unit-docs.json $RUNNER_TEMP/go-test-json/unit-api.json"
+rest_status=0
+routes_status=0
+wait "$rest" || rest_status=$?
+wait "$routes" || routes_status=$?
+s=$rest_status
+if [ "$s" -eq 0 ]; then s=$routes_status; fi
 if [ "$s" -eq 0 ]; then
-  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' $streams
+  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit.json" "$RUNNER_TEMP/go-test-json/unit-routes.json"
 else
-  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' $streams
+  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit.json" "$RUNNER_TEMP/go-test-json/unit-routes.json"
 fi
 exit $s"""
 NATSLIVE_STEP = "Test the container-backed NATS matrix (natslive)"
@@ -711,14 +696,12 @@ GATES = [
         # to the log, so none of them is in the simple form: -json is not a flag the check
         # reduces and a redirect is not in that form either (dispatch://INFRA-1075).
         #
-        # Four calls at once, which between them name every package but internal/integration, the
-        # integration step's: all of ./... but the three that take a Postgres service of their
-        # own, and those three. The superset ./... covers them all.
+        # Two calls at once, which between them name every package but internal/integration, the
+        # integration step's: all of ./... but internal/dispatch/routes, and that package against
+        # the job's second Postgres. The superset ./... covers both.
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
             (ENVOY, ["./internal/dispatch/routes"], "go test -count=1 -timeout 20m ./internal/dispatch/routes", {}),
-            (ENVOY, ["./internal/dispatch/docs"], "go test -count=1 -timeout 20m ./internal/dispatch/docs", {}),
-            (ENVOY, ["./internal/dispatch/api"], "go test -count=1 -timeout 20m ./internal/dispatch/api", {}),
         ]),
         pinned_step("envoy-go", NATSLIVE_STEP, ENVOY, NATSLIVE_SCRIPT, [
             (ENVOY, ["./internal/testnats/"], "go test -tags natslive ./internal/testnats/", {"tags": "natslive"}),

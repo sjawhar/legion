@@ -2741,36 +2741,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      # The documents service and the Dispatch API are the module's two heaviest Postgres
-      # packages, and what they wait on is a server, not a core: the module's packages sum to
-      # 5,033 s of wall against a 749-second step, so the work already overlaps about seven times
-      # on four cores. A server of its own gives each of them its own checkpointer, its own
-      # horizon and its own connection budget, while the four cores stay shared, which is the one
-      # lever left inside a single job (dispatch://INFRA-1075).
-      docs:
-        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-        env:
-          POSTGRES_PASSWORD: ci
-        ports: ["5434:5432"]
-        options: >-
-          --shm-size=1g
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      api:
-        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-        env:
-          POSTGRES_PASSWORD: ci
-        ports: ["5435:5432"]
-        options: >-
-          --shm-size=1g
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
@@ -2836,8 +2806,7 @@ jobs:
       # writer pg_locks shows with no backend pid (dispatch://INFRA-1075).
       - name: Raise the Postgres connection and prepared-transaction limits for the parallel tests
         run: |
-          for id in "${{ job.services.postgres.id }}" "${{ job.services.horizon.id }}" \
-                    "${{ job.services.docs.id }}" "${{ job.services.api.id }}"; do
+          for id in "${{ job.services.postgres.id }}" "${{ job.services.horizon.id }}"; do
             docker exec "$id" psql -U postgres -c "alter system set max_connections = 500"
             docker exec "$id" psql -U postgres -c "alter system set max_prepared_transactions = 20"
             docker restart "$id"
@@ -2876,64 +2845,46 @@ jobs:
       # The API package used to run first and on its own, because the per-test database clone and
       # drop of every other package queued on the service's one checkpointer beside it. The test
       # harness no longer clones a database per test (internal/pgclone), so that queue is gone and
-      # the module runs in one step. -p 8 rather than go test's default of GOMAXPROCS, and
+      # the module runs in one call, which overlaps the API package's own time with the rest's
+      # rather than spending it twice. -p 8 rather than go test's default of GOMAXPROCS, and
       # -parallel 12 rather than its default of GOMAXPROCS as well, because these tests wait far
       # more than they compute: a profile of the API package spends 2.19 per cent of its wall
       # time on this process's CPU, and the document service's spends 583 s of CPU over 1,867 s
       # of wall. Four lanes on a four-core runner would be four waits at a time, not four
-      # workers. 20 minutes is the deadline for every package of a call, which the API and
-      # documents packages are the reason for.
+      # workers. The two numbers are bounded by what the runner's own Postgres can serve beside
+      # them, which is why max_connections is raised above, and by the race lanes' memory, which
+      # is why those jobs set their own (envoy-go-race-docs). 20 minutes is the deadline for
+      # every package of the call, which the API and documents packages are the reason for.
       #
-      # The step is four `go test` calls at once, each against a Postgres service of its own, and
-      # it waits on all four, so its time is the longest of them rather than their sum. What
-      # these tests wait on is a server, not a core: the packages sum to 5,033 s of wall against
-      # a 749-second step, so the work already overlaps about seven times on four cores, and a
-      # server of its own gives a lane its own checkpointer, its own safe horizon and its own
-      # connection budget while the cores stay shared. internal/dispatch/routes needs that for
-      # correctness rather than speed - its tests wait on the event log's safe horizon, which any
-      # transaction anywhere on an instance holds back (the service's own comment above) - and
-      # the documents and API packages, the two heaviest, take one each because they are what the
-      # step's own time is made of.
+      # internal/dispatch/routes runs beside that call, at the same time, against the second
+      # Postgres service, which is its alone: its tests wait on the event log's safe horizon, and
+      # any transaction anywhere on an instance holds that back (the service's own comment above).
+      # The two calls run as background jobs of this shell and the step waits on both, so the
+      # step's time is the longer of them rather than their sum, and it exits non-zero when either
+      # fails - the first call's status if it failed, else the second's.
       - name: Unit test envoy Go package
         run: |
           mkdir -p "$RUNNER_TEMP/go-test-json"
-          lane() {
-            name=$1
-            dsn=$2
-            shift 2
-            DISPATCH_TEST_DATABASE_URL="$dsn" BROKER_TEST_DATABASE_URL="$dsn" \
-              go test -json -count=1 -p 8 -parallel 12 -timeout 20m "$@" \
-              > "$RUNNER_TEMP/go-test-json/unit-$name.json"
-          }
-          go list ./... |
-            grep -Ev '/internal/integration$|/internal/dispatch/(routes|docs|api)$' \
-            > "$RUNNER_TEMP/rest-packages.txt"
-          lane rest "$DISPATCH_TEST_DATABASE_URL" $(cat "$RUNNER_TEMP/rest-packages.txt") &
+          go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
+            xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
           rest=$!
-          lane routes "$HORIZON_TEST_DATABASE_URL" ./internal/dispatch/routes &
+          DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \
+            go test -json -count=1 -parallel 12 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
           routes=$!
-          lane docs "$DOCS_TEST_DATABASE_URL" ./internal/dispatch/docs &
-          docs=$!
-          lane api "$API_TEST_DATABASE_URL" ./internal/dispatch/api &
-          api=$!
-          s=0
-          for pid in "$rest" "$routes" "$docs" "$api"; do
-            lane_status=0
-            wait "$pid" || lane_status=$?
-            if [ "$s" -eq 0 ]; then s=$lane_status; fi
-          done
-          streams="$RUNNER_TEMP/go-test-json/unit-rest.json $RUNNER_TEMP/go-test-json/unit-routes.json"
-          streams="$streams $RUNNER_TEMP/go-test-json/unit-docs.json $RUNNER_TEMP/go-test-json/unit-api.json"
+          rest_status=0
+          routes_status=0
+          wait "$rest" || rest_status=$?
+          wait "$routes" || routes_status=$?
+          s=$rest_status
+          if [ "$s" -eq 0 ]; then s=$routes_status; fi
           if [ "$s" -eq 0 ]; then
-            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' $streams
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit.json" "$RUNNER_TEMP/go-test-json/unit-routes.json"
           else
-            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' $streams
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit.json" "$RUNNER_TEMP/go-test-json/unit-routes.json"
           fi
           exit $s
         env:
           HORIZON_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5433/postgres?sslmode=disable
-          DOCS_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5434/postgres?sslmode=disable
-          API_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5435/postgres?sslmode=disable
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
