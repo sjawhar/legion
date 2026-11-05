@@ -95,8 +95,8 @@ ARG GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
 # gopls, which the go stage builds static from golang.org/x/tools/gopls at this tag (gopls/v<version>).
 ARG GOPLS_VERSION=0.23.0
 # The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
-# stage fetches for it (an archive, or kubectl's single binary), which the build checks before unpacking
-# or installing anything.
+# stage fetches for it (an archive, or a single binary as kubectl's and yq's are), which the build
+# checks before unpacking or installing anything.
 ARG UV_VERSION=0.13.5
 ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
 # Node 24 LTS.
@@ -396,10 +396,10 @@ RUN test -n "$LEGION_REVISION" \
 # toolchain: what a worker needs to work a repository that is not Legion's, specific to none: uv (which
 # installs each project's own Python from its `.python-version` or `requires-python`; the image's own
 # python3 is trixie's, installed by the runtime-base stage for Oh My Pi's Python eval), Node with npm and
-# corepack, the AWS CLI v2, kubectl, the Go toolchain at go.work's version (the release the go stage
-# builds `legion` with, so a worker builds the daemon as CI does), and the TypeScript and Python language
-# servers Oh My Pi's LSP tools start. All five downloads are checked against their pinned SHA-256
-# before any is unpacked or installed. uv, uvx and kubectl are single binaries, copied to /usr/local/bin
+# corepack, the AWS CLI v2, kubectl, mikefarah's yq, the Go toolchain at go.work's version (the release
+# the go stage builds `legion` with, so a worker builds the daemon as CI does), and the TypeScript and
+# Python language servers Oh My Pi's LSP tools start. Every download is checked against its pinned SHA-256
+# before any is unpacked or installed. uv, uvx, kubectl and yq are single binaries, copied to /usr/local/bin
 # as gh and jj are; Node, Go and the AWS CLI keep their own trees under /opt, and /out/bin holds the
 # symlinks into them that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir`
 # writes its two). The pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write
@@ -689,10 +689,11 @@ RUN dpkg-query -W -f '${db:Status-Status} ${Package}\n' > /tmp/dpkg-packages \
 # the same way. The k8s.io modules that go.mod replaces with ./staging/src, kubectl itself among them,
 # are that release's own source, each with its license file under staging/src/k8s.io at the release's
 # tag; the repository keeps the license text of every other module it links under LICENSES/vendor
-# there. The language servers' own LICENSE files come from their installed trees in the toolchain
-# stage; TypeScript's ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come with
-# them. A missing or empty file fails the build. The fetches depend only on the pins, so they come
-# first, in a layer a source change reuses; the assembly reads the other stages' outputs after them.
+# there. yq's section names its own go.mod the same way. The language servers' own LICENSE files come
+# from their installed trees in the toolchain stage; TypeScript's ThirdPartyNoticeText.txt and the
+# typeshed LICENSE pyright bundles come with them. A missing or empty file fails the build. The
+# fetches depend only on the pins, so they come first, in a layer a source change reuses; the
+# assembly reads the other stages' outputs after them.
 FROM tools AS notices
 ARG BUN_VERSION
 ARG JJ_TOOL
