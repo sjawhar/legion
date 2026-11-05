@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { checkouts, specWork, TestHandoff } from "./score";
+import { checkouts, specWork, statesDesign, TestHandoff } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
 // profile's gateway key command runs past its budget) says nothing about the skill under test: the
@@ -1256,11 +1256,18 @@ const cleanJudges: Record<string, object> = {
   "proposal.json": { rows: [{ item: "the greeting word", verdict: "proposed", ask: null }] },
   "shared-runs.json": { rows: [] },
 };
+/** A question the run asked the person, opened and answered before the earliest version any
+ *  fixture here writes (`conversationOrder`: a question before the first version, an answer
+ *  before the version that states a design). A fixture that means to fail `asked` or `grew`
+ *  passes its own times. */
 const openAsk = (id: string) => ({
   id,
   question: "Which name should the example use?",
   options: [{ label: "Ada" }, { label: "Grace" }],
   multiple: false,
+  // `second(1)` and `second(2)`, written out: this runs at module scope, above that helper.
+  created_at: "2026-10-24T10:00:01.000Z",
+  answer: { at: "2026-10-24T10:00:02.000Z" },
 });
 const approvedStates = [
   { turn: 1, open_asks: [openAsk("ask-1")], approval: null },
@@ -2301,6 +2308,21 @@ specRun("spec-writing-head-100", {
     finish
   ),
   versions: [8.5, 12.5, 16.5],
+});
+// The one-shot draft the conversation rule forbids: the spec's first version at second 120, the
+// question to the person opened at 150 and answered at 170. Every other score passes, so the row
+// fails on `asked` and `grew` alone.
+specRun("spec-writing-head-140", {
+  asks: [
+    {
+      kind: "question",
+      ...openAsk("ask-1"),
+      state: "answered",
+      created_at: second(150),
+      answer: { at: second(170) },
+    },
+    { id: "appr-1", kind: "approval", question: "Approve spec.md v3?", options: [] },
+  ],
 });
 // A check between them: it counts for the helper's write.
 specRun("spec-writing-head-101", {
@@ -3523,7 +3545,18 @@ function rowOf(name: string): string {
   const end = all.findIndex((line, index) => index > start && !line.startsWith("  "));
   return all.slice(start, end < 0 ? undefined : end).join("\n");
 }
-const SCORES = ["outline", "checked", "refusals", "plan", "routed", "chat", "quoted", "self"];
+const SCORES = [
+  "outline",
+  "checked",
+  "refusals",
+  "plan",
+  "routed",
+  "chat",
+  "quoted",
+  "self",
+  "asked",
+  "grew",
+];
 /** The scores of a spec run's row, by name. */
 function scoresOf(name: string): Record<string, string> {
   const row = rowOf(name);
@@ -3927,6 +3960,48 @@ test("checked: a version Dispatch recorded for the session that no shown write m
   expect(rowOf("spec-writing-head-101").split("\n")[0]).toContain(" writes_seen=2 versions=3");
   // A run whose shown writes match its recorded versions carries no flag.
   expect(rowOf("spec-writing-head-1")).not.toContain("writes_seen=");
+});
+
+test("asked and grew: a run that writes the spec before it asks fails, however short the draft", () => {
+  // The one-shot draft: the question comes after the first version, and the version that states a
+  // design comes before any answer.
+  expect(scoresOf("spec-writing-head-140")).toEqual({
+    ...allPass,
+    asked: "false",
+    grew: "false",
+  });
+  expect(rowOf("spec-writing-head-140")).toContain(
+    `conversation: version 2 (${second(120)}) states a design, and the run had asked the person nothing by then (${second(150)})`
+  );
+  expect(rowOf("spec-writing-head-140")).toContain(
+    `conversation: version 2 (${second(120)}) states a design, and the person had answered nothing by then (${second(170)})`
+  );
+  // Asking first and answering first is the pass, which `spec-writing-head-1` already shows.
+  expect(scoresOf("spec-writing-head-1").asked).toBe("true");
+  expect(scoresOf("spec-writing-head-1").grew).toBe("true");
+});
+
+// The review of 2026-11-05 measured several ways past the first definition, which looked for
+// three literal heading strings in the version's text. Four of the six rows below are refused by
+// that definition and held by `statesDesign`, which reads the text's own structure: the two
+// spaces, the design under `## Summary`, the empty sections and the fenced example. The other
+// two, the closing hash and the plain no-design spec, both definitions agree on, and they are
+// here as guards rather than as evidence.
+test("statesDesign: a design is found by what the version holds, not by three literal headings", () => {
+  const design = "**R1.** The broker answers in 100 ms. From: dispatch://ACME-1/ask/1\n";
+  // Spacing and a closing hash are the author's, not the test's: `##  Requirements` is a
+  // Requirements section, and the old `text.includes("## Requirements")` missed it.
+  expect(statesDesign(`##  Requirements\n\nThe broker answers in 100 ms.\n`)).toBe(true);
+  expect(statesDesign(`## Design ##\n\nOne table, keyed by run.\n`)).toBe(true);
+  // A design written out before the conventional headings arrive is still a design.
+  expect(statesDesign(`## Summary\n\n${design}`)).toBe(true);
+  // An empty section states nothing: the old definition failed a run for writing the headings.
+  expect(statesDesign(`## Requirements\n\n## Design\n\n## Acceptance\n`)).toBe(false);
+  expect(statesDesign(`## Summary\n\nNotices are lost today.\n\n## Problem\n\nThey are.\n`)).toBe(
+    false
+  );
+  // A heading or a requirement inside a fenced example belongs to the example.
+  expect(statesDesign("## Summary\n\n```md\n## Design\n\nOne table.\n```\n")).toBe(false);
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {
