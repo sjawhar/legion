@@ -8075,6 +8075,66 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("doc-read names the version bytes and the approval's pin and provenance", async () => {
+    const hash = "ab".repeat(32);
+    for (const state of ["approved", "stale", "changes_requested"] as const) {
+      for (const source of ["insert", "backfill", undefined] as const) {
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          if (target.pathname === "/api/v1/issues/DSP-42") {
+            return response({
+              key: "DSP-42",
+              primary_artifact_id: "artifact-42",
+              open_asks: [],
+              artifacts: [
+                {
+                  id: "artifact-42",
+                  slug: "spec",
+                  name: "spec.md",
+                  primary: true,
+                  approval: {
+                    state,
+                    latest_version: 4,
+                    version: 3,
+                    by: { kind: "user", id: "alice" },
+                    ...(source === undefined
+                      ? {}
+                      : { content_sha256: hash, content_sha256_source: source }),
+                  },
+                },
+              ],
+            });
+          }
+          if (target.pathname === "/api/v1/artifacts/artifact-42/versions/3") {
+            return response({ markdown: "# Spec", number: 3, sha256: hash });
+          }
+          if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = await executeDispatchTool({
+          tool: "dispatch_doc_read",
+          args: { issue: "DSP-42", version: 3 },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+        expect(result.text).toContain(`Content: sha256:${hash}\nApproval:`);
+        const line = result.text.split("\n").find((row) => row.startsWith("Approval:"));
+        if (source === undefined) {
+          expect(line).not.toContain("content sha256:");
+          if (state === "approved") expect(line).toBe("Approval: approved v3 by alice");
+        } else {
+          expect(line).toEndWith(
+            `, content sha256:${hash}${source === "backfill" ? " (hashed after approval)" : ""}`
+          );
+        }
+      }
+    }
+  });
+
   test("dispatch_doc_read tells the agent when the document's approval went stale", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
@@ -10693,6 +10753,48 @@ describe("executeDispatchTool", () => {
       "Referenced by:",
       "- none",
     ]);
+  });
+
+  test("a comment read names the comment each nested reply answers", async () => {
+    const root = "11111111-1111-4111-8111-111111111111";
+    const middle = "22222222-2222-4222-8222-222222222222";
+    const leaf = "33333333-3333-4333-8333-333333333333";
+    const comment = (id: string, body: string, answers: string | null) => ({
+      id,
+      issue_key: "DSP-1",
+      author: { kind: "user", id: "alice" },
+      body,
+      anchor: null,
+      reply_to: id === root ? null : root,
+      answers,
+      resolved: false,
+      suggestion: null,
+      created_at: "2026-09-09T00:00:00Z",
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === `/api/v1/comments/${root}`) {
+        return response({
+          comment: comment(root, "Root.", null),
+          replies: [comment(middle, "Middle.", root), comment(leaf, "Leaf.", middle)],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: `dispatch://DSP-1/comment/${root}` },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    expect(result.text).toContain(`${leaf} · user alice\nAnswers: ${middle}\nBody: Leaf.`);
+    expect(result.text).toContain(`${middle} · user alice\nBody: Middle.`);
+    expect(result.text).not.toContain(`Answers: ${root}`);
   });
 
   test("reads the targeted comment and quoted reply chain from a Dispatch comment reference", async () => {

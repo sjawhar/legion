@@ -1477,7 +1477,7 @@ Do these steps in this order:
    The earlier release reads the file before it opens the database or the cluster, and refuses this release's shape key by key, so a daemon re-pinned on the file as this release left it never starts:
 
    - the top-level keys this release added, each `unknown key <key>` (`classify` in `internal/config/config.go` at `legion-v10.0.0`):
-     `capabilities`, `production_check_hours`, `worker_backends` and `role_config_files`;
+     `capabilities`, `production_check_hours`, `pod_update_max_open_rounds`, `pod_update_rounds_per_minute`, `worker_backends` and `role_config_files`;
 
    - under `projects.<KEY>`, the `repo` the earlier release requires (`projects.<KEY>.repo must
      be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `deploys`, `memory`, `merge` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
@@ -1983,6 +1983,11 @@ Every other undecodable request body is logged `api: refused an undecodable requ
 A relaunched process that registers still on the old contract is charged as a launch failure (the claim remembers `PluginRelaunchFor`), ending, like any other exhausted budget, in a `worker-died`.
 The contract shows on every claim view — `GET /legion/v1/state`, `legion state --json`, `read_record`'s `pluginContract` field
 — on `legion claims list`'s line, whose last two columns are the claim's `updateRound` and the `updateHead` its worker reported (`-` for neither), and on the state's controller locator.
+`legion claims list` also prints one line of its own under the claims, what the daemon's last pod-update sweep decided about the project's two limits on opening rounds ("The disk dies with its pod" below, `podUpdateRoundsLine` in `packages/daemon/cmd/legion/claims.go`):
+`pod update rounds: max open 2, 1 a minute; in a round: 2 — INFRA-10, INFRA-1000; waiting on the open-round limit: 25 — <keys>; waiting on the limit a minute: none`, with `no limit` in place of a limit the file does not set, at most 20 keys of a list and then `and <n> more`, and `pod update rounds: the daemon has not swept yet` before the first sweep.
+It is that sweep's own word, written whole when the sweep decided it, and it is printed whenever the command prints at all, over no claims as over many:
+an operator served no line cannot tell a daemon that held no issue back from a binary too old to know the limits.
+A `legion` of this release against a daemon of an earlier one, which serves no such record, prints `pod update rounds: this daemon does not report them; it is older than this binary` rather than the line of a daemon that has not swept.
 
 What a contract bump never refreshes is the pod's own `legion` binary:
 the launcher, the shim and `workspace-init` keep running the generation they were started with, so a release that changes the launcher's or the shim's own wire to the daemon is a pod replacement, which the update round makes ("Pinning a release that drops what a running pod still uses" above), never something the contract relaunch fixes in place.
@@ -3945,21 +3950,25 @@ Every claim of the issue that has a session and has not retired holds the round 
 and each one is given a task naming the drift, the round's own id and asking it to push its work to the issue branch and answer `ready_for_update` with that id.
 A `failed` claim is the exception: it runs no turn on the pod, so the round asks it nothing and does not wait for it (`askedClaims`); what it left unpushed is carried off the disk by the push check before the replacement (below), and a retry brings it back into the round as any other claim.
 No claim is left out of a round for the contract its plugin records:
-a worker whose plugin has no such op is asked all the same, and its task tells it to push and end its turn, which the daemon reads as its answer (`answerByTurnEnd`).
-A turn after an answer takes the answer back and the worker is asked again, since that turn can move the branch (`takeBackSignal`), unless it is the turn of the round's own ask, or the claim's plugin has no such op and the daemon sent nothing for the turn:
-that plugin's own phase-stall reminder starts such turns after the WAITING line the task asks for, while a plugin with the op holds its reminder until the round ends.
-The daemon cannot tell that reminder from an Envoy notice, a background job's result or a person's steer, so in such a claim none of them takes the answer back: work such a turn commits and does not push is carried off the disk by the push check before the replacement (below), not by the worker's answer.
+every claim is asked, its task tells it to push its work and to end its turn, and the end of that turn is its answer at every plugin contract (`answerByTurnEnd`), since a `legion` tool built with no `ready_for_update` operation is one the daemon cannot tell from a tool that has it.
+How the standing answer was given is recorded on the claim (its `update_answered_by_turn_end` column), and that record, never the contract, is what a later turn is read against.
+A turn after an answer takes the answer back and the worker is asked again, since that turn can move the branch (`takeBackSignal`), unless it is the turn of the round's own ask, or the daemon sent nothing for the turn and the answer standing was given by a turn's end:
+such a worker is reminded by its own plugin's phase stall, after the WAITING line the task asks for, while a worker that answered with the call holds that reminder off for as long as its answer stands.
+The daemon cannot tell that reminder from an Envoy notice, a background job's result or a person's steer, so after an answer a turn's end gave none of them takes it back:
+work such a turn commits and does not push is carried off the disk by the push check before the replacement (below), not by the worker's answer.
 The id is what makes the answer that round's:
 the daemon takes an answer only for the round the claim is in now and refuses any other, naming both ids, so an answer given to a task the worker read before the round changed counts for nothing and the worker is asked again.
 A suspended claim is revived for the task, unless the operator's own suspension holds it, which takes the task on the operator's resume.
-A claim that has not answered is asked again every `pod_update_retask_hours` (a `legion.yaml` key, a decimal number of hours, 1 by default), and never while it holds a task of its own.
+A claim that has not answered is asked again every `pod_update_retask_hours` (a `legion.yaml` key, a decimal number of hours, 1 by default), and never in place of a task it already holds.
+The delivery slot the end of that task's own turn frees is the open round's before it is the claim's own next task, and so is the slot the operator's resume leaves free (`takeSlotForUpdate`), each under that same re-ask bound:
+a worker whose own next task is pending at every sweep is asked there rather than never.
 Once every such claim has answered and none is in a turn, the daemon ends the pod (`ReplacePod`), each role in it is reported displaced and resumed uncharged on its own session, and the first of those resumes provisions a fresh pod from the current configuration.
 The replacement asks once more, under the pod's own lock and immediately before it suspends anything, whether it is still due:
 the daemon reads the issue's claims from the store again — which is how a claim created since the sweep read its list, such as the next phase's role launched into the kept pod, is counted — and runs the same waiting and working checks.
 A claim that has not answered, or a turn that started while the replacement waited for the pod's launch turn, aborts it:
 nothing is suspended, the round stays open, and the next sweep decides again.
 
-Then, still under the pod's lock and before it suspends anything, the daemon runs the push check of the pod's disk (`checkUnpushed` in `podupdate.go`, `internal/rescue`), since a worker's answer is the only other guard and two kinds of claim give none worth trusting: a `failed` claim is asked nothing, and a claim whose plugin has no `ready_for_update` op keeps its answer through turns the daemon sent nothing for.
+Then, still under the pod's lock and before it suspends anything, the daemon runs the push check of the pod's disk (`checkUnpushed` in `podupdate.go`, `internal/rescue`), since a worker's answer is the only other guard and two kinds of claim give none worth trusting: a `failed` claim is asked nothing, and a claim whose standing answer was given by the end of its own task's turn keeps that answer through turns the daemon sent nothing for, whatever contract its plugin records.
 The check runs inside the pod, in the shim of one of the round's own processes, as that role and with that role's own GitHub credential: the shim's `rescue-unpushed` frame (`internal/shimwire`) runs git and jj in the role's environment, so the clone's credential helper answers from the role's gh files and the daemon handles no secret for it.
 It asks a process of the implementer or the merger first, the roles that act as the implement App, and asks the next process of the pod when one cannot be asked at all.
 For every workspace on the disk (`/legion/workspaces/<owner>/<repo>/<issue>`, whose repository is the one its own git names, so a directory there that is no git worktree is an error rather than a pass) it reads what the workspace's remote holds now (`git ls-remote origin`, so a commit GitHub keeps only under a pull request's ref after a squash merge counts as held, and a commit only a stale remote-tracking ref names, its branch deleted or force-pushed on GitHub since the pod's last fetch, does not) and finds, against that:
@@ -3989,6 +3998,12 @@ nothing is suspended, the round stays open, the next sweep checks again, and onc
 A pod started from an image whose shim predates the check answers the frame through its agent, which refuses it as a command it does not know.
 Such a pod cannot be checked, and refusing it would hold every pod of an older image until its tree ends, so it is replaced on its workers' answers alone, as every pod was before the check:
 the replacement's line says so (`unchecked`), and so does a message on the issue.
+Where some claim of the round answered by the end of its own task's turn, that replacement is refused once instead (`reaskedForPushCheck`):
+a turn's end is the weakest answer the round takes, nothing can read the disk behind it, and each such worker is posted one more ask, which takes its answer back and lets the round ask it at the next tick (`supervise.PodUpdateReask`).
+The refusal is the daemon's own, so it costs the round one sweep and tells nobody.
+One ask each, which the claim's own mark records (`update_reasked_for_push_check`):
+the second answer, by the call or by another turn's end, lets the replacement run, since a round that refused again at each turn's end would never end.
+Asked nothing more there are a claim that answered with the call, one that has left the round's own pod, a `failed` one, and one whose recorded contract is below the contract that introduced `ready_for_update`, which has no operation to call and could only give the same answer one turn later.
 Before the first roll onto the release that brought the check, run [Carrying unpushed work out of an issue's pod](#carrying-unpushed-work-out-of-an-issues-pod) over every live issue pod.
 
 Nothing the round decides is held in memory:
@@ -3999,6 +4014,20 @@ every worker in it has already been told to push its work and to start no new wo
 A worker that has answered waits for that replacement.
 It comes back on the new pod in its own session, through the displaced path, with its workspace provisioned afresh from the issue's pushed branch and the task the round held back still waiting for it
 — which is why it is asked to push before it answers.
+
+How many update rounds run at once is the project's to cap, with two optional top-level `legion.yaml` keys, each a positive integer (`beginPodUpdateSweep`, `podUpdateSweep`):
+`pod_update_max_open_rounds` is how many issues may hold an open round at once, counted over the whole project at the top of every sweep, and `pod_update_rounds_per_minute` how many rounds one sweep may open, where a sweep within 50 seconds of this daemon's last opening opens none (`podUpdateOpeningGap`).
+A key the file leaves out is no limit at all, and there is no default:
+one change to the pod template drifts every pod of the project at once, and the first sweep after it would otherwise ask every worker of the fleet to stop what it is doing and push.
+Neither limit ends a round, pauses one, or holds back the re-ask of one that is open:
+the gate stands only where a new round would open, so a change reaches a few pods first and the rest as those finish.
+Only an ask that reached a worker is charged against either limit, since an issue with no claim to ask opens no round and holds no slot.
+An issue a limit holds back carries the plugin rounds of its own claims as before (`reconcilePluginUpdates`):
+no pod round is open over it, and a claim's own plugin round has nothing to do with the slot its issue waits for.
+Nothing of that pace is in the store, because neither key decides a round, so a daemon that has just booted opens its first round at its first sweep.
+The sweep opens every round of its tick before it makes any pod replacement, and makes those replacements in key order after its walk over the issues (`replacePodForRound`):
+a replacement waits its pod out, a sweep interval and the push check's own bound at worst, so one made where it is decided would hold every issue behind it in the walk for those minutes, and the limit a minute would open one round per slow sweep rather than the rounds a minute the project asks for.
+What the last sweep decided under the two limits is one line of `legion claims list` ("Contract discipline" above).
 
 A round that is not finishing is told to the project's controller as an `update-stalled` notice `pod_update_notice_hours` after it opened (a `legion.yaml` key, a decimal number of hours, 4 by default),
 naming the issue, the round, the pod, the drift and every claim it waits on with that claim's state (`skill://legion-controller/references/escalation.md`).
