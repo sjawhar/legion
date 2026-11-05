@@ -140,7 +140,10 @@ func TestDecisionConversionPreservesDistinctKeepsWithIdenticalHeadings(t *testin
 	if err != nil || report.Moved != 2 {
 		t.Fatalf("receipt conversion: %#v %v\n%s", report, err, out.String())
 	}
-	view := readIssueDecisions(t, handler, issue.Key)
+	view, err := (&server{deps: deps}).issueDecisionNodes(t.Context(), issue.Key)
+	if err != nil {
+		t.Fatalf("converted node read: %v", err)
+	}
 	if len(view.Decisions) != 2 {
 		t.Fatalf("converted choices: %s", mustJSON(t, view))
 	}

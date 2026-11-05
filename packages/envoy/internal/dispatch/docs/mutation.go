@@ -370,7 +370,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		return err
 	}
 	if contentChanged {
-		if err := refuseRemovingAnsweredDecisions(ctx, op.tx, artifactID, actor, tree.Node()); err != nil {
+		if err := refuseAgentDecisionChanges(ctx, op.tx, artifactID, actor, tree.Node()); err != nil {
 			return err
 		}
 	}
@@ -553,6 +553,11 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	}
 	if err := weighRendering("", canonical); err != nil {
 		return "", err
+	}
+	if actor.Kind != "system" && (actor.Kind != "user" || actor.Act != nil) {
+		if err := refuseDecisionPersonClaim(tree); err != nil {
+			return "", err
+		}
 	}
 	// A new document holds no pointer before this write, so every pointer it seeds is checked.
 	if err := refuseBlockPointers(ctx, tx, artifactID, tree, nil, offsets); err != nil {

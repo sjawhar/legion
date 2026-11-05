@@ -6,12 +6,29 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // pinDecisionPassages retains each shaped passage's original words in the existing GraphNode
 // pin shape. The default compares the passage at the relation's creation with its text now;
 // an explicitly requested document version supplies that version's words for historical matching.
 func (s *server) pinDecisionPassages(ctx context.Context, decisions []model.Decision, artifactID string, version int) error {
+	if version > 0 {
+		var at time.Time
+		if err := s.deps.Store.Pool.QueryRow(ctx, `select created_at from artifact_versions where artifact_id=$1::uuid and number=$2`, artifactID, version).Scan(&at); err != nil {
+			return err
+		}
+		for i := range decisions {
+			links := decisions[i].Links[:0]
+			for _, link := range decisions[i].Links {
+				if link.To.Parent != nil && link.To.Parent.ID == artifactID && link.CreatedAt.After(at) {
+					continue
+				}
+				links = append(links, link)
+			}
+			decisions[i].Links = links
+		}
+	}
 	type place struct{ decision, link int }
 	var places []place
 	var documents, blocks []string
@@ -81,4 +98,39 @@ func (s *server) pinDecisionPassages(ctx context.Context, decisions []model.Deci
 		node.Pin = &model.BlockPin{Version: *number, Ref: node.Ref + "@v" + strconv.Itoa(*number), Text: *atVersion, State: state}
 	}
 	return rows.Err()
+}
+
+// The ordinary block-links read deliberately omits removed targets. A decision also shows the
+// passage it once shaped, so retain only its own shaped edges whose target has block history.
+func (s *server) removedDecisionPassages(ctx context.Context, from, to string) ([]model.BlockLink, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+ select r.block_id,r.to_id,substr(r.to_id,length(a.ref_key)+2),r.created_at,r.created_version,
+   a.issue_key,a.project_key,a.slug,a.is_primary
+ from block_refs r
+ join document_blocks f on f.artifact_id=r.artifact_id and f.block_id=r.block_id
+ join artifacts a on a.id=$2::uuid and left(r.to_id,length(a.ref_key)+1)=a.ref_key||'#'
+ where r.artifact_id=$1::uuid and r.kind='shaped' and r.to_kind='block'
+   and not exists (select 1 from document_blocks t where t.artifact_id=a.id and t.node_id=r.to_id)
+   and exists (select 1 from document_block_texts h where h.artifact_id=a.id and h.block_id=substr(r.to_id,length(a.ref_key)+2) and h.text is not null)
+ order by r.created_at desc,r.from_node,r.to_id`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []model.BlockLink
+	for rows.Next() {
+		link := model.BlockLink{Kind: "shaped"}
+		document := model.Artifact{ID: to, Kind: "doc"}
+		if err := rows.Scan(&link.From.BlockID, &link.To.ID, &link.To.BlockID, &link.CreatedAt, &link.CreatedVersion, &document.IssueKey, &document.Project, &document.Slug, &document.Primary); err != nil {
+			return nil, err
+		}
+		reference := artifactReference(document)
+		link.To.Kind = "block"
+		link.To.IssueKey, link.To.Project = document.IssueKey, document.Project
+		link.To.Ref = refs.BlockRef(reference, link.To.BlockID)
+		link.To.Document = reference
+		link.To.Parent = &model.NodeParent{Kind: "artifact", ID: to, Ref: reference}
+		result = append(result, link)
+	}
+	return result, rows.Err()
 }

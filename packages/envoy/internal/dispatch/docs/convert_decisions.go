@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/sjawhar/envoy/internal/dispatch/decisionmigration"
@@ -16,6 +17,15 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
+
+const decisionConversionSourceSummary = "Retire the separate decision document"
+const decisionConversionActorID = "decision-node-conversion"
+
+// ConvertedDecisionSourcesSQL identifies sources with a committed conversion version. Keeping
+// their names and slugs lets the legacy reader and writer address the same artifact until cutover.
+// The caller aliases its artifact as a, bounding this lookup to that artifact's indexed history.
+const ConvertedDecisionSourcesSQL = `select artifact_id from artifact_versions
+ where artifact_id=a.id and summary='` + decisionConversionSourceSummary + `' and authors @> '[{"kind":"system","id":"` + decisionConversionActorID + `"}]'::jsonb`
 
 type DecisionConversion struct {
 	Documents int
@@ -40,6 +50,7 @@ func (s *Service) ConvertDecisionDocuments(ctx context.Context, apply bool, out 
  select a.id::text, a.issue_key, coalesce(spec.id::text,'')
  from artifacts a left join artifacts spec on spec.issue_key=a.issue_key and spec.is_primary and spec.kind='doc'
  where a.kind='doc' and (a.name='decisions.md' or a.slug='decisions-md')
+   and a.id not in (`+ConvertedDecisionSourcesSQL+`)
  order by a.issue_key,a.id`)
 	if err != nil {
 		return report, err
@@ -207,13 +218,17 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 			return report, err
 		}
 	}
-	_, specBlocks, err := s.TextWithBlocks(joined, source.spec)
+	specMarkdown, specBlocks, err := s.TextWithBlocks(joined, source.spec)
 	if err != nil {
 		return report, err
 	}
 	held := map[string]bool{}
+	heldAsks := map[string]bool{}
 	for _, block := range specBlocks {
 		held[block.ID] = true
+		if block.Type == "ask" {
+			heldAsks[block.ID] = true
+		}
 	}
 	var specSlug string
 	if err := tx.QueryRow(joined, `select slug from artifacts where id=$1::uuid`, source.spec).Scan(&specSlug); err != nil {
@@ -257,9 +272,32 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 	}
 	knownAsks := map[string]bool{}
 	for _, ask := range asks {
-		knownAsks[ask.ID] = true
+		knownAsks[ask.ID] = ask.State == "answered" && ask.Answer != nil
+	}
+	headings := decisionmigration.SectionHeadings(entries, legacyMarkdown, legacyBlocks)
+	keptHeadings := map[string]bool{}
+	if source.id != "" {
+		rows, err := tx.Query(joined, `select block_id from decision_keeps where artifact_id=$1::uuid`, source.id)
+		if err != nil {
+			return report, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return report, err
+			}
+			keptHeadings[id] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return report, err
+		}
 	}
 	for i := range entries {
+		if keptHeadings[headings[entries[i].ID]] {
+			entries[i].Drop = false
+		}
 		if entries[i].Drop {
 			for _, id := range entries[i].Asks {
 				if !knownAsks[id] {
@@ -283,7 +321,7 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 				}
 			}
 		}
-		if ask.BlockID != nil && ask.BlockArtifactID != nil && *ask.BlockArtifactID == source.spec && held[*ask.BlockID] {
+		if ask.BlockID != nil && ask.BlockArtifactID != nil && *ask.BlockArtifactID == source.spec && heldAsks[*ask.BlockID] {
 			if len(shaped) > 0 {
 				for _, block := range specBlocks {
 					if block.ID == *ask.BlockID {
@@ -311,7 +349,7 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 		// Move only the legacy source, a row-only cited ask, or a missing spec ask whose history
 		// establishes provenance. A current ask in another document stays its source there.
 		restore := ask.BlockArtifactID == nil || source.id != "" && ask.BlockArtifactID != nil && *ask.BlockArtifactID == source.id
-		if ask.BlockID != nil && !held[*ask.BlockID] {
+		if ask.BlockID != nil && !heldAsks[*ask.BlockID] {
 			var historical bool
 			if err := tx.QueryRow(joined, `select exists(select 1 from document_block_texts where artifact_id=$1::uuid and block_id=$2)`, source.spec, *ask.BlockID).Scan(&historical); err != nil {
 				return report, err
@@ -326,7 +364,11 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 			id = *ask.BlockID
 		}
 		if held[id] {
-			return report, fmt.Errorf("cannot restore ask %s: spec block %s already has a different owner", ask.ID, id)
+			base := "restored-ask-" + ask.ID
+			id = base
+			for suffix := 2; held[id]; suffix++ {
+				id = base + "-" + strconv.Itoa(suffix)
+			}
 		}
 		node, err := conversionAskNode(ask, id)
 		if err != nil {
@@ -392,7 +434,7 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 		}
 	}
 	if source.id != "" {
-		fmt.Fprintf(out, "  retire source as decision-history-%s.md (versions, reviews and closed conversations retained)\n", source.id)
+		fmt.Fprintf(out, "  mark source converted without renaming it (versions, reviews and closed conversations retained)\n")
 	}
 	if !apply {
 		return report, nil
@@ -403,31 +445,31 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 		}
 		changed = true
 	}
+	pointer := "The decisions are in dispatch://" + source.key + "/artifact/decisions-md."
+	if source.id != "" && strings.Contains(specMarkdown, pointer) {
+		if _, err := s.ApplyOps(joined, source.spec, []model.EditOp{{Op: "replace", Find: pointer, With: "The decisions are the decision and answered ask nodes in this spec."}}, conversionActor, nil); err != nil {
+			return report, err
+		}
+		changed = true
+	}
 	if changed {
 		version, err := s.conversionVersion(joined, tx, source.spec, "Decision nodes replace the separate decision document")
 		if err != nil {
 			return report, err
 		}
-		if err := moveConvertedDecisionKeeps(joined, tx, source, entries, legacyMarkdown, legacyBlocks, version.Version.Number); err != nil {
+		if err := copyConvertedDecisionKeeps(joined, tx, source, entries, legacyMarkdown, legacyBlocks, version.Version.Number); err != nil {
 			return report, err
 		}
 	}
 	if source.id != "" {
-		history := "decision-history-" + source.id
-		if _, err := tx.Exec(joined, `update artifacts set name=$2,slug=$3 where id=$1::uuid`, source.id, history+".md", history); err != nil {
-			return report, err
-		}
-		if _, err := s.ReplaceText(joined, source.id, "Decision nodes are in dispatch://"+source.key+"/spec. Earlier versions retain the conversion history.\n", conversionActor); err != nil {
-			return report, err
-		}
-		if _, err := s.conversionVersion(joined, tx, source.id, "Retire the separate decision document"); err != nil {
+		if _, err := s.conversionVersion(joined, tx, source.id, decisionConversionSourceSummary); err != nil {
 			return report, err
 		}
 	}
 	return report, nil
 }
 
-var conversionActor = model.Actor{Kind: "system", ID: "decision-node-conversion"}
+var conversionActor = model.Actor{Kind: "system", ID: decisionConversionActorID}
 
 // Conversion is a document writer like the HTTP routes: append and stamp its version event in
 // the same transaction, and let the joined ledger publish only after that transaction commits.
