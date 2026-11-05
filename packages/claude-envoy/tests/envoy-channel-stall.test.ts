@@ -10,14 +10,18 @@ import {
 import { type StallProxy, startStallProxy } from "@legion/envoy-client/test/stall-proxy"
 import { RECOVERY_BOUND_MS, runFreezeScenario } from "@legion/envoy-client/test/stall-scenario"
 import type { Subprocess } from "bun"
-import { z } from "zod"
+import { type ModCallArguments, modSocketPath } from "../hooks/mod-protocol"
+import { startFakeMod } from "./fake-mod"
 
 const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 
-const ChannelNotificationSchema = z.object({
-  method: z.literal("notifications/claude/channel"),
-  params: z.object({ content: z.string() }),
-})
+/** What one `$.session.append` the server made carries, which is how a delivery reaches the model
+ *  now that there is no channel (INFRA-1026). */
+function appendedText(args: ModCallArguments["session.append"]): string {
+  return args.message.content
+    .map((block) => (typeof block["text"] === "string" ? block["text"] : ""))
+    .join("")
+}
 
 /** A channel server process, initialized, whose only NATS path goes through `proxy`. */
 interface ChannelServer {
@@ -63,6 +67,8 @@ async function startChannelServer(
       CLAUDE_CONFIG_DIR: configDirectory,
       CLAUDE_CODE_SESSION_ID: sessionID,
       CLAUDE_PLUGIN_DATA: home,
+      // The base the server and the mod below both resolve the link's socket from.
+      TMPDIR: home,
       // No heartbeat registration runs in the test's window: the reconnect's registration, on a
       // new epoch, is the only one that restarts the relay.
       ENVOY_HEARTBEAT_MS: "240000",
@@ -71,20 +77,20 @@ async function startChannelServer(
     stdout: "pipe",
     stderr: "pipe",
   })
+  // Every delivery reaches the model as a row the mod stores, so the mod is this test's view of
+  // what the session was shown.
+  const socketPath = modSocketPath(sessionID, { TMPDIR: home })
+  if (socketPath === undefined) throw new Error("the session names no mod socket")
   const channel: string[] = []
-  void (async () => {
-    let buffered = ""
-    for await (const chunk of server.stdout.pipeThrough(new TextDecoderStream())) {
-      buffered += chunk
-      for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
-        const notification = ChannelNotificationSchema.safeParse(
-          JSON.parse(buffered.slice(0, newline)),
-        )
-        buffered = buffered.slice(newline + 1)
-        if (notification.success) channel.push(notification.data.params.content)
-      }
-    }
-  })()
+  const mod = await startFakeMod(socketPath, {
+    sessionId: sessionID,
+    answers: {
+      "session.append": (args) => {
+        channel.push(appendedText(args))
+        return { uuid: `row-${channel.length}` }
+      },
+    },
+  })
   let stderr = ""
   void (async () => {
     for await (const chunk of server.stderr.pipeThrough(new TextDecoderStream())) stderr += chunk
@@ -122,6 +128,7 @@ async function startChannelServer(
       }
     },
     async stop() {
+      await mod.stop()
       server.kill("SIGTERM")
       const killer = setTimeout(() => server.kill("SIGKILL"), 10_000)
       await server.exited

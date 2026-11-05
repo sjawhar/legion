@@ -30,6 +30,8 @@ function sessionWith(followed: string[]): ChannelSession {
     unfollow: async () => [],
     rememberRole: async () => undefined,
     onRoleRegained: () => undefined,
+    capabilitiesChanged: () => undefined,
+    observe: () => undefined,
     shutdown: async () => undefined,
   }
 }

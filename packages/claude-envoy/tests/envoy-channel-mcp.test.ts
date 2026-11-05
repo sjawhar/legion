@@ -5,15 +5,18 @@ import { join, resolve } from "node:path"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
+import { modSocketPath } from "../hooks/mod-protocol"
 import { waitFor } from "./channel-session-harness"
+import { startFakeMod } from "./fake-mod"
 import { FakeNatsServer } from "./fake-nats-server"
 
 const entry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 
 // What Claude Code sees over MCP, with Dispatch configured: the Envoy tools and nothing else, since
-// agents reach Dispatch through the `dispatch` command the plugin's bin/ puts on the Bash tool's PATH.
-// Its deliveries are channel notifications, so the session advertises Aside alone.
-test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, points at the dispatch command, and advertises aside alone", async () => {
+// agents reach Dispatch through the `dispatch` command the plugin's bin/ puts on the Bash tool's
+// PATH. A terminal session reaches the model only through its mod (INFRA-1026), so it advertises
+// no delivery mode until the mod connects, and Aside, BTW and Send once one has.
+test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, points at the dispatch command, and advertises nothing until its mod connects", async () => {
   const broker = new FakeNatsServer()
   const dispatchRequests: string[] = []
   const dispatch = Bun.serve({
@@ -59,9 +62,9 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, poi
       ENVOY_URL: `http://127.0.0.1:${listener.port}`,
       CLAUDE_CODE_SESSION_ID: "ses_mcp",
       CLAUDE_PLUGIN_DATA: stateDirectory,
-      // The test runner, not `claude --channels`, starts this server, so the channel gate
-      // (`src/claude-channel.ts`) would find no channel and advertise nothing.
-      ENVOY_CHANNEL_LOADED: "1",
+      // The socket the server binds for its mod, and the one the fake mod below connects to,
+      // are both resolved from this base (`resolveModSocketPath`).
+      TMPDIR: stateDirectory,
       DISPATCH_URL: `http://127.0.0.1:${dispatch.port}`,
       DISPATCH_TOKEN: "test-token",
     },
@@ -85,10 +88,24 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, poi
 
     const { tools } = await client.listTools()
     expect(tools.map(({ name }) => name)).toEqual(envoyToolSpecs.map(({ name }) => name))
-    // Every registration of the session carries Aside alone.
+    // Nothing until the mod connects: without one no message reaches the model at all.
     expect(advertised.length).toBeGreaterThan(0)
-    for (const modes of advertised) expect(modes).toEqual(["aside"])
+    for (const modes of advertised) expect(modes).toEqual([])
 
+    const socketPath = modSocketPath("ses_mcp", { TMPDIR: stateDirectory })
+    if (socketPath === undefined) throw new Error("the session names no mod socket")
+    const mod = await startFakeMod(socketPath, { sessionId: "ses_mcp" })
+    try {
+      // The mod's hello makes the session register again, with what it can take now.
+      await waitFor(
+        async () => (advertised.at(-1) as string[] | undefined)?.length === 3,
+        "the session to advertise its delivery modes",
+        () => JSON.stringify(advertised),
+      )
+      expect(advertised.at(-1)).toEqual(["aside", "btw", "steer"])
+    } finally {
+      await mod.stop()
+    }
     const instructions = client.getInstructions() ?? ""
     expect(instructions).toContain("`dispatch` command")
     expect(instructions).not.toContain("Dispatch tools")

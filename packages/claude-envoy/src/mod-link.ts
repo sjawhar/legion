@@ -66,8 +66,10 @@ export interface ModLink {
   readonly sessionId: () => string | undefined
   /** Called whenever that id changes, the first report included. */
   readonly onSessionId: (listener: (sessionId: string) => void) => void
-  /** Whether a mod is polling this link now: true while a poll is held and for one hold after the
-   *  last one, so a mod that stopped stops counting within about ten seconds. */
+  /** Whether a mod is talking to this link now: true while a poll is held, and for one hold
+   *  after the mod's last poll or event, so a mod that stopped stops counting within about ten
+   *  seconds. A session's delivery modes are read off this (`sessionCapabilities`), and the
+   *  mod's first event - its hello - is as good a proof that it is there as its first poll. */
   readonly connected: () => boolean
   /** Stop serving, unlink the socket, end `events` and reject every unanswered request. */
   readonly close: () => Promise<void>
@@ -340,6 +342,7 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
       return
     }
     if (route === MOD_ROUTE_EVENTS) {
+      lastPollAt = Date.now()
       const events = readEvents(body)
       if (events === undefined) {
         answerJson(response, 400, { error: "the body carries no events" })

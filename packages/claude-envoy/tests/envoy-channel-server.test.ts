@@ -12,7 +12,7 @@ import {
   createChannelDelivery,
   enqueueChannelMessage,
   MCP_SERVER_INFO,
-  sanitizeChannelMetadata,
+  sessionCapabilities,
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { roleStateFile, SessionIdentity } from "../src/session-identity"
@@ -47,7 +47,7 @@ const roleForwardRaw = JSON.stringify({
   payload_summary: "Review please",
 })
 
-test("emits each Envoy envelope as the exact Claude channel notification", async () => {
+test("writes each Envoy envelope into the session as the rendered card that names its sender", async () => {
   const notifier = new FakeNotifier()
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
@@ -59,63 +59,11 @@ test("emits each Envoy envelope as the exact Claude channel notification", async
 
   expect(notifier.notifications).toEqual([
     {
-      method: "notifications/claude/channel",
-      params: {
-        content:
-          'envoy:\n  to: you (ses_claude)\n  from: ses_sender\n  at: "2025-10-09T08:53:20Z"\n  id: evt-42\n  urgency: high\n  reply_with:\n    tool: envoy_send\n    args:\n      session_id: ses_sender\n      in_reply_to: evt-42\n      message: ...\n  summary: Use the channel',
-        meta: {
-          producer: "agent",
-          topic: directSubject,
-          event_id: "evt-42",
-          dedupe_key: "delivery-42",
-          urgency: "high",
-          from_session: "ses_sender",
-        },
-      },
+      content:
+        'envoy:\n  to: you (ses_claude)\n  from: ses_sender\n  at: "2025-10-09T08:53:20Z"\n  id: evt-42\n  urgency: high\n  reply_with:\n    tool: envoy_send\n    args:\n      session_id: ses_sender\n      in_reply_to: evt-42\n      message: ...\n  summary: Use the channel',
+      eventId: "evt-42",
     },
   ])
-})
-
-test("presents an ad-hoc topic's forward on the agent subject with the topic it was published to", async () => {
-  const notifier = new FakeNotifier()
-  const delivery = createChannelDelivery({
-    identity: new SessionIdentity("ses_claude", "/tmp"),
-    notifier,
-    configFile: sessionConfigFile("claude", process.env),
-  })
-  // The publish route forwards an ad-hoc topic's envelope, unchanged, to each self-subscribed
-  // session's agent subject, and that copy can arrive before the one on the topic itself.
-  const adHocForward = JSON.stringify({
-    event_id: "evt-team-3",
-    dedupe_key: "publish.0123456789abcdef0123456789abcdef",
-    source: "agent",
-    source_session: "ses_sender",
-    topic: "notifications.team.deploy-squad",
-    issued_at: 1_760_000_000_000,
-    payload_summary: "Deploy done",
-  })
-
-  await delivery.enqueue({ subject: directSubject, raw: adHocForward })
-
-  expect(notifier.notifications).toHaveLength(1)
-  expect(notifier.notifications[0]?.params.meta).toEqual({
-    producer: "agent",
-    topic: "notifications.team.deploy-squad",
-    event_id: "evt-team-3",
-    dedupe_key: "publish.0123456789abcdef0123456789abcdef",
-    from_session: "ses_sender",
-  })
-})
-
-test("strips unsafe channel meta keys before notifying Claude Code", () => {
-  expect(
-    sanitizeChannelMetadata({
-      producer: "envoy",
-      "from-session": "ses_sender",
-      "1bad": "dropped",
-      event_id: "evt-1",
-    }),
-  ).toEqual({ producer: "envoy", event_id: "evt-1" })
 })
 
 test("enqueues a forwarded role-lane event before publishing its adapter receipt", async () => {
@@ -248,7 +196,7 @@ test("a Dispatch Retry the listener re-sends under the same dedupe key reaches C
     await settled()
 
     expect(notifier.notifications).toHaveLength(1)
-    expect(notifier.notifications[0]?.params.meta["event_id"]).toBe("evt-attempt")
+    expect(notifier.notifications[0]?.eventId).toBe("evt-attempt")
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
@@ -269,7 +217,7 @@ test("a send whose notification failed is delivered when it is sent again", asyn
             failNext = false
             throw new Error("the MCP transport refused the write")
           }
-          delivered.push(String(notification.params.meta["event_id"]))
+          delivered.push(String(notification.eventId))
         },
       },
     }),
@@ -341,7 +289,7 @@ test("registers no delivery mode for a session whose channel Claude Code did not
   const session = await startChannelSession(
     sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
       client,
-      capabilities: [],
+      capabilities: () => [],
     }),
   )
 
@@ -386,7 +334,7 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
       expect.objectContaining({
         sessionID: "ses_claude",
         topics: [directSubject],
-        capabilities: ["aside"],
+        capabilities: ["aside", "steer"],
         selfSubscribed: true,
         plugin: { name: "@sjawhar/claude-envoy", version: "afe10b2f3e1b" },
       }),
@@ -988,3 +936,10 @@ test("a refused NATS seed leaves the listener tools on, opens no NATS connection
     await rm(home, { recursive: true, force: true })
   }
 }, 20_000)
+
+test("a Legion pane takes Aside and Send from the start and gains BTW when its mod connects", () => {
+  // The pane's messages go through the bridge's inbox, which needs no mod; the side turn a BTW
+  // is does. A terminal session's own rule is driven end to end in `envoy-channel-mcp.test.ts`.
+  expect(sessionCapabilities({ pane: true, mod: false })).toEqual(["aside", "steer"])
+  expect(sessionCapabilities({ pane: true, mod: true })).toEqual(["aside", "steer", "btw"])
+})

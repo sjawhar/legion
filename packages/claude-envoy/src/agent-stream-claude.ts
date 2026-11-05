@@ -99,6 +99,14 @@ export interface ClaudeAgentStreamDeps {
   readonly publisher: AgentStreamPublisher
   /** The clock a step's timestamp is allocated from, and every other message is stamped with. */
   readonly now: () => number
+  /**
+   * The Dispatch message a row of the conversation is, where it is one
+   * (`./user-turn-state`). A person's own message would otherwise reach the page twice - as the
+   * message Dispatch stored and as the row the session took it as - and the row's tag is how the
+   * page knows the two are one message (`conversation.ts` in the Agents page). A row of the
+   * session's own keeps its own id as its tag, as every row did before.
+   */
+  readonly tagFor?: (row: string) => string | undefined
 }
 
 export interface ClaudeAgentStream {
@@ -247,8 +255,14 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     return at
   }
 
-  const record = (subject: string, message: ClaudeStreamMessage, streaming: boolean): void => {
-    publisher.record(subject, message, streaming)
+  const record = (
+    subject: string,
+    message: ClaudeStreamMessage,
+    streaming: boolean,
+    /** The Dispatch message this row delivered, where it is one. */
+    dispatchMessageId?: string,
+  ): void => {
+    publisher.record(subject, message, streaming, dispatchMessageId)
   }
 
   /** One `turn.step` snapshot as the assistant message of that step. */
@@ -295,6 +309,12 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     // into a slot of its own: publishing both shows the viewer the same answer twice.
     if (door === "response") return
     if (door === "prompt") {
+      // A prompt this plugin submitted without `asUser` is not a person's message: Claude Code
+      // frames it as "The claude-envoy plugin sent a message:" and the only one the server sends
+      // is the nudge at a row a turn never read (`../src/mod-session`, `UNREAD_ROW_PROMPT`).
+      // Measured on 2.1.310: a submit with `asUser` carries `asUser: true` on the row's origin
+      // and one without it carries no such field, which is what tells the two apart.
+      if (origin.kind === "plugin" && origin.asUser !== true) return
       record(
         subject,
         {
@@ -304,6 +324,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
           timestamp: now(),
         },
         false,
+        deps.tagFor?.(uuid),
       )
       return
     }
@@ -337,6 +358,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
         timestamp: now(),
       },
       false,
+      deps.tagFor?.(uuid),
     )
   }
 

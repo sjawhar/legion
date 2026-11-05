@@ -113,7 +113,7 @@ test("channel mode answers a relay frame received at once and done only once the
     await waitFor(async () => held.written.length === 1, "the notification write")
     // `received` went out before the write began, and nothing more while it is unresolved.
     expect(nats.repliesOn("_INBOX.one")).toEqual(["received"])
-    expect(held.written[0]?.params.meta["event_id"]).toBe(message.id)
+    expect(held.written[0]?.eventId).toBe(message.id)
     await settled()
     expect(nats.repliesOn("_INBOX.one")).toEqual(["received"])
 
@@ -171,7 +171,7 @@ test("bridge mode answers done once the inbox says Claude Code took the message,
     sessionOptions(new SessionIdentity(SESSION, "/tmp"), directory, {
       connection: nats,
       notifier: inbox.notifier,
-      capabilities: INBOX_CAPABILITIES,
+      capabilities: () => INBOX_CAPABILITIES,
       client,
     }),
   )
@@ -287,7 +287,7 @@ for (const [why, answer] of [
       const message = peerMessage("core")
       nats.emit(DIRECT, message.raw)
       await waitFor(async () => notifier.written.length === 1, "the core frame's write")
-      expect(notifier.written[0]?.params.meta["event_id"]).toBe(message.id)
+      expect(notifier.written[0]?.eventId).toBe(message.id)
     } finally {
       for (const write of notifier.pending) write.resolve()
       await session.shutdown()
@@ -355,7 +355,7 @@ test("a late BTW is passed over and answered done, and the frame after it is sho
     const after = peerMessage("after-btw")
     nats.emitRelay(SESSION, { subject: DIRECT, seq: 4, raw: after.raw, reply: "_INBOX.after" })
     await waitFor(async () => notifier.written.length === 1, "the frame after the BTW")
-    expect(notifier.written[0]?.params.meta["event_id"]).toBe(after.id)
+    expect(notifier.written[0]?.eventId).toBe(after.id)
     expect(nats.repliesOn("_INBOX.btw")).toEqual(["received", "done"])
   } finally {
     for (const write of notifier.pending) write.resolve()
@@ -392,7 +392,7 @@ test("consumer mode asks no replay, shows no stored-subject core frame but answe
     const team = peerMessage("team", "notifications.team.deploy")
     nats.emit("notifications.team.deploy", team.raw)
     await waitFor(async () => notifier.written.length === 1, "the team topic's write")
-    expect(notifier.written.map((written) => written.params.meta["event_id"])).toEqual([team.id])
+    expect(notifier.written.map((written) => written.eventId)).toEqual([team.id])
 
     // Heartbeats ran meanwhile, each sweeping after it registered, and none of them asked the
     // listener's replay route.
@@ -400,7 +400,7 @@ test("consumer mode asks no replay, shows no stored-subject core frame but answe
     await waitFor(async () => registrations.length >= ticks + 3, "three more heartbeats")
     await settled()
     expect(replays()).toBe(0)
-    expect(notifier.written.map((written) => written.params.meta["event_id"])).toEqual([team.id])
+    expect(notifier.written.map((written) => written.eventId)).toEqual([team.id])
   } finally {
     for (const write of notifier.pending) write.resolve()
     await session.shutdown()
@@ -465,15 +465,11 @@ test("a gap the registration reports is told once, through the notice path", asy
       for (const write of notifier.pending) write.resolve()
       return nats.repliesOn("_INBOX.gap").includes("done")
     }, "done")
-    expect(notifier.written.map((written) => written.params.meta["event_id"])).toEqual([
-      undefined,
-      message.id,
-    ])
-    const notices = notifier.written.filter(
-      (written) => written.params.meta["producer"] === "envoy",
-    )
+    expect(notifier.written.map((written) => written.eventId)).toEqual([undefined, message.id])
+    // A notice of Envoy's own names no envelope; every other line written is a frame's.
+    const notices = notifier.written.filter((written) => written.eventId === undefined)
     expect(notices).toHaveLength(1)
-    expect(notices[0]?.params.content).toContain("72 hours")
+    expect(notices[0]?.content).toContain("72 hours")
   } finally {
     for (const write of notifier.pending) write.resolve()
     await session.shutdown()

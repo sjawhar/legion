@@ -10,13 +10,12 @@ import type {
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
 import {
-  CHANNEL_CAPABILITIES,
   type ChannelNotification,
   type ChannelNotifier,
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { readPersistedRole, roleStateFile, SessionIdentity } from "../src/session-identity"
-import { emptyReplay, type FakeClient, waitFor } from "./channel-session-harness"
+import { emptyReplay, type FakeClient, testCapabilities, waitFor } from "./channel-session-harness"
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
@@ -91,7 +90,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
     identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
-    capabilities: CHANNEL_CAPABILITIES,
+    capabilities: testCapabilities,
     client,
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
@@ -138,7 +137,7 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
     identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
-    capabilities: CHANNEL_CAPABILITIES,
+    capabilities: testCapabilities,
     client,
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
@@ -192,7 +191,7 @@ test("the role read's 404 still means no live holder: the kept lane changed only
     identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
-    capabilities: CHANNEL_CAPABILITIES,
+    capabilities: testCapabilities,
     client,
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
@@ -242,7 +241,7 @@ test("a soft claim another live session refuses removes the role record, which n
     identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
-    capabilities: CHANNEL_CAPABILITIES,
+    capabilities: testCapabilities,
     client,
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },

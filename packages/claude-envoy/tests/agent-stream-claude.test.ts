@@ -7,8 +7,9 @@
  * Every assertion is over the replay a viewer would be answered with, never over which function
  * called which.
  */
-import { join } from "node:path"
+
 import { expect, test } from "bun:test"
+import { join } from "node:path"
 import {
   AGENT_STREAM_LIMITS,
   type AgentStreamFrame,
@@ -18,12 +19,7 @@ import {
   agentStreamFramesSubject,
 } from "@legion/contracts"
 import { AgentStreamPublisher } from "@legion/pi-shared/agent-stream"
-import type {
-  ModCommandInfo,
-  ModConfigRow,
-  ModContentBlock,
-  ModEvent,
-} from "../hooks/mod-protocol"
+import type { ModCommandInfo, ModConfigRow, ModContentBlock, ModEvent } from "../hooks/mod-protocol"
 import {
   CLAUDE_EFFORT_LEVELS,
   CLAUDE_THINKING_HIDDEN,
@@ -64,7 +60,7 @@ interface Harness {
 
 /** A publisher a viewer is already watching, with a clock the test moves itself: a real one would
  *  make a step's allocated timestamp unpredictable, and the slot is the timestamp. */
-function harness(startAt = 1_000): Harness {
+function harness(startAt = 1_000, tagFor?: (row: string) => string | undefined): Harness {
   let clock = startAt
   const now = (): number => clock
   const published: AgentStreamFrame[] = []
@@ -72,7 +68,11 @@ function harness(startAt = 1_000): Harness {
     now,
     publish: (_subject, payload) => published.push(JSON.parse(payload) as AgentStreamFrame),
   })
-  const stream = createClaudeAgentStream({ now, publisher })
+  const stream = createClaudeAgentStream({
+    now,
+    publisher,
+    ...(tagFor === undefined ? {} : { tagFor }),
+  })
   publisher.noteViewer()
   return {
     feed: (...events) => {
@@ -97,9 +97,7 @@ function toolResults(replay: AgentStreamReplay): AgentStreamToolResult[] {
 }
 
 function textOf(message: AgentStreamMessage): string {
-  return message.parts
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .join("")
+  return message.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")
 }
 
 function reasoningOf(message: AgentStreamMessage): string[] {
@@ -191,7 +189,11 @@ test("a response row publishes nothing, so the step's answer is the only copy", 
   live.tick(10)
   live.feed(
     appendRow("response", [{ text: "PAPAYA", type: "text" }], {
-      message: { content: [{ text: "PAPAYA", type: "text" }], role: "assistant", type: "assistant" },
+      message: {
+        content: [{ text: "PAPAYA", type: "text" }],
+        role: "assistant",
+        type: "assistant",
+      },
       origin: { kind: "model", model: "claude-sonnet-5" },
       uuid: "row-response",
     }),
@@ -213,6 +215,29 @@ test("two prompts stamped in one millisecond keep separate slots", () => {
   const kept = messages(live.replay())
   expect(kept.map(textOf)).toEqual(["first ask", "second ask"])
   expect(kept.every((message) => message.role === "user")).toBe(true)
+})
+
+test("a person's message shows as their own, and the prompt pointing at a row it left shows nothing", () => {
+  const live = harness(1_000, (row) => (row === "row-sent" ? "msg-7" : undefined))
+  live.feed(
+    // Measured on 2.1.310: a submit with `asUser` carries it on the row's origin, and the
+    // plugin's own prompt is framed as the plugin speaking.
+    appendRow("prompt", [{ text: "ship it", type: "text" }], {
+      origin: { asUser: true, kind: "plugin", name: "claude-envoy" },
+      uuid: "row-sent",
+    }),
+    appendRow(
+      "prompt",
+      [{ text: "The claude-envoy plugin sent a message:\nRead the message above.", type: "text" }],
+      { origin: { kind: "plugin", name: "claude-envoy" }, uuid: "row-nudge" },
+    ),
+  )
+
+  const kept = messages(live.replay())
+  expect(kept.map(textOf)).toEqual(["ship it"])
+  // Tagged with the Dispatch message it is, so the page shows it once rather than beside the
+  // copy Dispatch stored.
+  expect(kept[0]?.dispatchMessageId).toBe("msg-7")
 })
 
 test("a command row keeps the row's own role and a note row an assistant one", () => {
@@ -293,7 +318,12 @@ test("a real 2.1.310 turn replays as the prompt, three steps and two tool result
 
   // The prompt, then one assistant message per step of the turn. The three `response` rows the
   // session also appended added nothing.
-  expect(kept.map((message) => message.role)).toEqual(["user", "assistant", "assistant", "assistant"])
+  expect(kept.map((message) => message.role)).toEqual([
+    "user",
+    "assistant",
+    "assistant",
+    "assistant",
+  ])
   expect(textOf(kept[0] as AgentStreamMessage)).toContain("is 391 prime?")
   expect(textOf(kept[3] as AgentStreamMessage)).toBe(
     "No, 391 is not prime, because it equals 17 × 23.",
@@ -308,9 +338,7 @@ test("a real 2.1.310 turn replays as the prompt, three steps and two tool result
   )
   const results = toolResults(replay)
   expect(calls.map((call) => call.toolName)).toEqual(["Read", "Read"])
-  expect(results.map((result) => result.toolCallId)).toEqual(
-    calls.map((call) => call.toolCallId),
-  )
+  expect(results.map((result) => result.toolCallId)).toEqual(calls.map((call) => call.toolCallId))
   expect(results[0]?.isError).toBe(false)
   expect(results[0]?.output).toContain("hello from present.txt")
   expect(results[1]?.isError).toBe(true)
@@ -436,7 +464,9 @@ test("a conversation past the history limit keeps the newest messages", () => {
 
   const kept = messages(live.replay())
   expect(kept).toHaveLength(AGENT_STREAM_LIMITS.historyMessages)
-  expect(textOf(kept[0] as AgentStreamMessage)).toBe(`step ${over - AGENT_STREAM_LIMITS.historyMessages}`)
+  expect(textOf(kept[0] as AgentStreamMessage)).toBe(
+    `step ${over - AGENT_STREAM_LIMITS.historyMessages}`,
+  )
   expect(textOf(kept[kept.length - 1] as AgentStreamMessage)).toBe(`step ${over - 1}`)
 })
 

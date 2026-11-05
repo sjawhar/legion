@@ -41,10 +41,7 @@ async function inbox(answer: (delivery: { id: string; content: string }) => obje
 }
 
 function notification(content: string, eventID?: string) {
-  return {
-    method: "notifications/claude/channel" as const,
-    params: { content, meta: eventID === undefined ? {} : { event_id: eventID } },
-  }
+  return { content, ...(eventID === undefined ? {} : { eventId: eventID }) }
 }
 
 test("writes each delivery as one line keyed by its event id and resolves on the bridge's ok", async () => {

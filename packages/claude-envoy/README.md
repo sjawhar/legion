@@ -1,14 +1,14 @@
 # claude-envoy
 
-Claude Code channel plugin for Legion's Envoy subsystem. One MCP stdio server consumes Envoy NATS
-events and sends them to the current Claude Code session as supported
-`notifications/claude/channel` notifications.
+Claude Code plugin for Legion's Envoy subsystem. One MCP stdio server consumes Envoy NATS events
+and puts them into the current Claude Code session's own conversation, and takes a person's
+message from Dispatch's Agents page as that person's own turn.
 
 ## Architecture
 
 - `.mcp.json` launches the committed bundle `dist/envoy-channel.js` (built from
-  `bin/envoy-channel.ts`; see "The bundle" below). It declares the experimental `claude/channel`
-  capability, so Claude Code accepts its event notifications; it also exposes the Envoy messaging
+  `bin/envoy-channel.ts`; see "The bundle" below). It reaches the model through this plugin's
+  Claude Code mod (`hooks/mod.ts`); it also exposes the Envoy messaging
   tools through that same MCP server.
 - `bin/dispatch` is the `dispatch` command, which Claude Code puts on the Bash tool's `PATH` while
   the plugin is enabled; it runs the committed bundle `dist/dispatch.js`. Agents reach Dispatch
@@ -110,76 +110,16 @@ events and sends them to the current Claude Code session as supported
   Claude Code or the model processed the event: the channel protocol has no processing ack. A plain
   direct send (`/v1/messages/send`) is a JetStream publish and gets no receipt: its reply subject is
   the publisher's acknowledgement inbox, and an empty receipt there fails the publish.
-- The server registers the session as self-subscribed with `capabilities: ["aside"]`, or
-  `["aside", "steer"]` in a Legion pane whose deliveries go to the bridge's inbox (below). It never
-  advertises `btw`, and a plain session does not advertise `steer` (see "Intentionally omitted").
-  A plain session whose channel Claude Code did not load registers no capability. Claude Code never
-  tells a server whether it loaded its channel: the MCP handshake is the same either way, and a
-  notification sent while it is not loaded is dropped without a word, so Dispatch would record an
-  Aside to that session as sent while the model never saw it. The server therefore reads the
-  command line of the `claude` process that runs it (`src/claude-channel.ts`; the nearest ancestor
-  whose program is `claude`, since Claude Code may run the server through a shell prefix or a
-  `bun` shim) and applies Claude Code's gate as of 2.1.301: an entry naming this plugin (from a
-  bare MCP config, any `server:` entry) in `--channels`, or in
-  `--dangerously-load-development-channels` in an interactive session (no `-p`, `--print`,
-  `--init-only` or `--sdk-url` option, and, where `/proc` shows it, a terminal on stdout), the
-  arguments read as Claude Code's own scanner reads them; the marketplace the plugin is loaded from
-  (`inline` for `--plugin-dir`, else the plugin cache's, compared as Claude Code names its cache
-  directory); and, for `--channels`, an `allowedChannelPlugins` entry (an object, or a
-  `plugin@marketplace` string; an invalid entry is dropped alone) from the managed settings
-  source that owns it: the cached `remote-settings.json`, else `managed-settings.json` with its
-  `managed-settings.d/` drop-ins (`.json` names not starting with a dot), and under
-  `managedSourcesBehavior: "merge"` the highest of them that sets the key. With no capability the
-  listener refuses every targeted delivery (`session … does not advertise aside`), Dispatch shows
-  the session as taking no messages, and the server says why on stderr and in its MCP
-  instructions. `ENVOY_CHANNEL_LOADED=1` or `0` overrides the check, for an allowlist an MDM
-  profile delivers. A command line it cannot read, or no `claude` among the server's ancestors,
-  counts as loaded (a Claude Code run under another program name inside another `claude`
-  session's shell reads as the outer one), and so does the command line of a Claude Code that runs
-  on Node, whose `process.title = "claude"` overwrites the arguments (on Linux, the title and NUL
-  padding, whatever the executable's name; elsewhere, one word from a program named `node…`). A
-  Legion pane whose deliveries go to the bridge's inbox needs no channel, so the check does not
-  apply there.
-
-  The check cannot see every reason Claude Code refuses a channel. Claude Code also turns channels
-  off for the account (not signed in, or an account without the channels feature), for a
-  third-party provider (Bedrock, Vertex or Foundry), and when the managed settings do not set
-  `channelsEnabled: true`; outside Linux it cannot tell whether stdout is a terminal;
-  Claude Code skips a channel on a connection that negotiated an MCP protocol revision with no
-  unsolicited notifications. Claude Code then shows
-  `--dangerously-load-development-channels ignored` (or `--channels ignored`) with the reason when
-  the session starts, and drops every notification. The server still advertises Aside, so Dispatch
-  records a message to that session as sent while the model never sees it. If the session shows
-  that warning, start it with `ENVOY_CHANNEL_LOADED=0` so it advertises no delivery mode.
-
-  Two more cases turn on what Claude Code has cached in the profile, which the check does not
-  read (both measured on Claude Code 2.1.309, 2026-10-23). Read from Claude Code's code: it checks
-  each channel notification as it arrives, against the usage policy it fetches from Anthropic
-  (`policy-limits.json` in the profile) and its feature flags (`cachedGrowthBookFeatures` in the
-  profile's `.claude.json`), and draws the channel banner once, at startup.
-  - **A new profile's first launch with the key in `ANTHROPIC_API_KEY`** shows
-    `--channels waiting for your organization's policy` and "Messages are dropped until it loads",
-    even with the channel allowlisted in managed settings, and the banner does not clear once the
-    policy loads. That policy is Anthropic's, not `managed-settings.json`. The profile had cached
-    it a second after the prompt appeared, and an Aside sent 45 s in, under that banner, reached
-    the model. With `policy-limits.json` in the profile, messages arrive whatever the banner says,
-    and the next launch shows the channel loaded.
-  - **A new profile whose key comes only from an `apiKeyHelper`** had no feature flags on its
-    first launch in all four profiles tried, and showed `--channels ignored` and "Channels are not
-    currently available". The server still advertises Aside, and an Aside Dispatch recorded as sent
-    never reached the model. One profile loaded the channel on its second launch; another on its
-    third, its second (with the key in `ANTHROPIC_API_KEY`, quit 13 s in) still ignored; a third
-    was ignored on its second launch too, and the fourth was not launched again. The launch that
-    loaded the channel fetched the flags at startup, and an Aside then reached the model. With the
-    key in `ANTHROPIC_API_KEY` instead, two new profiles fetched the flags during their first
-    launch.
-
-  The other way round, the check runs once at startup, so a channel an SDK host turns on later
-  (`enableChannel`) is not seen: that session advertises no mode and Dispatch refuses messages
-  Claude Code would pass on. Start such a session with `ENVOY_CHANNEL_LOADED=1`. And because the
-  install path holds a marketplace name as Claude Code writes it into its cache (every character
-  outside `[A-Za-z0-9_-]` made `-`), a flag naming `legion-plugins` for a plugin installed from
-  `legion.plugins` counts as a match, though Claude Code refuses it.
+- The server registers the session as self-subscribed with what it can take now
+  (`sessionCapabilities` in `src/envoy-channel-server.ts`), read again at every registration. A
+  terminal session reaches the model only through its mod (`hooks/mod.ts`, `src/mod-session.ts`),
+  so it advertises nothing until the mod connects and `aside`, `btw` and `steer` once it has; a
+  Legion pane, whose deliveries go to the bridge's inbox (below), advertises `aside` and `steer`
+  from the start and gains `btw` with the mod. It registers again the moment the mod says hello,
+  so Dispatch learns what the session takes without waiting for a heartbeat. With no capability
+  the listener refuses every targeted delivery (`session … does not advertise aside`) and
+  Dispatch shows the session as taking no messages, which is the right answer for a session
+  nothing can reach.
 - A targeted Dispatch delivery the shared renderer rejects is never shown to the model: when it
   names a message, the server posts `Invalid Dispatch targeted delivery frame` to
   `POST /api/v1/messages/{id}/reply` so the attempt fails visibly; otherwise it is logged and dropped.
@@ -392,45 +332,22 @@ claude-envoy has no release of its own, so `.github/workflows/changelog-fold.yam
 changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
 first fold run after they merge.
 
-## Enable the channel
+## How a message reaches the model
 
-Channels are gated by Claude Code's managed settings: whoever administers the machine writes
-`/etc/claude-code/managed-settings.json` (on macOS,
-`/Library/Application Support/ClaudeCode/managed-settings.json`), which turns channels on and
-allowlists the plugin, and the user opts the plugin into each session with `--channels`. An
-account that receives server-managed settings (cached as `remote-settings.json` in the Claude Code
-config directory) takes these keys from them instead, and under the default
-`managedSourcesBehavior` the local file then changes nothing:
+Nothing has to be enabled on the machine: the plugin carries a Claude Code mod (`hooks/mod.ts`,
+loaded by the `modules` key of `hooks/hooks.json`), and the mod and this server meet on a Unix
+socket of the session's own (`hooks/mod-protocol.ts`, `src/mod-link.ts`). Claude Code 2.1.310 or
+newer runs the mod; below that it never connects, and a terminal session advertises no delivery
+mode, so Dispatch refuses a message to it rather than reporting it delivered.
 
-```json
-{
-  "channelsEnabled": true,
-  "allowedChannelPlugins": [
-    { "marketplace": "legion-plugins", "plugin": "claude-envoy" }
-  ]
-}
-```
-
-```bash
-claude --channels plugin:claude-envoy@legion-plugins
-```
-
-Restart Claude Code once after its first launch on a new profile (a fresh `~/.claude` or a new
-`CLAUDE_CONFIG_DIR`), with the same flag, and read the banner it shows at startup.
-"Channels (experimental) messages from plugin:claude-envoy@legion-plugins inject directly in this
-session" means the channel is loaded. `--channels ignored` and "Channels are not currently
-available" mean it is not: the session drops every channel message while it still advertises
-Aside, so restart again. A first launch that says `--channels waiting for your organization's
-policy` keeps saying so after the policy has loaded, and its messages arrive (the channel check's
-limits, above).
-
-For a plugin outside the allowlist (a development marketplace, a bare `server:` entry) use
-`--dangerously-load-development-channels <entry>`; it bypasses the allowlist only, so
-`channelsEnabled` still applies. Do not combine it with any `--channels` entry that names the
-same plugin: Claude Code matches the `--channels` entry first, so that entry then needs the
-allowlist and the installed plugin's marketplace, and otherwise Claude Code skips the channel
-(`Channel notifications skipped: you asked for plugin:…@legion-plugins but the installed
-claude-envoy plugin is from …`).
+A person's own message from Dispatch's Agents page becomes the session's own user turn
+(`src/user-turn-router.ts`): the frame is only a candidate, and what makes a turn is Dispatch
+recording that this session accepted that attempt, whose stored body is what is injected. During
+a turn it is a row of the conversation the model reads at the turn's next request; while the
+session is idle it is the prompt of a new turn, in the person's own words. A `/` message runs as
+the command it is and its output is the reply on Dispatch; `/model` and `/effort` set what they
+name; a BTW is answered off to the side and adds nothing to the conversation. Every other frame
+arrives as the rendered card that names its sender.
 
 The plugin reads one envoy.json: `$CLAUDE_CONFIG_DIR/envoy.json` when `CLAUDE_CONFIG_DIR` is set,
 else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
@@ -515,42 +432,17 @@ consent preconfigured and must not depend on local dialogs.
 
 ## Intentionally omitted
 
-- **Targeted BTW:** no session advertises `btw`. A channel notification has no model or
-  Claude Code acknowledgement, so advertising BTW would promise an automatic correlated Dispatch
-  reply that does not exist. Add it only with a server-owned pending-delivery state and explicit
-  reply tool design.
-- **Steer outside a Legion pane:** Claude Code queues channel notifications for the model's next
-  turn, so a steer cannot be honoured any differently from an aside; a session whose deliveries
-  are channel notifications does not advertise it.
-- **Permission relay:** the server does not declare `claude/channel/permission`. It has no
-  sender-authenticated reply path or reply-ack design for remote permission decisions; declaring
-  one would let unauthenticated Envoy payloads approve tool use. Dispatch asks stay on Dispatch.
+- **A delivery to a session with no mod:** a terminal session whose mod has not connected
+  advertises no delivery mode at all, rather than taking a message nothing can show. Claude Code
+  below 2.1.310 never runs the mod, so such a session takes nothing.
+- **Permission relay:** remote permission decisions have no sender-authenticated reply path or
+  reply-ack design here; carrying them would let unauthenticated Envoy payloads approve tool use.
+  Dispatch asks stay on Dispatch.
 
 ## Manual smoke
 
-`smoke-channel.sh` is a real manual smoke, never a CI step. It starts an isolated, interactive
-Claude Code session, answers its startup dialogs unattended (folder trust, the development-channel
-warning, first-use MCP consent — in whatever order they appear), waits for the Envoy registration,
-sends an actual direct Envoy event, and asserts the model writes the unique payload before checking
-teardown. It requires a live Envoy listener, NATS, Claude authentication, a configured model,
-managed settings that enable channels and allowlist the plugin (see "Enable the channel"), and an
-installed plugin entry:
-
-```bash
-ENVOY_NATS_URL=nats://envoy-nats:4222 \
-  CLAUDE_CHANNEL_ENTRY=plugin:claude-envoy@legion-plugins \
-  bash -c 'cd packages/claude-envoy/scripts && ./smoke-channel.sh'
-```
-
-`CLAUDE_CHANNEL_FLAG` defaults to `--channels` when the entry ends in `@legion-plugins` (the
-allowlisted marketplace) and to `--dangerously-load-development-channels` for every other entry;
-set it explicitly to override. The `PASS` line prints the registered session row (id, dir,
-capabilities); a failure dumps the pane and the full `tmux pipe-pane` capture of everything Claude
-printed. The session runs on the smoke's own tmux server, on a socket in its temp directory, so its
-teardown can end only that session; the script prints the `tmux -S <socket> attach -t <session>` line
-that watches it. Use `CLAUDE_BIN` or `ENVOY_URL` to select a different Claude binary or listener. For
-source-tree diagnostics, pass a temporary bare-server config through `CLAUDE_MCP_CONFIG` and use
-`CLAUDE_CHANNEL_ENTRY=server:envoy`; the marketplace command above is the plugin packaging check.
+`smoke-clear-rebind.sh` and `smoke-session-title.sh` are real manual smokes, never CI steps. Each
+needs a live Envoy listener, NATS, Claude authentication and a configured model.
 
 To exercise an unmerged checkout the way the marketplace would install it, register a development
 marketplace with a `command` source in copy mode whose command builds a copy of the plugin with
@@ -569,8 +461,8 @@ heartbeats later. It also fails when the entry moves later than the handoff poll
 `ENVOY_HEARTBEAT_MS=60000` that checks the poll rather than a heartbeat that happened to fall soon
 after `/clear`. It needs `tmux`, `curl`, `jq`, `bun` (for the default build), an authenticated
 `claude`, and the listener and NATS; it sends no prompt to the model and removes both ids' registry
-entries when it exits. Like `smoke-channel.sh`, it runs its session on its own tmux server, on a
-socket in its temp directory, and prints the `tmux -S <socket> attach -t <session>` line that
+entries when it exits. It runs its session on its own tmux server, on a socket in its temp
+directory, and prints the `tmux -S <socket> attach -t <session>` line that
 watches it. Pointed at an older build (an installed plugin cache directory), it reproduces the
 stale subject that build leaves behind:
 

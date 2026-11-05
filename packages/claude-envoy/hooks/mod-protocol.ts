@@ -245,6 +245,10 @@ export interface ModAppendMessage {
  *  so the kind crosses as the string it is. */
 export interface ModAppendOrigin {
   readonly kind: string
+  /** `plugin`: whether the plugin submitted the prompt as the person's own words
+   *  (`$.prompt.submit`'s `asUser`). Measured on 2.1.310: the field is there on such a row and
+   *  absent on a plugin's own prompt, which Claude Code frames as the plugin speaking. */
+  readonly asUser?: boolean
   /** `plugin`: the submitting plugin's name. */
   readonly name?: string
   /** `model`: whose response it is. */

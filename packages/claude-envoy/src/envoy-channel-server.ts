@@ -7,6 +7,7 @@ import {
   agentStreamControlSubject,
   agentStreamFramesSubject,
   agentSubject,
+  DELIVERY_CAPABILITIES,
   type DeliveryCapability,
   ROLE_TOPIC_PREFIX,
   zodSchemaApi,
@@ -26,6 +27,8 @@ import {
   type RenderInboundResult,
   renderInbound,
 } from "@legion/envoy-client/delivery"
+import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config"
+import { DispatchClient } from "@legion/envoy-client/dispatch-http"
 import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
 import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
@@ -81,7 +84,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { connect } from "nats"
 import { z } from "zod"
-import type { ModConfigRow } from "../hooks/mod-protocol"
+import type { ModConfigRow, ModContentBlock, ModEvent } from "../hooks/mod-protocol"
 import { name as packageName, version as packageVersion } from "../package.json" with {
   type: "json",
 }
@@ -94,9 +97,9 @@ import {
   createChannelForwarder,
   deliveryIdentity,
 } from "./channel-forwarder"
-import { type ChannelGate, detectClaudeChannel, installedPluginVersion } from "./claude-channel"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
+import { installedPluginVersion } from "./installed-build"
 import {
   endPane,
   type LegionClaim,
@@ -120,6 +123,7 @@ import {
   legionToolDefinition,
 } from "./legion-tool"
 import { type ModLink, startModLink } from "./mod-link"
+import { type ModSession, modSession } from "./mod-session"
 import {
   type ReplayStateFile,
   type ReplayStateWriter,
@@ -145,15 +149,25 @@ import {
   touchStateFile,
 } from "./session-state"
 import { type SessionTitle, sessionTitle } from "./session-title"
+import {
+  createUserTurnRouter,
+  type UserTurnRouter,
+  type UserTurnRouterOptions,
+} from "./user-turn-router"
+import {
+  pruneStaleSessionTurns,
+  readUserTurnState,
+  type UserTurnState,
+  userTurnState,
+  userTurnStateFile,
+} from "./user-turn-state"
 
-const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
 const CHANNEL_INSTRUCTIONS =
-  "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is how soon the sender asks you to act (it does not change when or in what order deliveries arrive), from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
+  "Envoy delivers trusted, internal session and Dispatch events into this conversation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch."
 const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
-const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
 /** How often the handoff file is checked for a `/clear`. */
 const HANDOFF_POLL_MS = 250
 /** How long a handoff waits for NATS to confirm the new direct subject before retrying. */
@@ -197,17 +211,35 @@ function undefinedOnNotFound(error: unknown): undefined {
 export const MCP_SERVER_INFO = { name: "envoy", version: packageVersion } as const
 
 /**
- * The delivery modes a session whose deliveries are channel notifications advertises: Claude Code
- * queues a notification for the model's next turn, which is an aside and cannot be a steer.
+ * What a session takes, which Dispatch checks every targeted delivery against.
+ *
+ * A terminal session reaches the model only through its mod (`./mod-session`): until one
+ * connects no message reaches the model at all, so it advertises nothing and Dispatch refuses a
+ * message to it rather than reporting it delivered; with one it takes an Aside, a Send and the
+ * side turn a BTW is. A Legion pane's messages go through the bridge's inbox, which needs no mod
+ * (`INBOX_CAPABILITIES`), and it gains the BTW when the mod connects.
  */
-export const CHANNEL_CAPABILITIES = ["aside"] as const satisfies readonly DeliveryCapability[]
+export function sessionCapabilities(session: {
+  readonly pane: boolean
+  readonly mod: boolean
+}): readonly DeliveryCapability[] {
+  if (!session.pane) return session.mod ? DELIVERY_CAPABILITIES : []
+  return session.mod ? [...INBOX_CAPABILITIES, "btw"] : INBOX_CAPABILITIES
+}
 
+/**
+ * One line this server writes into the session: a rendered Envoy delivery, a replayed one, or a
+ * notice of Envoy's own. Claude Code took these as `<channel>` messages until INFRA-1026 removed
+ * that channel; what writes them now is the session's own conversation, through the mod
+ * (`./mod-session`) or, in a Legion pane, the bridge's inbox (`./legion-inbox`).
+ */
 export interface ChannelNotification {
-  readonly method: typeof CHANNEL_NOTIFICATION_METHOD
-  readonly params: {
-    readonly content: string
-    readonly meta: Readonly<Record<string, string>>
-  }
+  readonly content: string
+  /** The envelope this line is, where it is one: the id the Legion bridge answers it by. */
+  readonly eventId?: string
+  /** `content` as Claude Code's own blocks, where a line carries more than its text (a person's
+   *  pictures); the text alone is still `content`, for a reader that does not know the field. */
+  readonly blocks?: readonly ModContentBlock[]
 }
 
 export interface ChannelNotifier {
@@ -277,6 +309,18 @@ export interface ChannelSession {
    * ready again from it. The hook runs detached from the heartbeat; a rejection is logged.
    */
   onRoleRegained(hook: RoleRegainHook): void
+  /**
+   * The session's advertised delivery modes have changed (`ChannelSessionOptions.capabilities` is
+   * read again): register, so Dispatch learns what the session takes now. A terminal session
+   * advertises nothing until its mod connects, which is the change this exists for.
+   */
+  capabilitiesChanged(): void
+  /**
+   * Takes one of the mod's events, in the order the link yielded them: the router of a person's
+   * messages reads them (`./user-turn-router`), and so does the session behind it. The live view
+   * owns the link's one event stream and hands each event over.
+   */
+  observe(event: ModEvent): void
   /** Drain NATS, deregister this listener route, and release timer resources. */
   shutdown(): Promise<void>
 }
@@ -287,10 +331,19 @@ export interface ChannelSessionOptions {
   readonly notifier: ChannelNotifier
   /**
    * The delivery modes the session advertises to the listener, which Dispatch checks every
-   * targeted delivery against: the ones `notifier` honours (`CHANNEL_CAPABILITIES`, or
-   * `INBOX_CAPABILITIES` for the Legion bridge's inbox).
+   * targeted delivery against. Read at each registration rather than once, because what the
+   * session can take changes while it runs: a terminal session takes nothing until its mod
+   * connects, and a Legion pane gains `btw` when it does. The owner says so with
+   * `ChannelSession.capabilitiesChanged`.
    */
-  readonly capabilities: readonly DeliveryCapability[]
+  readonly capabilities: () => readonly DeliveryCapability[]
+  /**
+   * The router a person's messages go through (`./user-turn-router`), built for the record of
+   * the session id now bound: at startup, and again whenever a `/clear` moves the session to
+   * another id, since that record is kept per session id (`./user-turn-state`). Omitted, every
+   * frame arrives as the card it renders as.
+   */
+  readonly router?: (state: UserTurnState) => UserTurnRouter
   readonly client: Pick<
     EnvoyClient,
     | "subscribe"
@@ -396,26 +449,16 @@ class UnsupportedEnvoyToolError extends Error {
   }
 }
 
-/** Claude Code silently drops invalid keys, so remove them before writing a notification. */
-export function sanitizeChannelMetadata(
-  metadata: Readonly<Record<string, string | undefined>>,
-): Record<string, string> {
-  const sanitized: Record<string, string> = {}
-  for (const [key, value] of Object.entries(metadata)) {
-    if (value !== undefined && ChannelMetaKey.test(key)) sanitized[key] = value
-  }
-  return sanitized
-}
-
 /**
- * Answer a targeted Dispatch delivery this session could not honour, so the
- * sender sees the attempt fail instead of waiting on a reply that never comes.
+ * Answer a targeted Dispatch delivery, on the sender's behalf: the reply this session has for it,
+ * or the error that stopped it, so the sender sees the attempt fail instead of waiting on a reply
+ * that never comes.
  */
-async function postDispatchReply(
+export async function postDispatchReply(
   identity: SessionIdentity,
   configFile: SessionConfigFile,
   delivery: DispatchDelivery,
-  result: { readonly error: string },
+  result: { readonly body?: string; readonly error?: string },
 ): Promise<void> {
   const config = sessionDispatchSettings(configFile, process.env, {
     cwd: identity.directory,
@@ -425,71 +468,73 @@ async function postDispatchReply(
 }
 
 /**
- * Render inbound Envoy envelopes through the shared renderer and write them to the notifier one at
- * a time, in the order they were queued. A frame's promise resolves once the notifier resolved its
- * write: in a Legion pane, once the bridge answered that Claude Code took the message into a step;
- * in channel mode, once the MCP transport took the `notifications/claude/channel` write, the
- * strongest signal Claude Code gives there (it acknowledges no notification).
+ * Render inbound Envoy envelopes through the shared renderer and hand each one to the session,
+ * one at a time, in the order they were queued.
+ *
+ * A frame a person's own message, command, pick or BTW (`router`, `./user-turn-router`) is taken
+ * by the router and nothing is written as a card; everything else is written to the notifier as
+ * the rendered card it is, which names its sender. A frame's promise resolves once the session
+ * has it: in a Legion pane, once the bridge answered that Claude Code took the message into a
+ * step; in a terminal session, once the mod stored the row.
+ *
+ * Routing runs in the same queue as the writes, so a person's message and the cards around it
+ * reach the session in the order they arrived.
  */
 export function createChannelDelivery(input: {
   readonly identity: SessionIdentity
   readonly notifier: ChannelNotifier
   /** The session's envoy.json, which a rejected Dispatch frame's reply reads. */
   readonly configFile: SessionConfigFile
+  /** What a person's own message, command, pick or BTW becomes; omitted, every frame is a card. */
+  readonly router?: () => UserTurnRouter | undefined
 }): ChannelDeliveryPath {
   const inbox: ChannelInboxEntry[] = []
   let tail = Promise.resolve()
 
-  const queue = (notification: ChannelNotification): Promise<void> => {
-    const queued = tail.then(() => input.notifier.notification(notification))
-    tail = queued.catch((error: unknown) => {
-      process.stderr.write(`envoy-channel: channel notification failed — ${messageFor(error)}\n`)
-    })
-    return queued
-  }
-
-  /** Lists a rendered frame in the inbox and queues `content` for it. */
-  const show = (rendered: RenderInboundResult, subject: string, content: string): Promise<void> => {
-    const envelope = rendered.envelope
-    if (envelope !== undefined) {
-      inbox.unshift({
-        event_id: envelope.event_id ?? "unknown",
-        at: inboundTimestamp(envelope.issued_at),
-        from: envelope.source_session ?? envelope.source,
-        summary: envelope.payload_summary ?? "unknown",
-      })
-      if (inbox.length > CHANNEL_INBOX_LIMIT) inbox.pop()
-    }
-    return queue({
-      method: CHANNEL_NOTIFICATION_METHOD,
-      params: {
-        content,
-        // Claude Code stamps its own `source="<channel name>"` attribute on the
-        // <channel> tag, so the Envoy producer travels under `producer`.
-        meta: sanitizeChannelMetadata({
-          producer: envelope?.source ?? "unknown",
-          // A forward on the agent subject (a role message, or an ad-hoc topic's copy the
-          // publish route confirms with this session) carries the topic it was published to.
-          topic: envelope?.topic || subject,
-          event_id: envelope?.event_id,
-          dedupe_key: envelope?.dedupe_key,
-          urgency: envelope?.urgency,
-          from_session: envelope?.source_session,
-          expects_reply: envelope?.expects_reply,
-          in_reply_to: envelope?.in_reply_to,
-        }),
+  /** Runs `work` behind everything queued before it, keeping the frames in order. */
+  const queued = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = tail.then(work)
+    tail = run.then(
+      () => undefined,
+      (error: unknown) => {
+        process.stderr.write(`envoy-channel: a delivery failed — ${messageFor(error)}\n`)
       },
+    )
+    return run
+  }
+
+  const write = (notification: ChannelNotification): Promise<void> =>
+    queued(() => input.notifier.notification(notification))
+
+  /** Lists a rendered frame in the inbox. */
+  const list = (rendered: RenderInboundResult): void => {
+    const envelope = rendered.envelope
+    if (envelope === undefined) return
+    inbox.unshift({
+      event_id: envelope.event_id ?? "unknown",
+      at: inboundTimestamp(envelope.issued_at),
+      from: envelope.source_session ?? envelope.source,
+      summary: envelope.payload_summary ?? "unknown",
+    })
+    if (inbox.length > CHANNEL_INBOX_LIMIT) inbox.pop()
+  }
+
+  /** Lists a rendered frame and writes `content` into the session as the card it is. */
+  const show = (rendered: RenderInboundResult, content: string): Promise<void> => {
+    list(rendered)
+    return write({
+      content,
+      ...(rendered.envelope?.event_id === undefined ? {} : { eventId: rendered.envelope.event_id }),
     })
   }
 
-  // A BTW never starts a turn here. The listener sends one only to a session that advertises
-  // `btw`, which this one never does, and neither delivery path can show a message without
-  // starting a turn (the Legion bridge's inbox starts one when Claude Code is idle). So a BTW that
-  // arrives replayed or late anyway is passed over, named on stderr.
+  // A replayed or late BTW is never answered: the question was asked while this session was not
+  // taking messages, and Dispatch has long since recorded the attempt. Only a live one runs
+  // (`./user-turn-router`).
   const passOverBtw = (rendered: RenderInboundResult, how: "replayed" | "late"): boolean => {
     if (rendered.delivery?.mode !== "btw") return false
     process.stderr.write(
-      `envoy-channel: passing over ${how} BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn\n`,
+      `envoy-channel: passing over ${how} BTW ${rendered.envelope?.event_id ?? "unknown"}: it was asked while this session was not taking messages\n`,
     )
     return true
   }
@@ -525,20 +570,34 @@ export function createChannelDelivery(input: {
         return tail.then(() => false)
       }
       if (late === true && passOverBtw(rendered, "late")) return tail.then(() => false)
-      return show(rendered, subject, rendered.content).then(() => true)
+      return queued(async () => {
+        // A message Dispatch accepted as this session's own turn is never also a card. A failure
+        // after that acceptance throws, so the frame is not answered and the listener sends it
+        // again, rather than a person's message vanishing into a delivery nobody kept.
+        const routed = await input.router?.()?.route(rendered)
+        if (routed === true) {
+          list(rendered)
+          return true
+        }
+        await input.notifier.notification({
+          content: rendered.content,
+          ...(rendered.envelope?.event_id === undefined
+            ? {}
+            : { eventId: rendered.envelope.event_id }),
+        })
+        list(rendered)
+        return true
+      })
     },
     async replay(frame) {
       const rendered = renderInbound(frame.data, input.identity.id, frame.subject)
       if (replaySuppressed(rendered)) return "suppressed"
       if (passOverBtw(rendered, "replayed")) return "suppressed"
-      await show(rendered, frame.subject, replayedText(rendered.content, frame.time))
+      await show(rendered, replayedText(rendered.content, frame.time))
       return "shown"
     },
     notice(content) {
-      return queue({
-        method: CHANNEL_NOTIFICATION_METHOD,
-        params: { content, meta: { producer: "envoy" } },
-      })
+      return write({ content })
     },
     inbox() {
       return [...inbox]
@@ -581,10 +640,19 @@ export async function enqueueChannelMessage(
 export async function startChannelSession(options: ChannelSessionOptions): Promise<ChannelSession> {
   const { identity } = options
   let directSubject = agentSubject(identity.id)
+  /**
+   * What this session does with a person's direct messages, for the id now bound: the record is
+   * kept per session id (`./user-turn-state`), so a `/clear` builds another one. Undefined until
+   * the record is loaded, and for a session the owner gave no router.
+   */
+  let router: UserTurnRouter | undefined
+  /** The record the router above reads and writes, kept so a shutdown can wait for its writes. */
+  let turns: UserTurnState | undefined
   const delivery = createChannelDelivery({
     identity,
     notifier: options.notifier,
     configFile: options.configFile,
+    router: () => router,
   })
   const userTopics = new Set<string>()
   let heldRole: string | undefined
@@ -724,6 +792,30 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     openRelay(sessionId, stateWriter, snapshot.consumer)
     replayBound = sessionId
     return rememberedTopics(snapshot.state)
+  }
+
+  /**
+   * Builds the router of a person's messages for the id now bound, on the record that id's file
+   * holds: at startup, and again after a `/clear`, since no attempt of the id left behind may be
+   * spent under the new one. A record that cannot be read leaves the session with none, and
+   * every frame then arrives as the card it renders as: taking a person's message as their own
+   * turn needs the record of which attempts this session has already spent, and without it an
+   * attempt could be accepted twice.
+   */
+  const restoreTurns = async (): Promise<void> => {
+    router = undefined
+    turns = undefined
+    if (options.router === undefined) return
+    const file = userTurnStateFile(options.stateDirectory, identity.id)
+    const restored = await readUserTurnState(file).catch((error: unknown) => {
+      process.stderr.write(
+        `envoy-channel: could not read this session's record of the messages it took (${messageFor(error)}); its messages arrive as cards\n`,
+      )
+      return undefined
+    })
+    if (restored === undefined) return
+    turns = userTurnState(file, restored)
+    router = options.router(turns)
   }
 
   /** A sweep runs on the engine's own chain, never in the registry's. */
@@ -1044,7 +1136,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       topics,
       port: 0,
       title,
-      capabilities: options.capabilities,
+      capabilities: options.capabilities(),
       driving: false,
       selfSubscribed: true,
       clientInstanceID: options.clientInstanceID,
@@ -1243,6 +1335,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // nothing, and the old id's sweep in flight writes nothing more. Loading it closes the old
     // id's relay (its unanswered frames `nak`) and subscribes the new id's relay subject.
     await restoreReplay()
+    // The new id takes a record of its own: an attempt the old id handled is the old id's, and
+    // the rows of a conversation a `/clear` ended name nothing in the new one.
+    await restoreTurns()
     roleTransferFrom ??= previous
     // The new relay subject reaches the server before the registration that asks for it. Not
     // fatal: a relayed frame nobody answers pauses the relay, which sends again after its backoff
@@ -1395,6 +1490,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // (ten minutes after it stopped) still follows them, and its sweep still reads them. Its relay
   // comes with it too, restored and subscribed before the first registration asks for it.
   const remembered = await restoreReplay()
+  // What this session has already done with the messages Dispatch sent it, before any frame can
+  // arrive: an attempt a process before this one spent must not be spent again.
+  await restoreTurns()
   // The NATS subscription precedes registration so the listener never routes
   // a direct delivery to an advertised but deaf channel process.
   forwarder.follow(directSubject)
@@ -1451,6 +1549,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   for (const prune of [
     () => pruneStaleSessionHandoffs(options.stateDirectory),
     () => pruneStaleSessionTitles(options.stateDirectory),
+    () => pruneStaleSessionTurns(options.stateDirectory),
     // The role sweep is told whose session this is: see `pruneStaleSessionRoles`.
     () => pruneStaleSessionRoles(options.stateDirectory, identity.id),
   ]) {
@@ -1532,6 +1631,18 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     onRoleRegained(hook) {
       regained = hook
     },
+    capabilitiesChanged() {
+      if (shuttingDown) return
+      // The same path a reconnect takes: one more registration, behind whatever is queued.
+      serialized(register).catch((error: unknown) => {
+        process.stderr.write(
+          `envoy-channel: could not advertise this session's delivery modes (${messageFor(error)}); the next heartbeat retries\n`,
+        )
+      })
+    },
+    observe(event) {
+      router?.observe(event)
+    },
     async rememberRole(role) {
       heldRole = role
       await writePersistedRole(roleStateFile(options.stateDirectory, identity.id), {
@@ -1557,8 +1668,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
           `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
         )
       })
-      // What was written meanwhile (a resume point, a ledger record) lands before the process goes.
+      // What was written meanwhile (a resume point, a ledger record, a message taken) lands
+      // before the process goes.
       await stateWriter?.idle()
+      await turns?.idle()
       // The handoff directory stays: Claude Code restarts this server inside the
       // same `claude` process (plugin reload, changed config), and the hook does
       // not rewrite the file until the next SessionStart. Startup pruning removes
@@ -1696,11 +1809,23 @@ export interface AgentStreamOptions {
   readonly now?: () => number
   /** Where a failure that must not stop the session is written; the server's stderr by default. */
   readonly warn?: (text: string) => void
+  /**
+   * Takes every event this stream reads, before the stream records it. The link's events have one
+   * consumer and this is it, so whatever else needs them - the router of a person's messages, and
+   * the turn tracking behind it - is handed them here.
+   */
+  readonly observe?: (event: ModEvent) => void
+  /** The Dispatch message a row of the conversation is, which tags that row so the Agents page
+   *  shows a person's own message once rather than beside its stored copy. */
+  readonly tagFor?: (row: string) => string | undefined
 }
 
 export interface AgentStreamRunner {
   /** Stop answering the control subject. The mod's events end with the link itself. */
   readonly stop: () => void
+  /** Read the session's model and levels again and publish them: a pick has just changed one,
+   *  and the header must show it before the reply naming it reaches the page. */
+  readonly refresh: () => void
 }
 
 /**
@@ -1729,7 +1854,11 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
     now,
     publish: (subject, payload) => connection.publish(subject, encoder.encode(payload)),
   })
-  const stream = createClaudeAgentStream({ now, publisher })
+  const stream = createClaudeAgentStream({
+    now,
+    publisher,
+    ...(options.tagFor === undefined ? {} : { tagFor: options.tagFor }),
+  })
   /** The id both subjects name now; it moves with the mod's own id after a `/clear`. */
   let session = options.sessionID
   let subscription: ChannelTopicSubscription | undefined
@@ -1878,6 +2007,9 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
         refreshCommands()
       }
       if (event.kind === "model") model = event.model
+      // Before the stream records it: an event can be the row a person's message turned out to
+      // be, and that row is tagged with the message it is.
+      options.observe?.(event)
       stream.record(framesSubject(), event)
       // A step is the one event that can change the thinking level, and the model event is the
       // mod's own report of a model change: neither is worth a read of the mod to notice.
@@ -1891,6 +2023,9 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
   subscribe()
 
   return {
+    refresh(): void {
+      refreshSettings()
+    },
     stop(): void {
       if (stopped) return
       stopped = true
@@ -1986,35 +2121,18 @@ export async function runEnvoyChannelServer(): Promise<void> {
     directory,
   )
   const stateDirectory = pluginStateDirectory()
-  // The Legion bridge's inbox takes the events itself; otherwise they go to Claude Code's channel.
+  // In a Legion pane a person's message goes to the bridge's inbox, which makes it a user turn;
+  // in a terminal session everything this server writes goes through the mod.
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
   // The plugin's own bundle, which Claude Code runs from its plugin cache when installed.
   const bundlePath = process.argv[1] ?? ""
   // One connection to the bridge carries every line this server writes into the session: each
   // Envoy delivery, and the reminders and notices the phase endpoint writes.
   const inbox = inboxSocket === undefined ? undefined : createInboxNotifier(inboxSocket)
-  // Claude Code drops a notification from a channel it did not load without telling this server,
-  // so such a session advertises no delivery mode and Dispatch refuses a message to it rather than
-  // reporting it delivered. The bridge's inbox needs no channel.
-  const channel: ChannelGate =
-    inboxSocket === undefined
-      ? detectClaudeChannel({
-          claudePid: process.ppid,
-          bundlePath,
-          environment: process.env,
-        })
-      : { loaded: true }
-  if (!channel.loaded) {
-    process.stderr.write(
-      `envoy-channel: Claude Code did not load this server as a channel: ${channel.why}; the session advertises no delivery mode, so Dispatch refuses messages to it instead of losing them\n`,
-    )
-  }
 
   const server = new Server(MCP_SERVER_INFO, {
-    capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    instructions: channel.loaded
-      ? CHANNEL_INSTRUCTIONS
-      : `${CHANNEL_INSTRUCTIONS} Claude Code did not load this channel for this session (${channel.why}), so no Envoy event or Dispatch message reaches you as a <channel> message, and the session advertises no delivery mode; envoy_inbox still lists what arrived.`,
+    capabilities: { tools: {} },
+    instructions: CHANNEL_INSTRUCTIONS,
   })
   const client = createEnvoyClient({
     baseUrl: envoy.url,
@@ -2046,14 +2164,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
           claim: () => claim?.capability(),
           booted: claimBooted.promise,
           readState: (signal) => daemon.state({ signal }),
-          inbox:
-            inbox === undefined
-              ? undefined
-              : (text) =>
-                  inbox.notification({
-                    method: CHANNEL_NOTIFICATION_METHOD,
-                    params: { content: text, meta: {} },
-                  }),
+          inbox: inbox === undefined ? undefined : (text) => inbox.notification({ content: text }),
           publish: client.publish,
           env: process.env,
           log: phaseLog,
@@ -2094,29 +2205,6 @@ export async function runEnvoyChannelServer(): Promise<void> {
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))
   })
-  // The endpoint is told every line this server writes for a delivery: the `UserPromptSubmit`
-  // that carries one back is that delivery's turn, not a fresh assignment, and this server, which
-  // writes them all, is the only place that knows.
-  const notifier: ChannelNotifier =
-    inbox === undefined
-      ? server
-      : phaseHook === undefined
-        ? inbox
-        : {
-            notification: async (notification) => {
-              phaseHook.deliveryWritten(notification.params.content)
-              await inbox.notification(notification)
-            },
-          }
-  // A session whose deliveries are channel notifications Claude Code did not load shows the model
-  // nothing, so it advertises no delivery mode at all.
-  const capabilities =
-    inboxSocket !== undefined ? INBOX_CAPABILITIES : channel.loaded ? CHANNEL_CAPABILITIES : []
-  const booting = new AbortController()
-
-  const stopped = Promise.withResolvers<void>()
-  let stopping = false
-  let session: ChannelSession | undefined
   // INFRA-1026: the link to this session's Claude Code mod, bound below once the MCP transport is
   // up. It is this process's own socket, closed with the server. `linked` resolves with it for
   // the live view, which also needs the NATS connection this function opens further down.
@@ -2124,6 +2212,48 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const linked = Promise.withResolvers<ModLink>()
   // The Agents page's live view of this session, once both the link and the connection are up.
   let agentStream: AgentStreamRunner | undefined
+  // The session itself, as this server drives it (`./mod-session`). The link binds after this
+  // server starts and can fail to bind at all, so every call goes through the holder above: a
+  // session with no mod answers none of them, which is what "no mod" means here.
+  const claude: ModSession = modSession({
+    link: {
+      request: (call, args, requestOptions) => {
+        const link = modLink
+        if (link === undefined) {
+          return Promise.reject(new Error("this session has no link to Claude Code"))
+        }
+        return link.request(call, args, requestOptions)
+      },
+      connected: () => modLink?.connected() === true,
+    },
+    warn: (text) => process.stderr.write(`envoy-channel: ${text}\n`),
+  })
+  // Every line this server writes into the session: the bridge's inbox in a Legion pane, and the
+  // mod's own `session.append` in a terminal session, where the model reads the row at its next
+  // request. The endpoint is told every line written for a delivery: the `UserPromptSubmit` that
+  // carries one back is that delivery's turn, not a fresh assignment, and this server, which
+  // writes them all, is the only place that knows.
+  const writer: ChannelNotifier = inbox ?? {
+    notification: async ({ content, blocks }) => {
+      await claude.show(blocks ?? [{ type: "text", text: content }])
+    },
+  }
+  const notifier: ChannelNotifier =
+    phaseHook === undefined
+      ? writer
+      : {
+          notification: async (notification) => {
+            phaseHook.deliveryWritten(notification.content)
+            await writer.notification(notification)
+          },
+        }
+  const capabilities = (): readonly DeliveryCapability[] =>
+    sessionCapabilities({ pane: inboxSocket !== undefined, mod: modLink?.connected() === true })
+  const booting = new AbortController()
+
+  const stopped = Promise.withResolvers<void>()
+  let stopping = false
+  let session: ChannelSession | undefined
   const stop = (): void => {
     if (stopping) return
     stopping = true
@@ -2169,6 +2299,37 @@ export async function runEnvoyChannelServer(): Promise<void> {
     },
   )
 
+  /** The record of the session id now bound, which the live view reads a row's tag from. */
+  let turns: UserTurnState | undefined
+  /**
+   * The router of a person's messages, built again for each session id the session binds
+   * (`ChannelSessionOptions.router`). Everything it needs that does not move with the id - the
+   * Claude Code session, Dispatch, where a pane's message goes - is this process's.
+   */
+  const router = (state: UserTurnState): UserTurnRouter => {
+    turns = state
+    const options: UserTurnRouterOptions = {
+      dispatch: (ms) => {
+        const active = activeDispatchSettings(
+          sessionDispatchSettings(configFile, process.env, { cwd: directory }).dispatch,
+        )
+        return active === null
+          ? undefined
+          : new DispatchClient(active.url, active.token, fetch, AbortSignal.timeout(ms))
+      },
+      refreshSettings: () => agentStream?.refresh(),
+      reply: (delivery, result) => postDispatchReply(identity, configFile, delivery, result),
+      session: claude,
+      sessionId: () => identity.id,
+      state,
+      warn: (text) => process.stderr.write(`envoy-channel: ${text}\n`),
+      // A pane's person message is a line of the bridge's inbox, which makes it a user turn;
+      // the phase endpoint is told of it as it is told of every line this server writes.
+      ...(inboxSocket === undefined ? {} : { inbox: (input) => notifier.notification(input) }),
+    }
+    return createUserTurnRouter(options)
+  }
+
   let connection: ChannelForwarderConnection | undefined
   try {
     const { inbound } = envoy
@@ -2194,6 +2355,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
         connection,
         notifier,
         capabilities,
+        router,
         client,
         heartbeatMs: envoy.heartbeatMs,
         configFile,
@@ -2209,6 +2371,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
       // It needs the bus as well as the link, so it starts here rather than beside the bind; a
       // session whose link never binds never starts one, and runs as it did before.
       const bus = connection
+      const live = session
       void linked.promise.then((link) => {
         if (stopping) return
         agentStream = startAgentStream({
@@ -2217,7 +2380,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
           followsSessionId: configuredValue(overrideSessionId) === undefined,
           link,
           sessionID: identity.id,
+          // The link's events have one consumer, and the router needs them too.
+          observe: (event) => live.observe(event),
+          tagFor: (row) => turns?.messageOf(row),
         })
+        // The session takes messages once the mod is there, and says so: a terminal session
+        // advertises nothing until then, and a pane gains the side turn a BTW is.
+        link.onSessionId(() => live.capabilitiesChanged())
       })
     }
     runtime = { identity, client, session }
