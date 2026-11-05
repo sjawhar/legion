@@ -1058,7 +1058,9 @@ export async function classifyCorpus(corpus: string, work: string): Promise<Clas
       appendFileSync(verdictsPath, read.map((one) => `${JSON.stringify(one)}\n`).join(""));
       for (const one of read) verdicts.set(one.id, one.class);
       rmSync(shard.dir, { recursive: true, force: true });
-      console.error(`readers: shard ${index + 1} of ${shards.length}, ${read.length} texts classed`);
+      console.error(
+        `readers: shard ${index + 1} of ${shards.length}, ${read.length} texts classed`
+      );
     }
   }
   return places.map((place) => ({
