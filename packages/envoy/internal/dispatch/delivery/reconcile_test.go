@@ -656,3 +656,79 @@ func TestReconcileWorkflowStopsAtTheFirstRateLimitAndCapsLastError(t *testing.T)
 		t.Fatalf("len(settings.LastError) = %d, want capped at maxLastErrorLength (%d)", len(*settings.LastError), maxLastErrorLength)
 	}
 }
+
+// The head pass keeps a `before_merge` result's currency honest, and it reads no delivery
+// setting: the stored heads, the issues and the App are all it needs. A Dispatch whose delivery
+// is not configured still has pull requests, checks and results, so a pass there must still move
+// a head a push moved — otherwise every result recorded at the head before it reads `older` for
+// good. Driven through runOnce, the entry point that reads the settings; reconcilePullRequestHeads
+// never sees them, so calling it would prove nothing. The population steps, which are the
+// settings' own, must stay idle in the same pass.
+func TestReconcileRefreshesAPullRequestHeadWithNoDeliverySettings(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	key := seedHeadIssue(t, ctx, pool, 5)
+	// deliveryTestPool clears every delivery table, but the events are this database's own and
+	// outlive the run, so an earlier run's issue.deployed must not read as this pass's.
+	if _, err := pool.Exec(ctx, `delete from events where issue_key = $1`, key); err != nil {
+		t.Fatalf("clear the events of %s: %v", key, err)
+	}
+
+	const (
+		headWas = "1515151515151515151515151515151515151515"
+		headNow = "2525252525252525252525252525252525252525"
+	)
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/pulls/55", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, map[string]any{
+			"number": 55, "title": key + " the work", "body": "", "html_url": "https://github.com/acme/widgets/pull/55",
+			"state": "open", "merged": false, "updated_at": "2026-02-06T00:00:00Z",
+			"head": map[string]any{
+				"ref": "legion/" + key, "sha": headNow,
+				"repo": map[string]any{"full_name": "acme/widgets"},
+			},
+			"base": map[string]any{"ref": "main"},
+		})
+	})
+	fake.handle("GET /repos/acme/widgets/pulls/55/commits", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{})
+	})
+
+	stale := time.Now().Add(-2 * PullRequestHeadStaleAfter)
+	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+		Repo: "acme/widgets", Number: 55, HeadSHA: headWas, HeadRef: "legion/" + key, BaseRef: "main",
+		State: "open", IssueKey: &key, AttributionSource: "title_body", AttributionComplete: true,
+		Title: key + " the work", URL: "https://github.com/acme/widgets/pull/55", CheckedAt: &stale,
+	}); err != nil {
+		t.Fatalf("store the stale head: %v", err)
+	}
+
+	NewReconcile(pool, fake.newTestClient(), events.NewBroker()).runOnce(ctx)
+
+	head := readHead(t, ctx, pool, "acme/widgets", 55)
+	if head.HeadSHA != headNow {
+		t.Fatalf("the head after a pass with no delivery settings = %q, want %q: the head pass reads no setting",
+			head.HeadSHA, headNow)
+	}
+	atOld, err := HeadAttributedTo(ctx, pool, key, headWas)
+	if err != nil || atOld {
+		t.Fatalf("HeadAttributedTo(%s, the head it left) = %v, %v; want false: a result there is older",
+			key, atOld, err)
+	}
+	atNew, err := HeadAttributedTo(ctx, pool, key, headNow)
+	if err != nil || !atNew {
+		t.Fatalf("HeadAttributedTo(%s, the head it moved to) = %v, %v; want true", key, atNew, err)
+	}
+
+	// The population is the settings' own: with none, the pass moved none of it.
+	var stored int
+	if err := pool.QueryRow(ctx, `select count(*) from delivery_pull_requests`).Scan(&stored); err != nil {
+		t.Fatalf("count the stored pull requests: %v", err)
+	}
+	if stored != 0 {
+		t.Fatalf("the pass stored %d delivery pull requests, want none: it has no population to search", stored)
+	}
+	if deployed := deployedEvents(t, ctx, pool, key); len(deployed) != 0 {
+		t.Fatalf("the pass wrote %d issue.deployed events for %s, want none", len(deployed), key)
+	}
+}

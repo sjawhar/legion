@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -36,6 +37,34 @@ func seedHeadIssue(t *testing.T, ctx context.Context, pool *store.Pool, number i
 	if _, err := pool.Exec(ctx, `
 		insert into issues (key, project_key, number, title, status, created_by, rank)
 		values ($1, 'HEAD', $2, $1, 'todo', '{"kind":"system","id":"test"}'::jsonb, $1)
+		on conflict do nothing
+	`, key, number); err != nil {
+		t.Fatalf("seed issue %s: %v", key, err)
+	}
+	return key
+}
+
+// seedGadgetsIssue writes project GDGT, maps acme/gadgets to it as its default and writes
+// GDGT-<number>: the second repository a two-key title needs, since repo_projects' primary key
+// is the repository and acme/widgets already belongs to another project.
+func seedGadgetsIssue(t *testing.T, ctx context.Context, pool *store.Pool, number int) string {
+	t.Helper()
+	key := fmt.Sprintf("GDGT-%d", number)
+	if _, err := pool.Exec(ctx, `
+		insert into projects (key, name) values ('GDGT', 'Gadgets') on conflict (key) do nothing
+	`); err != nil {
+		t.Fatalf("seed the project: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into repo_projects (repo, project, created_by, is_default)
+		values ('acme/gadgets', 'GDGT', '{"kind":"system","id":"test"}'::jsonb, true)
+		on conflict (repo) do nothing
+	`); err != nil {
+		t.Fatalf("map the repository to the project: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, status, created_by, rank)
+		values ($1, 'GDGT', $2, $1, 'todo', '{"kind":"system","id":"test"}'::jsonb, $1)
 		on conflict do nothing
 	`, key, number); err != nil {
 		t.Fatalf("seed issue %s: %v", key, err)
@@ -233,6 +262,78 @@ func TestAPullRequestNamingAnIssueOfAnotherRepositoryAttributesNobody(t *testing
 	attributed, err := HeadAttributedTo(ctx, pool, "HEAD-3", "7777777777777777777777777777777777777777")
 	if err != nil || attributed {
 		t.Fatalf("HeadAttributedTo(HEAD-3) = %v, %v; want false", attributed, err)
+	}
+}
+
+// A title that names another repository's issue before this repository's own must not cost the
+// pull request its attribution. The attribution takes the first ranked candidate and nothing
+// after it (attributionSelect's `limit 1`), so a title naming two issues loses the one that
+// belongs here, and an attributed head is exactly what makes a `before_merge` result at that
+// head read current (HeadAttributedTo, the question api/results_currency.go asks). Both writers
+// of the row answer for it: the `pull_request` envelope and the read-through a recorded result
+// makes.
+func TestAPullRequestTitledAfterAnotherRepositorysIssueKeepsItsOwn(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	foreign := seedHeadIssue(t, ctx, pool, 4)
+	own := seedGadgetsIssue(t, ctx, pool, 4)
+
+	const sha = "8888888888888888888888888888888888888888"
+	title := foreign + ": the other repository's issue, and " + own + " (this one)"
+
+	fake := newFakeGitHub(t)
+	// While the defect stands the four cheap sources name nobody, so both paths page the commit
+	// messages, the fifth. How often they do is no part of this test: what the row holds is.
+	fake.handle("GET /repos/acme/gadgets/pulls/{number}/commits", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{})
+	})
+	fake.handle("GET /repos/acme/gadgets/commits/{sha}/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{map[string]any{
+			"number": 22, "title": title, "body": "", "html_url": "https://github.com/acme/gadgets/pull/22",
+			"state": "open", "merged": false, "updated_at": "2026-02-05T00:00:00Z",
+			"head": map[string]any{
+				"ref": "legion/" + own, "sha": sha,
+				"repo": map[string]any{"full_name": "acme/gadgets"},
+			},
+			"base": map[string]any{"ref": "main"},
+		}})
+	})
+	client := fake.newTestClient()
+
+	// The envelope path: #21, reported by a `pull_request` event.
+	intake := newIntake(nil, pool, deliveryTestLeases(t, pool), client, events.NewBroker(), nil)
+	if _, err := intake.recordPullRequestHead(ctx, map[string]string{
+		"kind": "pr", "action": "opened", "merged": "false", "repo": "acme/gadgets", "number": "21",
+		"title": title, "body": "", "head_ref": "legion/" + own, "head_repo": "acme/gadgets",
+		"head_sha": sha, "base_ref": "main", "url": "https://github.com/acme/gadgets/pull/21",
+		"updated_at": "2026-02-05T00:00:00Z",
+	}, 21); err != nil {
+		t.Fatalf("record the head the envelope reports: %v", err)
+	}
+	fromEnvelope := readHead(t, ctx, pool, "acme/gadgets", 21)
+	if fromEnvelope.IssueKey == nil || *fromEnvelope.IssueKey != own || fromEnvelope.AttributionSource != "title_body" {
+		t.Fatalf("#21 = %+v, want %s from its title: %s resolves to acme/widgets, %s to this repository",
+			fromEnvelope, own, foreign, own)
+	}
+
+	// The read-through path: #22, the same title, learned from the commit alone.
+	if _, err := ReadThroughCommitPulls(ctx, pool, client, "acme/gadgets", sha, time.Now()); err != nil {
+		t.Fatalf("read through the commit's pull requests: %v", err)
+	}
+	fromReadThrough := readHead(t, ctx, pool, "acme/gadgets", 22)
+	if fromReadThrough.IssueKey == nil || *fromReadThrough.IssueKey != own || fromReadThrough.AttributionSource != "title_body" {
+		t.Fatalf("#22 = %+v, want %s from its title", fromReadThrough, own)
+	}
+
+	// What the results route asks of this package.
+	attributed, err := HeadAttributedTo(ctx, pool, own, sha)
+	if err != nil || !attributed {
+		t.Fatalf("HeadAttributedTo(%s) = %v, %v; want true", own, attributed, err)
+	}
+	elsewhere, err := HeadAttributedTo(ctx, pool, foreign, sha)
+	if err != nil || elsewhere {
+		t.Fatalf("HeadAttributedTo(%s) = %v, %v; want false: it is another repository's issue",
+			foreign, elsewhere, err)
 	}
 }
 

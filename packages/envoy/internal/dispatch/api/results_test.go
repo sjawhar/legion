@@ -523,6 +523,62 @@ func TestRecordingAResultReadsThroughToAPullRequestDispatchHasNoEventFor(t *test
 	}
 }
 
+// The same case at the surface a reviewer reads: a pull request of acme/gadgets whose title
+// names acme/widgets' issue before its own. The attribution takes the first ranked candidate
+// and nothing after it (delivery's attributionSelect), so the head the read-through learns is
+// attributed to nobody and the result at it reads older, although the title names the check's
+// own issue too. Judged through the route, which is where a reviewer's approval condition is
+// actually read.
+func TestAResultAtTheHeadOfAPullRequestTitledAfterAnotherRepositorysIssueReadsCurrent(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate fixture key: %v", err)
+	}
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":77,"app_slug":"dispatch-test","permissions":{"contents":"read","pull_requests":"read"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"token":"ghs_fake_77","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	// The repository is readable, so a result at no attributed head is older rather than unknown.
+	mux.HandleFunc("GET /repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"full_name":%q,"default_branch":"main"}`, r.PathValue("owner")+"/"+r.PathValue("repo"))
+	})
+	var title string
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{sha}/pulls", func(w http.ResponseWriter, r *http.Request) {
+		repo := r.PathValue("owner") + "/" + r.PathValue("repo")
+		fmt.Fprintf(w, `[{"number":33,"title":%q,"body":"","html_url":"https://github.com/%s/pull/33",
+			"state":"open","merged":false,"updated_at":"2026-01-02T00:00:00Z",
+			"head":{"ref":"legion/x","sha":%q,"repo":{"full_name":%q}},"base":{"ref":"main"}}]`,
+			title, repo, headCommit, repo)
+	})
+	// While the defect stands the title, body, links and branch name nobody the read-through may
+	// keep, so it pages the commit messages, the fifth source.
+	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls/{number}/commits", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[]`)
+	})
+	upstream := httptest.NewServer(mux)
+	t.Cleanup(upstream.Close)
+	handler, _, _ := newTestServer(t, testServerOptions{
+		app:           &auth.AppConfig{ClientID: "Iv1.test", PEM: pemText},
+		githubAPIBase: upstream.URL,
+	})
+
+	elsewhere := issueInRepository(t, handler, "RESW", "acme/widgets", "Another repository's issue")
+	own := issueInRepository(t, handler, "RESG", "acme/gadgets", "This repository's issue")
+	title = elsewhere.Key + ": the other repository's issue, and " + own.Key + " (this one)"
+	uploadDocument(t, handler, "/api/v1/issues/"+own.Key, "verification.md", twoChecks)
+
+	recorded := decodeBody[recordedResult](t, recordResult(t, handler, own.Key, resultBody("k1", "pass", headCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, own.Key), "k1", recorded.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("a result at the head of %s's own pull request = %q, want current: its title names %s first, but %s is the issue of acme/gadgets",
+			own.Key, got, elsewhere.Key, own.Key)
+	}
+}
+
 // The answer to a record carries the moment the row was written, not the zero time: created_at
 // is a declared field of the contract, and a reader takes it for when the run happened.
 func TestRecordedResultAnswersTheTimeItWasStored(t *testing.T) {
