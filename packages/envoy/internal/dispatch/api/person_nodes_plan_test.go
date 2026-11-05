@@ -45,7 +45,7 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 		name, sql string
 		args      []any
 	}{
-		{"person", personNodesQuery, []any{"alice", 50, 0, time.Now().Add(-30*24*time.Hour), []string{"s-owned"}}},
+		{"person", personNodesQuery, []any{"alice", 50, 0, time.Now().Add(-30 * 24 * time.Hour), []string{"s-owned"}}},
 		{"person-aliases", personAliasesQuery, []any{"alice"}},
 		{"existing-point-read", `select * from graph_edges where from_kind = 'comment' and from_id = $1`, []any{"c4ca4238-a0b9-2382-0dcc-509a6f75849b"}},
 	} {
