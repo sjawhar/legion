@@ -2678,7 +2678,29 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The budgets below, this one and the three on steps, are measured: GitHub's jobs API over
+    # the 397 of the newest 400 ci.yaml runs that could be read, created between
+    # 2026-11-05T04:52:45Z and 2026-11-05T21:06:27Z (268 pull_request, 120 merge_group, 12
+    # push), over the 335 jobs of this name that concluded success.
+    #
+    #   step                                                          median   95th    max
+    #   Install Playwright Chromium                                     20 s   34 s  339 s
+    #   Browser-test dispatch dashboard against two server processes   102 s  188 s  202 s
+    #   Browser-test a sign-in across two server processes              11 s   12 s   13 s
+    #   every other step summed                                         68 s   94 s  135 s
+    #   the whole job                                                  207 s  305 s  516 s
+    #
+    # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
+    # next whole minute, with a floor of two minutes; an install step's budget comes from its own
+    # arithmetic instead. So 202 s x 1.15 = 232 s -> 4 min for the dashboard step, 13 s x 1.15 =
+    # 15 s -> the two-minute floor for the sign-in step, and 4 min for the install step, for the
+    # reason its own comment gives. The job budget is the sum of its step budgets plus the
+    # measured maximum of every step without one, rounded up: 4 + 4 + 2 min plus 135 s = 13 min.
+    #
+    # Budgets on the steps and not on the job alone, because a step the runner cancels at its own
+    # budget is a failed step rather than a cancelled job: the `if: failure()` upload below still
+    # runs, where a job budget cancelling the job leaves it unrun.
+    timeout-minutes: 13
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -2726,22 +2748,61 @@ jobs:
         # current and start in seconds.
         run: go build -o ./dispatch-e2e ./cmd/dispatch
         working-directory: packages/envoy
+      # Chromium, its headless shell and ffmpeg, which the install step below downloads under the
+      # Playwright version bun.lock pins, which is what decides their revisions. This job cached
+      # nothing before and downloaded all three on every run. The key is its own,
+      # playwright-chromium-, which the dispatch job's playwright-<runner.os>- restore prefix does
+      # not match, so the two jobs never read each other's entry. No pull-request or merge-queue
+      # run writes an Actions cache entry, so this restores nothing until the save below has run
+      # on main once.
+      - id: playwright-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-chromium-{0}-', runner.os) || '' }}
       - name: Install Playwright Chromium
-        # The runner image's chrome-stable apt source intermittently fails `apt-get update`; the
-        # dispatch job's install step says why dropping it is safe.
-        run: |
-          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium
+        # No apt in this step at all. Playwright's `chromium` entry in its ubuntu24.04-x64 table
+        # adds no package this GitHub ubuntu-24.04 image lacks, so `--with-deps` installed only
+        # Playwright's `tools` list: the CJK, Thai and Cyrillic font packages and xvfb. Measured
+        # at the merge base, that was `0 upgraded, 9 newly installed`, `Need to get 21.1 MB of
+        # archives`, plus 10.5 MB of package indexes in `apt-get update`. All of that is gone,
+        # and with it this step's removal of the runner image's chrome-stable apt source, which
+        # it carried only because that source's index intermittently failed `apt-get update`.
+        #
+        # The fonts are not needed: this job's two specs, signin.multiprocess.e2e.ts and
+        # two-builds.multiprocess.e2e.ts, run headless Chromium and compare no screenshot
+        # (neither holds `toHaveScreenshot` or `toMatchSnapshot`), and fonts-liberation and
+        # fonts-noto-color-emoji are on the image already. A row that later needs CJK or Thai
+        # glyphs would fail visibly.
+        #
+        # The 4-minute budget: this step downloads browsers only, Playwright's own download
+        # retries five times across mirrors inside it, and healthy today is a 20 s median and a
+        # 34 s 95th percentile, with a 339 s maximum that included the apt fetch this step no
+        # longer makes.
+        timeout-minutes: 4
+        run: bunx playwright install chromium
         working-directory: packages/dispatch
+      # Beside the install, not at the end of the job: it keeps what the install just downloaded,
+      # so a job that installs Chromium and then fails a row does not throw the download away.
+      # Only on a push to main whose steps have succeeded so far: no other run of this repository
+      # writes an Actions cache entry.
+      - if: github.event_name == 'push' && success() && steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
       - name: Browser-test dispatch dashboard against two server processes
         # Builds the dashboard twice (A's and B's, with distinct build ids) and runs the
         # multiprocess specs through the round-robin proxy.
+        timeout-minutes: 4
         run: bun run e2e:multiprocess
         working-directory: packages/dispatch
       - name: Browser-test a sign-in across two server processes
         # Both processes sign people in through the dev OIDC issuer (DISPATCH_E2E_SIGNIN=oidc,
         # e2e/harness-signin.ts), and its one spec starts a sign-in on A and completes it on B. The
         # step before built the dashboard; B serves A's build, which this spec does not tell apart.
+        timeout-minutes: 2
         run: DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_SIGNIN=oidc bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
