@@ -16,6 +16,8 @@ import { useEventFeed } from "./api/event-feed";
 import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ShellSkeleton } from "./components/ShellSkeleton";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { DeferredAskCard } from "./features/doc/DeferredAskCard";
 import { openDocumentEarly } from "./features/doc/open-document-early";
@@ -48,7 +50,6 @@ import {
   RefPreviewHost,
   SearchPalette,
 } from "./features/shell/deferred-shell";
-import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
 import {
   appKeymap,
@@ -93,7 +94,6 @@ import {
   primaryButtonHoverBg,
   railAccentHoverText,
   railAccentText,
-  railActiveBg,
   railBg,
   railBorder,
   railDangerText,
@@ -307,35 +307,6 @@ function ConnectionErrorPage({ onRetry }: { onRetry: () => void }): ReactNode {
         </button>
       </div>
     </ShellMessagePage>
-  );
-}
-
-function ShellSkeleton(): ReactNode {
-  return (
-    <div aria-busy="true" className={`xl:flex ${canvasText}`}>
-      <header
-        className={`flex items-center px-3 xl:hidden ${railBorder} ${railBg} ${railText} border-b`}
-      >
-        <span className="text-lg font-semibold">Dispatch</span>
-      </header>
-      <aside
-        className={`hidden p-5 xl:block xl:min-h-dvh xl:w-80 xl:border-r ${railBorder} ${railBg} ${railText}`}
-      >
-        <span className="text-lg font-semibold">Dispatch</span>
-        <div aria-label="Loading navigation" className="mt-6 space-y-2" role="status">
-          {[0, 1, 2, 3].map((row) => (
-            <div className={`h-4 w-full animate-pulse rounded ${railActiveBg}`} key={row} />
-          ))}
-        </div>
-      </aside>
-      <main className="min-w-0 flex-1 p-6">
-        <div aria-label="Loading Dispatch" className="space-y-3" role="status">
-          {[0, 1, 2].map((row) => (
-            <div className={`h-4 w-full animate-pulse rounded ${skeletonBg}`} key={row} />
-          ))}
-        </div>
-      </main>
-    </div>
   );
 }
 

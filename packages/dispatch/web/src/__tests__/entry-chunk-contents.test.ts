@@ -7,8 +7,8 @@ import {
   addressChunks,
   chunksHolding,
   DEFERRED_PARTS,
-  type DocumentAddress,
   faultsInBuild,
+  type PreloadAddress,
 } from "../entry-chunk-contents";
 
 const dirs: string[] = [];
@@ -77,14 +77,18 @@ function chunkOf(part: string): string {
 }
 
 /** The chunks a build has to preload at `address`: one per part that address's reader needs. */
-function neededAt(address: DocumentAddress): string[] {
+function neededAt(address: PreloadAddress): string[] {
   return DEFERRED_PARTS.filter((part) => part.neededBy.includes(address)).map((part) =>
     chunkOf(part.name)
   );
 }
 
-/** Both lists of a build that preloads everything it owes, which is what this check passes. */
-const preloadsEverything = { document: neededAt("document"), issue: neededAt("issue") };
+/** Every list of a build that preloads everything it owes, which is what this check passes. */
+const preloadsEverything = {
+  app: neededAt("app"),
+  document: neededAt("document"),
+  issue: neededAt("issue"),
+};
 
 test("a build with every part in a lazy chunk, and the document address's chunks preloaded, passes", () => {
   const dir = build({
@@ -137,16 +141,53 @@ test("a marker no chunk holds is a drifted string, not a passing build", () => {
 });
 
 test("a part a document address needs, in a chunk that address does not preload, is a second wait", () => {
+  const dropped = chunkOf("the project document page");
   const dir = build({
-    // The project document page is what a project document's address draws, and only the issue
-    // address's list is written.
-    addresses: { document: [], issue: neededAt("issue") },
+    // The project document page is what a project document's address draws, and its own chunk
+    // is the one its list leaves out.
+    addresses: {
+      ...preloadsEverything,
+      document: neededAt("document").filter((file) => file !== dropped),
+    },
     chunks: { "assets/entry.js": 'export const build="abc";', ...partChunks() },
   });
   const faults = faultsInBuild(dir);
   expect(faults.map((fault) => fault.part?.name)).toEqual(["the project document page"]);
   expect(faults[0].fault).toContain("which the document address needs");
   expect(faults[0].fault).toContain("index.html preloads none of them there");
+});
+
+test("a part the part it is named apart from statically imports is one task, not two", () => {
+  const apart = DEFERRED_PARTS.find((part) => (part.apartFrom ?? []).length > 0);
+  if (apart === undefined) throw new Error("no part is named apart from another");
+  const [other] = apart.apartFrom ?? [];
+  const chunks = partChunks();
+  // The other part's chunk reaches this one by a static import, as a page whose route imported
+  // it statically would: one module graph, one evaluation, one main-thread task.
+  chunks[chunkOf(other)] =
+    `import"./${chunkOf(apart.name).replace("assets/", "")}";${chunks[chunkOf(other)]}`;
+  const dir = build({
+    addresses: preloadsEverything,
+    chunks: { "assets/entry.js": 'export const build="abc";', ...chunks },
+  });
+  const faults = faultsInBuild(dir);
+  expect(faults.map((fault) => fault.part?.name)).toEqual([apart.name]);
+  expect(faults[0].fault).toContain("in one main-thread task");
+});
+
+test("a part the other part only imports dynamically is a task of its own", () => {
+  const apart = DEFERRED_PARTS.find((part) => (part.apartFrom ?? []).length > 0);
+  if (apart === undefined) throw new Error("no part is named apart from another");
+  const [other] = apart.apartFrom ?? [];
+  const chunks = partChunks();
+  chunks[chunkOf(other)] =
+    `export const load=()=>import("./${chunkOf(apart.name).replace("assets/", "")}");` +
+    chunks[chunkOf(other)];
+  const dir = build({
+    addresses: preloadsEverything,
+    chunks: { "assets/entry.js": 'export const build="abc";', ...chunks },
+  });
+  expect(faultsInBuild(dir)).toEqual([]);
 });
 
 test("an address preloading a chunk the build does not hold is a fault of its own", () => {

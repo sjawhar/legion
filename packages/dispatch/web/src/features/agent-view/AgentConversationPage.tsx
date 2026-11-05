@@ -9,6 +9,7 @@ import { Link, useParams } from "react-router-dom";
 import { agentMessageRequest, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import type { Message } from "../../api/types";
+import { ErrorBoundary } from "../../components/ErrorBoundary";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -25,7 +26,6 @@ import { MODE_LABELS } from "../conversation/delivery";
 import { useAgents } from "../conversation/useAgents";
 import { useSessionSends } from "../conversation/useSessionSends";
 import { AgentName, useAgentText } from "../refs/AgentName";
-import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { SendStoppedError } from "../writes/keyed-write";
 import { useKeyedWrite } from "../writes/useKeyedWrite";

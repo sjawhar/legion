@@ -33,6 +33,11 @@ declare global {
     __largeDocumentEditorAt?: number;
     /** The longest `longtask` entry's duration, in milliseconds, since the page began. */
     __largeDocumentLongestTask?: number;
+    /** Every `longtask` entry since the page began, by when it started and how long it ran.
+     *  The longest number above says how bad the worst freeze is; this says how many there
+     *  were and where each fell, which is what a report of the tasks still over the target
+     *  reads (dispatch://INFRA-341, R11). */
+    __largeDocumentLongTasks?: { at: number; ms: number }[];
     /** `performance.now()` when the reader first had any block of the document on the screen -
      *  the server's draw, or the page's own - which is read against no target. */
     __largeDocumentPaintedAt?: number;
@@ -42,6 +47,12 @@ declare global {
 /** What the renderer's CPU is throttled by: the rate the set-up names
  *  (`Emulation.setCPUThrottlingRate`). */
 export const cpuThrottlingRate = 4;
+
+/** The longest main-thread task either document may cost a reader ("Targets for large
+ *  documents", dispatch://INFRA-341/spec): a task over half a second is a freeze a person
+ *  sees. The measuring rows read it as their target, and the line this module prints names
+ *  every task past it. */
+export const longTaskTargetMs = 500;
 
 /** How long the scroll waits between steps; each step moves one viewport height. */
 export const scrollStepMs = 100;
@@ -99,6 +110,10 @@ export interface DocumentMeasurement {
   readonly firstPaintedMs: number | undefined;
   /** The longest main-thread task, in milliseconds, over the whole measurement. */
   readonly longestTaskMs: number;
+  /** Every main-thread task over `longTaskMs`, in the order they ran: when each started,
+   *  counted from the start of navigation, and how long it held the thread. What the longest
+   *  number alone cannot say is how many freezes a reader met and where. */
+  readonly longTasks: readonly { readonly at: number; readonly ms: number }[];
   /** How many viewport heights the scroll moved before it reached the end of the document or its
    *  cap, which says the page scrolled at all. */
   readonly scrollSteps: number;
@@ -151,12 +166,14 @@ export async function watchTheDocument(page: Page): Promise<void> {
       pollMs: number;
     }) => {
       window.__largeDocumentLongestTask = 0;
+      window.__largeDocumentLongTasks = [];
       new PerformanceObserver((entries) => {
         for (const entry of entries.getEntries()) {
           window.__largeDocumentLongestTask = Math.max(
             window.__largeDocumentLongestTask ?? 0,
             entry.duration
           );
+          window.__largeDocumentLongTasks?.push({ at: entry.startTime, ms: entry.duration });
         }
       }).observe({ buffered: true, type: "longtask" });
       const inTheViewport = (selector: string): boolean => {
@@ -285,9 +302,10 @@ export async function measureDocument(
   );
 
   const longestTaskMs = await page.evaluate(() => window.__largeDocumentLongestTask);
+  const longTasks = await page.evaluate(() => window.__largeDocumentLongTasks);
   const windowClosedMs = await page.evaluate(() => performance.now());
   const firstPaintedMs = await page.evaluate(() => window.__largeDocumentPaintedAt);
-  if (firstBlockMs === undefined || longestTaskMs === undefined) {
+  if (firstBlockMs === undefined || longestTaskMs === undefined || longTasks === undefined) {
     throw new Error("the page lost its recorders: an init script never ran");
   }
   return {
@@ -295,6 +313,7 @@ export async function measureDocument(
     firstBlockMs,
     firstPaintedMs,
     longestTaskMs,
+    longTasks,
     scrollSteps,
     windowClosedMs,
   };
@@ -305,12 +324,18 @@ export async function measureDocument(
  * keeps with the result, and on stdout, which `--reporter line` prints as the row runs.
  */
 export function printMeasurement(what: string, measured: DocumentMeasurement): void {
+  const over = measured.longTasks.filter(({ ms }) => ms > longTaskTargetMs);
   const line =
     `${what}: editor's first block ${Math.round(measured.firstBlockMs)} ms, ` +
     `editor open ${measured.editorOpenedMs === undefined ? "never" : `${Math.round(measured.editorOpenedMs)} ms`}, ` +
     `longest main-thread task ${Math.round(measured.longestTaskMs)} ms, ` +
     `first block painted ${measured.firstPaintedMs === undefined ? "never" : `${Math.round(measured.firstPaintedMs)} ms`}, ` +
-    `over ${measured.scrollSteps} scroll steps in a ${Math.round(measured.windowClosedMs)} ms window`;
+    `${measured.longTasks.length} main-thread task(s) over 50 ms and ${over.length} over ` +
+    `${longTaskTargetMs} ms` +
+    (over.length === 0
+      ? ""
+      : ` (${over.map(({ at, ms }) => `${Math.round(ms)} ms at ${Math.round(at)} ms`).join("; ")})`) +
+    `, over ${measured.scrollSteps} scroll steps in a ${Math.round(measured.windowClosedMs)} ms window`;
   test.info().annotations.push({ description: line, type: "R11 measurement" });
   console.log(`R11 measurement · ${line}`);
 }

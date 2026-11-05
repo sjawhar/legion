@@ -54,7 +54,12 @@ import {
   sectionHeading,
   smallDocument,
 } from "./large-documents";
-import { measureDocument, printMeasurement, throttleTheCpu } from "./large-documents-page";
+import {
+  longTaskTargetMs,
+  measureDocument,
+  printMeasurement,
+  throttleTheCpu,
+} from "./large-documents-page";
 import { openCommentThread, settledScrollTop } from "./mermaid-helpers";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
@@ -89,10 +94,6 @@ const agent = {
   actor: { id: "e2e-large-documents-agent", kind: "session" as const },
   as: "agent" as const,
 };
-
-/** The longest main-thread task either document may cost a reader ("Targets for large
- *  documents", dispatch://INFRA-341/spec): a task over half a second is a freeze a person sees. */
-const longestTaskTargetMs = 500;
 
 /**
  * Resolves once the server owes nothing this seed left it: no document settlement queued or
@@ -228,7 +229,7 @@ for (const row of rows) {
       expect(measured.longestTaskMs).toBeGreaterThan(0);
 
       expect(measured.firstBlockMs).toBeLessThanOrEqual(row.firstBlockTargetMs);
-      expect(measured.longestTaskMs).toBeLessThanOrEqual(longestTaskTargetMs);
+      expect(measured.longestTaskMs).toBeLessThanOrEqual(longTaskTargetMs);
     } finally {
       await alice.close();
     }

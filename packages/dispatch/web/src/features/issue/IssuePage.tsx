@@ -1,4 +1,5 @@
 import {
+  type ComponentType,
   lazy,
   type ReactNode,
   Suspense,
@@ -22,13 +23,9 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { ActivityTab } from "../activity/ActivityTab";
-import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
-import { ConversationTab } from "../conversation/ConversationTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { outsideAskCard } from "../inbox/ask-card";
-import { PlanTab } from "../plan/PlanTab";
 import {
   buildReferencePath,
   documentRoute,
@@ -39,9 +36,6 @@ import {
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { VerificationTab } from "../verification/VerificationTab";
-import { ChildrenTab } from "./ChildrenTab";
-import { DecisionsPanel } from "./DecisionsPanel";
 import { IssueHeaderSkeleton, IssueTabsSkeleton } from "./issue-page-skeleton";
 import { stateForIssue } from "./pins";
 import { SpecToolbar } from "./SpecToolbar";
@@ -50,22 +44,36 @@ import { useIssuePriority } from "./useIssuePriority";
 import { type ItemLanding, type ItemRoute, isItemRoute, useItemLanding } from "./useItemLanding";
 
 /**
- * The parts of the issue page that are not the document, each in a chunk of its own behind a
+ * The parts of the issue page that are not its frame, each in a chunk of its own behind a
  * `Suspense` boundary of its own.
  *
- * The page used to mount in one commit - the header, the tab strip and the document surface
- * together - and a commit cannot be interrupted, so that one commit held the main thread for
- * about 0.7 s on a phone at 4x CPU throttling; rendering the page inside a transition makes its
- * render interruptible and leaves that commit whole (dispatch://INFRA-341, R11). Each boundary
- * here makes one commit of its own instead: the document's part commits first, with the two
- * boxes the reader already has in front of them (`issue-page-skeleton.tsx`), and the header, the
- * tabs and each side list land after it, one commit each.
+ * There are two reasons, and they are different reasons.
  *
- * The chunks are downloaded beside the page's own, from the address
- * (`DOCUMENT_ADDRESS_MODULES` in `web/vite.config.ts`), so the reader waits for no request here
- * - only for the microtask each boundary resolves in. What appears, and when, is unchanged: the
- * header and tabs replace the skeleton the reader was already reading, and a side list draws
- * under the document it belongs to, where nothing above it moves as it lands.
+ * The first is the commit. The page used to mount in one commit - the header, the tab strip
+ * and the document surface together - and a commit cannot be interrupted, so that one commit
+ * held the main thread for about 0.7 s on a phone at 4x CPU throttling; rendering the page
+ * inside a transition makes its render interruptible and leaves that commit whole
+ * (dispatch://INFRA-341, R11). Each boundary here makes one commit of its own instead: the
+ * document's part commits first, with the two boxes the reader already has in front of them
+ * (`issue-page-skeleton.tsx`), and the header, the tabs and each side list land after it, one
+ * commit each.
+ *
+ * The second is the evaluation. A chunk and every chunk it statically imports evaluate in one
+ * main-thread task, so while this module imported the tab panels and the document surface
+ * statically, opening a document evaluated all of them in one task of 505 to 579 ms: the
+ * Conversation with the ask card and its composer, the Activity list with the margin's cards,
+ * the role documents with the contracts package's zod schemas - none of which a document
+ * address draws. Each `import()` below evaluates in a task of its own, and a panel the
+ * address does not open is a task that never runs at all; `web/src/entry-chunk-contents.ts`
+ * holds the build to that.
+ *
+ * The chunks a document address needs are downloaded beside the page's own, from the address
+ * (`DOCUMENT_ADDRESS_MODULES` in `web/vite.config.ts`), so the reader waits for no request
+ * here - only for the microtask each boundary resolves in. What appears, and when, is
+ * unchanged: the header and tabs replace the skeleton the reader was already reading, and a
+ * side list draws under the document it belongs to, where nothing above it moves as it lands.
+ * A tab's panel is mounted only once that tab has been opened (`activatedTabs`), so its chunk
+ * is asked for then, as the reader asks for the tab.
  */
 const IssueHeader = lazy(() =>
   import("./IssueHeader").then((module) => ({ default: module.IssueHeader }))
@@ -75,6 +83,35 @@ const IssueTabs = lazy(() =>
 );
 const SpecRequirements = lazy(() =>
   import("./SpecRequirements").then((module) => ({ default: module.SpecRequirements }))
+);
+/** The document surface, which every tab that shows a document draws and which both addresses
+ *  that open a document preload. */
+const ArtifactDocument = lazy(() =>
+  import("../artifacts/ArtifactDocument").then((module) => ({
+    default: module.ArtifactDocument,
+  }))
+);
+const ActivityTab = lazy(() =>
+  import("../activity/ActivityTab").then((module) => ({ default: module.ActivityTab }))
+);
+const ChildrenTab = lazy(() =>
+  import("./ChildrenTab").then((module) => ({ default: module.ChildrenTab }))
+);
+const ConversationTab = lazy(() =>
+  import("../conversation/ConversationTab").then((module) => ({
+    default: module.ConversationTab,
+  }))
+);
+const DecisionsPanel = lazy(() =>
+  import("./DecisionsPanel").then((module) => ({ default: module.DecisionsPanel }))
+);
+const PlanTab = lazy(() =>
+  import("../plan/PlanTab").then((module) => ({ default: module.PlanTab }))
+);
+const VerificationTab = lazy(() =>
+  import("../verification/VerificationTab").then((module) => ({
+    default: module.VerificationTab,
+  }))
 );
 
 export function IssuePage(): ReactNode {
@@ -202,11 +239,11 @@ function RoleDocumentPanel({
   onVersionChange,
   tab,
 }: {
-  Tab: (props: {
+  Tab: ComponentType<{
     artifact: Artifact | undefined;
     children?: ReactNode;
     issueKey: string;
-  }) => ReactNode;
+  }>;
   activated: boolean;
   active: boolean;
   artifact: Artifact | undefined;
@@ -224,18 +261,20 @@ function RoleDocumentPanel({
       role="tabpanel"
     >
       {activated ? (
-        <Tab artifact={artifact} issueKey={issueKey}>
-          {artifact === undefined ? null : (
-            <ArtifactDocument
-              artifact={artifact}
-              isClosed={isClosed}
-              owner={{ key: issueKey, kind: "issue" }}
-              onVersionChange={(version) => onVersionChange(artifact, version)}
-              showDiff={false}
-              version={undefined}
-            />
-          )}
-        </Tab>
+        <Suspense fallback={null}>
+          <Tab artifact={artifact} issueKey={issueKey}>
+            {artifact === undefined ? null : (
+              <ArtifactDocument
+                artifact={artifact}
+                isClosed={isClosed}
+                owner={{ key: issueKey, kind: "issue" }}
+                onVersionChange={(version) => onVersionChange(artifact, version)}
+                showDiff={false}
+                version={undefined}
+              />
+            )}
+          </Tab>
+        </Suspense>
       ) : null}
     </div>
   );
@@ -500,21 +539,23 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       >
         {activatedTabs.spec && !(artifactRoute !== undefined && !isPrimaryArtifactRoute) ? (
           <div className="space-y-4">
-            <ArtifactDocument
-              artifact={primaryArtifact}
-              askId={askId}
-              commentId={commentId}
-              highlightTerm={highlightTerm}
-              isClosed={isClosed}
-              onToolbarChange={handleSpecToolbarChange}
-              owner={{ key: issueKey, kind: "issue" }}
-              onVersionChange={(version) => {
-                setSpecShowDiff(false);
-                selectDocumentVersion(primaryArtifact, version);
-              }}
-              showDiff={specShowDiff}
-              version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
-            />
+            <Suspense fallback={null}>
+              <ArtifactDocument
+                artifact={primaryArtifact}
+                askId={askId}
+                commentId={commentId}
+                highlightTerm={highlightTerm}
+                isClosed={isClosed}
+                onToolbarChange={handleSpecToolbarChange}
+                owner={{ key: issueKey, kind: "issue" }}
+                onVersionChange={(version) => {
+                  setSpecShowDiff(false);
+                  selectDocumentVersion(primaryArtifact, version);
+                }}
+                showDiff={specShowDiff}
+                version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+              />
+            </Suspense>
             <Suspense fallback={null}>
               <SpecRequirements issueKey={issueKey} />
             </Suspense>
@@ -549,15 +590,17 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         role="tabpanel"
       >
         {activatedTabs.conversation ? (
-          <ConversationTab
-            issueArtifacts={issueArtifacts}
-            focusItemId={conversationFocusItemId}
-            isClosed={isClosed}
-            issueKey={issueKey}
-            onFirstPlacement={forgetConversationScroll}
-            state={state.data}
-            visible={activeTab === "conversation"}
-          />
+          <Suspense fallback={null}>
+            <ConversationTab
+              issueArtifacts={issueArtifacts}
+              focusItemId={conversationFocusItemId}
+              isClosed={isClosed}
+              issueKey={issueKey}
+              onFirstPlacement={forgetConversationScroll}
+              state={state.data}
+              visible={activeTab === "conversation"}
+            />
+          </Suspense>
         ) : null}
       </div>
       <div
@@ -567,7 +610,11 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         id="issue-children-panel"
         role="tabpanel"
       >
-        {activatedTabs.children ? <ChildrenTab issue={issue.data} /> : null}
+        {activatedTabs.children ? (
+          <Suspense fallback={null}>
+            <ChildrenTab issue={issue.data} />
+          </Suspense>
+        ) : null}
       </div>
       <ArtifactRoutePanel
         active={activeTab === "artifacts"}
@@ -582,21 +629,23 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         toolbar={artifactToolbar}
       >
         {selectedArtifact?.kind === "doc" ? (
-          <ArtifactDocument
-            artifact={selectedArtifact}
-            askId={askId}
-            commentId={commentId}
-            highlightTerm={highlightTerm}
-            isClosed={isClosed}
-            onToolbarChange={handleArtifactToolbarChange}
-            owner={{ key: issueKey, kind: "issue" }}
-            onVersionChange={(version) => {
-              setArtifactShowDiff(false);
-              selectDocumentVersion(selectedArtifact, version);
-            }}
-            showDiff={artifactShowDiff}
-            version={artifactRoute?.version}
-          />
+          <Suspense fallback={null}>
+            <ArtifactDocument
+              artifact={selectedArtifact}
+              askId={askId}
+              commentId={commentId}
+              highlightTerm={highlightTerm}
+              isClosed={isClosed}
+              onToolbarChange={handleArtifactToolbarChange}
+              owner={{ key: issueKey, kind: "issue" }}
+              onVersionChange={(version) => {
+                setArtifactShowDiff(false);
+                selectDocumentVersion(selectedArtifact, version);
+              }}
+              showDiff={artifactShowDiff}
+              version={artifactRoute?.version}
+            />
+          </Suspense>
         ) : null}
       </ArtifactRoutePanel>
       <div
@@ -606,7 +655,11 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         id="issue-activity-panel"
         role="tabpanel"
       >
-        {activatedTabs.activity ? <ActivityTab issueKey={issueKey} state={state.data} /> : null}
+        {activatedTabs.activity ? (
+          <Suspense fallback={null}>
+            <ActivityTab issueKey={issueKey} state={state.data} />
+          </Suspense>
+        ) : null}
       </div>
       <div
         aria-hidden={activeTab !== "decisions"}
@@ -616,11 +669,13 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         role="tabpanel"
       >
         {activatedTabs.decisions ? (
-          <DecisionsPanel
-            artifacts={issue.data?.artifacts ?? []}
-            isClosed={isClosed}
-            issueKey={issueKey}
-          />
+          <Suspense fallback={null}>
+            <DecisionsPanel
+              artifacts={issue.data?.artifacts ?? []}
+              isClosed={isClosed}
+              issueKey={issueKey}
+            />
+          </Suspense>
         ) : null}
       </div>
     </section>

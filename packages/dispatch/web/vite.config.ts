@@ -94,27 +94,51 @@ function thirdPartyNoticesFile(): { page: Plugin; worker: () => Plugin } {
 const notices = thirdPartyNoticesFile();
 
 /**
- * The modules a document address needs before the page can draw it, each named by the module
- * whose chunk holds it: the page that opens a document, and the parts of it that stand under
- * their own `Suspense`. Each is reached by an `import()` of the entry chunk, so without the
- * preload below its bytes are asked for only once the entry has downloaded, compiled and
- * evaluated - a second serial wait on a phone, which is the wait splitting the entry was meant
- * to remove (dispatch://INFRA-341, R11).
+ * What the entry chunk asks for with `import()` as it evaluates, and the chunk of each must
+ * therefore be downloaded beside the entry's own rather than behind it: the app itself, the
+ * reads the page opens with, and - at an address that opens a document - the page that opens
+ * it and the parts of that page which stand under their own `Suspense`. Each is named by the
+ * module whose chunk holds it. Without the preload below, their bytes are asked for only once
+ * the entry has downloaded, compiled and evaluated - a second serial wait on a phone, which is
+ * the wait splitting the entry was meant to remove (dispatch://INFRA-341, R11).
+ *
+ * `EVERY_ADDRESS` is in all three lists rather than only in `app`, because the inline script
+ * in `index.html` preloads one list and only one: an address that opens a document reads the
+ * list of its own shape, and a list that left the app out would leave the app a request
+ * behind.
  *
  * Only what the page needs to draw belongs here. The decision card every Markdown body draws
  * (`features/doc/DeferredAskCard.tsx`) does not: no `ask` shell exists until a body has been
  * parsed and painted, and its chunk statically imports the Inbox's ask card, half a megabyte
- * the reader would download and compile in front of the first screen.
+ * the reader would download and compile in front of the first screen. Neither does a tab panel
+ * no document address opens - the Conversation, the Activity list, the role documents - each
+ * of which is now a chunk of its own (`features/issue/IssuePage.tsx`) and is asked for when
+ * the reader asks for its tab.
  */
+const EVERY_ADDRESS = [
+  // The app: the shell, its routes and everything they draw with (`main.tsx`).
+  "src/app.tsx",
+  // The sign-in check and the address's own document, read before the app evaluates
+  // (`features/shell/boot.ts`).
+  "src/features/shell/boot.ts",
+] as const;
+
 const DOCUMENT_ADDRESS_MODULES = {
-  document: ["src/features/document/DocumentPage.tsx"],
+  app: EVERY_ADDRESS,
+  document: [
+    ...EVERY_ADDRESS,
+    "src/features/document/DocumentPage.tsx",
+    "src/features/artifacts/ArtifactDocument.tsx",
+  ],
   issue: [
+    ...EVERY_ADDRESS,
     "src/features/issue/IssuePage.tsx",
-    // The page's own parts, each a commit of its own now (`IssuePage.tsx`).
+    // The page's own parts, each a commit and a task of its own now (`IssuePage.tsx`).
     "src/features/issue/IssueHeader.tsx",
     "src/features/issue/IssueTabs.tsx",
     "src/features/issue/SpecRequirements.tsx",
     "src/features/artifacts/ArtifactDetails.tsx",
+    "src/features/artifacts/ArtifactDocument.tsx",
   ],
 } as const;
 
