@@ -9,11 +9,24 @@ import {
   referencesQuery,
   resolvedPrefixItems,
 } from "./reference-target";
-import { readTextReferences, type TextReading, type TextSource } from "./text-references";
+import {
+  readTextCandidates,
+  readTextReferences,
+  type TextReading,
+  type TextReferenceFacts,
+  type TextSource,
+} from "./text-references";
 
-/** The empty answers, shared so a body that needs nothing keeps one identity across renders and
- *  the link pass it is a dependency of never re-runs for a fresh empty object. */
-const NO_KEYS: readonly string[] = [];
+/** The one reading of what a caller handed over: a body's markdown, read as one text, or the
+ *  distinct candidates a document editor reported, each read as the whole mention it is. */
+function readText(text: string | readonly string[], facts: TextReferenceFacts): TextReading {
+  return typeof text === "string"
+    ? readTextReferences(text, facts)
+    : readTextCandidates(text, facts);
+}
+
+/** The empty question map, shared so a body that needs none keeps one identity across renders
+ *  and the link pass it is a dependency of never re-runs for a fresh empty object. */
 const NO_MAP: Readonly<Record<string, string>> = {};
 
 /** Everything a rendered body needs to link what it cites, and the reading it was found in:
@@ -39,23 +52,29 @@ export interface TextReferences extends ReferenceLinking {
  * written (`referencesQuery`), and the item is then read under the whole id the answer carries,
  * so nothing is ever cached under a prefix.
  *
+ * `text` is a body's markdown, or the distinct candidates a document editor's own reader found,
+ * which are read one by one rather than joined into a text (`readTextCandidates`).
+ *
  * A body that writes no key, no `#id` and no prefix - almost every body - starts no query at all
  * and is read once.
  */
-export function useTextReferences(markdown: string, source?: TextSource): TextReferences {
+export function useTextReferences(
+  text: string | readonly string[],
+  source?: TextSource
+): TextReferences {
   const origin = window.location.origin;
   // The first reading: it resolves every `dispatch://` reference and dashboard address on its
   // own, and says which keys, question and prefixes the rest waits on.
-  const written = useMemo(() => readTextReferences(markdown, { origin }), [markdown, origin]);
+  const written = useMemo(() => readText(text, { origin }), [origin, text]);
   const { keys, prefixes, questions } = written.needs;
 
-  const summaries = useQueries({
+  // `combine` is held to its last answer by structural sharing, so these keep one identity
+  // while the set of issues that exist is unchanged, however often the queries report.
+  const issues = useQueries({
     queries: keys.map((key) => ({ ...issueSummaryQuery(key), retry: false })),
+    combine: (summaries): readonly string[] =>
+      keys.filter((_, index) => summaries[index]?.isSuccess === true),
   });
-  // Joined rather than kept as an array, so the facts below hold one identity while the set of
-  // issues that exist is unchanged, however often the queries report.
-  const exist = keys.filter((_, index) => summaries[index]?.isSuccess === true).join(" ");
-  const issues = useMemo(() => (exist === "" ? NO_KEYS : exist.split(" ")), [exist]);
 
   // Only a text that writes a `#id` asks for the map (`needs.questions`), and only one that
   // names the record its text is can: the route answers for a source, not for a page.
@@ -68,16 +87,16 @@ export function useTextReferences(markdown: string, source?: TextSource): TextRe
     [questionRead.data]
   );
 
-  const resolutions = useQueries({
+  const items = useQueries({
     queries: prefixes.map((reference) => ({ ...referencesQuery(reference), retry: false })),
+    combine: (resolutions): Readonly<Record<string, string>> => {
+      const resolved: Record<string, string> = {};
+      for (const answer of resolutions) {
+        Object.assign(resolved, resolvedPrefixItems(answer.data));
+      }
+      return resolved;
+    },
   });
-  const resolved = JSON.stringify(
-    Object.assign({}, ...resolutions.map((answer) => resolvedPrefixItems(answer.data)))
-  );
-  const items = useMemo(
-    () => (resolved === "{}" ? NO_MAP : (JSON.parse(resolved) as Record<string, string>)),
-    [resolved]
-  );
 
   const facts = useMemo(
     () => ({ issues, items, origin, questions: askedQuestions }),
@@ -85,10 +104,8 @@ export function useTextReferences(markdown: string, source?: TextSource): TextRe
   );
   const reading: TextReading = useMemo(
     () =>
-      keys.length === 0 && prefixes.length === 0 && !questions
-        ? written
-        : readTextReferences(markdown, facts),
-    [facts, keys.length, markdown, prefixes.length, questions, written]
+      keys.length === 0 && prefixes.length === 0 && !questions ? written : readText(text, facts),
+    [facts, keys.length, prefixes.length, questions, text, written]
   );
   return useMemo(() => {
     const cited = new Set<string>();

@@ -1,4 +1,4 @@
-import { decodeBlockId } from "@legion/contracts";
+import { decodeBlockId, isIdPrefix } from "@legion/contracts";
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -47,7 +47,7 @@ import {
   buildProjectPath,
   documentRoute,
 } from "../refs/routes";
-import { isIdPrefix, textSourceOf } from "../refs/text-references";
+import { textSourceOf, uniquePrefixMatch } from "../refs/text-references";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
@@ -79,25 +79,16 @@ import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
 
-/** The one block of `root` whose id starts with `prefix`, compared without case, or undefined
- *  where none does or two or more do - an id written short names a record only where it names
- *  exactly one, as the server resolves one (`text.IsIDPrefix`). The editor's own rendered
- *  blocks are the answer, the same `[data-block-id]` elements `focusBlock` looks a whole id up
- *  in, so a block link written short costs no read. */
+/** The one block of `root` whose id starts with `prefix`, or undefined where none does or two
+ *  or more do (`uniquePrefixMatch`). The editor's own rendered blocks are the answer, the same
+ *  `[data-block-id]` elements `focusBlock` looks a whole id up in, so a block link written short
+ *  costs no read; a block the editor draws twice carries its id twice, which is that one block. */
 function wholeBlockId(root: HTMLElement, prefix: string): string | undefined {
-  const lower = prefix.toLowerCase();
-  let found: string | undefined;
+  const ids: string[] = [];
   for (const element of root.querySelectorAll<HTMLElement>("[data-block-id]")) {
-    const id = element.getAttribute("data-block-id") ?? "";
-    if (!id.toLowerCase().startsWith(lower) || id === found) {
-      continue;
-    }
-    if (found !== undefined) {
-      return undefined;
-    }
-    found = id;
+    ids.push(element.getAttribute("data-block-id") ?? "");
   }
-  return found;
+  return uniquePrefixMatch(ids, prefix);
 }
 
 const CONTROL_CHARACTERS = /\p{Cc}/gu;

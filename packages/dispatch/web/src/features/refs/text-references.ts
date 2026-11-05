@@ -1,3 +1,5 @@
+import { isIdPrefix } from "@legion/contracts";
+
 import { itemOfBlock } from "./block-reference";
 import { referenceSpans } from "./reference-spans";
 import {
@@ -40,6 +42,12 @@ export interface TextReference {
    *  reference as written, as the server stores it. */
   readonly reference: string | undefined;
   readonly route: DispatchReferenceRoute | undefined;
+  /** How many characters from `start` the reference names, where that is fewer than all of the
+   *  ones written, so a title drawn over it hides no character it does not stand for: a `#id`
+   *  or an address an author left a sentence's or an emphasis's `-` or `_` on resolves without
+   *  those characters, which stay the author's own text. Absent where the reference needs every
+   *  character it was written with. */
+  readonly named?: number;
   /** Whether what it names is still open: an unknown key, an unknown question, or a prefix no
    *  item has been resolved for. A caller that has asked the server nothing sees every candidate
    *  unresolved. */
@@ -100,15 +108,25 @@ export interface TextReading {
   readonly needs: TextReferenceNeeds;
 }
 
-/** An id written short: a hex digit and seven or more hex digits and hyphens, read without case
- *  (the server's `text.IsIDPrefix`). A whole uuid is no prefix - an exact id needs no resolving
- *  and always wins. */
-const idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
-const uuidPattern =
-  /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
-
-export function isIdPrefix(value: string): boolean {
-  return idPrefixPattern.test(value) && !uuidPattern.test(value);
+/**
+ * The one whole id of `ids` that starts with `prefix`, compared without case; undefined where
+ * none does or two or more do, which the text keeps as written, because an id written short
+ * names a record only where it names exactly one - as the server resolves one. The same id
+ * listed twice is that one record again, not a second match.
+ */
+export function uniquePrefixMatch(ids: Iterable<string>, prefix: string): string | undefined {
+  const lower = prefix.toLowerCase();
+  let found: string | undefined;
+  for (const id of ids) {
+    if (id === found || !id.toLowerCase().startsWith(lower)) {
+      continue;
+    }
+    if (found !== undefined) {
+      return undefined;
+    }
+    found = id;
+  }
+  return found;
 }
 
 /** The characters of a question block's id, as an `:::ask{#id}` line declares it (the server's
@@ -278,6 +296,15 @@ function bareCandidates(text: string, from: number, to: number, found: BareCandi
   }
 }
 
+/** `written` without the trailing `_` and `-` an emphasis or a sentence leaves on a mention, or
+ *  undefined where it has none or is nothing without them. It is the one statement of that
+ *  trim: a mention is resolved as written first and this way second, and the characters it
+ *  resolved without are the author's own (`TextReference.named`). */
+function trimmedMention(written: string): string | undefined {
+  const trimmed = written.replace(/[_-]+$/, "");
+  return trimmed === written || trimmed === "" ? undefined : trimmed;
+}
+
 /** The ask the question map gives `#id`: the id as written, else the id without the trailing `_`
  *  and `-` an emphasis or a sentence leaves on it, else - when what is left is an id written
  *  short - the one question block id it is a prefix of. A declared id wins over a short one, and
@@ -289,8 +316,7 @@ function questionReference(
   if (questions === undefined) {
     return undefined;
   }
-  const trimmed = id.replace(/[_-]+$/, "");
-  const shortened = trimmed === id || trimmed === "" ? undefined : trimmed;
+  const shortened = trimmedMention(id);
   if (Object.hasOwn(questions, id)) {
     return questions[id];
   }
@@ -311,20 +337,8 @@ function questionPrefix(
   if (!isIdPrefix(value)) {
     return undefined;
   }
-  let found: string | undefined;
-  for (const [id, reference] of Object.entries(questions)) {
-    if (
-      id.length < value.length ||
-      id.slice(0, value.length).toLowerCase() !== value.toLowerCase()
-    ) {
-      continue;
-    }
-    if (found !== undefined) {
-      return undefined;
-    }
-    found = reference;
-  }
-  return found;
+  const id = uniquePrefixMatch(Object.keys(questions), value);
+  return id === undefined ? undefined : questions[id];
 }
 
 /** Which of a route's ids a text may have written short, each with the kind of record it names:
@@ -369,28 +383,17 @@ function itemKinds(
   return kinds;
 }
 
-/** The one whole id of `items` of `kind` that starts with `prefix`, compared without case;
- *  undefined where none does or two or more do, each of which the text keeps as written. */
+/** The one whole id of `items` of `kind` that starts with `prefix`: a prefix is resolved among
+ *  the items of its own kind, as the server resolves it within the owner the reference names. */
 function wholeId(
   items: readonly { id: string; kind: ReferenceTargetKind }[],
   prefix: string,
   kind: ReferenceTargetKind
 ): string | undefined {
-  const lower = prefix.toLowerCase();
-  let found: string | undefined;
-  for (const item of items) {
-    if (item.kind !== kind || item.id.length < lower.length) {
-      continue;
-    }
-    if (item.id.slice(0, lower.length).toLowerCase() !== lower) {
-      continue;
-    }
-    if (found !== undefined) {
-      return undefined;
-    }
-    found = item.id;
-  }
-  return found;
+  return uniquePrefixMatch(
+    items.filter((item) => item.kind === kind).map((item) => item.id),
+    prefix
+  );
 }
 
 /** `route` with its block id replaced, keeping its pin. */
@@ -459,6 +462,22 @@ export function routeWithWholeIds(
   return resolved.unresolved ? undefined : resolved.route;
 }
 
+/** The reference an address as written names, with the whole ids `items` names put in: the
+ *  value the reader stores for it, resolved or not. Undefined where the value is no address. */
+function addressReference(
+  value: string,
+  origin: string,
+  items: readonly { id: string; kind: ReferenceTargetKind }[]
+): string | undefined {
+  const route = referenceRouteFromHref(value, origin);
+  if (route === undefined) {
+    return undefined;
+  }
+  return buildDispatchReference(
+    prefixReference(route) === undefined ? route : resolvePrefixIds(route, items).route
+  );
+}
+
 /**
  * Every reference `text` holds, and what a caller would have to ask to resolve the rest. The
  * reference-shaped spans are read first, as the server reads them, and a bare key or `#id` only
@@ -498,10 +517,21 @@ export function readTextReferences(text: string, facts: TextReferenceFacts = {})
       kinds ??= itemKinds(facts.items ?? {}, origin);
       resolved = resolvePrefixIds(route, kinds);
     }
+    const reference = buildDispatchReference(resolved.route);
+    // The trailing `_` or `-` an author left on an address is theirs where the address names
+    // the same thing without it.
+    const shortened = trimmedMention(span.value);
+    let named: number | undefined;
+    if (shortened !== undefined) {
+      kinds ??= itemKinds(facts.items ?? {}, origin);
+      named =
+        addressReference(shortened, origin, kinds) === reference ? shortened.length : undefined;
+    }
     references.push({
       end: span.start + span.value.length,
       form: "address",
-      reference: buildDispatchReference(resolved.route),
+      named,
+      reference,
       route: resolved.route,
       start: span.start,
       text: span.value,
@@ -531,10 +561,21 @@ export function readTextReferences(text: string, facts: TextReferenceFacts = {})
       continue;
     }
     questions = true;
-    const reference = questionReference(facts.questions, candidate.id ?? "");
+    const id = candidate.id ?? "";
+    const reference = questionReference(facts.questions, id);
+    // The `#id` names the ask without the `_` or `-` a sentence or an emphasis left on it where
+    // the trimmed id names the same ask, and the `#` counts toward the characters it names.
+    const shortened = trimmedMention(id);
+    const named =
+      reference !== undefined &&
+      shortened !== undefined &&
+      questionReference(facts.questions, shortened) === reference
+        ? shortened.length + 1
+        : undefined;
     references.push({
       end: candidate.end,
       form: "question",
+      named,
       reference,
       route: reference === undefined ? undefined : referenceRouteFromHref(reference, origin),
       start: candidate.start,
@@ -543,5 +584,42 @@ export function readTextReferences(text: string, facts: TextReferenceFacts = {})
     });
   }
   references.sort((one, other) => one.start - other.start);
+  return { needs: { keys, prefixes, questions }, references };
+}
+
+/**
+ * Every reference a list of candidates holds, each read on its own as the whole mention it is.
+ * A document editor reports the distinct words its own reader found rather than one text, and
+ * each is resolved here under exactly the rules a body's text is: a candidate neither starts
+ * nor ends against what another one holds, so no joining character has to stand for the
+ * boundary. Each reference's `start` and `end` are its own candidate's.
+ */
+export function readTextCandidates(
+  candidates: readonly string[],
+  facts: TextReferenceFacts = {}
+): TextReading {
+  const references: TextReference[] = [];
+  const keys: string[] = [];
+  const seenKeys = new Set<string>();
+  const prefixes: string[] = [];
+  const seenPrefixes = new Set<string>();
+  let questions = false;
+  for (const candidate of candidates) {
+    const reading = readTextReferences(candidate, facts);
+    references.push(...reading.references);
+    for (const key of reading.needs.keys) {
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        keys.push(key);
+      }
+    }
+    for (const prefix of reading.needs.prefixes) {
+      if (!seenPrefixes.has(prefix)) {
+        seenPrefixes.add(prefix);
+        prefixes.push(prefix);
+      }
+    }
+    questions ||= reading.needs.questions;
+  }
   return { needs: { keys, prefixes, questions }, references };
 }

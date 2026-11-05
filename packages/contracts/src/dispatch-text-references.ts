@@ -19,51 +19,9 @@ const ITEMS = {
   "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": BLOCK,
 };
 
-/**
- * Markdown bodies with the references each one cites, in order of first appearance, as read
- * against the server origin `https://dispatch.test`, or the row's `origin` where it names one.
- * Four readers are tested against it - the dashboard's `composerReferences` (its composer's
- * reference pills, which read `dispatch://` references and dashboard addresses alone), the
- * dashboard's reader and resolver for text (what its rendered markdown, its unfurl cards and its
- * document editors share), those renderers (what they link), and the Go reader `text.Mentions`,
- * which writes the reference graph, through its JSON copy in
- * `packages/envoy/internal/dispatch/text/testdata` - so neither where a reference ends nor what
- * it names can change on one side only.
- *
- * A reference ends at whitespace (Unicode space separators included, a vertical tab and U+FEFF
- * not), an angle or square bracket, a quote, a backtick or a pipe; the sentence punctuation,
- * emphasis and strikethrough delimiters and unbalanced closing parenthesis after it are dropped.
- * External URLs cite nothing, and neither does a reference whose target id, as the server stores
- * the edge to it, is past MAX_REFERENCE_TARGET_BYTES. A block reference is its document's, ask's,
- * comment's or issue message's reference, `#b-` and the block id as `encodeBlockId` writes it
- * (readers take any percent-encoding; an id past MAX_BLOCK_ID_BYTES names nothing), optionally
- * pinned to version N of the document, or to revision N of the comment or of the ask's parts, by
- * a trailing `@v<N>` (a message never changes, so a pinned message block names nothing); each
- * `refs` entry for one is written that canonical way.
- *
- * A text also cites what it writes bare: an issue key (`CORE-12`) that names an existing issue,
- * as `dispatch://CORE-12`, and `#` with the id of a question block of the text's document, as
- * that question's ask. Either stands alone: after the start of the text, whitespace (or a
- * numeric reference to whitespace, such as the `&#32;` stored markdown writes a space at a
- * mark's edge as), or one of ( [ " ' * _ > ` ~ |. A key ends at the end of the text or at a
- * character that is not a letter, a digit, `-`, `/`, `#` or `@`, and the sentence punctuation
- * and delimiters `.` `,` `:` `;` `_` `*` `~` end it only when no letter or digit follows them. A
- * `#id` is `#` and the longest run of `[A-Za-z0-9_-]`, or that run without its trailing `_` and
- * `-` where no question holds the whole run; the `{#id …}` an `:::ask` declares its question
- * with is no candidate.
- *
- * The id a reference names may be a prefix of the id it means: a hex digit and seven or more of
- * `[0-9a-f-]` after it, read without case. Where one id of `items` starts with it, the reference
- * is that item's, written with the whole id; where two ids do, or where the text holds a `-` the
- * id does not, it is stored as written, as a reference to a missing target is. A `#id` run of
- * eight or more such characters that no question declares is read the same way, against the
- * question block ids.
- *
- * The server reads a key, a `#id` and a prefix inside a code span, a code block and a link's
- * destination, as it reads a `dispatch://` reference in code today; a renderer links none of
- * them there.
- */
-export const DISPATCH_TEXT_REFERENCES: readonly {
+/** One row of DISPATCH_TEXT_REFERENCES: a markdown body, what a reader of it already knows, and
+ *  what it cites. */
+export interface DispatchTextReferenceRow {
   body: string;
   origin?: string;
   /** The issue keys that name an existing issue; a row without it has none. */
@@ -78,7 +36,10 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   links?: readonly string[];
   /** Only a reader of the bare key, `#id` and prefix grammar writes this row's `refs`. */
   grammar?: true;
-}[] = [
+}
+
+/** The rows written out, which are every row but the code twins `IN_CODE` builds below. */
+const WRITTEN: readonly DispatchTextReferenceRow[] = [
   { body: "Tied to dispatch://CORE-1 here.", refs: ["dispatch://CORE-1"] },
   { body: "Tied to **dispatch://CORE-1** here.", refs: ["dispatch://CORE-1"] },
   { body: "Tied to `dispatch://CORE-1` here.", refs: ["dispatch://CORE-1"], links: [] },
@@ -788,279 +749,148 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
     items: ITEMS,
     refs: ["dispatch://CORE-1/spec#b-5da04f24"],
   },
-  // Every form the server reads bare, again in code: it indexes each one there, as it indexes a
-  // `dispatch://` reference in code, and no renderer links inside a code span or a code block.
-  {
-    body: "`CORE-1` is blocked.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
+];
+
+/**
+ * Every form the server reads bare, again in code: the body that writes it inside a code span or
+ * a code block, beside the body of the row above it repeats. The server indexes each one there,
+ * as it indexes a `dispatch://` reference in code, so a twin cites exactly what its row cites,
+ * and no renderer links inside a code span or a code block, so a twin links nothing. A form
+ * added above is twinned by one line here; its facts are never written a second time.
+ */
+const IN_CODE: readonly (readonly [written: string, inCode: string])[] = [
+  ["CORE-1 is blocked.", "`CORE-1` is blocked."],
+  ["Blocked on CORE-1 today.", "Blocked on `CORE-1` today."],
+  ["Blocked (CORE-1) today.", "Blocked `(CORE-1)` today."],
+  ["Blocked [CORE-1] today.", "Blocked `[CORE-1]` today."],
+  ['Blocked on "CORE-1" today.', 'Blocked on `"CORE-1"` today.'],
+  ["Blocked on 'CORE-1' today.", "Blocked on `'CORE-1'` today."],
+  ["Blocked on **CORE-1** today.", "Blocked on `**CORE-1**` today."],
+  ["Blocked on _CORE-1_ today.", "Blocked on `_CORE-1_` today."],
+  [">CORE-1 is blocked.", "`>CORE-1` is blocked."],
+  ["Blocked on ~~CORE-1~~ today.", "Blocked on `~~CORE-1~~` today."],
+  ["|issue|state|\n|---|---|\n|CORE-1|open|", "Cells are written `|CORE-1|open|`."],
+  ["Blocked on&#32;CORE-1 today.", "Blocked on `&#32;CORE-1` today."],
+  ["Blocked on&#x20;CORE-1 today.", "Blocked on `&#x20;CORE-1` today."],
+  ["Blocked on&#9;CORE-1 today.", "Blocked on `&#9;CORE-1` today."],
+  ["Blocked on&#10;CORE-1 today.", "Blocked on `&#10;CORE-1` today."],
+  ["See XCORE-1 here.", "See `XCORE-1` here."],
+  ["Both CORE-1 and ACME-12 are blocked.", "Both `CORE-1` and `ACME-12` are blocked."],
+  ["CORE-1's spec is done.", "`CORE-1's` spec is done."],
+  ["Done in CORE-1.", "Done in `CORE-1.`"],
+  ["Blocked on CORE-1, then shipped.", "Blocked on `CORE-1,` then shipped."],
+  ["See [the blocker](CORE-1).", "See `[the blocker](CORE-1)`."],
+  // The same key again, in a fenced code block rather than a span.
+  ["CORE-1 is blocked.", "```\nCORE-1 is blocked.\n```"],
+  ["See #q2 for the rollout.", "See `#q2` for the rollout."],
+  ["As agreed, _see #q2_.", "As agreed, `_see #q2_`."],
+  ["Answered in #q2.", "Answered in `#q2.`"],
+  ["See [the question](#q2).", "See `[the question](#q2)`."],
+  ["See #7b2c9d04 for the rollout.", "See `#7b2c9d04` for the rollout."],
+  ["See dispatch://CORE-1/ask/2a7f1c90 here.", "See `dispatch://CORE-1/ask/2a7f1c90` here."],
+  [
+    "See dispatch://CORE-1/ask/2a7f1c90-1f4e here.",
+    "See `dispatch://CORE-1/ask/2a7f1c90-1f4e` here.",
+  ],
+  ["See dispatch://CORE-1/ask/2A7F1C90 here.", "See `dispatch://CORE-1/ask/2A7F1C90` here."],
+  [
+    "See dispatch://CORE-1/comment/3b8e2d01 here.",
+    "See `dispatch://CORE-1/comment/3b8e2d01` here.",
+  ],
+  [
+    "See dispatch://CORE-1/comment/3b8e2d01-2a5f here.",
+    "See `dispatch://CORE-1/comment/3b8e2d01-2a5f` here.",
+  ],
+  [
+    "See dispatch://CORE-1/comment/3B8E2D01 here.",
+    "See `dispatch://CORE-1/comment/3B8E2D01` here.",
+  ],
+  [
+    "See dispatch://CORE-1/message/4c9f3e12 here.",
+    "See `dispatch://CORE-1/message/4c9f3e12` here.",
+  ],
+  [
+    "See dispatch://CORE-1/message/4c9f3e12-3b60 here.",
+    "See `dispatch://CORE-1/message/4c9f3e12-3b60` here.",
+  ],
+  [
+    "See dispatch://CORE-1/message/4C9F3E12 here.",
+    "See `dispatch://CORE-1/message/4C9F3E12` here.",
+  ],
+  ["See dispatch://CORE-1/spec#b-5da04f23 here.", "See `dispatch://CORE-1/spec#b-5da04f23` here."],
+  [
+    "See dispatch://CORE-1/spec#b-5da04f23-4c71 here.",
+    "See `dispatch://CORE-1/spec#b-5da04f23-4c71` here.",
+  ],
+  ["See dispatch://CORE-1/spec#b-5DA04F23 here.", "See `dispatch://CORE-1/spec#b-5DA04F23` here."],
+];
+
+/** The row that writes `written` in code: its own facts, its own `refs`, and no links. The
+ *  fields are written in the order a row writes them, so the JSON copy the Go reader walks
+ *  (`testdata/dispatch-text-references.json`) reads the same whether a row was written out or
+ *  built here. */
+function inCodeRow(written: string, body: string): DispatchTextReferenceRow {
+  const row = WRITTEN.find((candidate) => candidate.body === written);
+  if (row === undefined) {
+    throw new Error(`no row of DISPATCH_TEXT_REFERENCES writes ${JSON.stringify(written)}`);
+  }
+  return {
+    body,
+    ...(row.origin === undefined ? {} : { origin: row.origin }),
+    ...(row.issues === undefined ? {} : { issues: row.issues }),
+    ...(row.questions === undefined ? {} : { questions: row.questions }),
+    ...(row.items === undefined ? {} : { items: row.items }),
+    refs: row.refs,
     links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `CORE-1` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked `(CORE-1)` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked `[CORE-1]` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: 'Blocked on `"CORE-1"` today.',
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `'CORE-1'` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `**CORE-1**` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `_CORE-1_` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "`>CORE-1` is blocked.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `~~CORE-1~~` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Cells are written `|CORE-1|open|`.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `&#32;CORE-1` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `&#x20;CORE-1` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `&#9;CORE-1` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `&#10;CORE-1` today.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `XCORE-1` here.",
-    issues: ["XCORE-1"],
-    refs: ["dispatch://XCORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Both `CORE-1` and `ACME-12` are blocked.",
-    issues: ["CORE-1", "ACME-12"],
-    refs: ["dispatch://CORE-1", "dispatch://ACME-12"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "`CORE-1's` spec is done.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Done in `CORE-1.`",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Blocked on `CORE-1,` then shipped.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `[the blocker](CORE-1)`.",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "```\nCORE-1 is blocked.\n```",
-    issues: ["CORE-1"],
-    refs: ["dispatch://CORE-1"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `#q2` for the rollout.",
-    questions: QUESTIONS,
-    refs: [QUESTIONS.q2],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "As agreed, `_see #q2_`.",
-    questions: QUESTIONS,
-    refs: [QUESTIONS.q2],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "Answered in `#q2.`",
-    questions: QUESTIONS,
-    refs: [QUESTIONS.q2],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `[the question](#q2)`.",
-    questions: QUESTIONS,
-    refs: [QUESTIONS.q2],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `#7b2c9d04` for the rollout.",
-    questions: QUESTIONS,
-    refs: ["dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/ask/2a7f1c90` here.",
-    items: ITEMS,
-    refs: [ASK],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/ask/2a7f1c90-1f4e` here.",
-    items: ITEMS,
-    refs: [ASK],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/ask/2A7F1C90` here.",
-    items: ITEMS,
-    refs: [ASK],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/comment/3b8e2d01` here.",
-    items: ITEMS,
-    refs: [COMMENT],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/comment/3b8e2d01-2a5f` here.",
-    items: ITEMS,
-    refs: [COMMENT],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/comment/3B8E2D01` here.",
-    items: ITEMS,
-    refs: [COMMENT],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/message/4c9f3e12` here.",
-    items: ITEMS,
-    refs: [MESSAGE],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/message/4c9f3e12-3b60` here.",
-    items: ITEMS,
-    refs: [MESSAGE],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/message/4C9F3E12` here.",
-    items: ITEMS,
-    refs: [MESSAGE],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/spec#b-5da04f23` here.",
-    items: ITEMS,
-    refs: [BLOCK],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/spec#b-5da04f23-4c71` here.",
-    items: ITEMS,
-    refs: [BLOCK],
-    links: [],
-    grammar: true,
-  },
-  {
-    body: "See `dispatch://CORE-1/spec#b-5DA04F23` here.",
-    items: ITEMS,
-    refs: [BLOCK],
-    links: [],
-    grammar: true,
-  },
+    ...(row.grammar === undefined ? {} : { grammar: row.grammar }),
+  };
+}
+
+/**
+ * Markdown bodies with the references each one cites, in order of first appearance, as read
+ * against the server origin `https://dispatch.test`, or the row's `origin` where it names one.
+ * Four readers are tested against it - the dashboard's `composerReferences` (its composer's
+ * reference pills, which read `dispatch://` references and dashboard addresses alone), the
+ * dashboard's reader and resolver for text (what its rendered markdown, its unfurl cards and its
+ * document editors share), those renderers (what they link), and the Go reader `text.Mentions`,
+ * which writes the reference graph, through its JSON copy in
+ * `packages/envoy/internal/dispatch/text/testdata` - so neither where a reference ends nor what
+ * it names can change on one side only.
+ *
+ * A reference ends at whitespace (Unicode space separators included, a vertical tab and U+FEFF
+ * not), an angle or square bracket, a quote, a backtick or a pipe; the sentence punctuation,
+ * emphasis and strikethrough delimiters and unbalanced closing parenthesis after it are dropped.
+ * External URLs cite nothing, and neither does a reference whose target id, as the server stores
+ * the edge to it, is past MAX_REFERENCE_TARGET_BYTES. A block reference is its document's, ask's,
+ * comment's or issue message's reference, `#b-` and the block id as `encodeBlockId` writes it
+ * (readers take any percent-encoding; an id past MAX_BLOCK_ID_BYTES names nothing), optionally
+ * pinned to version N of the document, or to revision N of the comment or of the ask's parts, by
+ * a trailing `@v<N>` (a message never changes, so a pinned message block names nothing); each
+ * `refs` entry for one is written that canonical way.
+ *
+ * A text also cites what it writes bare: an issue key (`CORE-12`) that names an existing issue,
+ * as `dispatch://CORE-12`, and `#` with the id of a question block of the text's document, as
+ * that question's ask. Either stands alone: after the start of the text, whitespace (or a
+ * numeric reference to whitespace, such as the `&#32;` stored markdown writes a space at a
+ * mark's edge as), or one of ( [ " ' * _ > ` ~ |. A key ends at the end of the text or at a
+ * character that is not a letter, a digit, `-`, `/`, `#` or `@`, and the sentence punctuation
+ * and delimiters `.` `,` `:` `;` `_` `*` `~` end it only when no letter or digit follows them. A
+ * `#id` is `#` and the longest run of `[A-Za-z0-9_-]`, or that run without its trailing `_` and
+ * `-` where no question holds the whole run; the `{#id …}` an `:::ask` declares its question
+ * with is no candidate.
+ *
+ * The id a reference names may be a prefix of the id it means: a hex digit and seven or more of
+ * `[0-9a-f-]` after it, read without case. Where one id of `items` starts with it, the reference
+ * is that item's, written with the whole id; where two ids do, or where the text holds a `-` the
+ * id does not, it is stored as written, as a reference to a missing target is. A `#id` run of
+ * eight or more such characters that no question declares is read the same way, against the
+ * question block ids.
+ *
+ * The server reads a key, a `#id` and a prefix inside a code span, a code block and a link's
+ * destination, as it reads a `dispatch://` reference in code today; a renderer links none of
+ * them there.
+ */
+export const DISPATCH_TEXT_REFERENCES: readonly DispatchTextReferenceRow[] = [
+  ...WRITTEN,
+  ...IN_CODE.map(([written, body]) => inCodeRow(written, body)),
 ];

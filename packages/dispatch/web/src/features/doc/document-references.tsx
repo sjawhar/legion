@@ -16,11 +16,7 @@ import {
   type DispatchReferenceRoute,
   parseNodeReference,
 } from "../refs/routes";
-import {
-  readTextReferences,
-  type TextReferenceFacts,
-  type TextSource,
-} from "../refs/text-references";
+import { readTextReferences, type TextSource } from "../refs/text-references";
 import { useTextReferences } from "../refs/useTextReferences";
 import type { EditorHandle } from "./editor";
 
@@ -43,29 +39,6 @@ import type { EditorHandle } from "./editor";
  *  renders and never hands the plugin a fresh value that says the same thing. */
 const NO_WORDS: readonly string[] = [];
 const NO_TITLES: Readonly<Record<string, string>> = {};
-
-/**
- * How many of the words written the reference names, where that is fewer than all of them, so a
- * title hides no character the reference does not stand for: a `#id` the author left a sentence's
- * or an emphasis's `-` or `_` on resolves without it, and the editor keeps it as the author's own
- * text. The reader decides, by reading the shorter words it would read on their own; a text that
- * means something else without its last characters keeps them all.
- */
-function namedLength(
-  written: string,
-  reference: string,
-  facts: TextReferenceFacts
-): number | undefined {
-  const shortened = written.replace(/[_-]+$/, "");
-  if (shortened === written || shortened === "") {
-    return undefined;
-  }
-  const { references } = readTextReferences(shortened, facts);
-  const only = references.length === 1 ? references[0] : undefined;
-  return only?.reference === reference && only.end === shortened.length
-    ? shortened.length
-    : undefined;
-}
 
 /** One reference the editor's text holds, as the host resolved it. */
 interface ResolvedReference {
@@ -149,10 +122,9 @@ export function DocumentReferences({
     []
   );
 
-  // One line per word, so each is read as the whole mention it was: the reader starts a bare key
-  // or `#id` at a line's start and ends it at its end, exactly as it did in the document.
-  const text = useMemo(() => words.join("\n"), [words]);
-  const { facts, reading } = useTextReferences(text, source);
+  // Each candidate is read as the whole mention it was, on its own: the editor's words never
+  // become one text, so nothing another word holds can end this one (`readTextCandidates`).
+  const { reading } = useTextReferences(words, source);
   const resolved = useMemo(() => {
     const found: ResolvedReference[] = [];
     for (const reference of reading.references) {
@@ -160,14 +132,14 @@ export function DocumentReferences({
         continue;
       }
       found.push({
-        length: namedLength(reference.text, reference.reference, facts),
+        length: reference.named,
         reference: reference.reference,
         route: reference.route,
         words: reference.text,
       });
     }
     return found;
-  }, [facts, reading]);
+  }, [reading]);
 
   const targets = useMemo(() => {
     const drawn = new Map<string, ReferenceTarget | null>();

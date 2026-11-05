@@ -1,7 +1,6 @@
-import { DISPATCH_TEXT_REFERENCES } from "@legion/contracts";
+import { DISPATCH_TEXT_REFERENCES, isIdPrefix } from "@legion/contracts";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { isIdPrefix } from "../web/src/features/refs/text-references";
 import {
   baseUrl,
   createComment,

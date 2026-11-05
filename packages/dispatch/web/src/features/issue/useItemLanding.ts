@@ -1,22 +1,15 @@
-import { ID_AMBIGUOUS } from "@legion/contracts";
+import { ID_AMBIGUOUS, isIdPrefix } from "@legion/contracts";
 import { useQuery } from "@tanstack/react-query";
 
 import { ApiError, type ErrorCandidate } from "../../api/client";
 import type { IDCandidate, IssueDetails } from "../../api/types";
-import {
-  askQuery,
-  commentQuery,
-  messageQuery,
-  referencesQuery,
-  resolvedPrefixItems,
-} from "../refs/reference-target";
+import { askQuery, commentQuery, messageQuery, useWholeRouteRead } from "../refs/reference-target";
 import {
   buildIssuePath,
   type DispatchReferenceRoute,
   documentItemPath,
   type IssueRoute,
 } from "../refs/routes";
-import { isIdPrefix, prefixReference, routeWithWholeIds } from "../refs/text-references";
 
 /** The item routes: `/issues/KEY/asks|comments|messages/<id>`. */
 export type ItemRoute = Extract<IssueRoute, { id: string }>;
@@ -69,29 +62,30 @@ function isIDCandidate(candidate: ErrorCandidate): candidate is IDCandidate {
  * an anchored item never flashes its Conversation turn before opening its document.
  *
  * An address whose id is a whole uuid is read exactly as it always was: the item's own read
- * under that id, and nothing else. Only an id written short (`isIdPrefix`) is resolved first,
- * through the graph read of the reference the address names, which the server resolves within
- * the issue that address names; the item is then read under the whole id the answer carries, so
- * nothing is ever read or cached under a prefix. One match replaces the address with the whole
- * id (`rewrite`), a prefix the server refused as ambiguous lists its matches, and one that names
- * nothing is the 404 a whole id that names nothing already is.
+ * under that id, and nothing else. Only an id written short (`isIdPrefix`) is resolved first, by
+ * the one graph read every surface resolves a short id through (`useWholeRouteRead`), which the
+ * server resolves within the issue the address names; the item is then read under the whole id
+ * the answer carries, so nothing is ever read or cached under a prefix. One match replaces the
+ * address with the whole id (`rewrite`), a prefix the server refused as ambiguous lists its
+ * matches, and one that names nothing is the 404 a whole id that names nothing already is.
+ *
+ * The gate is on the item's own id, not on `prefixReference`, because an item route also carries
+ * a block: an item whose id is whole and whose `#b-` id is short is this item's landing, read
+ * under its own whole id, and resolving it as an item prefix would rewrite - or 404 - a link
+ * that already names the item exactly.
  */
 export function useItemLanding(
   route: IssueRoute,
   issue: IssueDetails | undefined
 ): ItemLanding | undefined {
-  const origin = window.location.origin;
   const address = isItemRoute(route) ? route : undefined;
-  const prefix =
-    address !== undefined && isIdPrefix(address.id) ? prefixReference(address) : undefined;
-  const resolution = useQuery({ ...referencesQuery(prefix), enabled: prefix !== undefined });
+  const short = address !== undefined && isIdPrefix(address.id) ? address : undefined;
+  const read = useWholeRouteRead(short);
+  const { prefix, resolution } = read;
   // The route the address names with its id written whole: the address's own route where it
   // wrote it whole, and the graph read's answer where it wrote it short. An answer naming a
   // record of another kind, or none, leaves it undefined, and the landing below is the 404.
-  const answered: DispatchReferenceRoute | undefined =
-    prefix === undefined || address === undefined
-      ? address
-      : routeWithWholeIds(address, resolvedPrefixItems(resolution.data), origin);
+  const answered: DispatchReferenceRoute | undefined = prefix === undefined ? address : read.route;
   const whole =
     answered !== undefined && "key" in answered && isItemRoute(answered) ? answered : undefined;
   // The item's own read waits for the whole id: a prefix is never a key anything is cached

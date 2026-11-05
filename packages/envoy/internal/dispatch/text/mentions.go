@@ -215,13 +215,12 @@ func isItemKind(kind string) bool {
 }
 
 // IsIDPrefix reports whether value is an id written short: a hex digit and 7 or more hex digits
-// and hyphens, read without case, that is not a whole uuid. Its twin on the web is idPrefixPattern
-// in `packages/envoy-client/src/dispatch-execute.ts`, `/^[0-9a-f][0-9a-f-]{7,}$/i`: the two accept
-// the same characters at the same length. They differ in the one way each caller needs. The client
-// reads a whole uuid first (normalizeUUID) and only then that pattern, so the pattern itself says
-// nothing about a whole id; Mentions has no such step, and an exact id always wins, so a value a
-// uuid can be read from - 32 hex digits, or 36 characters with hyphens at 8, 13, 18 and 23 - is no
-// prefix here.
+// and hyphens, read without case, that is not a whole uuid. Its twin on the web is isIdPrefix in
+// `packages/contracts/src/dispatch-text-rules.ts`, the one copy every TypeScript caller reads -
+// the dashboard's reader of text and the `dispatch` command's executor alike. The two read the
+// same rule: the same characters at the same length, and no whole uuid, in either spelling those
+// characters allow - 32 hex digits, or 36 characters with hyphens at 8, 13, 18 and 23 - because
+// an exact id needs no resolving and always wins.
 func IsIDPrefix(value string) bool {
 	if len(value) < 8 || !isHexByte(value[0]) {
 		return false

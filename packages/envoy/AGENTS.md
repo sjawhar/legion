@@ -2538,7 +2538,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `user_ask_snooze` has none to back-fill:
   the table is created by `0048` and its only writers ship in the same change, so no deployed schema ever carried a version of it written under a raw login
   — (`store/migrations/0048_user_ask_snooze.up.sql`);
-  a non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`;
+  an id written short (8 characters or more of the hex digits and hyphens an id starts with) names the one ask that carries it, is `409 ID_AMBIGUOUS` where two or more do, and is the route's own answer for an ask it does not hold where none does — `404 NOT_FOUND` on the `PUT`, and the `DELETE`'s own `400 ASK_ID_INPUT`, that one route answering no 404 for an ask it does not hold (`idRoutes`, `api/id_prefix.go`);
+  any other non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`;
   the bound allows no skew, and the SPA's presets keep clear of it (the one that can land near midnight falls through to the next morning rather than naming a moment inside the request's own latency).
   `DELETE /api/v1/me/asks/{id}/snooze` removes it and answers `204` whether or not a row was there.
   Neither write touches the ask or reaches any other login: a snooze is one viewer's view state.
@@ -2614,7 +2615,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   a credential without the `person` scope sends `{ "actor": { "kind": "session", "id": "<own id>" } }` in the body on both verbs and may act only when the path session equals it (`403 FOLLOWER_FORBIDDEN`);
   one that holds it — a person's browser cookie, or a token of theirs — may add or remove any session and sends no body, since putting another session on an ask is the person's act, and that write is recorded as the person with the agent beside them.
   A credential acting as the path session itself follows or unfollows it as it always did, recorded as that session with no act, whether the session is the one a broker-issued token proved or the one its body names: that is its own act and no person's.
-  A non-UUID ask id is `400 ASK_ID_INPUT`; removing a session that does not follow is `404 FOLLOWER_NOT_FOUND`; a repeated `PUT` is a `204` no-op with no event.
+  An ask id written short names the one ask that carries it and is `409 ID_AMBIGUOUS` where two or more do, as it is on every route that takes an ask (`idRoutes`); any other non-UUID ask id is `400 ASK_ID_INPUT`; removing a session that does not follow is `404 FOLLOWER_NOT_FOUND`; a repeated `PUT` is a `204` no-op with no event.
 
 - A reply joins its thread the same way on both write paths.
   `threadHeadOf` (`api/comment_create.go`) climbs `reply_to` from an already-locked comment to the head of its thread and, when that head is an ask, the reply stores the ask's `ask_id` with `reply_to` null and the reply's `turn`;
@@ -2627,7 +2628,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Do not add DB introspection or harness-specific hidden coupling unless there is no API path.
 
 - Dispatch caps (`CAP_EXCEEDED` 400) read `<field> is N characters over the M-character limit (L/M)` (`capExceededError`, UTF-16 units) or `<field> is N over the M-item limit (C/M)` for counts;
-  `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` answer a non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`);
+  `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` resolve an id written short to the one item of that kind which carries it before the handler runs, answer `409 ID_AMBIGUOUS` where two or more do and their own `404 NOT_FOUND` where none does, and answer any other non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`, behind `api/id_prefix.go`);
   a document-edit quote miss (`TARGET_NOT_FOUND`) names the three nearest blocks, a `# Title` quote selects a heading, and a quote opening with a list marker (`- x`, `5. x`, a task box `[ ]` or `[x]` allowed after it) that matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and its box matching only a task item in that state (`pmdoc.ParseListItemQuote`, `listItemQuoteMatches`), a miss saying what the marker means and quoting the text without it;
   a quote written as a table row's cells, its ` | ` the boundary between cells rather than text a cell holds, names instead the run of one row's cells its parts match (`tableRowQuoted`), and a quote reaching from one table cell into another names both cells, a move anchor included, which is refused as an insert anchor is.
   The outbox `payload_summary` of `ask.answered` is the answer rendering (`<selected> - <text>`), not the question.
