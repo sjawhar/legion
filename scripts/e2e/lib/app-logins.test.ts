@@ -261,6 +261,23 @@ describe("app-logins.ts", () => {
     expect(stderr.slice(-1000)).toContain("wrote more than 1048576 bytes to stderr");
   });
 
+  // A token command that fails under the cap has the whole of its stderr quoted in the failure,
+  // so the line this process ends on is about a megabyte long, written in one go with nothing
+  // after it but the exit. An exit that does not wait for that write discards most of it, and
+  // the caller is left with the command's noise and no reason for the run's failure.
+  test("the failure a token command's stderr is quoted in reaches the caller whole, and last", async () => {
+    const noisy = "printf '%01000000d' 0 >&2; printf 'END-OF-STDERR\\n' >&2; exit 3";
+    const { code, stderr } = await run(config(app("101", noisy), app("202")));
+    expect(code).toBe(1);
+    const failure = `app-logins: the implement App (app_id 101): github_apps.implement.token_command failed (exit 3): ${"0".repeat(1_000_000)}END-OF-STDERR`;
+    // By length and by both ends: a mismatch between two megabyte-long lines prints no diff
+    // anyone can read.
+    const last = stderr.split("\n").at(-1) ?? "";
+    expect(last.length).toBe(failure.length);
+    expect(last.slice(0, 120)).toBe(failure.slice(0, 120));
+    expect(last.slice(-40)).toBe(failure.slice(-40));
+  });
+
   test("a token command whose escaped descendant holds its output open fails within the drain bound", async () => {
     const escaped = "setsid sleep 60 >&2 & exit 0";
     const started = Date.now();
