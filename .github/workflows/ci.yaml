@@ -3191,8 +3191,8 @@ jobs:
       # names no test (dispatch://INFRA-1085). .github/scripts/race_memory.py samples the largest
       # process beside the run, writing a line every 5 s that names that process and the tests
       # running at that moment, so a step the kernel does take still says what it reached. After
-      # the run it fails this step when that peak passed RACE_MEM_LIMIT_KB, 8388608 kB, half the
-      # runner, naming the tests that were running at the highest sample.
+      # the run it writes the peak, and fails this step when the peak passed RACE_MEM_LIMIT_KB,
+      # 8388608 kB, half the runner, naming the tests that were running at the highest sample.
       # -json is the stream the sampler reads to know them; it writes every Output field back
       # out, so the log still carries the --- FAIL lines and the package's own line. -count=1
       # because the job restores the Go build cache above, and a cached pass must not stand in

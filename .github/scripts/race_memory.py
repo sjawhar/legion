@@ -40,8 +40,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-# Half of a 16 GiB runner, which leaves the race binary room to be killed by this script with a
-# log rather than by the kernel without one.
+# Half of a 16 GiB runner, so a run that grows past it but still fits on the runner turns the
+# step red after it ends, with the peak and the tests named, rather than passing unnoticed.
 DEFAULT_LIMIT_KB = 8388608
 
 SAMPLE_SECONDS = 5.0
@@ -238,6 +238,28 @@ def limit_from_env(environ: Mapping[str, str]) -> tuple[int, str]:
         raise ValueError(f"RACE_MEM_LIMIT_KB is {raw!r}, not a number of kB") from None
 
 
+def decision_line(peak_kb: int, field: str, limit_kb: int, highest: Sample | None) -> str:
+    """The line written when the peak passed the limit: the peak, the limit, and the highest
+    sample of the run with the tests it had running.
+
+    The warning about another moment is written only for a `VmHWM` peak, the one number the
+    kernel can reach between two samples. A `VmRSS` peak is the highest sample itself, the very
+    sample named in this line, so there is no other moment it could have belonged to.
+    """
+    where = (
+        f"the highest sampled VmRSS, {highest.rss_kb} kB at {highest.seconds:.1f} s, "
+        f"had these tests running: {highest.tests}"
+        if highest is not None
+        else "no sample saw the process tree"
+    )
+    line = f"race memory: the peak of {peak_kb} kB passed the limit of {limit_kb} kB; {where}."
+    if field == "VmHWM":
+        line += (
+            " VmHWM can be reached between two samples, so the peak may belong to another moment."
+        )
+    return line
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(
@@ -301,16 +323,7 @@ def main(argv: list[str]) -> int:
     log.line(f"race memory: the peak was {peak_kb} kB ({field}), the limit {limit_kb} kB")
 
     if peak_kb > limit_kb:
-        where = (
-            f"the highest sampled VmRSS, {highest.rss_kb} kB at {highest.seconds:.1f} s, "
-            f"had these tests running: {highest.tests}"
-            if highest is not None
-            else "no sample saw the process tree"
-        )
-        log.line(
-            f"race memory: the peak of {peak_kb} kB passed the limit of {limit_kb} kB; {where}. "
-            "VmHWM can be reached between two samples, so the peak may belong to another moment."
-        )
+        log.line(decision_line(peak_kb, field, limit_kb, highest))
 
     # The exit rule, decided here and not before, because the command has ended by now: a
     # command that failed on its own keeps its status, since the tests' own failure is what the

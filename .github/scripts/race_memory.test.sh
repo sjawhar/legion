@@ -5,10 +5,11 @@
 #
 # Each case runs the real script around a stand-in command — a shell or a Python program that
 # prints a -json stream and grows — so no Go, no race binary and no database are needed. The two
-# functions the sampling loop reads its numbers with, `summarize` and `choose_peak`, are called
-# on their own, over fixture `/proc/<pid>/status` texts written here, because one of the rule's
-# two branches cannot be reached on a kernel that reports no `VmHWM` (gVisor) and the other
-# cannot be reached on one that does.
+# functions the sampling loop reads its numbers with, `summarize` and `choose_peak`, and the
+# `decision_line` written from what they return, are called on their own over fixture
+# `/proc/<pid>/status` texts written here, because one of the rule's two branches cannot be
+# reached on a kernel that reports no `VmHWM` (gVisor) and the other cannot be reached on one
+# that does.
 #
 # Run from anywhere: .github/scripts/race_memory.test.sh
 # CI runs it in ci.yaml's test job.
@@ -58,12 +59,21 @@ time.sleep(6)
 sys.stdout.write(str(len(block)) + "\n")
 '
 run_sampler 1 python3 -c "$grower"
-check "exits non-zero" "$([ "$status" -ne 0 ] && echo true || echo false)"
+check "exits 1" "$(is "$status" 1)"
 check "names the limit it was given" "$(contains "$out" 'the limit is 1 kB (RACE_MEM_LIMIT_KB)')"
-check "names the test that was running" "$(contains "$out" 'TestTheSamplerNamesMe')"
+check "its decision line names the tests at the highest sample" \
+  "$(contains "$out" 'had these tests running: TestTheSamplerNamesMe')"
 check "says the peak passed the limit" "$(contains "$out" 'passed the limit of 1 kB')"
-check "warns that the peak may be between two samples" \
-  "$(contains "$out" 'VmHWM can be reached between two samples')"
+# How that line ends depends on the kernel: a VmHWM peak can have been reached between two
+# samples, while a VmRSS peak — all gVisor gives, since it reports no VmHWM — is the highest
+# sample itself, the one the line has just named.
+if [ "$(contains "$out" 'the peak was [0-9][0-9]* kB (VmHWM),')" = true ]; then
+  check "warns that a VmHWM peak may be between two samples" \
+    "$(contains "$out" 'VmHWM can be reached between two samples')"
+else
+  check "leaves the between-samples warning off a VmRSS peak" \
+    "$(is "$(contains "$out" 'may belong to another moment')" false)"
+fi
 check "took a sample at 0 s and another at 5 s" \
   "$([ "$(grep -c -- ' s, VmRSS ' <<<"$out")" -ge 2 ] && echo true || echo false)"
 
@@ -81,9 +91,13 @@ walk = race_memory.summarize([
     "Name:\tgo\nPPid:\t1\nVmRSS:\t    1000 kB\nVmHWM:\t    4200 kB\n",
     "Name:\tdocs.test\nPPid:\t2\nVmRSS:\t    3000 kB\nVmHWM:\t    3900 kB\n",
 ], 0.0, "none")
-print("%d %s" % race_memory.choose_peak(walk.hwm_kb, walk.rss_kb))
+peak_kb, field = race_memory.choose_peak(walk.hwm_kb, walk.rss_kb)
+print("%d %s" % (peak_kb, field))
+print(race_memory.decision_line(peak_kb, field, 1, walk))
 ')
-check "takes the largest VmHWM, not the largest VmRSS" "$(is "$hwm" "4200 VmHWM")"
+check "takes the largest VmHWM, not the largest VmRSS" "$(is "${hwm%%$'\n'*}" "4200 VmHWM")"
+check "its decision line warns the peak may belong to another moment" \
+  "$(contains "$hwm" 'VmHWM can be reached between two samples, so the peak may belong')"
 
 echo "case: the peak falls back to the highest sampled VmRSS where there is no VmHWM"
 rss=$(peak '
