@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -34,14 +35,13 @@ const personAliasesQuery = `
 	       coalesce(array_agg(alias) filter (where alias_kind = 'session'), '{}'::text[])
 	from person_aliases where person = $1 and alias_kind in ('login', 'session')`
 
-const personNodesQuery = `
+// personNodesQuery pages the nodes a person authored or their proved sessions received.
+// Authorship comes from graph_person_edges and receipt from refs.SessionReceiptsSQL, the shared
+// derivation the delivery census checks; this read owns neither. $1 is the canonical login, $2
+// and $3 the page, $4 the lower bound on receipt and $5 the person's proved session ids.
+var personNodesQuery = `
 	with reached as materialized (
-		select case e.type when 'comment.created' then 'comment' when 'ask.answered' then 'ask' else 'message' end as from_kind,
-		       e.payload->>'id' as from_id
-		from events e
-		where e.type in ('ask.answered', 'comment.created', 'message.created', 'message.answered')
-		  and e.payload->>'id' <> '' and e.created_at >= $4
-		  and e.published_destinations && array(select 'notifications.agent.' || unnest($5::text[]))
+		select distinct from_kind, from_id from ` + refs.SessionReceiptsSQL("$5", "$4") + ` receipts
 	), related as (
 		select from_kind, from_id, array_agg(distinct kind order by kind) as relations from (
 			select g.from_kind, g.from_id, g.kind from graph_person_edges g
@@ -49,14 +49,6 @@ const personNodesQuery = `
 			  and g.from_kind in ('comment', 'message', 'ask')
 			union all
 			select from_kind, from_id, 'delivered_to' from reached
-			union all
-			select 'message', d.message_id::text, 'delivered_to'
-			from message_deliveries d
-			where d.session_id = any($5) and d.state = 'sent' and d.created_at >= $4
-			union all
-			select 'comment', d.comment_id::text, 'delivered_to'
-			from comment_deliveries d
-			where d.session_id = any($5) and d.state = 'sent' and d.created_at >= $4
 		) edges group by from_kind, from_id
 	), items as (
 		select 'comment' as kind, c.id::text as id, c.body as title, c.created_at, r.relations,

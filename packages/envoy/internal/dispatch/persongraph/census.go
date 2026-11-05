@@ -39,6 +39,14 @@ const censusSources = `with sources as (
 // the outbox's recorded destinations and sent attempts, independently of the view's SQL. Event
 // types are the word-carrying types sessionanswers reads; unlike that human-words projection,
 // delivery edges retain session-authored items too. Role topics prove a role, not its holder.
+//
+// It compares that reference with two reads: the whole graph (refs.AllEdgesSQL), which carries
+// role recipients too, and the session receipts the person page runs
+// (refs.SessionReceiptsSQL), so the page's own query is checked and not only the view beside
+// it. The page's read is bounded by since and by a session list; the sessions passed are every
+// one the records name, and an event or an attempt for an item created inside the window is
+// itself inside it, so the two readings cover the same rows. A difference the page's read alone
+// shows is counted under a person_page_ cause.
 func Census(ctx context.Context, pool *store.Pool, since time.Time) (DeliveryCensus, error) {
 	report := DeliveryCensus{Since: since.UTC(), ByKind: map[string]int{"comment": 0, "message": 0, "ask": 0}, Missing: map[string]int{}, Unexpected: map[string]int{}}
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -139,6 +147,39 @@ func Census(ctx context.Context, pool *store.Pool, since time.Time) (DeliveryCen
 		return report, err
 	}
 	rows.Close()
+	pageSessions := make([]string, 0)
+	seenSession := map[string]bool{}
+	for _, want := range expected {
+		for target := range want {
+			if target.kind == "session" && !seenSession[target.id] {
+				seenSession[target.id] = true
+				pageSessions = append(pageSessions, target.id)
+			}
+		}
+	}
+	page := map[node]map[recipient]bool{}
+	rows, err = tx.Query(ctx, censusSources+`
+		select r.from_kind, r.from_id, r.session_id from `+refs.SessionReceiptsSQL("$2", "$1")+` r
+		join sources s on s.kind = r.from_kind and s.id = r.from_id`, since, pageSessions)
+	if err != nil {
+		return report, fmt.Errorf("census person page receipts: %w", err)
+	}
+	for rows.Next() {
+		var source node
+		var session string
+		if err := rows.Scan(&source.kind, &source.id, &session); err != nil {
+			rows.Close()
+			return report, err
+		}
+		if page[source] == nil {
+			page[source] = map[recipient]bool{}
+		}
+		page[source][recipient{"session", session}] = true
+	}
+	if err := rows.Err(); err != nil {
+		return report, err
+	}
+	rows.Close()
 	for source, want := range expected {
 		mismatch := false
 		for target, cause := range want {
@@ -146,10 +187,20 @@ func Census(ctx context.Context, pool *store.Pool, since time.Time) (DeliveryCen
 				report.Missing[cause]++
 				mismatch = true
 			}
+			if target.kind == "session" && !page[source][target] {
+				report.Missing["person_page_"+cause]++
+				mismatch = true
+			}
 		}
 		for target := range actual[source] {
 			if _, recorded := want[target]; !recorded {
 				report.Unexpected["unrecorded"]++
+				mismatch = true
+			}
+		}
+		for target := range page[source] {
+			if _, recorded := want[target]; !recorded {
+				report.Unexpected["person_page_unrecorded"]++
 				mismatch = true
 			}
 		}
