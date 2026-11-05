@@ -238,7 +238,9 @@ test("Retry of a failed delivery on a closed issue posts a new attempt", async (
 // A closed issue's document takes no edit, so the browser writes no mark: the selection bar offers
 // Comment alone, the comment names its text by quote, the server writes the mark, and the thread
 // arrives in the margin.
-test("a margin comment on a closed issue's spec posts with its quote", async ({ browser }) => {
+test("a margin comment on a closed issue's spec posts with its quote @phone", async ({
+  browser,
+}) => {
   const { issueKey } = await seedClosedIssue();
   const alice = await asUser(browser, "alice");
 
@@ -275,7 +277,7 @@ test("a margin comment on a closed issue's spec posts with its quote", async ({ 
 // The issue can close while a person has its spec open with the editor focused - the merge closes
 // it - and the open page goes over to the closed document's Comment alone. A selection made then
 // is offered Comment, as it is on a page loaded after the close, on a phone as on a desktop.
-test("a margin comment on a spec whose issue closed while the page was open posts with its quote", async ({
+test("a margin comment on a spec whose issue closed while the page was open posts with its quote @phone", async ({
   browser,
 }) => {
   await createProject({ key: "E2E", name: "Closed issues" });
