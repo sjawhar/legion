@@ -1,0 +1,8 @@
+kind: Added
+body: >-
+  Reviews retain the SHA-256 of the stored UTF-8 version they approved, with insert
+  or backfill provenance. Startup fills legacy reviews without changing approval
+  decisions, and review, approval, event and document-version reads expose the hashes.
+time: 2026-11-05T10:42:29Z
+custom:
+  Issue: pr2803

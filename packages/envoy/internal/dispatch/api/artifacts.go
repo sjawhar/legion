@@ -867,6 +867,9 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
+		hash := sha256.Sum256([]byte(markdown))
+		sha := hex.EncodeToString(hash[:])
+		version.SHA256 = &sha
 		WriteJSON(w, http.StatusOK, struct {
 			Markdown string `json:"markdown"`
 			model.Version

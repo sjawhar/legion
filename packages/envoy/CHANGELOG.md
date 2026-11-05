@@ -52,6 +52,11 @@
   edit, a named version, an upload, a review, an approval request, a claim, a PATCH outside the
   closed allow-list, and the comment actions resolve, reopen, edit, accept and reject on an
   existing comment are still `409 ISSUE_CLOSED` until the issue reopens.
+## [29.11.0] - 2026-11-05
+
+### Added
+
+- Envoy records a CI check run or check suite that names no pull request under pull request n when its check suite's head branch is `refs/pull/<n>/head`, and Dispatch reconciles each open pull request's head with GitHub every 5 minutes, recording every completed check run and check suite the listener's record of that head lacks. One new setting, `DISPATCH_REVIEWER_APP_ID`, the review App's id, which the pass checks a `tester` or `architect` check run against.
 
 ## [29.9.0] - 2026-11-05
 

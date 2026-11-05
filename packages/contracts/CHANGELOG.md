@@ -16,6 +16,12 @@
   takes no messages or comments: Dispatch now accepts both on a closed issue (asks and artifacts
   are still refused). The description says a close of an issue already closed is refused
   `ISSUE_CLOSED` before anything is posted (INFRA-448).
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- LegionOperatorClaimsResponse carries pod_update_rounds: what the daemon's last pod-update sweep decided under the two new legion.yaml limits on opening pod-update rounds — each limit or null for no limit, the issues holding an open round, and the issues each limit held back.
+- Review and approval contracts expose approved content hashes and their provenance; runtime review-event validation preserves both fields. Document-version reads can report the SHA-256 of their stored UTF-8 bytes.
 
 ## [main@f06073fb9ef4] - 2026-11-05
 
