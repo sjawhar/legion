@@ -569,6 +569,29 @@ test("a person's message with a picture shows once, not beside its stored copy",
   ).toEqual(["Look at this[image]"]);
 });
 
+// A person writes a bracketed word of their own - `[ack]`, `[done]`, `[LGTM]` - and the session
+// streams it back as the one text part it is. The placeholder rule reads that part as the stream
+// naming a block it did not render, drops it, and leaves the turn saying nothing, so Dispatch's
+// stored copy no longer matches and the person's message shows twice. Driven live on a Claude
+// Code 2.1.310 session: a Send of `[ack]` drew two `agent-message-user` rows (INFRA-1026).
+test("a person's message that is a bracketed word of their own shows once", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "[ack]"), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [userFrame(1, at, "[ack]", "m1")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findAllByText("[ack]");
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["[ack]"]);
+});
+
 // Send is the terminal's Enter: the default wherever the session takes a steer. A session that
 // advertises Aside and no Send would refuse one, so Aside is its default.
 test("the live view sends as Send by default where the session takes it, and as Aside where it does not", async () => {
