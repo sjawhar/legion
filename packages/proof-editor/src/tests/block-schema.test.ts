@@ -396,8 +396,13 @@ function thrownBy(run: () => unknown): Error | undefined {
 }
 
 await test('a block pointer attribute reads and writes exactly the values the shared table accepts', async () => {
-  const proof = await createHeadlessProof({ blockSchema: pointerSchema });
-  for (const { value, ok, why } of DISPATCH_BLOCK_POINTER_VALUES) {
+  for (const { value, ok, why, items } of DISPATCH_BLOCK_POINTER_VALUES) {
+    const proof = await createHeadlessProof({ blockSchema: {
+      ...pointerSchema,
+      types: pointerSchema.types.map((type) => type.name === 'claim' ? {
+        ...type, attributes: { serves: { kind: 'block[]' as const, targets: ['requirement'], items } },
+      } : type),
+    } });
     const markdown = `:::claim{#c1 serves="${value}"}\nBody.\n:::\n`;
     if (ok) {
       const claim = proof.parseMarkdown(markdown).child(0);
@@ -416,6 +421,25 @@ await test('a block pointer attribute reads and writes exactly the values the sh
       assert(error!.message.includes('"serves"'), `${why}: refusal = ${error!.message}`);
     }
   }
+});
+
+await test('an item from survives editor parsing, HTML paste and attribute commands but serves refuses it', async () => {
+  const source = 'dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b1';
+  const type = { name: 'requirement', content: 'paragraph+', render: 'host', attributes: {
+    from: { kind: 'block[]', targets: ['ask'], items: ['ask', 'comment', 'message'] },
+    serves: { kind: 'block[]', targets: ['requirement'] },
+  } } as const;
+  const proof = await createHeadlessProof({ blockSchema: { version: 4, types: [type] } });
+  const markdown = `:::requirement{#r9 from="${source}"}\nNeed.\n:::\n`;
+  const doc = proof.parseMarkdown(markdown);
+  assert(proof.serializeMarkdown(doc) === markdown, 'the item from did not round-trip');
+  const rule = typedBlockSpec(type).parseDOM![0] as { getAttrs: (dom: HTMLElement) => Record<string, unknown> | false };
+  const pasted = rule.getAttrs({ getAttribute: (key: string) => key === 'data-proof-block-attr-from' ? source : null } as HTMLElement);
+  assert(pasted !== false && JSON.stringify(pasted.from) === JSON.stringify([source]), 'HTML paste dropped from');
+  let state = EditorState.create({ schema: proof.schema, doc });
+  const commands = createTypedBlockCommands({ blockSchema: { version: 4, types: [type] }, getState: () => state, dispatch: (tr) => { state = state.apply(tr); } });
+  assert(commands.setBlockAttributes('r9', { from: [source] }), 'attribute command refused from');
+  assert(thrownBy(() => commands.setBlockAttributes('r9', { serves: [source] })) !== undefined, 'serves accepted the same item');
 });
 
 await test('typed-block commands refuse a block pointer to a block of their document whose type it does not allow', async () => {

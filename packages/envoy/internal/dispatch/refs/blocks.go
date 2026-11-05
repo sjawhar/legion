@@ -20,7 +20,7 @@ import (
 
 // Pointer is one reference a typed block's `block[]` attribute holds (pmdoc.BlockPointer): the
 // typed block's id and type, the link's kind (the attribute's name), the block reference it names,
-// and the block types the attribute points at (none: any block).
+// and the document block types the attribute points at (none for an item target or no type limit).
 type Pointer struct {
 	Block, BlockType, Kind string
 	Target                 text.Ref
@@ -486,12 +486,12 @@ func BlockChanges(ctx context.Context, q Queryer, artifactID string) (map[string
 // written (rendered, in document order, each parent before its children), is indexed, read through
 // q: a block of that document as written's node for its id (uniqueBlocks: the first holder of a
 // repeated id, and no id the index cannot key), any other as its document's current blocks
-// (document_blocks) hold it, with one query for every such target. Ask pointers resolve their
-// actual owner from asks, never the issue key supplied in the reference. A missing target is
-// absent. The write lands in the document's own issue, or in none when a project holds it; that
-// issue's ancestors are read only once a target turns out to sit in another document
-// (IssueAncestors), since a pointer inside the writing document - a plan task's `needs`, the
-// common case - is held to nothing above it (pmdoc.CheckBlockPointers), and this runs inside
+// (document_blocks) hold it, and current item blocks (comment_blocks, message_blocks, ask_blocks),
+// with one query for each group. Whole-ask references resolve their actual owner from asks,
+// never the issue key supplied in the reference. A removed block is absent. The write lands in
+// the document's own issue, or in none when a project holds it; that issue's ancestors are read
+// only once a target sits in another issue (IssueAncestors), since a pointer inside the writing
+// issue is held to nothing above it (pmdoc.CheckBlockPointers). This runs inside
 // the write's transaction.
 func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []model.ArtifactBlock, targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
 	var writing pmdoc.BlockWriting
@@ -509,6 +509,7 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []m
 	found := make(map[string]pmdoc.BlockTarget, len(targets))
 	var elsewhere []string
 	var askIDs []uuid.UUID
+	var itemBlocks []string
 	for _, target := range targets {
 		nodeID := text.TargetID(target)
 		if target.Kind == "ask" {
@@ -517,15 +518,16 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []m
 			}
 			continue
 		}
+		if target.Item != "" {
+			itemBlocks = append(itemBlocks, nodeID)
+			continue
+		}
 		// A ref_key holds no '#', so the node id's document part ends at its first one.
 		if document, _, _ := strings.Cut(nodeID, "#"); document != writing.Document {
 			elsewhere = append(elsewhere, nodeID)
 		} else if typ, ok := own[target.Block]; ok {
 			found[nodeID] = pmdoc.BlockTarget{Types: []string{typ}, Document: writing.Document, Issue: writing.Issue, Primary: primary}
 		}
-	}
-	if len(elsewhere) == 0 && len(askIDs) == 0 {
-		return writing, found, nil
 	}
 	if len(elsewhere) > 0 {
 		rows, err := q.Query(ctx, `
@@ -575,13 +577,42 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []m
 			return pmdoc.BlockWriting{}, nil, err
 		}
 	}
-	// Only a target in another document can sit in another issue, so the ancestor walk is paid
-	// for only here.
-	ancestors, err := IssueAncestors(ctx, q, writing.Issue)
-	if err != nil {
-		return pmdoc.BlockWriting{}, nil, err
+	if len(itemBlocks) > 0 {
+		rows, err := q.Query(ctx, `
+			select b.node_id, c.issue_key from comment_blocks b join comments c on c.id = b.comment_id
+			where b.node_id = any($1) and b.position is not null and c.issue_key is not null
+			union all
+			select b.node_id, m.issue_key from message_blocks b join messages m on m.id = b.message_id
+			where b.node_id = any($1) and b.position is not null and m.issue_key is not null
+			union all
+			select b.node_id, a.issue_key from ask_blocks b join asks a on a.id = b.ask_id
+			where b.node_id = any($1) and b.position is not null and a.issue_key is not null
+		`, itemBlocks)
+		if err != nil {
+			return pmdoc.BlockWriting{}, nil, fmt.Errorf("read the item blocks %s points at: %w", artifactID, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var nodeID, issue string
+			if err := rows.Scan(&nodeID, &issue); err != nil {
+				return pmdoc.BlockWriting{}, nil, fmt.Errorf("scan an item block %s points at: %w", artifactID, err)
+			}
+			found[nodeID] = pmdoc.BlockTarget{Issue: issue}
+		}
+		if err := rows.Err(); err != nil {
+			return pmdoc.BlockWriting{}, nil, err
+		}
 	}
-	writing.Ancestors = ancestors
+	for _, target := range found {
+		if target.Issue != "" && target.Issue != writing.Issue {
+			ancestors, err := IssueAncestors(ctx, q, writing.Issue)
+			if err != nil {
+				return pmdoc.BlockWriting{}, nil, err
+			}
+			writing.Ancestors = ancestors
+			break
+		}
+	}
 	return writing, found, nil
 }
 

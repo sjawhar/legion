@@ -1,0 +1,5 @@
+kind: Added
+body: Declare the item kinds a block pointer attribute permits and share canonical item-block parsing between the server and editor without widening document-only pointers.
+time: 2026-11-05T09:43:00Z
+custom:
+  Issue: INFRA-1098

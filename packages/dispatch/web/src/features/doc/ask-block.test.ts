@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { EditorState, TextSelection } from "@milkdown/kit/prose/state";
-import type { EditorView } from "@milkdown/kit/prose/view";
+import { EditorView } from "@milkdown/kit/prose/view";
 import { DOMSerializer, Schema } from "prosemirror-model";
 
 import type { BlockTypeSchema } from "../../api/types";
-import { askBlockEditingPlugin, editingAskBlockPos } from "./ask-block";
+import { askBlockEditingPlugin, editingAskBlockPos, installTypedBlocks } from "./ask-block";
 import { renderTypedBlock } from "./typed-block-drawing";
 
 const schema = new Schema({
@@ -179,7 +179,12 @@ const checkSchema = new Schema({
     paragraph: { content: "inline*", group: "block" },
     text: { group: "inline" },
     check: {
-      attrs: { blockId: { default: null }, run: { default: null }, serves: { default: null } },
+      attrs: {
+        blockId: { default: null },
+        run: { default: null },
+        serves: { default: null },
+        from: { default: null },
+      },
       content: "paragraph+",
       group: "block",
     },
@@ -188,6 +193,7 @@ const checkSchema = new Schema({
 
 const checkType: BlockTypeSchema = {
   attributes: {
+    from: { kind: "block[]", targets: ["ask"], items: ["ask", "comment", "message"] },
     run: { kind: "string" },
     serves: { kind: "block[]", targets: ["requirement"] },
   },
@@ -239,10 +245,82 @@ test("a block[] attribute draws the blocks it points at, each linked to its bloc
 
 test("a block[] attribute pointing at no block is not drawn at all", () => {
   const drawn = checkBlock([]);
-
   expect(drawn.querySelector('[data-proof-block-attribute="serves"]')).toBeNull();
   expect(drawn.textContent).not.toContain("serves");
   expect(drawn.querySelector('dd[data-proof-block-attribute="run"]')?.textContent).toBe(
     "bun test web/src"
   );
+});
+
+test("a from header links to a declared comment block but serves does not", () => {
+  const source = "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b1";
+  const node = checkSchema.node("check", { blockId: "c1", from: [source], serves: [source] }, [
+    checkSchema.node("paragraph", undefined, [checkSchema.text("Check retries.")]),
+  ]);
+  const dom = DOMSerializer.renderSpec(document, renderTypedBlock(node, checkType))
+    .dom as HTMLElement;
+  const link = dom.querySelector<HTMLAnchorElement>('dd[data-proof-block-attribute="from"] a');
+  expect(link?.getAttribute("href")).toBe(
+    "/issues/CORE-1/comments/11111111-1111-4111-8111-111111111111#b-b1"
+  );
+  expect(link?.getAttribute("data-dispatch-href")).toBe(source);
+  expect(dom.querySelector('dd[data-proof-block-attribute="serves"]')).toBeNull();
+});
+
+test("hovering a typed header link preserves its DOM while content edits stay observed", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = new EditorView(host, {
+    state: EditorState.create({ schema: checkSchema }),
+    nodeViews: {
+      paragraph: () => {
+        const dom = document.createElement("p");
+        return { contentDOM: dom, dom };
+      },
+    },
+  });
+  try {
+    installTypedBlocks(
+      view,
+      { version: 4, types: [checkType] },
+      () => {},
+      () => () => {}
+    );
+    const source = "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b1";
+    view.updateState(
+      EditorState.create({
+        doc: checkSchema.node("doc", undefined, [
+          checkSchema.node("check", { blockId: "c1", from: [source] }, [
+            checkSchema.node("paragraph", undefined, [checkSchema.text("Check retries.")]),
+          ]),
+        ]),
+        schema: checkSchema,
+      })
+    );
+    const link = view.dom.querySelector("a");
+    if (link === null) throw new Error("the from header has no source link");
+    const hovered = Promise.withResolvers<void>();
+    const hoverObserver = new MutationObserver(() => {
+      hoverObserver.disconnect();
+      hovered.resolve();
+    });
+    hoverObserver.observe(link, { attributes: true });
+    link.classList.add("markdown-link-hover-target");
+    await hovered.promise;
+    expect(view.dom.querySelector("a")).toBe(link);
+    const paragraph = view.dom.querySelector("p");
+    if (paragraph === null) throw new Error("the check has no editable content");
+    const edited = Promise.withResolvers<void>();
+    const editObserver = new MutationObserver(() => {
+      editObserver.disconnect();
+      edited.resolve();
+    });
+    editObserver.observe(paragraph, { childList: true });
+    paragraph.textContent = "Changed check content.";
+    await edited.promise;
+    expect(view.state.doc.textContent).toBe("Changed check content.");
+  } finally {
+    view.destroy();
+    host.remove();
+  }
 });

@@ -184,8 +184,8 @@ export function formatBlockReference(reference: DispatchBlockReference): string 
 
 /**
  * The block `value` names when it is one block reference written exactly as
- * `formatBlockReference` writes it - the one way a typed block's `block[]` attribute holds a
- * pointer - or undefined. Its document part is an issue's primary document
+ * `formatBlockReference` writes it - a typed block attribute's document pointer form -
+ * or undefined. Its document part is an issue's primary document
  * (`dispatch://<ISSUE>/spec`) or a document of an issue or a project
  * (`dispatch://<ISSUE or PROJECT>/artifact/<slug>`), its fragment one `parseBlockFragment` reads,
  * its id at most MAX_BLOCK_ID_BYTES and its target id at most MAX_REFERENCE_TARGET_BYTES, as text
@@ -216,17 +216,45 @@ export function parseCanonicalBlockReference(value: string): DispatchBlockRefere
   return formatBlockReference(reference) === value ? reference : undefined;
 }
 
+const CANONICAL_ITEM_BLOCK_REFERENCE = new RegExp(
+  `^dispatch://(${ISSUE_KEY})/(ask|comment|message)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})#b-(.*)$`,
+  "s"
+);
+const NO_ITEM_KINDS: readonly string[] = [];
+
+/** An unpinned block of an issue's item, with its full lower-case UUID. */
+export function parseCanonicalItemBlockReference(
+  value: string
+): { issue: string; item: "ask" | "comment" | "message"; id: string; block: string } | undefined {
+  const match = CANONICAL_ITEM_BLOCK_REFERENCE.exec(value);
+  if (match === null) return undefined;
+  const [, issue = "", item, id = "", fragment = ""] = match;
+  const parsed = parseBlockFragment(fragment);
+  if (
+    parsed === undefined ||
+    parsed.pin !== undefined ||
+    utf8Bytes(parsed.block) > MAX_BLOCK_ID_BYTES ||
+    !referenceTargetFits(`${item}/${id}#${parsed.block}`) ||
+    `dispatch://${issue}/${item}/${id}#b-${encodeBlockId(parsed.block)}` !== value
+  )
+    return undefined;
+  return { issue, item: item as "ask" | "comment" | "message", id, block: parsed.block };
+}
+
 /**
  * The pointers a typed block's `block[]` attribute holds, as markdown writes it: the empty string
- * for none, else canonical block references (`parseCanonicalBlockReference`) joined by exactly one
+ * for none, else canonical document or declared item block references joined by exactly one
  * space, with none leading or trailing and none repeated. Undefined for any other value, which is
  * refused, never normalised, so the editor and the server never disagree on one
  * (`blockPointerValueProblem` says why). Go's twin is `pmdoc.ParseBlockPointerValue`; both are
  * tested against DISPATCH_BLOCK_POINTER_VALUES, whose JSON copy is
  * `packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json`.
  */
-export function parseBlockPointerValue(value: string): string[] | undefined {
-  if (blockPointerValueProblem(value) !== undefined) {
+export function parseBlockPointerValue(
+  value: string,
+  items: readonly string[] = NO_ITEM_KINDS
+): string[] | undefined {
+  if (blockPointerValueProblem(value, items) !== undefined) {
     return undefined;
   }
   return value === "" ? [] : value.split(" ");
@@ -238,34 +266,38 @@ export function parseBlockPointerValue(value: string): string[] | undefined {
  * `JSON.stringify` where Go uses `%q`, which escapes a control or non-printing character
  * differently), or undefined when it is one.
  */
-export function blockPointerValueProblem(value: string): string | undefined {
+export function blockPointerValueProblem(
+  value: string,
+  items: readonly string[] = NO_ITEM_KINDS
+): string | undefined {
   if (value === "") {
     return undefined;
   }
   if (value.startsWith(" ") || value.endsWith(" ") || value.includes("  ")) {
     return `${JSON.stringify(value)} must be block references separated by exactly one space, with none leading or trailing`;
   }
-  return blockPointersProblem(value.split(" "));
+  return blockPointersProblem(value.split(" "), items);
 }
 
-/**
- * Why `values` are not the pointers of a `block[]` attribute - one is a part of an ask or a block
- * of a comment or a message, which a pointer never names (a `block[]` attribute points at blocks
- * of documents, whose types its targets limit, and an item's block has no type), one is otherwise
- * not a canonical block reference (`parseCanonicalBlockReference`), or one is named twice -
- * following the wording of Go's `pmdoc.validateBlockPointerValues`, quoted as above, or undefined
- * when they are.
- */
-export function blockPointersProblem(values: readonly string[]): string | undefined {
+/** Why a pointer list is invalid. Item blocks require the attribute's explicit items list. */
+export function blockPointersProblem(
+  values: readonly string[],
+  items: readonly string[] = NO_ITEM_KINDS
+): string | undefined {
   const seen = new Set<string>();
   for (const value of values) {
     const item = itemBlockKind(value);
-    if (item !== undefined) {
+    if (item !== undefined && !items.includes(item)) {
       // The kind takes the article its noun does: an ask, a comment, a message.
       const article = item === "ask" ? "an" : "a";
       return `${JSON.stringify(value)} is a block of ${article} ${item}: a block[] attribute points only at a block of a document`;
     }
-    if (parseCanonicalBlockReference(value) === undefined) {
+    if (
+      parseCanonicalBlockReference(value) === undefined &&
+      (item === undefined ||
+        !items.includes(item) ||
+        parseCanonicalItemBlockReference(value) === undefined)
+    ) {
       return `${JSON.stringify(value)} is not a block reference as Dispatch writes one: dispatch://<ISSUE>/spec#b-<id>, or dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>, the id percent-encoded in upper-case hex except ASCII letters, digits and -, optionally pinned @v<N>`;
     }
     if (seen.has(value)) {
@@ -287,6 +319,7 @@ export const DISPATCH_BLOCK_POINTER_VALUES: readonly {
   ok: boolean;
   why: string;
   problem?: string;
+  items?: readonly string[];
 }[] = [
   {
     value: "dispatch://CORE-1/spec#b-x",
@@ -453,6 +486,67 @@ export const DISPATCH_BLOCK_POINTER_VALUES: readonly {
     ok: false,
     why: "a document's block, then an issue message's",
     problem: "is a block of a message: a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b1",
+    items: ["comment"],
+    ok: true,
+    why: "a declared comment block",
+  },
+  {
+    value: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b1",
+    items: ["message"],
+    ok: true,
+    why: "a declared message block",
+  },
+  {
+    value: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b1",
+    items: ["ask"],
+    ok: true,
+    why: "a declared item ask part",
+  },
+  {
+    value: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b1",
+    items: ["comment"],
+    ok: false,
+    why: "an undeclared item kind",
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b1@v1",
+    items: ["comment"],
+    ok: false,
+    why: "an item pointer cannot pin a revision",
+  },
+  {
+    value: "dispatch://CORE-1/comment/AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA#b-b1",
+    items: ["comment"],
+    ok: false,
+    why: "a non-canonical UUID spelling",
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111#b-b1",
+    items: ["comment"],
+    ok: false,
+    why: "an item prefix is not a UUID",
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/comment/11111111-1111-4111-8111-111111111111#b-b1",
+    items: ["comment"],
+    ok: false,
+    why: "an item pointer must belong to an issue",
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-%62",
+    items: ["comment"],
+    ok: false,
+    why: "a non-canonical item block encoding",
+  },
+  {
+    value:
+      "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b1 dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b1",
+    items: ["comment"],
+    ok: false,
+    why: "a repeated item pointer",
   },
 ];
 

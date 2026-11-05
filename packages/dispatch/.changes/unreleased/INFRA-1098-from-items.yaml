@@ -1,0 +1,5 @@
+kind: Added
+body: Cover comment-block provenance through real CLI writes, reads at both ends and browser editing while keeping serves document-only.
+time: 2026-11-05T09:43:00Z
+custom:
+  Issue: INFRA-1098

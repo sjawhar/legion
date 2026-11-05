@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestDecisionFromSchemaNamesDocumentAsksOnly(t *testing.T) {
+func TestDecisionFromSchemaNamesDocumentAsksAndDeclaredItems(t *testing.T) {
 	for _, name := range []string{"callout", "ask", "decision", "requirement", "plan_task", "check"} {
 		t.Run(name, func(t *testing.T) {
 			typ, ok := typedBlock(name)
@@ -13,8 +13,8 @@ func TestDecisionFromSchemaNamesDocumentAsksOnly(t *testing.T) {
 				t.Fatalf("no schema type %q", name)
 			}
 			attribute, ok := typ.Attributes.Lookup("from")
-			if !ok || attribute.Kind != BlockAttributeBlockList || !slices.Equal(attribute.Targets, []string{"ask"}) {
-				t.Fatalf("%s.from = %+v (declared %t), want block[] targeting only ask", name, attribute, ok)
+			if !ok || attribute.Kind != BlockAttributeBlockList || !slices.Equal(attribute.Targets, []string{"ask"}) || !slices.Equal(attribute.Items, []string{"ask", "comment", "message"}) {
+				t.Fatalf("%s.from = %+v (declared %t), want document asks and declared item blocks", name, attribute, ok)
 			}
 		})
 	}

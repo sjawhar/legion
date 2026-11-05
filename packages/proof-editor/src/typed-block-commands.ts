@@ -76,7 +76,7 @@ function validateValue(typeName: string, name: string, attribute: BlockAttribute
       if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
         throw new Error(`typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)} must be an array of block references`);
       }
-      const problem = blockPointersProblem(value as readonly string[]);
+      const problem = blockPointersProblem(value as readonly string[], attribute.items);
       if (problem !== undefined) throw new Error(`typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${problem}`);
     }
   }

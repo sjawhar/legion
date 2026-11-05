@@ -1,0 +1,5 @@
+kind: Added
+body: Preserve declared item-block provenance through markdown parsing, HTML paste and typed-block attribute commands.
+time: 2026-11-05T09:43:00Z
+custom:
+  Issue: INFRA-1098

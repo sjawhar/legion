@@ -70,6 +70,9 @@ export function validateBlockSchema(schema: BlockSchema): void {
       if (attribute.targets !== undefined && attribute.kind !== 'block[]') {
         throw new Error(`typed block ${JSON.stringify(type.name)} attribute ${JSON.stringify(name)} has targets, which only a block[] attribute may carry`);
       }
+      if (attribute.items !== undefined && (attribute.kind !== 'block[]' || attribute.items.some((item) => item !== 'ask' && item !== 'comment' && item !== 'message'))) {
+        throw new Error(`typed block ${JSON.stringify(type.name)} attribute ${JSON.stringify(name)} has unsupported items; only a block[] attribute may name ask, comment or message`);
+      }
     }
   }
 }
@@ -103,7 +106,7 @@ function parseAttribute(typeName: string, name: string, attribute: BlockAttribut
       return values;
     }
     case 'block[]':
-      return parseBlockPointers(typeName, name, value);
+      return parseBlockPointers(typeName, name, value, attribute.items);
   }
 }
 

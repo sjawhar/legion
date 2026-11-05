@@ -26,7 +26,11 @@ function typedBlockView(
   if (typeof blockId === "string" && blockId !== "") {
     (dom as HTMLElement).dataset.blockId = blockId;
   }
-  return { contentDOM, dom };
+  return {
+    contentDOM,
+    dom,
+    ignoreMutation: (mutation) => !contentDOM?.contains(mutation.target),
+  };
 }
 
 let nextHostKey = 0;

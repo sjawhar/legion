@@ -235,6 +235,14 @@ func validateAttributeSchema(typeName, name string, attr BlockAttributeSchema) e
 	if attr.Kind != BlockAttributeBlockList && attr.Targets != nil {
 		return fmt.Errorf("type %q attribute %q has targets, which only a block[] attribute may carry", typeName, name)
 	}
+	if attr.Kind != BlockAttributeBlockList && attr.Items != nil {
+		return fmt.Errorf("type %q attribute %q has items, which only a block[] attribute may carry", typeName, name)
+	}
+	for _, item := range attr.Items {
+		if item != "ask" && item != "comment" && item != "message" {
+			return fmt.Errorf("type %q attribute %q has unsupported item kind %q", typeName, name, item)
+		}
+	}
 	if attr.Scope != "" && (attr.Kind != BlockAttributeBlockList || attr.Scope != BlockAttributeScopeDocument && attr.Scope != BlockAttributeScopeSpec) {
 		return fmt.Errorf("type %q attribute %q has unsupported pointer scope %q", typeName, name, attr.Scope)
 	}
@@ -330,19 +338,19 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 		if !ok {
 			return fmt.Errorf("must be an array of block references, got %T", value)
 		}
-		return validateBlockPointerValues(items)
+		return validateBlockPointerValues(items, attr.Items)
 	}
 	return nil
 }
 
 // ParseBlockPointerValue reads a `block[]` attribute as markdown writes it: the empty string for
-// no pointers, else canonical block references (text.CanonicalBlockRef) joined by exactly one
-// space, with none leading or trailing and none repeated. Anything else is refused, never
-// normalised, so the server and the editor never disagree on a value. Its twin is
+// no pointers, else canonical document or declared item block references joined by exactly one
+// space, with none leading or trailing and none repeated. Item blocks are unpinned and limited to
+// items. Anything else is refused, never normalised. Its twin is
 // parseBlockPointerValue in @legion/contracts, whose blockPointerValueProblem gives its refusal's
 // reason in this function's wording, quoting a value as JSON.stringify does where this uses %q;
 // both are tested against `testdata/block-pointer-values.json`.
-func ParseBlockPointerValue(raw string) ([]string, error) {
+func ParseBlockPointerValue(raw string, items []string) ([]string, error) {
 	if raw == "" {
 		return []string{}, nil
 	}
@@ -350,22 +358,18 @@ func ParseBlockPointerValue(raw string) ([]string, error) {
 		return nil, fmt.Errorf("%q must be block references separated by exactly one space, with none leading or trailing", raw)
 	}
 	values := strings.Split(raw, " ")
-	if err := validateBlockPointerValues(values); err != nil {
+	if err := validateBlockPointerValues(values, items); err != nil {
 		return nil, err
 	}
 	return values, nil
 }
 
-// validateBlockPointerValues refuses a list of block pointers holding a part of an ask or a block
-// of a comment or a message (text.Ref.Item), which a pointer never names: a `block[]` attribute
-// points at blocks of documents, whose types its targets limit, and an item's block has no type.
-// It refuses one that is otherwise not a canonical block reference (text.CanonicalBlockRef), and
-// one named twice. Its twin is blockPointersProblem in @legion/contracts, which follows its
-// wording, quoting a value as JSON.stringify does.
-func validateBlockPointerValues(values []string) error {
+// validateBlockPointerValues accepts document blocks and the unpinned item blocks declared in
+// items. Every reference must be canonical and occur once; the browser uses the same corpus.
+func validateBlockPointerValues(values, items []string) error {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if ref, ok := text.ParseRef(value, ""); ok && ref.Kind == "block" && ref.Item != "" {
+		if ref, ok := text.ParseRef(value, ""); ok && ref.Kind == "block" && ref.Item != "" && !slices.Contains(items, ref.Item) {
 			// The kind takes the article its noun does: an ask, a comment, a message.
 			article := "a"
 			if ref.Item == "ask" {
@@ -373,7 +377,12 @@ func validateBlockPointerValues(values []string) error {
 			}
 			return fmt.Errorf("%q is a block of %s %s: a block[] attribute points only at a block of a document", value, article, ref.Item)
 		}
-		if _, ok := text.CanonicalBlockRef(value); !ok {
+		_, canonical := text.CanonicalBlockRef(value)
+		if !canonical {
+			ref, ok := text.CanonicalItemBlockRef(value)
+			canonical = ok && slices.Contains(items, ref.Item)
+		}
+		if !canonical {
 			return fmt.Errorf("%q is not a block reference as Dispatch writes one: dispatch://<ISSUE>/spec#b-<id>, or dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>, the id percent-encoded in upper-case hex except ASCII letters, digits and -, optionally pinned @v<N>", value)
 		}
 		if _, repeated := seen[value]; repeated {
@@ -411,7 +420,7 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 		}
 		return value, nil
 	case BlockAttributeBlockList:
-		return ParseBlockPointerValue(text)
+		return ParseBlockPointerValue(text, attr.Items)
 	default:
 		return nil, fmt.Errorf("has unknown kind %q", attr.Kind)
 	}
