@@ -1583,8 +1583,9 @@ func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
 // and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
 // there are; with none the line says so.
 //
-// The state body names no claim's suspender — every plugin parses it with the strict schema of
-// its own contract — so the command reads that from the operator claim list, with the bearer
+// The state body names no claim's suspender — every plugin parses it with the schema of its own
+// contract, and one whose answer side predates INFRA-1048 refuses a key it does not know — so the
+// command reads that from the operator claim list, with the bearer
 // --operator-token-file names (strandedSuspenders). Read without that flag, as a pane reads,
 // there is no bearer and a released claim reads as the suspended worker it is.
 func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {

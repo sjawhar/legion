@@ -1271,8 +1271,10 @@ function schemaKeys(
 
 // The guard the INFRA-945 plan's departure 1 chose in place of serving two shapes of one body: a
 // session reads whatever this daemon serves with the schema of its own contract, so a key no
-// older contract knows refuses the whole body. `suspendedBy` is served to the operator's bearer
-// and nowhere else, and this holds that for every schema the module exports, present and future.
+// older contract knows refuses the whole body at a plugin whose answer side predates INFRA-1048,
+// and is dropped at every plugin after it, which loses the field rather than the body.
+// `suspendedBy` is served to the operator's bearer and nowhere else, and this holds that for every
+// schema the module exports, present and future.
 test("no session-facing response carries suspendedBy", () => {
   let walked = 0;
   for (const [name, schema] of Object.entries(legionApi)) {
