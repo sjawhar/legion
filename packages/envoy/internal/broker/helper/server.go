@@ -104,7 +104,7 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		}
 		sessionID := ""
 		if req.SessionID != nil {
-			sessionID = *req.SessionID
+			_ = req.SessionID
 		}
 		resp = s.register(ctx, peer, pid, sessionID, wait)
 	case "sign":
