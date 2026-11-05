@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/sampler"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -186,6 +187,13 @@ type Options struct {
 	// every process in it, so a server a role started would die with that generation and take
 	// every sibling role's test database with it.
 	TestPostgres bool
+	// SamplerRules is runtime.kubernetes.sampler_rules: the deployment's own kind rules for the
+	// pod's resource sampler, which decide from a process's program and arguments whether its
+	// CPU and memory are counted as build, test or tool work. They are tried before the sampler's
+	// built-in list, so one of them overrides a built-in rule rather than waiting behind it, and
+	// they reach an issue pod's launcher in the `--sampler` flag the pod builder renders
+	// (samplerFlag). Nil is a deployment that configured none, which gets the built-in list.
+	SamplerRules []sampler.Rule
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).

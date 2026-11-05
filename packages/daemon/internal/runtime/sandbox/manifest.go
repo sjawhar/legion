@@ -599,6 +599,7 @@ func (r *Runtime) sandboxManifest(l launch) sandbox {
 // without rebuilding the launch that built it (drift.go).
 func (r *Runtime) podTemplate(l launch) podTemplate {
 	_, providersMounts := r.providers()
+	volumes := r.volumes(l)
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyAlways,
 		TerminationGracePeriodSeconds: new(int64(math.Ceil(r.terminationGrace.Seconds()))),
@@ -615,9 +616,9 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 		NodeSelector:      r.nodeSelector(),
 		Tolerations:       r.tolerations(),
 		PriorityClassName: r.scheduling.PriorityClass,
-		Volumes:           r.volumes(l),
+		Volumes:           volumes,
 		InitContainers:    l.kind.initContainers(r, l),
-		Containers:        []corev1.Container{r.launcherContainer(l, providersMounts)},
+		Containers:        []corev1.Container{r.launcherContainer(l, providersMounts, volumes)},
 	}
 	for i := range spec.InitContainers {
 		kubeletLiteral(&spec.InitContainers[i])
@@ -643,9 +644,10 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 // generations when the deployment keeps sessions there (sessionProxyFlags); the per-generation
 // worker-shim argv and plain environment arrive in the launcher's start command, while values the
 // kubelet must resolve (the downward API, the operator's secret refs) are set on the container.
-func (r *Runtime) launcherContainer(l launch, providersMounts []corev1.VolumeMount) corev1.Container {
+// volumes is the pod's own volume list, which an issue pod's container renders for its sampler.
+func (r *Runtime) launcherContainer(l launch, providersMounts []corev1.VolumeMount, volumes []corev1.Volume) corev1.Container {
 	resolved, _ := r.launchEnvironment(l)
-	return l.kind.launcherContainer(r, l, resolved, providersMounts)
+	return l.kind.launcherContainer(r, l, resolved, providersMounts, volumes)
 }
 
 // kubeletLiteral escapes a container's command and env values against the kubelet's expansion,

@@ -170,6 +170,41 @@ func TestPodDriftIsNothingForAPodALaunchJustCreated(t *testing.T) {
 	}
 }
 
+// A label another controller puts on a running pod is no drift and replaces nothing. The one this
+// deployment expects is `monitoring.theorem.dev/detail: "off"`, which turns the detailed
+// monitoring of dispatch://INFRA-1141 off for a pod: it is set on the pod by whoever decides that,
+// after the pod was created, and a daemon that read it as a pod built from another configuration
+// would end every role's turn and take the issue's disk the moment somebody marked a pod. What a
+// pod is judged by is the configuration it was built from, which its template records
+// (podShapeAnnotation), and the four facets of the pod its workers can be asked about
+// (driftedInPod); a label is none of them. The role's next launch keeps the pod, and the label is
+// still on it afterwards.
+func TestAnExtraLabelOnAPodIsNoDriftAndIsNotReplaced(t *testing.T) {
+	const detail = "monitoring.theorem.dev/detail"
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	loc := g.spawn(spec)
+	g.update(g.pod(loc.Sandbox.Name), func(pod *corev1.Pod) { pod.Labels[detail] = "off" })
+	if drifted := driftOf(t, g.ctx, g.r, loc); len(drifted) > 0 {
+		t.Fatalf("PodDrift = %q, want nothing of a pod another controller only labelled", drifted)
+	}
+	if held := heldInPod(g.r, g.pod(loc.Sandbox.Name), claim.Roles); len(held) > 0 {
+		t.Fatalf("the labelled pod holds %+v, which a pod created now is not handed", held)
+	}
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
+	next, err := g.r.Resume(g.ctx, &loc, spec)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if next.Sandbox.PodUID != loc.Sandbox.PodUID {
+		t.Fatalf("Resume replaced pod %s with %s; a label another controller added is no reason to end every role of the issue",
+			loc.Sandbox.PodUID, next.Sandbox.PodUID)
+	}
+	if value := g.pod(loc.Sandbox.Name).Labels[detail]; value != "off" {
+		t.Errorf("the pod carries %s=%q after the launch, want it left as the controller set it", detail, value)
+	}
+}
+
 // Each key of a pod's shape reads as drifted on its own, and the reason names that key: a daemon
 // restarted onto another image, another reservation for the issue pod, an operator volume or mount
 // added, or another disk size, over the pod the release before it left running. A deployment

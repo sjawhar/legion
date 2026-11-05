@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/sampler"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -58,7 +60,14 @@ func TestAnIssuePodRunsEveryRoleInOneContainer(t *testing.T) {
 	for _, role := range claim.Roles {
 		want = append(want, "--role", string(role))
 	}
-	want = append(want, "--stop-grace", "30s")
+	// The sampler's JSON stands between the roles and --stop-grace, as --test-postgres does;
+	// what it holds is TestAnIssuePodDeclaresItsSamplersPort's and
+	// TestTheSamplersVolumesAreTheRenderedPodsOwn's.
+	at := slices.Index(c.Command, "--sampler")
+	if at < 0 || at+1 >= len(c.Command) {
+		t.Fatalf("the roles container runs %q, want --sampler and the sampler's JSON", c.Command)
+	}
+	want = append(want, "--sampler", c.Command[at+1], "--stop-grace", "30s")
 	if !slices.Equal(c.Command, want) {
 		t.Errorf("the roles container runs %q, want %q", c.Command, want)
 	}
@@ -191,6 +200,156 @@ func TestAnIssuePodServesItsOwnTestPostgres(t *testing.T) {
 	}
 	if value := envValue(off.mainEnvironment(launchOf(t, off, rootSpec(t))), launcher.TestPGVariable); value != "" {
 		t.Errorf("a deployment that serves no test database tells its roles %s=%q", launcher.TestPGVariable, value)
+	}
+}
+
+// samplerConfigOf is the configuration the container's `--sampler` carries, read as its launcher
+// reads it: the kubelet's doubling of `$` undone first, since the process is handed the text as
+// it was written (kubeletLiteral).
+func samplerConfigOf(t *testing.T, c corev1.Container) launcher.SamplerConfig {
+	t.Helper()
+	at := slices.Index(c.Command, "--sampler")
+	if at < 0 || at+1 >= len(c.Command) {
+		t.Fatalf("the %s container runs %q, want --sampler and the sampler's JSON", c.Name, c.Command)
+	}
+	var cfg launcher.SamplerConfig
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(c.Command[at+1], "$$", "$")), &cfg); err != nil {
+		t.Fatalf("the sampler's flag %q is no SamplerConfig: %v", c.Command[at+1], err)
+	}
+	return cfg
+}
+
+// Every issue pod's roles container declares the sampler's port, named `sampler` and numbered
+// 9464, which is what a scrape selects it by, and its launcher is handed the whole configuration
+// of that sampler on one flag: the port it binds, the project and issue of the pod's own labels,
+// which is where the series' `project` and `issue` come from, and the deployment's own kind rules
+// (runtime.kubernetes.sampler_rules), tried before the sampler's built-in list. The controller's
+// pod declares no port and is handed no flag: it holds no issue, and these series are an issue
+// pod's (docs/sampler-metrics.md).
+func TestAnIssuePodDeclaresItsSamplersPort(t *testing.T) {
+	opts := goldenOptions()
+	opts.SamplerRules = []sampler.Rule{{Program: "cargo", Arguments: []string{"test"}, Kind: sampler.KindTest}}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := launchOf(t, r, rootSpec(t))
+	c := r.podTemplate(l).Spec.Containers[0]
+	want := []corev1.ContainerPort{{Name: "sampler", ContainerPort: 9464, Protocol: corev1.ProtocolTCP}}
+	if !slices.Equal(c.Ports, want) {
+		t.Errorf("the roles container declares ports %+v, want %+v", c.Ports, want)
+	}
+	cfg := samplerConfigOf(t, c)
+	labels := r.labels(l)
+	if cfg.Port != 9464 {
+		t.Errorf("the sampler is told port %d, want the port the container declares, 9464", cfg.Port)
+	}
+	if cfg.Project != labels[labelProject] || cfg.Issue != labels[labelIssue] {
+		t.Errorf("the sampler is told project %q issue %q, want the pod's own labels %q and %q",
+			cfg.Project, cfg.Issue, labels[labelProject], labels[labelIssue])
+	}
+	sameRule := func(a, b sampler.Rule) bool {
+		return a.Program == b.Program && a.Kind == b.Kind && slices.Equal(a.Arguments, b.Arguments)
+	}
+	if !slices.EqualFunc(cfg.Rules, opts.SamplerRules, sameRule) {
+		t.Errorf("the sampler is told rules %+v, want the deployment's %+v", cfg.Rules, opts.SamplerRules)
+	}
+	// The controller's pod runs no sampler: nothing to declare and nothing to hand over.
+	controller := r.podTemplate(launchOf(t, r, controllerSpec(t))).Spec.Containers[0]
+	if len(controller.Ports) > 0 {
+		t.Errorf("the controller's container declares ports %+v, want none", controller.Ports)
+	}
+	if slices.Contains(controller.Command, "--sampler") {
+		t.Errorf("the controller's container runs %q, want no --sampler", controller.Command)
+	}
+	// A deployment that configures no rule hands over none, and the sampler runs on its built-in
+	// list alone.
+	plain, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules := samplerConfigOf(t, plain.podTemplate(launchOf(t, plain, rootSpec(t))).Spec.Containers[0]).Rules; len(rules) > 0 {
+		t.Errorf("a deployment that configures no rule hands the sampler %+v, want none", rules)
+	}
+}
+
+// The volumes the sampler is told to measure are the rendered pod's own: each is a volume the pod
+// declares and the roles container mounts, carrying exactly that container's mount paths for it,
+// the medium the pod spec declares and the role its name names. Every memory-backed volume the
+// container mounts is among them — those are the ones that charge the pod's memory limit, which
+// is what the readings size — and no name that is not a volume of the pod is. The two volumes the
+// init containers alone mount are not in the list: this container holds no path to read either
+// at, and the sampler counts a failed read for an entry with no path.
+func TestTheSamplersVolumesAreTheRenderedPodsOwn(t *testing.T) {
+	opts := goldenOptions()
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.TestPostgres = true
+	opts.Pod = Pod{Volumes: []corev1.Volume{operatorVolume}, VolumeMounts: []corev1.VolumeMount{operatorMount}}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := r.podTemplate(launchOf(t, r, rootSpec(t))).Spec
+	c := pod.Containers[0]
+	declared := map[string]corev1.Volume{}
+	for _, volume := range pod.Volumes {
+		declared[volume.Name] = volume
+	}
+	mounted := map[string][]string{}
+	for _, mount := range c.VolumeMounts {
+		mounted[mount.Name] = append(mounted[mount.Name], mount.MountPath)
+	}
+	// onMemory is what the pod spec declares a volume to be backed by, stated here in the test's
+	// own terms: the kubelet keeps these three on a tmpfs charged to the pod's memory.
+	onMemory := func(volume corev1.Volume) bool {
+		return volume.Secret != nil || volume.Projected != nil ||
+			(volume.EmptyDir != nil && volume.EmptyDir.Medium == corev1.StorageMediumMemory)
+	}
+	measured := map[string]sampler.Volume{}
+	for _, entry := range samplerConfigOf(t, c).Volumes {
+		if _, twice := measured[entry.Name]; twice {
+			t.Errorf("the sampler is told volume %s twice", entry.Name)
+		}
+		measured[entry.Name] = entry
+		volume, declares := declared[entry.Name]
+		if !declares {
+			t.Errorf("the sampler is told volume %s, which the pod does not declare", entry.Name)
+			continue
+		}
+		if !slices.Equal(entry.Paths, mounted[entry.Name]) {
+			t.Errorf("the sampler reads volume %s at %q, want the roles container's own mounts %q", entry.Name, entry.Paths, mounted[entry.Name])
+		}
+		if want := map[bool]string{true: "memory", false: "disk"}[onMemory(volume)]; entry.Medium != want {
+			t.Errorf("the sampler is told volume %s is on %q, want %q", entry.Name, entry.Medium, want)
+		}
+	}
+	for name, paths := range mounted {
+		if onMemory(declared[name]) && measured[name].Name == "" {
+			t.Errorf("the memory volume %s is mounted at %q and is in none of the sampler's entries", name, paths)
+		}
+	}
+	for _, name := range []string{provisionVolume, tempVolume} {
+		if _, container := mounted[name]; container {
+			t.Fatalf("the roles container mounts %s: this test holds that only the init containers do", name)
+		}
+		if _, told := measured[name]; told {
+			t.Errorf("the sampler is told %s, which this container mounts nowhere: it would fail a read at every pass", name)
+		}
+	}
+	// The role each volume belongs to is read from its name, and the volumes no single role owns
+	// carry none, which the sampler serves as `shared`.
+	for _, role := range claim.Roles {
+		for _, prefix := range []string{"launcher", "gh", "private", "state", agentSecretsKeyVolume} {
+			name := prefix + "-" + string(role)
+			if entry, told := measured[name]; !told || entry.Role != string(role) {
+				t.Errorf("the sampler is told %+v for volume %s, want it owned by %s", entry, name, role)
+			}
+		}
+	}
+	for _, name := range []string{issueVolume, configVolume, roleHomesVolume, testPGVolume, agentSecretsTokenVolume, operatorVolume.Name} {
+		if entry, told := measured[name]; !told || entry.Role != "" {
+			t.Errorf("the sampler is told %+v for volume %s, want it measured and owned by no role", entry, name)
+		}
 	}
 }
 

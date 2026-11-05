@@ -8,6 +8,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/sampler"
 )
 
 // Settings is the daemon's resolved legion.yaml as `GET /legion/v1/state` carries it (contract
@@ -133,8 +134,21 @@ type KubernetesSettings struct {
 	Setup []string `json:"setup"`
 	// TestPostgres is whether every issue pod serves its own PostgreSQL for tests, which every
 	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
-	TestPostgres    bool                    `json:"test_postgres"`
+	TestPostgres bool `json:"test_postgres"`
+	// SamplerRules is the deployment's own kind rules for the pod's resource sampler, `[]` while
+	// the file sets none: every issue pod's launcher is handed them, so every pod knows them, as
+	// with `setup`.
+	SamplerRules    []SamplerRuleSettings   `json:"sampler_rules"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`
+}
+
+// SamplerRuleSettings is one `runtime.kubernetes.sampler_rules` entry: the program the rule
+// matches, the run of arguments that must follow it (`[]` where the rule names none) and the kind
+// a match counts the process's CPU and memory as.
+type SamplerRuleSettings struct {
+	Program   string   `json:"program"`
+	Arguments []string `json:"arguments"`
+	Kind      string   `json:"kind"`
 }
 
 // SchedulingSettings is `runtime.kubernetes.scheduling`; the selector and the tolerations are `{}`
@@ -375,6 +389,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 		SessionStore: string(block.SessionStore.Kind),
 		Setup:        stringsOf(block.Setup),
 		TestPostgres: block.TestPostgres,
+		SamplerRules: samplerRuleSettingsOf(block.SamplerRules),
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
@@ -391,6 +406,17 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 	}
 	if plugins := block.Plugins; plugins != nil {
 		settings.Plugins = &PluginsSettings{PiLegion: pluginSourceOf(plugins.PiLegion), PiEnvoy: pluginSourceOf(plugins.PiEnvoy)}
+	}
+	return settings
+}
+
+// samplerRuleSettingsOf is the deployment's sampler rules as the state shows them, `[]` for a
+// deployment that configured none, as stringsOf answers `[]` for an unset argv: the state's
+// readers refuse a null.
+func samplerRuleSettingsOf(rules []sampler.Rule) []SamplerRuleSettings {
+	settings := make([]SamplerRuleSettings, len(rules))
+	for i, rule := range rules {
+		settings[i] = SamplerRuleSettings{Program: rule.Program, Arguments: stringsOf(rule.Arguments), Kind: string(rule.Kind)}
 	}
 	return settings
 }

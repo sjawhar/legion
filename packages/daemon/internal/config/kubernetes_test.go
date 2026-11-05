@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/sampler"
 )
 
 const workerImage = "ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -1794,5 +1796,95 @@ func TestTestPostgresSettlesFromTheFile(t *testing.T) {
 	}
 	if !cfg.Runtime.Kubernetes.TestPostgres {
 		t.Error("test_postgres: true settled false")
+	}
+}
+
+// sampler_rules settles as the list the file wrote, in its order, with the arguments a rule names
+// and none where it names none: the runtime hands it to every issue pod's launcher, which tries
+// it before the sampler's built-in rules.
+func TestSamplerRulesSettleFromTheFile(t *testing.T) {
+	const block = "    sampler_rules:\n" +
+		"      - { program: cargo, arguments: [test], kind: test }\n" +
+		"      - { program: tsc, kind: build }\n"
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+block), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []sampler.Rule{
+		{Program: "cargo", Arguments: []string{"test"}, Kind: sampler.KindTest},
+		{Program: "tsc", Kind: sampler.KindBuild},
+	}
+	got := cfg.Runtime.Kubernetes.SamplerRules
+	if !slices.EqualFunc(got, want, func(a, b sampler.Rule) bool {
+		return a.Program == b.Program && a.Kind == b.Kind && slices.Equal(a.Arguments, b.Arguments)
+	}) {
+		t.Fatalf("sampler_rules settled %+v, want %+v", got, want)
+	}
+	// A file that writes the key out configures no rule, which is the sampler's built-in list
+	// alone.
+	plain, err := LoadForValidation(writeConfigFile(t, kubernetesFile), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules := plain.Runtime.Kubernetes.SamplerRules; rules != nil {
+		t.Errorf("a file that sets no sampler_rules settled %+v, want none", rules)
+	}
+}
+
+// Every rule the sampler's engine could not match as its author meant it is refused at load, by
+// the engine's own validator and never a second one, and the refusal names the key an operator
+// edits (runtime.kubernetes.sampler_rules) rather than the package that wrote it.
+func TestSamplerRulesRefusals(t *testing.T) {
+	for name, tc := range map[string]struct{ block, want string }{
+		"a kind no rule answers": {
+			"    sampler_rules: [{ program: cargo, kind: agent }]\n",
+			`runtime.kubernetes.sampler_rules: rule "cargo" has kind "agent": a rule answers one of build, test, tool, other`,
+		},
+		"the same rule twice": {
+			"    sampler_rules: [{ program: cargo, arguments: [test], kind: test }, { program: cargo, arguments: [test], kind: build }]\n",
+			`runtime.kubernetes.sampler_rules: rule "cargo test" twice`,
+		},
+		"a program named by its path": {
+			"    sampler_rules: [{ program: /usr/bin/cargo, kind: build }]\n",
+			`runtime.kubernetes.sampler_rules: rule "/usr/bin/cargo" names a program by its path`,
+		},
+		"a pattern that is a glob": {
+			"    sampler_rules: [{ program: 'go*', kind: build }]\n",
+			`runtime.kubernetes.sampler_rules: rule "go*" holds "go*": a rule matches a whole word literally`,
+		},
+		"an entry that is no mapping": {
+			"    sampler_rules: [cargo]\n",
+			"runtime.kubernetes.sampler_rules[0] must be a mapping",
+		},
+		"a list that is no array": {
+			"    sampler_rules: { program: cargo, kind: build }\n",
+			"runtime.kubernetes.sampler_rules must be an array",
+		},
+		"a rule with no program": {
+			"    sampler_rules: [{ kind: build }]\n",
+			"runtime.kubernetes.sampler_rules[0].program is required: the program the rule matches",
+		},
+		"a rule with no kind": {
+			"    sampler_rules: [{ program: cargo }]\n",
+			"runtime.kubernetes.sampler_rules[0].kind is required: the kind a match counts the process's work as",
+		},
+		"a member the entry does not model": {
+			"    sampler_rules: [{ program: cargo, args: [test], kind: test }]\n",
+			"unknown key runtime.kubernetes.sampler_rules[0].args",
+		},
+		"an argument that is no string": {
+			"    sampler_rules: [{ program: cargo, arguments: [1], kind: test }]\n",
+			"runtime.kubernetes.sampler_rules[0].arguments must be an array of non-empty strings",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+tc.block), noEnv)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err %v, want %q", err, tc.want)
+			}
+			if err != nil && strings.Contains(err.Error(), "sampler: ") {
+				t.Errorf("err %v names the package rather than the key an operator edits", err)
+			}
+		})
 	}
 }

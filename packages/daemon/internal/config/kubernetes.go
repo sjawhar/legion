@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/sampler"
 )
 
 // Kubernetes is the settled `runtime.kubernetes` block: where the Sandbox runtime runs its pods and
@@ -98,6 +99,12 @@ type Kubernetes struct {
 	// the pod as LEGION_TEST_PG_DSN, so no agent points a test at the deployment's own databases.
 	// False when the file sets none. It needs an image carrying /usr/local/bin/legion-testpg.
 	TestPostgres bool
+	// SamplerRules is `runtime.kubernetes.sampler_rules`: this deployment's own rules for the
+	// pod's resource sampler, each a program, the run of arguments that must follow it where the
+	// rule names one, and the kind a match counts the process's CPU and memory as. They are
+	// tried before the sampler's built-in list, so one of them overrides a built-in rule rather
+	// than waiting behind it. Nil when the file sets none, which is the built-in list alone.
+	SamplerRules []sampler.Rule
 }
 
 // RepositoryCacheConfig is `runtime.kubernetes.repository_cache`: the volume each repository's
@@ -451,7 +458,8 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup", "test_postgres")
+		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup", "test_postgres",
+		"sampler_rules")
 	if err != nil {
 		return nil, err
 	}
@@ -518,6 +526,9 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.TestPostgres, err = readTestPostgres(fields["test_postgres"]); err != nil {
 		return nil, err
 	}
+	if block.SamplerRules, err = readSamplerRules(fields["sampler_rules"]); err != nil {
+		return nil, err
+	}
 	if block.RepositoryCache, err = readRepositoryCache(fields["repository_cache"]); err != nil {
 		return nil, err
 	}
@@ -537,6 +548,57 @@ func readTestPostgres(value *yaml.Node) (bool, error) {
 		return false, fmt.Errorf("%s must be true or false", key)
 	}
 	return on, nil
+}
+
+// readSamplerRules reads `runtime.kubernetes.sampler_rules`, nil when absent: the deployment's
+// own kind rules for the pod's resource sampler, each a mapping of a program, the run of
+// arguments that must follow it where the rule names one, and the kind a match answers
+// (docs/sampler-metrics.md, "The kinds"). It is the YAML shape of sampler.Rule, and the list
+// reaches each issue pod's launcher as the `rules` of its `--sampler` flag.
+//
+// Every rule is then put to sampler.NewRules, the one validator of a rule, which refuses a kind
+// no rule may answer, a program named by its path, a pattern that is more than one word or holds
+// a glob's characters, and the same rule twice. Its refusals name the package rather than the
+// key an operator edits, so the key path takes that prefix's place and the message reads as every
+// other refusal of this file does, as readNatsURLs does with an address's.
+func readSamplerRules(value *yaml.Node) ([]sampler.Rule, error) {
+	const key = kubernetesKey + ".sampler_rules"
+	if value == nil {
+		return nil, nil
+	}
+	if value.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("%s must be an array", key)
+	}
+	rules := make([]sampler.Rule, 0, len(value.Content))
+	for index, entry := range value.Content {
+		field := fmt.Sprintf("%s[%d]", key, index)
+		if entry.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("%s must be a mapping", field)
+		}
+		fields, err := members(entry, field, "program", "arguments", "kind")
+		if err != nil {
+			return nil, err
+		}
+		var rule sampler.Rule
+		if rule.Program, err = requiredString(fields["program"], field+".program", ": the program the rule matches"); err != nil {
+			return nil, err
+		}
+		if fields["arguments"] != nil {
+			if rule.Arguments, err = readStrings(fields["arguments"], field+".arguments"); err != nil {
+				return nil, err
+			}
+		}
+		kind, err := requiredString(fields["kind"], field+".kind", ": the kind a match counts the process's work as")
+		if err != nil {
+			return nil, err
+		}
+		rule.Kind = sampler.Kind(kind)
+		rules = append(rules, rule)
+	}
+	if _, err := sampler.NewRules(rules); err != nil {
+		return nil, fmt.Errorf("%s: %s", key, strings.TrimPrefix(err.Error(), "sampler: "))
+	}
+	return rules, nil
 }
 
 // readSetup reads `runtime.kubernetes.setup`, an argv of non-empty strings (readStrings), nil when

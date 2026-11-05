@@ -55,6 +55,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/sampler"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -96,6 +97,7 @@ type Runtime struct {
 	agent                          []string
 	setup                          []string
 	testPostgres                   bool
+	samplerRules                   []sampler.Rule
 	bootTimeout                    time.Duration
 	registrationIntervals          int
 	busyBackoff                    time.Duration
@@ -350,8 +352,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
-		testPostgres: opts.TestPostgres,
-		tokens:       opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
+		testPostgres: opts.TestPostgres, samplerRules: slices.Clone(opts.SamplerRules),
+		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
 		store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,

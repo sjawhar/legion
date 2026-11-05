@@ -107,6 +107,7 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.Plugins":                             "runtime.kubernetes.plugins",
 	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
 	"Kubernetes.TestPostgres":                        "runtime.kubernetes.test_postgres",
+	"Kubernetes.SamplerRules":                        "runtime.kubernetes.sampler_rules",
 	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
 	"RepositoryCacheConfig.Volume":                   "runtime.kubernetes.repository_cache.volume",
 	"RepositoryCacheConfig.RefreshMinutes":           "runtime.kubernetes.repository_cache.refresh_minutes",
@@ -286,7 +287,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
 	assertKeys(t, "settings.runtime.kubernetes", kubernetesKeys, []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
-		"agent_secrets", "plugins", "setup", "test_postgres", "repository_cache",
+		"agent_secrets", "plugins", "setup", "test_postgres", "sampler_rules", "repository_cache",
 	})
 	assertKeys(t, "settings.runtime.kubernetes.repository_cache", keysOf(t, kubernetesKeys["repository_cache"]), []string{
 		"volume", "refresh_minutes", "retain_hours", "resources",
@@ -345,6 +346,14 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := []string{"/bin/sh", "-c", "echo fixture-setup"}; !slices.Equal(settings.Runtime.Kubernetes.Setup, want) {
 		t.Errorf("runtime.kubernetes.setup = %q, want %q", settings.Runtime.Kubernetes.Setup, want)
+	}
+	if want := []SamplerRuleSettings{{Program: "cargo", Arguments: []string{"test"}, Kind: "test"}}; !slices.EqualFunc(
+		settings.Runtime.Kubernetes.SamplerRules, want,
+		func(a, b SamplerRuleSettings) bool {
+			return a.Program == b.Program && a.Kind == b.Kind && slices.Equal(a.Arguments, b.Arguments)
+		},
+	) {
+		t.Errorf("runtime.kubernetes.sampler_rules = %+v, want the file's one rule %+v", settings.Runtime.Kubernetes.SamplerRules, want)
 	}
 	cache := settings.Runtime.Kubernetes.RepositoryCache
 	if cache.Volume != "40Gi" || cache.RefreshMinutes != 15 || cache.RetainHours != 48 || cache.Resources.CPU != "500m" || cache.Resources.CPURequest != "500m" || cache.Resources.Memory != "1Gi" || cache.Resources.EphemeralStorage != "2Gi" {

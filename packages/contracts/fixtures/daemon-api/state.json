@@ -473,6 +473,15 @@
           "echo fixture-setup"
         ],
         "test_postgres": false,
+        "sampler_rules": [
+          {
+            "program": "cargo",
+            "arguments": [
+              "test"
+            ],
+            "kind": "test"
+          }
+        ],
         "repository_cache": {
           "volume": "40Gi",
           "refresh_minutes": 15,

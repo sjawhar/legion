@@ -142,6 +142,8 @@ runtime:
       pi_legion: 10.4.0
       pi_envoy: https://legion:fixture-plugin-password@plugins.internal.example/pi-envoy-10.4.0.tgz?token=fixture-plugin-token
     setup: [/bin/sh, -c, 'echo fixture-setup']
+    sampler_rules:
+      - {program: cargo, arguments: [test], kind: test}
     repository_cache:
       volume: 40Gi
       refresh_minutes: 15

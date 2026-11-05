@@ -1988,6 +1988,7 @@ runtime:
       resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # the defaults
     setup: [/bin/sh, -c, '<command>']   # optional: run in every role's namespace before each start of its Oh My Pi (below)
     test_postgres: true         # optional, default false: every issue pod's roles container serves its own PostgreSQL for tests (A test database in the pod, above)
+    sampler_rules: [{ program: cargo, arguments: [test], kind: test }]   # optional: this deployment's own rules for what the resource sampler counts a process's work as (Operator configuration, below)
 bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: <the port advertise_host or bind serves it on>
@@ -2561,6 +2562,17 @@ architect, planner, implementer, tester, reviewer, merger):
    A generation whose role-init fails before it starts the shim, setting up the role's namespaces, exits 71 (`launcher.RoleInitSetupFailedExit`, a status role-init uses for nothing else) and is reported with the exit code `-2` (`shimwire.LauncherExitSetupFailed`), which no shim exits with, and the daemon's detail for it quotes the role's last lines, role-init's reason among them;
    a role-init that ends any other way without reporting its shim's status (a panic's
    2) is reported with that exit as it is.
+
+**The pod's resource sampler.**
+The `roles` container declares one port, `sampler`, numbered 9464, and its launcher runs `legion sampler` as a child of its own, started again whenever it exits.
+The sampler serves the pod's CPU and memory at `GET /metrics` on that port, split by role and by the kind of work each process does, with each volume's used bytes and the pod's own totals;
+`docs/sampler-metrics.md` is the list of series, their labels and the rules behind them.
+The daemon hands the whole of it over on one flag, `--sampler <json>` (`samplerFlag`, `podkind.go`):
+the port, the `project` and `issue` every series carries, which are the pod's own `legion.dev/project` and `legion.dev/issue` label values, the volumes to measure — each volume the pod declares that the `roles` container mounts, with that container's own paths for it, the medium the pod spec declares (`memory` for a memory `emptyDir`, a Secret or a projected volume, `disk` for the rest) and the role its name names — and the deployment's own kind rules (`runtime.kubernetes.sampler_rules`).
+The launcher writes the sampler two files under `/var/run/legion/roles/sampler/`:
+`volumes.json`, the volume list above, written once before any role starts, and `roles.json`, each running role's generation's `role-init` process id, rewritten whenever one of them starts or ends.
+Both are under the roles directory, which every role's namespace covers, so no role can rewrite the map of process ids the sampler reads its roles from.
+The controller's pod declares no port and is handed no flag: it holds no issue, and these series are an issue pod's.
 
 The pod's disk is declared in the pod template itself, as a generic ephemeral volume (`issuePod.disk`, `podkind.go`):
 `ReadWriteOnce`, of `runtime.kubernetes.issue_volume` (50Gi by default) and `storage_class`.
@@ -4617,6 +4629,15 @@ each issue's pod (every role of it alike) and the image probe's.
   [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is an example of one, the one the Go live harnesses run on:
   a `models.yml` and a settings overlay from a ConfigMap, and a mounted token its key command reads.
   Its README lists what an operator supplies and how `pod` and `provider_keys` compose.
+
+- **`runtime.kubernetes.sampler_rules`** adds this deployment's own rules to the resource sampler every issue pod runs ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), which decide what a process's CPU and memory are counted as.
+  Each entry is a `program`, an optional run of `arguments` that must follow it, and a `kind`, one of `build`, `test`, `tool` and `other`:
+  `{ program: cargo, arguments: [test], kind: test }` counts a `cargo test` and everything under it as test work.
+  A pattern is one whole word matched literally, never a substring, a glob or a regular expression, and a program is named by its last path element alone;
+  load refuses a rule that is written any other way, a kind no rule may answer, and the same program and arguments twice, naming the key and the rule.
+  The deployment's rules are tried before the sampler's built-in list (`packages/daemon/internal/sampler/rules.go`), so one of them overrides a built-in rule rather than waiting behind it.
+  A file that sets no rule gets the built-in list alone.
+  `docs/sampler-metrics.md` lists the kinds and the series they label.
 
 - **Dispatch's public dashboard.**
   Every pod reaches Dispatch at `dispatch_url`, usually an in-cluster address nobody outside the cluster can open.

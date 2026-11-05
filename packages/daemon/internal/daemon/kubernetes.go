@@ -347,6 +347,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		SessionStore:            k.SessionStore,
 		Setup:                   k.Setup,
 		TestPostgres:            k.TestPostgres,
+		SamplerRules:            k.SamplerRules,
 		BootTimeout:             cfg.WorkerBootTimeout,
 		RegistrationIntervals:   cfg.WorkerBootRegistrationDeadlineIntervals,
 		BusyBackoff:             busyBackoffFirst,
