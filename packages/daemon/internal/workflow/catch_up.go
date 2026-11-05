@@ -30,6 +30,14 @@ import (
 // claims, so a decision a release left unclaimed reaches this architect here; one still claimed by
 // a queued start or catch-up is that row's to settle. A tree that lingers or has left the workflow
 // is told nothing, nor is a sub-architect (no workflow path starts one) or a phase worker.
+//
+// The catch-up a start writes in place of a launch (intake.ClaimReady.Paced) is a wake of the
+// architect — it reads its whole context when the catch-up arrives, which is what the per-minute
+// cap counts — so it takes its turn in the daemon's pacing (Config.Reserve) and the row is due at
+// the moment that turn comes, rather than at once. The turn is taken here, inside the fact's
+// transaction, so a start row that runs again after a crash takes no second one: the fact applies
+// once for the row that wrote it. A launch's own ready takes none, since the launch took its turn
+// at the machine's gate (supervise's reserveWake); so does every ready while the pacing is off.
 func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimReady) (intake.Result, error) {
 	if fact.Role != claim.RoleArchitect {
 		return intake.Result{}, nil
@@ -41,7 +49,12 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	if root == nil || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || record.OutOfWorkflow(root.Status) {
 		return intake.Result{}, nil
 	}
-	return intake.Result{}, QueueCatchUp(ctx, tx, e.store, e.cfg.DesignGate, *root, fact.Launch, e.now())
+	now := e.now()
+	var paced time.Time
+	if fact.Paced && e.cfg.Reserve != nil {
+		paced = e.cfg.Reserve(now)
+	}
+	return intake.Result{}, QueueCatchUp(ctx, tx, e.store, e.cfg.DesignGate, *root, fact.Launch, now, paced)
 }
 
 // QueueCatchUp is the one composer of a root architect's catch-up, which both the ready
@@ -58,7 +71,14 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 // a live lease: that row may be publishing now, and the decisions the catch-up claims are that
 // telling's to settle, so this one names only what nobody claims. The notice goes through the
 // outbox like any other, so it is routed, held and re-held as they are.
-func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now time.Time) error {
+//
+// paced is the moment the daemon's wake pacing reserved for this catch-up, and the notice row's
+// next_at: the zero value, which every caller but the paced ready passes (CatchUpTheTreesOwed for
+// HandOverKept, and the ready of a launch), is now, so a catch-up no pacing holds is due as it
+// always was. A reserved moment also marks the row (record.Notice.Paced), which is what keeps a
+// ready from pulling it forward (the daemon's releaseWaiting) and what tells the outbox to write
+// the line a wake writes when it runs it.
+func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now, paced time.Time) error {
 	catchUp, awaiting, err := treeCatchUp(ctx, tx, store, gate, root)
 	if err != nil {
 		return err
@@ -82,8 +102,13 @@ func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 	if len(awaiting) > 0 {
 		reason += fmt.Sprintf("; in accepting, waiting for your acceptance, which no worker gives: %s (read the evidence, then sign_off or request_backward_move)", strings.Join(awaiting, ", "))
 	}
-	return EnqueueNaming(ctx, tx, store, root.Key, root.Key, record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp},
-		kept, now)
+	at := now
+	if !paced.IsZero() {
+		at = paced
+	}
+	return EnqueueNaming(ctx, tx, store, root.Key, root.Key,
+		record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp, Paced: !paced.IsZero()},
+		kept, at)
 }
 
 // treeCatchUp is root's tree as the record holds it: whether a hand-over created the root at this

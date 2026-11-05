@@ -35,6 +35,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/wakepace"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -70,6 +71,12 @@ type workflowRuntime struct {
 	// through them, so the wake forwards to whatever attach has stored, and to nothing before
 	// then — the outbox's boot sweep finds every row written before it ran.
 	outboxWake atomic.Pointer[outbox]
+	// wakes is the daemon's one wake limiter as the engine reaches it (reserveWake): supervision
+	// owns it (openSupervision), and the engine is built before supervision exists, so the
+	// Reserve the engine is given at open forwards to whatever attach has stored here. Nothing
+	// applies a fact before attach — the durable consumers open after it, and the boot's terminal
+	// replay runs after it — so no wake of the engine's goes unpaced for want of it.
+	wakes atomic.Pointer[wakepace.Limiter]
 	// bootID disambiguates this boot's synthetic Dispatch consumer position facts from another
 	// boot's, or another project's daemon: processed_events is keyed only on (source, event_id),
 	// shared by every project's daemon in the database, and a stream recreated by a later boot
@@ -337,6 +344,13 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
 	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
+	// The one wake the engine causes is the catch-up a start writes in place of a launch
+	// (workflow's claimReady), and it is paced with the launches it stands among. A deployment
+	// that paces nothing gives the engine no Reserve at all, which is the pacing off: the engine
+	// then writes that catch-up due at once, as it always did.
+	if cfg.WorkerWakesPerMinute > 0 {
+		engineCfg.Reserve = w.reserveWake
+	}
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
@@ -360,6 +374,17 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 	if r := w.outboxWake.Load(); r != nil {
 		r.wake(issue, kind)
 	}
+}
+
+// reserveWake is the engine's Reserve (workflow.Config.Reserve): the moment the daemon's one wake
+// limiter gives the catch-up a start writes in place of a launch, from the limiter attach stored
+// (wakes). Before attach there is none, and the wake is due at once; nothing applies a fact that
+// early.
+func (w *workflowRuntime) reserveWake(now time.Time) time.Time {
+	if l := w.wakes.Load(); l != nil {
+		return l.Reserve(now)
+	}
+	return now
 }
 
 // engineConfig is the workflow engine's configuration from the daemon's, the review App's bot
@@ -791,10 +816,17 @@ func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, paylo
 	return nil
 }
 
+// attach gives the workflow what only supervision has: the outbox, built on its supervisor and
+// its runtime, and the daemon's one wake limiter, which the engine reserves the catch-up it
+// writes in place of a launch from (reserveWake) and whose rate and burst the outbox names in
+// the line that catch-up writes when it runs (wakeRan).
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
+	w.wakes.Store(supervision.wakes)
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
+		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design,
+		supervision.cfg.WorkerWakesPerMinute, supervision.cfg.WorkerWakeBurst,
+		w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)

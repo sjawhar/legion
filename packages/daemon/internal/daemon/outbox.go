@@ -92,7 +92,15 @@ type outbox struct {
 	// writes states and whose kept approval pair a start task names (workflow.QueueCatchUp). A
 	// test that builds the runner by hand leaves it zero, which reads as the shipped policy.
 	designGate config.DesignGate
-	log        *slog.Logger
+	// wakeRate and wakeBurst are the pace the operator set (`worker_wakes_per_minute`,
+	// `worker_wake_burst`, config.Config), carried for the one line a paced catch-up writes when
+	// this runner runs it (wakeRan) and read for nothing else: the reservation that decides when
+	// such a row is due is the workflow engine's (workflow.Config.Reserve), taken from the one
+	// limiter the daemon paces every wake from. A test that builds the runner by hand leaves both
+	// zero, which is the pacing off and the line's own reading of it.
+	wakeRate  int
+	wakeBurst int
+	log       *slog.Logger
 	// now is the moment a row is listed, claimed, renewed and retried at; clock arms the lanes'
 	// timers — the sweep's, a lane's wait for its next due row, a running row's lease renewal.
 	// Both are the wall clock in production, and a test holds both still (heldClock). A test that
@@ -151,13 +159,14 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, wakeRate, wakeBurst int, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, designGate: designGate, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
+		handlers: handlers, designGate: designGate, wakeRate: wakeRate, wakeBurst: wakeBurst,
+		project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -652,9 +661,10 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // topic, and to nothing else. Every notice kind is for an architect, and no claim subscribes to an
 // issue topic (packages/pi-legion/src/claim-session.ts), so no issue topic carries one. The
 // owner, the earlier notices it waits behind, and whether its tree lingers are read from one
-// snapshot of the tree (notice_routing.go). A notice waits
-// (errNoticeWaits) behind an earlier notice of its tree that is held for the same architect, so
-// each architect is told in the order the notices were written. A role topic with no live holder
+// snapshot of the tree (notice_routing.go). A notice waits behind an earlier notice of its tree
+// that is held for the same architect, so each architect is told in the order the notices were
+// written: on its backoff (errNoticeWaits), or, when the earlier row is itself due at a moment
+// still ahead, at that moment and once (wait.Until). A role topic with no live holder
 // refuses the publish (notify.ErrNoHolder): while the owning architect's claim can hold its role
 // again — relaunching, or a root the operator suspended and can resume — the row is held for it;
 // once nobody will hold that role for this notice — the claim has failed or retired, or its tree
@@ -689,12 +699,53 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // finishes any other way leaves them claimed until its row's deletion releases them, for the
 // architect's next ready to name. However the row ends, a catch-up that told its decisions in any
 // run forgets them here rather than let its ending release what the architect has already heard.
+//
+// A row the wake pacing held to its turn (record.Notice.Paced) writes the line a wake writes as
+// it runs, before anything else, because running it is the wake: the architect reads its whole
+// context from the catch-up (wakeRan).
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
+	if payload.Paced {
+		r.wakeRan(row)
+	}
 	if err := r.deliverNotice(ctx, row, payload); err != nil {
 		return err
 	}
 	return r.settleTold(ctx, row, payload)
 }
+
+// wakeRan is the one line a wake the outbox runs writes, where it runs: the catch-up a start row
+// wrote in place of a launch, which the pacing held until row.NextAt (workflow's claimReady). It
+// is written in the shape supervise's own wakeRan writes — the same message at Info, the same
+// kind, waited, waitedFor, paced, rate and burst — rather than through something the two share,
+// because the two have nothing else in common: that one is a method of a claim's machine, reading
+// its own clock and its own WakePace, and this one reads an outbox row. The shape is what matters
+// to its reader: one grep over the daemon's log finds every wake of a restart or a plugin wave,
+// whichever lane caused it, and counts the wakes of a minute against the rate and burst each line
+// names. The claim is the architect the catch-up goes to, the root architect of the row's issue
+// (QueueCatchUp writes the row for the root), spelled as a machine's own lines spell a claim,
+// since this logger is the runner's and carries no claim of its own.
+//
+// How long the wake waited is the row's own record, not a clock: the engine composed the row at
+// the moment it reserved and wrote it due at the moment the pacing gave it, so next_at less
+// created_at is what the pacing held this wake for. A row the burst let straight out — the first
+// wake of a wave — waited nothing and says so, as supervise's line does; reading the wait from
+// the runner's clock instead would call every such row held, by however long the lane took to
+// pick it up.
+func (r *outbox) wakeRan(row record.OutboxRow) {
+	architect, _ := claim.NewToken(r.project, row.Issue, claim.RoleArchitect)
+	waitedFor := row.NextAt.Sub(row.CreatedAt)
+	fields := []any{"claim", string(architect), "kind", wakeCatchUp, "waited", waitedFor > 0}
+	if waitedFor > 0 {
+		fields = append(fields, "waitedFor", waitedFor)
+	}
+	fields = append(fields, "paced", true, "rate", r.wakeRate, "burst", r.wakeBurst)
+	r.log.Info("supervise: wake ran", fields...)
+}
+
+// wakeCatchUp is the kind of wake a paced catch-up is, as the line it writes names it (wakeRan).
+// The lanes beside it are internal/supervise's: a role process a launch starts ("launch") and the
+// stale-plugin lane's update task ("plugin-task"). All three reserve from the one limiter.
+const wakeCatchUp = "catch-up"
 
 // deliverNotice is the notice executor's own work: routing the notice, publishing it, and settling
 // what a catch-up that will never publish named. Its endings are notice's to read.
@@ -749,7 +800,16 @@ func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payloa
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", held.State, "stopping", held.Stopping)
 		return nil
 	}
-	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
+	if earlier, due := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
+		// The row the fence holds this one behind is due at a known moment when the wake pacing
+		// holds it (record.Notice.Paced): this row runs once, then, rather than climbing its
+		// backoff to it — over a hold of tens of minutes that is a Warn every attempt from the
+		// seventh (settle), about one wake's worth of noise per architect in a wave. The hold
+		// itself is right: it keeps the architect to the one wake its catch-up is.
+		if now := r.now().UTC(); due.After(now) {
+			return wait.Until(due, fmt.Sprintf("%s's notice row %d waits behind its row %d, due at %s",
+				architect, row.ID, earlier, due.Format(time.RFC3339)))
+		}
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
@@ -1083,12 +1143,19 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// the decisions the task carries are settled first (settleKept) and the catch-up is
 		// composed without them; the settle after the row then finds nothing left to do. A retry of
 		// the row queues the task no second time and applies the fact once.
+		//
+		// That catch-up stands in place of a launch, so it is a wake of the architect and takes a
+		// turn in the daemon's pacing like the launch it replaces: the fact says so (Paced), the
+		// engine takes the turn inside the fact's transaction and writes the row due at it
+		// (workflow's claimReady), and this runner writes the line that wake writes when the row
+		// runs (wakeRan). A start that launches instead took its turn at the machine's gate above
+		// (supervise's reserveWake), so one start row is one wake either way.
 		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
 			if err := r.settleKept(ctx, row, payload, gave); err != nil {
 				return err
 			}
 			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
-				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
+				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation, Paced: true}, r.handlers...); err != nil {
 				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)
 			}
 		}
