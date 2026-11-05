@@ -122,7 +122,7 @@ func TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder(t *testing.T) 
 	// them as soon as its term starts, where the durable path's own messages wait out the hold.
 	// So the line comes after them, and the row waits for it rather than reading it once.
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(mpPoll) {
-		if mpLineWith(c.Output.String(), "settle hold ended", `"hand_back_marked":false`) != "" {
+		if lineWith(c.Output.String(), "settle hold ended", `"hand_back_marked":false`) != "" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -209,7 +209,7 @@ func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
 	mpWaitActive(t, b, time.Second)
 }
 
-// SIGKILL of the active pod while a prompt to session T is in flight, then more messages to T. The
+// SIGKILL of the active pod while a frame to session T is in flight, then more messages to T. The
 // standby takes over: T must take every message, the one in flight at the kill included, in the
 // order they were published and within the hard bound (architect Q2: in order within 15 s; a
 // repeat with the same id is allowed). TestTwoPodsSIGKILLHandsOverInOrderWithin15s leaves the
@@ -217,12 +217,12 @@ func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
 // attempt for that message over at once: deferred as another pod's live attempt, it would reach
 // T 35 s after the kill, after every newer message. The killed pod is the lease holder whose
 // expired record the new holder took, so its attempt is no live pod's.
-func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
+func TestTwoPodsSIGKILLMidFrameKeepsTheSessionsOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartNATSSessions(t, uri)
-	const blocked = "ses_mp_midprompt"
+	const blocked = "ses_mp_midframe"
 	a.registerNATS(t, serving, blocked)
 	publisher := mpConnectPublisher(t, uri)
 
@@ -231,7 +231,7 @@ func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
 	select {
 	case <-inHand:
 	case <-time.After(10 * time.Second):
-		t.Fatalf("%s never prompted %s", a.instance, blocked)
+		t.Fatalf("%s never sent %s a frame", a.instance, blocked)
 	}
 	killed := a.kill(t)
 	stop := publisher.every(200*time.Millisecond, blocked)
@@ -327,13 +327,13 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 	serving.requireKnown(t, publisher.all())
 	a.WaitExit(t, "SIGTERM")
 	mpWaitActive(t, b, time.Second)
-	if line := mpLineWith(a.Output.String(), "handed the durable's messages back", `"hand_back_marked":true`); line == "" {
+	if line := lineWith(a.Output.String(), "handed the durable's messages back", `"hand_back_marked":true`); line == "" {
 		t.Fatalf("%s did not mark its hand-back clean:\n%s", a.instance, mpTail(mpLinesWithout(a.Output.String()), 40))
 	}
 	// The hold ends on the mark, or sooner because every message the stopping pod can still
 	// have outstanding is already in this pod's hands; what it must not do is run to its 7 s
 	// cap, which is the outcome the line leaves empty.
-	if line := mpLineWith(b.Output.String(), "settle hold ended", `"hand_back_marked":true`); line == "" || strings.Contains(line, `"outcome":""`) {
+	if line := lineWith(b.Output.String(), "settle hold ended", `"hand_back_marked":true`); line == "" || strings.Contains(line, `"outcome":""`) {
 		t.Fatalf("%s did not end its settle hold inside the hand-back cap on %s's mark: %s\n%s", b.instance, a.instance, line, mpTail(mpLinesWithout(b.Output.String()), 40))
 	}
 }
@@ -349,7 +349,7 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 // stale_binding for it, which the mark clears again; were it left standing, the next stop in the
 // chain would mark nothing and the hand-over after it would hold to the 7 s cap of a hard
 // take-over, with the messages queued at the SIGTERM arriving about 11 s after their publish.
-func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
+func TestTwoPodsEveryGracefulStopWithAFrameInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
@@ -372,8 +372,8 @@ func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWi
 }
 
 // A lost node, then graceful stops one after another of the pod that took its expired lease and of
-// each pod after it, B to C to D, each with a prompt in hand and a retry outstanding as in
-// TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s. The server
+// each pod after it, B to C to D, each with a frame in hand and a retry outstanding as in
+// TestTwoPodsEveryGracefulStopWithAFrameInHandAndARetryOutstandingDeliversWithin10s. The server
 // keeps the lost pod's connection, and with it the durable's push binding, until its ping timeout,
 // minutes in production, so B subscribes beside it and marks the record stale_binding, which no
 // later holder can clear while that binding stands. A stop whose term had such a binding open
@@ -383,7 +383,7 @@ func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWi
 // healthy session still reaches it in order, within the 15 s a hard take-over is given. The cost
 // is the node loss's: it lasts until the server drops that connection, and no mark is written in
 // the meantime, which is the safe answer rather than the fast one.
-func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstandingDeliversInOrderWithin15s(t *testing.T) {
+func TestTwoPodsEveryGracefulStopAfterANodeLossWithAFrameInHandAndARetryOutstandingDeliversInOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
@@ -409,7 +409,7 @@ func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstan
 	serving.requireOrder(t, messages)
 	serving.requireKnown(t, publisher.all())
 	for _, pod := range []*mpPod{holder, other} {
-		if line := mpLineWith(pod.Output.String(), "handed the durable's messages back", `"hand_back_marked":true`); line != "" {
+		if line := lineWith(pod.Output.String(), "handed the durable's messages back", `"hand_back_marked":true`); line != "" {
 			t.Fatalf("%s marked its hand-back clean though a lost node's binding stood beside it: %s", pod.instance, line)
 		}
 	}
@@ -418,7 +418,7 @@ func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstan
 // mpGracefulStopsInTurn stops stopping gracefully, then each pod that takes its place in turn, with
 // next the first stop's standby and each later standby a pod started then, named after standbys,
 // one per stop but the first. Each stop comes once the active pod has delivered every message to
-// healthy published so far, past its own settle hold, and a second into a prompt that the serving
+// healthy published so far, past its own settle hold, and a second into a frame that the serving
 // port never answers, to a session of row's registered for it, with healthy's messages queued
 // behind it. It returns once the last stop's standby is active.
 func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpNATSSession, publisher *mpPublisher, healthy []string, row string, stopping, next *mpPod, standbys ...string) {
@@ -427,7 +427,7 @@ func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpNATSSess
 		sessionID := fmt.Sprintf("ses_mp_%s_slow_%d", row, handOver+1)
 		stopping.registerNATS(t, serving, sessionID)
 		sent := mpTo(publisher.all(), healthy...)
-		mpEventually(t, mpGracefulBound, stopping.instance+" to deliver what was published before its prompt in hand", func() bool {
+		mpEventually(t, mpGracefulBound, stopping.instance+" to deliver what was published before its frame in hand", func() bool {
 			return serving.tookAll(sent)
 		})
 		inHand := serving.hold(sessionID)
@@ -435,9 +435,9 @@ func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpNATSSess
 		select {
 		case <-inHand:
 		case <-time.After(10 * time.Second):
-			t.Fatalf("%s never prompted %s", stopping.instance, sessionID)
+			t.Fatalf("%s never sent %s a frame", stopping.instance, sessionID)
 		}
-		time.Sleep(time.Second) // healthy's messages queue behind the prompt in hand
+		time.Sleep(time.Second) // healthy's messages queue behind the frame in hand
 		stopping.Terminate(t)
 		stopping.WaitExit(t, "SIGTERM")
 		mpWaitActive(t, next, mpGracefulBound)

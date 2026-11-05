@@ -674,7 +674,7 @@ func (p *mpPod) subscribe(t *testing.T, body string) {
 	}
 }
 
-// mpEventMark carries a message's event id in the text of the prompt its session receives.
+// mpEventMark carries a message's event id in the text of the frame its session receives.
 var mpEventMark = regexp.MustCompile(`mp-event=([A-Za-z0-9_-]+)`)
 
 // mpNATSSession is the stand-in every session of a row receives through: one NATS subscription
@@ -684,10 +684,10 @@ var mpEventMark = regexp.MustCompile(`mp-event=([A-Za-z0-9_-]+)`)
 // the session never took it. A frame to a failing session (fail) is answered `nak` and counted
 // apart: the session never took it either. Every frame it sees, whichever of those it is, is
 // recorded in the row's delivery journal (mpJournal), which a failing row prints. The frames it
-// answered, and the checks a row reads them through, are mpPromptLog's (prompt_log_test.go),
+// answered, and the checks a row reads them through, are mpFrameLog's (frame_log_test.go),
 // which it embeds.
 type mpNATSSession struct {
-	mpPromptLog
+	mpFrameLog
 	conn    *natsgo.Conn
 	journal *mpJournal
 
@@ -743,7 +743,7 @@ func (s *mpNATSSession) receive(msg *natsgo.Msg) {
 		s.mu.Lock()
 		s.unexpected = append(s.unexpected, msg.Subject+" "+string(msg.Data))
 		s.mu.Unlock()
-		s.journal.receipt(mpReceipt{session: sessionID, at: time.Now(), answer: mpPromptUnexpected})
+		s.journal.receipt(mpReceipt{session: sessionID, at: time.Now(), answer: mpFrameUnexpected})
 		return
 	}
 	event := mark[1]
@@ -770,7 +770,7 @@ func (s *mpNATSSession) receive(msg *natsgo.Msg) {
 		s.reply(msg, relayReplyDone)
 		taken := time.Now()
 		s.took(sessionID, event, taken)
-		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpPromptTaken})
+		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpFrameTaken})
 		return
 	}
 	if gated {
@@ -782,12 +782,12 @@ func (s *mpNATSSession) receive(msg *natsgo.Msg) {
 		}
 	}
 	if hold {
-		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpPromptHeld})
+		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpFrameHeld})
 		close(held)
 		return
 	}
 	if failing {
-		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpPromptRefused})
+		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpFrameRefused})
 		s.reply(msg, relayReplyNak)
 		return
 	}
@@ -795,7 +795,7 @@ func (s *mpNATSSession) receive(msg *natsgo.Msg) {
 	s.reply(msg, relayReplyDone)
 	taken := time.Now()
 	s.took(sessionID, event, taken)
-	s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpPromptTaken})
+	s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpFrameTaken})
 }
 
 // reply answers a frame with one word, as a session's plugin does.
@@ -878,7 +878,7 @@ func (s *mpNATSSession) tookAll(messages []mpMessage) bool {
 	return true
 }
 
-// awaitAll waits until every message was prompted to its session at least once.
+// awaitAll waits until every message was delivered to its session at least once.
 func (s *mpNATSSession) awaitAll(t *testing.T, messages []mpMessage, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -897,11 +897,11 @@ func (s *mpNATSSession) awaitAll(t *testing.T, messages []mpMessage, within time
 	}
 }
 
-// requireOnce fails the test unless every message was prompted exactly once.
+// requireOnce fails the test unless every message was delivered exactly once.
 func (s *mpNATSSession) requireOnce(t *testing.T, messages []mpMessage) {
 	t.Helper()
 	if wrong := s.notOnce(messages); len(wrong) > 0 {
-		t.Fatalf("%d of %d messages were not prompted exactly once: %v", len(wrong), len(messages), wrong)
+		t.Fatalf("%d of %d messages were not delivered exactly once: %v", len(wrong), len(messages), wrong)
 	}
 }
 
@@ -919,7 +919,7 @@ func (s *mpNATSSession) requireAtMostTwice(t *testing.T, m mpMessage, why string
 	return took
 }
 
-// requireKnown fails the test when a session was prompted with an event id no message carried: a
+// requireKnown fails the test when a session was given an event id no message carried: a
 // repeat is only ever of a message, with its own event id.
 func (s *mpNATSSession) requireKnown(t *testing.T, messages []mpMessage) {
 	t.Helper()
@@ -929,12 +929,12 @@ func (s *mpNATSSession) requireKnown(t *testing.T, messages []mpMessage) {
 	}
 	for event := range s.counts() {
 		if !known[event] {
-			t.Fatalf("a session was prompted with event %s, which no message carried", event)
+			t.Fatalf("a session was given event %s, which no message carried", event)
 		}
 	}
 }
 
-// requireOrder fails the test unless each session took its messages, each at its first prompt,
+// requireOrder fails the test unless each session took its messages, each at its first frame,
 // in the order they were published.
 func (s *mpNATSSession) requireOrder(t *testing.T, messages []mpMessage) {
 	t.Helper()
@@ -960,7 +960,7 @@ func (s *mpNATSSession) requireOrder(t *testing.T, messages []mpMessage) {
 		}
 		describe := func(event string) string {
 			at, _ := s.first(sessionID, event)
-			return fmt.Sprintf("%s (published %s, prompted %s after the session's first publish)", event,
+			return fmt.Sprintf("%s (published %s, taken %s after the session's first publish)", event,
 				published[event].Sub(sent[0].published).Round(time.Millisecond), at.Sub(sent[0].published).Round(time.Millisecond))
 		}
 		for index := range min(len(got), len(events)) {
@@ -973,7 +973,7 @@ func (s *mpNATSSession) requireOrder(t *testing.T, messages []mpMessage) {
 	}
 }
 
-// requireWithin fails the test unless every message's first prompt came within bound of its
+// requireWithin fails the test unless every message's first frame came within bound of its
 // publish or of since, whichever is later.
 func (s *mpNATSSession) requireWithin(t *testing.T, messages []mpMessage, bound time.Duration, since time.Time) {
 	t.Helper()
@@ -1295,11 +1295,11 @@ func mpTail(text string, n int) string {
 // own output (mpLinesWithout), since a hundred messages' worth of them would bury everything
 // else, so a run that lost a message could not be told from one that was merely late with it.
 //
-// The journal is what the harness saw of each message: the publish, every prompt the serving
+// The journal is what the harness saw of each message: the publish, every frame the serving
 // port answered for it, and - for a message the port did not take exactly once - the sequence
 // the stream holds it under, what the machine's durable has done with it, and the lines each pod
 // logged that name it, which is where an acknowledgement shows. A pod that logged
-// "listener agent delivered" prompted the message and acked it; a message the durable counts
+// "listener agent delivered" sent the message and acked it; a message the durable counts
 // neither unacknowledged nor waiting, that no pod ever logged, never reached a pod at all.
 //
 // That last reading is what this exists for. A message the stream stored, that no pod of the
@@ -1315,13 +1315,13 @@ func mpTail(text string, n int) string {
 //
 // It is printed when the row fails, and only then: a row that passes is as quiet as before.
 
-// mpPromptTaken and the three beside it are what a session answered one frame, as the
+// mpFrameTaken and the three beside it are what a session answered one frame, as the
 // journal records it (mpNATSSession.receive).
 const (
-	mpPromptTaken      = "done"
-	mpPromptHeld       = "held"
-	mpPromptRefused    = "nak"
-	mpPromptUnexpected = "unexpected"
+	mpFrameTaken      = "done"
+	mpFrameHeld       = "held"
+	mpFrameRefused    = "nak"
+	mpFrameUnexpected = "unexpected"
 )
 
 // mpJournalScanCap bounds the stream sequences a failing row reads back, so a row that published
@@ -1342,7 +1342,7 @@ type mpPublication struct {
 	topic   string
 }
 
-// mpReceipt is one frame a session saw and what it answered (mpPromptTaken and the three
+// mpReceipt is one frame a session saw and what it answered (mpFrameTaken and the three
 // beside it). event is empty for a request no session expects, which carries no event id.
 type mpReceipt struct {
 	session string
@@ -1440,7 +1440,7 @@ func (j *mpJournal) dump(t *testing.T) {
 	for _, publication := range published {
 		taken := 0
 		for _, receipt := range took[publication.message.event] {
-			if receipt.answer == mpPromptTaken {
+			if receipt.answer == mpFrameTaken {
 				taken++
 			}
 		}
@@ -1456,7 +1456,7 @@ func (j *mpJournal) dump(t *testing.T) {
 		event := publication.message.event
 		fmt.Fprintf(&report, "\n  %s to %s: published %s on %s, %s; %s",
 			event, publication.message.session, j.into(publication.message.published), publication.topic,
-			mpStoredAs(stored, event), j.prompts(took[event]))
+			mpStoredAs(stored, event), j.answers(took[event]))
 	}
 	known := map[string]bool{}
 	for _, publication := range published {
@@ -1464,7 +1464,7 @@ func (j *mpJournal) dump(t *testing.T) {
 	}
 	for _, receipt := range receipts {
 		if !known[receipt.event] {
-			fmt.Fprintf(&report, "\n  a prompt to %s for %q, which the row published nothing for: %s (%s)",
+			fmt.Fprintf(&report, "\n  a frame to %s for %q, which the row published nothing for: %s (%s)",
 				receipt.session, receipt.event, j.into(receipt.at), receipt.answer)
 		}
 	}
@@ -1489,14 +1489,14 @@ func (j *mpJournal) dump(t *testing.T) {
 	t.Log(report.String())
 }
 
-// prompts is what a session answered for one message, in the order it answered.
-func (j *mpJournal) prompts(receipts []mpReceipt) string {
+// answers is what a session answered for one message, in the order it answered.
+func (j *mpJournal) answers(receipts []mpReceipt) string {
 	if len(receipts) == 0 {
 		return "no session saw a frame for it"
 	}
 	answers := make([]string, len(receipts))
 	for index, receipt := range receipts {
-		answers[index] = fmt.Sprintf("prompted %s (%s)", j.into(receipt.at), receipt.answer)
+		answers[index] = fmt.Sprintf("took it %s (%s)", j.into(receipt.at), receipt.answer)
 	}
 	return strings.Join(answers, ", ")
 }

@@ -724,6 +724,8 @@ export interface ArtifactReview {
   readonly ask_id: string | null;
   readonly kind?: ArtifactReviewKind;
   readonly created_at: string;
+  readonly content_sha256: string | null;
+  readonly content_sha256_source: "insert" | "backfill" | null;
 }
 
 /** The document's approval as of its latest version: `draft` has never been reviewed or
@@ -747,6 +749,8 @@ export interface ArtifactApproval {
   readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
+  readonly content_sha256?: string;
+  readonly content_sha256_source?: "insert" | "backfill";
   readonly requested_by?: Actor;
   /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
    *  version moved it past the one its agent last handed to the human, or a reply left it with the
@@ -958,6 +962,7 @@ export interface Version {
    *  Absent on a document version from a server that predates it. */
   readonly size?: number;
   readonly mime?: string;
+  /** The stored bytes' hash; present on a document version read as well as a file version. */
   readonly sha256?: string;
 }
 
@@ -1502,6 +1507,11 @@ export interface Comment extends AnchorPosition {
   readonly body: string;
   readonly anchor: Anchor | null;
   readonly reply_to: string | null;
+  /** The comment this reply answers: the one the write named, where `reply_to` is the head of
+   *  the thread the write climbed to. The two are the same on a reply to a thread's root; a
+   *  reply that names an ask alone carries neither, as no comment that is not a reply does.
+   *  Absent from a Dispatch older than the field. A conversation nests a reply under it. */
+  readonly answers?: string | null;
   readonly ask_id: string | null;
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is
    *  waiting) and on every other comment. A human's reply is always `agent`; a session's is
@@ -1708,6 +1718,15 @@ export const DISPATCH_LOGIN_HEADER = "Dispatch-Login";
 /** The code of the `409` for a write whose `DISPATCH_LOGIN_HEADER` names a login that is not its
  *  caller's: nothing ran. The page drops every write that login pressed. */
 export const DISPATCH_LOGIN_CHANGED = "LOGIN_CHANGED";
+
+/**
+ * The code of the `403` for a write by an access token the secrets broker issued that names a
+ * session and a service but no person: the machine holding it has signed nobody in, so Dispatch
+ * has nobody to record the write under. Its reads are unaffected. The message names
+ * `agent-secrets login`, the one command that makes the write possible, because whoever reads
+ * the refusal is whoever must run it.
+ */
+export const DISPATCH_SIGN_IN_REQUIRED = "SIGN_IN_REQUIRED";
 
 /** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
  *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */
@@ -2322,6 +2341,7 @@ export type GraphEdgeKind =
   | "anchored_to"
   | "owned_by"
   | "replies_to"
+  | "answers"
   | "followed_by"
   | "part_of"
   | "depends_on"
@@ -2567,6 +2587,8 @@ export interface ArtifactReviewEventPayload {
   readonly actor: Actor;
   readonly reason: string | null;
   readonly ask_id: string | null;
+  readonly content_sha256?: string;
+  readonly content_sha256_source?: "insert" | "backfill";
 }
 
 /** Whether a recorded result still speaks for the work as it stands: `current` at the commit the
@@ -3695,6 +3717,8 @@ export const ArtifactReviewEventPayloadSchema = z.object({
   actor: z.object({ kind: z.string(), id: z.string() }).passthrough().optional(),
   reason: z.string().nullish(),
   ask_id: z.string().nullish(),
+  content_sha256: z.string().optional(),
+  content_sha256_source: z.enum(["insert", "backfill"]).optional(),
 });
 
 const askEventPayloadFields = {

@@ -1110,10 +1110,19 @@ func main() {
 	// answers 503 "service starting" and /healthz "starting" meanwhile, so an issuer that does not
 	// answer at start leaves the listener up and unready instead of ending it.
 	apiVerifier := newAPIVerifier(oidcIssuer, oidcAudience)
+	// The broker-token settings are read here, beside the other two credentials, so a
+	// half-configured one refuses the start before anything is bound. Its verifier is built
+	// later, once JetStream is open: the spent-proof bucket it records a proof in lives there
+	// (brokerTokens.open).
+	brokerConfig, err := resolveListenerBrokerConfig(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	brokerTokenAuth := newBrokerTokens(brokerConfig)
 	if err := validateListenerAPIAuth(cfg, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
 		log.Fatal(err)
 	}
-	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer))
+	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer, brokerTokenAuth))
 	logger.Info("listener API hosts: " + describeListenerAPIHosts(apiToken, apiVerifier, cfg.AllowedHosts))
 	if apiVerifier != nil {
 		go apiVerifier.discover(context.Background(), logger)
@@ -1204,7 +1213,7 @@ func main() {
 		mux.Handle(hook.path, webhookGate)
 	}
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, apiVerifier, cfg.AllowedHosts, logger, v1Gate)
+	v1Handler := apiAuth(apiToken, apiVerifier, brokerTokenAuth, cfg.AllowedHosts, logger, v1Gate)
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
@@ -1225,6 +1234,12 @@ func main() {
 	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream) at the
 	// deployment's replica count and byte limit (listenerStreamOptions).
 	client := connectListener(cfg, instance, logger)
+	// The spent-proof bucket, before anything of /v1 can be served: a listener configured to take
+	// broker access tokens on a bus that cannot open it refuses to start, naming the setting,
+	// rather than recording spent proofs where its own replicas cannot see them.
+	if err := brokerTokenAuth.open(client.Conn, cfg.NATSReplicas); err != nil {
+		log.Fatal(err)
+	}
 	consumer := bus.ListenerDurable(cfg.MachineID)
 	// The durable is checked here, before the cache warm-ups below (up to 30 s each), so a refused
 	// one ends the start within the NATS connect: no pod could receive from it, and nothing serves
@@ -1596,13 +1611,8 @@ func main() {
 	receiver.Start()
 	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
-	// This pod relays its machine's session consumers only while it receives the durable, which
-	// the receive term sets and clears (durableReceiver.begin and durableReceiver.end,
-	// sessionRelays.setOwned). Nothing below writes it: the self-health monitor's probe and
-	// rebuild judge the durable's binding, which a standby's resubscribe reports bound with no
-	// term behind it.
 
-	// Phase 6b3: Say we are alive and reporting, now and every listenerReadyInterval, on the one
+	// Phase 6b: Say we are alive and reporting, now and every listenerReadyInterval, on the one
 	// topic the Legion daemons read wakes of released issue pods from. Without it a daemon
 	// cannot tell "the listener sends no reports" from "the listener has nothing to report", so
 	// it releases nothing: this is the positive signal that lets release run at all. Every pod

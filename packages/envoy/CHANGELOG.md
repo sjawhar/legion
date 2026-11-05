@@ -1,5 +1,413 @@
 # Changelog
 
+## [29.12.0] - 2026-11-05
+
+### Added
+
+- Reviews retain the SHA-256 of the stored UTF-8 version they approved, with insert or backfill provenance. Startup fills legacy reviews without changing approval decisions, and review, approval, event and document-version reads expose the hashes.
+
+### Changed
+
+- Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.2. A keystroke no longer scans
+  every distinct missing client in the waiting queue. Default document UUIDs use two allocations
+  instead of eight. Room closure cannot evict a room while an apply writes it, failed joins
+  reclaim eligible rooms, and cancelled applies can stop waiting for a room load. The library
+  also offers context-aware room closure; Dispatch retains its existing close wrapper. Logical
+  content lengths and splice offsets use uint64 without changing the wire format; Dispatch
+  needs no consumer API adaptation. Cloning a document with emptied waiting-queue slots no
+  longer panics, protecting current Dispatch's warm write forks. Three repeated library
+  microbenchmark slowdowns remain, but their percentages do not measure whole-update cost.
+
+## [29.11.0] - 2026-11-05
+
+### Added
+
+- Envoy records a CI check run or check suite that names no pull request under pull request n when its check suite's head branch is `refs/pull/<n>/head`, and Dispatch reconciles each open pull request's head with GitHub every 5 minutes, recording every completed check run and check suite the listener's record of that head lacks. One new setting, `DISPATCH_REVIEWER_APP_ID`, the review App's id, which the pass checks a `tester` or `architect` check run against.
+
+## [29.9.0] - 2026-11-05
+
+### Added
+
+- The secrets broker's RFC 8693 token exchange takes a machine's Google identity token as a
+  fourth subject token (`urn:envoy:params:oauth:token-type:google-identity`), checking Google's
+  signature, the issuer, the audience `BROKER_GOOGLE_OIDC_AUDIENCE`, the expiry and
+  `email_verified`. `BROKER_VM_SERVICES` maps the token's `email` to a service;
+  `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` are now optional per account and pin the
+  Compute Engine project and instance names together or not at all, an account pinned in neither
+  taking a token that carries no `google.compute_engine` claims at all; and the new
+  `BROKER_VM_EXCHANGE_ACCOUNTS` (`<service account email>=<project>=<person>[=<session>]`) gives
+  a fleet the person and Dispatch project it writes for. A listed account with no such entry gets
+  a token that names its service and no person, a new kind carried as `service` on the
+  introspection answer and read by `brokertoken.Caller.Service`. The new
+  `BROKER_GOOGLE_OIDC_ISSUER` (default `https://accounts.google.com`) lets a dev stack put
+  `cmd/dev-oidc-issuer` in Google's place.
+
+- A person signs in once on a machine and that machine's sessions then act for them. The
+  secrets broker's RFC 8693 token exchange takes the person's own Google identity token as a
+  fifth subject token (`urn:envoy:params:oauth:token-type:person-google-identity`) with the
+  machine's as the actor token (`urn:envoy:params:oauth:token-type:machine-google-identity`),
+  proved by the box key the client made at sign-in. The new `BROKER_SIGNIN_DEVICE_AUDIENCE`
+  (optional, no default; needs `BROKER_GOOGLE_OIDC_AUDIENCE`) is the audience of the device-flow
+  client `agent-secrets login` runs Google's device grant as, and the person is held to the
+  Workspace domain `BROKER_SIGNIN_DOMAIN` names through the `hd` claim. The minted access token
+  names the person and, as the new `machine` claim and introspection field, the machine's
+  account. Migration 0025 adds `person_signins`, one row per person and box key, with the
+  machine's account and the times it was made, last used and revoked. Dispatch relays two new
+  routes: `GET /v1/person-signins` lists a person's sign-ins by machine and
+  `POST /v1/person-signins/{id}/revoke` ends one, ending every access token minted under it in
+  the revoke's own transaction. Each refusal has its own message: an account of another domain,
+  an `email_verified` that is not true, either token minted for the other's audience, an actor
+  token for an account no entry lists, and a box key the person has revoked, which names
+  `agent-secrets login`.
+
+- A person's sign-in on a machine now reaches that person's own secrets there. The trade that
+  signs them in mints a launcher credential of its own, in the exchange's own transaction and
+  through the seam a machine's credential already uses, and names it in the token answer's
+  `credential_id` and `credential_expires_at`. That credential carries the person as its
+  operator, so the session it enrols is that person's: it reads the secrets that person owns and
+  the shared agent-tier ones, and no other person's and none of the fleet's, while the machine's
+  own credential goes on carrying its fleet's service and no person. It is keyed by the person,
+  the machine's Google account and the box key's thumbprint, so two people signed in on one
+  machine hold one credential each and one person signed in on two machines holds one per
+  machine, and it is held to a listed fleet on every call as a machine's is. Revoking the
+  sign-in through `POST /v1/person-signins/{id}/revoke` now ends that credential in the same
+  transaction as the sign-in row and the access tokens minted under it, so no proof signed with
+  the box key authenticates again and every session it enrolled ends with its grants and pending
+  requests.
+
+- The broker now publishes RFC 8414 authorization server metadata at
+  `GET /.well-known/oauth-authorization-server`, with no credential: its issuer and its token,
+  introspection and revocation endpoints, all built from `BROKER_PUBLIC_URL`; the grants it
+  serves; the one client authentication method it takes (`none`); the algorithms a DPoP proof
+  may be signed with; and, under `subject_token_types_supported`, the token types its RFC 8693
+  exchange accepts, since neither RFC registers a member for them.
+  `BROKER_MACHINE_LOGIN_URL` is no longer required: with no page for a person to type a code
+  into, the broker serves no device grant at all — `POST /v1/oauth/device_authorization` is not
+  mounted and answers 404, and the metadata names neither the device code nor a device
+  authorization endpoint — while the token exchange, introspection and revocation are served as
+  ever; with the page set the device grant is what it was.
+  `BROKER_API_ACCOUNTS` now takes a Google service account beside a Kubernetes one, written
+  `listener=google:example-listener@example-project.iam.gserviceaccount.com`: such a caller
+  presents its machine's own Google identity token for `BROKER_GOOGLE_OIDC_AUDIENCE`, verified
+  against `BROKER_GOOGLE_OIDC_ISSUER` and looked up by the token's `email` rather than a
+  Kubernetes subject, which is how a listener running on a VM reads a token back. A Google entry
+  needs `BROKER_GOOGLE_OIDC_AUDIENCE` where a Kubernetes one needs `BROKER_K8S_OIDC_ISSUER`, and
+  both kinds keep one refusal taxonomy.
+  A person's sign-in credential is no longer listed or revocable as a machine login: it is on
+  the sign-ins list alone, and `POST /v1/person-signins/{id}/revoke` is what ends it, together
+  with the sign-in row that would otherwise mint it again.
+
+- Dispatch now admits an access token the secrets broker issued that names a session and a
+  service and no person: a machine nobody has signed in on. Such a caller reads as any session
+  does, and `whoami` names its session and its service, but every write it makes is refused
+  `403 SIGN_IN_REQUIRED` naming `agent-secrets login`, the command that signs a person in on
+  that machine, because Dispatch records a write under the person who made it and this
+  credential names none. The refusal sits in front of every mutating route rather than in each
+  one, so a route added later is covered by the table it joins. Such a token names no project
+  either, since a fleet whose entry names no person names no project for it: its scope is
+  `person`, Dispatch's project check leaves it alone, and the write refusal is the whole of what
+  holds it. The access-log line records the service it acts for where it names no person.
+  Dispatch relays two more of the broker's routes to the page a person reads:
+  `GET /api/v1/signins` lists the machines the caller has signed in on and
+  `POST /api/v1/signins/{id}/revoke` ends one, which stops that machine trading for them and
+  ends the access tokens already minted under it. Dispatch names the person from its own
+  session, so nobody reads or revokes another's; the Settings page renders them as **Sign-ins**,
+  beside Live grants.
+  `GET /api/v1/credentials/capabilities` answers `{"machine_code_page": <bool>}` from a cached
+  read of the broker's RFC 8414 metadata, and the web app serves the page where a person types a
+  machine's code only while that answer is true. A broker that serves no device grant prints no
+  code for anyone to type, so there is no page; no Dispatch setting changes, since the broker is
+  where that is decided. A broker Dispatch cannot read keeps the answer it last gave, or, with
+  none, keeps the page: a page that vanishes because one read timed out is worse than one that
+  lingers.
+
+- The Envoy listener takes an access token the secrets broker issued, presented under RFC 9449's
+  DPoP scheme, beside its two bearers. `ENVOY_AGENT_SECRETS_URL` turns it on,
+  `ENVOY_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` or `ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE` is the
+  identity it calls introspection as (a projected Kubernetes token in a pod, this machine's
+  Google identity token on a VM), and `ENVOY_PUBLIC_URL` is the origin a proof's `htu` is checked
+  against; any one of them set without the rest refuses the start. A caller the broker names is
+  bound to its session on the five routes that act as one — subscribe, unsubscribe, `roles/set`,
+  `messages/send` and `messages/publish` — each refusing 403 a body naming another session, while
+  the read routes that name another session by design are untouched; a token naming a service and
+  no person is admitted as any other session's is. Spent proofs are recorded in the new
+  `envoy_dpop_proofs` KV bucket, which every listener of a deployment shares and whose subjects
+  the listener's NATS grant now covers, so a bus with no JetStream refuses the start rather than
+  leaving a proof replayable against another replica. A request presenting no token is judged
+  exactly as it was before.
+
+- One Go client of the secrets broker's RFC 8693 token exchange, `internal/brokerclient`, which
+  `agent-secrets`, `agent-secrets-helper` and `legion controller start` all trade through: the
+  identity a machine already holds is traded for one of the broker's DPoP-bound access tokens and
+  traded again before that token expires, the grant issuing no refresh token at all, and a client
+  that cannot renew stops with a plain error rather than acting with no identity. Each process
+  makes its own key and sends only its public half. `AGENT_SECRETS_MACHINE_IDENTITY` says which
+  identity this machine proves — `kubernetes` (`AGENT_SECRETS_MACHINE_TOKEN_FILE`, a pod's
+  projected service-account token), `metadata` (`AGENT_SECRETS_MACHINE_AUDIENCE`, a Compute Engine
+  machine's own token, asked for with `format=full` through no proxy) or `pool`
+  (`AGENT_SECRETS_POOL_AUDIENCE` and `AGENT_SECRETS_POOL_ACCOUNT`, a token minted through a
+  workload identity pool with `generateIdToken` and `includeEmail`) — and `AGENT_SECRETS_SESSION`
+  the session name a trade writes under. With it unset every program works exactly as before.
+  A refusal the broker answers carries what it said: it reads as the OAuth refusal it is, so the
+  redaction that keeps a configured URL's credential out of every message prints the broker's
+  own reason — an entry that fixes no session while the request names none, an identity no entry
+  lists — instead of `the request failed`, and prints the status alone where that URL carries a
+  credential.
+  The wire contract both this client and the TypeScript one are held to is the corpus at
+  `packages/envoy/internal/brokerclient/testdata/wire.json`, which each suite replays: a field one
+  client sends or reads without an entry there fails that client's own test.
+
+  `agent-secrets login` signs a person in on a machine: it makes a box key, runs Google's device
+  authorization grant for `openid` and `email` alone, trades the person's identity token with the
+  machine's as the actor token, and keeps the key and Google's refresh token together in that
+  person's own record under the key directory, mode 0600 in a 0700 directory. One record per
+  person, so a second person signs in beside the first; `AGENT_SECRETS_PERSON` says which of them
+  a session acts for, and with more than one sign-in and no such variable every form that needs a
+  session identity refuses and names them. `AGENT_SECRETS_SIGNIN_CLIENT_ID`,
+  `AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE` and `AGENT_SECRETS_SIGNIN_ISSUER` (default
+  `https://accounts.google.com`) name the device-flow client. A machine that proves an identity of
+  its own and holds no launcher and no helper registers a session key of its own under the
+  credential its trade mints, so a pod needs nobody to enrol it, and `agent-secrets-helper` gets
+  its launcher credential the same way with no person approving the machine at all.
+
+  `legion controller start` gives the controller's session that same route where the controller's
+  own file asks for it: `dispatch_token_broker: true`, the alternative to `dispatch_token_file`
+  and never set beside it, has the session trade this machine's identity for a Dispatch
+  credential of its own and renew it, so nobody copies a person's Dispatch token onto a machine.
+  It hands Oh My Pi no
+  `DISPATCH_TOKEN_FILE` and no `DISPATCH_TOKEN`, and drops an inherited one, since such a token
+  is bound to the key its holder proves and Dispatch refuses it presented as a bearer; it
+  trades once itself before the daemon mints the controller's capability, so a broker that
+  refuses this machine refuses the start, in the broker's own words, rather than leaving a
+  controller to find at its first write that it can write nothing.
+
+- `agent-secrets-helper` now enrols each session under the person signed in on the box, where
+  there is one. Before every enrolment it reads this user's own sign-ins
+  (`<key dir>/signins`, which `AGENT_SECRETS_KEY_DIR` names and `agent-secrets login` writes
+  0600 in a 0700 directory): with one it trades that sign-in for the person's launcher
+  credential and enrols the session under it, so a host session and an agent box registered
+  after the sign-in act for that person; with none, and with one the broker has refused, it
+  enrols under this machine's own credential, so a session registered after the person revokes
+  the sign-in is the fleet's again. It follows the box rather than the moment it started, so
+  neither signing in nor revoking needs the helper restarted, and a person's credential the
+  broker rejects is traded again inside the same enrolment rather than failing it. A second
+  user on the machine runs a helper of their own and reads their own directory; nothing here
+  takes a directory or a person from a session.
+  An enrolment now states only the operator the credential it is signed with carries: the
+  person for a sign-in's credential, the `AGENT_SECRETS_OPERATOR_FILE` login for a machine
+  login's, and none at all for the credential a machine's own identity traded for, which names
+  its fleet's service and no person. A machine in that mode reads no operator file, so a
+  missing or empty one no longer stops it enrolling — the broker refuses an enrolment stating
+  an operator its credential has not got (`OPERATOR_MISMATCH`), which is what stopped such a
+  machine enrolling any session at all. A revoke is signed with the credential the enrolment
+  was made under, falling back to this machine's own when the broker answers that the
+  enrolment is not that credential's.
+  The helper also answers the calls that need no peer identity — `login`, `login-status`,
+  `enroll-session-key`, `unenroll-session-key`, `sessions`, `drain` and `undrain` — on a kernel
+  that cannot pin the caller's pidfd (`SO_PEERPIDFD`, Linux 6.5), which it refused before: the
+  peer is pinned for the five ops judged on who the caller is and for nothing else.
+  `agent-secrets-helper install` writes `AGENT_SECRETS_KEY_DIR` into the unit beside the three
+  paths it already wrote.
+  In the token client, the broker's `429` is no longer read as a refusal no retry can cure: the
+  token endpoint spends a bucket per source address, and a renewal loop that stopped on one
+  would enrol nothing from the moment its credential lapsed, with only a restart to cure it. A
+  token that lives less than the five minutes before expiry a renewal aims at is now renewed at
+  half of what is left, rather than being traded again the instant it lands.
+
+
+### Removed
+
+- The VM half of `POST /v1/launcher-credentials/token` and the `vm` enrollment kind are gone: a
+  machine now presents its Google identity token to the RFC 8693 token exchange, which mints or
+  re-uses that machine's launcher credential in the exchange's own transaction and names it in
+  the token answer's `credential_id` and `credential_expires_at`. The machine enrols a `session`
+  under that credential, so every secrets route works for it exactly as a pod's does. The
+  credential is keyed by the machine and the key it trades with
+  (`<account>@<project>/<zone>/<instance id>#<key thumbprint>` for a token minted on a Compute
+  Engine instance, `<account>#<key thumbprint>` for one minted anywhere else) and names its
+  fleet's service and no person, so the machine reads the secrets that service owns
+  and the shared agent-tier ones and never a person's; a fleet's `BROKER_VM_EXCHANGE_ACCOUNTS`
+  person and project reach its Dispatch token alone. Migration `0026`
+  retires every live `vm` enrollment, with its grants and its pending requests, and takes the
+  kind out of the enrollments check. `agent-secrets enroll --vm` and `renew --vm` are gone, and
+  the Compute Engine metadata identity reader they held moves to
+  `internal/googleidentity`. `BROKER_GOOGLE_OIDC_AUDIENCE`, `BROKER_VM_SERVICES`,
+  `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` all stay: they are the exchange's machine
+  entries.
+
+
+### Fixed
+
+- A person's sign-in holds to one row per person and box key, live or revoked, so a revoke that
+  commits while a trade waits on it refuses that trade instead of leaving a second live sign-in
+  behind; the refusal is the insert's own conflict rather than a read taken before the revoke
+  landed. A sign-in's box key presented from another machine is refused `invalid_grant` naming
+  `agent-secrets login`, where the row used to follow the key and every trade after it collided
+  on `launcher_credentials_live_key`. `agent-secrets login` trades under the person's own session
+  name rather than `AGENT_SECRETS_SESSION`, which is unset on most boxes (the trade was refused
+  for want of a session name) and on the rest names the session this machine trades its own
+  identity under (which the person's trade took, after which the helper's own trade was refused
+  for good). A sign-in's or a machine's own session registers itself again, once, when the broker
+  says its enrollment is not live, so a box goes on working past `BROKER_LEASE_SECONDS` without
+  a second `agent-secrets login` and a second sign-in on that person's list. A refresh token
+  Google no longer honours falls the box back to its own authority instead of failing every
+  enrolment, and a refusal a retry can cure — the broker's 429 — no longer marks a person's
+  sign-in refused for the life of the helper. A clock-skewed DPoP proof (`invalid_dpop_proof`)
+  and a `use_dpop_nonce` that survives the transport's retry no longer stop the renewal loop, so
+  a helper started before NTP corrects the host's clock trades again rather than holding no
+  launcher credential until somebody restarts it. A `LAUNCHER_INVALID` on a machine that proves
+  an identity of its own wakes that machine's trade loop, so register and sign stop answering
+  `NO_CREDENTIAL` at once rather than at the token's own renewal. `agent-secrets-helper install`
+  writes this machine's identity and sign-in settings into the unit it installs
+  (`AGENT_SECRETS_MACHINE_IDENTITY`, `_MACHINE_TOKEN_FILE`, `_MACHINE_AUDIENCE`, `_POOL_AUDIENCE`,
+  `_POOL_ACCOUNT`, `_SIGNIN_ISSUER`, `_SIGNIN_CLIENT_ID`, `_SIGNIN_CLIENT_SECRET_FILE`,
+  `_PERSON` and `_SESSION`), without which the installed helper fell back to the device-grant
+  machine login and ignored every `agent-secrets login` on the box.
+
+- A machine's session renews only while the launcher credential its Google identity token minted is still live — not revoked, not past the hour's expiry that token gave it, and its account still listed for its service — so a copy of a session's key and enrollment id taken off the box renews nothing once that box's login has ended; a person's session and a pod's renew as before. A machine's credential is now keyed by the key its DPoP proof presented as well as by the machine, on every path rather than only where the token carries no Compute Engine claims, so a copy of a machine's identity token presented with another key mints a credential beside the machine's instead of moving the machine's onto the copier's key and letting it end that machine's sessions. Beside them: Dispatch reads the broker's device-grant metadata once per wave of callers rather than once per caller behind a lock; an identity-mode helper no longer warns every hour that its one-hour credential lapses soon; `agent-secrets login` keeps its sign-ins under $XDG_STATE_HOME/agent-secrets/signins, which a reboot keeps, rather than under the key directory it empties; and the Google token verifier, the two VM pins and the renewal token the VM login left behind are each named and placed where they are used.
+- An Envoy listener with none of the `ENVOY_AGENT_SECRETS_*` variables set serves a client that
+  presents `Authorization: DPoP` again. A client sends that header to whatever listener it is
+  pointed at whenever it has a secrets broker and a machine identity to trade and no Envoy bearer
+  is set, so the loopback, no-bearer listener a GCP VM and the clustered hub run was answering its
+  own clients 401. Such a listener now reads the header as it read every Authorization header it
+  did not know before this credential existed: the open listener serves the request with no
+  session bound, a listener that requires a bearer answers the 401 it always answered, no broker
+  is asked anything, and nothing is logged.
+  Three more routes that act on one session are now held to the session a broker access token
+  names, as the five write routes already were: `POST /v1/replay`, `DELETE /v1/sessions/<id>` and
+  `DELETE /v1/interests/<id>`. A token issued for one session can no longer read another session's
+  agent inbox, remove its registration or drop its interests; each is refused 403 naming both
+  sessions. The Claude Code `/clear` handoff still deregisters the session it hands off from,
+  which it does while it is still that session, and the `client_instance_id` that request carries
+  goes on deciding which client instance's registration may be removed.
+  A presentation the listener could not judge because its spent-proof store did not answer is now
+  answered `503` with `Retry-After: 1` rather than `401`, as a broker that did not answer already
+  was: the token was never judged, and a client does not retry a 401, so a NATS fault of a few
+  seconds was failing sends made with a perfectly live token.
+
+- A session told to hold its Dispatch credential at the secrets broker now reads no bearer at all. `DISPATCH_TOKEN_BROKER=1` makes the broker route the only one Dispatch's section consults — no `DISPATCH_TOKEN`, no `DISPATCH_TOKEN_FILE`, no chosen envoy.json's `dispatch.token`, no checkout pair — and a machine that can trade none turns Dispatch off with an error naming the broker variable that is missing, rather than falling back to whatever bearer the box holds; any other value of the variable is refused by name. `legion controller start` hands that variable to the controller under `dispatch_token_broker`, which it needs because the controller keeps the operator's HOME: before this, the operator's own envoy.json wrote Dispatch as the operator whenever its `dispatch.token` named the same server, and turned Dispatch off when it named another.
+- `scripts/dev-stack.sh` now drops the two databases it created when it is stopped by a signal,
+  not only on Ctrl-C and on a clean exit. Its cleanup put INT and TERM back on their default
+  disposition before stopping anything, so a SIGTERM sent to the whole process group — what a
+  supervisor's stop sends, and what reaches this shell again whenever the signal is repeated or
+  a process of the stack takes it first — killed the run between the kills and the drops, and
+  `dev_stack_broker_<suffix>` and `dev_stack_dispatch_<suffix>` stayed on the server for every
+  stop. The cleanup now ignores both signals for the rest of the run instead, which also puts
+  the psql that runs each drop out of reach of a signal sent to the group, and it returns at
+  once when it is already running. A run ended by SIGKILL still leaves both databases behind:
+  no process can trap that signal. `scripts/dev-stack.test.sh` has the case.
+
+- `agent-secrets-helper` keeps the key a machine that proves an identity of its own trades with
+  in `~/.config/agent-secrets/identity-key.pem`, mode 0600, and makes one only at that machine's
+  first trade. The broker names a machine's one launcher credential by the thumbprint of that
+  key, so a helper that made a new key at every start asked for a new subject at every restart
+  and left the credential its sessions were enrolled under behind: the sessions it re-pinned
+  retried a revoke no credential of theirs could ever make and never enrolled again while their
+  processes lived, and a box enrolled with `agent-secrets enroll --helper` was refused
+  `ENROLLMENT_NOT_LIVE` once the old credential lapsed, with nothing to enrol it again. A revoke
+  the broker refuses `NOT_ENROLLING_CREDENTIAL` is final to the helper, as `OPERATOR_MISMATCH`
+  already was, so a session whose old enrollment belongs to a credential this helper no longer
+  holds enrolls afresh and leaves that one to its lease.
+  `legion controller start`'s check of the broker route trades under a session name of its own
+  rather than under `AGENT_SECRETS_SESSION`, which is what the controller's session does: its
+  session id is minted when Oh My Pi starts, so a check that traded under the variable passed
+  for a fleet entry that fixes that very name and then launched a controller whose every
+  Dispatch write the broker refused. The rule a trade names a session by is now one function
+  each client reads — the caller's own session where it acts as one, and `AGENT_SECRETS_SESSION`
+  otherwise, which is the only name a daemon, a command or the helper has.
+
+- A listener call that acts for a session presents that session's own credential, so a process
+  that switches sessions hands back the role the session it left still holds instead of being
+  answered 403 and leaving that role with a session whose subject it has closed until the
+  registration's TTL lapses. The listener binds a broker token's session on eight routes, and
+  every call whose body names the session it acts for — subscribe, unsubscribe, the
+  deregistration, a role claim, a replay, and a send or publish with a source session — now
+  names it to the credential; a read of another session's record still names none.
+
+  The token exchange mints or moves a launcher credential only for a trade that asks for one. An
+  absent `launcher_credential` parameter asks, so `agent-secrets`, `agent-secrets-helper` and a
+  person's sign-in keep theirs by sending nothing, and so does any client written before the
+  parameter; `false` declines and any other spelling is `invalid_request`. Every TypeScript
+  client declines: none reads the credential, and each makes a key per process and per session,
+  so each `dispatch` call, each Claude Code hook run, each `envoy-send` and each session of a
+  long-lived process used to leave a `launcher_credentials` row and a
+  `launcher_credential.token_login` audit row on the operator's machine-logins list that nothing
+  removes.
+
+  The TypeScript broker client reads `invalid_dpop_proof` and `use_dpop_nonce` as refusals a
+  later trade may be answered differently, as the Go client already did, so a proof signed
+  before NTP corrects the host's clock no longer drops a live token and fails every Dispatch and
+  listener call. The wire corpus both clients replay carries a vector for each of the two
+  behaviours above, so neither client can drift from the other on them unnoticed.
+
+- A person's sign-in may no longer decline the launcher credential it holds: a trade of
+  `SubjectTokenTypePerson` sending `launcher_credential=false` is refused `400 invalid_request`,
+  "A sign-in holds its credential", and nothing is recorded for it. `agent-secrets login`, its
+  only caller, reads the credential id out of the answer and refuses one without it, and the
+  sessions a sign-in enrols read that person's secrets under that credential, so a sign-in
+  holding none was a sign-in that could do nothing. A machine's own trade declines as before.
+  The revoke of a sign-in ends a token in one of two ways: `store.RevokePersonSignInTx` ends
+  every access token the person and the box key had minted when its statement began, and the
+  revoke's next statement ends, through the sign-in's credential, a token from a trade that
+  committed while the revoke waited. A declined trade's token held no credential, so the second
+  way missed it; every person's token now holds one. A test holds the first way: a revoke after
+  a sign-in's trade leaves its token `active: false`.
+
+  `legion controller start`'s one check that the controller's machine can hold a Dispatch
+  credential now declines the launcher credential (`launcher_credential=false`) and names its
+  own session directly. The check enrols no session, reads no secret, and makes a key that dies
+  with the call, so the `launcher_credentials` row and the `launcher_credential.token_login`
+  audit row it used to leave behind put a machine login on the operator's list, keyed by a
+  thumbprint nothing held afterwards, at every start.
+
+  The operate page and the revoke guide now say what a machine-login revoke does not cut off.
+  A box that proves its own identity keeps its key across restarts
+  (`~/.config/agent-secrets/identity-key.pem`), and the broker's upsert conflicts only with a
+  live row, so the box's next trade mints a new live credential bound to that same key and a
+  copy of the key file signs launcher proofs again. Cutting such a box off is three steps in one
+  order: remove the key file, restart the helper so its next trade holds a credential of a
+  subject of its own, then revoke the old login.
+
+- The revoke guide now says how long a revoked access token is still served: Dispatch asks the
+  broker whether a token is live and reuses that answer for five seconds
+  (`AffirmativeCacheTTL`, `internal/brokertoken/brokertoken.go`) rather than asking once per
+  request, so the sessions on a box whose sign-in was revoked lose Dispatch within that window
+  rather than at the instant of the revoke.
+
+  Trimming the trailing slashes off a configured URL reads the string once, in the broker token
+  client's broker URL and in the Dispatch URL a session resolves when its credential is traded
+  at the broker. A `/\/+$/` replace reads it once for every position its unanchored search can
+  start at, which costs a URL of n slashes O(n²).
+
+- The Go half of the broker token client drops every slash an address ends in, as the TypeScript
+  half already did, so one wire contract is read by one rule. `AGENT_SECRETS_URL` is typed by hand
+  into a unit file, a pod's environment or a shell, and one extra slash used to leave this half
+  posting `//v1/oauth/token` where the other half posts `/v1/oauth/token`: a DPoP proof's `htu` is
+  the URL the caller built, so the path the broker's own mux then cleans no longer matched the
+  proof and the trade was refused naming the credential rather than the URL an operator could fix.
+  `agent-secrets` reads `AGENT_SECRETS_URL` and `AGENT_SECRETS_APPROVE_URL` through the same one
+  helper (`brokerclient.WithoutTrailingSlashes`) that `brokerclient.New` reads its broker URL by,
+  and an address that is nothing but slashes now counts as no address at all: `brokerclient.New`
+  refuses it as "no broker URL", and every `agent-secrets` form refuses it with the message it
+  gives when the variable is unset.
+
+- `agent-secrets-helper` reads the broker's address by the one rule the clients keep
+  (`brokerclient.WithoutTrailingSlashes`): `serve` drops every slash `AGENT_SECRETS_URL` ends in,
+  and `install` drops every slash of `--url` or `AGENT_SECRETS_URL` before it writes the unit's
+  `Environment=AGENT_SECRETS_URL=` line. Both dropped one slash of however many, so a typed
+  `https://secrets.example//` left the helper signing launcher proofs for `//v1/enrollments` —
+  refused `LAUNCHER_INVALID`, which clears the machine credential, so no session on the box can
+  enrol until a person approves a new machine login — and `install` persisted that typo into the
+  unit every later start reads. An address of nothing but slashes is no address at all: `install`
+  refuses it with the message it gives when no URL is named at all, and `serve` refuses it as a
+  missing `AGENT_SECRETS_URL`.
+
+## [29.8.0] - 2026-11-05
+
+### Added
+
+- agent-secrets names a released secret whose value ends in a line ending, in one line on standard error before the command runs, with no part of any value in it. The value is still injected exactly as it is stored, line endings and all, because a stored secret may be several lines; but a one-line credential that ends in one is nearly always the trailing newline of whatever seeded it, and it is invisible where it is written and expensive where it is read: a caller that puts such a value straight into an HTTP header gets a rejected header, and the error reporting that can quote the whole secret. The line says to keep an ending the value is meant to have, and otherwise to store the value again with agent-secrets secret set, piping it with the ending already removed, since that form drops one final LF and no carriage return.
+
 ## [29.7.0] - 2026-11-05
 
 ### Added

@@ -58,7 +58,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 62 patterns:
+      # ci.yaml's *legion_command, 65 patterns:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -86,6 +86,7 @@ on:
       - 'packages/daemon/internal/intake/*'
       - 'packages/daemon/internal/launcher/*'
       - 'packages/daemon/internal/lookpath/*'
+      - 'packages/daemon/internal/memorygroup/*'
       - 'packages/daemon/internal/modeltoken/*'
       - 'packages/daemon/internal/natsauth/*'
       - 'packages/daemon/internal/notify/*'
@@ -119,11 +120,15 @@ on:
       - 'packages/daemon/internal/wait/*'
       - 'packages/daemon/internal/workflow/*'
       - 'packages/daemon/internal/workspace/*'
+      - 'packages/envoy/brokerclient/*'
+      - 'packages/envoy/internal/brokerclient/*'
+      - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
-      # ci.yaml's *dispatch_server, 53 patterns:
+      # ci.yaml's *dispatch_server, 57 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
+      - 'packages/envoy/internal/cistore/*'
       - 'packages/envoy/internal/contracts/*'
       - 'packages/envoy/internal/dedupe/*'
       - 'packages/envoy/internal/dispatch/accesslog/*'
@@ -133,6 +138,7 @@ on:
       - 'packages/envoy/internal/dispatch/architecture/*'
       - 'packages/envoy/internal/dispatch/asks/*'
       - 'packages/envoy/internal/dispatch/auth/*'
+      - 'packages/envoy/internal/dispatch/cireconcile/*'
       - 'packages/envoy/internal/dispatch/config/*'
       - 'packages/envoy/internal/dispatch/dashboard/*'
       - 'packages/envoy/internal/dispatch/delivery/**'
@@ -164,8 +170,10 @@ on:
       - 'packages/envoy/internal/dispatch/store/migrations/**'
       - 'packages/envoy/internal/dispatch/text/*'
       - 'packages/envoy/internal/githubappjwt/*'
+      - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/internal/id/*'
       - 'packages/envoy/internal/kvwatch/*'
+      - 'packages/envoy/internal/logging/*'
       - 'packages/envoy/internal/metrics/*'
       - 'packages/envoy/internal/oidc/*'
       - 'packages/envoy/internal/pglisten/*'

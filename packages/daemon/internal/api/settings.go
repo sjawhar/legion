@@ -75,12 +75,19 @@ type Settings struct {
 	// update round waits before it asks a worker again, and how long after the round opened the
 	// controller is told it is stalled. They are decimals so a live proof and the production
 	// check can drive each bound inside one run.
-	PodUpdateRetaskHours float64                 `json:"pod_update_retask_hours"`
-	PodUpdateNoticeHours float64                 `json:"pod_update_notice_hours"`
-	ReviewRoundCap       int                     `json:"review_round_cap"`
-	MaxFixAttempts       int                     `json:"max_fix_attempts"`
-	Controller           config.ControllerLaunch `json:"controller"`
-	Capabilities         CapabilitiesSettings    `json:"capabilities"`
+	PodUpdateRetaskHours float64 `json:"pod_update_retask_hours"`
+	PodUpdateNoticeHours float64 `json:"pod_update_notice_hours"`
+	// PodUpdateMaxOpenRounds and PodUpdateRoundsPerMinute are `pod_update_max_open_rounds` and
+	// `pod_update_rounds_per_minute`: how many issues may hold an open update round at once, and
+	// how many rounds one sweep may open in a minute. Each is null, and neither is omitted, when
+	// the file names no limit, so a reader of the settings sees the key and reads from it that
+	// the deployment caps nothing.
+	PodUpdateMaxOpenRounds   *int                    `json:"pod_update_max_open_rounds"`
+	PodUpdateRoundsPerMinute *int                    `json:"pod_update_rounds_per_minute"`
+	ReviewRoundCap           int                     `json:"review_round_cap"`
+	MaxFixAttempts           int                     `json:"max_fix_attempts"`
+	Controller               config.ControllerLaunch `json:"controller"`
+	Capabilities             CapabilitiesSettings    `json:"capabilities"`
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
 	// role, `{}` while the file names none.
 	WorkerBackends map[string]string `json:"worker_backends"`
@@ -214,6 +221,19 @@ type ProjectSettings struct {
 	Merge          MergeSettings    `json:"merge"`
 	SlackChannels  []string         `json:"slack_channels"`
 	Deploys        []DeploySettings `json:"deploys"`
+	Memory         MemorySettings   `json:"memory"`
+}
+
+// MemorySettings is a project's `memory` block as the file writes it: the mode each new tree is
+// drawn under, absent for a project that names no block, which is off (config.Memory.Word); the
+// Oh My Pi overlays every role of a memory-group tree names after the operator's and its own, `[]`
+// for a project that names none; and the one instructions file the daemon appends to such a role's
+// system prompt, absent when the block names none. The paths are the operator's own file names,
+// which no credential rides in.
+type MemorySettings struct {
+	Mode         config.MemoryMode `json:"mode,omitempty"`
+	ConfigFiles  []string          `json:"config_files"`
+	Instructions string            `json:"instructions,omitempty"`
 }
 
 // DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
@@ -302,6 +322,8 @@ func SettingsOf(cfg config.Config) Settings {
 		ProductionCheckHours:                    cfg.ProductionCheckBound.Hours(),
 		PodUpdateRetaskHours:                    cfg.PodUpdateRetask.Hours(),
 		PodUpdateNoticeHours:                    cfg.PodUpdateNotice.Hours(),
+		PodUpdateMaxOpenRounds:                  cfg.PodUpdateMaxOpenRounds,
+		PodUpdateRoundsPerMinute:                cfg.PodUpdateRoundsPerMinute,
 		ReviewRoundCap:                          cfg.ReviewRoundCap,
 		MaxFixAttempts:                          cfg.MaxFixAttempts,
 		Controller:                              cfg.ControllerLaunch,
@@ -322,6 +344,11 @@ func SettingsOf(cfg config.Config) Settings {
 			Merge:          MergeSettings{ByHand: make([]string, len(project.Merge.ByHand))},
 			SlackChannels:  stringsOf(project.SlackChannels),
 			Deploys:        make([]DeploySettings, len(project.Deploys)),
+			Memory: MemorySettings{
+				Mode:         project.Memory.Mode,
+				ConfigFiles:  stringsOf(project.Memory.ConfigFiles),
+				Instructions: project.Memory.InstructionsPath,
+			},
 		}
 		for i, pattern := range project.Merge.ByHand {
 			entry.Merge.ByHand[i] = pattern.Expression

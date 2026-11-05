@@ -28,8 +28,8 @@ func TestAGracefulStopHandsWhatItHeldBackAndReleasesTheLeaseToTheStandby(t *test
 	active := startReceiverRig(t, uri, machineID, "pod-a", func(ctx context.Context, msg *natsgo.Msg) {
 		activeHandled.Add(1)
 		inHand <- ctx
-		// A prompt that never answers: it ends only when the stop cancels it, and the handler
-		// then NAKs it, as the delivery handler does a cancelled prompt.
+		// A delivery that never answers: it ends only when the stop cancels it, and the handler
+		// then NAKs it, as the delivery handler does a cancelled delivery.
 		<-ctx.Done()
 		_ = msg.Nak()
 	}, handBackTiming(), testLeaseTiming())
@@ -295,7 +295,7 @@ func TestAGracefulStopMarksTheHandBackForTheRecordItReleased(t *testing.T) {
 func TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack(t *testing.T) {
 	uri := testnats.URL(t)
 	const machineID = "box-stuck-handler"
-	// The handler answers neither its prompt's cancel nor the stop: it holds the message past
+	// The handler answers neither its delivery's cancel nor the stop: it holds the message past
 	// inflightCancelWait, and is let go only once the test is over.
 	stuck := make(chan struct{})
 	defer close(stuck)
@@ -527,7 +527,7 @@ func TestASuccessorThatSubscribesAfterTheLingerLetGoSettlesForTheAckWait(t *test
 	timing := handBackTiming()
 	timing.lingerMax = 0
 	active := startReceiverRig(t, uri, machineID, "pod-a", func(ctx context.Context, msg *natsgo.Msg) {
-		// A prompt that never answers: the stop cancels it and the handler NAKs it, so pod-a's
+		// A delivery that never answers: the stop cancels it and the handler NAKs it, so pod-a's
 		// linger hands that message back with the delay too.
 		<-ctx.Done()
 		_ = msg.Nak()

@@ -1118,7 +1118,7 @@ func TestSendHandler_AcceptsHumanSource(t *testing.T) {
 // answers 200 with no body at all, as this route always has.
 func TestDeleteSessionHandler_IsIdempotent(t *testing.T) {
 	_, sessions := setupSessionsTest(t, nil, []string{"ses_closed"})
-	handler := deleteSessionHandler(sessions)
+	handler := deleteSessionHandler(sessions, logging.New("test"))
 
 	for i := range 2 {
 		rr := httptest.NewRecorder()
@@ -1149,7 +1149,7 @@ func TestDeleteSessionHandler_DeletesTheSameClientInstancesRegistration(t *testi
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/"+sessionID+"?client_instance_id="+instanceID, nil)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1176,7 +1176,7 @@ func TestDeleteSessionHandler_KeepsAnotherClientInstancesRegistration(t *testing
 		"/v1/sessions/"+sessionID+"?client_instance_id=4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a",
 		nil,
 	)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1219,7 +1219,7 @@ func TestDeleteSessionHandler_RejectsOtherMethods(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/ses_closed", nil)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rr.Code)
@@ -1410,7 +1410,7 @@ func TestAdminInterestsHandler_ListAll(t *testing.T) {
 		"ses_list_b": {"notifications.test.>"},
 		"ses_list_a": {"notifications.github.>"},
 	}, nil)
-	handler := adminInterestsHandler(registry, sessions, nil)
+	handler := adminInterestsHandler(registry, sessions, nil, logging.New("test"))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/interests/", nil)
 	rec := httptest.NewRecorder()
@@ -1435,7 +1435,7 @@ func TestAdminInterestsHandler_GetBySession(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_get_test": {"notifications.test.>"},
 	}, nil)
-	handler := adminInterestsHandler(registry, sessions, nil)
+	handler := adminInterestsHandler(registry, sessions, nil, logging.New("test"))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/interests/ses_get_test", nil)
 	rec := httptest.NewRecorder()
@@ -1474,7 +1474,7 @@ func TestAdminInterestsHandler_GetAnswers404OnlyForAnUnknownSession(t *testing.T
 	if err != nil {
 		t.Fatalf("failed to create session registry: %v", err)
 	}
-	handler := adminInterestsHandler(registry, sessions, nil)
+	handler := adminInterestsHandler(registry, sessions, nil, logging.New("test"))
 	get := func(sessionID string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/interests/"+sessionID, nil))
@@ -1503,7 +1503,7 @@ func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_delete_target": {"notifications.test.>"},
 	}, nil)
-	handler := adminInterestsHandler(registry, sessions, nil)
+	handler := adminInterestsHandler(registry, sessions, nil, logging.New("test"))
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_delete_target", nil)
 	rec := httptest.NewRecorder()
@@ -1522,7 +1522,7 @@ func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
 
 func TestAdminInterestsHandler_DeleteIdempotent(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	handler := adminInterestsHandler(registry, sessions, nil)
+	handler := adminInterestsHandler(registry, sessions, nil, logging.New("test"))
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_nonexistent", nil)
 	rec := httptest.NewRecorder()
@@ -1535,7 +1535,7 @@ func TestAdminInterestsHandler_DeleteIdempotent(t *testing.T) {
 
 func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	handler := adminInterestsHandler(registry, sessions, nil)
+	handler := adminInterestsHandler(registry, sessions, nil, logging.New("test"))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/interests/", nil)
 	rec := httptest.NewRecorder()
@@ -1649,7 +1649,7 @@ func TestAdminInterestsHandler_RowsCarryALiveSessionsHeartbeat(t *testing.T) {
 	registry, sessions := setupInterestLastSeenTest(t, []string{live, unknown})
 	beat := heartbeat(t, sessions, live)
 
-	list, single := listedInterestRows(t, adminInterestsHandler(registry, sessions, nil))
+	list, single := listedInterestRows(t, adminInterestsHandler(registry, sessions, nil, logging.New("test")))
 	wantLastSeen(t, "GET /v1/interests/", list[live], beat)
 	wantLastSeen(t, "GET /v1/interests/"+live, single[live], beat)
 	for route, row := range map[string]interestRowLastSeen{"GET /v1/interests/": list[unknown], "GET /v1/interests/" + unknown: single[unknown]} {
@@ -1677,7 +1677,7 @@ func TestAdminInterestsHandler_RowsCarryAnExpiredSessionsLastHeartbeat(t *testin
 	})
 	time.Sleep(sessionTTL + 200*time.Millisecond)
 
-	list, single := listedInterestRows(t, adminInterestsHandler(registry, sessions, nil))
+	list, single := listedInterestRows(t, adminInterestsHandler(registry, sessions, nil, logging.New("test")))
 	wantLastSeen(t, "GET /v1/interests/", list[expired], beat)
 	wantLastSeen(t, "GET /v1/interests/"+expired, single[expired], beat)
 }
@@ -3609,6 +3609,17 @@ func listenerTestEnvelope(topic, dedupeKey string) contracts.Envelope {
 		PayloadSummary: "listener test notification",
 		TraceID:        id.New(),
 	}
+}
+
+// lineWith is the first line of output containing every one of parts, or "". The rows of both
+// builds read a log line through it.
+func lineWith(output string, parts ...string) string {
+	for line := range strings.SplitSeq(output, "\n") {
+		if !slices.ContainsFunc(parts, func(part string) bool { return !strings.Contains(line, part) }) {
+			return line
+		}
+	}
+	return ""
 }
 
 func marshalListenerEnvelope(t *testing.T, item contracts.Envelope) []byte {

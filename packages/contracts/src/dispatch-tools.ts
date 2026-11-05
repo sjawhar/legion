@@ -1460,6 +1460,7 @@ export const dispatchToolSpecs = [
       "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " +
       `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` +
       "--events N lists the last N, and --all-events every one. " +
+      "A comment reply chain names the comment each nested reply answers as `Answers: <comment id>`. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " +
@@ -1768,7 +1769,7 @@ export const dispatchToolSpecs = [
     name: "dispatch_whoami",
     example: {},
     description:
-      "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or null. project is the one project key your credential may write, or null when it names none.",
+      "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token and under a broker token that names a service and no person. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or the fleet a broker token naming no person belongs to, or null. A broker token that names a service may read and is refused every write with SIGN_IN_REQUIRED, which names the command a person signs in on that machine with. project is the one project key your credential may write, or null when it names none.",
     arguments: () => ({}),
     strict: true,
   },

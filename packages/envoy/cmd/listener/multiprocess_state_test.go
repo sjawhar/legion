@@ -191,7 +191,7 @@ func TestTwoPodsRepeatAtMostOnceWhatAKilledPodDelivered(t *testing.T) {
 	swallowed := a.swallowNextAck(t)
 	m := publisher.mustPublish(t, sessionID)
 	swallowed()
-	mpEventually(t, 10*time.Second, a.instance+"'s frame to "+sessionID+" to have landed", func() bool { return serving.promptsTo(sessionID) == 1 })
+	mpEventually(t, 10*time.Second, a.instance+"'s frame to "+sessionID+" to have landed", func() bool { return serving.framesTo(sessionID) == 1 })
 	killed := a.kill(t)
 
 	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
@@ -223,7 +223,7 @@ func TestTwoPodsDeliverWhatAKilledPodOnlyAttempted(t *testing.T) {
 	select {
 	case <-inHand:
 	case <-time.After(10 * time.Second):
-		t.Fatalf("%s never prompted %s", a.instance, sessionID)
+		t.Fatalf("%s never sent %s a frame", a.instance, sessionID)
 	}
 	killed := a.kill(t)
 
@@ -233,7 +233,7 @@ func TestTwoPodsDeliverWhatAKilledPodOnlyAttempted(t *testing.T) {
 	serving.requireWithin(t, messages, bound, killed)
 	time.Sleep(2 * time.Second)
 	serving.requireOnce(t, messages)
-	if line := mpLineWith(b.Output.String(), `"msg":"listener delivery deferred to another pod's attempt"`, `"event_id":"`+m.event+`"`); line != "" {
+	if line := lineWith(b.Output.String(), `"msg":"listener delivery deferred to another pod's attempt"`, `"event_id":"`+m.event+`"`); line != "" {
 		t.Fatalf("%s deferred %s as a live pod's attempt, though %s held the lease it took over: %s", b.instance, m.event, a.instance, line)
 	}
 }
@@ -471,7 +471,7 @@ func TestTwoPodsEveryQueuedMessageReachesTheSessionAtMostTwiceAcrossAReceiveLost
 	t.Cleanup(heal)
 	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
 	taken := time.Since(cut)
-	if released := mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`); released == "" {
+	if released := lineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`); released == "" {
 		t.Fatalf("%s kept the lease its lost receive connection cannot deliver on:\n%s", a.instance, mpTail(mpLinesWithout(a.Output.String()), 40))
 	}
 

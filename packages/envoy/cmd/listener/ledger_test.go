@@ -283,7 +283,7 @@ func TestASessionThatReceivesCostsNoLedgerWaitOrRetry(t *testing.T) {
 		t.Fatalf("register the other listener's session: %v", err)
 	}
 	for _, sessionID := range []string{"ses_self", "ses_remote"} {
-		item := listenerTestEnvelope(contracts.AgentSubject(sessionID), "unprompted-"+sessionID)
+		item := listenerTestEnvelope(contracts.AgentSubject(sessionID), "unasked-"+sessionID)
 		msg, settlement := settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, item))
 		jetStreamDeliveryHandler(cfg)(context.Background(), msg)
 		if got := settlement(t); got != "+ACK" {
@@ -300,13 +300,13 @@ func TestASessionThatReceivesCostsNoLedgerWaitOrRetry(t *testing.T) {
 	// session's interest is no session of this machine that takes it another way
 	// (durableNeedsDelivery). The lapsed one costs no ledger call - its resolution failed, so
 	// there is no delivery to record - and the self-subscribed one costs the one best-effort ask.
-	const topic = "notifications.github.owner.repo.fanout-unprompted"
+	const topic = "notifications.github.owner.repo.fanout-unasked"
 	for _, sessionID := range []string{"ses_self", "ses_lapsed"} {
 		if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
 			t.Fatalf("register %s's interest in %s: %v", sessionID, topic, err)
 		}
 	}
-	item := listenerTestEnvelope(topic, "unprompted-fanout")
+	item := listenerTestEnvelope(topic, "unasked-fanout")
 	msg, settlement := settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, item))
 	jetStreamDeliveryHandler(cfg)(context.Background(), msg)
 	if got := settlement(t); got != "+ACK" {
@@ -317,7 +317,7 @@ func TestASessionThatReceivesCostsNoLedgerWaitOrRetry(t *testing.T) {
 	if got := strings.Count(logs, `"msg":"`+ledgerUnavailableLine+`"`); got != 1 {
 		t.Fatalf("logged %d %q WARNs, want the one best-effort ask of the self-subscribed recipient:\n%s", got, ledgerUnavailableLine, logs)
 	}
-	if line := mpLineWith(logs, `"msg":"`+ledgerUnavailableLine+`"`); !strings.Contains(line, `"retry":false`) {
+	if line := lineWith(logs, `"msg":"`+ledgerUnavailableLine+`"`); !strings.Contains(line, `"retry":false`) {
 		t.Fatalf("the best-effort ask asked for a retry: %s", line)
 	}
 }
@@ -487,7 +487,7 @@ func TestASelfSubscribedSessionReadFromTheBucketCostsNoLedgerWaitOrRetry(t *test
 	if got := strings.Count(logs, `"msg":"`+ledgerUnavailableLine+`"`); got != 1 {
 		t.Fatalf("logged %d %q WARNs, want the one best-effort ask of %s:\n%s", got, ledgerUnavailableLine, target, logs)
 	}
-	if line := mpLineWith(logs, `"msg":"`+ledgerUnavailableLine+`"`); !strings.Contains(line, `"retry":false`) {
+	if line := lineWith(logs, `"msg":"`+ledgerUnavailableLine+`"`); !strings.Contains(line, `"retry":false`) {
 		t.Fatalf("the best-effort ask asked for a retry: %s", line)
 	}
 	if ledgerDelivered(t, harness.config, item.DedupeKey, target) {

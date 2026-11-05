@@ -106,7 +106,7 @@ func tbRequireEachOnce(t *testing.T, publisher *mpPublisher, serving *mpNATSSess
 	for _, m := range messages {
 		perSession[m.session]++
 	}
-	t.Logf("%d messages, each prompted exactly once: %v", len(messages), perSession)
+	t.Logf("%d messages, each delivered exactly once: %v", len(messages), perSession)
 }
 
 // No message on any subject is skipped, doubled, or dropped by both while two builds share the

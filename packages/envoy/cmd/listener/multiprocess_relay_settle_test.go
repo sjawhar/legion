@@ -93,10 +93,12 @@ func mpStartRelayRow(t *testing.T, sessionID string, hold mpRelayHold, lanes boo
 // That repeat is what the merge of #2674 costs here. A frame's reply and the consumer's ack ride
 // the one connection, so a drop loses both together and the relay has no second channel it could
 // have recorded the delivery on - which is what the delivery ledger on the lease connection was
-// for a push to a serving port. The guarantee is therefore at most one repeat under the same
-// event id, the same shape as the settle bound's, and what this row holds is that it is at most
-// one and that it comes back at once rather than after the pull's 30 s silence (INFRA-557
-// tester's round 24).
+// for a push to a serving port. What this row holds is that one drop's cost: the frame the drop
+// cut comes back once, under its own event id, and at once rather than after the pull's 30 s
+// silence, and no other frame comes back with it. That is this drop's shape and not the general
+// rule: every relay restart sends again every frame above the ack floor, and a frame that draws
+// no reply inside the receipt wait is probed again and again, so a frame can come back more than
+// once (README, "When a session can see a message twice").
 func TestTwoPodsARelayedFrameTheLinksDroppedUnderIsRepeatedAtMostOnceWithItsId(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -131,8 +133,8 @@ func TestTwoPodsARelayedFrameTheLinksDroppedUnderIsRepeatedAtMostOnceWithItsId(t
 	healSessions := a.lanes.drop(mpSessionConsumerConnection)
 	t.Cleanup(healSessions)
 	disconnected := func(name string) bool {
-		return mpLineWith(a.Output.String(), "envoy nats disconnected", `name=`+name) != "" ||
-			mpLineWith(a.Output.String(), "envoy nats disconnected", `name="`+name+`"`) != ""
+		return lineWith(a.Output.String(), "envoy nats disconnected", `name=`+name) != "" ||
+			lineWith(a.Output.String(), "envoy nats disconnected", `name="`+name+`"`) != ""
 	}
 	mpEventually(t, 10*time.Second, a.instance+" to read its session-consumer connection dropped", func() bool {
 		return disconnected(mpSessionConsumerConnection)
@@ -174,9 +176,9 @@ func TestTwoPodsARelayedFrameTheLinksDroppedUnderIsRepeatedAtMostOnceWithItsId(t
 // session's consumer, so it restarts at an ack floor past that message and never sends it again.
 // The session must take it exactly once. Before the settle the stopping relay forgot the frame
 // unacked, the successor was given it again, and the session took it twice: CI met that as
-// TestTwoPodsReceiveConnectionLostHandsOverWithin15s's "evt-mp-0079 to ses_mp_recvlost_one
-// prompted 2 times" (run 41589787158, job 125769769345); this row forces that order (INFRA-557
-// tester's round 27).
+// TestTwoPodsReceiveConnectionLostHandsOverWithin15s's exactly-once check, where
+// evt-mp-0079 reached ses_mp_recvlost_one twice (run 41589787158, job 125769769345); this row
+// forces that order (the tester's round 27).
 func TestTwoPodsARelayedFrameInFlightWhenTheTermEndsIsNotSentAgainByTheSuccessor(t *testing.T) {
 	const sessionID = "ses_mp_relay_term_end_once"
 	row := mpStartRelayRow(t, sessionID, mpHoldGated, false)
@@ -229,7 +231,7 @@ func TestTwoPodsARelayedFrameHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMos
 	serving.requireAtMostTwice(t, m, "the frame whose reply the settle bound cut off")
 	serving.requireKnown(t, []mpMessage{warm, m, after})
 	serving.requireOrder(t, []mpMessage{warm, m, after})
-	if mpLineWith(a.Output.String(), `"msg":"`+relayFrameInDoubtLine+`"`, m.event) == "" {
+	if lineWith(a.Output.String(), `"msg":"`+relayFrameInDoubtLine+`"`, m.event) == "" {
 		t.Fatalf("%s logged no in-doubt line naming %s, so the frame its settle bound cut was left unsaid", a.instance, m.event)
 	}
 }
@@ -282,7 +284,7 @@ func TestTwoPodsSIGKILLWithAFrameUnansweredReachesTheSessionWithin15s(t *testing
 // its host wrote it, so the stopping relay settles a frame on "done" alone (settleStoppedFrames
 // waits for outstanding, which only done or nak clears): this one is left in doubt when the
 // grace ends and the successor sends it once more. The session must take that frame at most
-// twice and every other message exactly once, and be prompted with no event id no message
+// twice and every other message exactly once, and be given no event id no message
 // carried. The repeat costs the host nothing: the real client writes a redelivered copy once
 // (packages/envoy-client/src/consumer-delivery.ts joins a copy of a frame it still holds and
 // drops one it has written). The same holds when the term ends for a lost receive connection
@@ -326,7 +328,7 @@ func TestTwoPodsARelayedFrameAnsweredInsideTheGraceOfAReceiveLostReleaseIsTakenO
 	warm, m, release := row.warm, row.held, row.release
 	t.Cleanup(a.lanes.cut(mpReceiveConnection(a.instance)))
 	mpEventually(t, mpHardBound, a.instance+" to release the lease for its lost receive connection", func() bool {
-		return mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`) != ""
+		return lineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`) != ""
 	})
 	time.Sleep(200 * time.Millisecond) // inside relaySettleGrace of the release
 	release()

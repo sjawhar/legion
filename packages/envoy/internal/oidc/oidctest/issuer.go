@@ -4,7 +4,9 @@
 // token would come from, and, once EnableCodeFlow arms it, the authorization,
 // token and revocation endpoints a person's sign-in goes through
 // (authorization code with optional PKCE S256, refresh token, RFC 7009
-// revocation). It is an ordinary
+// revocation), and, once EnableDeviceFlow arms it, the device authorization
+// endpoint and the device code grant a device with no browser signs in
+// through (RFC 8628). It is an ordinary
 // package rather than a _test.go file so the packages that need it —
 // internal/oidc, internal/dispatch/api, internal/dispatch/routes,
 // internal/dispatch/store, cmd/dispatch and cmd/listener — can all import it;
@@ -23,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,10 +82,13 @@ type Issuer struct {
 }
 
 // codeFlowClient is one confidential client the code flow serves: its secret,
-// and the key the ID tokens issued to it are signed with.
+// the key the ID tokens issued to it are signed with, and whether the device
+// authorization grant is armed for it (EnableDeviceFlow), which the clients
+// EnableCodeFlow arms it for do not serve.
 type codeFlowClient struct {
 	key          *Key
 	clientSecret string
+	deviceGrant  bool
 }
 
 // codeFlow is the state of the authorization and token endpoints: the
@@ -97,6 +103,7 @@ type codeFlow struct {
 	signInByDefault map[string]any
 	codes           map[string]codeGrant
 	grants          map[string]*refreshGrant
+	deviceCodes     map[string]*deviceGrant
 	refreshes       int
 	token           tokenFailure
 	revocation      revocation
@@ -151,6 +158,37 @@ type refreshGrant struct {
 	revoked  bool
 }
 
+// deviceGrant is one device authorization (RFC 8628): the client it was issued
+// to, the user code a person types in to approve it, the claims of the sign-in
+// that approved it, nil while nobody has, and the moment it stops being
+// answered.
+type deviceGrant struct {
+	clientID string
+	userCode string
+	claims   map[string]any
+	expires  time.Time
+}
+
+const (
+	// deviceCodeGrantType is RFC 8628's grant type, which x/oauth2 spells in a
+	// package its users cannot import.
+	deviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+	// deviceCodeLifetime is how long a device code is answered for, the span
+	// the device authorization answer reports as expires_in. ExpireDeviceCodes
+	// ends the codes issued so far without a test waiting it out.
+	deviceCodeLifetime = 10 * time.Minute
+	// devicePollInterval is the interval, in seconds, the device authorization
+	// answer asks the device to poll at. Nothing enforces it — a poll that
+	// arrives sooner is answered, never slow_down — so a test polls as fast as
+	// it likes; it is one second rather than Google's five so that a client
+	// that does honour it still finishes a test quickly.
+	devicePollInterval = 1
+	// userCodeAlphabet is what a user code is drawn from: capitals with no
+	// vowel, so no code reads as a word, and none of the letters a person
+	// confuses with a digit while typing one in.
+	userCodeAlphabet = "BCDFGHJKLMNPQRSTVWXZ"
+)
+
 // New starts an issuer on a random loopback port, serving no keys yet. The
 // server is closed at cleanup.
 func New(t TB) *Issuer {
@@ -160,6 +198,7 @@ func New(t TB) *Issuer {
 	mux.HandleFunc("/.well-known/openid-configuration", issuer.handleDiscovery)
 	mux.HandleFunc("/keys", issuer.handleKeys)
 	mux.HandleFunc("GET /authorize", issuer.handleAuthorize)
+	mux.HandleFunc("POST /device_authorization", issuer.handleDeviceAuthorization)
 	mux.HandleFunc("POST /token", issuer.handleToken)
 	mux.HandleFunc("POST /revoke", issuer.handleRevoke)
 	issuer.server = httptest.NewServer(mux)
@@ -276,14 +315,35 @@ func (i *Issuer) JWKSFetches() int {
 func (i *Issuer) EnableCodeFlow(key *Key, clientID, clientSecret string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.enableClient(key, clientID, clientSecret, false)
+}
+
+// EnableDeviceFlow arms the device authorization endpoint and the device code
+// grant for one confidential client, the way EnableCodeFlow arms the
+// authorization and token endpoints, and on the same terms: the client's own
+// signing key and secret, the issuer's own queued sign-ins. A client id
+// already served is replaced, so a client serves the device grant or the code
+// flow, not both, as a Google client registered for limited-input devices is
+// not the one a browser signs in at. The device codes it issues are approved
+// by ApproveDeviceCode.
+func (i *Issuer) EnableDeviceFlow(key *Key, clientID, clientSecret string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.enableClient(key, clientID, clientSecret, true)
+}
+
+// enableClient serves clientID, arming the device grant for it when device is
+// set. The caller holds i.mu.
+func (i *Issuer) enableClient(key *Key, clientID, clientSecret string, device bool) {
 	if i.codeFlow == nil {
 		i.codeFlow = &codeFlow{
-			clients: map[string]*codeFlowClient{},
-			codes:   map[string]codeGrant{},
-			grants:  map[string]*refreshGrant{},
+			clients:     map[string]*codeFlowClient{},
+			codes:       map[string]codeGrant{},
+			grants:      map[string]*refreshGrant{},
+			deviceCodes: map[string]*deviceGrant{},
 		}
 	}
-	i.codeFlow.clients[clientID] = &codeFlowClient{key: key, clientSecret: clientSecret}
+	i.codeFlow.clients[clientID] = &codeFlowClient{key: key, clientSecret: clientSecret, deviceGrant: device}
 }
 
 // OmitCodeFlowEndpoints makes the discovery document name no authorization or
@@ -422,6 +482,55 @@ func (i *Issuer) Refreshes() int {
 	return i.codeFlow.refreshes
 }
 
+// ApproveDeviceCode approves the device authorization whose user code a person
+// has typed in, signing it in as the next person SignInAs queued or, with none
+// queued, the one SignInByDefault set, the way an authorization request signs
+// one in. The user code is read as the person types it, whatever its case and
+// surrounding space. A user code no device authorization is waiting on, one
+// approved already and one whose device code has expired are each refused, as
+// is an approval with nobody to sign in. It takes no TB because a command
+// calls it: cmd/dev-oidc-issuer's control route that approves a user code.
+func (i *Issuer) ApproveDeviceCode(userCode string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	typed := strings.ToUpper(strings.TrimSpace(userCode))
+	if i.codeFlow == nil {
+		return fmt.Errorf("no device authorization is waiting on the user code %q", typed)
+	}
+	flow := i.codeFlow
+	for _, grant := range flow.deviceCodes {
+		if grant.userCode != typed {
+			continue
+		}
+		switch {
+		case grant.claims != nil:
+			return fmt.Errorf("the user code %q was approved already", typed)
+		case !time.Now().Before(grant.expires):
+			return fmt.Errorf("the user code %q has expired", typed)
+		case len(flow.queued) > 0:
+			grant.claims, flow.queued = flow.queued[0], flow.queued[1:]
+		case flow.signInByDefault != nil:
+			grant.claims = maps.Clone(flow.signInByDefault)
+		default:
+			return errors.New("no sign-in queued (SignInAs) and no default (SignInByDefault)")
+		}
+		return nil
+	}
+	return fmt.Errorf("no device authorization is waiting on the user code %q", typed)
+}
+
+// ExpireDeviceCodes ends every device authorization issued so far: the next
+// poll with any of their device codes answers expired_token, as one does once
+// the person took longer than deviceCodeLifetime to approve it.
+func (i *Issuer) ExpireDeviceCodes() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	past := time.Now().Add(-time.Second)
+	for _, grant := range i.codeFlow.deviceCodes {
+		grant.expires = past
+	}
+}
+
 // Authorize follows authURL the way a browser does through the identity
 // provider's sign-in, and returns the code and state the issuer redirects back
 // with. The person signed in is the one SignInAs queued, or, when none is
@@ -510,6 +619,8 @@ func (i *Issuer) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	if !omitCodeFlow {
 		document["authorization_endpoint"] = i.server.URL + "/authorize"
 		document["token_endpoint"] = i.server.URL + "/token"
+		document["device_authorization_endpoint"] = i.server.URL + "/device_authorization"
+		document["grant_types_supported"] = []string{"authorization_code", "refresh_token", deviceCodeGrantType}
 	}
 	if !omitRevocation {
 		document["revocation_endpoint"] = i.server.URL + "/revoke"
@@ -567,15 +678,62 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
-// handleToken answers the two grants a confidential client makes, as Cognito's
-// token endpoint does: a code exchange returns an ID token, an access token and
-// a refresh token (none once OmitRefreshTokens is set); a refresh returns a
-// fresh ID token and access token and no new refresh token. Each grant is the
-// client's own: a code or a refresh token another client was issued is
-// invalid_grant. A code whose authorization request carried a PKCE challenge is
-// exchanged only with the code_verifier whose S256 is that challenge (RFC 7636
-// section 4.6); a missing or wrong verifier is invalid_grant, and spends the
-// code like any refusal.
+// handleDeviceAuthorization answers a device authorization request (RFC 8628
+// section 3.1) as Google's does: the client names itself and the scope it
+// wants, and the answer is the device code it polls the token endpoint with,
+// the user code a person types in, where they type it, and how long the codes
+// live. The request carries no secret, as the device holds none it can keep;
+// a client the issuer does not serve the device grant for is invalid_client,
+// and so is one it serves only the code flow for.
+func (i *Issuer) handleDeviceAuthorization(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		tokenError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	flow := i.codeFlow
+	if flow == nil {
+		http.Error(w, "code flow not enabled", http.StatusNotFound)
+		return
+	}
+	client, served := flow.clients[r.PostForm.Get("client_id")]
+	if !served || !client.deviceGrant {
+		tokenError(w, http.StatusUnauthorized, "invalid_client")
+		return
+	}
+	deviceCode, userCode := randomValue(), randomUserCode()
+	flow.deviceCodes[deviceCode] = &deviceGrant{
+		clientID: r.PostForm.Get("client_id"),
+		userCode: userCode,
+		expires:  time.Now().Add(deviceCodeLifetime),
+	}
+	verification := i.server.URL + "/device"
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"device_code":               deviceCode,
+		"user_code":                 userCode,
+		"verification_uri":          verification,
+		"verification_uri_complete": verification + "?user_code=" + url.QueryEscape(userCode),
+		"expires_in":                int(deviceCodeLifetime.Seconds()),
+		"interval":                  devicePollInterval,
+	})
+}
+
+// handleToken answers the three grants a confidential client makes, as
+// Cognito's token endpoint does for the first two and Google's does for the
+// third: a code exchange returns an ID token, an access token and a refresh
+// token (none once OmitRefreshTokens is set); a refresh returns a fresh ID
+// token and access token and no new refresh token; and a device code grant
+// (RFC 8628 section 3.4) returns what a code exchange does, once a person has
+// approved its user code, answering authorization_pending until they have and
+// expired_token once the code's life has run out. Each grant is the client's
+// own, and authenticates as the client, device code included, as Google's
+// device grant does: a code, a refresh token or a device code another client
+// was issued is invalid_grant. A code whose authorization request carried a
+// PKCE challenge is exchanged only with the code_verifier whose S256 is that
+// challenge (RFC 7636 section 4.6); a missing or wrong verifier is
+// invalid_grant, and spends the code like any refusal.
 func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		tokenError(w, http.StatusBadRequest, "invalid_request")
@@ -650,6 +808,30 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		claims = maps.Clone(grant.claims)
+	case deviceCodeGrantType:
+		code := r.PostForm.Get("device_code")
+		grant, waiting := flow.deviceCodes[code]
+		switch {
+		case !waiting || grant.clientID != clientID:
+			tokenError(w, http.StatusBadRequest, "invalid_grant")
+			return
+		case !time.Now().Before(grant.expires):
+			delete(flow.deviceCodes, code)
+			tokenError(w, http.StatusBadRequest, "expired_token")
+			return
+		case grant.claims == nil:
+			tokenError(w, http.StatusBadRequest, "authorization_pending")
+			return
+		}
+		// The poll that redeems a device code spends it, as the exchange
+		// spends an authorization code; a poll that is answered
+		// authorization_pending spends nothing.
+		delete(flow.deviceCodes, code)
+		claims = maps.Clone(grant.claims)
+		if !flow.omitRefresh {
+			refresh = randomValue()
+			flow.grants[refresh] = &refreshGrant{clientID: clientID, claims: maps.Clone(grant.claims)}
+		}
 	default:
 		tokenError(w, http.StatusBadRequest, "unsupported_grant_type")
 		return
@@ -752,6 +934,24 @@ func randomValue() string {
 		panic(errors.New("oidctest: crypto/rand failed: " + err.Error()))
 	}
 	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+// randomUserCode is the code a person types in to approve a device
+// authorization: short enough to read off one screen and type into another,
+// in the two groups of four Google's is written in.
+func randomUserCode() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		panic(errors.New("oidctest: crypto/rand failed: " + err.Error()))
+	}
+	code := make([]byte, 0, len(buf)+1)
+	for at, b := range buf {
+		if at == len(buf)/2 {
+			code = append(code, '-')
+		}
+		code = append(code, userCodeAlphabet[int(b)%len(userCodeAlphabet)])
+	}
+	return string(code)
 }
 
 func (i *Issuer) handleKeys(w http.ResponseWriter, _ *http.Request) {

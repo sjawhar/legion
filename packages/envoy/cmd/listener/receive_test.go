@@ -314,7 +314,7 @@ func TestADurableMessageReceivedWithoutTheLeaseIsDroppedAndRedeliveredToTheHolde
 }
 
 // The holder keeps every message it has received alive with InProgress, the one in hand and the
-// ones queued behind it, so a prompt that takes longer than the 6 s ack wait is not redelivered
+// ones queued behind it, so a delivery that takes longer than the 6 s ack wait is not redelivered
 // while it runs, and neither is anything queued behind it.
 func TestInProgressKeepsTheHoldersMessagesPastTheAckWait(t *testing.T) {
 	uri := testnats.URL(t)

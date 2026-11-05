@@ -21,8 +21,11 @@ Every pod of a machine id, active or standby:
   to a session that is gone — and says it is alive and reporting on the same topic at its start
   and every `listenerReadyInterval` after it (`wake.go`). Every pod reports, because every pod
   serves those routes and one request reaches one of them; the report an agent delivery raises
-  when it gives up is the holder's, off the durable path. A report is one event id the daemon
-  marks once, so two pods both saying one listener is alive is the same answer twice.
+  when it gives up is the holder's, off the durable path. Each report carries a fresh event id
+  (`wake.go`), so the two pods share none; what makes two pods saying it the same answer twice is
+  what the daemon keeps of a report: the greatest time any report named
+  (`RecordListenerReady`, `packages/daemon/internal/store/wake.go`), which one live reporter is
+  enough to hold up.
 
 Only the pod holding the machine's **delivery lease** receives the durable consumer, writes its
 policy, and runs the loops one deliverer runs: the interest reaper, the role-claim reaper, the
@@ -176,7 +179,7 @@ link the server `packages/envoy/go.mod` pins, v2.15.2, and
   the held batch and a session keeps the order of its events. With nothing outstanding the hold
   ends at its first read and messages reach their sessions about 5 to 6 s after the last renewal;
   otherwise once the dead pod's messages are back, and at the cap, about 12 to 13 s after it, when
-  a message waits out a retry's delay (a failed prompt's 30 s, an unplaceable delivery's 5 s): that
+  a message waits out a retry's delay (a failed delivery's 30 s, an unplaceable delivery's 5 s): that
   message stays outstanding until its delay ends and arrives after the hold, as it would have on
   the dead pod. The tests bound it at 15 s.
 - **Graceful stop after a hard one.** The lease record carries three flags for the next holder.

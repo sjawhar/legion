@@ -72,8 +72,8 @@ import (
 // The holder sends InProgress every inProgressEvery for every message it has received and not
 // settled, queued or in hand, so none waits out the ack wait while this pod is alive. On a
 // shutdown the message in hand gets inflightGrace to finish before its handling context is
-// cancelled, which aborts a prompt in flight; inflightCancelWait bounds the wait for the handler
-// to return after that.
+// cancelled, which aborts a delivery in flight; inflightCancelWait bounds the wait for the
+// handler to return after that.
 //
 // A holder's graceful stop hands its messages back (durableReceiver.handBack) and keeps its
 // subscription until the next holder has one, since a push consumer's last subscriber going while

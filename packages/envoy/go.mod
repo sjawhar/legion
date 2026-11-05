@@ -136,35 +136,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 )
 
-// The sjawhar/ygo fork is upstream ygo v1.55.0, through upstream main 510c2cf5, plus fixes, each
-// carried until upstream ships it; its release notes list every member with its upstream pull
-// request. Thirteen wait in open upstream pull requests: pre-integration refusals change nothing,
-// and a partly applied update relays the bytes the room integrated and parked (#340, which
-// replaces #334, #341, #344, #345, #352, #356 and #357); when a non-local transaction advances a
-// document's own client clock, the document takes a new client ID at commit, so every write fork
-// reads that ID after decoding its history (#340, breaking);
-// peer memory is bounded and dead peers close - a per-peer write queue byte budget
-// (Server.PeerWriteQueueBytes, which the document service sets), a failed write or a server close
-// ends the peer and drops its unread input, a joining peer gets the room's state once, and a room
-// an Apply, a relay Inject or a join is inside is not closed under it, so CloseRoom answers
-// ErrRoomInUse and a caller closes the room from inside its own Apply with CloseRoomWithin (#342,
-// which replaces #339, #343, #358 and #366); OnUpdate fires only for a transaction that changes
-// the document, after its GC, and carries only that transaction's deletions (#350); garbage
-// collection and type encoding match Yjs (#347); undo and redo restore what Yjs restores (#359);
-// CloseRoom closes a browser that joins while it runs (#331); a document logs each commit's
-// update, and what the commit parked, in commit order under its own lock (UpdateLog,
-// LoggedUpdate.Parked, #332), against which the room's update observer measures each update; a
-// remote update's scans can be bounded (#333); a map-valued text format no longer panics with the
-// lock held (#335); a transaction names the shared types it changed and every shared type its
-// container (ChangedTypes and Parent, #336), so the room's update observer renders only the
-// top-level blocks an update touched; awareness reaches its sending peer and a read-only peer gets
-// a bounded empty awareness response, so an idle provider stays connected (#338);
-// Server.OnTokenAuthContext, OnTokenAuth with the connection's request context, which Dispatch
-// does not set (#351); and WithFormatCleanup and Doc.SetFormatCleanup, which turn off the format
-// cleanup a remote apply runs, so a copy that replays the room's commit log (newDocumentCopy) and
-// a room loading its stored history (bootstrapLoadedState) make no commit the room never made
-// (#369). Two await upstream pull requests: a per-apply scan budget stacked on #333, which
-// Dispatch does not set, and Doc.Clone, retained from v1.54.1-sami.4, which copies a document
-// without encoding or decoding it: a write's fork of its room is that room's replica cloned
-// (warmFork, forkPoint).
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.1
+// The fork keeps the upstream module path; consume its published tag through a remote
+// versioned replacement. RELEASE_NOTES.md in the tagged fork lists its upstream fixes.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.2

@@ -53,8 +53,9 @@ func bindAsAHolder(t *testing.T, uri, machineID string, handle natsgo.MsgHandler
 }
 
 // leaveARetryOutstanding publishes data to machineID's durable and has a holder on a connection
-// of its own NAK it for a retry a minute later, as the delivery handler NAKs a prompt that failed,
-// then go: the message stays outstanding, counted in the durable's NumAckPending, for that minute.
+// of its own NAK it for a retry a minute later, as the delivery handler NAKs a delivery that
+// failed, then go: the message stays outstanding, counted in the durable's NumAckPending, for
+// that minute.
 // It returns a client to publish and read the durable with.
 func leaveARetryOutstanding(t *testing.T, uri, machineID, data string) *bus.Client {
 	t.Helper()

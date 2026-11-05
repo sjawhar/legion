@@ -65,7 +65,7 @@ func TestTwoPodsReconnectInPlaceDeliversEachMessageOnce(t *testing.T) {
 		t.Fatalf("%d pods report themselves active after the reconnect, want 1", actives)
 	}
 	watch.requireServed(t, cut)
-	t.Logf("%d messages, each prompted once across a %s cut of %s", len(messages), outage, a.instance)
+	t.Logf("%d messages, each taken once across a %s cut of %s", len(messages), outage, a.instance)
 }
 
 // A short drop: the active pod's link is cut for 2 s, under the lease's 5 s. It reconnects and
@@ -182,13 +182,13 @@ func TestTwoPodsStartedTogetherElectOneActivePod(t *testing.T) {
 	}
 }
 
-// SIGKILL of the active pod while it has a message in hand, on a port session T whose prompt never
+// SIGKILL of the active pod while it has a message in hand, on a port session T whose frame never
 // answers, and a second message to T queued behind it on T's own consumer. The standby takes over:
 // both of T's messages and every message published after the kill reach their sessions within
 // 15 s, each session's in the order they were published, and the standby lists the registered
 // sessions throughout. Before INFRA-557 the durable's 60 s ack wait holds the queued message with
 // the killed pod (and any message the server pushed to it as it died), so those come after the
-// newer ones, and late. What waits behind the prompt in hand is T's own consumer's since main's
+// newer ones, and late. What waits behind the frame in hand is T's own consumer's since main's
 // per-session consumers: another session's messages no longer queue behind it, and the standby's
 // relay restarts that consumer at its ack floor, which is what brings both messages back at once
 // rather than at the consumer's own 60 s ack wait.
@@ -390,7 +390,7 @@ func TestTwoPodsReceiveConnectionLostHandsOverWithin15s(t *testing.T) {
 
 	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
 	taken := time.Since(cut)
-	released := mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`)
+	released := lineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`)
 	if released == "" {
 		t.Fatalf("%s released the lease without logging why:\n%s", a.instance, mpTail(mpLinesWithout(a.Output.String()), 40))
 	}
@@ -491,9 +491,9 @@ func TestTwoPodsReceiveConnectionBackInsideTheBoundKeepsTheLease(t *testing.T) {
 	}
 }
 
-// A graceful stop: the active pod is in hand on a prompt that never answers when it is sent
+// A graceful stop: the active pod is in hand on a frame that never answers when it is sent
 // SIGTERM, with a message published every 100 ms before and after. Every message reaches its
-// session within 10 s of its publish; a message prompted twice is the same message, with its own
+// session within 10 s of its publish; a message delivered twice is the same message, with its own
 // event id. Before INFRA-557 the stopping pod keeps the durable bound for ~23 s, through its HTTP
 // shutdown and its NATS drain, so the messages wait.
 func TestTwoPodsGracefulStopDeliversWithin10s(t *testing.T) {
@@ -516,7 +516,7 @@ func TestTwoPodsGracefulStopDeliversWithin10s(t *testing.T) {
 	select {
 	case <-inHand:
 	case <-time.After(10 * time.Second):
-		t.Fatalf("%s never prompted %s", a.instance, slow)
+		t.Fatalf("%s never sent %s a frame", a.instance, slow)
 	}
 	signalled := a.Terminate(t)
 	time.Sleep(6 * time.Second) // publish on through the hand-over
@@ -735,7 +735,7 @@ func TestTwoPodsStandbyAcrossANATSRestartLogsNoResubscribeFailure(t *testing.T) 
 	// A recovery's first attempt runs at the reconnect and the next a second later: watch past both.
 	const failure = "envoy nats recovery resubscribe failed"
 	for until := time.Now().Add(5 * time.Second); time.Now().Before(until); time.Sleep(mpPoll) {
-		if line := mpLineWith(b.Output.String(), failure); line != "" {
+		if line := lineWith(b.Output.String(), failure); line != "" {
 			t.Fatalf("%s, the standby, logged across the NATS restart: %s", b.instance, line)
 		}
 	}
@@ -816,7 +816,7 @@ func TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s(t
 	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
 	time.Sleep(5 * time.Second) // publish on past the take-over
 	stop()
-	if mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`) == "" {
+	if lineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`) == "" {
 		t.Fatalf("%s never released the lease for its lost receive connection; its lease lines:\n%s", a.instance,
 			mpLinesMatching(a.Output.String(), "lease"))
 	}

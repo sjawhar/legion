@@ -292,7 +292,7 @@ func (r *durableReceiver) drain(t *receiveTerm) (*nats.Conn, bool) {
 }
 
 // settleInHand gives the message in hand inflightGrace to settle, then cancels its handling, which
-// aborts a prompt in flight and NAKs the message, and waits inflightCancelWait more for the
+// aborts a delivery in flight and NAKs the message, and waits inflightCancelWait more for the
 // handler to return. It reports whether the handler returned: one still running holds a message
 // this pod can no longer keep alive, which comes back at its ack wait, long after the next
 // holder's 3 s hold would have ended, so a graceful stop writes no clean-hand-back mark for it

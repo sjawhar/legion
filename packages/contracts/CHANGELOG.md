@@ -1,5 +1,35 @@
 # Changelog
 
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- LegionOperatorClaimsResponse carries pod_update_rounds: what the daemon's last pod-update sweep decided under the two new legion.yaml limits on opening pod-update rounds — each limit or null for no limit, the issues holding an open round, and the issues each limit held back.
+- Review and approval contracts expose approved content hashes and their provenance; runtime review-event validation preserves both fields. Document-version reads can report the SHA-256 of their stored UTF-8 bytes.
+
+## [main@f06073fb9ef4] - 2026-11-05
+
+### Added
+
+- Each issue of the Legion state carries its tree's memory draw: `memoryGroup`, `memoryDrawMode`
+  and `memoryDrawnAt`, all optional. A tree no draw has reached carries none of the three, and a
+  daemon before contract 49 sends none.
+
+### Fixed
+
+- The schemas that read the Legion daemon's answers now ignore a key they do not name, at every depth, so a plugin one contract behind its daemon reads the state instead of refusing the whole body for one field the daemon added. They still refuse a body that lacks a field they require or carries one of a type they do not describe, a refusal still arrives with its stable code, and every body the plugin sends is still refused for a key its schema does not name. The gate that holds the reader to the daemon's Go wire shape is now an equality between each golden's parse and the file, which names the path of the first key the parse dropped.
+
+## [main@804d3695e12e] - 2026-11-05
+
+### Added
+
+- `DISPATCH_SIGN_IN_REQUIRED` is the code of the `403` Dispatch answers a write by an access
+  token the secrets broker issued that names a session and a service and no person: the machine
+  holding it has signed nobody in, so there is nobody to record the write under. Reads are
+  unaffected, and the refusal's message names `agent-secrets login`. It is generated into Go as
+  `contracts.DispatchSignInRequired`, as `DISPATCH_LOGIN_CHANGED` is, so the server's refusal
+  and every client's reading of it cannot drift apart.
+
 ## [main@27c52d310319] - 2026-11-05
 
 ### Added
