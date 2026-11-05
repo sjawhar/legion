@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
@@ -89,7 +88,7 @@ func readPages[T any](ctx context.Context, r *Reconciler, c *counts, tally *int,
 // listener's record of that head lacks. It answers the stop a rate limit ended the pass at, and
 // nil for every other outcome: a head the pass could not read is named at WARN and the pass goes
 // on to the next.
-func (r *Reconciler) readHead(ctx context.Context, writer *cistore.Store, head pullHead, c *counts) *stop {
+func (r *Reconciler) readHead(ctx context.Context, writer Writer, head pullHead, c *counts) *stop {
 	c.heads++
 	kept := r.kept(writer, head)
 	runs, err := readPages(ctx, r, c, &c.headRequests, kept.runs, func(ctx context.Context, page int, etag string) (conditionalPage[object], error) {
@@ -129,7 +128,7 @@ func (r *Reconciler) readHead(ctx context.Context, writer *cistore.Store, head p
 // kept is what the pass remembers of one head, and an empty state when its ETags must not be
 // used: the record they stand for is gone (the bucket's seven-day TTL, or a delete), so a
 // conditional read would answer 304 and leave the head with no record at all.
-func (r *Reconciler) kept(writer *cistore.Store, head pullHead) headState {
+func (r *Reconciler) kept(writer Writer, head pullHead) headState {
 	state, ok := r.heads[head.key()]
 	if !ok {
 		return headState{}
@@ -179,7 +178,7 @@ func (r *Reconciler) headFailed(err error, head pullHead, c *counts) (*stop, boo
 // with, under the pull request's number and the owner and name GitHub itself gave. wanted counts
 // the observations those rules named, whether or not the record already held them; ok is false
 // when a write failed, which is what makes the pass drop this head's ETags.
-func (r *Reconciler) record(ctx context.Context, writer *cistore.Store, head pullHead, runs, suites []pageOf[object], c *counts) (wanted int, ok bool) {
+func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, runs, suites []pageOf[object], c *counts) (wanted int, ok bool) {
 	ok = true
 	repository := head.owner + "/" + head.repo
 	for _, page := range runs {

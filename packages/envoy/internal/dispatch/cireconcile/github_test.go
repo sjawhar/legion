@@ -61,10 +61,13 @@ type fakeGitHub struct {
 }
 
 // fakeRepository is what GET /repos/{owner}/{repo} answers: the name GitHub itself gives the
-// repository and its id.
+// repository and its id. unreadable answers that read 404 instead, while the installation
+// lookup still answers for the repository: GitHub showing the App a repository it then does not
+// answer for.
 type fakeRepository struct {
-	fullName string
-	id       int64
+	fullName   string
+	id         int64
+	unreadable bool
 }
 
 // fakePull is one open pull request of GET /repos/{owner}/{repo}/pulls.
@@ -123,7 +126,7 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		f.mu.Lock()
 		repository, known := f.repos[r.PathValue("owner")+"/"+r.PathValue("repo")]
 		f.mu.Unlock()
-		if !known {
+		if !known || repository.unreadable {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 			return
 		}
@@ -340,9 +343,45 @@ func (f *fakeGitHub) countPath(path string) int {
 	return sent
 }
 
+// sincePath is every request from index from onwards that named path, oldest first: what one
+// pass sent to one listing, where from is count() read before that pass.
+func (f *fakeGitHub) sincePath(from int, path string) []fakeRequest {
+	var found []fakeRequest
+	for _, request := range f.received()[from:] {
+		if before, _, _ := strings.Cut(request.url, "?"); before == path {
+			found = append(found, request)
+		}
+	}
+	return found
+}
+
 // etagOf is the ETag the stand-in last answered one URL (path and query together) with.
 func (f *fakeGitHub) etagOf(requestURI string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.etags[requestURI]
+}
+
+// hideRepository makes GET /repos/{name} answer 404 while the App is still installed on the
+// repository, so a pass holds a token for it and GitHub answers nothing about it.
+func (f *fakeGitHub) hideRepository(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.repos[name] = fakeRepository{unreadable: true}
+}
+
+// installationID is the installation every token is minted for, the id GitHub budgets this
+// stand-in's reads under (githubapp.InstallationScope).
+func (f *fakeGitHub) installationID() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.installID
+}
+
+// forgetRequests empties the request log, so what a test asserts on afterwards is what the
+// passes after it sent and nothing else.
+func (f *fakeGitHub) forgetRequests() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = nil
 }

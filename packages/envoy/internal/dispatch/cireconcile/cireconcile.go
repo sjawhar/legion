@@ -34,7 +34,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/cistore"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -63,6 +63,16 @@ const (
 	maxPages = 100
 )
 
+// Writer is the CI record store a pass writes through: the listener's bucket bound by
+// cistore.OpenWriter, which creates nothing. It is an interface rather than the store itself so
+// that a caller may put its own writer in the pass's way, as every other collaborator of a
+// Reconciler is its caller's to choose; *cistore.Store satisfies it.
+type Writer interface {
+	Record(context.Context, contracts.CIObservation) error
+	RecordSuite(context.Context, contracts.CIObservation) error
+	HasRecord(owner, repo, number, sha string) (bool, error)
+}
+
 // Reconciler reads GitHub for the CI observations the listener's records lack and writes them.
 // Its collaborators are fields its caller sets, as redeliver.Sweeper's are, so a test passes its
 // own. One Reconciler runs one pass at a time: it remembers between passes the ETags GitHub
@@ -81,7 +91,7 @@ type Reconciler struct {
 	// bucket: a pass calls it until it has once succeeded, and every later pass writes through
 	// that writer. It fails while NATS is not connected, and while the listener has not made the
 	// bucket; a pass it fails for reads GitHub nothing and leaves the binding to a later one.
-	Open func() (*cistore.Store, error)
+	Open func() (Writer, error)
 	// ReviewerAppID is the review App's id, Dispatch's DISPATCH_REVIEWER_APP_ID. A verdict check
 	// (`tester`, `architect`) is recorded only when that App created it
 	// (contracts.ReviewerVerdictDecision); unset, no verdict check is recorded at all.
@@ -93,7 +103,7 @@ type Reconciler struct {
 	Pace time.Duration
 
 	// writer is what Open bound, nil until a pass has bound it.
-	writer *cistore.Store
+	writer Writer
 	// rows is what the last pass learned of each repo_projects row, keyed by the row's own text:
 	// the ETag of GitHub's answer about it, and the name and id that answer gave.
 	rows map[string]rowState
@@ -184,7 +194,7 @@ func (r *Reconciler) Pass(ctx context.Context) {
 }
 
 // bind returns the CI record writer, binding it on the first pass that can.
-func (r *Reconciler) bind() (*cistore.Store, error) {
+func (r *Reconciler) bind() (Writer, error) {
 	if r.writer != nil {
 		return r.writer, nil
 	}
@@ -197,7 +207,7 @@ func (r *Reconciler) bind() (*cistore.Store, error) {
 }
 
 // reconcile is one pass over every mapped repository, and the stop that ended it early.
-func (r *Reconciler) reconcile(ctx context.Context, writer *cistore.Store, c *counts) *stop {
+func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *stop {
 	rows, err := r.mapped(ctx)
 	if err != nil {
 		r.Logger.Warn("ci reconcile read no repository mappings", "error", err)

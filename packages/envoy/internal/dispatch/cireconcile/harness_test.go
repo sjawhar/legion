@@ -55,6 +55,13 @@ const (
 // gave, which is why a pass keyed from the lower-cased row would settle somewhere else.
 const checksSubject = "notifications.github." + gitHubOwner + "." + gitHubName + ".pr." + pullNumber + ".checks"
 
+// checkRunsPath and checkSuitesPath are the paths of the head's two listings, which a pass reads
+// page by page and a test counts the reads of.
+const (
+	checkRunsPath   = "/repos/" + gitHubRepository + "/commits/" + headSHA + "/check-runs"
+	checkSuitesPath = "/repos/" + gitHubRepository + "/commits/" + headSHA + "/check-suites"
+)
+
 // reviewerAppID is the review App's id as a Reconciler and the listener's webhook take it: the
 // text of the number GitHub's own objects carry.
 var reviewerAppID = strconv.Itoa(reviewerApp)
@@ -72,9 +79,24 @@ type harness struct {
 	webhook    http.HandlerFunc
 	logs       *syncBuffer
 	reconciler *Reconciler
+	// reviewer is the review App's id this test's listener and pass were built with, which
+	// startListener needs for the webhook handler it mounts.
+	reviewer string
 }
 
+// newHarness is the whole stack with the listener already running, which every test wants but
+// the one about a pass that runs before the listener has made the CI bucket.
 func newHarness(t *testing.T, reviewer string) *harness {
+	t.Helper()
+	h := newHarnessBeforeTheListener(t, reviewer)
+	h.startListener()
+	return h
+}
+
+// newHarnessBeforeTheListener is the stack with no CI bucket: NATS is up, so a pass runs, but
+// nothing has made envoy_ci_state yet, which is where a Dispatch process booted ahead of the
+// listener stands. startListener then makes the bucket, as the listener itself does.
+func newHarnessBeforeTheListener(t *testing.T, reviewer string) *harness {
 	t.Helper()
 	ctx := t.Context()
 	database := storetest.Open(t)
@@ -85,48 +107,81 @@ func newHarness(t *testing.T, reviewer string) *harness {
 	}
 	t.Cleanup(client.Close)
 
-	// The listener's own store, which makes the bucket and watches it, and its real summary loop:
-	// the pass's job is to make this listener settle, and a record alone does not prove that.
-	listener, err := cistore.Open(client.Conn, logging.New("listener"), cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
-	if err != nil {
-		t.Fatalf("open the listener's CI store: %v", err)
-	}
-	ready, cancelReady := context.WithTimeout(ctx, 10*time.Second)
-	defer cancelReady()
-	if err := listener.WaitForCacheReady(ready); err != nil {
-		t.Fatalf("the listener's cache is not ready: %v", err)
-	}
-	loop, endLoop := context.WithCancel(ctx)
-	t.Cleanup(endLoop)
-	cistore.StartSummaryLoop(loop, listener, client, 100*time.Millisecond, 20*time.Millisecond,
-		metrics.New().NewGauge("held", ""), logging.New("loop"))
-
 	logs := &syncBuffer{}
 	limits := ratelimit.New(database.Pool)
 	github := newFakeGitHub(t)
-	h := &harness{
+	return &harness{
 		t:        t,
 		ctx:      ctx,
 		github:   github,
 		pool:     database.Pool,
 		bus:      client,
-		listener: listener,
-		webhook:  webhook.GitHubHandler(webhookSecret, "@legion", reviewer, client, listener),
 		logs:     logs,
+		reviewer: reviewer,
 		reconciler: &Reconciler{
 			Pool:   database.Pool,
 			GitHub: github.client(limits),
 			Limits: limits,
-			// The writer is bound by the first pass that finds NATS connected, as the running
-			// pass binds it, rather than here.
-			Open:          func() (*cistore.Store, error) { return cistore.OpenWriter(client.Conn, logging.New("writer")) },
+			// The writer is bound by the first pass that finds NATS connected and the bucket
+			// made, as the running pass binds it, rather than here.
+			Open:          openWriter(client),
 			ReviewerAppID: reviewer,
 			Logger:        slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			// A test waits for no pace.
 			Pace: 0,
 		},
 	}
-	return h
+}
+
+// openWriter is the Open a Reconciler of this harness binds through: cistore's own writer, which
+// creates no bucket and so fails until the listener has made one.
+func openWriter(client *bus.Client) func() (Writer, error) {
+	return func() (Writer, error) {
+		writer, err := cistore.OpenWriter(client.Conn, logging.New("writer"))
+		if err != nil {
+			return nil, err
+		}
+		return writer, nil
+	}
+}
+
+// startListener opens the listener's own store, which makes the bucket and watches it, and its
+// real summary loop, and mounts the listener's real webhook handler over them: the pass's job is
+// to make this listener settle, and a record alone does not prove that.
+func (h *harness) startListener() {
+	h.t.Helper()
+	listener, err := cistore.Open(h.bus.Conn, logging.New("listener"), cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
+	if err != nil {
+		h.t.Fatalf("open the listener's CI store: %v", err)
+	}
+	ready, cancelReady := context.WithTimeout(h.ctx, 10*time.Second)
+	defer cancelReady()
+	if err := listener.WaitForCacheReady(ready); err != nil {
+		h.t.Fatalf("the listener's cache is not ready: %v", err)
+	}
+	loop, endLoop := context.WithCancel(h.ctx)
+	h.t.Cleanup(endLoop)
+	cistore.StartSummaryLoop(loop, listener, h.bus, 100*time.Millisecond, 20*time.Millisecond,
+		metrics.New().NewGauge("held", ""), logging.New("loop"))
+	h.listener = listener
+	h.webhook = webhook.GitHubHandler(webhookSecret, "@legion", h.reviewer, h.bus, listener)
+}
+
+// replica is a second Reconciler standing for the other Dispatch process of a deployment: a
+// GitHub client of its own over the one stand-in, and a log of its own, over the database, the
+// NATS and the shared rate limits this harness's own Reconciler uses.
+func (h *harness) replica() *Reconciler {
+	h.t.Helper()
+	limits := ratelimit.New(h.pool)
+	return &Reconciler{
+		Pool:          h.pool,
+		GitHub:        h.github.client(limits),
+		Limits:        limits,
+		Open:          openWriter(h.bus),
+		ReviewerAppID: h.reviewer,
+		Logger:        slog.New(slog.NewJSONHandler(&syncBuffer{}, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Pace:          0,
+	}
 }
 
 // mapRepository maps one repository to a project of its own, as Settings → Repositories does.
@@ -252,10 +307,10 @@ func (h *harness) post(event, body, delivery string) {
 	}
 }
 
-// passLine is the fields of the last "ci reconcile pass" line the pass logged.
-func (h *harness) passLine() map[string]any {
+// lines is the fields of every line the pass logged under msg, oldest first.
+func (h *harness) lines(msg string) []map[string]any {
 	h.t.Helper()
-	var line map[string]any
+	var found []map[string]any
 	for _, text := range strings.Split(strings.TrimSpace(h.logs.String()), "\n") {
 		if text == "" {
 			continue
@@ -264,14 +319,21 @@ func (h *harness) passLine() map[string]any {
 		if err := json.Unmarshal([]byte(text), &fields); err != nil {
 			h.t.Fatalf("a log line is not JSON: %v\n%s", err, text)
 		}
-		if fields["msg"] == "ci reconcile pass" {
-			line = fields
+		if fields["msg"] == msg {
+			found = append(found, fields)
 		}
 	}
-	if line == nil {
+	return found
+}
+
+// passLine is the fields of the last "ci reconcile pass" line the pass logged.
+func (h *harness) passLine() map[string]any {
+	h.t.Helper()
+	lines := h.lines("ci reconcile pass")
+	if len(lines) == 0 {
 		h.t.Fatalf("no pass line was logged:\n%s", h.logs.String())
 	}
-	return line
+	return lines[len(lines)-1]
 }
 
 // logged reports whether any line the pass logged carries text.
