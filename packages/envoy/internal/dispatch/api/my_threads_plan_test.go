@@ -50,8 +50,8 @@ func TestMyThreadsPlansKeepExistingReadAndUserThreadsIndex(t *testing.T) {
 			}
 			var plans []struct {
 				Plan      map[string]any
-				Execution float64         `json:"Execution Time"`
-				Planning  float64         `json:"Planning Time"`
+				Execution float64 `json:"Execution Time"`
+				Planning  float64 `json:"Planning Time"`
 			}
 			if err := json.Unmarshal(raw, &plans); err != nil {
 				t.Fatal(err)
