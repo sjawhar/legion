@@ -542,4 +542,15 @@ package api
 // (20261104153554_issue_memory_carried). (This branch took 47 while main's idle-release change
 // was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
 // note says.)
-const DaemonAPIVersion = 49
+//
+// 50: INFRA-1208 -- the resource sampler, which every issue pod's `roles` container now runs.
+// The daemon renders one `--sampler <json>` flag on that container's `legion launcher` command
+// (`internal/runtime/sandbox/podkind.go`), carrying the pod's project and issue, its volume list
+// and the deployment's `runtime.kubernetes.sampler_rules`, and the container declares the port
+// `sampler` at 9464. A launcher built before this change refuses an unknown flag with exit 2
+// (`cmd/legion/main.go`'s parseFlags), and that launcher is PID 1 of the container, so an image
+// of an earlier build would crash-loop every new issue pod: the number holds this daemon and the
+// image that runs its roles together, as 27's `--default-branch` did. The settings carry the new
+// `sampler_rules` list, which every plugin reads loosely and which changes no strictly parsed
+// shape, and no store migration comes with it.
+const DaemonAPIVersion = 50
