@@ -275,17 +275,21 @@ func TestChatFailsWithoutACallWhenSignInFails(t *testing.T) {
 	}
 }
 
+// The identity lower-cases the endpoint's host, as embed.AzureClient's does, so a vector or an
+// answer is never attributed to two spellings of one resource. The host here is a placeholder
+// rather than a real inference domain: no test of this issue names one, since none may call a
+// cloud model.
 func TestHTTPClientIdentityIsThePlaceTheHostAndTheModel(t *testing.T) {
 	client, err := going.NewHTTPClient(going.HTTPConfig{
 		Place:     "azure",
-		Endpoint:  "https://Example-Resource.services.ai.azure.com/openai/v1/",
+		Endpoint:  "https://Example-Resource.Models.Example/openai/v1/",
 		Model:     "gpt-5-chat",
 		TokenFile: "/run/secrets/chat-token",
 	})
 	if err != nil {
 		t.Fatalf("NewHTTPClient: %v", err)
 	}
-	if got, want := client.Identity(), "azure:example-resource.services.ai.azure.com/gpt-5-chat"; got != want {
+	if got, want := client.Identity(), "azure:example-resource.models.example/gpt-5-chat"; got != want {
 		t.Errorf("Identity() = %q, want %q", got, want)
 	}
 }

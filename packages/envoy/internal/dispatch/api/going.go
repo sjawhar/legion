@@ -79,15 +79,32 @@ type goingRunState struct {
 // empty string for every project, as search reads its own filter) and the words of the question,
 // and answers the stored row. ends_at is created_at plus contracts.GoingRunWindow: both come
 // from one now(), the transaction's own, so the window is exactly that long.
+//
+// The insert is made in a transaction of the shared pool rather than as a bare statement, because
+// the POST that calls it is a keyed write: the commit step marks the request's Idempotency-Key
+// committed with the write itself, which is what answers a repeat after a crash KEY_COMMITTED
+// rather than recording the question a second time (keyed_write_guard_test.go).
 func (s *server) recordGoingRequest(ctx context.Context, author model.Actor, project, words string) (goingRequest, error) {
 	stored, err := json.Marshal(author)
 	if err != nil {
 		return goingRequest{}, err
 	}
-	return scanGoingRequest(s.deps.Store.Pool.QueryRow(ctx, `
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return goingRequest{}, err
+	}
+	defer tx.Rollback(ctx)
+	request, err := scanGoingRequest(tx.QueryRow(ctx, `
 		insert into going_requests (author, project, words, ends_at)
 		values ($1::jsonb, $2::text, $3::text, now() + make_interval(secs => $4))
 		returning `+goingRequestColumns, stored, project, words, contracts.GoingRunWindow.Seconds()))
+	if err != nil {
+		return goingRequest{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return goingRequest{}, err
+	}
+	return request, nil
 }
 
 // readGoingRequest is one run by id, pgx.ErrNoRows when the record holds none: a run that was
