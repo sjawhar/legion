@@ -23,6 +23,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/testpg"
 )
 
 // DatabaseURLEnv names the Postgres server the broker's tests run against.
@@ -120,23 +121,7 @@ func Open(t testing.TB, params ...string) *store.Store {
 // wants tables runs store.Migrate on it itself.
 func DatabaseURL(t testing.TB) string {
 	t.Helper()
-	raw := serverURL(t)
-	name := randomName(t, "database")
-	// Both statements go through admin, whose bare Exec runs them outside a transaction: a
-	// create database cannot run inside one. The drop forces the connections a test left behind
-	// (a listener that outlived its own cleanup, a pool closing) off the database, because a
-	// database one connection still holds cannot be dropped, and a leaked one would otherwise
-	// leave a database behind that no later run can clean up either. The database is a file copy
-	// of template1 (docs/testing.md, "A database a Go test creates").
-	admin(t, raw, "create database "+name+" strategy file_copy")
-	t.Cleanup(func() { admin(t, raw, "drop database "+name+" with (force)") })
-
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse %s: %v", DatabaseURLEnv, err)
-	}
-	parsed.Path = "/" + name
-	return parsed.String()
+	return testpg.DatabaseOn(t, serverURL(t), "broker_test")
 }
 
 func admin(t testing.TB, databaseURL, statement string) {
