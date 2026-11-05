@@ -39,6 +39,7 @@ import {
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import { blockFragment } from "../refs/block-reference";
+import { TextAskCard } from "../refs/markdown-cards";
 import { fetchReferencePath, needsSpecSlug, watchPicturePath } from "../refs/reference-target";
 import {
   buildDispatchReference,
@@ -52,12 +53,12 @@ import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
-import { AskBlockCard } from "./AskBlockCard";
+import { AskBlockCard, PreviewDecisionCard, PreviewDecisionsContext } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
-import { DocumentPreview, documentPreview } from "./DocumentPreview";
+import { DocumentPreview, documentPreview, takeTheBuiltBlocks } from "./DocumentPreview";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import { currentAddress, firstScreenAwaits } from "./first-screen";
@@ -226,6 +227,20 @@ function whatScrolls(element: HTMLElement): HTMLElement | null {
   return null;
 }
 
+/** Scrolls whatever carries `within` by `moved` pixels, so what the reader is looking at stays
+ *  on the same line of their screen while the page changes above it. */
+function moveTheScroll(within: HTMLElement, moved: number): void {
+  if (moved === 0) {
+    return;
+  }
+  const scroller = whatScrolls(within);
+  if (scroller === null) {
+    window.scrollBy(0, moved);
+    return;
+  }
+  scroller.scrollTop += moved;
+}
+
 /** Puts the reader back where `place` left them, in a document `drawn` draws the same blocks of
  *  in the same order. A block the new draw does not have - a document edited between the two -
  *  leaves the page where it is, which is the browser's own scroll anchoring rather than a jump
@@ -235,16 +250,7 @@ function putTheReaderBack(drawn: HTMLElement, place: ReadersBlock | undefined): 
   if (block === undefined || place === undefined) {
     return;
   }
-  const moved = block.getBoundingClientRect().top - place.top;
-  if (moved === 0) {
-    return;
-  }
-  const scroller = whatScrolls(drawn);
-  if (scroller === null) {
-    window.scrollBy(0, moved);
-    return;
-  }
-  scroller.scrollTop += moved;
+  moveTheScroll(drawn, block.getBoundingClientRect().top - place.top);
 }
 
 export function ProofDocument({
@@ -483,6 +489,19 @@ export function ProofDocument({
       onAskAnswered?.(askId);
     },
     [queryClient, artifact.id, onAskAnswered]
+  );
+  /** What a decision block in the document's own draw answers its ask with, before the editor
+   *  that would host it exists (`PreviewDecisionCard`): the same asks, the same callbacks and
+   *  the same read-only rule the editor's own blocks are given. */
+  const previewDecisions = useMemo(
+    () => ({
+      asks: blockAsks,
+      onAnswered: blockAnswered,
+      owner: owner.kind === "document" ? owner : undefined,
+      readOnly: blocksReadOnly,
+      rowResolution: isClosed,
+    }),
+    [blockAsks, blockAnswered, owner, blocksReadOnly, isClosed]
   );
   const openBlockAsks = useMemo(
     () =>
@@ -858,6 +877,12 @@ export function ProofDocument({
               // painting the rest of itself into a page this editor is about to replace
               // (`DocumentPreview`).
               setEditorBuilding(true);
+              // Where the reader had got to in the document's own draw, read before the first
+              // batch takes any of it: both draws hold the same document's top-level blocks in
+              // the same order, so the block they were reading is the editor's block of the
+              // same index (`readersBlock`), and the editor holds every one of them by the
+              // time the build ends.
+              const place = readersBlock(documentPreview(parent.parentElement));
               void createEditor(parent, {
                 // The document's typed blocks, over the editor's still-empty document: every
                 // `ask`, every host-rendered block and every picture gets its node view inside
@@ -904,6 +929,28 @@ export function ProofDocument({
                 },
                 onMarkClick: (markId) => marginRef.current.focusItemForMark(markId),
                 onMarkHover: (markId) => marginRef.current.hoverItemForMark(markId),
+                // Each batch of the build, in the batch's own task: the draw the reader is
+                // reading gives up the blocks the editor has just built, so the frame the
+                // browser draws next holds each of them once (dispatch://INFRA-341, R11). The
+                // blocks go above the rest of the draw, which is why the editor's root stands
+                // before it in the page. Where the splice is above the top of the screen, the
+                // scroll moves with it: the editor's copy of a block is not the same height as
+                // the draw's once either has painted, and the reader's words must not slide
+                // under them a batch at a time.
+                onBatch: (built) => {
+                  const preview = documentPreview(parent.parentElement);
+                  if (preview === null) {
+                    return undefined;
+                  }
+                  const before = preview.getBoundingClientRect();
+                  return () => {
+                    takeTheBuiltBlocks(preview, built);
+                    if (before.top >= 0 || preview.childElementCount === 0) {
+                      return;
+                    }
+                    moveTheScroll(preview, preview.getBoundingClientRect().bottom - before.bottom);
+                  };
+                },
                 // A pane takes no edits: a reader who clicks into the text from a list never
                 // changes the document they are reading.
                 readOnly: !page || isClosedRef.current || schemaReadOnlyRef.current,
@@ -927,17 +974,10 @@ export function ProofDocument({
                   }
                   editor = handle;
                   editorRef.current = handle;
-                  // Where the reader had got to in the document's own draw, and where that
-                  // leaves them in the editor's: both draw the same document's top-level blocks
-                  // in the same order, so the block they were reading is the editor's block of
-                  // the same index (`readersBlock`).
-                  const place = readersBlock(documentPreview(parent.parentElement));
-                  // The swap, in a task of its own: the editor's build and the binding's
-                  // connect are each a task before this one (`@legion/proof-editor`'s
-                  // `progressive-build.ts`), and this task is one visibility change and one
-                  // commit. Both halves are in it, so the frame the browser draws next holds
-                  // the editor and not the draw: no frame is drawn holding both, and none is
-                  // drawn holding neither.
+                  // The swap, in a task of its own after the binding's connect
+                  // (`@legion/proof-editor`'s `progressive-build.ts`): what is left of the
+                  // draw by now is the empty element the batches emptied, block by block, and
+                  // this commit takes it off the page.
                   flushSync(() => {
                     handle.reveal();
                     setEditorDrawn(true);
@@ -1159,10 +1199,22 @@ export function ProofDocument({
           navigate(buildReferencePath(route));
         }}
       >
-        {showsOwnText ? (
-          <DocumentPreview address={address} building={editorBuilding} markdown={liveMarkdown} />
-        ) : null}
+        {/* The editor's root stands before the document's own draw, because the build fills it
+        from the top: while it runs the page is the editor's blocks, then the draw's blocks the
+        editor has not reached, which is the document in order and each of its blocks once
+        (dispatch://INFRA-341, R11). */}
         <div ref={root} />
+        {showsOwnText ? (
+          <TextAskCard.Provider value={PreviewDecisionCard}>
+            <PreviewDecisionsContext.Provider value={previewDecisions}>
+              <DocumentPreview
+                address={address}
+                building={editorBuilding}
+                markdown={liveMarkdown}
+              />
+            </PreviewDecisionsContext.Provider>
+          </TextAskCard.Provider>
+        ) : null}
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (

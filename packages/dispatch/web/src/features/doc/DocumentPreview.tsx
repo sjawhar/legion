@@ -6,6 +6,7 @@ import { paintBlock, paintBlockInSlices } from "../refs/paint-block";
 import { useRenderedMarkdown } from "../refs/useRenderedMarkdown";
 import { leadingBlocks } from "./document-blocks";
 import { firstScreenAwaits, takeFirstScreen } from "./first-screen";
+import { BLOCK_ID_ATTRIBUTE } from "./scroll-block";
 
 /** The class the preview's own element carries, which `styles.css` skips the off-screen blocks
  *  of exactly as it skips the editor's (`content-visibility`). */
@@ -16,6 +17,32 @@ const PREVIEW_CLASS = "dispatch-doc-preview";
  *  swaps the editor in. */
 export function documentPreview(within: HTMLElement | null): HTMLElement | null {
   return within?.querySelector<HTMLElement>(`.${PREVIEW_CLASS}`) ?? null;
+}
+
+/**
+ * Takes the blocks the editor's latest batch has just built off the document's own draw, named
+ * by the `data-block-id` each of them carries (dispatch://INFRA-341, R11).
+ *
+ * The editor builds the document's top-level blocks from the top, a batch at a time, and shows
+ * each batch as it lands; this runs in that same task, so the frame the browser draws next
+ * holds each of those blocks once - the editor's copy - and every block after them still here.
+ *
+ * Two things name the same block. A block the markdown itself identified carries the document's
+ * own id in both draws - the blocks the server drew (`first-screen.ts`), and every decision
+ * block, whose id is written in its `:::ask{#...}` opener - and is matched by that id wherever
+ * it stands. Every other block this draw parsed was given an id of its own, so it is matched by
+ * its place: the two draw the same document's top-level blocks in the same order and the same
+ * number of them, which is the rule the server's renderer and this draw are held to and the one
+ * the reader's place already rests on (`ProofDocument`'s `readersBlock`).
+ */
+export function takeTheBuiltBlocks(preview: HTMLElement, built: readonly string[]): void {
+  const theirs = new Set(built);
+  const drawn = Array.from(preview.children);
+  for (let at = 0; at < drawn.length; at += 1) {
+    const block = drawn[at];
+    const id = block.getAttribute(BLOCK_ID_ATTRIBUTE);
+    if (at < built.length || (id !== null && theirs.has(id))) block.remove();
+  }
 }
 
 /**

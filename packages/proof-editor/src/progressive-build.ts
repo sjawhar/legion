@@ -1,6 +1,7 @@
 /**
- * Building a document's editor a batch of blocks at a time, so that no one task of the build
- * freezes the page (dispatch://INFRA-341, R11).
+ * Building a document's editor a batch of blocks at a time, in front of the reader, so that no
+ * one task of the build freezes the page and the blocks it has built are a document they can
+ * read and write before the rest of it arrives (dispatch://INFRA-341, R11).
  *
  * What the one task was. `collabService.connect()` installs y-prosemirror's sync plugin, whose
  * plugin view calls `ProsemirrorBinding._forceRerender()`
@@ -22,19 +23,47 @@
  * batch's nodes go into the editor in a transaction of their own, so ProseMirror builds that
  * batch's node views and no more, and each batch is its own task.
  *
+ * Why the reader is given each batch. A build hidden until its last batch hands the reader a
+ * document eight to thirteen seconds after they asked for it, and what they read until then -
+ * the host's own draw of the same blocks - takes no edits. So the editor's root is shown in the
+ * task its first batch lands in, the host takes its own copies of those blocks off the page in
+ * that same task (`onBatch`), and from that moment the blocks on the screen are the editor's
+ * own: a reader can type in them, split one, join two or paste across several, and every one of
+ * those edits reaches the Yjs document before the last batch lands.
+ *
+ * How an edit reaches the Yjs document before the binding exists. The sync plugin is not
+ * installed while the batches run, so there is no binding to write through. The batches build
+ * each block against its own element of the real fragment, so the editor's document is the
+ * fragment's first `built` blocks, in order, and y-prosemirror's own `updateYFragment` - marked
+ * `@private @unstable`, which is why `package.json` pins the version exactly and
+ * `tests/progressive-build.test.ts` covers every shape of edit through it - writes the
+ * difference between a ProseMirror node and a `Y.XmlFragment`. It is given a window onto the
+ * blocks already built: `toArray()` answers the fragment's first `built` children, read at the
+ * moment of the write, and `insert` and `delete` pass through to the real fragment at the same
+ * index, because that window is a prefix of it. The window may not hold the writes itself - a
+ * Yjs insert through an `Object.create` view makes the view the inserted item's parent
+ * (`Item.js`), and encoding the update then throws in `findRootTypeKey` (`ID.js`) - and the
+ * indices may not be remembered, because another person's insert shifts them while the build
+ * runs, which is why they are read from the fragment at write time. No element of a block the
+ * batches have not built yet is read or removed: the window ends at `built`.
+ *
  * What the batches are not allowed to change. Every block ends in the real DOM, so this is
- * neither a virtual DOM nor a virtualized list. Nothing is written to the Yjs document: the
- * sync plugin is not installed while the batches run, so no transaction of theirs can reach it,
- * and each batch carries `ySyncPluginKey`'s `isChangeOrigin` exactly as `_forceRerender`'s own
- * transaction does, so every plugin that tells a remote change from a reader's - the block-id
- * stamp (`./editor/schema/block-ids.ts`) and the ask content rule (`./ask-content.ts`) - reads
- * the build as what it is. An edit another person makes while the batches run lands in the Yjs
- * document as ever, and `repair` below puts it in the editor before the binding adopts it.
+ * neither a virtual DOM nor a virtualized list. Each batch carries `ySyncPluginKey`'s
+ * `isChangeOrigin` exactly as `_forceRerender`'s own transaction does, so every plugin that
+ * tells a remote change from a reader's - the block-id stamp (`./editor/schema/block-ids.ts`)
+ * and the ask content rule (`./ask-content.ts`) - reads the build as what it is, none of it is
+ * undoable, and none of it is written back to the Yjs document. A change another person makes
+ * while the batches run is applied to the editor in the task it arrives in, for the block it
+ * touched, with the reader's cursor kept, so their next keystroke neither writes over it nor
+ * writes at a stale index.
  */
-import { Fragment, type Node as ProseMirrorNode, type Schema } from "@milkdown/kit/prose/model";
+import type { Fragment, Node as ProseMirrorNode, Schema } from "@milkdown/kit/prose/model";
+import type { Transaction } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { initProseMirrorDoc, ySyncPluginKey } from "y-prosemirror";
+import { initProseMirrorDoc, updateYFragment, ySyncPluginKey } from "y-prosemirror";
 import type * as Y from "yjs";
+
+import { BLOCK_ID_ATTR } from "./editor/schema/block-ids";
 
 /** What `ySyncPlugin` adopts, and what `initProseMirrorDoc` answers: each Yjs type of the
  *  document against the ProseMirror node, or run of nodes, built from it. y-prosemirror names
@@ -43,6 +72,16 @@ import type * as Y from "yjs";
  *  and `AbstractType` is invariant in the event it emits, so no narrower type names them all. */
 // biome-ignore lint/suspicious/noExplicitAny: y-prosemirror's own key type, for the reason above.
 export type ProsemirrorMapping = Map<Y.AbstractType<any>, ProseMirrorNode | ProseMirrorNode[]>;
+
+/** What y-prosemirror carries between the calls that read and write one document: the mapping,
+ *  and its cache of which mark types may overlap. `BindingMetadata` is the name in
+ *  `sync-plugin.js`, which the package exports from no entry point either, so `updateYFragment`
+ *  takes this shape structurally. */
+interface BindingMetadata {
+  // biome-ignore lint/suspicious/noExplicitAny: y-prosemirror's own value type for this cache.
+  isOMark: Map<any, boolean>;
+  mapping: ProsemirrorMapping;
+}
 
 /** A top-level child of the document's fragment: one block of the document. */
 export type Block = Y.XmlElement | Y.XmlText | Y.XmlHook;
@@ -53,7 +92,8 @@ export type Block = Y.XmlElement | Y.XmlText | Y.XmlHook;
 const BATCH_BUDGET_MS = 120;
 
 /** How many blocks the first batch converts, before any batch has been timed. Small enough that
- *  a page of heavy blocks - a wide table, a long code block - cannot overrun on the first try. */
+ *  a page of heavy blocks - a wide table, a long code block - cannot overrun on the first try,
+ *  and more than a phone's screen holds, so the first batch is a screenful to read. */
 const FIRST_BATCH_BLOCKS = 8;
 
 /** The most blocks one batch converts, however cheap the last one was. A batch far larger than
@@ -73,27 +113,48 @@ const MAX_BATCH_GROWTH = 4;
  * whose types are the keys the binding's mapping needs. Everything else about the window is the
  * fragment's own, through the prototype chain.
  */
-function windowOnto(fragment: Y.XmlFragment, blocks: Block[]): Y.XmlFragment {
+function windowOnto(fragment: Y.XmlFragment, blocks: readonly Block[]): Y.XmlFragment {
   const window: Y.XmlFragment = Object.create(fragment);
-  window.toArray = () => blocks;
+  window.toArray = () => [...blocks];
   return window;
 }
 
 /**
- * Converts `blocks` and adds what it learned to `mapping`, answering the nodes it built.
+ * A window onto the blocks of `fragment` that the batches have already built - its first
+ * `built()` children - which `updateYFragment` may write through.
  *
- * The batches' blocks are disjoint, so no batch overwrites another's entries; `repair` converts
- * a block again on purpose, and its entries replace the stale ones.
+ * `toArray()` is read at the moment of the write rather than remembered, because another
+ * person's insert or delete moves those blocks while the build runs. `insert` and `delete` are
+ * the real fragment's, at the same index, since the window is a prefix of it: a Yjs insert
+ * through the window itself would make the window the inserted item's parent (`Item.js`) and
+ * encoding the update would then throw in `findRootTypeKey` (`ID.js`), and a delete through it
+ * would write the new length onto the window rather than onto the fragment. Everything
+ * `updateYFragment` reads - `get`, `slice`, the document, the item - is the fragment's own
+ * through the prototype chain, and reaches no block past `built()`, because the only indices it
+ * is given come from `toArray()`.
  */
-function convert(
-  mapping: ProsemirrorMapping,
-  fragment: Y.XmlFragment,
-  blocks: Block[],
-  schema: Schema
-): Fragment {
-  const built = initProseMirrorDoc(windowOnto(fragment, blocks), schema);
-  for (const [type, node] of built.mapping) mapping.set(type, node);
-  return built.doc.content;
+function writableWindowOnto(fragment: Y.XmlFragment, built: () => number): Y.XmlFragment {
+  const window: Y.XmlFragment = Object.create(fragment);
+  window.toArray = () => fragment.toArray().slice(0, built());
+  window.insert = (index, content) => {
+    fragment.insert(index, content);
+  };
+  window.delete = (index, length) => {
+    fragment.delete(index, length);
+  };
+  return window;
+}
+
+/** The ids of `blocks`, as `data-block-id` spells them in the DOM: what the host takes its own
+ *  copies of this batch's blocks off the page by. A block the markdown named - the server's
+ *  draw, and every decision block - carries the document's own id here. */
+function idsOf(blocks: readonly Block[]): string[] {
+  const ids: string[] = [];
+  for (const block of blocks) {
+    const id = "getAttribute" in block ? block.getAttribute(BLOCK_ID_ATTR) : undefined;
+    if (typeof id === "string" && id !== "") ids.push(id);
+  }
+  return ids;
 }
 
 /** How many blocks the next batch takes, from how long `blocks` of them cost. */
@@ -128,116 +189,257 @@ export function endOfTask(): Promise<void> {
   return promise;
 }
 
-/** Puts `content` in the editor: the first batch replaces the empty document Milkdown created,
- *  and every batch after it is appended at the end. Marked as `_forceRerender`'s own
- *  transaction is, so no plugin reads the build as a reader's edit and none of it is undoable. */
-function place(view: EditorView, content: Fragment, first: boolean): void {
-  const tr = view.state.tr;
-  if (first) {
-    tr.replaceWith(0, tr.doc.content.size, content);
-  } else {
-    tr.insert(tr.doc.content.size, content);
-  }
-  view.dispatch(
-    tr.setMeta("addToHistory", false).setMeta(ySyncPluginKey, { isChangeOrigin: true })
-  );
+/** Whether `tr` is one of this module's own writes into the editor, or the binding's: a
+ *  transaction marked as `_forceRerender`'s own is, which no plugin and nothing here reads as a
+ *  reader's edit. */
+function isTheDocumentsOwn(tr: Transaction): boolean {
+  const meta = tr.getMeta(ySyncPluginKey) as { isChangeOrigin?: boolean } | undefined;
+  return meta?.isChangeOrigin === true;
 }
 
-/**
- * Puts the document the fragment holds now in the editor, for a fragment that changed while the
- * batches ran: another person's edit, or this document's own settlement arriving.
- *
- * A block the change touched is converted again, a block it added is converted, a block it
- * removed is left out, and every other block is the node that batch already built - the same
- * object, so ProseMirror keeps its node views and the DOM it has. The caller runs this in the
- * same task as the binding it hands the mapping to, so nothing can change between the two.
- */
-function repair(
-  view: EditorView,
-  fragment: Y.XmlFragment,
-  schema: Schema,
-  mapping: ProsemirrorMapping,
-  changed: Set<Block>
-): void {
-  const blocks = fragment.toArray();
-  const stale = blocks.filter((block) => changed.has(block) || !mapping.has(block));
-  if (stale.length > 0) convert(mapping, fragment, stale, schema);
-  const nodes: ProseMirrorNode[] = [];
-  for (const block of blocks) {
-    const node = mapping.get(block);
-    // A block `createNodeFromYElement` refused answers no node, and it deleted the Yjs type as
-    // it refused; the document it writes is the one `_forceRerender` would have written too.
-    if (node !== undefined && !Array.isArray(node)) nodes.push(node);
-  }
-  const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, Fragment.fromArray(nodes));
-  view.dispatch(
-    tr.setMeta("addToHistory", false).setMeta(ySyncPluginKey, { isChangeOrigin: true })
-  );
+/** Where the editor's top-level block `index` starts. */
+function startOf(doc: ProseMirrorNode, index: number): number {
+  let pos = 0;
+  for (let at = 0; at < index; at += 1) pos += doc.child(at).nodeSize;
+  return pos;
 }
 
 export interface ProgressiveBuild {
-  /** The document's own fragment, the one the binding will adopt. */
-  fragment: Y.XmlFragment;
-  schema: Schema;
-  view: EditorView;
   /**
    * Hands the mapping the batches made to `ySyncPlugin`
    * (`collabService.mergeOptions({ ySyncOpts: { mapping } })`, then `connect()`), in a task of
    * its own after the last batch's.
    *
-   * The binding adopts in this call rather than after this function resolves, because the
-   * repair below and the adoption have to fall in one task: an edit that arrived between them
-   * would be in the Yjs document, absent from the editor, and no business of a binding that
-   * only draws what arrives after it. Not called at all for a view destroyed while the batches
+   * The binding adopts in this call rather than after this function resolves, because the live
+   * write path above has to end in the same task the binding begins in: an edit that arrived
+   * between them would be in neither. Not called at all for a view destroyed while the batches
    * ran, which belongs to nothing and must not be connected.
    */
   adopt(mapping: ProsemirrorMapping): void;
+  /** The document's own fragment, the one the binding will adopt. */
+  fragment: Y.XmlFragment;
+  /**
+   * The editor is the reader's from here: its first batch's blocks are in it, its root is to be
+   * shown, and an edit in those blocks reaches the Yjs document. Called once, in the task that
+   * first batch lands in, and not at all for a document of no blocks, which has nothing to show
+   * and nothing to write.
+   */
+  live(): void;
+  /**
+   * Hands the host each batch as it lands, so its own draw of the document gives way block by
+   * block: called in the batch's own task with the ids of the blocks it is about to build, and
+   * what it answers is called in that same task once they are in the editor. Nothing is painted
+   * between the two, so no frame holds one of those blocks twice and none holds it nowhere.
+   */
+  onBatch?: (building: readonly string[]) => (() => void) | undefined;
+  schema: Schema;
+  view: EditorView;
 }
 
 /**
- * Builds `view`'s document from `fragment` a batch of blocks at a time, and has `adopt` hand
+ * Builds `view`'s document from `fragment` a batch of blocks at a time, showing each batch to
+ * the reader as it lands and writing their edits in it back to `fragment`, and has `adopt` hand
  * the binding the mapping those batches made. Every block of the fragment is in the editor's
  * document, and in the real DOM, when this resolves.
  *
- * The caller keeps `view`'s root hidden for the whole of this and until it swaps the editor in
- * (`createProofEditor`'s `reveal`). The reader has the document's own draw in front of them
- * while an editor is built for them (`DocumentPreview.tsx` in Dispatch), and a build that
- * painted its batches would put a second, growing copy of the document under that draw;
- * hidden, the batches cost no layout either, which is the one part of the old single task that
- * was already cheap.
- *
- * The last batch, the adoption and the swap are three tasks, not one (dispatch://INFRA-341,
- * R11): together they were 1,370 ms on a phone at 4x CPU throttling, over the 500 ms a reader
- * feels as a freeze. The task between the last batch and the adoption is this function's;
- * the one between the adoption and the swap is `createProofEditor`'s, which answers its handle
- * a task after the connect so the host's swap never joins it.
+ * The last batch, the adoption and the host's swap are three tasks, not one
+ * (dispatch://INFRA-341, R11): together they were 1,370 ms on a phone at 4x CPU throttling,
+ * over the 500 ms a reader feels as a freeze. The task between the last batch and the adoption
+ * is this function's; the one between the adoption and the swap is `createProofEditor`'s, which
+ * answers its handle a task after the connect so the host's swap never joins it.
  */
 export async function buildTheDocumentInBatches({
   adopt,
   fragment,
+  live,
+  onBatch,
   schema,
   view,
 }: ProgressiveBuild): Promise<void> {
-  const mapping: ProsemirrorMapping = new Map();
-  const changed = new Set<Block>();
-  let changedAtAll = false;
-  // Which blocks changed while the batches ran. A deep event's `path` is read from the fragment,
-  // so its first step is the index of the block the change is in; an event on the fragment
-  // itself is a block added or removed, which `repair` reads off the fragment as it stands.
-  const note = (events: Y.YEvent<Y.AbstractType<unknown>>[]): void => {
-    changedAtAll = true;
-    for (const event of events) {
-      const [index] = event.path;
-      if (typeof index !== "number") continue;
-      const block = fragment.get(index);
-      if (block !== undefined) changed.add(block as Block);
+  const ydoc = fragment.doc;
+  if (ydoc === null) throw new Error("the document's fragment belongs to no Y.Doc");
+  const meta: BindingMetadata = { isOMark: new Map(), mapping: new Map() };
+  /** How many of the fragment's leading blocks are in the editor, in order: the editor's
+   *  document is those blocks and nothing else, which is what makes the window below a prefix
+   *  of the fragment and its indices the fragment's own. */
+  let built = 0;
+  /** Whether a write of this module's own is running, so the transactions it causes are not
+   *  read as the reader's and written again. */
+  let writing = false;
+  const liveWindow = writableWindowOnto(fragment, () => built);
+
+  /** Converts `blocks`, adds what it learned to the mapping, and answers the nodes it built.
+   *  The batches' blocks are disjoint; a block converted again on purpose - one another person
+   *  changed - replaces the stale entries with its own. */
+  const convert = (blocks: readonly Block[]): Fragment => {
+    const made = initProseMirrorDoc(windowOnto(fragment, blocks), schema);
+    for (const [type, node] of made.mapping) meta.mapping.set(type, node);
+    return made.doc.content;
+  };
+
+  /** Puts a change of the document's own in the editor: never undoable, and marked as
+   *  `_forceRerender`'s own transaction is, so no plugin reads it as a reader's edit and
+   *  nothing writes it back to the Yjs document it came from. */
+  const change = (edit: (tr: Transaction) => void): void => {
+    const tr = view.state.tr;
+    edit(tr);
+    view.dispatch(
+      tr.setMeta("addToHistory", false).setMeta(ySyncPluginKey, { isChangeOrigin: true })
+    );
+  };
+
+  /** Puts `content` in the editor: the first batch replaces the empty document Milkdown
+   *  created, and every batch after it is appended at the end. */
+  const place = (content: Fragment, first: boolean): void => {
+    change((tr) => {
+      if (first) {
+        tr.replaceWith(0, tr.doc.content.size, content);
+      } else {
+        tr.insert(tr.doc.content.size, content);
+      }
+    });
+  };
+
+  /** Writes the reader's edits in the built blocks into the fragment, through the window onto
+   *  those blocks. The editor's document is that prefix, so what `updateYFragment` reads as the
+   *  fragment's children are the blocks the batches built and what it writes lands at their
+   *  real indices; the fragment itself is left out of the mapping the binding will adopt, since
+   *  the window is not the type that binding draws. */
+  const writeTheReadersEdits = (): void => {
+    const { doc } = view.state;
+    updateYFragment(ydoc, liveWindow, doc, meta);
+    meta.mapping.delete(liveWindow);
+    built = doc.childCount;
+  };
+
+  const dispatch = view.dispatch;
+  /** Reads every transaction the editor applies, and writes the reader's own through the window
+   *  in the task they made it. Wrapping `dispatch` rather than adding a plugin keeps the write
+   *  path exactly as long as the build: Milkdown's collab service reconfigures the view from
+   *  `prosePluginsCtx` when it connects, which a plugin added here is not in. */
+  const installTheWritePath = (): void => {
+    view.dispatch = (tr) => {
+      dispatch(tr);
+      if (writing || !tr.docChanged || isTheDocumentsOwn(tr)) return;
+      writing = true;
+      try {
+        writeTheReadersEdits();
+      } finally {
+        writing = false;
+      }
+    };
+  };
+
+  /**
+   * Draws the block at `index` again, for a block another person changed.
+   *
+   * What goes into the editor is the smallest range of that block that differs
+   * (`Fragment.findDiffStart` and `findDiffEnd`, ProseMirror's own), never the whole block, so
+   * the reader's cursor is carried over that range by the transaction's own mapping: a caret
+   * after another person's insert moves along with their words, and one before it does not
+   * move at all. A block whose node type has changed under them is the one case with nothing
+   * to map through, and it is replaced whole.
+   */
+  const redraw = (index: number): void => {
+    const block = fragment.get(index) as Block | undefined;
+    if (block === undefined || index >= view.state.doc.childCount) return;
+    const drawn = convert([block]).firstChild;
+    // A block `createNodeFromYElement` refused answers no node, and it deleted the Yjs type as
+    // it refused; the fragment's own observer brings that deletion back here.
+    if (drawn === null) return;
+    change((tr) => {
+      const from = startOf(tr.doc, index);
+      const current = tr.doc.child(index);
+      if (current.type !== drawn.type) {
+        tr.replaceWith(from, from + current.nodeSize, drawn);
+        return;
+      }
+      if (!current.sameMarkup(drawn)) tr.setNodeMarkup(from, drawn.type, drawn.attrs, drawn.marks);
+      const start = current.content.findDiffStart(drawn.content);
+      const ends = current.content.findDiffEnd(drawn.content);
+      if (start === null || ends === null) return;
+      // Where the two ends overlap - a run repeated on both sides of the change - the diff is
+      // widened to the start, as ProseMirror's own document comparison does.
+      const overlap = Math.max(start - Math.min(ends.a, ends.b), 0);
+      const inside = from + 1;
+      tr.replaceWith(
+        inside + start,
+        inside + ends.a + overlap,
+        drawn.content.cut(start, ends.b + overlap)
+      );
+    });
+  };
+
+  /** Applies another person's insert or delete of a whole block inside the built run. The delta
+   *  is walked over the fragment as it now stands, so `at` is the index each change lands at;
+   *  a block added at or past the frontier is left to the batch that reaches it. */
+  const restructure = (delta: Y.YEvent<Y.XmlFragment>["changes"]["delta"]): void => {
+    let at = 0;
+    for (const op of delta) {
+      if (op.retain !== undefined) {
+        at += op.retain;
+      } else if (op.insert !== undefined) {
+        const added = op.insert as Block[];
+        if (at < built) {
+          const content = convert(added);
+          change((tr) => tr.insert(startOf(tr.doc, at), content));
+          built += added.length;
+        }
+        at += added.length;
+      } else if (op.delete !== undefined) {
+        const gone = Math.min(op.delete, Math.max(built - at, 0));
+        if (gone === 0) continue;
+        change((tr) => {
+          const from = startOf(tr.doc, at);
+          let to = from;
+          for (let which = at; which < at + gone; which += 1) to += tr.doc.child(which).nodeSize;
+          tr.delete(from, to);
+        });
+        built -= gone;
+      }
     }
   };
-  fragment.observeDeep(note);
+
+  /** Everything another person changed while the batches run, in the task it arrives in: the
+   *  blocks they added or removed inside the built run first, so the indices the changed blocks
+   *  are read at are the ones the fragment now holds. A deep event's `path` is read from the
+   *  fragment, so its first step is the index of the block the change is in. */
+  const applyTheirChange = (
+    events: Y.YEvent<Y.AbstractType<unknown>>[],
+    transaction: Y.Transaction
+  ): void => {
+    // The window's own writes come back through here; they are already in the editor.
+    if (transaction.origin === ySyncPluginKey || view.isDestroyed) return;
+    for (const event of events) {
+      if (event.target === fragment) {
+        restructure((event as Y.YEvent<Y.XmlFragment>).changes.delta);
+      }
+    }
+    const changed = new Set<number>();
+    for (const event of events) {
+      const [index] = event.path;
+      if (typeof index === "number" && index < built) changed.add(index);
+    }
+    for (const index of [...changed].sort((left, right) => left - right)) redraw(index);
+  };
+
+  /** The live path - the fragment's observer and the write wrapper - taken down once, in the
+   *  task the binding goes up in, or when the build gives up on a destroyed view. */
+  let watching = true;
+  const stopWatching = (): void => {
+    if (!watching) return;
+    watching = false;
+    fragment.unobserveDeep(applyTheirChange);
+    view.dispatch = dispatch;
+  };
+
+  fragment.observeDeep(applyTheirChange);
   try {
-    const blocks = fragment.toArray();
-    let built = 0;
     let take = FIRST_BATCH_BLOCKS;
+    let replaced = false;
+    /** Whether the reader has the editor: its first batch is in it and its blocks take edits
+     *  that reach the Yjs document. */
+    let open = false;
     // At least one pass, so a fragment holding nothing still replaces the empty document
     // Milkdown created with the empty document the fragment says, exactly as `_forceRerender`
     // would have: otherwise the binding would adopt a document holding a paragraph the
@@ -246,20 +448,28 @@ export async function buildTheDocumentInBatches({
     do {
       if (view.isDestroyed) return;
       const began = performance.now();
-      const batch = blocks.slice(built, built + take);
-      place(view, convert(mapping, fragment, batch, schema), built === 0);
+      const batch = fragment.toArray().slice(built, built + take) as Block[];
+      const landed = onBatch?.(idsOf(batch));
+      place(convert(batch), !replaced);
+      replaced = true;
       built += batch.length;
+      if (batch.length > 0 && !open) {
+        open = true;
+        installTheWritePath();
+        live();
+      }
+      landed?.();
       take = nextBatch(batch.length, performance.now() - began);
-      if (built < blocks.length) await endOfTask();
-    } while (built < blocks.length);
-    // The last batch ends here, and the adoption is a task of its own; from the repair to the
-    // binding is one task, so no edit can arrive between the two, and anything that arrives
-    // afterwards is the binding's, which is what it is for.
+      if (built < fragment.length) await endOfTask();
+    } while (built < fragment.length);
+    // The last batch ends here, and the adoption is a task of its own; the live write path ends
+    // in the task the binding starts in, so no edit falls between the two and anything that
+    // arrives afterwards is the binding's, which is what it is for.
     await endOfTask();
     if (view.isDestroyed) return;
-    if (changedAtAll) repair(view, fragment, schema, mapping, changed);
-    adopt(mapping);
+    stopWatching();
+    adopt(meta.mapping);
   } finally {
-    fragment.unobserveDeep(note);
+    stopWatching();
   }
 }

@@ -194,6 +194,21 @@ export interface CreateProofEditorOptions {
    * and a plugin added here sees the build as it happens.
    */
   beforeBuild?: (view: EditorView) => void;
+  /**
+   * Hands the host each batch of the build as it lands, so its own draw of the same document
+   * gives way block by block (dispatch://INFRA-341, R11).
+   *
+   * It is called in the batch's own task, with the `data-block-id` of every block that batch is
+   * about to build, and what it answers - where it answers anything - is called in that same
+   * task once those blocks are in the editor. Nothing is painted between the two, so a host
+   * that takes its copies of those blocks off the page in the second half shows no frame
+   * holding one of them twice and none holding it nowhere.
+   *
+   * The editor's root is shown in the task its first batch lands in, and its blocks take edits
+   * that reach the Yjs document from that moment (`./progressive-build.ts`), so what this hands
+   * the host is a document the reader is already reading and writing.
+   */
+  onBatch?: (building: readonly string[]) => (() => void) | undefined;
 }
 
 export interface ProofEditorHandle extends TypedBlockCommands {
@@ -258,14 +273,14 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
   /**
-   * Shows the editor's root, which is hidden from before the first batch of the build until
-   * this is called (`createProofEditor`).
+   * Shows the editor's root, for a root still hidden.
    *
-   * The swap is the host's, because only the host knows what the editor replaces: in Dispatch
-   * the reader has the document's own draw in front of them while the editor is built
-   * (`features/doc/DocumentPreview.tsx`), and no frame may hold both that draw and this editor
-   * or neither of them. So the host takes this and whatever it is swapping for in one task -
-   * one visibility change, one commit - and the browser draws the frame after it.
+   * A document of blocks shows itself: the root is shown in the task the build's first batch
+   * lands in, so the reader has the editor's own first block while the rest is built
+   * (`./progressive-build.ts`). What is left for this is a document of no blocks at all, whose
+   * build has nothing to show - a past version, which is drawn with `setMarkdown` after the
+   * build (`features/doc/VersionView.tsx` in Dispatch) - and the host's own last word at the
+   * end of a build, which costs nothing for a root already shown.
    */
   reveal(): void;
   /** Tear down the editor and any collab bindings. */
@@ -491,9 +506,14 @@ export async function createProofEditor(
   // The document is built a batch of blocks at a time, each batch a task of its own, and the
   // binding adopts the document and the mapping those batches made instead of drawing the whole
   // document itself in one task (./progressive-build.ts, dispatch://INFRA-341 R11). The root is
-  // hidden for the whole of it and stays hidden until the host swaps the editor in (`reveal`),
-  // so the batches cost no layout, no frame holds a half-built document, and the swap itself -
-  // the host's own draw of the document going, this root coming - is one change in one frame.
+  // hidden until the first of those batches, and shown in the task that batch lands in: from
+  // there the reader has the editor's own first block and every block after it as it is built,
+  // and the host takes its own draw of each batch's blocks off the page in that same task
+  // (`onBatch`), so no frame holds a block twice. `data-write-path="live"` says the blocks on
+  // the screen take edits that reach the Yjs document - through the window onto the blocks
+  // already built until the last batch, through the binding after it - which is what a reader,
+  // and the measurement that times them (`e2e/large-documents-page.ts` in Dispatch), reads the
+  // editor's first usable block by.
   const shown = root.style.display;
   root.style.display = 'none';
   try {
@@ -506,6 +526,11 @@ export async function createProofEditor(
         collabService.connect();
       },
       fragment: opts.ydoc.getXmlFragment('prosemirror'),
+      live: () => {
+        root.style.display = shown;
+        root.dataset.writePath = 'live';
+      },
+      onBatch: opts.onBatch,
       schema: editor.ctx.get(schemaCtx),
       view,
     });
@@ -631,8 +656,9 @@ export async function createProofEditor(
     destroy(): void {
       alive = false;
       // A root this editor never revealed is still hidden, and the host builds its next editor
-      // in the same element.
+      // in the same element, which no longer takes this editor's edits.
       root.style.display = shown;
+      delete root.dataset.writePath;
       unregisterPopoverHook();
       editor.action((ctx) => {
         const collabService = ctx.get(collabServiceCtx);

@@ -17,6 +17,16 @@ export function documentEditor(page: Page): Locator {
   return page.getByRole("textbox", { name: "Document editor" });
 }
 
+/** The editor a reader already has while the rest of its blocks are still being built: its root
+ * carries `data-write-path="live"` from the task its first batch lands in, which is the task it
+ * is shown in and the task from which an edit in it reaches the Yjs document
+ * (`packages/proof-editor/src/progressive-build.ts`, dispatch://INFRA-341 R11). It wears the
+ * `Document editor` name only once the whole document is in it, so `documentEditor` finds
+ * nothing until the build is over and this finds the same element before and after. */
+export function editorBeingBuilt(page: Page): Locator {
+  return page.locator('.proof-editor[data-write-path="live"] [contenteditable="true"]').first();
+}
+
 /** The document's connection dot once it is connected. Its accessible name is its `title`
  * (ConnectionDot.tsx), which reads "connected" only in that state, so this matches nothing while
  * the document connects and none of the shell skeleton's loading statuses. */
@@ -505,8 +515,14 @@ export async function copy(page: Page): Promise<Clipboard> {
 }
 
 /** Pastes clipboard contents at the caret, through the editor's own paste handler. */
-export async function paste(page: Page, clipboard: Clipboard): Promise<void> {
-  await documentEditor(page).evaluate((root, { html, text }) => {
+export function paste(page: Page, clipboard: Clipboard): Promise<void> {
+  return pasteIn(documentEditor(page), clipboard);
+}
+
+/** `paste`, in an editor the caller names: the one still being built has no name of its own
+ * yet (`editorBeingBuilt`). */
+export async function pasteIn(editor: Locator, clipboard: Clipboard): Promise<void> {
+  await editor.evaluate((root, { html, text }) => {
     const data = new DataTransfer();
     data.setData("text/html", html);
     data.setData("text/plain", text);

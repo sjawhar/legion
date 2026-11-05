@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { createContext, type ReactNode, useContext } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 
@@ -156,6 +156,42 @@ export function TextAskBlockCard({ host }: { host: AskBlockHost }): ReactNode {
       owner={undefined}
       readOnly
       rowResolution={false}
+    />
+  );
+}
+
+/** What a decision block drawn before the editor exists needs to answer its ask: the document's
+ *  indexed asks, and the same callbacks the editor's own blocks are given (`ProofDocument`).
+ *  Held in a context of its own so the card component below never changes identity, which
+ *  would unmount a reader's half-made answer every time the asks are read again. */
+export interface PreviewDecisions {
+  readonly asks: readonly Ask[];
+  readonly onAnswered: (askId: string) => void;
+  readonly owner: { project: string; slug: string } | undefined;
+  readonly readOnly: boolean;
+  readonly rowResolution: boolean;
+}
+
+export const PreviewDecisionsContext = createContext<PreviewDecisions | undefined>(undefined);
+
+/** The decision block of a document the reader has before its editor is built
+ *  (`DocumentPreview`): the same shared ask card the editor's own blocks draw, read by the
+ *  block's id - which the markdown itself names, in the block's `:::ask{#...}` opener - from
+ *  the document's asks, so a reader can answer it while the editor is still being built
+ *  (dispatch://INFRA-341, R11). With no decisions in context it is the read-only record every
+ *  other body draws. */
+export function PreviewDecisionCard({ host }: { host: AskBlockHost }): ReactNode {
+  const decisions = useContext(PreviewDecisionsContext);
+  if (decisions === undefined) return <TextAskBlockCard host={host} />;
+  const blockId = String(host.node.attrs.blockId);
+  return (
+    <AskBlockCard
+      ask={decisions.asks.find((candidate) => candidate.block_id === blockId)}
+      host={host}
+      onAnswered={decisions.onAnswered}
+      owner={decisions.owner}
+      readOnly={decisions.readOnly}
+      rowResolution={decisions.rowResolution}
     />
   );
 }

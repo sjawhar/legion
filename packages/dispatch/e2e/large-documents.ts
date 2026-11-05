@@ -57,11 +57,17 @@ export function documentTitle(sections: number): string {
   return `A synthetic document of ${sections} sections`;
 }
 
+/** The first sentence of the `index`th section's prose, which names the section, so it stands
+ *  in that one paragraph and nowhere else in the document: what a row anchors a caret by. */
+export function proseOpening(index: number): string {
+  return `Section ${index + 1} is about the ${subject(index)}.`;
+}
+
 /** The sentence a section's prose opens with, which names the section so no two sections are the
  *  same bytes. */
 function proseHead(index: number): string {
   return (
-    `Section ${index + 1} is about the ${subject(index)}. It is written here rather than taken ` +
+    `${proseOpening(index)} It is written here rather than taken ` +
     "from the document that failed on a phone, because this repository is public and that " +
     "document is not."
   );
@@ -167,18 +173,22 @@ function decisionSection(decision: number, sections: number): number {
   return Math.floor((decision * sections) / decisionBlocks) - 1;
 }
 
-function sectionText(index: number, decision: number | undefined): string {
+function sectionText(index: number, decision: number | undefined, drawings: boolean): string {
   const blocks = [
     `## ${sectionHeading(index)}`,
     "",
     `### How the ${subject(index)} settles`,
     listBlock(index),
     tableBlock(index),
-    codeBlock(index),
-    index % sequenceDiagramEvery === sequenceDiagramEvery - 1
-      ? sequenceDiagram(index)
-      : flowchart(index),
   ];
+  if (drawings) {
+    blocks.push(
+      codeBlock(index),
+      index % sequenceDiagramEvery === sequenceDiagramEvery - 1
+        ? sequenceDiagram(index)
+        : flowchart(index)
+    );
+  }
   if (decision !== undefined) {
     blocks.push(decisionBlock(decision, index));
   }
@@ -194,16 +204,19 @@ function sectionText(index: number, decision: number | undefined): string {
   return blocks.join("\n\n");
 }
 
-/** A synthetic document of `sections` sections: one diagram each and `decisionBlocks` decision
- *  blocks spread through it, about `sections * 2,900` characters long. */
-export function syntheticDocument(sections: number): string {
+/** A synthetic document of `sections` sections and `decisionBlocks` decision blocks spread
+ *  through it, about `sections * 2,900` characters long. With `drawings`, every section also
+ *  holds a code block and a Mermaid diagram; without them every top-level block it holds
+ *  carries an id in every draw of it, which is what a row counting the blocks on the screen
+ *  needs (a code block's node view stamps none, `mermaid-code-block-view.ts`). */
+export function syntheticDocument(sections: number, drawings = true): string {
   const decisions = new Map<number, number>();
   for (let decision = 1; decision <= decisionBlocks; decision += 1) {
     decisions.set(decisionSection(decision, sections), decision);
   }
   const written: string[] = [`# ${documentTitle(sections)}`];
   for (let index = 0; index < sections; index += 1) {
-    written.push(sectionText(index, decisions.get(index)));
+    written.push(sectionText(index, decisions.get(index), drawings));
   }
   return `${written.join("\n\n")}\n`;
 }
@@ -250,3 +263,37 @@ export const documentNames = {
 
 /** How many diagrams each document holds, which is one per section. */
 export const documentDiagrams = { large: largeSections, small: smallSections } as const;
+
+/** How many sections the document a row counts the blocks of holds: enough that its build takes
+ *  a dozen batches under 4x CPU throttling, few enough that a frame loop reading every block of
+ *  it is not itself the thing that slows the page. */
+const plainSections = 24;
+
+/** A document of the same shape with neither a code block nor a diagram in it, so every one of
+ *  its top-level blocks carries a `data-block-id` wherever it is drawn: what the row counting
+ *  each block id across the server's draw, the page's own draw and the editor needs
+ *  (acceptance A7). */
+export const plainDocument = syntheticDocument(plainSections, false);
+
+/** The id of the decision block the document below opens with. */
+export const openingDecisionBlockId = "decision-opening";
+
+/** A short document whose third block is a decision, so the blocks the server draws into the
+ *  page it sends - 30 top-level blocks or 16 KB (`internal/dispatch/pmdoc/first_screen.go`) -
+ *  hold it, and so does the page's own draw that takes them over. A reader answers it there,
+ *  before any editor exists (acceptance A7). */
+export const openingDecisionDocument = [
+  "# The lease ledger",
+  "",
+  "The paragraph a reader meets first, before the page has an editor to read it in.",
+  "",
+  `:::ask{#${openingDecisionBlockId} urgency="med" multiple="false"}`,
+  "Which window should the lease ledger settle in?",
+  "",
+  "- The next window",
+  "- The window after it",
+  ":::",
+  "",
+  "The paragraph after the decision, so the block is not the document's last word.",
+  "",
+].join("\n");
