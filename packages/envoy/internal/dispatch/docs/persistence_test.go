@@ -16,7 +16,14 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// TestMain runs the package's tests and then reports the services they left alive
+// (service_leak_test.go): the memory a test that never shuts its service down holds for the rest
+// of the binary's run. The report cannot fail the run - the exit code stays storetest.Main's.
+func TestMain(m *testing.M) {
+	code := storetest.Main(m)
+	reportLeakedServices()
+	os.Exit(code)
+}
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {
 	t.Helper()

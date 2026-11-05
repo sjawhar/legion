@@ -619,6 +619,13 @@ func (s *Service) purgeSuppressedPersistence(room string) {
 	delete(s.suppressed, room)
 }
 
+// newServiceHook is nil outside this package's own tests, where the leak check installs it
+// (service_leak_test.go's init). New calls it on every service it builds, which is the only place
+// that sees them all: a service is handed to its test, not to any registry, so nothing else can
+// count the ones the tests build or tell which of them are still alive when the binary ends. The
+// cost in production is one nil check per service.
+var newServiceHook func(*Service)
+
 // New constructs the ygo server used by Dispatch's document API and websocket
 // endpoint.
 func New(deps Deps) *Service {
@@ -704,6 +711,10 @@ func New(deps Deps) *Service {
 	srv.OnLastPeer = service.settleLastPeer
 	// ygo calls it once for every room it retires, whichever way: the idle sweep, CloseRoom.
 	srv.OnUnloadDocument = service.releaseUnloadedRoom
+
+	if newServiceHook != nil {
+		newServiceHook(service)
+	}
 
 	return service
 }
