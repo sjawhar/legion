@@ -99,7 +99,7 @@ env:
   # patches/nats@2.29.3.patch applied) are shipped build inputs too, so they get the same patch
   # release.
   PI_ENVOY_VERSION_ARGS: >-
-    --package-dir packages/pi-envoy --first-npm @sjawhar/pi-legion-envoy
+    --first-npm @sjawhar/pi-legion-envoy
     --patch-path skills/agent-secrets/ --patch-path skills/asd-ste100/
     --patch-path skills/dispatch/ --patch-path skills/dispatch-first/
     --patch-path skills/dispatch-writing-specs/ --patch-path skills/envoy/
@@ -116,7 +116,7 @@ env:
   # bundle inlines nats.js through envoy-client, with its patch applied) are shipped build inputs
   # too, so they get the same patch release.
   PI_LEGION_VERSION_ARGS: >-
-    --package-dir packages/pi-legion --first-npm @sjawhar/pi-legion-envoy
+    --first-npm @sjawhar/pi-legion-envoy
     --patch-path skills/legion-architect/ --patch-path skills/legion-controller/
     --patch-path skills/legion-oracle/ --patch-path skills/legion-retro/
     --patch-path skills/legion-worker/ --patch-path skills/leading-a-work-stream/
@@ -195,20 +195,28 @@ jobs:
       # links, which the smoke test checks and the worker image installs. For each Oh My Pi plugin
       # it is the version that plugin's build job releases in this run, decided from the same tags
       # and the same arguments as that job's own version step, or, when the plugin has nothing to
-      # release, its manifest's version at this checkout, which npm already carries (a publish's bump
-      # commit lands on main only after this run's checkout). The workflow's one concurrency group
-      # keeps one run of main at a time, so no other run moves a tag between this step and the
-      # plugins' build jobs. publish's "legion: Check the linked plugin pair" refuses to release
-      # this legion unless npm then carries exactly this pair.
+      # release, the version of its newest tag, which npm carries: a release commits nothing, so
+      # the committed manifest records no release and the tags alone say what was published. The
+      # workflow's one concurrency group keeps one run of main at a time, so no other run moves a
+      # tag between this step and the plugins' build jobs. publish's "legion: Check the linked
+      # plugin pair" refuses to release this legion unless npm then carries exactly this pair.
       - name: Resolve plugin versions for the smoke test and worker image
         id: plugin_versions
         run: |
-          # pair_member <version output> <package>: the version it releases, or its manifest's when it skips.
+          # pair_member <version output> <tag prefix>: the version it releases, or, when it skips,
+          # the version of the newest <tag prefix> tag, which is what npm carries. A newest tag
+          # whose name is not <tag prefix>X.Y.Z, and no such tag at all, print nothing, which the
+          # guards below refuse.
           pair_member() {
-            if [ "$(sed -n 's/^skip=//p' <<<"$1")" = true ]; then
-              jq -r '.version // empty' "packages/$2/package.json"
-            else
+            local tag version
+            if [ "$(sed -n 's/^skip=//p' <<<"$1")" != true ]; then
               sed -n 's/^version=//p' <<<"$1"
+              return 0
+            fi
+            tag=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$2*")
+            version=${tag#"$2"}
+            if [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              printf '%s\n' "$version"
             fi
           }
           # The plugins' own build jobs write their "No release published" summary lines; with
@@ -217,8 +225,8 @@ jobs:
           envoy=$(GITHUB_STEP_SUMMARY='' .github/scripts/release-push.sh version pi-envoy-v $PI_ENVOY_VERSION_ARGS)
           # shellcheck disable=SC2086 # $PI_LEGION_VERSION_ARGS is the argument list, split on purpose
           legion=$(GITHUB_STEP_SUMMARY='' .github/scripts/release-push.sh version pi-legion-v $PI_LEGION_VERSION_ARGS)
-          envoy_version=$(pair_member "$envoy" pi-envoy)
-          legion_version=$(pair_member "$legion" pi-legion)
+          envoy_version=$(pair_member "$envoy" pi-envoy-v)
+          legion_version=$(pair_member "$legion" pi-legion-v)
           if [ -z "$legion_version" ]; then
             echo "::error::Could not resolve @sjawhar/pi-legion version"
             exit 1
@@ -323,12 +331,11 @@ jobs:
 
       # First, before setup-bun: no dependency code has run and no cache has been restored when the
       # tags are read. A re-run after publish's "pi-envoy: Push tag" pushed the tag checks out this
-      # same commit with that tag on the bump commit above it, where the range would be empty and
-      # skip the release it never finished; release-push.sh version releases that tag again instead
-      # (`tagged`), and every publish step is safe to repeat: npm reuses a published version,
-      # `release-push.sh release` reuses a published release and publishes a draft one, `tag`
-      # accepts its own tag, and `push-main` pushes nothing once main holds this version or a later
-      # one. Otherwise it bumps from the newest pi-envoy-v* tag over the paths
+      # same commit with that tag on it, where the range would be empty and skip the release it
+      # never finished; release-push.sh version releases that tag again instead (`tagged`), and
+      # every publish step is safe to repeat: npm reuses a published version, `release-push.sh
+      # release` reuses a published release and publishes a draft one, and `tag` accepts its own
+      # tag on this commit. Otherwise it bumps from the newest pi-envoy-v* tag over the paths
       # $PI_ENVOY_VERSION_ARGS names (the workflow's `env:` says why each is there).
       - name: Determine next version
         id: version
@@ -520,12 +527,10 @@ jobs:
   # in the same package succeeded (`steps.<id>.outcome`, under `!cancelled()`). So a failed step
   # stops the rest of its own package and no other: one package's failure never holds back another
   # whose build released. Each package starts from the run's commit (`git checkout --force --detach
-  # "$GITHUB_SHA"` and `git clean -ffdx`, in its hand-over check), so every bump commit is one
-  # commit on that commit: `release-push.sh tag` commits on HEAD, `tagged` finds a tag only on HEAD
-  # or a child of it, and `push-main` refuses a HEAD more than one commit ahead of main. Two
-  # packages' bump commits change different package.json files and different workspace entries
-  # of bun.lock, so when one lands on main first the other's `push-main` rebase onto it has
-  # nothing to resolve.
+  # "$GITHUB_SHA"` and `git clean -ffdx`, in its hand-over check), and nothing of a release is
+  # committed: `release-push.sh tag` tags $GITHUB_SHA itself, which main already holds, and
+  # `tagged` finds a tag only on HEAD. So no package's steps move main, and a re-run of this job
+  # reads the same tags its first attempt pushed.
   publish:
     needs: [pi_envoy_build, pi_legion_build, legion_build]
     if: always() && github.ref == 'refs/heads/main'
@@ -536,8 +541,8 @@ jobs:
     # records `trustedPublisher: github` for each plugin; no NPM_TOKEN is set), which also signs npm
     # provenance (`npm publish --provenance`) and is the Sigstore signing certificate's token for
     # the legion archives' provenance attestation, which attestations: write stores. The tag pushes
-    # and version-bump commits use the deploy key, held only by the env of each package's "Push tag"
-    # and "Push version bump" steps and legion's "Tag release", not any scope.
+    # use the deploy key, held only by the env of each plugin's "Push tag" step and of legion's
+    # "Tag release", which pushes its own tag, not any scope.
     permissions:
       contents: write
       id-token: write
@@ -551,9 +556,8 @@ jobs:
       version: ${{ steps.legion_release.outputs.version }}
       tag: ${{ steps.legion_release.outputs.tag }}
     steps:
-      # For release-push.sh, the bump commits and the tags, with every tag (legion's existing-tag
-      # check reads them). No credential is left in the checkout: the deploy key reaches the push
-      # steps alone.
+      # For release-push.sh and the tags, with every tag (legion's existing-tag check reads them).
+      # No credential is left in the checkout: the deploy key reaches the push steps alone.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -597,23 +601,11 @@ jobs:
           tag=$(.github/scripts/release-push.sh handed pi-envoy-v "$VERSION" "$RUNNER_TEMP/pi-envoy-tarball" "$stem.tgz")
           { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
 
-      # The committed manifest takes the version "pi-envoy: Commit and tag" commits, which sets
-      # bun.lock's workspace entry to it too; the tarball carries it already.
-      - name: "pi-envoy: Set release version"
-        id: pi_envoy_set_version
-        if: ${{ !cancelled() && steps.pi_envoy_handed.outcome == 'success' }}
-        env:
-          VERSION: ${{ needs.pi_envoy_build.outputs.version }}
-        run: |
-          jq --arg v "$VERSION" '.version = $v' \
-            packages/pi-envoy/package.json > tmp.json \
-            && mv tmp.json packages/pi-envoy/package.json
-
       # The tarball is pi_envoy_build's bytes, never a repack here: npm publish is handed the .tgz,
       # so no package script (prepack) runs in this job.
       - name: "pi-envoy: Publish to npm"
         id: pi_envoy_npm
-        if: ${{ !cancelled() && steps.pi_envoy_set_version.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.pi_envoy_handed.outcome == 'success' }}
         env:
           VERSION: ${{ needs.pi_envoy_build.outputs.version }}
           STEM: ${{ steps.pi_envoy_handed.outputs.stem }}
@@ -625,20 +617,18 @@ jobs:
           fi
         working-directory: packages/pi-envoy
 
-      - name: "pi-envoy: Commit and tag"
+      - name: "pi-envoy: Tag release"
         id: pi_envoy_tag
         if: ${{ !cancelled() && steps.pi_envoy_npm.outcome == 'success' }}
         env:
           VERSION: ${{ needs.pi_envoy_build.outputs.version }}
           TAG: ${{ steps.pi_envoy_handed.outputs.tag }}
-        run: |
-          .github/scripts/release-push.sh tag packages/pi-envoy \
-            "chore: release pi-envoy v$VERSION [skip ci]" "$TAG"
+        run: .github/scripts/release-push.sh tag "$VERSION" "$TAG"
 
-      # The deploy key reaches this step and "pi-envoy: Push version bump" alone. release-push.sh
-      # push-tag and push-main write it to a directory of their own, push over SSH to GitHub's
-      # pinned host keys, and remove the key again. The tag goes first (`release` below verifies it
-      # on GitHub), the bump commit last, after the tag and the release exist.
+      # The deploy key reaches this step alone of this package's. release-push.sh push-tag writes
+      # it to a directory of its own, pushes over SSH to GitHub's pinned host keys, and removes the
+      # key again. The tag goes before the release below, which verifies it on GitHub; the tag is
+      # all this package puts in the repository.
       - name: "pi-envoy: Push tag"
         id: pi_envoy_push_tag
         if: ${{ !cancelled() && steps.pi_envoy_tag.outcome == 'success' }}
@@ -656,14 +646,6 @@ jobs:
           VERSION: ${{ needs.pi_envoy_build.outputs.version }}
           STEM: ${{ steps.pi_envoy_handed.outputs.stem }}
         run: .github/scripts/release-push.sh release "$TAG" "Pi Envoy v$VERSION" "$RUNNER_TEMP/pi-envoy-tarball/$STEM.tgz"
-
-      - name: "pi-envoy: Push version bump"
-        id: pi_envoy_push_main
-        if: ${{ !cancelled() && steps.pi_envoy_release.outcome == 'success' }}
-        env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          VERSION: ${{ needs.pi_envoy_build.outputs.version }}
-        run: .github/scripts/release-push.sh push-main packages/pi-envoy "$VERSION"
 
       # pi-legion: what pi_legion_build packed, published as pi-envoy's above is.
       - name: "pi-legion: Download the tarball"
@@ -688,19 +670,9 @@ jobs:
           tag=$(.github/scripts/release-push.sh handed pi-legion-v "$VERSION" "$RUNNER_TEMP/pi-legion-tarball" "$stem.tgz")
           { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
 
-      - name: "pi-legion: Set release version"
-        id: pi_legion_set_version
-        if: ${{ !cancelled() && steps.pi_legion_handed.outcome == 'success' }}
-        env:
-          VERSION: ${{ needs.pi_legion_build.outputs.version }}
-        run: |
-          jq --arg v "$VERSION" '.version = $v' \
-            packages/pi-legion/package.json > tmp.json \
-            && mv tmp.json packages/pi-legion/package.json
-
       - name: "pi-legion: Publish to npm"
         id: pi_legion_npm
-        if: ${{ !cancelled() && steps.pi_legion_set_version.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.pi_legion_handed.outcome == 'success' }}
         env:
           VERSION: ${{ needs.pi_legion_build.outputs.version }}
           STEM: ${{ steps.pi_legion_handed.outputs.stem }}
@@ -712,17 +684,15 @@ jobs:
           fi
         working-directory: packages/pi-legion
 
-      - name: "pi-legion: Commit and tag"
+      - name: "pi-legion: Tag release"
         id: pi_legion_tag
         if: ${{ !cancelled() && steps.pi_legion_npm.outcome == 'success' }}
         env:
           VERSION: ${{ needs.pi_legion_build.outputs.version }}
           TAG: ${{ steps.pi_legion_handed.outputs.tag }}
-        run: |
-          .github/scripts/release-push.sh tag packages/pi-legion \
-            "chore: release pi-legion v$VERSION [skip ci]" "$TAG"
+        run: .github/scripts/release-push.sh tag "$VERSION" "$TAG"
 
-      # The deploy key reaches this step and "pi-legion: Push version bump" alone, as for pi-envoy.
+      # The deploy key reaches this step alone of this package's, as for pi-envoy.
       - name: "pi-legion: Push tag"
         id: pi_legion_push_tag
         if: ${{ !cancelled() && steps.pi_legion_tag.outcome == 'success' }}
@@ -741,20 +711,14 @@ jobs:
           STEM: ${{ steps.pi_legion_handed.outputs.stem }}
         run: .github/scripts/release-push.sh release "$TAG" "Pi Legion v$VERSION" "$RUNNER_TEMP/pi-legion-tarball/$STEM.tgz"
 
-      - name: "pi-legion: Push version bump"
-        id: pi_legion_push_main
-        if: ${{ !cancelled() && steps.pi_legion_release.outcome == 'success' }}
-        env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          VERSION: ${{ needs.pi_legion_build.outputs.version }}
-        run: .github/scripts/release-push.sh push-main packages/pi-legion "$VERSION"
-
       # The plugin pair npm carries for this run, which legion links and the worker image installs:
-      # for each Oh My Pi plugin, the version its build released when the last step of its package
-      # ("Push version bump") succeeded, or, when its build had nothing to release, its manifest's
-      # version at the run's commit, which npm already carries. ok=true only when both plugins are
-      # in one of those states; otherwise legion is not released and worker_image_attest does not
-      # attest the image on main, so neither links a plugin version npm lacks.
+      # for each Oh My Pi plugin, the version its build released when "Create GitHub release", the
+      # last step of its package, succeeded, or, when its build had nothing to release, the version
+      # of its newest tag, which npm carries: a release commits nothing, so the committed manifest
+      # records no release and the tags alone say what was published. ok=true only when both
+      # plugins are in one of those states; otherwise legion is not released and
+      # worker_image_attest does not attest the image on main, so neither links a plugin version
+      # npm lacks.
       - name: Check the plugin pair npm carries
         id: pair
         if: ${{ !cancelled() }}
@@ -762,23 +726,29 @@ jobs:
           PI_ENVOY_RESULT: ${{ needs.pi_envoy_build.result }}
           PI_ENVOY_SKIP: ${{ needs.pi_envoy_build.outputs.skip }}
           PI_ENVOY_VERSION: ${{ needs.pi_envoy_build.outputs.version }}
-          PI_ENVOY_PUSHED: ${{ steps.pi_envoy_push_main.outcome }}
+          PI_ENVOY_RELEASED: ${{ steps.pi_envoy_release.outcome }}
           PI_LEGION_RESULT: ${{ needs.pi_legion_build.result }}
           PI_LEGION_SKIP: ${{ needs.pi_legion_build.outputs.skip }}
           PI_LEGION_VERSION: ${{ needs.pi_legion_build.outputs.version }}
-          PI_LEGION_PUSHED: ${{ steps.pi_legion_push_main.outcome }}
+          PI_LEGION_RELEASED: ${{ steps.pi_legion_release.outcome }}
         run: |
-          # pair_member <build result> <skip> <pushed outcome> <released version> <package>: the
-          # version npm carries for the package, or nothing when its release did not publish.
+          # pair_member <build result> <skip> <release outcome> <released version> <tag prefix>:
+          # the version npm carries for the package, or nothing when its release did not publish.
+          # A package that released nothing in this run carries the version of its newest tag.
           pair_member() {
+            local tag version
             if [ "$1" = success ] && [ "$2" = true ]; then
-              git show "$GITHUB_SHA:packages/$5/package.json" | jq -r '.version // empty'
+              tag=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$5*")
+              version=${tag#"$5"}
+              if [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+                printf '%s\n' "$version"
+              fi
             elif [ "$1" = success ] && [ "$3" = success ]; then
               printf '%s\n' "$4"
             fi
           }
-          pi_envoy=$(pair_member "$PI_ENVOY_RESULT" "$PI_ENVOY_SKIP" "$PI_ENVOY_PUSHED" "$PI_ENVOY_VERSION" pi-envoy)
-          pi_legion=$(pair_member "$PI_LEGION_RESULT" "$PI_LEGION_SKIP" "$PI_LEGION_PUSHED" "$PI_LEGION_VERSION" pi-legion)
+          pi_envoy=$(pair_member "$PI_ENVOY_RESULT" "$PI_ENVOY_SKIP" "$PI_ENVOY_RELEASED" "$PI_ENVOY_VERSION" pi-envoy-v)
+          pi_legion=$(pair_member "$PI_LEGION_RESULT" "$PI_LEGION_SKIP" "$PI_LEGION_RELEASED" "$PI_LEGION_VERSION" pi-legion-v)
           ok=true
           if [ -z "$pi_envoy" ]; then
             echo "::warning::@sjawhar/pi-envoy had a release in this run that did not publish, so legion is not released and the worker image is not attested"
@@ -857,8 +827,8 @@ jobs:
 
       # The only legion step that holds the deploy key. release-push.sh push-tag writes it to a
       # directory of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the
-      # key again. The tag names $GITHUB_SHA, the commit legion_build built, whatever HEAD an
-      # earlier package's bump commit left.
+      # key again. The tag names $GITHUB_SHA, the commit legion_build built, which is what every
+      # package of this job checks out and tags.
       - name: "legion: Tag release"
         id: legion_tag
         if: ${{ !cancelled() && steps.legion_assets.outcome == 'success' }}
