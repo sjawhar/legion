@@ -201,10 +201,11 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 //
 // It is the configuration a running pod cannot be changed to carry: what its template was built
 // from (podShapeDrift — the image, the kind's reservation, the operator's volumes and mounts, and
-// the disk), and the three facets of the pod itself whose worker can be asked to push first — the
-// operator's volume and mount holding its role's overlays, the secrets broker's enrollment, and
-// the session store (driftedInPod). The two facets whose worker cannot be reached at all stay a
-// launch's business and are never a round's (movedInPod).
+// the disk), and the four facets of the pod itself whose worker can be asked to push first — the
+// operator's volume and mount holding its role's overlays, the secrets broker's enrollment, the
+// session store, and the GitHub owners its gh volume projects a directory for (driftedInPod).
+// The two facets whose worker cannot be reached at all stay a launch's business and are never a
+// round's (movedInPod).
 //
 // It answers nothing for a claim with no process — such a claim records no pod, so no pod of it
 // is gone — and nothing for a pod no round covers (roundCovers), today the project controller's:

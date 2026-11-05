@@ -51,7 +51,7 @@ default branch or spending a runner minute.
 ## Evidence
 
 The change under proof made the Legion daemon write the squash commit message of every merge it
-submits. Its surface was sjawhar/legion itself: a scratch base branch of `main`, a head of two
+submits. Its surface was cybermonklabs/legion itself: a scratch base branch of `main`, a head of two
 commits carrying the lines that must not reach a base branch, and a pull request of one onto the
 other. The repository's live settings, quoted with the result, were
 `squash_merge_commit_message=COMMIT_MESSAGES` and `squash_merge_commit_title=COMMIT_OR_PR_TITLE` —
@@ -67,7 +67,7 @@ every scratch pull request merged or closed.
 `enablePullRequestAutoMerge` was refused on every state a scratch base reaches — `Pull request is
 a draft`, `Pull request is in clean status`, `Pull request is in unstable status`, and, on a
 conflicting pull request whose base had no ruleset, `Protected branch rules not configured for
-this branch` — and `POST /repos/sjawhar/legion/rulesets` answered `403 Resource not accessible by
+this branch` — and `POST /repos/cybermonklabs/legion/rulesets` answered `403 Resource not accessible by
 integration`. It was then driven on the change's own pull request, sjawhar/legion#2562, whose base
 is the protected default branch and whose state was `BLOCKED`, the state the production arm is
 taken in: the mutation was sent, `autoMergeRequest { commitHeadline commitBody mergeMethod }` read

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -47,7 +48,7 @@ import (
 const (
 	testNamespace = "legion"
 	testProject   = "legion"
-	testImage     = "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef"
+	testImage     = "ghcr.io/cybermonklabs/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef"
 	testTree      = "LEGION-208"
 	// testSessionDSNKey is the providers Secret's key holding the session database's URL under the
 	// postgres store (Options.SessionStore), which every runtime a test configures carries as a
@@ -93,6 +94,7 @@ func testOptions() Options {
 		AdoptTimeout:          time.Minute,
 		Tokens:                staticTokens{},
 		GitHubCredential:      staticCredential,
+		GitHubOwners:          func() []string { return staticOwners },
 		Conns:                 fake.NewConns(),
 		RepositoryCache: RepositoryCache{
 			Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
@@ -140,8 +142,36 @@ func staticCredential(_ context.Context, role claim.Role, owner string) (ghconfi
 }
 
 // staticOwners are the owners of every bundle staticCredential renders for the test specs, whose
-// repository's owner is sjawhar, sorted.
+// repository's owner is sjawhar, sorted: the set testOptions serves as GitHubOwners too, so a
+// pod a rig launches projects a gh directory for each of them and has drifted from none.
 var staticOwners = []string{"acme", "sjawhar"}
+
+// addedOwner is an owner the project's mapping gained after a pod was created: no owner of
+// staticOwners, and sorted between them, so a pod built before it holds no directory of that
+// name and a bundle rendered now holds one.
+const addedOwner = "globex"
+
+// servedOwners are the owners a daemon servingAddedOwner serves, sorted: staticOwners with
+// addedOwner among them, which is what appauth.GitHubOwners answers once the mapping names a
+// repository of that owner. It is derived, so a staticOwners this package edits moves it too.
+var servedOwners = slices.Sorted(slices.Values(append(slices.Clone(staticOwners), addedOwner)))
+
+// servingAddedOwner is a restarted daemon serving one owner more: GitHubOwners answers
+// servedOwners, and every bundle it renders holds addedOwner's read-only files beside the
+// owners staticCredential always renders, as the daemon's own two answers move together
+// (appauth.GitHubOwners and appauth.GitHubCredential read one mapping). A pod created before it
+// projects no directory for the new owner and never will (movedGhOwners).
+func servingAddedOwner(o *Options) {
+	o.GitHubOwners = func() []string { return servedOwners }
+	o.GitHubCredential = func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, owner)
+		if err != nil {
+			return bundle, err
+		}
+		bundle.Owners[addedOwner] = ghconfig.Render(staticReadToken(role, addedOwner), string(appauth.AppRoleFor(role)), staticCredentialExpiry)
+		return bundle, nil
+	}
+}
 
 // launchOf is r's launch of spec as a relaunch that replaces the pod builds it: prepared, with each
 // role's gh bundle minted (gitHubBundles), so the pod's gh volumes and its agents' GH_CONFIG_DIR
@@ -369,6 +399,12 @@ type rig struct {
 	commandsMu sync.Mutex
 	commands   map[claim.Token][]shimwire.Frame
 	wanted     map[claim.Token]bool
+	// refuseBundle, when set, is the error every fake launcher of this rig answers each
+	// launcher_bundle slice with, as a launcher refuses one that did not arrive as it was sent.
+	// failRestore, when set, is the error its report of the restore carries instead, which is a
+	// launcher that held the whole bundle and could not put it back.
+	refuseBundle string
+	failRestore  string
 }
 
 type rigOption func(*rig, *Options)
@@ -377,6 +413,35 @@ func withOptions(edit func(*Options)) rigOption { return func(_ *rig, o *Options
 
 // withoutController runs no controller stand-in: the objects stay as the test wrote them.
 func withoutController() rigOption { return func(g *rig, _ *Options) { g.noController = true } }
+
+// withRefusedBundle has every fake launcher refuse each slice of a workspace bundle with reason.
+func withRefusedBundle(reason string) rigOption {
+	return func(g *rig, _ *Options) { g.refuseBundle = reason }
+}
+
+// withFailedRestore has every fake launcher of this rig hold the whole bundle and then report
+// that its restore failed with reason, as a launcher whose `git bundle unbundle` found no
+// prerequisite commit does.
+func withFailedRestore(reason string) rigOption {
+	return func(g *rig, _ *Options) { g.failRestore = reason }
+}
+
+// testLaunchers is a launchers of its own, outside any rig, with no saved workspace bundles to
+// carry: the tests that build one drive the launcher protocol itself.
+func testLaunchers() *launchers {
+	return newLaunchers(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// launcherIssue is the issue key a role token's pod is of, as the role Secret's annotation
+// carries it to the real resolver (launcherCredential.issue); "" for the project controller's
+// token, whose pod is of no issue.
+func launcherIssue(token claim.Token) string {
+	prefix, _, ok := token.Cut()
+	if !ok {
+		return ""
+	}
+	return strings.ToUpper(strings.TrimPrefix(prefix, "legion-"+testProject+"-"))
+}
 
 // sandboxHooks runs beforeDelete as the runtime asks to delete a Sandbox and afterGet once a get
 // of one returns, outside the fake client's lock, which the fake holds across a whole call.
@@ -680,12 +745,18 @@ var servicesGVR = corev1.SchemeGroupVersion.WithResource("services")
 
 var podsGVR = corev1.SchemeGroupVersion.WithResource("pods")
 
+// createPod makes the pod a Running Sandbox stands for, as the controller and the API server
+// between them do: a uid of its own, and the creation instant the API server stamps, which the
+// runtime reads to decide whether a release's saved work is this pod's to restore
+// (launcherSession.podCreated). The rig's clock is that stamp, so a test that advances it before
+// a pod is replaced gets a replacement newer than the one it replaced.
 func (g *rig) createPod(s *sandbox) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: s.Name, Namespace: testNamespace, Labels: s.Spec.PodTemplate.Metadata.Labels,
-			UID:             types.UID(fmt.Sprintf("uid-pod-%d", g.uids.Add(1))),
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "agents.x-k8s.io/v1beta1", Kind: "Sandbox", Name: s.Name, UID: s.UID, Controller: new(true)}},
+			UID:               types.UID(fmt.Sprintf("uid-pod-%d", g.uids.Add(1))),
+			CreationTimestamp: metav1.NewTime(*g.now.Load()),
+			OwnerReferences:   []metav1.OwnerReference{{APIVersion: "agents.x-k8s.io/v1beta1", Kind: "Sandbox", Name: s.Name, UID: s.UID, Controller: new(true)}},
 		},
 		Spec:   s.Spec.PodTemplate.Spec,
 		Status: corev1.PodStatus{Phase: corev1.PodPending},
@@ -740,7 +811,7 @@ func (g *rig) reportLauncher(token claim.Token, state shimwire.LauncherState) {
 	if pod == nil {
 		g.t.Fatal("cannot report launcher state without its pod")
 	}
-	s := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
+	s := g.r.launchers.accept(token, launcherIssue(token), pod.CreationTimestamp.Time, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
 	s.mu.Lock()
 	s.state = state
 	close(s.ready)
@@ -851,7 +922,7 @@ func (g *rig) connect(token claim.Token) { g.connectRunning(token, 0) }
 func (g *rig) connectRunning(token claim.Token, running uint64) {
 	server, client := net.Pipe()
 	pod := g.pod(SandboxName(token))
-	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
+	session := g.r.launchers.accept(token, launcherIssue(token), pod.CreationTimestamp.Time, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
 	g.t.Cleanup(func() { _ = client.Close() })
 	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
 	go func() {
@@ -861,6 +932,15 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 			first.Child = &shimwire.LauncherChild{Generation: running, PID: 42}
 		}
 		_ = writer.WriteFrame(first)
+		// held is the slices of each bundle sequence that arrived, as the real launcher holds
+		// them: the whole of one is answered Held (internal/launcher's bundleRestore), and the
+		// start that follows applies the bundle and reports what the restore did, which is what
+		// the daemon drops its saved copy on. whole names the sequence awaiting that start, and
+		// release the release whose save it carried, which the report names so that the daemon
+		// deletes that release's bundle and no other.
+		held := map[string]map[int]bool{}
+		whole := ""
+		var release int64
 		reader := bufio.NewReader(client)
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -883,6 +963,12 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 					_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("generation %d is still running", running)})
 					continue
 				}
+				// The real launcher restores the bundle inside the start, before it answers it
+				// (internal/launcher's manager.start), so the report crosses first.
+				if whole != "" {
+					_ = writer.WriteFrame(shimwire.LauncherRestored{ID: whole, Release: release, OK: g.failRestore == "", Error: g.failRestore})
+					whole, release = "", 0
+				}
 				running = command.Generation
 				_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation})
 				_ = writer.WriteFrame(shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: command.Generation, PID: 42}})
@@ -899,6 +985,22 @@ func (g *rig) connectRunning(token claim.Token, running uint64) {
 					state.LastExit = &shimwire.LauncherExit{Generation: stopped, Code: 143, Signal: "terminated"}
 				}
 				_ = writer.WriteFrame(state)
+			case shimwire.LauncherBundle:
+				if g.refuseBundle != "" {
+					_ = writer.WriteFrame(shimwire.LauncherBundleResult{ID: command.ID, Index: command.Index, Error: g.refuseBundle})
+					continue
+				}
+				if held[command.ID] == nil {
+					held[command.ID] = map[int]bool{}
+				}
+				held[command.ID][command.Index] = true
+				all := len(held[command.ID]) == command.Count
+				if all {
+					whole, release = command.ID, command.Release
+				}
+				_ = writer.WriteFrame(shimwire.LauncherBundleResult{
+					ID: command.ID, Index: command.Index, OK: true, Held: all,
+				})
 			}
 		}
 	}()

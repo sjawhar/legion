@@ -255,7 +255,7 @@ func assertMidPhaseChildrenAreNotStranded(t *testing.T, pool *pgxpool.Pool, root
 		claims = append(claims, c)
 	}
 	inTx(t, pool, func(tx pgx.Tx) {
-		stranded, err := workflow.Stranded(context.Background(), tx, record.NewStore(), testProject, claims)
+		stranded, err := workflow.Stranded(context.Background(), tx, record.NewStore(), testProject, claims, nil, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("read the stranded claims: %v", err)
 		}

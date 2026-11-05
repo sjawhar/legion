@@ -33,7 +33,7 @@ const (
 	inAccepting  = "LEGION-6" // waiting on its architect's acceptance: handed over
 	finished     = "LEGION-7" // done: stays
 	parked       = "LEGION-8" // parked by a person: stays
-	unstarted    = "LEGION-9" // still admitted: stays
+	unstarted    = "LEGION-9" // still admitted, held there by its accepted root: handed over
 	lingerOfRoot = uint64(1)
 )
 
@@ -43,11 +43,15 @@ const (
 // with its own architect, as the label and the todo do when a person sets them. Before, the child
 // stayed suspended, unlabelled and with no architect, and nothing ran it again (LEGION-624). Every
 // phase carries into the new generation: re-planning a merged child or withdrawing a READY would
-// lose completed work. A child that is still admitted, finished or parked stays with the tree. The
-// hand-over remains pending during the linger, so a root that comes back in it resumes its children
-// where they stood and hands none over. The close here is a person's — parked, then closed — which
-// is the path that still reaches the hand-over: a merged root's close waits for the rest of its
-// tree instead (the workflow's closeMerged), so it leaves no child mid-run to hand over.
+// lose completed work. A child that is finished or parked stays with the tree, and so does one
+// still at admitted that nothing holds there. This root is in awaiting_merge, a phase the daemon
+// has already accepted, so the child at admitted beneath it is one the daemon itself holds
+// (record.AcceptedAncestor), and its architect was told it starts once this root closes: the
+// linger hands it over too, whether the close followed the merge or a person made it by hand
+// (the workflow's fenceHeldUnderAccepted). The hand-over remains pending during the linger, so a
+// root that comes back in it resumes its children where they stood and hands none over. The close
+// here is a person's — parked, then closed — where a merged root's close waits for the rest of
+// its tree instead (the workflow's closeMerged) and leaves no child mid-run to hand over.
 func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T) {
 	pool, admission, engine := seedFinishingTree(t)
 	apply(t, pool, admission, "root-parked", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
@@ -57,7 +61,7 @@ func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T
 	}
 
 	expireLinger(t, pool, admission, engine)
-	if got, want := handOvers(t, pool), []string{planning, heldTesting, inRetro, awaiting, inAccepting}; !slices.Equal(got, want) {
+	if got, want := handOvers(t, pool), []string{planning, heldTesting, inRetro, awaiting, inAccepting, unstarted}; !slices.Equal(got, want) {
 		t.Fatalf("hand-overs once the linger ended = %v, want %v", got, want)
 	}
 	if got := messagedChildren(t, pool); len(got) != 0 {

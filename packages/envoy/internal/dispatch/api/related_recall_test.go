@@ -189,12 +189,12 @@ func loadRecallCorpus(t *testing.T, corpus recallCorpus) (*server, *store.Store,
 	}
 
 	started := time.Now()
-	items, err := refreshSearchTermStats(ctx, database.Pool, corpus.project)
+	refresh, err := refreshSearchTermStats(ctx, database.Pool, corpus.project)
 	if err != nil {
 		t.Fatalf("refresh the term statistics: %v", err)
 	}
 	refreshed := time.Since(started)
-	t.Logf("loaded %d issues (%d searchable items); refresh took %v", len(keys), items, refreshed)
+	t.Logf("loaded %d issues (%d searchable items); refresh took %v", len(keys), refresh.Items, refreshed)
 	return srv, database, refreshed
 }
 

@@ -40,7 +40,7 @@ Read the job's step list before you read its log, because the log's `running tes
 the test that happened to be executing, as INFRA-391 says:
 
 ```bash
-gh api repos/sjawhar/legion/actions/jobs/<job id> \
+gh api repos/cybermonklabs/legion/actions/jobs/<job id> \
   --jq '.steps[] | [.number, .name, .conclusion, .started_at, .completed_at] | @tsv'
 ```
 

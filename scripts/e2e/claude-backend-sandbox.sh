@@ -40,7 +40,7 @@
 # session table with `psql` in the session database's container.
 #
 # It pins the branch's own published worker image by digest. A pull-request run of
-# .github/workflows/worker-image.yaml publishes `ghcr.io/sjawhar/legion-worker:sha-<the first 12 hex
+# .github/workflows/worker-image.yaml publishes `ghcr.io/cybermonklabs/legion-worker:sha-<the first 12 hex
 # of the built commit>` and records that tag's digest, so the image must be built from the branch
 # under test — the branch carrying this repository's Claude Code lane, the Claude Code pin and the
 # `@sjawhar/claude-envoy` plugin in the image — before this proof can run, and LEGION_E2E_IMAGE
@@ -1117,7 +1117,7 @@ begin prerequisites
   fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 case "$image" in
   *@sha256:*) ;;
-  *) fail "LEGION_E2E_IMAGE must be the branch's worker image pinned by digest (…@sha256:…), not '$image': a pull-request run of .github/workflows/worker-image.yaml publishes ghcr.io/sjawhar/legion-worker:sha-<first 12 hex of the commit> and records its digest" ;;
+  *) fail "LEGION_E2E_IMAGE must be the branch's worker image pinned by digest (…@sha256:…), not '$image': a pull-request run of .github/workflows/worker-image.yaml publishes ghcr.io/cybermonklabs/legion-worker:sha-<first 12 hex of the commit> and records its digest" ;;
 esac
 [ -n "$storage_class" ] ||
   fail "LEGION_E2E_STORAGE_CLASS is unset: name the StorageClass of the issue pod's disk (the cluster has no default to fall back on)"

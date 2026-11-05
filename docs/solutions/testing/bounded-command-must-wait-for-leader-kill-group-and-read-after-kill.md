@@ -77,7 +77,7 @@ const value = readFileSync(output, "utf-8").trim();
 ```
 
 For an asynchronous command that needs streams, the pending change in
-[sjawhar/legion#1934](https://github.com/sjawhar/legion/pull/1934) applies the same ownership
+[sjawhar/legion#1934](https://github.com/cybermonklabs/legion/pull/1934) applies the same ownership
 rule in `packages/pi-legion/src/jj-attribution.ts`: spawn detached, race the leader and both
 streams against the deadline, and attach group cleanup to `child.exited.finally`. That finalizer
 runs before either a successful value or a non-zero result can resolve, so the process group is

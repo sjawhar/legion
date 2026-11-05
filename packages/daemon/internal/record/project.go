@@ -54,8 +54,12 @@ func OutOfWorkflow(status string) bool {
 // (ChildOpen), the acceptance order (OpenBeneath), the state's projection and the API's
 // refusals among them — and internal/workflow, where it used to live, is the one package
 // several of those may not read.
+//
+// The rule itself is pods.Standing.InWorkflow, which the pod gate reads with the issue's linger
+// (pods.InWorkflowNotLingering) and this reads without it: one statement, so a terminal phase
+// added to it moves admission, the linger, the production check and the release gate together.
 func InWorkflow(issue Issue) bool {
-	return !OutOfWorkflow(issue.Status) && issue.Phase != phase.Done
+	return issue.Standing().InWorkflow(OutOfWorkflow)
 }
 
 // AcceptedPhases are the phases an issue stands in after its own reviewed head was accepted and

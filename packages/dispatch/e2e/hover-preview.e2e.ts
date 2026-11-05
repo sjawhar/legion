@@ -1,6 +1,9 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { REF_PREVIEW_CLOSE_DELAY_MS } from "../web/src/features/refs/ref-preview-timing";
+import {
+  REF_PREVIEW_CLOSE_DELAY_MS,
+  REF_PREVIEW_OPEN_DELAY_MS,
+} from "../web/src/features/refs/ref-preview-timing";
 import { createComment, createIssue, createProject, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -10,19 +13,24 @@ const agent = {
   as: "agent" as const,
 };
 
+// The reader's dwell on a turn before its read mark is written: `DWELL_MS`,
+// `web/src/features/shell/useDwell.ts`, which exports nothing a spec can import.
+const DWELL_MS = 1_000;
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
 /** Hold the page's clock still, so a check about an open or a close delay cannot race it.
- * `pauseAt` takes a time on the page's own installed clock, and the Node process's `Date.now()`
- * can already be behind that clock, which would ask it to move backwards: a lead of `+ 1` ms
- * failed 11 runs of 12, and a second is past any skew. `pauseAt` runs every page timer that falls
- * due inside the jump, so no call site may have one armed that the jump must not fire: at three
- * of them the card is open, so its open timer has fired and no close is armed, and at the fourth
- * the card is closed under a held button, which arms nothing at all. */
+ * `pauseAt` takes a time on the page's own installed clock, which the jumps above a call site
+ * have already carried past the Node process's own `Date.now()`; asking it to move backwards
+ * refuses, so the lead of a second is taken from the page's reading of its clock. `pauseAt` runs
+ * every page timer that falls due inside the jump, so no call site may have one armed that the
+ * jump must not fire: at three of them the card is open, so its open timer has fired and no
+ * close is armed, and at the fourth the card is closed under a held button, which arms nothing
+ * at all. */
 async function pauseClock(page: Page): Promise<void> {
-  await page.clock.pauseAt(Date.now() + 1000);
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000);
 }
 
 /** Put a board card in the middle of the board's scroller, clear of both edge zones. dnd-kit
@@ -124,6 +132,7 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     await centreInBoard(page, target.key);
     await link.hover();
     const card = page.getByRole("tooltip");
+    await page.clock.runFor(REF_PREVIEW_OPEN_DELAY_MS);
     await expect(card).toBeVisible();
     await expect(card).toContainText("Hover target");
     await expect(card).toContainText("The target's spec explains");
@@ -163,6 +172,7 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     // can travel onto the card without closing it, and clicking the card follows the same link.
     await page.mouse.move(0, 0);
     await link.hover();
+    await page.clock.runFor(REF_PREVIEW_OPEN_DELAY_MS);
     await expect(card).toBeVisible();
     // `hover()` moves the pointer in one step, straight from the reference onto the card. A close
     // that move armed would run on the page's timers, so the check drives those timers: with the
@@ -196,10 +206,21 @@ test("a card survives a held-button drag that leaves its reference and comes bac
     const turns = page.getByRole("list", { name: "Conversation turns" });
     const link = turns.getByRole("link", { name: "Hover target" });
     await expect(link).toBeVisible();
-    // The dwell's read mark drops the `New` mark and moves the reference 24 px up; settle it first.
-    await expect(turns.getByText("New", { exact: true })).toHaveCount(0);
+    // The dwell's read mark drops the `New` mark and moves the reference 24 px up; settle it
+    // first. The dwell is a page timer (`DWELL_MS`), so the page's own clock spends it, and the
+    // jump repeats because the mark is written only once the observer has reported the turn.
+    await expect
+      .poll(
+        async () => {
+          await page.clock.runFor(DWELL_MS);
+          return turns.getByText("New", { exact: true }).count();
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(0);
     await link.hover();
     const card = page.getByRole("tooltip");
+    await page.clock.runFor(REF_PREVIEW_OPEN_DELAY_MS);
     await expect(card).toBeVisible();
     await pauseClock(page);
 
@@ -248,10 +269,21 @@ test("a card survives a held-button move from the card back onto its reference",
     const turns = page.getByRole("list", { name: "Conversation turns" });
     const link = turns.getByRole("link", { name: "Hover target" });
     await expect(link).toBeVisible();
-    // The dwell's read mark drops the `New` mark and moves the reference 24 px up; settle it first.
-    await expect(turns.getByText("New", { exact: true })).toHaveCount(0);
+    // The dwell's read mark drops the `New` mark and moves the reference 24 px up; settle it
+    // first. The dwell is a page timer (`DWELL_MS`), so the page's own clock spends it, and the
+    // jump repeats because the mark is written only once the observer has reported the turn.
+    await expect
+      .poll(
+        async () => {
+          await page.clock.runFor(DWELL_MS);
+          return turns.getByText("New", { exact: true }).count();
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(0);
     await link.hover();
     const card = page.getByRole("tooltip");
+    await page.clock.runFor(REF_PREVIEW_OPEN_DELAY_MS);
     await expect(card).toBeVisible();
     await pauseClock(page);
 

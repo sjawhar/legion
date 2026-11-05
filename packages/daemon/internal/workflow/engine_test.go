@@ -109,7 +109,8 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 
 // A child entering an open gate is recorded by its own fact and starts planning when the waiting
 // line reaches it, its planner's start queued behind the row creating the child's branch, which
-// the start waits for.
+// the start waits for, and the in_progress of the phase it enters written over the todo Dispatch
+// shows.
 func TestRegisteredOpenGateRecordsChildAndStartsPlanningAtItsSlot(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -134,7 +135,7 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningAtItsSlot(t *testing.T) 
 	}
 	// The second notice is the architect's: every child the line starts tells it so
 	// (ChildStartedNotice).
-	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice", "notice"})
+	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice", "notice"})
 	var branchIssue string
 	var generation int
 	if err := pool.QueryRow(ctx, "select issue, (payload->>'generation')::int from outbox where kind = 'issue_branch'").Scan(&branchIssue, &generation); err != nil {

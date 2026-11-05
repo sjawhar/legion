@@ -271,8 +271,8 @@ RUNNER_STOP_GRACE_SECONDS=120
 RUNNER_RUN_SLACK_SECONDS=900
 RUN_LABEL=dispatch-loadtest/run
 ROLE_LABEL=dispatch-loadtest/role
-LEGION_REPO=sjawhar/legion
-ENVOY_IMAGE_REPO=ghcr.io/sjawhar/legion/envoy
+LEGION_REPO=cybermonklabs/legion
+ENVOY_IMAGE_REPO=ghcr.io/cybermonklabs/legion/envoy
 PG_IMAGE_PREFIX=mirror.gcr.io/pgvector/pgvector:0.8.1-pg
 SOCAT_IMAGE=mirror.gcr.io/alpine/socat:1.8.0.3
 RUNNER_IMAGE=mirror.gcr.io/library/debian:bookworm-slim
@@ -550,7 +550,7 @@ resolve_image() {
 }
 
 # image_for_commit SHA: ghcr.io's envoy image of SHA by digest. With none, it walks SHA's
-# first-parent ancestors on sjawhar/legion (gh api) to the newest that has one and dies naming
+# first-parent ancestors on cybermonklabs/legion (gh api) to the newest that has one and dies naming
 # both; nothing has been created by then.
 image_for_commit() {
   local commit=$1 image c i
@@ -2629,11 +2629,15 @@ run_step() {
   runner_put "$dir/copy-meta.json" "/work/meta/$name.json"
 
   endpoints
+  # -heap-samples: the step's heap-live series, which CURVES.md and TREND.md show. A step measures
+  # the copy's capacity, not one build's CPU against another's, so the heap profile Dispatch
+  # writes every 15 s is worth its cost here; a replay, which is compared on Dispatch's CPU, runs
+  # without it (run_replay).
   run_in_runner "$name" "$dir" "step-$name" $((30 + $(duration_seconds "$duration") + 20 + RUNNER_RUN_SLACK_SECONDS)) \
     /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
     -seed /work/seed.json -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" \
     -events "$events" -sessions "$sessions" -requests "$requests" -duration "$duration" \
-    -warmup "$warmup" -grace 20s -rng-seed "$rng_seed" "${ENDPOINTS[@]}"
+    -warmup "$warmup" -grace 20s -rng-seed "$rng_seed" -heap-samples "${ENDPOINTS[@]}"
   note "step $name done: $dir"
 }
 
@@ -3129,7 +3133,9 @@ replay_codepaths() {
 
 # run_replay NAME FROM TO PHASE: one replay step (see the header), into steps/NAME; with --typing
 # (TYPING), browser typing into typing_docs_replay's documents, mapped through the reset
-# database's loadtest.replay_ids.
+# database's loadtest.replay_ids. It gives loadgen run no -heap-samples: the replay is compared on
+# Dispatch's CPU over the window, and Dispatch writes any heap profile the harness asks for, so
+# the heap of a replay is read at the window's edges alone (heap-start.pprof, heap-end.pprof).
 run_replay() {
   local name=$1 from=$2 to=$3 phase=$4 window
   valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"

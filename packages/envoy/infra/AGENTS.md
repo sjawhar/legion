@@ -210,7 +210,7 @@ versions. Never add the module to the root `go.work`.
   and its `THIRD_PARTY_NOTICES` in one directory, `envoy-infra-<os>-<arch>/`, which mise's
   `github:` backend strips on install. A mise pin names that archive per platform with a tool alias
   (`README.md`, "The command"), since the same tag carries the plugin's archives and
-  `github:sjawhar/legion` the `legion` command's. Changing either side breaks every consumer's
+  `github:cybermonklabs/legion` the `legion` command's. Changing either side breaks every consumer's
   install. A version is cut only from what the plugin and the command build from: the workflow's
   version step lists, with `go list -deps ./cmd/...` for each target, the directories of the
   workspace's modules either compiles in, and adds those modules' `go.mod` and `go.sum`, the

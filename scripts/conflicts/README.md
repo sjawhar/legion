@@ -82,7 +82,7 @@ The Python run's records are read as they are.
 - `--repo <owner/name>`
 
   The repository measured.
-  Default `sjawhar/legion`.
+  Default `cybermonklabs/legion`.
 
 - `--workdir <dir>`
 

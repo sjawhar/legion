@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,8 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -62,8 +66,12 @@ type OperatorClaim struct {
 	UncertainStreak int              `json:"uncertainStreak"`
 	// Pending is the task the claim holds, until the turn it started ends.
 	Pending *DeliveryView `json:"pending,omitempty"`
-	// SuspendedBy is who suspended the claim while it is suspended: operator, daemon, exit, or
-	// unknown (a suspension recorded before migration 0038); absent otherwise.
+	// SuspendedBy is who suspended the claim while it is suspended: operator, daemon, exit,
+	// released (its idle pod was released), or unknown (a suspension recorded before migration
+	// 0038); absent otherwise. These routes are the one surface that serves it: a session parses
+	// every body it reads with the schema of its own contract, so a key an older contract does not
+	// know refuses the whole body at a plugin whose answer side predates INFRA-1048, and is dropped
+	// at every plugin after it (api.StrandedClaim).
 	SuspendedBy string `json:"suspendedBy,omitempty"`
 	// SuspensionHeld is a suspension the machine holds for the agent's turn (supervise's
 	// holdSuspension); absent when none is.
@@ -212,7 +220,7 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
-		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		if _, err := s.trees.OpenOperatorTreeLifecycle(ctx, s.project, req.Tree, s.drawMemory(req.Tree)); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
 			return
 		} else if err != nil {
@@ -243,6 +251,18 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	s.operatorDone(r, token)
 	writeJSON(w, status, operatorView(m.Claim()))
+}
+
+// drawMemory is the draw of tree's memory group, for the open that creates the tree's lifecycle
+// row to run in its own transaction (store.Store.OpenOperatorTreeLifecycle): the group this
+// project's mode gives the tree, recorded on the tree's root (memorygroup.DrawAndRecord, which
+// admission's own path draws through too). An operator's tree usually has no issue record at all,
+// and then the draw writes nothing (record.Store.DrawMemory) — nothing is refused and no record
+// is invented.
+func (s *server) drawMemory(tree string) func(ctx context.Context, tx pgx.Tx) error {
+	return func(ctx context.Context, tx pgx.Tx) error {
+		return memorygroup.DrawAndRecord(ctx, tx, s.records, tree, s.memory, s.coin, s.now())
+	}
 }
 
 // claimRequest is one operator request on an existing claim: event builds the request the claim's
@@ -374,7 +394,7 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := m.Claim()
-	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.records == nil || s.roleFor == nil {
+	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.roleFor == nil {
 		s.claimRequest("retry", retryEvent)(w, r)
 		return
 	}

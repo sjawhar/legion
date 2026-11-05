@@ -4,7 +4,7 @@ description: How pages are laid out, how to add one, how generated reference pag
 ---
 
 This site is an [Astro Starlight](https://starlight.astro.build/) project in `docs/site/` of the
-[Legion repository](https://github.com/sjawhar/legion). Every push to `main` publishes it to GitHub
+[Legion repository](https://github.com/cybermonklabs/legion). Every push to `main` publishes it to GitHub
 Pages, and every pull request that touches it builds it, so a broken page or link fails the pull
 request before it can merge.
 

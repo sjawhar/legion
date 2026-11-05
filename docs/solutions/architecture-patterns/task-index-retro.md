@@ -17,7 +17,7 @@ related_issues:
 
 # Task Index Performance — Implementer Retro
 
-**PR:** https://github.com/sjawhar/legion/pull/51
+**PR:** https://github.com/cybermonklabs/legion/pull/51
 
 ## What Was Hard
 
