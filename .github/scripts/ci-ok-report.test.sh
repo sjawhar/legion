@@ -269,4 +269,20 @@ check "exits 0" "$(is "$status" 0)"
 check "posts one check run rather than waiting" "$(is "$(posted)" 1)"
 check "failing" "$(is "$(field .conclusion)" failure)"
 
+echo "case: a decided merge_group run whose jobs route GitHub refuses posts its verdict all the same"
+# The artifact list above it is read three times before the script gives up; the jobs route is
+# read once, inside an `&&` chain, so one refusal leaves `decision` untouched, `pending`
+# non-empty, and the script says it waits and exits 0. On a decided merge-group run nothing
+# posts later: the reporting job uploaded its own `failure` report before this step ran, so its
+# follower reads REPORT=failure and force-cancels the whole run, and a force-cancel leaves every
+# `if: always()` step skipped. The group then carries no ci-ok at all and holds the queue until
+# GitHub's 180-minute check timeout drops its pull request — the outcome this file's own header
+# names as the one to prevent. Nothing worse can come of posting a failing verdict on a group
+# that is about to be thrown away.
+report ci-ok-typecheck-1-failure
+run_report "$group_selects" merge_group
+check "exits 0" "$(is "$status" 0)"
+check "posts its failing ci-ok rather than waiting on a read it cannot make" "$(is "$(posted)" 1)"
+check "failing" "$(is "$(field .conclusion)" failure)"
+
 summary "ci-ok-report.sh posts ci-ok only once every job that runs has reported"
