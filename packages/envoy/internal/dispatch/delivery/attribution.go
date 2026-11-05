@@ -158,8 +158,9 @@ type attributionColumns struct {
 // project's default mapping (refs.IssueRepoTerms) — and a title and a body together can name
 // many keys: a Legion pull request names one or two, while a body listing a tree's issues can
 // name a dozen, so 25 is room for the shapes that occur and a bound on the work a pathological
-// body can ask for. The bound drops only candidates ranked below it, which under the rule
-// before this change — the first ranked candidate outright — could never have won either.
+// body can ask for. The bound drops only candidates ranked below it, so an issue is passed over
+// for the bound's sake alone where the five sources name more than 25 keys and none of the
+// first 25 is held to the pull request's repository.
 const attributionCandidateBound = 25
 
 // attributionCandidates is the issues a pull request's five sources name, best first: the
@@ -194,15 +195,15 @@ func attributionCandidates(c attributionColumns) string {
 // It is never null — a candidate whose issue row is missing, and one whose parent chain ran out
 // of depth, is simply not held — so a caller may read it as a plain boolean and a `where` over
 // it drops exactly the candidates that are not held. The comparison is lowercased on both sides
-// because GitHub spells an owner and a repository as their owners do (`Acme/Widgets`), which is
-// why the code before this change used strings.EqualFold.
+// because GitHub spells an owner and a repository as their owners do (`Acme/Widgets`), and a
+// stored repository may be spelled either way.
 //
 // Both sides go through the server's one repository-renaming rule first
 // (refs.CanonicalRepoSQL), so one repository under two names is one repository here: an issue
 // recorded under a name that was renamed away is held to a pull request on the new name, and an
 // issue recorded under the new name to a pull request Dispatch stored under the old one. A
-// repository with no rename is its own canonical name, so a repository Dispatch does not map
-// compares exactly as it did before.
+// repository with no rename is its own canonical name, so a repository Dispatch maps no rename
+// for is compared by that name alone.
 func attributionHeld(repo string) string {
 	return `coalesce(not ` + refs.IssueRepoTooDeep +
 		` and lower(` + refs.CanonicalRepoSQL(refs.IssueRepoResolved) + `) = lower(` + refs.CanonicalRepoSQL(repo) + `), false)`
@@ -219,6 +220,16 @@ var attributionOneColumns = attributionColumns{
 
 const attributionOneRepo = "$6"
 
+// attributionSubjects is the `subjects` term both statements below splice: the distinct keys
+// their candidates name, which is the set refs.IssueRepoTerms walks. One text, spliced twice,
+// because the two statements must ask the walk about exactly the same keys — a term that
+// differed between them would resolve one statement's candidates and not the other's. `where
+// key is not null` because the batch reads its candidates through a `left join lateral`, which
+// answers one null-keyed row for a pull request whose five sources name nothing at all.
+const attributionSubjects = `subjects as (
+	select distinct key from candidates where key is not null
+)`
+
 // attributionCandidatesQuery is the one statement that resolves a pull request's candidates from
 // stored inputs: every candidate the five sources name, best first, each marked whether it is
 // held to the pull request's own repository. The repository rule is spliced in over the
@@ -229,9 +240,7 @@ const attributionOneRepo = "$6"
 // a statement that never differs, and pgx caches a prepared plan per statement text.
 var attributionCandidatesQuery = `with recursive candidates as (
 	` + attributionCandidates(attributionOneColumns) + `
-), subjects as (
-	select distinct key from candidates
-), ` + refs.IssueRepoTerms + `
+), ` + attributionSubjects + `, ` + refs.IssueRepoTerms + `
 select c.key, c.source, ` + attributionHeld(attributionOneRepo) + ` as held
 from candidates c
 	left join issues i on i.key = c.key
@@ -259,9 +268,7 @@ var attributionBatchQuery = `
 	CitedIssues: "src.attribution_cited_issues", BranchKeys: "src.attribution_branch_keys",
 	CommitKeys: "src.attribution_commit_keys",
 }) + `) f on true
-		), subjects as (
-			select distinct key from candidates where key is not null
-		), ` + refs.IssueRepoTerms + `, held as (
+		), ` + attributionSubjects + `, ` + refs.IssueRepoTerms + `, held as (
 			select c.pr_repo, c.pr_number, c.key, c.rank, c.n
 			from candidates c
 				left join issues i on i.key = c.key
@@ -337,9 +344,17 @@ func resolveStoredIssueKey(ctx context.Context, pool *store.Pool, repo, url stri
 }
 
 // firstHeldCandidate is the index of the first candidate held to the pull request's own
-// repository, -1 when none is: the rule's one scan, so resolveStoredIssueKey and
-// headAttribution (pull_request_heads.go), which also needs the index to name what it passed
-// over, cannot come to answer one ranked list differently.
+// repository, -1 when none is: the pick made over one pull request's ranked list, which both
+// readers of that list share — resolveStoredIssueKey and headAttribution
+// (pull_request_heads.go), the second of which also needs the index to name what it passed
+// over — so the two cannot come to answer one list differently.
+//
+// The pick is made in two places, not one: a whole batch of stored rows is picked for in SQL
+// instead, by attributionBatchQuery's `distinct on (pr_repo, pr_number) … order by … rank, n`
+// over its `held` term, since resolving a batch row by row would pay for a repository walk per
+// row (AttributePullRequests). The two are one rule because they read one ranked list and one
+// holding: attributionCandidates ranks, attributionHeld holds, attributionSubjects names the
+// keys the walk resolves, and all three are spliced into both statements.
 func firstHeldCandidate(candidates []attributionCandidate) int {
 	return slices.IndexFunc(candidates, func(candidate attributionCandidate) bool { return candidate.held })
 }

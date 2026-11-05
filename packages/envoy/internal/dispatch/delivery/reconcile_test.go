@@ -740,12 +740,13 @@ func TestReconcileRefreshesAPullRequestHeadWithNoDeliverySettings(t *testing.T) 
 // every pull request merged before this change whose title or body named another repository's
 // issue first: the merge envelope read GitHub in full, which stamps the row read
 // (recordPullRequestHead), and the old rule credited nobody, so the row is merged, unattributed
-// and stamped. ListStalePullRequestHeads takes a merged row only while its checked_at is null,
-// nothing else ever revisits a merged row, and a recorded result reads through only for a commit
-// no head Dispatch knows — so without this the row keeps no issue for good and every
-// `before_merge` result at that head reads `older` for ever, which is the defect this issue
-// exists to fix (its own witness, theorem-labs/agent-infra#2131 for INFRA-1219, merged at
-// 2026-11-05T01:09:12Z with head 0018f0a1af2f, is such a row).
+// and stamped. ListStalePullRequestHeads takes a merged row credited to nobody only until the
+// rule this build judges by has judged it (AttributionRuleVersion), so a row an older rule
+// judged is offered once more; nothing else ever revisits a merged row, and a recorded result
+// reads through only for a commit no head Dispatch knows — so without this the row keeps no
+// issue for good and every `before_merge` result at that head reads `older` for ever, which is
+// the defect this issue exists to fix (its own witness, theorem-labs/agent-infra#2131 for
+// INFRA-1219, merged at 2026-11-05T01:09:12Z with head 0018f0a1af2f, is such a row).
 func TestReconcileAttributesAMergedHeadAnEarlierPassLeftCreditedToNobody(t *testing.T) {
 	fastPageRetries(t)
 	pool, ctx := deliveryTestPool(t)
@@ -778,6 +779,9 @@ func TestReconcileAttributesAMergedHeadAnEarlierPassLeftCreditedToNobody(t *test
 	}); err != nil {
 		t.Fatalf("store the merged head the old rule left: %v", err)
 	}
+	// The rule that judged it: no writer stamps a rule that is not this build's, so the row an
+	// older rule left is written and then stamped with that rule's number.
+	stampLegacyAttributionRule(t, ctx, pool, "acme/gadgets", 60)
 
 	NewReconcile(pool, fake.newTestClient(), events.NewBroker()).runOnce(ctx)
 
@@ -800,13 +804,21 @@ func TestReconcileAttributesAMergedHeadAnEarlierPassLeftCreditedToNobody(t *test
 // GitHub exactly once, and the pass after it has no business with the row. Without that bound
 // every merged pull request credited to nobody would cost three GitHub calls every five
 // minutes, for ever, which is the shape the architect refused.
+//
+// The pull request here is titled after the other repository's issue alone, so this rule credits
+// it to nobody as the rule before it did. That is what makes the read count pin the rule bound
+// and not the arm's `issue_key is null`: a row this pass credited would leave the arm on its
+// issue alone, while this row stays in every way the arm reads but the rule it is stamped with.
 func TestReconcileReadsAMergedHeadItReJudgedOnlyOnce(t *testing.T) {
 	fastPageRetries(t)
 	pool, ctx := deliveryTestPool(t)
 	foreign := seedHeadIssue(t, ctx, pool, 61)
-	own := seedGadgetsIssue(t, ctx, pool, 61)
+	// acme/gadgets is a repository of its own project, as in the test above: what makes the
+	// title's issue foreign is that it resolves to acme/widgets, not that Dispatch maps nothing
+	// for the pull request's own repository.
+	seedProjectRepository(t, ctx, pool, "GDGT", "Gadgets", gadgetsRepo)
 	const sha = "6161616161616161616161616161616161616161"
-	title := foreign + ": the other repository's issue, and " + own + " (this one)"
+	title := foreign + ": the other repository's issue, and no issue of this one"
 
 	var pullReads atomic.Int32
 	fake := newFakeGitHub(t)
@@ -816,7 +828,7 @@ func TestReconcileReadsAMergedHeadItReJudgedOnlyOnce(t *testing.T) {
 			"number": 61, "title": title, "body": "", "html_url": "https://github.com/acme/gadgets/pull/61",
 			"state": "closed", "merged": true, "updated_at": "2026-02-07T00:00:00Z",
 			"head": map[string]any{
-				"ref": "legion/" + own, "sha": sha,
+				"ref": "topic", "sha": sha,
 				"repo": map[string]any{"full_name": "acme/gadgets"},
 			},
 			"base": map[string]any{"ref": "main"},
@@ -826,26 +838,29 @@ func TestReconcileReadsAMergedHeadItReJudgedOnlyOnce(t *testing.T) {
 		mustEncode(t, w, []any{})
 	})
 
-	// A row stored before this change: merged, credited to nobody, stamped read, and judged by
-	// the rule that took the first candidate outright, which attribution_rule numbers 0.
+	// A row stored before this build: merged, credited to nobody, stamped read, and judged by
+	// the rule that took the first candidate outright, which attribution_rule numbers 0. No
+	// writer stamps that rule, so the row is written and then stamped with it.
 	stamped := time.Now().Add(-24 * time.Hour)
 	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
-		Repo: "acme/gadgets", Number: 61, HeadSHA: sha, HeadRef: "legion/" + own, BaseRef: "main",
+		Repo: "acme/gadgets", Number: 61, HeadSHA: sha, HeadRef: "topic", BaseRef: "main",
 		State: "merged", IssueKey: nil, AttributionSource: "none", AttributionComplete: true,
 		Title: title, URL: "https://github.com/acme/gadgets/pull/61", CheckedAt: &stamped,
 	}); err != nil {
 		t.Fatalf("store the merged head the old rule left: %v", err)
 	}
+	stampLegacyAttributionRule(t, ctx, pool, "acme/gadgets", 61)
 
 	reconcile := NewReconcile(pool, fake.newTestClient(), events.NewBroker())
 	reconcile.runOnce(ctx)
 	head := readHead(t, ctx, pool, "acme/gadgets", 61)
-	if head.IssueKey == nil || *head.IssueKey != own {
-		t.Fatalf("the merged head after the first pass = %v, want %s", head.IssueKey, own)
+	if head.IssueKey != nil {
+		t.Fatalf("the merged head after the first pass = %v, want nobody: %s resolves to acme/widgets, and the title names no issue of acme/gadgets",
+			head.IssueKey, foreign)
 	}
-	if head.AttributionRule != AttributionRuleVersion {
+	if head.attributionRule != AttributionRuleVersion {
 		t.Fatalf("the merged head's attribution_rule after the first pass = %d, want %d: the read stamps the rule that judged it",
-			head.AttributionRule, AttributionRuleVersion)
+			head.attributionRule, AttributionRuleVersion)
 	}
 
 	reconcile.runOnce(ctx)
@@ -860,7 +875,7 @@ func TestReconcileReadsAMergedHeadItReJudgedOnlyOnce(t *testing.T) {
 	if len(stale) != 0 {
 		t.Fatalf("a third pass would read %+v, want nothing: this rule has judged every merged row", stale)
 	}
-	if again := readHead(t, ctx, pool, "acme/gadgets", 61); again.IssueKey == nil || *again.IssueKey != own {
-		t.Fatalf("the merged head after the second pass = %v, want %s still", again.IssueKey, own)
+	if again := readHead(t, ctx, pool, "acme/gadgets", 61); again.IssueKey != nil {
+		t.Fatalf("the merged head after the second pass = %v, want nobody still", again.IssueKey)
 	}
 }

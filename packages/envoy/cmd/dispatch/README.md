@@ -1615,7 +1615,7 @@ The head pass also takes every merged row credited to nobody that the rule the r
 a `pull_request` envelope naming no head repository attributes nobody, a pull request merged under an older rule keeps whatever that rule concluded, and nothing else ever looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
 The row is written outside the reconcile by the `pull_request` envelope, and by the read-through made for a commit that heads no pull request Dispatch knows (`delivery.ReadThroughCommitPulls`):
 a recorded result makes one, and so does the read of an issue's results, which spends at most one such read per repository and commit every `delivery.CommitPullReadStaleAfter` (`GET /api/v1/issues/{key}/results`, Routes below).
-`pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, and `pull_request_heads_merged_unread`, partial on `state` and `issue_key` since `20261105070440` dropped its `checked_at` half, its merged arm.
+`pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, `pull_request_heads_merged_unread`, partial on `state` and `issue_key` since `20261105070440` dropped its `checked_at` half, its merged arm, and `pull_request_heads_repo_head` (`20261105112616`, below) the question the results read asks before it reads GitHub: whether any stored pull request has this commit of this repository as its head.
 A new table, as above; its census answers `0`.
 
 Migration `20261102122400_default_branch_commits` creates `default_branch_commits`, what Dispatch's GitHub App answered about one commit of one repository: whether the repository's default branch carries it.
@@ -1643,6 +1643,14 @@ The canonical name of a repository is what its row's `renamed_to` names, else th
 A column check refuses a repository renamed to itself, and the route refuses a pair whose target is itself renamed and a rename of a repository another mapping already points at, so the canonical name is one step away and no cycle exists.
 Adding a nullable column with no default writes the catalog alone, so it holds `repo_projects` in `ACCESS EXCLUSIVE` for milliseconds and rewrites no row;
 the release before it neither reads nor writes the column and names its columns in every insert, so it keeps writing mappings while it still serves.
+Its census answers `0`.
+
+Migration `20261105112616_pull_request_heads_repo_head` creates `pull_request_heads_repo_head` on `pull_request_heads (repo, head_sha)`, the index behind the question the results read asks before it reads GitHub about a commit: has any stored pull request this commit of this repository as its head, whatever its state and whatever issue it is attributed to (`delivery.HeadStoredAt`)?
+A `before_merge` result whose commit heads no row attributed to the check's own issue is read through GitHub, which is how a result recorded before its pull request opened stops reading `older`, and that read can repair nothing for a commit Dispatch already holds a pull request for: the reconcile re-reads an open row every five minutes and offers a merged one once per rule version, so asking GitHub again from a read teaches nothing.
+So the read asks this first, and a child's result on its parent's tab — whose commit heads the child's own pull request, attributed to the child — costs no GitHub call at all (`api/results_currency.go`, `currencyReader.readThroughHead`).
+No index served that lookup: `pull_request_heads_issue_head` is keyed `(issue_key, head_sha)` and partial on `issue_key is not null`, which answers the currency read and no lookup by repository and head commit, and the primary key is `(repo, number)`, so every results read of such a commit scanned the table.
+`create index` takes `SHARE` on `pull_request_heads` while it builds, holding that table's writes for one read of a table that holds a row per pull request Dispatch has seen an event for;
+the release before it neither reads nor writes the index, an index deciding a plan and never an answer, so it rolls beside this one.
 Its census answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.

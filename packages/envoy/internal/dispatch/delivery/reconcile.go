@@ -119,9 +119,9 @@ func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases, due time
 // The head pass (reconcilePullRequestHeads) runs first and whatever the settings say.
 // pull_request_heads is not delivery's own table: it is what a recorded check result's currency
 // is measured against (api/results_currency.go), and that reader is served in every deployment,
-// delivery configured or not. Behind the settings it never ran in production, so a result
-// recorded at a head a later push replaced read `current` for ever. It is outside the deploy
-// repository's permission check for the same reason: that check asks about the deploy
+// delivery configured or not, so a deployment with no delivery settings refreshes its heads and
+// a result recorded at a head a later push replaced reads `older` there too. It is outside the
+// deploy repository's permission check for the same reason: that check asks about the deploy
 // repository's Actions and Pull-requests grants, while the head pass reads each row's own
 // repository with that row's own token.
 //
@@ -131,8 +131,8 @@ func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases, due time
 // population, the deploy repository, its workflow paths) or run against the deploy repository's
 // own grants.
 //
-// The intake's NATS consumer stays gated too, and that is not an oversight this change leaves
-// behind: it binds its durable only once the settings cache holds settings (Intake.Run), and the
+// The intake's NATS consumer is gated on the settings for a reason of its own, not for the one
+// above: it binds its durable only once the settings cache holds settings (Intake.Run), and the
 // durable is created with no start policy (deliveryConsumerConfig, so JetStream's DeliverAll), so
 // a first bind in a deployment that never had settings would deliver the stream's whole 72-hour
 // backlog
@@ -194,8 +194,8 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, searchScope, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
-	// The head pass itself ran before the settings were read, at the top of the pass; its failure
-	// is recorded here, where last_error names the steps in the order they used to run.
+	// The head pass ran at the top of the pass, before the settings were read; its failure is
+	// recorded here, so last_error names the steps in this list's order.
 	record("reconcile pull request heads", headErr)
 	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, production, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {

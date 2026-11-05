@@ -89,16 +89,38 @@ func seedGadgetsIssueUnderTheOldName(t *testing.T, ctx context.Context, pool *st
 	return key
 }
 
-func readHead(t *testing.T, ctx context.Context, pool *store.Pool, repo string, number int) PullRequestHead {
+// storedHead is one stored row as a test reads it: the shape every writer fills in
+// (PullRequestHead), plus the attribution_rule column, which is no field of it —
+// UpsertPullRequestHead binds AttributionRuleVersion itself, so only the row says which rule
+// judged it.
+type storedHead struct {
+	PullRequestHead
+	attributionRule int
+}
+
+// stampLegacyAttributionRule sets a stored row's attribution_rule to 0, the rule a row written
+// before that column has: the rule that took the first candidate outright, whatever repository
+// its issue resolved to. No writer stamps it, so a test that needs such a row writes it with
+// this one update (UpsertPullRequestHead).
+func stampLegacyAttributionRule(t *testing.T, ctx context.Context, pool *store.Pool, repo string, number int) {
 	t.Helper()
-	var head PullRequestHead
+	if _, err := pool.Exec(ctx, `
+		update pull_request_heads set attribution_rule = 0 where repo = $1 and number = $2
+	`, repo, number); err != nil {
+		t.Fatalf("make %s#%d a row of the rule before this one: %v", repo, number, err)
+	}
+}
+
+func readHead(t *testing.T, ctx context.Context, pool *store.Pool, repo string, number int) storedHead {
+	t.Helper()
+	var head storedHead
 	if err := pool.QueryRow(ctx, `
 		select repo, number, head_sha, head_ref, base_ref, state, issue_key, attribution_source,
 			checked_at, attribution_rule
 		from pull_request_heads where repo = $1 and number = $2
 	`, repo, number).Scan(&head.Repo, &head.Number, &head.HeadSHA, &head.HeadRef, &head.BaseRef,
 		&head.State, &head.IssueKey, &head.AttributionSource, &head.CheckedAt,
-		&head.AttributionRule); err != nil {
+		&head.attributionRule); err != nil {
 		t.Fatalf("read the head of %s#%d: %v", repo, number, err)
 	}
 	return head
@@ -665,6 +687,12 @@ func TestAnUnreadableRepositoryStampsThePullRequestHead(t *testing.T) {
 // ListStalePullRequestHeads the issue's results at its own merged head would read `older` for
 // good. HeadAttributedTo is the currency read api/results.go's currencyReader makes of this
 // package, so the test asserts currency through it rather than standing an API up.
+//
+// The rows beside it are the arm's bound: a merged row that carries an issue, one this rule has
+// judged already, a fork's head the read credits to nobody, and a row whose pull request GitHub
+// no longer has, which the pass cannot read at all and stamps instead
+// (MarkPullRequestHeadChecked) — rule and time together, since the rule is what ends the offer
+// of a row whose checked_at an older rule already set.
 func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T) {
 	fastPageRetries(t)
 	pool, ctx := deliveryTestPool(t)
@@ -705,6 +733,17 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 			},
 			"base": map[string]any{"ref": "main"},
 		})
+	})
+	// #65's pull request is gone — GitHub answers 404 — so the pass can read nothing about it
+	// and stamps the row instead (MarkPullRequestHeadChecked). The stamp carries the rule as
+	// well as the time, which is what ends this row's offer: a merged row credited to nobody is
+	// taken while its stored rule is older than this one, whatever its checked_at
+	// (ListStalePullRequestHeads).
+	var goneReads atomic.Int32
+	fake.handle("GET /repos/acme/widgets/pulls/65", func(w http.ResponseWriter, _ *http.Request) {
+		goneReads.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"Not Found"}`)
 	})
 	fake.handle("GET /repos/acme/widgets/pulls/{number}/commits", func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("#%s's commit messages were paged; its title attributes it, and an envelope naming no head repository attributes nobody whatever they say", r.PathValue("number"))
@@ -756,7 +795,6 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
 		Repo: "acme/widgets", Number: 63, HeadSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		HeadRef: "topic", BaseRef: "main", State: "merged", EventAt: &eventAt, CheckedAt: &read,
-		AttributionRule: AttributionRuleVersion,
 	}); err != nil {
 		t.Fatalf("store the merged head this rule has judged already: %v", err)
 	}
@@ -766,14 +804,24 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 	}); err != nil {
 		t.Fatalf("store the merged head of a fork's pull request: %v", err)
 	}
+	// The gone pull request, as a row an older rule judged: merged, credited to nobody, and
+	// stamped read by that rule's own pass. Its offer to this rule is open, so the pass takes it.
+	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+		Repo: "acme/widgets", Number: 65, HeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		HeadRef: "legion/HEAD-7", BaseRef: "main", State: "merged", EventAt: &eventAt,
+		CheckedAt: &read,
+	}); err != nil {
+		t.Fatalf("store the merged head whose pull request is gone: %v", err)
+	}
+	stampLegacyAttributionRule(t, ctx, pool, "acme/widgets", 65)
 	batch, err := ListStalePullRequestHeads(ctx, pool, PullRequestHeadBatch, time.Now())
 	if err != nil {
 		t.Fatalf("list the stale heads: %v", err)
 	}
 	// Not fatal: the pass below is the behaviour this test is for, and its own assertions say
 	// what an empty batch costs the issue.
-	if len(batch) != 2 || batch[0].Number != 61 || batch[1].Number != 64 {
-		t.Errorf("the batch = %+v, want #61 and #64: an attributed merged row and one this rule has judged are not taken", batch)
+	if len(batch) != 3 || batch[0].Number != 61 || batch[1].Number != 64 || batch[2].Number != 65 {
+		t.Errorf("the batch = %+v, want #61, #64 and #65: an attributed merged row and one this rule has judged are not taken", batch)
 	}
 
 	reconcile := NewReconcile(pool, client, nil)
@@ -807,9 +855,20 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 	if fork.CheckedAt == nil {
 		t.Fatalf("#64 after the pass = %+v, want it stamped read even though the read attributed nobody", fork)
 	}
+	gone := readHead(t, ctx, pool, "acme/widgets", 65)
+	if gone.attributionRule != AttributionRuleVersion {
+		t.Fatalf("#65's attribution_rule after the pass = %d, want %d: a row the pass could not read at all is one this rule has been offered",
+			gone.attributionRule, AttributionRuleVersion)
+	}
+	if gone.CheckedAt == nil || !gone.CheckedAt.After(read) {
+		t.Fatalf("#65's checked_at after the pass = %v, want a time after the stamp it had: its pull request is gone, so the pass stamps the row", gone.CheckedAt)
+	}
+	if gone.IssueKey != nil {
+		t.Fatalf("#65 after the pass = %+v, want it still credited to nobody: GitHub has nothing to say about it", gone)
+	}
 
-	// Once, and once only: the refresh stamps the row whether or not it could attribute it, so
-	// neither row comes back to the list.
+	// Once, and once only: the refresh stamps the row whether or not it could attribute it, and
+	// a row it could not read at all is stamped too, so no row comes back to the list.
 	if err := reconcile.reconcilePullRequestHeads(ctx, time.Now()); err != nil {
 		t.Fatalf("reconcile a second time: %v", err)
 	}
@@ -819,12 +878,15 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 	if reads := forkReads.Load(); reads != 1 {
 		t.Fatalf("a second pass read #64 from GitHub again (%d reads in all), want the row taken once though it is still attributed to nobody", reads)
 	}
+	if reads := goneReads.Load(); reads != 1 {
+		t.Fatalf("a second pass asked GitHub for the gone #65 again (%d reads in all), want the row taken once: the stamp carries the rule as well as the time", reads)
+	}
 	again, err := ListStalePullRequestHeads(ctx, pool, PullRequestHeadBatch, time.Now())
 	if err != nil {
 		t.Fatalf("list the stale heads again: %v", err)
 	}
 	if len(again) != 0 {
-		t.Fatalf("a third pass would read %+v, want nothing", again)
+		t.Fatalf("a third pass would read %+v, want nothing: #65 among them, since the stamp of the rule is what ends a gone row's offer", again)
 	}
 }
 

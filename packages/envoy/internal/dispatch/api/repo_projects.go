@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -438,8 +439,12 @@ func parseRepoRename(repo string, raw *string) (*string, error) {
 // refuseRepoRenameChain holds the rename graph to one step for a write that sets the pair
 // repo → renamedTo: it refuses a target that is itself renamed, and refuses renaming a
 // repository some other mapping is already renamed to. Either would put the canonical name of
-// a repository two steps away, which no reader walks (refs.CanonicalRepo reads one row), and
-// together they make a cycle impossible.
+// a repository two steps away, which no reader walks (refs.CanonicalRepo takes one step), and
+// together they make a cycle impossible. The target's own step is read through
+// refs.CanonicalRepo, the rule itself, so what this route refuses and what every reader resolves
+// are one answer: a target that canonicalises to itself is the end of the chain, compared
+// without case as every comparison of a repository is, since the column's own check refuses only
+// a rename to the identical spelling.
 //
 // It takes one lock over the whole graph first, since the rows it must hold still are not this
 // mapping's own: the writer already holds its own mapping's locks by here
@@ -460,14 +465,12 @@ func refuseRepoRenameChain(ctx context.Context, tx pgx.Tx, repo, renamedTo strin
 	case !errors.Is(err, pgx.ErrNoRows):
 		return err
 	}
-	var onwards string
-	switch err := tx.QueryRow(ctx, `
-		select renamed_to from repo_projects where lower(repo) = lower($1) and renamed_to is not null
-	`, renamedTo).Scan(&onwards); {
-	case errors.Is(err, pgx.ErrNoRows):
-		return nil
-	case err != nil:
+	onwards, err := refs.CanonicalRepo(ctx, tx, renamedTo)
+	if err != nil {
 		return err
+	}
+	if strings.EqualFold(onwards, renamedTo) {
+		return nil
 	}
 	return errorf(http.StatusBadRequest, "INVALID_REPO_PROJECT",
 		"%s was itself renamed to %s, so %s cannot be renamed to it; name %s instead", renamedTo, onwards, repo, onwards)

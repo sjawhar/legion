@@ -47,14 +47,10 @@ type PullRequestHead struct {
 	// attribution the row already holds. Only attributeHead can answer it, so the zero value is
 	// the careful one: a writer that does not set it deletes nobody's issue.
 	AttributionComplete bool
-	// AttributionRule is the rule that judged the attribution this write carries
-	// (AttributionRuleVersion). A write that read GitHub stamps it on the row, which is what
-	// ends the reconcile's one offer of a merged row to that rule.
-	AttributionRule int
-	Title           string
-	URL             string
-	EventAt         *time.Time
-	CheckedAt       *time.Time
+	Title               string
+	URL                 string
+	EventAt             *time.Time
+	CheckedAt           *time.Time
 }
 
 // PullRequestHeadState is the state a `pull_request` event leaves the row in: a pull request
@@ -97,9 +93,12 @@ func PullRequestHeadState(action string, merged bool) string {
 // sent round again. attribution_rule is kept by the same test, and it is the other half of the
 // merged arm's bound: a write that did not read GitHub leaves the stored rule alone, so a
 // merged row an incomplete envelope wrote is still offered to the current rule, while a refresh
-// that did read GitHub ends that offer whether or not it could attribute the row. A test that
-// seeds a row without AttributionRule therefore seeds a row no rule has judged, which is what a
-// row stored before that column is.
+// that did read GitHub ends that offer whether or not it could attribute the row. The rule
+// written is AttributionRuleVersion, bound here and carried in no field of PullRequestHead, so
+// every write stamps the rule this build judges by and no writer can leave a row claiming a
+// rule that never judged it. An insert writes it outright: a row this build has just made was
+// judged by this build's rule. A test that needs a row of an older rule sets attribution_rule
+// itself, with one update.
 func UpsertPullRequestHead(ctx context.Context, pool *store.Pool, head PullRequestHead) error {
 	_, err := pool.Exec(ctx, `
 		insert into pull_request_heads (
@@ -128,7 +127,7 @@ func UpsertPullRequestHead(ctx context.Context, pool *store.Pool, head PullReque
 	`,
 		head.Repo, head.Number, head.HeadSHA, head.HeadRef, head.BaseRef, head.State,
 		head.IssueKey, head.AttributionSource, head.Title, head.URL, head.EventAt, head.CheckedAt,
-		head.AttributionComplete, head.AttributionRule,
+		head.AttributionComplete, AttributionRuleVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("store the head of %s#%d: %w", head.Repo, head.Number, err)
@@ -418,16 +417,16 @@ func attributeHead(ctx context.Context, pool *store.Pool, client *githubapp.Clie
 }
 
 // headRow is the row one pull request GitHub answered makes, with the attribution the read
-// reached and the rule that made it (AttributionRuleVersion): the one builder both GitHub
-// readers below write through, so the two cannot drift. The list form of a pull request carries
-// merged_at but not merged, so a merge is read from whichever of the two GitHub sent.
+// reached: the one builder both GitHub readers below write through, so the two cannot drift.
+// The rule that judged it is the write's own (UpsertPullRequestHead binds
+// AttributionRuleVersion). The list form of a pull request carries merged_at but not merged, so
+// a merge is read from whichever of the two GitHub sent.
 func headRow(repoFull string, payload pullRequestPayload, attributed headAttributionResult, checkedAt *time.Time) PullRequestHead {
 	return PullRequestHead{
 		Repo: repoFull, Number: payload.Number, HeadSHA: payload.Head.SHA, HeadRef: payload.Head.Ref,
 		BaseRef: payload.Base.Ref, State: PullRequestHeadState(payload.State, payload.Merged || payload.MergedAt != nil),
 		IssueKey: attributed.issueKey, AttributionSource: attributed.source,
-		AttributionComplete: attributed.complete, AttributionRule: AttributionRuleVersion,
-		Title: payload.Title, URL: payload.HTMLURL,
+		AttributionComplete: attributed.complete, Title: payload.Title, URL: payload.HTMLURL,
 		EventAt: payload.UpdatedAt, CheckedAt: checkedAt,
 	}
 }
@@ -442,10 +441,10 @@ func headRepositoryOf(payload pullRequestPayload) string {
 }
 
 // attributePayload attributes one pull request GitHub itself answered: the four facts its
-// payload carries, the head repository it names (headRepositoryOf) and, when those four name
-// nobody, its commit messages, read with the caller's installation token. The one place the two
-// GitHub readers below build an attribution from a payload, so a sixth source, or a sixth fact
-// a payload carries, is added in one.
+// payload carries, the head repository it names (headRepositoryOf) and, when no candidate those
+// four name is held to the repository the pull request is in, its commit messages, read with the
+// caller's installation token. The one place the two GitHub readers below build an attribution
+// from a payload, so a sixth source, or a sixth fact a payload carries, is added in one.
 func attributePayload(ctx context.Context, pool *store.Pool, client *githubapp.Client, token, repoFull string, payload pullRequestPayload) (headAttributionResult, error) {
 	return attributeHead(ctx, pool, client, func() (string, error) { return token, nil },
 		attributionFacts{
@@ -579,12 +578,13 @@ func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githu
 //
 // The envelope carries the title, body, branch and head commit, which are four of the
 // attribution's five sources and outrank the fifth; the fifth, the commit messages, is read only
-// when those four name nobody (attributeHead), and a merge that follows reuses what was read
-// rather than paging the same commits again (completePullRequest). A read the App refuses
-// attributes the row from the envelope alone and makes the write an incomplete one, which
-// deletes no attribution the row already carries and leaves it unstamped; a rate limit is
-// returned, as the reconcile's own refresh returns it, so the caller does not persist a weaker
-// attribution and then stamp the row read.
+// when no candidate those four name is held to the repository the pull request is in
+// (attributeHead), and a merge that follows reuses what was read rather than paging the same
+// commits again (completePullRequest). A read the App refuses attributes the row from the
+// envelope alone and makes the write an incomplete one, which deletes no attribution the row
+// already carries and leaves it unstamped; a rate limit is returned, as the reconcile's own
+// refresh returns it, so the caller does not persist a weaker attribution and then stamp the
+// row read.
 //
 // The envelope also carries the head's own repository (`head_repo`), which the attribution holds
 // the currency to. An envelope that does not name it — one a publisher older than this field
@@ -632,8 +632,7 @@ func (in *Intake) recordPullRequestHead(ctx context.Context, payload map[string]
 		Repo: repoFull, Number: number, HeadSHA: payload["head_sha"], HeadRef: payload["head_ref"],
 		BaseRef: payload["base_ref"], State: PullRequestHeadState(payload["action"], payload["merged"] == "true"),
 		IssueKey: attributed.issueKey, AttributionSource: attributed.source,
-		AttributionComplete: attributed.complete, AttributionRule: AttributionRuleVersion,
-		Title: payload["title"], URL: payload["url"],
+		AttributionComplete: attributed.complete, Title: payload["title"], URL: payload["url"],
 		EventAt: envelopeTime(payload["updated_at"]), CheckedAt: checkedAt,
 	}, given)
 }

@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -117,6 +118,87 @@ func TestAttributingAStoredPullRequestTitledAfterAnotherRepositorysIssueKeepsIts
 	if got := storedIssueKey(t, ctx, pool, "acme/gadgets", 220); got != own {
 		t.Fatalf("the stored pull request's issue = %s, want %s: %s resolves to acme/widgets, %s to acme/gadgets",
 			got, own, foreign, own)
+	}
+}
+
+// TestAttributingAStoredPullRequestUnderARepositorysOldNameCreditsItsIssue: the pull-request
+// side of the renaming rule, over the stored population. AttributePullRequests reads each row's
+// repository from the row itself (attributionBatchQuery's c.pr_repo), so a row stored under the
+// name its repository was renamed away from is held to an issue recorded under the new name
+// only because both sides go through refs.CanonicalRepoSQL (attributionHeld). Every head writer
+// keys its row by the canonical name (upsertHeadUnderCanonicalName), so this table is where a
+// row under the old name is actually stored: the rows the merged-PR search and the envelopes
+// wrote before the operator recorded the pair keep the old name for good, and the issue's
+// Delivery timeline must still credit them.
+func TestAttributingAStoredPullRequestUnderARepositorysOldNameCreditsItsIssue(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedRenamedGadgets(t, ctx, pool)
+	own := seedGadgetsIssue(t, ctx, pool, 11)
+
+	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
+		Repo: gadgetsOldRepo, Number: 240, Title: own + ": the work, merged before the rename was recorded",
+		URL: "https://github.com/" + gadgetsOldRepo + "/pull/240", Author: "octocat",
+		CreatedAt: &merged, MergedAt: &merged,
+		Attribution: &AttributionInputs{TitleKeys: []string{own}},
+	}); err != nil {
+		t.Fatalf("seed the stored pull request under %s: %v", gadgetsOldRepo, err)
+	}
+
+	if _, err := AttributePullRequests(ctx, pool, 100); err != nil {
+		t.Fatalf("attribute: %v", err)
+	}
+	if got := storedIssueKey(t, ctx, pool, gadgetsOldRepo, 240); got != own {
+		t.Fatalf("the issue of the row stored under %s = %s, want %s: %s resolves to %s, which %s was renamed to",
+			gadgetsOldRepo, got, own, own, gadgetsRepo, gadgetsOldRepo)
+	}
+}
+
+// TestAttributingAStoredPullRequestReadsOneCanonicalNameFromTwoMappingsOfOneRepository: the
+// renaming rule answers one name however many rows name it. repo_projects' primary key is the
+// repository's own spelling, so two mappings whose names differ only by case can exist — direct
+// SQL or a hand repair, which 20261105075455_repo_projects_renamed_to expects — and the rule is
+// spliced into statements as an expression (refs.CanonicalRepoSQL, attributionHeld): a scalar
+// subquery over both rows would fail the whole statement with `more than one row returned by a
+// subquery`, taking intake, the head refresh and this pass with it.
+func TestAttributingAStoredPullRequestReadsOneCanonicalNameFromTwoMappingsOfOneRepository(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedRenamedGadgets(t, ctx, pool)
+	own := seedGadgetsIssue(t, ctx, pool, 12)
+	// The second mapping of the same name, as only direct SQL writes it: the route canonicalises
+	// a mapping's path, so it would land on the row above instead.
+	if _, err := pool.Exec(ctx, `
+		insert into repo_projects (repo, project, created_by, is_default, renamed_to)
+		values ('OldCo/Gadgets', 'GDGT', '{"kind":"system","id":"delivery-test"}'::jsonb, false, $1)
+		on conflict (repo) do update set renamed_to = excluded.renamed_to
+	`, gadgetsRepo); err != nil {
+		t.Fatalf("record a second mapping of %s: %v", gadgetsOldRepo, err)
+	}
+	// The row outlives the test's own context, which is cancelled before any cleanup runs, so the
+	// delete takes one of its own: left behind, this mapping would put every later test's reads
+	// of the old name through two rows.
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), `delete from repo_projects where repo = 'OldCo/Gadgets'`); err != nil {
+			t.Errorf("drop the second mapping of %s: %v", gadgetsOldRepo, err)
+		}
+	})
+
+	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
+		Repo: gadgetsOldRepo, Number: 241, Title: own + ": the work, under a twice-mapped old name",
+		URL: "https://github.com/" + gadgetsOldRepo + "/pull/241", Author: "octocat",
+		CreatedAt: &merged, MergedAt: &merged,
+		Attribution: &AttributionInputs{TitleKeys: []string{own}},
+	}); err != nil {
+		t.Fatalf("seed the stored pull request under %s: %v", gadgetsOldRepo, err)
+	}
+
+	if _, err := AttributePullRequests(ctx, pool, 100); err != nil {
+		t.Fatalf("attribute with two mappings of one name: %v", err)
+	}
+	if got := storedIssueKey(t, ctx, pool, gadgetsOldRepo, 241); got != own {
+		t.Fatalf("the issue of the row stored under %s = %s, want %s: both mappings name %s",
+			gadgetsOldRepo, got, own, gadgetsRepo)
 	}
 }
 
