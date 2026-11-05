@@ -29,11 +29,14 @@
 #       requests and limits and the size of the Postgres data volume.
 #   cluster.sh seed --namespace NS            loadgen seed, seed-refs and seed-finish, then the template
 #                                             database dispatch_seed.
-#   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only] [--typing
-#                   [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]
+#   cluster.sh step --namespace NS NAME FACTOR [--duration 10m | --schedule 0.5x:60s,10x:60s,...]
+#                   [--reads-only] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]
 #       Reset, then one loadgen run at FACTOR × (4 events/s, 60 requests/s) with the
 #       series-sessions count (--reads-only: 0 events), then the crash check, the stored-order
 #       check, cgroup-merge, tables. --typing adds browser typing (below).
+#       --schedule changes the rate inside the window (loadgen run -schedule: each segment's
+#       factor multiplies FACTOR's rates, and the window is the segments' total, so it takes no
+#       --duration); summary.json then carries the recovery after the last drop.
 #       FACTOR may be fractional (8.5). Postgres's write-out counters (pg_stat_bgwriter, and
 #       pg_stat_checkpointer from Postgres 17) go into pg-stats-before.json and pg-stats-after.json.
 #   cluster.sh series --namespace NS [--duration 10m]   1x 2x 3x 5x 7x 10x, then 10x-reads, then
@@ -2591,11 +2594,23 @@ save_pod_logs() {
   wait "${pids[@]}" || true
 }
 
-# run_step NAME FACTOR DURATION READS_ONLY PHASE: one step (see the header), into steps/NAME; with
-# --typing (TYPING), browser typing into typing_plan_step's documents, the ones its own loadgen
-# run plans the most versions for.
+# run_step NAME FACTOR DURATION READS_ONLY PHASE [SCHEDULE]: one step (see the header), into
+# steps/NAME; with --typing (TYPING), browser typing into typing_plan_step's documents, the ones its
+# own loadgen run plans the most versions for. With SCHEDULE (loadgen run -schedule), DURATION is
+# ignored: the window is the schedule's total.
 run_step() {
-  local name=$1 factor=$2 duration=$3 reads=$4 phase=$5
+  local name=$1 factor=$2 duration=$3 reads=$4 phase=$5 schedule=${6:-}
+  local scheduled=()
+  if [ -n "$schedule" ]; then
+    [[ $schedule =~ ^[0-9]+(\.[0-9]+)?x:[1-9][0-9]*(s|m|h)(,[0-9]+(\.[0-9]+)?x:[1-9][0-9]*(s|m|h))*$ ]] ||
+      die "--schedule '$schedule' is not <factor>x:<duration>,... with whole s, m or h durations"
+    local segment total=0
+    for segment in ${schedule//,/ }; do
+      total=$((total + $(duration_seconds "${segment#*:}")))
+    done
+    duration=${total}s
+    scheduled=(-schedule "$schedule")
+  fi
   valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"
   if ! valid factor "$factor" || ! awk -v f="$factor" 'BEGIN { exit !(f > 0) }'; then
     die "factor '$factor' is not a number above 0"
@@ -2637,7 +2652,7 @@ run_step() {
     /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
     -seed /work/seed.json -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" \
     -events "$events" -sessions "$sessions" -requests "$requests" -duration "$duration" \
-    -warmup "$warmup" -grace 20s -rng-seed "$rng_seed" -heap-samples "${ENDPOINTS[@]}"
+    -warmup "$warmup" -grace 20s -rng-seed "$rng_seed" -heap-samples "${scheduled[@]}" "${ENDPOINTS[@]}"
   note "step $name done: $dir"
 }
 
@@ -3571,13 +3586,15 @@ seed_run() {
 }
 
 cmd_step() {
-  parse "namespace run duration typing-peers typing-rate typing-docs" "reads-only typing" "$@"
+  parse "namespace run duration schedule typing-peers typing-rate typing-docs" "reads-only typing" "$@"
   positional 2 "NAME FACTOR"
   use_run
   typing_parse
   local reads=false
   [ -z "${OPT[reads-only]:-}" ] || reads=true
-  run_step "${POS[0]}" "${POS[1]}" "${OPT[duration]:-10m}" "$reads" steps
+  [ -z "${OPT[schedule]:-}" ] || [ -z "${OPT[duration]:-}" ] ||
+    die "step: --schedule sets the window, so give it without --duration"
+  run_step "${POS[0]}" "${POS[1]}" "${OPT[duration]:-10m}" "$reads" steps "${OPT[schedule]:-}"
 }
 
 cmd_series() {
