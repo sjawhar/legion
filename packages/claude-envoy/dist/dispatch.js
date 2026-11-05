@@ -14687,7 +14687,9 @@ var ArtifactReviewEventPayloadSchema = object({
   version: number2().int().optional(),
   actor: object({ kind: string2(), id: string2() }).passthrough().optional(),
   reason: string2().nullish(),
-  ask_id: string2().nullish()
+  ask_id: string2().nullish(),
+  content_sha256: string2().optional(),
+  content_sha256_source: _enum2(["insert", "backfill"]).optional()
 });
 var askEventPayloadFields = {
   id: string2().optional(),
@@ -19995,17 +19997,18 @@ function approvalLine(artifact) {
   const approval = artifact.approval;
   if (approval === undefined || approval.state === "draft")
     return;
+  const content = approval.content_sha256 === undefined ? "" : `, content sha256:${approval.content_sha256}${approval.content_sha256_source === "backfill" ? " (hashed after approval)" : ""}`;
   switch (approval.state) {
     case "awaiting": {
       const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
       return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
     }
     case "approved":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}${content}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}${content}`;
     case "changes_requested":
-      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
+      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}${content}`;
   }
 }
 function componentsLine(components) {
@@ -21722,6 +21725,7 @@ Document token: ${listed.token}`,
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
+        ..."sha256" in document && document.sha256 !== undefined ? [`Content: sha256:${document.sha256}`] : [],
         ...approval === undefined ? [] : [approval]
       ];
       return {
