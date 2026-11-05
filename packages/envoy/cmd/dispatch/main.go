@@ -31,10 +31,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/cireconcile"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/dashboard"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -77,6 +79,10 @@ type bootConfig struct {
 	DefaultProject string
 	EnvoyURL       string
 	GitHubAPIBase  string
+	// ReviewerAppID is DISPATCH_REVIEWER_APP_ID, the id of the App whose `tester` and `architect`
+	// check runs are Legion's verdicts, as the text of the number GitHub's own objects carry it
+	// as. Empty means the CI reconcile pass records no verdict check at all.
+	ReviewerAppID  string
 	IdentityHeader string
 	// SignInIssuer, SignInClientID and SignInClientSecret, with exactly one of SignInGroup and
 	// SignInDomain, configure Google sign-in (DISPATCH_SIGNIN_*): through a Cognito sign-in pool
@@ -116,6 +122,10 @@ type bootConfig struct {
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
 	EditNoticeQuiet time.Duration
+	// CIReconcileInterval is how often the CI reconcile pass runs, zero for cireconcile.Interval's
+	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
+	// no process-level test can wait five minutes for a pass.
+	CIReconcileInterval time.Duration
 	// ListenerRosterUncached makes every read of the listener's session list ask the listener
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
@@ -662,6 +672,33 @@ func main() {
 		slog.Info("dispatch: webhook redelivery off: it needs NATS and the GitHub App private key")
 	}
 
+	// INFRA-1211: a webhook that never arrived leaves a head short of a check, and a head short
+	// of a check never settles, so every interval one process reads each open pull request's head
+	// from GitHub and records the completed checks Envoy's record of that head lacks. It is a
+	// timer that stays, as the webhook redelivery sweep and the delivery reconcile beside it are:
+	// GitHub has no feed of the webhook it never delivered, so there is nothing to wake on.
+	reconciler, err := ciReconciler(natsClient, database, appCfg, boot.GitHubAPIBase, boot.ReviewerAppID)
+	if err != nil {
+		slog.Error("dispatch: open the CI reconcile pass", "error", err)
+		os.Exit(1)
+	}
+	if reconciler != nil {
+		interval := cireconcile.Interval
+		if boot.CIReconcileInterval > 0 {
+			interval = boot.CIReconcileInterval
+		}
+		slog.Info("dispatch: reconciling the CI records GitHub's webhook never delivered", "client_id", appCfg.ClientID, "interval", interval)
+		if boot.ReviewerAppID == "" {
+			slog.Info("dispatch: the CI reconcile pass records no tester or architect check run: DISPATCH_REVIEWER_APP_ID is unset, so no App's verdict checks are trusted")
+		}
+		// The period argument is what makes one process serve each period (duty_passes): the
+		// lease alone only keeps two passes from overlapping, and the App's budget pays for every
+		// pass that runs.
+		go duty.RunLeased(ctx, leases, cireconcile.Lease, interval, duty.TickAfterInterval, reconciler.Pass)
+	} else {
+		slog.Info("dispatch: CI reconcile off: it needs NATS and the GitHub App private key")
+	}
+
 	go architecture.Run(ctx, appCtx.Architecture(), leases)
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
@@ -953,10 +990,14 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
 		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
+		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
 			return bootConfig{}, err
 		}
+	}
+	if boot.ReviewerAppID, err = reviewerAppID(env); err != nil {
+		return bootConfig{}, err
 	}
 	for _, setting := range []struct {
 		name   string
