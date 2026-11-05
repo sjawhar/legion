@@ -13,6 +13,16 @@
 // approver's, or anyone's for a record whose approver is record.AnyoneApprover. Every release of a
 // grant it produced re-verifies the whole chain — record hash, requester signature, one approval
 // by a login the record allows — so a row written by anyone but the broker releases nothing.
+//
+// One column of a request row is not frozen: its enrollment_id, and the same holds for a grant's
+// and a withheld name's. A session that enrols on a box it has not run on before takes what the
+// enrollment it is moving off holds — its grants, its requests and the names its operator withheld
+// from it — because an approval a person gives hours later, and the grant that comes of it, belong
+// to the session rather than to the box that asked (enroll.Create's adoption,
+// dispatch://INFRA-1167). So every read and every transition here is keyed by the enrollment the
+// row itself names now, never by the one the append-only credential_requests record froze: that is
+// what gets a moved session its own grant back, lets it cancel its own request, and still refuses
+// it another session's. moved_session_test.go drives each of those surfaces across a move.
 package requests
 
 import (
@@ -226,6 +236,9 @@ type enrollmentRow struct {
 // its lease's end. A caller that decides
 // for the session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.
+// The withheld names are read by the enrollment's own id, and an adoption carries a session's
+// withheld_secrets rows to the enrollment it moves to, so these are the names withheld from the
+// session rather than from a box it has left.
 func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (policy.Requester, error) {
 	rows, err := q.Query(ctx, `select name from withheld_secrets where enrollment_id=$1`, e.ID)
 	if err != nil {
@@ -257,7 +270,6 @@ func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (po
 // seam), requires iss to be this enrollment's own key and no login_hint (session requests never
 // name their own approver — that's the policy's job), rereads each name the live policy does not
 // serve (rereadMissing), and hands back a live grant for exactly these names when one may be
-// reused (reuseLiveGrant). Otherwise it decides and writes the request in one
 // reused (reuseLiveGrant). Otherwise it decides and writes the request in one transaction: it
 // takes the advisory locks that serialize pending requests for each requested name in one
 // enrollment (lockPendingNames), then locks the enrollment live (lockLiveEnrollment), so no
@@ -587,6 +599,9 @@ func lockPendingNames(ctx context.Context, tx pgx.Tx, enrollmentID string, sorte
 // Cancel ends a still-pending request the requesting session no longer wants, writing the
 // transition, its audit row, and — when the request has a credential-request record — the
 // record's cancelled event, all in one transaction (store.EndPendingRequests).
+// The owner check compares the caller against the requests row's own enrollment_id, which an
+// adoption rewrites, so the moved session cancels the request that moved with it and the box it
+// moved off is ErrNotYours.
 func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -870,6 +885,8 @@ func (m *Machine) VerifyChain(ctx context.Context, grantID string) error {
 // RevokeGrant ends a grant a session holds — a session may end only its own grant. Revoking an
 // already-revoked grant succeeds and changes nothing: it writes no second grant.revoked audit row,
 // so the trail never names a revoker who ended nothing. Human revocation is RevokeByApprover.
+// The owner check reads the grants row's own enrollment_id, which an adoption rewrites, so the
+// moved session ends the grant that moved with it and every other enrollment is ErrNotYours.
 func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -914,6 +931,9 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string)
 // request deciding on the session as this runs either is written first, and then ended here if it
 // got a withheld name, or decides with the name withheld. A revoke that ends nothing and withholds
 // nothing new succeeds and changes nothing.
+// The enrollment it reads the operator off, and the one withhold writes against, is the enrollment
+// the grants row names now, so an approver's revoke reaches a grant that moved and an operator's
+// withholds from the box the session runs on.
 func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login, actor string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -967,6 +987,8 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login, actor st
 // grant whose request got it automatically since then was approved by someone the withheld name
 // let approve it (currentPolicyAdmits), which stands. It answers the names it had not withheld
 // before.
+// Everything it writes and everything it ends is keyed by enrollmentID, the enrollment the grant
+// hangs off now, which after a move is the box the session runs on and not the one that asked.
 func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, requestID, actor string) ([]string, error) {
 	rows, err := tx.Query(ctx, `with names as (
 			select name from request_secrets where request_id=$2 and decision=$4
