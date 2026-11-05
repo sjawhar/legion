@@ -486,34 +486,37 @@ test("every prompt and agent that may write says to make its own scratch and del
 });
 
 // R9: a push moves the branch while the pull request can keep naming the old commit, so the new
-// commit gets no checks (dispatch://INFRA-1318). The worker skill carries the step and the
-// pr-body reference names it as the one bounded wait a role makes, so the "never wait on CI"
-// rule does not read as forbidding it. The `gh pr view` command and the schedule of the reads
-// are one wording held across the skill and the daemon's worker prompt, counted once in each;
-// the remaining sentences are the skill's own. This shows the text ships, never that a role
-// follows it.
+// commit gets no checks (dispatch://INFRA-1318). The step is one wording held across
+// `skill://legion-worker` and the daemon's worker prompt, counted once in each file, so the two
+// copies cannot drift; the carve-out that keeps the "never wait on CI" rule from reading as
+// forbidding the read is a second wording, held across the pr-body reference and the
+// implementer's prompt part. This shows the text ships, never that a role follows it.
 test("the worker skill tells a role to read the pull request's head after its own push", () => {
-  const sharedWithThePrompt = [
+  const sharedWithTheWorkerPrompt = [
     "skills/legion-worker/SKILL.md",
     "packages/daemon/internal/prompts/go/worker-common.md",
   ];
-  countedOncePerFile(
+  const step = [
     "gh pr view <n> --repo <the issue's repository> --json headRefOid --jq .headRefOid",
-    sharedWithThePrompt
-  );
-  countedOncePerFile(
     "about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with a read that gives the pushed commit ending the step there and only the last read deciding a mismatch",
-    sharedWithThePrompt
+    "This read is of the pull request's own head and of no check, so the wait it makes is not a wait on CI",
+    "an empty one when your work is complete",
+    "A new head makes every result recorded at the old head older, so record each `before_merge` check again at the new head.",
+    "tell your architect the commit you pushed, the head each read gave and the time of each, and end the turn with a WAITING line naming that answer rather than completing: a phase completed here hands the next role a commit the pull request does not name.",
+    "The push you make to answer an update task is the exception: that task has you answer the daemon and end the turn at once, so make this read in your next turn, before your phase completes.",
+    "The merger pushes nothing, so this step never falls to it; it reports a mismatch it sees to the architect.",
+  ];
+  for (const rule of step) {
+    countedOncePerFile(rule, sharedWithTheWorkerPrompt);
+  }
+  countedOncePerFile(
+    "the read of the pull request's head after a push is no wait on CI, because it reads the pull request's head and no check",
+    [
+      "skills/legion-worker/references/pr-body.md",
+      "packages/daemon/internal/prompts/go/implementer.md",
+    ]
   );
-  const skill = collapsed(path.join(staged, "legion-worker", "SKILL.md"));
-  expect(skill).toContain(
-    "push a new commit — an empty one when the work is complete — since a push of a commit the branch already holds moves no ref"
-  );
-  expect(skill).toContain(
-    "tell the architect both commits and every read, and wait with a `WAITING` line instead of completing"
-  );
-  expect(skill).toContain("The merger pushes nothing, so the step never reaches it.");
-  expect(collapsed(path.join(staged, "legion-worker", "references", "pr-body.md"))).toContain(
-    "the one bounded wait a role makes is the read of the pull request's own head after its own push, in `skill://legion-worker`, *Every role pushes its own commits*; it reads no check"
+  expect(collapsed(path.join(staged, "legion-worker", "SKILL.md"))).toContain(
+    "push a new commit on the one you pushed, an empty one when your work is complete, since a push of a commit the branch already holds moves no ref"
   );
 });

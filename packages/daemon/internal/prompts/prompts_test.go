@@ -418,9 +418,11 @@ func TestNewRewritesAPartTheRunningDaemonDidNotWrite(t *testing.T) {
 // A push moves the branch, but the pull request can keep naming the old commit, so the new
 // commit gets no checks and nothing reports it (dispatch://INFRA-1318). Every pushing role's
 // composed prompt therefore carries the read of the pull request's own head after its own push,
-// and neither architect shape does: a later edit that moves the step into a part both shapes
-// compose fails here rather than telling an architect to push. This shows the text is loaded,
-// never that a role follows it.
+// escalation sentence included, and neither architect shape does: a later edit that moves the
+// step into a part both shapes compose fails here rather than telling an architect to push. The
+// implementer's part carries the carve-out that keeps its "never sleep in a loop for anything"
+// rule from reading as forbidding the read. This shows the text is loaded, never that a role
+// follows it.
 func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
 	composer, err := New(t.TempDir())
 	if err != nil {
@@ -432,8 +434,8 @@ func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
 		"about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with a read that gives the pushed commit ending the step there and only the last read deciding a mismatch",
 		"once the branch has an open pull request",
 		"an empty one when your work is complete",
-		"tell your architect the commit you pushed",
-		"The merger pushes nothing, so this step never falls to it",
+		"tell your architect the commit you pushed, the head each read gave and the time of each, and end the turn with a WAITING line naming that answer rather than completing: a phase completed here hands the next role a commit the pull request does not name.",
+		"The merger pushes nothing, so this step never falls to it; it reports a mismatch it sees to the architect.",
 	}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester,
 		claim.RoleReviewer, claim.RoleMerger} {
@@ -443,6 +445,11 @@ func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
 				t.Errorf("the composed %s prompt omits %q", role, phrase)
 			}
 		}
+	}
+	const carveOut = "the read of the pull request's head after a push is no wait on CI, because it reads the pull request's head and no check"
+	if !strings.Contains(foldWhitespace(composedText(t, composer, claim.RoleImplementer, false)), carveOut) {
+		t.Errorf("the composed %s prompt omits %q, so it holds \"never sleep in a loop for anything\" beside the head read with nothing saying the read is no wait on CI",
+			claim.RoleImplementer, carveOut)
 	}
 	for _, isRoot := range []bool{true, false} {
 		text := foldWhitespace(composedText(t, composer, claim.RoleArchitect, isRoot))
