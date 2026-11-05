@@ -2319,13 +2319,36 @@ jobs:
     # `env:`: a name outside ci_filter_coverage.py's ENV_ALLOWED in this job's or any of its
     # steps' `env:` drops run-server.sh's `go build` out of check-ci-filters.sh's reduction, which
     # then counts it as reading every Go file of the repository.
-    # 40, against the 28 the issue's own acceptance sets. Six executions of this job at four lanes
-    # have measured 19:26, 20:46, 21:31, 28:17, 29:29 and 26:46, on one tree whose browser step
-    # alone read 1,050 s on one runner and 1,464 s on another, so the spread is the fleet's rather
-    # than the suite's. A job the timeout kills reports as cancelled and writes no Playwright
-    # report, so a timeout tight against the measurement costs the run that would say why it was
-    # slow - which is the one run anyone investigating a slow execution needs.
-    timeout-minutes: 40
+    #
+    # The budgets below, this one and the two on steps, are measured: GitHub's jobs API over the
+    # 397 of the newest 400 ci.yaml runs that could be read, created between 2026-11-05T04:52:45Z
+    # and 2026-11-05T21:06:27Z (268 pull_request, 120 merge_group, 12 push), over the 217 jobs of
+    # this name that concluded success. Three runs could not be read, 41995538189, 42034266338 and
+    # 42087689355, whose jobs endpoint answered HTTP 502 on four attempts. The whole window is
+    # after the commit that moved this job to four lanes, 9689e2c54 of 2026-11-05T04:09:18Z, so no
+    # run is left out for being older than it.
+    #
+    #   step                                             median    95th     max
+    #   Install Playwright Chromium, WebKit and Firefox     38 s   102 s   634 s
+    #   Browser-test dispatch dashboard                   1475 s  1582 s  1671 s
+    #   every other step summed                            199 s   221 s   232 s
+    #   the whole job                                     1715 s  1875 s  2348 s
+    #
+    # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
+    # next whole minute, with a floor of two minutes; an install step's budget comes from its own
+    # retry arithmetic instead. So 1671 s x 1.15 = 1922 s -> 33 min for the browser step, and
+    # 8 min for the install step, for the reason its own comment gives. The job budget is the sum
+    # of its step budgets plus the measured maximum of every step without one, rounded up:
+    # 8 + 33 min plus 232 s = 45 min. The spread is the fleet's rather than the suite's, which is
+    # why each budget is that measured maximum plus a margin rather than a figure near the median.
+    #
+    # Budgets on the steps and not on the job alone, because a step the runner cancels at its own
+    # budget fails that step and names it (`The action '<step name>' has timed out after <N>
+    # minutes.`), where a job budget cancels the job. So the `if: always()` and `if: failure()`
+    # upload steps below still run and the Playwright report, the memory samples and the CPU
+    # samples still reach the run, which a cancelled job loses. The job budget is the backstop
+    # above the sum of the step budgets, so it never fires first.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2443,8 +2466,9 @@ jobs:
       # `playsinline`, so no row plays media. The libraries WebKit links stay in the list:
       # libgstreamer-plugins-bad1.0-0, libgstreamer-plugins-base1.0-0, libgstreamer1.0-0,
       # libgstreamer-gl1.0-0, libflite1 and libgtk-4-1 among them. A row that later needs media
-      # reinstalls that package by name. That the browsers still launch is what the suite's
-      # webkit, webkit-iphone and firefox-download-navigation projects prove, which the
+      # reinstalls that package by name. That the browsers still launch is what the suite's six
+      # WebKit and Firefox projects prove - webkit, webkit-iphone, webkit-alone, firefox,
+      # firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) - which the
       # "Browser-test dispatch dashboard" step below runs.
       #
       # On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`,
@@ -2581,6 +2605,7 @@ jobs:
         # (/proc/stat) less the named groups, so a reader sees the whole step without
         # downloading the samples: it holds that loss, the runner's own work, the file-store
         # container and the sampler itself.
+        timeout-minutes: 33
         run: |
           # $RUNNER_TEMP holds everything this step writes, the run directory of e2e/run.ts
           # (mkdtempSync in os.tmpdir(), :183) among it, which is what the upload steps below
