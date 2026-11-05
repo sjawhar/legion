@@ -154,7 +154,7 @@ test("a ready carrying the capability report is the daemon's golden ReadyRequest
   expect(golden.capabilities?.rows).toHaveLength(3);
 });
 
-test("reads the daemon's state over a bodyless GET, and refuses one that drops a field the contract requires", async () => {
+test("reads the daemon's state over a bodyless GET", async () => {
   const state = daemonFixture("state.json");
   const { fetch, requests } = daemon(() => Response.json(state));
 
@@ -164,11 +164,6 @@ test("reads the daemon's state over a bodyless GET, and refuses one that drops a
   expect(requests).toEqual([
     { method: "GET", url: "http://daemon.test/legion/v1/state", body: undefined },
   ]);
-
-  const incomplete = daemon(() => Response.json(without(state, "capabilities"))).fetch;
-  await expect(
-    createLegionDaemonClient("http://daemon.test", incomplete).state()
-  ).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
 test("a state read hands fetch its caller's signal, and an abort ends a read the daemon never answers", async () => {

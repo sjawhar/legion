@@ -34,7 +34,7 @@ import {
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "./legion-api";
-import { LEGION_ROLES } from "./legion-roles";
+import { isLegionRole } from "./legion-roles";
 
 const fixtureDir = path.join(import.meta.dir, "..", "fixtures", "daemon-api");
 
@@ -153,7 +153,7 @@ test("every Go-written fixture parses to a value equal to the file", () => {
 });
 
 // What that equality catches, and the one place it is blind. A key no schema names is dropped
-// wherever an object names its keys, at the top level and at the depth the 2026-11-03 incident
+// wherever an object names its keys, at the top level and at the depth INFRA-1048's incident
 // took, and the gate names its path. Under `settings` (a `z.looseObject`) and under a pending
 // status write's `payload` (a `z.record`) nothing is dropped, so the gate sees nothing there:
 // both blocks are loose by design — legion.yaml's keys and the workflow's payload are not this
@@ -177,8 +177,9 @@ test("the gate names a key no schema names, and is blind under the loose blocks"
 
   const settings = fixture("state.json") as { settings: Record<string, unknown> };
   settings.settings.a_later_legion_yaml_key = "ridden loosely";
-  expect(droppedFromState(settings)).toBeUndefined();
-  expect<unknown>(LegionStateResponse.parse(settings)).toEqual(settings);
+  const parsedSettings = LegionStateResponse.parse(settings);
+  expect(firstDroppedKey(settings, parsedSettings)).toBeUndefined();
+  expect<unknown>(parsedSettings).toEqual(settings);
 
   const payload = fixture("state-stage3.json") as {
     pendingStatusWrites: { payload: Record<string, unknown> }[];
@@ -188,15 +189,15 @@ test("the gate names a key no schema names, and is blind under the loose blocks"
     throw new Error("state-stage3 fixture lacks its pending status write");
   }
   write.payload.somethingNew = "the workflow owns this shape";
-  expect(droppedFromState(payload)).toBeUndefined();
-  expect<unknown>(LegionStateResponse.parse(payload)).toEqual(payload);
+  const parsedPayload = LegionStateResponse.parse(payload);
+  expect(firstDroppedKey(payload, parsedPayload)).toBeUndefined();
+  expect<unknown>(parsedPayload).toEqual(payload);
 });
 
 // `workers` is keyed by a plain string, so the schema no longer holds the role names and the gate
 // above cannot see a role the Go side adds. The key list it held is held here instead: every
 // worker key of every golden is one of this build's roles.
 test("every golden's worker keys are roles this build knows", () => {
-  const knownRoles: readonly string[] = LEGION_ROLES;
   const states = Object.keys(schemas).filter((name) => schemas[name] === LegionStateResponse);
   expect(states.length).toBeGreaterThan(0);
 
@@ -205,7 +206,7 @@ test("every golden's worker keys are roles this build knows", () => {
     const state = LegionStateResponse.parse(fixture(name));
     for (const [key, issue] of Object.entries(state.issues)) {
       for (const role of Object.keys(issue.workers)) {
-        expect(knownRoles, `${name}: ${key} carries the worker ${role}`).toContain(role);
+        expect(isLegionRole(role), `${name}: ${key} carries the worker ${role}`).toBeTrue();
         seen += 1;
       }
     }

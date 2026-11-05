@@ -172,7 +172,7 @@ test("handoff_complete reads the issue's phase, finds the record and commit for 
 });
 
 /** `state.json` with a key no schema names at four depths: the top level, one issue, one worker's
- * claim — the path the 2026-11-03 incident took, where one key of a daemon a contract ahead
+ * claim — the path INFRA-1048's incident took, where one key of a daemon a contract ahead
  * failed every `legion` call — and the locator below that claim. */
 function stateWithKeysNoSchemaNames(): Record<string, unknown> {
   const state = daemonFixture("state.json");

@@ -405,8 +405,7 @@ export function createLegionDaemonClient(
     return parsed.value;
   };
 
-  /** Parses the request before it leaves the pane, then reads the route's success body, which is
-   * taken as the schema describes it with any key the schema does not name dropped. */
+  /** Parses the request before it leaves the pane, then reads the route's success body. */
   const post = <Input, Output>(
     path: string,
     request: z.ZodType<Input>,
