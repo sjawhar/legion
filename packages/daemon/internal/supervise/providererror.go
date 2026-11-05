@@ -61,6 +61,9 @@ type providerError struct {
 	retryable bool
 	status    int
 	model     string
+	// after is the newest turn-outcome report the claim held when this error arrived, nil when it
+	// held none. The failed turn's own report is the first one to come above it (ownReport).
+	after *TurnOutcome
 }
 
 // providerErrored is a turn that ran and ended in a provider error. The task is kept whatever the
@@ -70,7 +73,7 @@ type providerError struct {
 // and R2 forbids an attempt limit — so the claim counts its own run of such turns instead, and a
 // turn that ends with no error puts that run back to zero (promptResulted).
 func (m *Machine) providerErrored(ctx context.Context, r StreamPromptResult) error {
-	e := providerError{retryable: r.Retryable, status: r.HTTPStatus, model: r.Model}
+	e := providerError{retryable: r.Retryable, status: r.HTTPStatus, model: r.Model, after: m.lastTurnOutcome}
 	m.claim.ProviderErrorRun++
 	m.log.Warn("supervise: the turn this task's prompt ran ended in a provider error; the task is kept and sent again",
 		"delivery", r.DeliveryID, "retryable", r.Retryable, "httpStatus", r.HTTPStatus,
@@ -87,24 +90,24 @@ func (m *Machine) providerErrored(ctx context.Context, r StreamPromptResult) err
 // decideProviderError says whether the error the machine is holding can clear, in this order:
 //
 //   - it can when Oh My Pi marked it retryable, or its HTTP status is 429 or any 5xx, or the
-//     claim's newest turn-outcome report says the turn was refused. A content filter clears
-//     because the plugin has already moved the session down its model chain, so the next prompt
-//     goes to another model.
+//     failed turn's own report says the turn was refused. A content filter clears because the
+//     plugin has already moved the session down its model chain, so the next prompt goes to
+//     another model.
 //   - it cannot, and the claim fails so the workflow holds the issue for its architect, only when
 //     the error is marked not retryable and that report says provider-error. A malformed request
 //     is the case this exists for.
 //   - neither settles it: the report is waited for, once, for turnOutcomeWait, and the wait's
 //     expiry takes the error as one that can clear (turnOutcomeWaitOver).
 //
-// A report counts only when it is the claim's newest (turnoutcome.go keeps that one) and of this
-// claim's generation: a report of a generation the claim has left is another process's turn. One
-// that arrives while the wait is armed decides at once, from turnOutcome.
+// Only the failed turn's own report is read, and ownReport says which one that is. A report of
+// another turn settles nothing, so the decision falls through to the wait. One that arrives while
+// the wait is armed decides at once, from turnOutcome.
 func (m *Machine) decideProviderError(ctx context.Context) error {
 	e := m.providerError
 	if e == nil || pendingID(m.claim.Pending) != e.delivery {
 		return nil
 	}
-	outcome := m.reportedOutcome()
+	outcome := m.reportedOutcome(*e)
 	switch {
 	case e.retryable, e.status == http.StatusTooManyRequests, e.status >= 500 && e.status <= 599, outcome == claim.TurnRefused:
 		return m.providerErrorClears(ctx)
@@ -164,31 +167,49 @@ func turnOutcomeWaitOver(m *Machine, ctx context.Context, _ Event) error {
 	return m.providerErrorClears(ctx)
 }
 
-// thisGenerationsReport is the claim's newest turn-outcome report when it is one of this claim's
-// generation, and nil otherwise: a report of a generation the claim has left is another
-// process's turn, and says nothing about this one.
-func (m *Machine) thisGenerationsReport() *TurnOutcome {
-	if r := m.lastTurnOutcome; r != nil && r.Generation == m.claim.Generation {
-		return r
+// ownReport is the turn-outcome report of the turn e ended, nil until that report arrives. No key
+// is shared between a prompt's result and a report, so two facts pick it out: the report is of
+// this claim's generation — one of a generation the claim has left is another process's turn —
+// and it came above e.after, the newest report the claim held when the error arrived. The
+// ordering is what stands in for that key: the plugin counts a sequence per launch generation,
+// from 1, and sends one report per turn in the order the turns ended (turnoutcome.go), so the
+// first report above the anchor is the failed turn's own.
+//
+// The claim's newest report alone was the wrong answer, and both ways it was wrong were measured
+// (dispatch://INFRA-956, pull request 2780's first review). A report is posted from an agent_end
+// handler nothing awaits (packages/pi-legion/extensions/legion.ts), so the prompt's result
+// normally reaches the daemon first and the newest report at that moment is the turn before's: a
+// 529 whose own report said provider-error, followed by a refusal, failed the claim and held the
+// issue for its architect; and a refusal reported refused, followed by an HTTP 400 the provider
+// marked final, was sent again for ever behind a prompt that named a content filter. A report at
+// or below the anchor settles nothing, and the decision waits turnOutcomeWait out instead, which
+// is the answer this design already gives for silence.
+func (m *Machine) ownReport(e providerError) *TurnOutcome {
+	r := m.lastTurnOutcome
+	if r == nil || r.Generation != m.claim.Generation || !r.newerThan(e.after) {
+		return nil
 	}
-	return nil
+	return r
 }
 
 // reportedOutcome is the class that report gives, "" when there is no such report.
-func (m *Machine) reportedOutcome() claim.TurnOutcome {
-	if r := m.thisGenerationsReport(); r != nil {
+func (m *Machine) reportedOutcome(e providerError) claim.TurnOutcome {
+	if r := m.ownReport(e); r != nil {
 		return r.Outcome
 	}
 	return ""
 }
 
 // providerErrorCause names what ended the turn, in words built from structured fields alone: the
-// category of a refusal a report named, else the HTTP status, else nothing more than that a
-// provider failed. A refusal's own explanation is itself refused when it is sent back
+// category of a refusal the turn's own report named, else the HTTP status, else nothing more than
+// that a provider failed. A refusal's own explanation is itself refused when it is sent back
 // (dispatch://INFRA-956/artifact/cause-evidence-md), so the provider's text reaches neither the
 // prompt this is written into nor the controller's notice.
+//
+// The cause the controller's notice carries names no category: that notice goes when the error
+// arrives, which is before the turn's own report (ownReport).
 func (m *Machine) providerErrorCause(e providerError) string {
-	if r := m.thisGenerationsReport(); r != nil && r.Outcome == claim.TurnRefused && r.Category != "" {
+	if r := m.ownReport(e); r != nil && r.Outcome == claim.TurnRefused && r.Category != "" {
 		return "the provider's " + r.Category + " content filter"
 	}
 	if e.status != 0 {

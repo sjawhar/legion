@@ -55,9 +55,11 @@ func (o TurnOutcome) newerThan(held *TurnOutcome) bool {
 //
 // The provider-error retry reads it (dispatch://INFRA-956 R2, providererror.go): a turn a content
 // filter refused can clear, because the plugin has already moved the session down its model
-// chain, and a turn the provider failed in a way it marked final cannot. A report that lands
-// while that decision is waiting for one decides it here, in the same step, rather than at the
-// end of the wait.
+// chain, and a turn the provider failed in a way it marked final cannot. It reads this report
+// only while it is the failed turn's own, which the (generation, sequence) above the one the
+// claim held when the error arrived picks out (`ownReport`). A report that lands while that
+// decision is waiting for one decides it here, in the same step, rather than at the end of the
+// wait.
 //
 // It is memory only, as the held suspension and `askFirst` are (`Machine`'s fields in
 // machine.go): the decision reads the report within two minutes of the turn it is about, and a

@@ -480,8 +480,14 @@ export default function legionExtension(pi: PiApi): void {
   // same settled turn is reported to the daemon, which reads the class rather than the model.
   pi.on("agent_end", async (event, context) => {
     if (!(await modelFallbackSession(context))) return;
+    // The report is started before the model move, not behind it: it takes its sequence before
+    // its own first await (src/turn-outcome.ts), and that sequence is what the daemon's
+    // provider-error decision orders reports by (daemon internal/supervise/providererror.go). A
+    // turn that settled while the move was awaited used to take a lower sequence than the refused
+    // turn it followed.
+    const reported = turnOutcome.report(context.sessionManager.getSessionId(), event);
     await modelFallback.turnSettled(event, context);
-    await turnOutcome.report(context.sessionManager.getSessionId(), event);
+    await reported;
   });
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
