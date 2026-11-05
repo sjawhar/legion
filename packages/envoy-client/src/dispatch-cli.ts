@@ -505,7 +505,10 @@ export async function runDispatchCli(
       notes.push(followNoticeText(followed, await subscriptions()));
     }
     entry = { tool, details: result.details };
-    code = OK;
+    // A write Dispatch refused did nothing, and `skill://dispatch` promises exit 1 for a
+    // refusal: a create the near-copy gate stopped exits 1, so a caller that reads the status
+    // is never told an issue was filed. Its text is the same either way.
+    code = result.refused === true ? REFUSED : OK;
   } catch (error) {
     text = messageFor(error);
     // The command's write landed but its answer was lost: it is done, so the call succeeded, and

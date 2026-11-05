@@ -1723,6 +1723,57 @@ describe("the dispatch CLI's subscription note", () => {
     ]);
   });
 
+  // `skill://dispatch` promises exit 1 for a refusal, and a create the near-copy gate stops made
+  // nothing: a caller that reads the status must not be told an issue was filed.
+  test("a create the near-copy gate refuses exits 1, and a create it lets through exits 0", async () => {
+    const candidates = [
+      {
+        key: "DSP-9",
+        title: "Nightly export retries for ever",
+        status: "in_progress",
+        snippet: "<mark>Nightly</mark> export",
+        shared_terms: 4,
+        href: "/issues/DSP-9",
+      },
+    ];
+    const creating = (refuse: boolean) =>
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const { pathname } = new URL(String(input));
+        if (pathname === "/api/v1/projects/DSP/architecture-sources") {
+          return Response.json({ sources: [] });
+        }
+        if (pathname === "/api/v1/issues" && init?.method === "POST") {
+          return refuse
+            ? Response.json(
+                { code: "POSSIBLE_DUPLICATE", error: "possible duplicate of DSP-9", candidates },
+                { status: 409 }
+              )
+            : Response.json(
+                {
+                  key: "DSP-10",
+                  title: "Nightly export retries for ever",
+                  project: "DSP",
+                  components: { mode: "inherit", ids: [], unknown: [], reason: null },
+                },
+                { status: 201 }
+              );
+        }
+        return fetch(input, init);
+      }) as typeof fetch;
+    const create = ["issue", "--project", "DSP", "--title", "Nightly export retries for ever"];
+
+    const refused = await run(create, omp, "", creating(true));
+    expect(refused.code).toBe(1);
+    expect(refused.stdout).toContain(
+      'Not created: "Nightly export retries for ever" is a near copy of an open issue.'
+    );
+    expect(refused.stdout).toContain("DSP-9 [in_progress] Nightly export retries for ever");
+
+    const made = await run(create, omp, "", creating(false));
+    expect(made.code).toBe(0);
+    expect(made.stdout).toContain("Created DSP-10");
+  });
+
   test("a read asks no listener", async () => {
     interests = listed([]);
     const { code } = await run(["projects"], withListener);

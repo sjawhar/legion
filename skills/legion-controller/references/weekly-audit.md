@@ -31,10 +31,11 @@ dispatch read --issue <KEY> --all-events   # the issue.created line ends `forced
 any issue with more than ten the `issue.created` line is not printed at all.
 
 Keep the issues created inside the window, read each one's `issue.created` line, and count by
-filer: the event actor's `origin.session_title` cut at its last middle dot (`·`), so
-`Legion implementer · INFRA-1160` counts as `Legion implementer`, with every person counted
-together as one filer. Report, per filer, how many creates forced past a refusal and which issues
-each named, then the no-answer creates as their own line.
+filer. The line names its writer as `session <id> (<the session's title>)`, and the filer is that
+title cut at its last middle dot (`·`), so `Legion implementer · INFRA-1160` counts as
+`Legion implementer`, with every person counted together as one filer. A session that carries no
+title prints its id alone and is counted by that id. Report, per filer, how many creates forced
+past a refusal and which issues each named, then the no-answer creates as their own line.
 
 The recount is the same two commands: name them in the report beside the number.
 

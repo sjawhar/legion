@@ -3266,6 +3266,7 @@ describe("executeDispatchTool", () => {
         "If none is, run dispatch issue again with --force, and write in the new issue's spec why it is not each issue named here.",
       ].join("\n"),
       details: { duplicates: candidates },
+      refused: true,
     });
   });
 
@@ -11803,7 +11804,11 @@ describe("executeDispatchTool", () => {
             seq: 1,
             type: "issue.created",
             issue_key: "DSP-42",
-            actor: { kind: "session", id: "s1" },
+            actor: {
+              kind: "session",
+              id: "s1",
+              origin: { session_title: "Legion implementer · INFRA-1160" },
+            },
             created_at: "2026-09-09T00:01:00Z",
             payload: {
               key: "DSP-42",
@@ -11831,7 +11836,7 @@ describe("executeDispatchTool", () => {
       [
         "Key: DSP-42",
         "Events:",
-        "- #1 issue.created · session s1 · 2026-09-09T00:01:00Z · status triage · forced past DSP-7, DSP-9",
+        "- #1 issue.created · session s1 (Legion implementer · INFRA-1160) · 2026-09-09T00:01:00Z · status triage · forced past DSP-7, DSP-9",
       ].join("\n")
     );
   });
