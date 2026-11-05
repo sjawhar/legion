@@ -50,6 +50,10 @@ type listenerDeps struct {
 	consumers *sessionDelivery
 	// caches lists the stores above that are open, for the sites that treat every cache alike.
 	caches []listenerCache
+	// wakes publishes the wake reports a role send with no holder and an unplaceable agent
+	// message raise, off those paths and under the listener's own lifetime (wakeReporter); nil
+	// in a test that builds the deps without it, which reports no wake.
+	wakes *wakeReporter
 	// consumer names the durable whose lag /healthz reports.
 	consumer   string
 	streamName string
@@ -957,9 +961,17 @@ func main() {
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
+	// Wake reports are published off the paths that raise them, under a lifetime of the
+	// listener's own — the shutdown ends every retry still running — and a cap on how many
+	// retry at once (wakeReporter). It is built here because the delivery handlers below copy
+	// this configuration by value, so every seam of it must be set before they are built.
+	wakesCtx, stopWakeReports := context.WithCancel(context.Background())
+	wakes := newWakeReporter(wakesCtx, client)
+
 	// Phase 6: Open the role lane and /v1 onto the stores, then bind the durable consumer.
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
+		wakes:             wakes,
 		forwardRole:       startRoleForward(client),
 		registry:          registry,
 		sessions:          sessions,
@@ -1035,12 +1047,13 @@ func main() {
 	// The parts a shutdown ends, gathered once: every end of a start that serves /v1 passes them
 	// to shutdownListener.
 	parts := listenerParts{
-		server:   server,
-		client:   client,
-		lane:     lane,
-		delivery: delivery,
-		relays:   relays,
-		caches:   caches,
+		server:    server,
+		client:    client,
+		lane:      lane,
+		delivery:  delivery,
+		relays:    relays,
+		caches:    caches,
+		stopWakes: stopWakeReports,
 	}
 
 	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
@@ -1059,6 +1072,7 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
+		wakes:      wakes,
 		delivery:   &deliveryConfig,
 		confirmed:  dedupe.New(10 * time.Minute),
 	}
@@ -1140,6 +1154,13 @@ func main() {
 		ciDebounce := envDuration(logger, "ENVOY_CI_DEBOUNCE", 5*time.Second)
 		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
+
+	// Phase 6b3: Say we are alive and reporting, now and every listenerReadyInterval, on the one
+	// topic the Legion daemons read wakes of released issue pods from. Without it a daemon
+	// cannot tell "the listener sends no reports" from "the listener has nothing to report", so
+	// it releases nothing: this is the positive signal that lets release run at all. It shares
+	// summaryCtx, which the shutdown cancels.
+	startListenerReadyReports(summaryCtx, client, logger, listenerReadyInterval)
 
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;
@@ -1224,15 +1245,23 @@ type listenerParts struct {
 	delivery *sessionDelivery
 	relays   *sessionRelays
 	caches   []listenerCache
+	// stopWakes ends the wake reports still retrying (wakeReporter), nil on a shutdown reached
+	// before the reporter was built.
+	stopWakes func()
 }
 
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
 // signal, a fatal error or a bind that did not complete, and exits non-zero so the runtime's
 // restart policy restores the listener.
 func shutdownListener(logger *logging.Logger, parts listenerParts, loops listenerLoops) {
-	// Stop background loops before draining NATS.
+	// Stop background loops before draining NATS, the wake reports retrying off their callers'
+	// paths among them: each holds its goroutine for minutes otherwise, and a report published
+	// into a draining connection reaches nothing.
 	if loops.stop != nil {
 		loops.stop()
+	}
+	if parts.stopWakes != nil {
+		parts.stopWakes()
 	}
 
 	// Ordered shutdown:

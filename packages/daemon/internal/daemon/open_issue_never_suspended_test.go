@@ -9,20 +9,28 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// An open issue keeps every claim live. This drives the durable workflow and outbox through phase
-// changes, an awaiting-person hand-back and answer, two child re-entries, and boot/tick
-// reconciliation; no daemon suspend or issue-suspend effect may appear at any layer.
-func TestAnOpenIssuesClaimsNeverSuspend(t *testing.T) {
+// An open issue's claims are stopped by nothing but the exceptions
+// TestOpenIssueSuspensionInvariantKeepsTheExceptions enumerates, and an issue whose pod is still
+// working takes none of them. This drives the durable workflow and outbox through phase changes,
+// an awaiting-person hand-back and answer, two child re-entries, boot/tick reconciliation, and a
+// pass of the idle tick with release on: no suspend, no issue-suspend and no idle release may
+// appear at any layer. The release (INFRA-945) is the one exception that acts on an issue still in
+// the workflow, so it is the one this case has to keep out, and it is told from every other stop
+// by its own kind and op: an `issue_release` row and `supervise` rows whose op is `release`,
+// against the `issue_suspend` row and the `suspend` op of a stop that ends a claim's phase.
+func TestAnOpenIssueThatIsWorkingHasNoClaimStopped(t *testing.T) {
 	const (
 		root     = "LEGION-800"
 		forward  = "LEGION-801"
@@ -138,17 +146,27 @@ func TestAnOpenIssuesClaimsNeverSuspend(t *testing.T) {
 		for token := range claims {
 			machine, _ := sup.Machine(token)
 			got := machine.Claim()
-			if got.State == supervise.StateSuspended || got.SuspensionHeld && got.SuspensionHeldBy == supervise.SuspendedByDaemon {
-				t.Fatalf("%s: %s = %+v, want live without a daemon suspension", stage, token, got)
+			byRule := got.SuspensionHeldBy.ByRule() || got.SuspensionHeldBy == supervise.SuspendedByReleased
+			if got.State == supervise.StateSuspended || got.SuspensionHeld && byRule {
+				t.Fatalf("%s: %s = %+v, want live without a suspension by any daemon rule", stage, token, got)
 			}
 		}
 		var stopping int
-		if err := pool.QueryRow(ctx, `select count(*) from outbox where issue = any($1) and (kind = 'issue_suspend' or (kind = 'supervise' and payload->>'op' = 'suspend'))`,
+		if err := pool.QueryRow(ctx, `select count(*) from outbox where issue = any($1)
+			and (kind in ('issue_suspend', 'issue_release') or (kind = 'supervise' and payload->>'op' in ('suspend', 'release')))`,
 			[]string{root, forward, backward, running, checking}).Scan(&stopping); err != nil {
 			t.Fatalf("%s: count stopping rows: %v", stage, err)
 		}
 		if stopping != 0 {
-			t.Fatalf("%s: stopping rows = %d, want none for open issues", stage, stopping)
+			t.Fatalf("%s: stopping rows = %d, want none for open issues that are working", stage, stopping)
+		}
+		var marked int
+		if err := pool.QueryRow(ctx, `select count(*) from issue_releases where issue = any($1)`,
+			[]string{root, forward, backward, running, checking}).Scan(&marked); err != nil {
+			t.Fatalf("%s: count release marks: %v", stage, err)
+		}
+		if marked != 0 {
+			t.Fatalf("%s: release marks = %d, want none: no pod of this tree is idle", stage, marked)
 		}
 	}
 
@@ -200,11 +218,43 @@ func TestAnOpenIssuesClaimsNeverSuspend(t *testing.T) {
 		}
 	}
 	assertOpen("boot, tick, and outbox drain")
+
+	// The idle release is the one exception that acts on an issue still in the workflow, so a
+	// pass of the tick with release on has to leave this tree as it found it: every pod here took
+	// a turn a moment ago, so none of them is idle. The inputs the rule reads outside the issue
+	// record are all given to it — the Envoy listener reporting itself ready, the pods on the
+	// configured image, and every claim on the daemon's plugin contract having reported what it
+	// is doing since its last turn — so what keeps these pods is the rule itself, not an input it
+	// could not read.
+	if _, err := pool.Exec(ctx, `insert into listener_reports (project, ready_at) values ($1, $2)
+		on conflict (project) do update set ready_at = excluded.ready_at`, "legion", time.Now().UTC()); err != nil {
+		t.Fatalf("seed the listener's report: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `update claims set plugin_contract = $1, activity_at = now(),
+		activity_background = false, activity_kinds = '', activity_next_reminder_at = null`, api.DaemonAPIVersion); err != nil {
+		t.Fatalf("report what the pods are doing: %v", err)
+	}
+	idle := &workflowRuntime{pool: pool, projectID: "legion", log: quietLogger(), idleStore: trees,
+		idleImages: &releaseRuntime{Runtime: fake.NewRuntime(), onImage: true}, idlePeriod: time.Minute}
+	if !idle.listenerLive(ctx) {
+		t.Fatal("the listener's report is not live, so the tick below would decide no pod at all")
+	}
+	pods, podsErr := trees.IdlePods(ctx, "legion")
+	if podsErr != nil || len(pods) == 0 {
+		t.Fatalf("the pods the tick decides = %v, %v; want this tree's live claims", pods, podsErr)
+	}
+	idle.releaseIdlePods(ctx)
+	assertOpen("a pass of the idle tick over working pods")
 }
 
-// TestOpenIssueSuspensionInvariantKeepsTheExceptions covers the daemon-owned suspensions an open
-// issue must still allow. TestTheStoreRecordsWhoSuspendedAClaim covers the operator's real POST
-// /legion/v1/operator/claims/{token}/suspend route.
+// TestOpenIssueSuspensionInvariantKeepsTheExceptions enumerates every stop an open issue's claims
+// may take: the tree move that carries a child, the three statuses that take an issue out of the
+// workflow, and the idle release (INFRA-945), the one of them that leaves the issue in the
+// workflow and brings its pod back at the next wake for one of its roles. Each is told from the
+// others by the kind and op it writes. TestTheStoreRecordsWhoSuspendedAClaim covers the
+// operator's real POST /legion/v1/operator/claims/{token}/suspend route, and
+// TestAnOpenIssueThatIsWorkingHasNoClaimStopped that an open issue whose pod is working takes
+// none of these.
 func TestOpenIssueSuspensionInvariantKeepsTheExceptions(t *testing.T) {
 
 	t.Run("tree move", func(t *testing.T) {
@@ -242,4 +292,34 @@ func TestOpenIssueSuspensionInvariantKeepsTheExceptions(t *testing.T) {
 			}
 		})
 	}
+
+	// The idle release, the exception that acts on an issue still in the workflow: its pod has
+	// had no turn in progress and no turn due for the idle period, so every live claim of it is
+	// suspended with the source `released` and its session kept. It writes neither the `suspend`
+	// op of a stop that ends a phase nor the `issue_close` of an issue that left the workflow,
+	// but its own: one `release` supervise row per live role, then the `issue_release` teardown.
+	t.Run("idle release", func(t *testing.T) {
+		ctx := context.Background()
+		rig := newIdleRig(t)
+		if record.OutOfWorkflow(rig.issue.Status) {
+			t.Fatalf("the rig's issue is %q, want one still in the workflow", rig.issue.Status)
+		}
+
+		rig.w.releaseIdlePods(ctx)
+
+		if got := rig.rows(t); len(got) != 3 || got[0] != "issue_bundle" || got[1] != "supervise:release" || got[2] != "issue_release" {
+			t.Fatalf("queued rows = %v, want the save, the role stop and the teardown and nothing else", got)
+		}
+		rig.drain(t)
+		if got := rig.machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != supervise.SuspendedByReleased {
+			t.Fatalf("the released claim = %s by %s, want suspended by released", got.State, got.SuspendedBy)
+		}
+		var status string
+		if err := rig.pool.QueryRow(ctx, `select status from issues where key = $1`, rig.issue.Key).Scan(&status); err != nil {
+			t.Fatalf("read the released issue: %v", err)
+		}
+		if record.OutOfWorkflow(status) {
+			t.Fatalf("the released issue is %q, want the release to have left it in the workflow", status)
+		}
+	})
 }

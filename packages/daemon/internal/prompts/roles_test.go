@@ -259,6 +259,31 @@ func TestNoPartSaysLegionNeverMerges(t *testing.T) {
 	}
 }
 
+// A release of an idle issue pod ends every role process in it and keeps each role's session, its
+// phase and its pending task (supervise.SuspendedByReleased), and the next task, message or CI
+// settlement for one of its roles brings the pod back. So a part that says a role, a process or a
+// session stays live from its first assignment until its issue closes or leaves the workflow, or
+// that a waiting role is not suspended, says what the daemon no longer does, and an agent that
+// reads it treats a pod that went as news about its issue. Four of these sentences cross a line
+// break in their part, so the match runs over a body whose whitespace is collapsed to one space,
+// and the needle is a pattern rather than the sentences spelled out, so a grep for one of them
+// over this directory finds only prompt text.
+func TestNoPartSaysARoleStaysLiveUntilItsIssueEnds(t *testing.T) {
+	saysARoleStaysLive := regexp.MustCompile(`(?i)stays? live,? (from|until|only|as)|idle and not suspended`)
+	whitespace := regexp.MustCompile(`\s+`)
+	for dir, parts := range map[string]embed.FS{"roles": roleParts, "go": goParts} {
+		err := eachPart(parts, dir, func(name string, body []byte) error {
+			if phrase := saysARoleStaysLive.Find(whitespace.ReplaceAll(body, []byte(" "))); phrase != nil {
+				t.Errorf("%s/%s says %q: a released pod's roles lose their processes and keep their sessions", dir, name, phrase)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("read the %s parts: %v", dir, err)
+		}
+	}
+}
+
 // Background work is on for every role: Legion writes no Oh My Pi settings overlay, so
 // a long bash call becomes a background job and a task subagent runs as one, and a role reads a
 // result with the `wait` tool. Nothing takes a turn away from a role either: a CI red

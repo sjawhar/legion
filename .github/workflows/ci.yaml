@@ -375,6 +375,7 @@ jobs:
               - 'packages/daemon/internal/omplaunch/*'
               - 'packages/daemon/internal/ompsessions/*'
               - 'packages/daemon/internal/phase/*'
+              - 'packages/daemon/internal/pods/**'
               - 'packages/daemon/internal/podsafety/**'
               - 'packages/daemon/internal/procgroup/*'
               - 'packages/daemon/internal/projection/*'

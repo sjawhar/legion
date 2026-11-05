@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  A Claude Code role tells the Legion daemon at each `Stop` hook whether it runs background work
+  and when its next phase reminder is due, so the daemon can release an issue pod that is idle
+  and bring it back on the next wake.

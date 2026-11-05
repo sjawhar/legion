@@ -295,6 +295,11 @@ reviewing until you finish.
     controller topic. Either names this issue, the pull request, the merge commit, what you drove
     and what failed. Name the message or the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the
     result's `observed` and in the summary.
+- **Numbers the daemon holds are read with the `legion` tool.** Where the verdict rests on what a
+  deployment's idle release has done, `read_release_records` answers a window of the daemon's own
+  records of its releases, resumes and holds: its one argument `since` is the RFC 3339 instant
+  the window starts at, and the tool's own description says what the answer carries. It reads
+  them with this session's own claim, so there is no credential to fetch and none on disk.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look. Where no wake is
   queued yet, the daemon suspends your claim with its session kept, and the issue's Sandbox goes
   with its pod and disk; where a wake arrived while the look was open, the next look starts at once

@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+  Every claimed Oh My Pi session tells the Legion daemon what it is doing — whether it runs
+  background work, and for a phase worker when its next phase reminder is due — at each turn's
+  end and whenever the reading changes. That is what lets the daemon release an issue pod no
+  role of which has a turn in progress or a turn due, and bring it back on the next wake.
