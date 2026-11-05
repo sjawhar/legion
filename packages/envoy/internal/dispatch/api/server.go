@@ -736,7 +736,7 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 			}
 			handler = s.servedAsRead(deadline, route.Download, route.pinsConnection(), handler)
 		}
-		handler = admitted(limiter, route.Weight, handler)
+		handler = admitted(limiter, route.Weight, route.Lane, handler)
 	}
 	if route.Method != http.MethodGet {
 		// Every layer below may answer before the body is read - admission's refusal included;
@@ -790,8 +790,25 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 // A request whose client went away while it waited is answered nothing, since nobody is left to
 // read it, and its line carries 499 rather than the 200 of a handler that wrote nothing: under
 // load a client that gives up while queued is the most frequent way a request ends unanswered.
-func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) http.HandlerFunc {
+// A heavy read takes its lane first (admission.EnterLane, apiRoute.Lane): a lane is one route's
+// own limit, and a request waiting for it holds no class unit, so the routes whose statements the
+// database spends its processors on cannot take them from everything else. Its refusal is the same
+// 429 OVERLOADED, naming the lane.
+func admitted(limiter *admission.Limiter, weight int, lane admission.Lane, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if lane != admission.NoLane {
+			leave, err := limiter.EnterLane(r.Context(), lane)
+			if err != nil {
+				var refusal *admission.Refusal
+				if errors.As(err, &refusal) {
+					admission.WriteRefused(w, refusal)
+					return
+				}
+				accesslog.ClientGone(r.Context())
+				return
+			}
+			defer leave()
+		}
 		arrival := limiter.Arrive(admission.ClassOf(r.Method), weight)
 		ticket := arrival.AdmitNow()
 		if ticket == nil {

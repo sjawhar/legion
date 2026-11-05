@@ -1,0 +1,17 @@
+kind: Changed
+body: |-
+  Document compaction yields to requests. Before each fold, the compaction queue's worker and the
+  hourly sweep read the request admission: while it holds half of either class's units, or any
+  request is queued for room, the fold waits 50 ms and asks again, and while it holds a quarter of a
+  class's units folds are spaced at least 100 ms apart, so a backlog of folds never takes the
+  processor back to back on a server that is serving. The yielding is bounded, so compaction is
+  never starved either: a document is folded no later than 45 seconds past the moment it came due,
+  whatever the requests are doing, which puts a row's worst case at about two and three quarter
+  minutes from its write, inside the fifteen minutes the schedule already allowed. Before this, a
+  burst of writes left every document it touched due within the same two minutes and the queue
+  folded them 19 to 47 a second for about 50 seconds after the load had dropped, each fold holding
+  its document's lock, which answered requests at a 1.0 to 2.1 second p99 a minute after the burst.
+  Nothing is logged per fold; `dispatch_doc_compactions_queued`,
+  `dispatch_doc_compactions_deferred_total`, `dispatch_doc_compactions_forced_total` and
+  `dispatch_doc_compactions_paced_total` say what the queue holds and how often a fold waited, was
+  let through by the bound, or was spaced.

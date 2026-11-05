@@ -63,11 +63,17 @@ const (
 // Refusal is a request a Limiter did not admit. Nothing of the request ran, so its client may
 // retry it whatever its method.
 type Refusal struct {
-	Class  Class
+	Class Class
+	// Lane is the heavy read lane that refused the request (EnterLane), NoLane for a refusal by
+	// the request's class.
+	Lane   Lane
 	Reason Reason
 }
 
 func (r *Refusal) Error() string {
+	if r.Lane != NoLane {
+		return fmt.Sprintf("admission refused a %s request of the %s lane: %s", r.Class, r.Lane, r.Reason)
+	}
 	return fmt.Sprintf("admission refused a %s request: %s", r.Class, r.Reason)
 }
 
@@ -216,6 +222,11 @@ type Limits struct {
 	// reservation; DefaultLimits sets ReservedReadUnits. New clamps it to the read limit and
 	// to Total.
 	ReservedReads int
+	// HeavyReadLane is how many requests of one heavy read route may run at once
+	// (HeavyReadLaneLimit, lane.go); zero and below are one. The lanes are the same width:
+	// each of them is one route's hold on the database, and the measurement that sized them
+	// sized them together.
+	HeavyReadLane int
 }
 
 // DefaultLimits are the limits the server runs with: reads and writes by the CPUs the process may
@@ -227,6 +238,7 @@ func DefaultLimits() Limits {
 	return Limits{
 		Read: readLimit(procs), Write: writeLimit(procs), Total: MaxAdmittedUnits,
 		ReservedReads: ReservedReadUnits, ReadWait: DefaultReadWait, WriteWait: DefaultWriteWait,
+		HeavyReadLane: HeavyReadLaneLimit,
 	}
 }
 
@@ -244,6 +256,9 @@ type Limiter struct {
 	used    int    // the units held across the classes
 	arrived uint64 // arrivals so far: a waiter's place in the order the two queues are served in
 	classes [classCount]*gate
+	// lanes are the heavy read routes' own limits, each with a queue and a mutex of its own: a
+	// request takes its lane before it asks its class for units (EnterLane, lane.go).
+	lanes [laneCount]*laneGate
 
 	total         int // the combined cap and the read reservation under it, both set once by New
 	reservedReads int
@@ -267,6 +282,9 @@ func New(limits Limits) *Limiter {
 	}
 	if limits.Total > 0 {
 		l.total = limits.Total
+	}
+	for _, lane := range HeavyReadLanes() {
+		l.lanes[lane] = &laneGate{lane: lane, limit: max(limits.HeavyReadLane, 1), wait: l.classes[Read].wait}
 	}
 	l.reservedReads = min(max(limits.ReservedReads, 0), l.classes[Read].limit, l.total)
 	return l

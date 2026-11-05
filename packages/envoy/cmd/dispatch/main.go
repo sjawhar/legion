@@ -369,6 +369,10 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
+	// The one admission limiter the API admits through, made before the document service so that
+	// service's compaction yields to the very requests this admits, and so the metrics endpoint
+	// reads the same counts (requestLoad, docs.Deps.Requests).
+	limiter := admission.New(admission.DefaultLimits())
 	documentService := docs.New(docs.Deps{
 		Store:           database,
 		Events:          broker,
@@ -376,6 +380,7 @@ func main() {
 		ServerURL:       serverURL,
 		Settle:          boot.SettleDelay,
 		EditNoticeQuiet: boot.EditNoticeQuiet,
+		Requests:        requestLoad{limiter: limiter},
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
@@ -402,9 +407,6 @@ func main() {
 	if err != nil {
 		fatal("dispatch: build the embedder", "error", err)
 	}
-	// The one admission limiter the API admits through, made here so the metrics endpoint reads the
-	// same counts.
-	limiter := admission.New(admission.DefaultLimits())
 	built := routes.AppContextOptions{
 		SigningKey:     signingKey,
 		WebDistDir:     webDistDir,

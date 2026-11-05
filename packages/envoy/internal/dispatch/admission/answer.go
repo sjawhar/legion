@@ -75,11 +75,17 @@ func DeadlinePassed(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), ErrRequestDeadline)
 }
 
-// WriteRefused answers a request a Limiter refused (Admit's *Refusal) 429 OVERLOADED. A request
-// that carries a body has it drained first, by its caller: this writes the answer only.
+// WriteRefused answers a request a Limiter refused (Admit's *Refusal, EnterLane's) 429
+// OVERLOADED. A refusal by a heavy read's lane names the lane, so the client knows which route is
+// busy rather than reading that every read is. A request that carries a body has it drained
+// first, by its caller: this writes the answer only.
 func WriteRefused(w http.ResponseWriter, refusal *Refusal) {
-	writeRetryable(w, http.StatusTooManyRequests, CodeOverloaded, "the server has no room for another "+
-		refusal.Class.String()+" request ("+string(refusal.Reason)+"); nothing ran, retry after Retry-After")
+	what := "another " + refusal.Class.String() + " request"
+	if refusal.Lane != NoLane {
+		what = "another request of the " + refusal.Lane.String() + " lane"
+	}
+	writeRetryable(w, http.StatusTooManyRequests, CodeOverloaded, "the server has no room for "+
+		what+" ("+string(refusal.Reason)+"); nothing ran, retry after Retry-After")
 }
 
 // WriteUnserved answers a request whose handler failed with err because the server could not

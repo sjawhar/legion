@@ -245,6 +245,34 @@ func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registr
 		}
 		return samples
 	})
+	laneSamples := func(value func(admission.LaneStats) float64) []metrics.Sample {
+		stats := sources.Admission.LaneStats()
+		samples := make([]metrics.Sample, 0, len(stats))
+		for _, lane := range stats {
+			samples = append(samples, metrics.Sample{Labels: [][2]string{{"lane", lane.Lane.String()}}, Value: value(lane)})
+		}
+		return samples
+	}
+	registry.NewGaugeVecFunc(metricPrefix+"http_lane_in_flight", "Requests of the heavy read lane running now, of the lane's limit.", func() []metrics.Sample {
+		return laneSamples(func(l admission.LaneStats) float64 { return float64(l.InFlight) })
+	})
+	registry.NewGaugeVecFunc(metricPrefix+"http_lane_queued", "Requests of the heavy read lane waiting for a place in it now, holding no admission unit.", func() []metrics.Sample {
+		return laneSamples(func(l admission.LaneStats) float64 { return float64(l.Queued) })
+	})
+	registry.NewGaugeVecFunc(metricPrefix+"http_lane_limit", "Requests of the heavy read lane that may run at once in this process.", func() []metrics.Sample {
+		return laneSamples(func(l admission.LaneStats) float64 { return float64(l.Limit) })
+	})
+	registry.NewCounterVecFunc(metricPrefix+"http_lane_refused_total", "Requests a heavy read lane refused, by lane and reason.", func() []metrics.Sample {
+		stats := sources.Admission.LaneStats()
+		samples := make([]metrics.Sample, 0, 2*len(stats))
+		for _, lane := range stats {
+			samples = append(samples,
+				metrics.Sample{Labels: [][2]string{{"lane", lane.Lane.String()}, {"reason", string(admission.QueueFull)}}, Value: float64(lane.QueueFull)},
+				metrics.Sample{Labels: [][2]string{{"lane", lane.Lane.String()}, {"reason", string(admission.WaitExceeded)}}, Value: float64(lane.WaitExceeded)},
+			)
+		}
+		return samples
+	})
 	registry.NewGaugeFunc(metricPrefix+"http_admitted_units", "Admission units the admitted requests of both classes hold now, under the combined cap.", func() int64 {
 		return int64(sources.Admission.Totals().InFlight)
 	})
@@ -263,6 +291,16 @@ func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registr
 	registry.NewGaugeFunc(metricPrefix+"doc_rooms_peerless_bytes", "Heap those rooms are taken to hold, from the bytes each load decoded: what the resident-room budget bounds.", sources.Docs.PeerlessRoomBytes)
 	registry.NewCounterVecFunc(metricPrefix+"doc_rooms_budget_closed_total", "Rooms closed because the resident-room budget did not hold them, least recently used first.", func() []metrics.Sample {
 		return []metrics.Sample{{Value: float64(sources.Docs.RoomsClosedToBudget())}}
+	})
+	registry.NewGaugeFunc(metricPrefix+"doc_compactions_queued", "Documents the compaction queue holds now, the one in flight included: what a burst of writes leaves to fold.", sources.Docs.CompactionsQueued)
+	registry.NewCounterVecFunc(metricPrefix+"doc_compactions_deferred_total", "Folds that waited for the request admission to ease before they ran.", func() []metrics.Sample {
+		return []metrics.Sample{{Value: float64(sources.Docs.CompactionsDeferred())}}
+	})
+	registry.NewCounterVecFunc(metricPrefix+"doc_compactions_forced_total", "Folds the deferral bound let through while the requests were still pressing.", func() []metrics.Sample {
+		return []metrics.Sample{{Value: float64(sources.Docs.CompactionsForced())}}
+	})
+	registry.NewCounterVecFunc(metricPrefix+"doc_compactions_paced_total", "Folds the gap between folds held back on a busy server.", func() []metrics.Sample {
+		return []metrics.Sample{{Value: float64(sources.Docs.CompactionsPaced())}}
 	})
 
 	registry.NewCounterVecFunc(metricPrefix+"log_dropped_total", "Log records dropped because the log writer was too far behind, by level.", func() []metrics.Sample {
@@ -297,4 +335,21 @@ func runtimeValue(name string) func() int64 {
 		runtimemetrics.Read(read)
 		return int64(read[0].Value.Uint64())
 	}
+}
+
+// requestLoad is the request admission as the document service reads it (docs.RequestLoad): the
+// one limiter the API admits through, so the compaction yields to the requests this process is
+// actually serving. It converts the limiter's per-class counts, read together, into the three
+// numbers the compaction's rule needs and nothing else.
+type requestLoad struct {
+	limiter *admission.Limiter
+}
+
+func (l requestLoad) Classes() []docs.RequestClassLoad {
+	stats := l.limiter.Stats()
+	classes := make([]docs.RequestClassLoad, 0, len(stats))
+	for _, class := range stats {
+		classes = append(classes, docs.RequestClassLoad{Limit: class.Limit, InFlight: class.InFlight, Queued: class.Queued})
+	}
+	return classes
 }

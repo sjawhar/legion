@@ -71,6 +71,10 @@ type Deps struct {
 	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
 	// before its edit notice goes (recordEditNotice, RunEditNotices); zero means 30 s.
 	EditNoticeQuiet time.Duration
+	// Requests is the request admission the service's background work yields to - its compaction
+	// and its settlements (RequestLoad, requestYield): cmd/dispatch hands the one limiter the API
+	// admits through. A service with none runs that work without ever waiting.
+	Requests RequestLoad
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -694,7 +698,8 @@ func New(deps Deps) *Service {
 		maxPendingItems:   maxUpdateItems,
 	}
 	service.peerlessRoomBytes.Store(peerlessRoomHeapBudget)
-	service.compactions = startCompactionQueue(service.compactionStep)
+	service.compactions = startCompactionQueue(service.compactionStep,
+		newRequestYield(deps.Requests, service.now, compactionMaxDeferral, compactionFoldGap))
 	// The store tells the queue of every append it commits and every load it reads; a store that
 	// wraps a PgVersioned - a test's, to fail or hold one of its calls - tells it through the one
 	// it wraps.

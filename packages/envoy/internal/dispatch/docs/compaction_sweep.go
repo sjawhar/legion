@@ -71,6 +71,10 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// The sweep yields to the requests as the queue's worker does, each document from the
+		// moment this pass reaches it: the pass lists what is already due, so every document on
+		// its list is due now (requestYield.await).
+		s.compactions.yield.await(ctx, time.Now())
 		attempt := s.tryCompaction(ctx, room, false)
 		switch attempt.try {
 		case tryCompacted:
