@@ -553,7 +553,7 @@ describe("next_run", () => {
 describe("scenario_case", () => {
   const cases = (scenario: string, env: Record<string, string> = {}) =>
     bash(
-      `${fn("fail")}\n${fn("scenario_case")}\n${fn("askgate_case")}\n${fn("reviewer_case")}\nscenario_case "$1"`,
+      `${fn("fail")}\n${fn("scenario_case")}\n${fn("askgate_case")}\n${fn("reviewer_case")}\n${fn("retro_case")}\nscenario_case "$1"`,
       [scenario],
       env
     );
@@ -571,7 +571,8 @@ describe("scenario_case", () => {
   // Catches: a batch that runs the wrong world because the variable is unset or misspelt, which
   // would score as the reviewer's own verdict.
   test("an unset or unknown reviewer case fails, naming the variable and both cases", () => {
-    for (const env of [{}, { SKILL_SCENARIOS_REVIEWER_CASE: "text" }]) {
+    const unset: Record<string, string> = {};
+    for (const env of [unset, { SKILL_SCENARIOS_REVIEWER_CASE: "text" }]) {
       const result = cases("reviewer-text-findings", env);
       expect(result.code).toBe(1);
       expect(result.stdout).toBe("");
@@ -592,6 +593,23 @@ describe("scenario_case", () => {
       stdout: "",
       stderr: "",
     });
+  });
+
+  // Catches: a retro batch that runs no case at all, which the issue's check runs with no
+  // variable set, or one that takes a misspelt case for the measured arm.
+  test("retro-threads takes both cases, runs text-fixes unset, and fails on any other word", () => {
+    for (const name of ["text-fixes", "code-defect"])
+      expect(cases("retro-threads", { SKILL_SCENARIOS_RETRO_CASE: name })).toEqual({
+        code: 0,
+        stdout: `${name}\n`,
+        stderr: "",
+      });
+    expect(cases("retro-threads")).toEqual({ code: 0, stdout: "text-fixes\n", stderr: "" });
+    const result = cases("retro-threads", { SKILL_SCENARIOS_RETRO_CASE: "text" });
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("SKILL_SCENARIOS_RETRO_CASE");
+    expect(result.stderr).toContain("not text-fixes or code-defect");
   });
 
   // Catches: a batch that starts its services and its runs before it reads the case (cmd_batch
@@ -1360,7 +1378,8 @@ docker() {
   // Catches: a batch on a box with docker that takes one of the two URLs, or none, and stops
   // starting its containers.
   test("neither URL, or one without the other: the two containers, and no Postgres recorded", () => {
-    for (const env of [{}, { SKILL_SCENARIOS_NATS_URL: given.SKILL_SCENARIOS_NATS_URL }]) {
+    const none: Record<string, string> = {};
+    for (const env of [none, { SKILL_SCENARIOS_NATS_URL: given.SKILL_SCENARIOS_NATS_URL }]) {
       const { S, code, stdout } = up({ ...env, SKILL_SCENARIOS_PARALLEL: "1" });
       expect(code).toBe(0);
       const calls = readFileSync(path.join(S, "docker-calls"), "utf8");

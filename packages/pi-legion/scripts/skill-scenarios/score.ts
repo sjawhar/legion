@@ -8,10 +8,12 @@
 //     newline, whether the result spilled to an artifact, and so whether the file arrived whole;
 //     then the plugin paths Oh My Pi's log says it loaded.
 //   score.ts runs <runs dir> [<scenario>]
-//     One row per run, then counts per scenario and label (for a cased scenario — askgate and
-//     reviewer-text-findings — per case and label), and a legend saying what each count is. Each
+//     One row per run, then counts per scenario and label (for a cased scenario — askgate,
+//     reviewer-text-findings and retro-threads — per case and label), and a legend saying what
+//     each count is. Each
 //     scenario's rule is on the function that scores it: askOnMessage, measureBeforeAsk,
-//     testerProof, reviewerTextFindings, brainstormSurface, askgateReview, and specRow for
+//     testerProof, reviewerTextFindings, retroThreads, brainstormSurface, askgateReview, and
+//     specRow for
 //     spec-writing and spec-rewrite. A run the rig could not score is a rig error, printed with
 //     its reason and left out of the counts (unscored, below).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -108,13 +110,16 @@ const Handoffs = z.array(
   })
 );
 /** One line of the daemon stand-in's log (daemon-standin.ts): what reached it, when, and what it
- * answered; a completion's line names the handoff record it reported. */
+ * answered; a completion's line names the handoff record it reported, and a backward move's the
+ * phase it asked for and the reason it gave. */
 const DaemonLine = z.looseObject({
   at: z.string(),
   path: z.string(),
   status: z.number(),
   handoffId: z.string().optional(),
   handoffVersion: z.number().optional(),
+  to: z.string().optional(),
+  reason: z.string().optional(),
 });
 const nonEmpty = z.string().min(1);
 /** The tester's handoff as the tester role's prompt spells it (the `test` shape; nothing in the
@@ -953,6 +958,141 @@ function reviewerTextFindings(runDir: string, run: string, label: string, dirCas
     notes: notes.join(" "),
   };
 }
+
+/** Every case rig.sh's run_retro_threads builds a world for. */
+const RETRO_CASES = ["text-fixes", "code-defect"];
+/** A retro-threads run's directory, retro-threads-<case>-<label>-<n>, read as its case and its
+ * label; the longest case first, as REVIEWER_RUN sorts its own. */
+const RETRO_RUN = new RegExp(
+  `^retro-threads-(${RETRO_CASES.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
+);
+/** <run>/threads.json, rig.sh's worker_fixture: the threads the approval left open, each with
+ * the node id the `reviewThreads` route serves it under and the file its finding is on. */
+const Threads = z.array(z.looseObject({ id: z.string(), path: z.string() }));
+/** Everything one recorded gh call could carry a thread id or a reply in: its arguments, its
+ * stdin, and each file it read a body from. */
+function callText(call: z.infer<typeof Call>): string {
+  return [call.argv.join(" "), call.stdin ?? "", ...Object.values(call.files ?? {})].join("\n");
+}
+/** A reply on a review thread: the GraphQL mutation of
+ * `skill://legion-worker/references/review-threads.md`, or the REST reply route under a review
+ * comment. A call that only resolves a thread is no reply, whatever it carries. */
+const REPLY = /addPullRequestReviewThreadReply|\/replies\b/;
+
+/** retro-threads: what `skill://legion-retro` has retro do with the threads an approval left
+ * open. No round follows an approval, so nobody names those threads to it: it lists them itself,
+ * replies on each, resolves each one, brings the pull request body's `Threads` section to the
+ * head its own commit made, and pushes that commit once.
+ *
+ * The score reads what the run wrote, never the stand-in's static routes, which answer the same
+ * whatever the run did: the gh calls the stand-in recorded (calls.jsonl), the pushes the run's
+ * own bare remote logged (pushes.log) and the diff they carry, the body the stand-in kept, and
+ * the daemon stand-in's log (daemon.log). The threads are the world's own
+ * (<run>/threads.json), and the case is the one <run>/case.txt and the run's directory both
+ * name, which must agree.
+ *   text-fixes   two threads whose sentences a text fix closes. A run passes when each thread
+ *                carries one reply and one `resolveReviewThread` call of its own (no call
+ *                resolving two, which the reference forbids), one push lands on the issue
+ *                branch, its diff against the head the reviewer approved touches the threads'
+ *                own files and nothing else, the kept pull request body's `Threads:` line says
+ *                every thread resolved and none open and names each one, and the daemon stand-in
+ *                accepted a completion;
+ *   code-defect  one thread whose sentence is false only because the code is wrong. A run passes
+ *                when it pushed nothing and asked the daemon to move the issue back to
+ *                implementing, its reason naming that thread by its node id or by the file it is
+ *                on: the negative control, which fails a retro that writes a text fix over a
+ *                defect.
+ * `ref`: the agent read skill://legion-worker/references/review-threads.md, where the reply and
+ * the one-call-per-thread resolution are defined. */
+function retroThreads(runDir: string, run: string, label: string, dirCase: string): Row {
+  const retroCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
+  if (!RETRO_CASES.includes(retroCase))
+    throw new Error(`retro case.txt names '${retroCase}', not one of ${RETRO_CASES.join(", ")}`);
+  if (retroCase !== dirCase)
+    throw new Error(`case.txt names '${retroCase}', but the run's directory names ${dirCase}`);
+  const world = json(path.join(runDir, "world.json"), World);
+  const threads = json(path.join(runDir, "threads.json"), Threads);
+  const calls = parsed(path.join(runDir, "calls.jsonl"), Call).filter(
+    (call) => call.as === "gh" && call.exit === 0
+  );
+  // Each call that resolved a thread, with the threads it named: a call naming none or more than
+  // one, or carrying the mutation twice, is the bulk resolution the reference forbids.
+  const resolves = calls
+    .map((call) => ({ call, text: callText(call) }))
+    .filter(({ text }) => text.includes("resolveReviewThread"))
+    .map(({ text }) => ({
+      named: threads.filter((thread) => text.includes(thread.id)).map((thread) => thread.id),
+      times: text.split("resolveReviewThread").length - 1,
+    }));
+  const bulk = resolves.some(({ named, times }) => named.length !== 1 || times > 1);
+  const resolved = new Set(resolves.flatMap(({ named }) => (named.length === 1 ? named : [])));
+  const resolvedEach =
+    !bulk && resolves.length === threads.length && resolved.size === threads.length;
+  const replies = calls
+    .map((call) => callText(call))
+    .filter((text) => REPLY.test(text) && !text.includes("resolveReviewThread"))
+    .map((text) => threads.filter((thread) => text.includes(thread.id)).map((t) => t.id));
+  const replied = new Set(replies.flatMap((named) => (named.length === 1 ? named : [])));
+  const repliedEach = replies.length === threads.length && replied.size === threads.length;
+  const pushes = lines(path.join(runDir, "pushes.log")).flatMap((line) => {
+    const [, ref = "", , sha = ""] = line.split(" ");
+    return ref === `refs/heads/${world.branch}` ? [sha] : [];
+  });
+  const tip = pushes.at(-1);
+  const changed =
+    tip === undefined
+      ? []
+      : Bun.spawnSync([
+          "git",
+          "-C",
+          path.join(runDir, "remote.git"),
+          "diff",
+          "--name-only",
+          world.head,
+          tip,
+        ])
+          .stdout.toString()
+          .trim()
+          .split("\n")
+          .filter((name) => name !== "");
+  const wanted = threads.map((thread) => thread.path).toSorted();
+  const textFixesOnly = pushes.length === 1 && changed.toSorted().join("\n") === wanted.join("\n");
+  // The body the stand-in kept last, which is the one a reader of the pull request would see.
+  const body = calls.filter((call) => call.body !== undefined).at(-1)?.body ?? "";
+  const counted = /\*\*Threads:\*\*\s*(\d+) resolved, (\d+) unresolved/.exec(body);
+  const threadsLine =
+    counted?.[1] === String(threads.length) &&
+    counted[2] === "0" &&
+    threads.every((thread) => body.includes(thread.id));
+  const daemon = parsed(path.join(runDir, "daemon.log"), DaemonLine);
+  const complete = daemon.some(
+    (line) => line.path === "/legion/v1/handoff/complete" && line.status === 200
+  );
+  const back = daemon.find(
+    (line) => line.path === "/legion/v1/phase/backward" && line.status === 200
+  );
+  const sentBack =
+    back?.to === "implementing" &&
+    threads.some(
+      (thread) =>
+        (back.reason ?? "").includes(thread.id) || (back.reason ?? "").includes(thread.path)
+    );
+  const pass =
+    retroCase === "code-defect"
+      ? pushes.length === 0 && sentBack
+      : repliedEach && resolvedEach && textFixesOnly && threadsLine === true && complete;
+  const ref = readCalls(session(runDir)).some((call) =>
+    call.target.includes("skill://legion-worker/references/review-threads.md")
+  );
+  const notes = [
+    `case=${retroCase} threads=${threads.length} replied=${replied.size} replyCalls=${replies.length} resolved=${resolved.size} resolveCalls=${resolves.length} bulk=${bulk} pushes=${pushes.length} threadsLine=${threadsLine === true} complete=${complete} backward=${back === undefined ? "none" : back.to}`,
+    `changed=${JSON.stringify(changed)} wanted=${JSON.stringify(wanted)} sentBack=${sentBack}`,
+    lines(path.join(runDir, "out.txt")).at(-1) ?? "",
+  ];
+  // The row's scenario carries the case, as a reviewer-text-findings row's does, so the counts
+  // are per case and label.
+  return { run, scenario: `retro-threads:${retroCase}`, label, pass, ref, notes: notes.join(" ") };
+}
 /** Each cased scenario: how its run directory names its case and its label, and what a directory
  * that names none should have looked like. A scenario absent here takes no case. */
 const CASED: Record<string, { run: RegExp; shape: string }> = {
@@ -960,6 +1100,10 @@ const CASED: Record<string, { run: RegExp; shape: string }> = {
   "reviewer-text-findings": {
     run: REVIEWER_RUN,
     shape: "a reviewer-text-findings run's directory is reviewer-text-findings-<case>-<label>-<n>",
+  },
+  "retro-threads": {
+    run: RETRO_RUN,
+    shape: "a retro-threads run's directory is retro-threads-<case>-<label>-<n>",
   },
 };
 
@@ -3505,6 +3649,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "measure-before-ask": measureBeforeAsk,
       "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
       "reviewer-text-findings": reviewerTextFindings,
+      "retro-threads": retroThreads,
       brainstorm: brainstormSurface,
       askgate: askgateReview,
       "spec-writing": (dir, run, label) => specRow(dir, run, "spec-writing", label, reach),
@@ -3632,6 +3777,8 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           askgate: the rule for the run's label and case (askgateReview)",
       "           reviewer-text-findings: the verdict the case asks for, in the review submission",
       "           the gh stand-in recorded (reviewerTextFindings)",
+      "           retro-threads: the threads closed as the case asks, in the calls, the pushes",
+      "           and the kept body the run left (retroThreads)",
       "pass+ref   passed, and the agent read the file the rule is in (askgate: never counted)",
       "rig errors runs the rig could not score (unscored), left out of both counts",
       "flagged    counted runs whose row carries a flag (outside=, skills=, writes_seen=,",

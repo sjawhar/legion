@@ -19,9 +19,15 @@
 //                                          test handoff under the session TESTER, and the
 //                                          tester's own passing result on check k1 at <commit>,
 //                                          which a reviewer's approval gate reads (test: {id,
-//                                          version} in <file>). reviewer-text-findings seeds it
-//                                          beside the implementer's; tester-proof seeds neither,
-//                                          since its tester records both itself
+//                                          version} in <file>). reviewer-text-findings and
+//                                          retro-threads seed it beside the implementer's;
+//                                          tester-proof seeds neither, since its tester records
+//                                          both itself
+//   seed.ts review-handoff <file> <body file>
+//                                          <body file> as the issue's review handoff under the
+//                                          session REVIEWER, and no result, since a review round
+//                                          records none (review: {id, version} in <file>). A
+//                                          retro reads it at the version its task names
 //   seed.ts capture-handoffs <file> <run dir>
 //                                          every handoff record of the issue <file> names, newest
 //                                          first as Dispatch lists them, each with the body it
@@ -137,17 +143,19 @@ const SpecFixture = z.object({ issue: z.string(), spec_artifact: z.string() });
 type SpecFixture = z.infer<typeof SpecFixture>;
 /** The session a seeded ask is opened as: another agent's, never the run's own. */
 export const SEED_ASKER = { kind: "session", id: "spec-source-agent" } as const;
-/** What `tester-proof` writes, and `implement-handoff`, `tester-result` and `capture-handoffs`
- * read: the run's issue, and each phase record a seed has written on it. */
+/** What `tester-proof` writes, and `implement-handoff`, `tester-result`, `review-handoff` and
+ * `capture-handoffs` read: the run's issue, and each phase record a seed has written on it. */
 const TesterFixture = z.object({
   issue: z.string(),
   implement: z.object({ id: z.string(), version: z.number().int() }).optional(),
   test: z.object({ id: z.string(), version: z.number().int() }).optional(),
+  review: z.object({ id: z.string(), version: z.number().int() }).optional(),
 });
 /** The sessions the worker's predecessors wrote their handoffs as: the implementer's, and the
- * tester's where a scenario seeds one, never the run's own. */
+ * tester's and the reviewer's where a scenario seeds one, never the run's own. */
 export const IMPLEMENTER = { kind: "session", id: "rig-implementer" } as const;
 export const TESTER = { kind: "session", id: "rig-tester" } as const;
+export const REVIEWER = { kind: "session", id: "rig-reviewer" } as const;
 /** The person who files the run's issue, posts the source's input and answers every ask. */
 const PERSON = "alice";
 /** Dispatch's approval answer (packages/envoy/internal/dispatch/docs/approval_review.go). */
@@ -636,37 +644,36 @@ export async function testerProofIssue(file: string): Promise<void> {
 }
 
 /** One predecessor's handoff on the run's issue, as `dispatch handoff-write` records it under
- * that predecessor's own session, and its passing result against the issue's check `k1` at
- * `commit`, as `dispatch result` records it; the record goes into the fixture under its phase. A
+ * that predecessor's own session, and, for a phase whose role records one, its passing result
+ * against the issue's check `k1` at `result.commit`, as `dispatch result` records it; the record
+ * goes into the fixture under its phase. A
  * body that is no JSON object is the fixture's fault, refused before anything is written. */
 async function phaseHandoff(
   file: string,
   bodyFile: string,
-  commit: string,
-  phase: "implement" | "test",
-  role: "implementer" | "tester",
-  actor: Actor
+  phase: "implement" | "test" | "review",
+  actor: Actor,
+  result?: { role: "implementer" | "tester"; commit: string }
 ): Promise<void> {
   const fixture = TesterFixture.parse(JSON.parse(readFileSync(file, "utf8")));
   const body: unknown = JSON.parse(readFileSync(bodyFile, "utf8"));
   if (typeof body !== "object" || body === null || Array.isArray(body))
     throw new Error(`${bodyFile} holds no JSON object, which a handoff body is`);
   const recorded = await createHandoff(fixture.issue, phase, body, actor);
-  await agentPost(`/api/v1/issues/${encodeURIComponent(fixture.issue)}/results`, {
-    check: "k1",
-    role,
-    verdict: "pass",
-    commit,
-    surface: "cli",
-    run: "bun greet.ts Ada",
-    observed: "prints Hello, Ada! and exits 0",
-    negative_control: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
-    actor,
-  });
+  if (result !== undefined)
+    await agentPost(`/api/v1/issues/${encodeURIComponent(fixture.issue)}/results`, {
+      check: "k1",
+      role: result.role,
+      verdict: "pass",
+      commit: result.commit,
+      surface: "cli",
+      run: "bun greet.ts Ada",
+      observed: "prints Hello, Ada! and exits 0",
+      negative_control: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+      actor,
+    });
   const record = { id: recorded.id, version: recorded.version };
-  const next: z.infer<typeof TesterFixture> =
-    phase === "implement" ? { ...fixture, implement: record } : { ...fixture, test: record };
-  writeFileSync(file, `${JSON.stringify(next)}\n`);
+  writeFileSync(file, `${JSON.stringify({ ...fixture, [phase]: record })}\n`);
   console.log(
     `seeded ${fixture.issue}'s ${phase} handoff, version ${recorded.version} (${recorded.id})`
   );
@@ -679,15 +686,26 @@ export async function implementHandoff(
   bodyFile: string,
   commit: string
 ): Promise<void> {
-  await phaseHandoff(file, bodyFile, commit, "implement", "implementer", IMPLEMENTER);
+  await phaseHandoff(file, bodyFile, "implement", IMPLEMENTER, {
+    role: "implementer",
+    commit,
+  });
 }
 
 /** `tester-result <file> <body file> <commit>`: the tester's handoff and its passing result,
  * under the tester's session. A reviewer refuses an approval while a `before_merge` check of the
  * issue has no passing result current at the head it reads, so the reviewer scenario seeds this
- * one beside the implementer's and the reviewer's verdict rests on what it found in the change. */
+ * one beside the implementer's and the reviewer's verdict rests on what it found in the change;
+ * retro reads both results as the evidence its step 1 names. */
 export async function testerResult(file: string, bodyFile: string, commit: string): Promise<void> {
-  await phaseHandoff(file, bodyFile, commit, "test", "tester", TESTER);
+  await phaseHandoff(file, bodyFile, "test", TESTER, { role: "tester", commit });
+}
+
+/** `review-handoff <file> <body file>`: the round's review handoff, under the reviewer's session
+ * and with no result of its own, since a reviewer records none against a check. Retro's task
+ * names its version, and step 1 of skill://legion-retro reads it there. */
+export async function reviewHandoff(file: string, bodyFile: string): Promise<void> {
+  await phaseHandoff(file, bodyFile, "review", REVIEWER);
 }
 
 /** `GET route` as the agent bearer, its JSON answer; a refusal names the route and Dispatch's answer. */
@@ -927,7 +945,7 @@ async function captureBrainstorm(runDir: string): Promise<void> {
 }
 
 const USAGE =
-  "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir> | spec-writing <file> <source dir> | spec-rewrite <file> <source dir> | state <file> <turn> <run dir> | answer <file> <answers file> | approve <file> | capture-spec <file> <run dir> | askgate <file> | capture-askgate <file> <run dir> | tester-proof <file> | implement-handoff <file> <body file> <commit> | tester-result <file> <body file> <commit> | capture-handoffs <file> <run dir>";
+  "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir> | spec-writing <file> <source dir> | spec-rewrite <file> <source dir> | state <file> <turn> <run dir> | answer <file> <answers file> | approve <file> | capture-spec <file> <run dir> | askgate <file> | capture-askgate <file> <run dir> | tester-proof <file> | implement-handoff <file> <body file> <commit> | tester-result <file> <body file> <commit> | review-handoff <file> <body file> | capture-handoffs <file> <run dir>";
 
 /** Runs the mode `argv` names; false when argv names no mode, with its arguments. The first six
  * modes take extra arguments and ignore them, as they always did; each new mode takes exactly its
@@ -976,6 +994,8 @@ async function main(argv: string[]): Promise<boolean> {
     n === 4
   )
     await testerResult(file, second, third);
+  else if (command === "review-handoff" && file !== undefined && second !== undefined && n === 3)
+    await reviewHandoff(file, second);
   else if (command === "capture-handoffs" && file !== undefined && second !== undefined && n === 3)
     await captureHandoffs(file, second);
   else return false;

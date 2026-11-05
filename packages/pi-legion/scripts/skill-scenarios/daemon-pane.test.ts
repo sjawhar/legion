@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DAEMON_MODULE, RIG_GH_TOKEN, workerPane } from "./daemon-pane";
+import { DAEMON_MODULE, RIG_GH_TOKEN, runDaemonPane, workerPane } from "./daemon-pane";
 
 // The run directory: the daemon's pane environment makes the pane's home and the claim's gh
 // directory under its state directory.
@@ -182,4 +182,17 @@ test("refuses a script as the first gh on PATH and takes the gh the rig names", 
     ghPath: path.join(scriptBin, "gh"),
   }).env;
   expect(named.LEGION_GH_PATH).toBe(path.join(scriptBin, "gh"));
+}, 600_000);
+
+// The daemon starts the implementer twice, in implementing and again in retro, and the two end
+// differently: implementing ends with the implement handoff record and retro with none. The
+// stand-in daemon holds the issue in the phase it is told, so a rig scenario can boot a worker
+// in either.
+test("phase names the phase a role works, the one asked for when the role works more than one", () => {
+  expect(runDaemonPane(DAEMON_MODULE, ["phase", "implementer"])).toBe("implementing\nimplement\n");
+  expect(runDaemonPane(DAEMON_MODULE, ["phase", "implementer", "retro"])).toBe("retro\n\n");
+  expect(runDaemonPane(DAEMON_MODULE, ["phase", "tester", "testing"])).toBe("testing\ntest\n");
+  expect(() => runDaemonPane(DAEMON_MODULE, ["phase", "tester", "retro"])).toThrow(
+    '"tester" works no phase "retro"'
+  );
 }, 600_000);

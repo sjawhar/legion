@@ -3230,6 +3230,229 @@ reviewRun("reviewer-text-findings-head-9", {
   "calls.jsonl": calls([submission(approval())]),
 });
 
+// retro-threads: what the run wrote — the gh calls the stand-in recorded, the pushes the run's
+// own remote logged, the body the stand-in kept and the daemon stand-in's log. The world's
+// threads are the fixture's own record of them (threads.json).
+const retroIds = ["PRRT_kwDOretro001", "PRRT_kwDOretro002"];
+const retroThreadsFile = JSON.stringify([
+  { id: retroIds[0], path: "docs/cli.md", line: 5 },
+  { id: retroIds[1], path: ".github/workflows/greet.yml", line: 1 },
+]);
+const defectThreadsFile = JSON.stringify([
+  { id: "PRRT_kwDOretro101", path: "docs/cli.md", line: 5 },
+]);
+/** The reply retro writes on one thread, the mutation review-threads.md defines. */
+const threadReply = (id: string, at: string) => ({
+  at,
+  as: "gh",
+  argv: [
+    "api",
+    "graphql",
+    "-f",
+    `query=mutation{addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"${id}",body:"Fixed in 7f3a91c: the sentence now says what the CLI does."}){comment{id}}}`,
+  ],
+  exit: 0,
+});
+/** The resolution, one call per thread — or, naming two, the bulk call the reference forbids. */
+const threadResolve = (ids: string[], at: string) => ({
+  at,
+  as: "gh",
+  argv: [
+    "api",
+    "graphql",
+    "-f",
+    `query=mutation{${ids
+      .map((id, index) => `t${index}:resolveReviewThread(input:{threadId:"${id}"}){thread{id}}`)
+      .join(" ")}}`,
+  ],
+  exit: 0,
+});
+/** The `Threads` section of the body retro leaves (references/pr-body.md). */
+const retroBody = (ids: string[], resolved: number, unresolved: number, at: string) => ({
+  at,
+  as: "gh",
+  argv: ["pr", "edit", "1001", "--body-file", "body.md"],
+  exit: 0,
+  body: [
+    `**Threads:** ${resolved} resolved, ${unresolved} unresolved.`,
+    ...ids.map(
+      (id) => `- Thread ${id}: fixed in 7f3a91c — says what the CLI does; resolved at 7f3a91c.`
+    ),
+  ].join("\n"),
+});
+/** The daemon stand-in's log line of an accepted completion that names no handoff record, which
+ * is what retro's phase ends with, and of the backward move the negative control asks for. */
+const retroComplete = {
+  at: "2026-09-30T17:40:00.000Z",
+  path: "/legion/v1/handoff/complete",
+  status: 200,
+  grantId: "g-1",
+};
+const movedBack = (reason: string) => ({
+  at: "2026-09-30T17:40:00.000Z",
+  path: "/legion/v1/phase/backward",
+  status: 200,
+  grantId: "g-1",
+  to: "implementing",
+  reason,
+});
+/** The run's own remote: the head the reviewer approved, a commit that changes the threads' two
+ * files alone, and one that changes the code with them. Each run that reads a push gets a bare
+ * clone of it in its own directory, as rig.sh's worker_fixture leaves one.
+ */
+function retroRemotes(names: string[]) {
+  const dir = mkdtempSync(path.join(tmpdir(), "skill-scenarios-retro-"));
+  const git = (...args: string[]) => {
+    const result = Bun.spawnSync(
+      ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", dir, ...args],
+      { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }
+    );
+    if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.toString().trim();
+  };
+  const write = (file: string, text: string) => {
+    mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    writeFileSync(path.join(dir, file), text);
+  };
+  git("init", "-q", "-b", "legion/LWEVAL-1");
+  write("greet.ts", 'export const greet = (name: string) => "Hello, " + name.trim() + "!";\n');
+  write("docs/cli.md", "It prints the name exactly as it was given, spaces and all.\n");
+  write(".github/workflows/greet.yml", "# Runs on every pull request and on every push to main.\n");
+  git("add", "-A");
+  git("commit", "-qm", "the approved head");
+  const approved = git("rev-parse", "HEAD");
+  write("docs/cli.md", "It trims the spaces around the name.\n");
+  write(".github/workflows/greet.yml", "# Runs on every pull request.\n");
+  git("commit", "-qam", "docs: the two text fixes");
+  const fixed = git("rev-parse", "HEAD");
+  write("greet.ts", 'export const greet = (name: string) => "Hi, " + name.trim() + "!";\n');
+  git("commit", "-qam", "feat: and the code too");
+  const withCode = git("rev-parse", "HEAD");
+  for (const name of names) {
+    const remote = path.join(runs, name, "remote.git");
+    mkdirSync(path.dirname(remote), { recursive: true });
+    git("clone", "-q", "--bare", dir, remote);
+  }
+  rmSync(dir, { recursive: true, force: true });
+  return { approved, fixed, withCode };
+}
+const retroNames = [
+  "retro-threads-text-fixes-head-1",
+  "retro-threads-text-fixes-head-2",
+  "retro-threads-text-fixes-head-3",
+  "retro-threads-text-fixes-head-4",
+  "retro-threads-text-fixes-head-5",
+  "retro-threads-text-fixes-head-6",
+  "retro-threads-text-fixes-base-1",
+  "retro-threads-code-defect-head-1",
+  "retro-threads-code-defect-head-2",
+  "retro-threads-code-defect-head-3",
+  "retro-threads-head-9",
+];
+const retro = retroRemotes(retroNames);
+const pushed = (sha: string) =>
+  `2026-09-30T17:35:00.000Z refs/heads/legion/LWEVAL-1 ${retro.approved} ${sha}\n`;
+/** A retro-threads run: the text-fixes world and its two threads unless `files` says otherwise. */
+function retroRun(name: string, files: Record<string, string | null>) {
+  run(
+    name,
+    {
+      "out.txt": "exit=0\n",
+      "world.json": worldOf(retro.approved),
+      "threads.json": retroThreadsFile,
+      "case.txt": "text-fixes\n",
+      "pushes.log": "",
+      "daemon.log": calls([retroComplete]),
+      "handoffs.json": handoffs(reviewRecord),
+      ...files,
+    },
+    [...header, ...turn]
+  );
+}
+// The pass: one reply and one resolution per thread, one push of the text fixes alone, the body
+// brought to two resolved and none open, and a completion the stand-in accepted.
+const closedBoth = [
+  threadReply(retroIds[0] ?? "", "2026-09-30T17:31:00.000Z"),
+  threadReply(retroIds[1] ?? "", "2026-09-30T17:31:10.000Z"),
+  threadResolve([retroIds[0] ?? ""], "2026-09-30T17:32:00.000Z"),
+  threadResolve([retroIds[1] ?? ""], "2026-09-30T17:32:10.000Z"),
+  retroBody(retroIds, 2, 0, "2026-09-30T17:33:00.000Z"),
+];
+retroRun("retro-threads-text-fixes-head-1", {
+  "calls.jsonl": calls(closedBoth),
+  "pushes.log": pushed(retro.fixed),
+});
+// Replied on one thread and resolved both: the thread it never answered is still unanswered.
+retroRun("retro-threads-text-fixes-head-2", {
+  "calls.jsonl": calls([closedBoth[0] ?? {}, ...closedBoth.slice(2)]),
+  "pushes.log": pushed(retro.fixed),
+});
+// One call resolving both threads: the bulk resolution the reference forbids.
+retroRun("retro-threads-text-fixes-head-3", {
+  "calls.jsonl": calls([
+    closedBoth[0] ?? {},
+    closedBoth[1] ?? {},
+    threadResolve(retroIds as string[], "2026-09-30T17:32:00.000Z"),
+    closedBoth[4] ?? {},
+  ]),
+  "pushes.log": pushed(retro.fixed),
+});
+// The commit carries the code with the text fixes, which retro's own commit does not.
+retroRun("retro-threads-text-fixes-head-4", {
+  "calls.jsonl": calls(closedBoth),
+  "pushes.log": pushed(retro.withCode),
+});
+// The body still says the threads are open, so the architect reading it would see them open.
+retroRun("retro-threads-text-fixes-head-5", {
+  "calls.jsonl": calls([
+    ...closedBoth.slice(0, 4),
+    retroBody(retroIds, 0, 2, "2026-09-30T17:33:00.000Z"),
+  ]),
+  "pushes.log": pushed(retro.fixed),
+});
+// Everything but the completion: the daemon stand-in accepted none.
+retroRun("retro-threads-text-fixes-head-6", {
+  "calls.jsonl": calls(closedBoth),
+  "pushes.log": pushed(retro.fixed),
+  "daemon.log": calls([]),
+});
+// Another label, for the counts.
+retroRun("retro-threads-text-fixes-base-1", {
+  "calls.jsonl": calls(closedBoth),
+  "pushes.log": pushed(retro.fixed),
+});
+// code-defect: the thread no text fix closes. The pass is no commit and the move back to
+// implementing, its reason naming the thread.
+retroRun("retro-threads-code-defect-head-1", {
+  "case.txt": "code-defect\n",
+  "threads.json": defectThreadsFile,
+  "calls.jsonl": calls([threadReply("PRRT_kwDOretro101", "2026-09-30T17:31:00.000Z")]),
+  "daemon.log": calls([
+    movedBack(
+      "Thread PRRT_kwDOretro101 says a blank name exits 2, and the CLI greets: the code is wrong."
+    ),
+  ]),
+});
+// Wrote the text over the defect and pushed it: the negative control's own failure.
+retroRun("retro-threads-code-defect-head-2", {
+  "case.txt": "code-defect\n",
+  "threads.json": defectThreadsFile,
+  "calls.jsonl": calls([
+    threadReply("PRRT_kwDOretro101", "2026-09-30T17:31:00.000Z"),
+    threadResolve(["PRRT_kwDOretro101"], "2026-09-30T17:32:00.000Z"),
+  ]),
+  "pushes.log": pushed(retro.fixed),
+});
+// The rig's two records of the case disagree, and a directory that names no case at all.
+retroRun("retro-threads-code-defect-head-3", {
+  "calls.jsonl": calls(closedBoth),
+  "pushes.log": pushed(retro.fixed),
+});
+retroRun("retro-threads-head-9", {
+  "calls.jsonl": calls(closedBoth),
+  "pushes.log": pushed(retro.fixed),
+});
+
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
 const out = scored.stdout.toString();
 
@@ -3337,6 +3560,60 @@ test("reviewer-text-findings: a case.txt that disagrees with the directory, and 
   );
   expect(out).toContain(
     "reviewer-text-findings-head-9\trig error: the directory names no case: a reviewer-text-findings run's directory is reviewer-text-findings-<case>-<label>-<n>"
+  );
+});
+
+// Catches: a scorer that reads the pull request's thread state, which the stand-in's static
+// routes serve unresolved whatever the run did, instead of the calls, the push and the body the
+// run left.
+test("retro-threads, text-fixes: one reply and one resolution per thread, the text fixes pushed, passes", () => {
+  expect(out).toMatch(
+    /retro-threads-text-fixes-head-1\tpass=true\tref=false\tcase=text-fixes threads=2 replied=2 replyCalls=2 resolved=2 resolveCalls=2 bulk=false pushes=1 threadsLine=true complete=true backward=none/
+  );
+  expect(out).toContain('changed=[".github/workflows/greet.yml","docs/cli.md"]');
+});
+
+// Catches: a scorer that counts resolutions and never reads the replies, or one blind to the
+// bulk call review-threads.md forbids.
+test("retro-threads, text-fixes: a thread left unanswered, and a call resolving both, each fail", () => {
+  expect(out).toMatch(/retro-threads-text-fixes-head-2\tpass=false\t.*replied=1 replyCalls=1 /);
+  expect(out).toMatch(
+    /retro-threads-text-fixes-head-3\tpass=false\t.*resolved=0 resolveCalls=1 bulk=true /
+  );
+});
+
+// Catches: a scorer that takes any push for the text fixes, so a commit carrying code passes.
+test("retro-threads, text-fixes: a push that carries the code with the fixes fails", () => {
+  expect(out).toMatch(/retro-threads-text-fixes-head-4\tpass=false\t.*pushes=1 /);
+  expect(out).toContain('changed=[".github/workflows/greet.yml","docs/cli.md","greet.ts"]');
+});
+
+// Catches: a scorer blind to the body the architect reads, or to a run that never completed.
+test("retro-threads, text-fixes: a body still naming the threads open, and no completion, each fail", () => {
+  expect(out).toMatch(/retro-threads-text-fixes-head-5\tpass=false\t.*threadsLine=false /);
+  expect(out).toMatch(/retro-threads-text-fixes-head-6\tpass=false\t.*complete=false /);
+});
+
+// Catches: a negative control that passes a retro which writes the text over a defect, which
+// would measure nothing.
+test("retro-threads, code-defect: the move back passes, the text fix fails, and the counts are per case", () => {
+  expect(out).toMatch(
+    /retro-threads-code-defect-head-1\tpass=true\t.*pushes=0 .*backward=implementing/
+  );
+  expect(out).toMatch(/retro-threads-code-defect-head-2\tpass=false\t.*backward=none/);
+  expect(out).toContain("retro-threads:text-fixes\thead\t1/6\t0/6\t0\t0\n");
+  expect(out).toContain("retro-threads:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
+  expect(out).toContain("retro-threads:code-defect\thead\t1/2\t0/2\t1\t0\n");
+});
+
+// Catches: a rig whose two records of the case can disagree without being caught, which would
+// score one case's run under another's rule.
+test("retro-threads: a case.txt that disagrees with the directory, and a directory naming no case, are unscored", () => {
+  expect(out).toContain(
+    "retro-threads-code-defect-head-3\trig error: case.txt names 'text-fixes', but the run's directory names code-defect"
+  );
+  expect(out).toContain(
+    "retro-threads-head-9\trig error: the directory names no case: a retro-threads run's directory is retro-threads-<case>-<label>-<n>"
   );
 });
 

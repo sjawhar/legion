@@ -4,10 +4,11 @@
 // daemon-pane.ts runs it with `go run -overlay` as a main inside a checkout's packages/daemon, the
 // one place the daemon's internal packages can be imported from.
 //
-//	phase <role>             prints the phase the role's worker runs in, the first phase
-//	                         workflow.RoleFor gives to the role, then on a second line the word of
-//	                         the handoff record that phase ends with (handoffWords), empty for a
-//	                         phase that ends with none
+//	phase <role> [<phase>]   prints the phase the role's worker runs in, then on a second line the
+//	                         word of the handoff record that phase ends with (handoffWords), empty
+//	                         for a phase that ends with none. <phase> names it for a role that
+//	                         works more than one (the implementer works implementing and retro);
+//	                         without it, the first phase workflow.RoleFor gives to the role
 //	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh bundle
 //	                         under its LEGION_GH_OWNERS_DIR, and prints its paneResponse (JSON)
 package main
@@ -37,14 +38,18 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-const usage = "usage: daemon-pane phase <role> | pane < request.json"
+const usage = "usage: daemon-pane phase <role> [<phase>] | pane < request.json"
 
 func main() {
 	args := os.Args[1:]
 	var err error
 	switch {
-	case len(args) == 2 && args[0] == "phase":
-		err = printPhase(claim.Role(args[1]))
+	case (len(args) == 2 || len(args) == 3) && args[0] == "phase":
+		want := phase.Phase("")
+		if len(args) == 3 {
+			want = phase.Phase(args[2])
+		}
+		err = printPhase(claim.Role(args[1]), want)
 	case len(args) == 1 && args[0] == "pane":
 		err = pane()
 	default:
@@ -66,13 +71,21 @@ var handoffWords = map[phase.Phase]string{
 	phase.Planning: "plan", phase.Implementing: "implement", phase.Testing: "test", phase.Reviewing: "review",
 }
 
-func printPhase(role claim.Role) error {
+// printPhase prints the phase `role` works and that phase's handoff word. `want` is the phase the
+// caller asks for, for a role that works more than one: the daemon starts the implementer in
+// implementing and again in retro, and the two differ in what a completion must name. Empty, the
+// answer is the first phase of the transition table the role works.
+func printPhase(role claim.Role, want phase.Phase) error {
 	for _, p := range phase.All {
-		if workflow.RoleFor(p) == role {
-			fmt.Println(p)
-			fmt.Println(handoffWords[p])
-			return nil
+		if workflow.RoleFor(p) != role || (want != "" && p != want) {
+			continue
 		}
+		fmt.Println(p)
+		fmt.Println(handoffWords[p])
+		return nil
+	}
+	if want != "" {
+		return fmt.Errorf("%q works no phase %q", role, want)
 	}
 	return fmt.Errorf("%q works no phase", role)
 }

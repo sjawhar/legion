@@ -1139,6 +1139,33 @@ describe("tester-proof", () => {
     expect(dispatch.results).toEqual([]);
   });
 
+  // Catches: a review handoff recorded under the run's own session, which a retro would read as
+  // its own, or one that records a result against the issue's check, which a reviewer records
+  // none of.
+  test("records the review handoff under the reviewer's session, and no result", async () => {
+    const dir = freshDir("seed");
+    const file = path.join(dir, "fixture.json");
+    await seed.testerProofIssue(file);
+    const body = { schemaVersion: 1, phase: "review", issue: "LWEVAL-2", decision: "approved" };
+    writeFileSync(path.join(dir, "review.json"), JSON.stringify(body));
+    await seed.reviewHandoff(file, path.join(dir, "review.json"));
+    expect(dispatch.handoffs).toEqual([
+      expect.objectContaining({
+        issue_key: "LWEVAL-2",
+        phase: "review",
+        version: 1,
+        author: seed.REVIEWER,
+        body: JSON.stringify(body),
+      }),
+    ]);
+    expect(dispatch.results).toEqual([]);
+    expect(seed.REVIEWER.id).not.toBe(runSession.id);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      issue: "LWEVAL-2",
+      review: { id: dispatch.handoffs[0]?.id, version: 1 },
+    });
+  });
+
   // Catches: a capture that keeps only the metadata Dispatch lists, or loses the newest-first order
   // the score reads the run's own newest test record by.
   test("captures every record of the issue, newest first, each with its body", async () => {

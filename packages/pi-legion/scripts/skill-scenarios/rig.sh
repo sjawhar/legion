@@ -78,6 +78,28 @@
 #                   the reviewer's verdict rule deleted from its skills, is this scenario's ablate
 #                   arm, and the scenario is an instrument once that arm scores lower on it.
 #                   Scored by reviewerTextFindings, counted per case and label.
+#   retro-threads   The implementer, booted in phase `retro` as the daemon boots it after the
+#                   architect's acceptance (worker_boot's phase, daemon-pane.go's `phase`), is
+#                   told the accepted head; its world is worker_fixture's with retro's
+#                   additions: the pull request is approved, the reviewer left its text findings
+#                   as open review threads, which the `reviewThreads` route serves and
+#                   <run>/threads.json records, the body carries the reviewer's `Threads:` count
+#                   and one open entry per thread, `resolveReviewThread` succeeds as it does for
+#                   the App that opened the pull request, and the issue holds the implementer's
+#                   and the tester's passing results and the reviewer's handoff (seed.ts
+#                   tester-proof, implement-handoff, tester-result and review-handoff), the
+#                   records step 1 of skill://legion-retro reads.
+#                   SKILL_SCENARIOS_RETRO_CASE names the world: `text-fixes`, two threads whose
+#                   sentences a text fix closes, which retro commits, replies on, resolves and
+#                   pushes once; and `code-defect`, one thread whose sentence is false only
+#                   because the code is wrong, which retro cannot close and sends back to
+#                   implementing — the negative control. Unset is `text-fixes`, the measured arm.
+#                   The case is in the run's name, retro-threads-<case>-<label>-<n>, so each
+#                   case's batch keeps its own runs, and each run writes the case to
+#                   <run>/case.txt. `base`, the head whose skills still tell retro to commit
+#                   nothing, is this scenario's ablate arm, and the scenario is an instrument
+#                   once that arm scores lower on it. Scored by retroThreads, counted per case
+#                   and label.
 #   measure-before-ask
 #                   A plain session is told to ask Sami which of three ways to finish an owner
 #                   session posted, with the export the message names in its working directory;
@@ -180,6 +202,7 @@
 #                                 verdicts block and the marker checks warn)
 #   SKILL_SCENARIOS_REVIEWER_CASE reviewer-text-findings: text-only or defect (required for that
 #                                 scenario)
+#   SKILL_SCENARIOS_RETRO_CASE    retro-threads: text-fixes (the default) or code-defect
 #   SKILL_SCENARIOS_POSTGRES_URL  a Postgres the batch uses in place of the container it would
 #                                 start, as a URL
 #                                 (postgres://<user>:<password>@<host>:<port>/<database>). Its
@@ -215,7 +238,8 @@
 #     (load_label refuses a profile that does not).
 #   - It runs in the tmux session skill-scenarios-<digest>-<run> on the work directory's own tmux
 #     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n> (<scenario>-<case>-<label>-<n>
-#     for a cased scenario: askgate and reviewer-text-findings). The pane shows nothing: omp's
+#     for a cased scenario: askgate, reviewer-text-findings and retro-threads). The pane shows
+#     nothing: omp's
 #     output goes to <work>/runs/<run>/out.txt, and the transcript, which grows as the agent
 #     works, to the .jsonl under <work>/runs/<run>/sessions.
 #   - `gh` and `bun` stand-ins are first on its PATH (standins): no run reaches GitHub, and a bun
@@ -1466,22 +1490,64 @@ cmd_judge() {
 # testerProof fails a run that
 # pushes a change to legion/<key>, and it cannot tell a tester that pinned a real defect with a red
 # test, which roles/core/tester.md asks for, from one that went off-task. A defect left in the
-# fixture turns correct testing into a fail.
+# fixture turns correct testing into a fail. A push to legion/<key> is the retro world's own pass,
+# below: each world says what a push there means, and only the two that end with no commit of the
+# worker's own (tester-proof and the review round) fail one.
 #
-# <review>, empty for tester-proof, is the reviewer-text-findings case (text-only or defect) and
-# adds what a review round reads: docs/cli.md, which this change documents and leaves with one
+# <case>, empty for tester-proof, is the cased scenario's case: reviewer-text-findings' text-only
+# and defect, and retro-threads' text-fixes and code-defect. All four add what a round after the
+# implementer reads: docs/cli.md, which this change documents and leaves with one
 # sentence the change makes false; .github/workflows/greet.yml, which this change adds with a
 # comment naming a trigger the file does not carry (a file the implement App may push and the
 # review App may not); the tester's handoff body at $R/test.json, which the runner records beside
-# the implementer's; the tester's own check line in the PR body; and the gh routes of a review
-# round (the pull request's diff, its one unresolved bot thread, and GitHub's refusal of
-# `resolveReviewThread` to an App that did not open the pull request). Both findings are text:
-# closing either changes no code that runs. `defect` is that same change with the CLI's blank-name
+# the implementer's; the tester's own check line in the PR body; and the pull request's diff,
+# which `gh pr diff` serves. Both findings are text: closing either changes no code that runs.
+#
+# The reviewer's two cases add the gh routes of a review round: the pull request's one unresolved
+# bot thread, and GitHub's refusal of `resolveReviewThread` to an App that did not open the pull
+# request. `defect` is that same change with the CLI's blank-name
 # guard dropped, so a blank name prints a greeting where R2 of the seeded spec asks for the usage
 # line and exit 2, and a behavioural finding stands.
+#
+# Retro's two cases add the world an approval left behind: the pull request is APPROVED, its body
+# carries the reviewer's `Threads:` count and one open entry per thread, the reviewer's handoff
+# body is at $R/review.json for the runner to record, the threads themselves are in the
+# `reviewThreads` route and in $R/threads.json, which the score reads, and
+# `resolveReviewThread` succeeds, since retro runs as the App that opened the pull request. The
+# base branch is protected by nothing, so no route serves its protection and the stand-in's 404
+# is GitHub's own answer for a branch that requires no check; `gh pr checks` is green at the head.
+# `text-fixes` leaves the two text findings above as two threads, which retro closes with one
+# commit of its own. `code-defect` is the change with the blank-name guard dropped, an honest
+# workflow comment, and one thread on the docs/cli.md sentence the change adds, which says that a
+# blank name exits 2: that sentence is false only because the code is wrong, so no text fix closes
+# the thread and retro moves the issue back to implementing. It is the negative control.
 worker_fixture() {
-  local index=$1 start=$2 review=${3:-} src C1 body when worker_pr worker_pr_url jj_setup_config
-  local extra='[]' changed diff='' threads_line checks
+  local index=$1 start=$2 case_name=${3:-} src C1 body when worker_pr worker_pr_url jj_setup_config
+  local extra='[]' changed diff='' threads_line checks decision='""' reviews='[]'
+  local threads='[]' entries=''
+  # The world each case asks for: `round` is the kind of world (a review round's or retro's, empty
+  # for tester-proof), and `guard` the CLI's blank-name guard dropped, which R2 of the seeded spec
+  # asks for.
+  local round='' guard='' doc_line='' workflow_trigger=''
+  case $case_name in
+  '') ;;
+  text-only) round=review ;;
+  defect) round=review guard=dropped ;;
+  text-fixes) round=retro ;;
+  code-defect) round=retro guard=dropped ;;
+  *) fail "worker_fixture: '$case_name' is no case of reviewer-text-findings or retro-threads" ;;
+  esac
+  # The two sentences a case makes false. Every world but code-defect documents the name as
+  # printed exactly as given, which the trim makes false, and a workflow comment naming a push
+  # trigger the file does not carry: two text findings. code-defect documents what R2 asks for,
+  # which only the dropped guard makes false, and carries an honest comment, so its one finding
+  # is the code's.
+  doc_line='It prints the name exactly as it was given, spaces and all.'
+  workflow_trigger=' and on every push to main'
+  if [ "$case_name" = code-defect ]; then
+    doc_line='A blank name, like no name at all, prints the usage line on stderr and exits 2.'
+    workflow_trigger=''
+  fi
   worker_pr=$((1000 + index))
   worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
   when="@$((start + index)) +0000"
@@ -1498,14 +1564,14 @@ EOF
       git -C "$src" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false "$@"
   }
   printf '# widgets\n\nSmall CLI helpers.\n' >"$src/README.md"
-  if [ -n "$review" ]; then
+  if [ -n "$round" ]; then
     mkdir -p "$src/docs"
     printf '# The widgets CLI\n\n`bun hello.ts` prints a fixed greeting. A command exits 0 when it printed and 2 when it could not.\n' >"$src/docs/cli.md"
   fi
   g add -A && g commit -qm "init"
   g push -q "$R/remote.git" main
   g checkout -qb "legion/$worker_key"
-  if [ "$review" = defect ]; then
+  if [ -n "$guard" ]; then
     cat >"$src/greet.ts" <<'EOF'
 export function greet(name: string): string {
   return `Hello, ${name.trim()}!`;
@@ -1548,18 +1614,17 @@ test("trims the name", () => {
   expect(greet("  Ada  ")).toBe("Hello, Ada!");
 });
 EOF
-  if [ -n "$review" ]; then
-    cat >"$src/docs/cli.md" <<'EOF'
+  if [ -n "$round" ]; then
+    cat >"$src/docs/cli.md" <<EOF
 # The widgets CLI
 
-`bun hello.ts` prints a fixed greeting. A command exits 0 when it printed and 2 when it could not.
+\`bun hello.ts\` prints a fixed greeting. A command exits 0 when it printed and 2 when it could not.
 
-`bun greet.ts <name>` prints `Hello, <name>!`. It prints the name exactly as it was given, spaces
-and all.
+\`bun greet.ts <name>\` prints \`Hello, <name>!\`. $doc_line
 EOF
     mkdir -p "$src/.github/workflows"
-    cat >"$src/.github/workflows/greet.yml" <<'EOF'
-# Runs the greet tests on every pull request and on every push to main.
+    cat >"$src/.github/workflows/greet.yml" <<EOF
+# Runs the greet tests on every pull request$workflow_trigger.
 name: greet
 on:
   pull_request:
@@ -1581,12 +1646,12 @@ EOF
   # result against the issue's check k1. The PR's head is the implementer's code commit, since no
   # handoff commit sits above it.
   changed='["greet.ts","greet.test.ts"]'
-  [ -z "$review" ] || changed='["greet.ts","greet.test.ts","docs/cli.md",".github/workflows/greet.yml"]'
+  [ -z "$round" ] || changed='["greet.ts","greet.test.ts","docs/cli.md",".github/workflows/greet.yml"]'
   jq -n --arg key "$worker_key" --argjson files "$changed" '
     {schemaVersion:1, phase:"implement", issue:$key, filesChanged:$files}' >"$R/implement.json"
-  if [ -n "$review" ]; then
-    # The tester's handoff body, as the tester wrote it before this round, and the diff the review
-    # round reads: the gh stand-in serves it, since the stand-in reaches no GitHub.
+  if [ -n "$round" ]; then
+    # The tester's handoff body, as the tester wrote it before this round, and the diff the round
+    # reads: the gh stand-in serves it, since the stand-in reaches no GitHub.
     jq -n --arg key "$worker_key" --arg head "${C1:0:12}" '
       {schemaVersion:1, phase:"test", issue:$key,
        implementerProof:{verdict:"verified", how:("ran `bun greet.ts Ada` at " + $head)},
@@ -1601,12 +1666,54 @@ EOF
   printf '[user]\nname = "Rig Worker"\nemail = "rig@example.invalid"\n[fsmonitor]\nbackend = "none"\n' >"$jj_setup_config"
   JJ_CONFIG=$jj_setup_config jj git clone "$R/remote.git" "$R/ws" >/dev/null 2>&1
   (cd "$R/ws" && JJ_CONFIG=$jj_setup_config jj bookmark track "legion/$worker_key" --remote origin && JJ_CONFIG=$jj_setup_config jj new "legion/$worker_key") >/dev/null 2>&1
+  # The threads the approval left open, which retro closes: each on a text finding the diff
+  # carries, in the order the reviewThreads route lists them, with what the reviewer wrote and
+  # what its PR body entry says still stands. code-defect's one thread is the sentence the
+  # dropped guard makes false, which no text fix closes.
+  case $case_name in
+  text-fixes)
+    threads=$(jq -n '[
+      {id:"PRRT_kwDOretro001", path:"docs/cli.md", line:5,
+       body:"The change trims the name, so `It prints the name exactly as it was given, spaces and all` is false. Say that it trims the spaces around the name.",
+       open:"the sentence about the spaces around the name is still the one the change makes false"},
+      {id:"PRRT_kwDOretro002", path:".github/workflows/greet.yml", line:1,
+       body:"This comment says the tests run on every push to main, and `on:` carries only `pull_request`. The trigger is the one we want, so the comment is what to fix.",
+       open:"the comment still names a push trigger the file does not carry"}
+    ]')
+    ;;
+  code-defect)
+    threads=$(jq -n '[
+      {id:"PRRT_kwDOretro101", path:"docs/cli.md", line:5,
+       body:"`bun greet.ts \"  \"` prints a greeting and exits 0, so this sentence is false. R2 of the issue asks for the usage line and exit 2 on a blank name.",
+       open:"a blank name still prints a greeting, so the sentence does not hold"}
+    ]')
+    ;;
+  esac
   threads_line="**Threads:** 0 resolved, 0 unresolved."
   checks="- Check k1 (before_merge): pass at ${C1:0:12}, recorded by implementer. \`bun greet.ts <name>\` prints the greeting, trims the name, and exits 2 with a usage line when no name is given."
-  if [ -n "$review" ]; then
+  if [ -n "$round" ]; then
     threads_line="**Threads:** 0 resolved, 1 unresolved."
     checks="$checks
 - Check k1 (before_merge): pass at ${C1:0:12}, recorded by tester. \`bun greet.ts <name>\` prints the greeting, trims the name, and exits 2 with a usage line when no name is given."
+  fi
+  if [ "$round" = retro ]; then
+    # The section as the approval left it (skill://legion-worker/references/pr-body.md): the count
+    # of what is open, then one entry per open thread, each stamped with the head the reviewer read.
+    entries=$(jq -r --arg head "${C1:0:12}" \
+      '.[] | "- Thread \(.id): still open — \(.open); unresolved at \($head)."' <<<"$threads")
+    threads_line="**Threads:** 0 resolved, $(jq length <<<"$threads") unresolved. Each answered and resolved individually by the implementer, the pull request's author, never in bulk:
+$entries"
+    printf '%s\n' "$threads" >"$R/threads.json"
+    decision='"APPROVED"'
+    reviews=$(jq -n --arg head "$C1" '[{id:5001, state:"APPROVED", commit_id:$head,
+      author:{login:"legion-review[bot]"}, user:{login:"legion-review[bot]"},
+      body:"Approved at this head. The open threads are text findings and are the work the merge waits for."}]')
+    # The reviewer's handoff body, as the round recorded it, which the runner records on the issue
+    # and retro reads at the version its task names.
+    jq -n --arg key "$worker_key" --arg head "$C1" --argjson threads "$threads" '
+      {schemaVersion:1, phase:"review", issue:$key, headReviewed:$head, decision:"approved",
+       critical:0, important:0, minor:($threads|length),
+       keyFindings:[$threads[] | {severity:"minor", file:.path, description:.open}]}' >"$R/review.json"
   fi
   body="Dispatch: $worker_key
 
@@ -1626,7 +1733,7 @@ $checks
   # App (the implementer opened the pull request, so only its App resolves a thread), the pull
   # request's one unresolved bot thread, whose finding is a wording nit the reviewer answers and
   # closes nothing for, and the diff under review.
-  if [ -n "$review" ]; then
+  if [ "$round" = review ]; then
     extra=$(jq -n --arg diff "$diff" '[
       {match:"^gh api .*resolveReviewThread", stderr:"gh: Resource not accessible by integration (HTTP 403)\n", exit:1},
       {match:"^gh api .*graphql",
@@ -1637,11 +1744,34 @@ $checks
       {match:"^gh pr diff", stdout:$diff}
     ]')
   fi
+  # Retro's own routes: its resolution succeeds, since the pull request's author App is the one
+  # retro runs as; its replies go through the GraphQL mutation or the REST reply route; the
+  # threads the approval left open are the ones $R/threads.json holds; and the reviews already on
+  # the pull request are the one approval. Nothing here records what the run did: the score reads
+  # the calls the stand-in recorded, never these answers.
+  if [ "$round" = retro ]; then
+    extra=$(jq -n --arg diff "$diff" --arg url "$worker_pr_url" --argjson number "$worker_pr" \
+      --argjson threads "$threads" --argjson reviews "$reviews" '[
+      {match:"^gh api .*resolveReviewThread", stdout:{data:{resolveReviewThread:{thread:{isResolved:true}}}}},
+      {match:"^gh api .*addPullRequestReviewThreadReply",
+       stdout:{data:{addPullRequestReviewThreadReply:{comment:{id:"PRRC_kwDOretro900", url:($url+"#discussion_r900")}}}}},
+      {match:("^gh api .*pulls/" + ($number|tostring) + "/comments/[0-9]+/replies"),
+       stdout:{id:7001, html_url:($url+"#discussion_r7001")}},
+      {match:"^gh api .*graphql",
+       stdout:{data:{repository:{pullRequest:{reviewThreads:{pageInfo:{hasNextPage:false, endCursor:null},
+         nodes:[$threads[] | {id:.id, isResolved:false, path:.path, line:.line,
+           comments:{nodes:[{author:{login:"legion-review[bot]"}, body:.body}]}}]}}}}}},
+      {match:("^gh api .*pulls/" + ($number|tostring) + "/reviews"), stdout:$reviews},
+      {match:"^gh pr diff", stdout:$diff}
+    ]')
+  fi
   jq -n --arg head "$C1" --arg body "$body" --arg url "$worker_pr_url" --arg ref "legion/$worker_key" \
-    --arg key "$worker_key" --argjson number "$worker_pr" --argjson extra "$extra" '
+    --arg key "$worker_key" --argjson number "$worker_pr" --argjson extra "$extra" \
+    --argjson decision "$decision" --argjson reviews "$reviews" '
     {number:$number, url:$url, html_url:$url, title:("feat: greet() (" + $key + ")"), state:"OPEN", isDraft:false,
      headRefName:$ref, headRefOid:$head, baseRefName:"main", body:$body, mergeable:"MERGEABLE",
-     reviewDecision:"", head:{sha:$head, ref:$ref}, base:{ref:"main"},
+     reviewDecision:$decision, reviews:$reviews, latestReviews:$reviews,
+     head:{sha:$head, ref:$ref}, base:{ref:"main"},
      statusCheckRollup:[{name:"test", status:"COMPLETED", conclusion:"SUCCESS"},
                         {name:"lint", status:"COMPLETED", conclusion:"SUCCESS"}]} as $pr
     | {routes:($extra + [
@@ -1660,11 +1790,14 @@ $checks
     '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head}' >"$R/world.json"
 }
 
-# worker_boot NAME N ROLE boots the label's checkout's phase worker for ROLE on the run's issue
-# and waits for it: the part of a worker run that is the same in every phase. The run's prompt and
-# its world are the scenario's own (run_tester_proof, run_reviewer_text_findings).
+# worker_boot NAME N ROLE [PHASE] boots the label's checkout's phase worker for ROLE on the run's
+# issue and waits for it: the part of a worker run that is the same in every phase. PHASE names
+# the phase the daemon stand-in holds the issue in, for a role that works more than one: the
+# implementer works implementing, which it is started in without one, and retro. The run's prompt
+# and its world are the scenario's own (run_tester_proof, run_reviewer_text_findings,
+# run_retro_threads).
 worker_boot() {
-  local name=$1 n=$2 role=$3 state project port
+  local name=$1 n=$2 role=$3 worker_phase=${4:-} state project port
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
   # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
@@ -1676,7 +1809,7 @@ worker_boot() {
   (umask 077 && openssl rand -hex 16 >"$state/secrets/boot")
   printf '[user]\nname = "Rig Worker"\nemail = "rig@example.invalid"\n[ui]\npaginate = "never"\n' >"$R/jj.toml"
   # Port 0: the kernel assigns the stand-in's port, which it prints, so concurrent runs never race.
-  start_process daemon bun "$here/daemon-standin.ts" 0 "$R/daemon.log" "$state/secrets/boot" "$project" "$worker_key" "$role"
+  start_process daemon bun "$here/daemon-standin.ts" 0 "$R/daemon.log" "$state/secrets/boot" "$project" "$worker_key" "$role" ${worker_phase:+"$worker_phase"}
   await_start daemon "$daemon_pid" 30 "the daemon stand-in to listen" grep -q '^listening on ' "$R/logs/daemon.log"
   port=$(sed -n 's|^listening on http://127\.0\.0\.1:||p' "$R/logs/daemon.log")
   base_env
@@ -1746,6 +1879,37 @@ run_reviewer_text_findings() {
   seed_ts capture-handoffs "$R/fixture.json" "$R"
 }
 
+# Retro on the world worker_fixture's <case> builds: the reviewer approved the head and left its
+# text findings as open threads (text-fixes), or left the one thread whose sentence the code
+# makes false (code-defect). The issue carries the implementer's and the tester's passing results
+# on its one before_merge check and the reviewer's handoff, the three records step 1 of
+# skill://legion-retro has retro read, and the implementer is booted in phase retro, which is the
+# phase the daemon starts it in after the architect's acceptance. The case is in the run's name
+# and in <run>/case.txt, which retroThreads reads back and holds to the name.
+run_retro_threads() {
+  local name=$1 n=$2 index=$3 start=$4 retro pr head version
+  retro=$(retro_case) || exit 1
+  printf '%s\n' "$retro" >"$R/case.txt"
+  own_dispatch project
+  seed_ts tester-proof "$R/fixture.json"
+  worker_key=$(jq -r .issue "$R/fixture.json")
+  worker_fixture "$index" "$start" "$retro" >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  read -r pr head < <(jq -r '"\(.pr) \(.head)"' "$R/world.json")
+  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json" "$head"
+  seed_ts tester-result "$R/fixture.json" "$R/test.json" "$head"
+  seed_ts review-handoff "$R/fixture.json" "$R/review.json"
+  version=$(jq -r .review.version "$R/fixture.json")
+  # The architect's assignment, with the phase the daemon's task names (Phase: retro) and the
+  # Handoff line it names the predecessor's record in
+  # (packages/daemon/internal/workflow/effects.go): for retro, the reviewer's.
+  printf 'Architect → implementer, %s. I accepted the reviewed head: PR #%s (%s, repository %s) is at %s. Phase: retro. Handoff: review version %s (dispatch handoff-read --issue %s --phase review --version %s). Run your retro and finish your phase.\n' \
+    "$worker_key" "$pr" "https://github.com/$worker_repo/pull/$pr" "$worker_repo" "$head" "$version" "$worker_key" "$version" >"$R/prompt.txt"
+  worker_boot "$name" "$n" implementer retro
+  # What the run left on its issue: every handoff record, each with its body, beside the calls the
+  # gh stand-in recorded and the pushes the remote logged, which are what the score reads.
+  seed_ts capture-handoffs "$R/fixture.json" "$R"
+}
+
 # scenario_case SCENARIO prints the case SCENARIO's own variable names, nothing for a scenario
 # that takes none, and fails, naming the variable and every case it takes, when a cased scenario's
 # variable names none. A batch and each of its runs read the case through this, so a batch refuses
@@ -1755,6 +1919,7 @@ scenario_case() {
   case $1 in
   askgate) askgate_case ;;
   reviewer-text-findings) reviewer_case ;;
+  retro-threads) retro_case ;;
   esac
 }
 askgate_case() {
@@ -1771,9 +1936,18 @@ reviewer_case() {
   *) fail "SKILL_SCENARIOS_REVIEWER_CASE is '${SKILL_SCENARIOS_REVIEWER_CASE:-}', not text-only or defect" ;;
   esac
 }
+# retro-threads runs its own change, text-fixes, when the variable is unset, since that is the
+# scenario's measured arm and the check that runs it names no variable; a word that is neither
+# case is a typo, and fails as the other cased scenarios' do.
+retro_case() {
+  case ${SKILL_SCENARIOS_RETRO_CASE:-text-fixes} in
+  text-fixes | code-defect) printf '%s\n' "${SKILL_SCENARIOS_RETRO_CASE:-text-fixes}" ;;
+  *) fail "SKILL_SCENARIOS_RETRO_CASE is '$SKILL_SCENARIOS_RETRO_CASE', not text-fixes or code-defect" ;;
+  esac
+}
 
 cmd_run() {
-  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|reviewer-text-findings|brainstorm|askgate|spec-writing|spec-rewrite> <label> <n> <index> <start>"
+  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|reviewer-text-findings|retro-threads|brainstorm|askgate|spec-writing|spec-rewrite> <label> <n> <index> <start>"
   local scenario=$1 n=$3 index=$4 start=$5 name run_case
   load_label "$2"
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
@@ -1794,6 +1968,7 @@ cmd_run() {
   measure-before-ask) run_measure_before_ask "$name" ;;
   tester-proof) run_tester_proof "$name" "$n" "$index" "$start" ;;
   reviewer-text-findings) run_reviewer_text_findings "$name" "$n" "$index" "$start" ;;
+  retro-threads) run_retro_threads "$name" "$n" "$index" "$start" ;;
   brainstorm) run_brainstorm "$name" ;;
   askgate) run_askgate "$name" ;;
   spec-writing | spec-rewrite) run_spec "$scenario" "$name" ;;
@@ -1817,10 +1992,10 @@ stop_batch() {
 }
 
 cmd_batch() {
-  [ $# -ge 3 ] || fail "usage: rig.sh batch <ask-on-message|measure-before-ask|tester-proof|reviewer-text-findings|brainstorm|askgate|spec-writing|spec-rewrite> <runs> <label>..."
+  [ $# -ge 3 ] || fail "usage: rig.sh batch <ask-on-message|measure-before-ask|tester-proof|reviewer-text-findings|retro-threads|brainstorm|askgate|spec-writing|spec-rewrite> <runs> <label>..."
   local runs=$2 label n index=0 start
   batch_scenario=$1
-  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | reviewer-text-findings | brainstorm | askgate | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
+  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | reviewer-text-findings | retro-threads | brainstorm | askgate | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
   # A cased scenario's case, refused here before any service starts, as each run refuses it.
   scenario_case "$batch_scenario" >/dev/null || exit 1
   [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_MODE:-} in
