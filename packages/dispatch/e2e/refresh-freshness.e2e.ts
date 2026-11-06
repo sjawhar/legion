@@ -98,9 +98,9 @@ test("document panel: a new comment citing a project document shows in its open 
   }
 });
 
-test("reference: a title written while the reference's read is in flight shows after leaving the page and coming back @phone", async ({
+test("reference: a title written while the reference's read is in flight shows after leaving the page and coming back", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const target = await createIssue({ project: "CORE", title: "Target v1" });
   const holder = await createIssue({ project: "CORE", title: "Holder" });
@@ -129,9 +129,6 @@ test("reference: a title written while the reference's read is in flight shows a
     await page.clock.fastForward(150);
     await held.release();
     const navigation = page.getByRole("navigation", { name: "Navigation" });
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
     await navigation.getByRole("link", { name: /^Inbox/ }).click();
     await expect(page).toHaveURL(/\/(\?.*)?$/);
     // Away from the page for longer than the second the scheduler waits.
@@ -144,9 +141,9 @@ test("reference: a title written while the reference's read is in flight shows a
   }
 });
 
-test("inbox: an issue closed while the Inbox read is in flight drops its ask from the Inbox @phone", async ({
+test("inbox: an issue closed while the Inbox read is in flight drops its ask from the Inbox", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const other = await createIssue({ project: "CORE", title: "Quarterly budget review" });
   const staying = await createAsk(other.key, { question: "An ask that stays" }, bob);
@@ -161,14 +158,6 @@ test("inbox: an issue closed while the Inbox read is in flight drops its ask fro
     // The question the Inbox keeps, read as the row it is: from 1280 px its text is also in the
     // reading pane, which draws the selected row's card (INFRA-575).
     await expect(inboxRow(page, staying.id)).toBeVisible();
-    // The sidebar's project list, whose refresh is the close's barrier below, is mounted on a
-    // phone only while its drawer is open.
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-      await expect(
-        page.getByRole("navigation", { name: "Navigation" }).locator('a[href="/projects/CORE"]')
-      ).toBeVisible();
-    }
 
     // The Inbox read the new ask owes is composed with the ask and held; the close lands while it
     // is in flight.

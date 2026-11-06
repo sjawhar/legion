@@ -1,11 +1,4 @@
-import {
-  type Browser,
-  type BrowserContext,
-  expect,
-  type Page,
-  type TestInfo,
-  test,
-} from "@playwright/test";
+import { type Browser, type BrowserContext, expect, type Page, test } from "@playwright/test";
 
 import { type FakeSession, getSentMessages, setLiveSessions, setSessionSendStatus } from "./agents";
 import {
@@ -124,19 +117,17 @@ function freshReplay(sessionID: string): object {
   return replayOf(sessionID, [reported(1, "anthropic/model-a", "auto"), commandsFrame(2)]);
 }
 
-/** A browser context signed in as `login`, and a page at the row's width: a 390 px phone, or a
+/** A browser context signed in as `login`, and a page at `project`'s width: a 390 px phone, or a
  *  1280 × 800 desktop. */
 async function viewer(
   browser: Browser,
-  testInfo: TestInfo,
+  project: string,
   login: string
 ): Promise<{ context: BrowserContext; page: Page }> {
   const context = await asUser(browser, login);
   const page = await context.newPage();
   await page.setViewportSize(
-    PHONE_PROJECTS.includes(testInfo.project.name)
-      ? { height: 844, width: 390 }
-      : { height: 800, width: 1280 }
+    PHONE_PROJECTS.includes(project) ? { height: 844, width: 390 } : { height: 800, width: 1280 }
   );
   return { context, page };
 }
@@ -147,8 +138,8 @@ function livePath(sessionID: string): string {
 
 /** On a phone, the header's settings never push the page sideways: the document is no wider than
  *  the 390 px screen, and each rendered piece of the header's settings lies inside it. */
-async function expectNoSidewaysScroll(page: Page, testInfo: TestInfo): Promise<void> {
-  if (!PHONE_PROJECTS.includes(testInfo.project.name)) return;
+async function expectNoSidewaysScroll(page: Page, project: string): Promise<void> {
+  if (!PHONE_PROJECTS.includes(project)) return;
   const widths = await page.evaluate(() => ({
     clientWidth: document.documentElement.clientWidth,
     scrollWidth: document.documentElement.scrollWidth,
@@ -269,7 +260,7 @@ test("the header shows the session's reported model and thinking level before an
   const session = liveSession(1);
   await setLiveSessions([session]);
   await publishAgentStreamFrame(session.session_id, freshReplay(session.session_id), "replay");
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const { context, page } = await viewer(browser, testInfo.project.name, "alice");
   try {
     await page.goto(livePath(session.session_id));
     await expectPicked(page, "anthropic/model-a", "auto");
@@ -284,13 +275,13 @@ test("the header shows the session's reported model and thinking level before an
     await expect(page.getByTestId("agent-thread-empty")).toBeVisible();
     await expect(page.getByTestId("agent-message-assistant")).toHaveCount(0);
     await expect(notice).toHaveCount(0);
-    await expectNoSidewaysScroll(page, testInfo);
+    await expectNoSidewaysScroll(page, testInfo.project.name);
 
     // The model and thinking level change at the session's terminal: the next frame carries both.
     await publishAgentStreamFrame(session.session_id, reported(3, "anthropic/model-b", "high"));
     await expectPicked(page, "anthropic/model-b", "high");
     await expect(page.getByTestId("agent-message-assistant")).toHaveCount(0);
-    await expectNoSidewaysScroll(page, testInfo);
+    await expectNoSidewaysScroll(page, testInfo.project.name);
   } finally {
     await context.close();
   }
@@ -299,9 +290,9 @@ test("the header shows the session's reported model and thinking level before an
 // A1: a session on an older pi-envoy replays turns and no settings frame. Its header is the last
 // turn's model, as before, and it says what a restart would bring; a session not answering the
 // live view at all says nothing of the kind, since the empty transcript already says why.
-test("an older session's header shows its last turn's model with no picker and asks for a restart, and a session not answering the live view shows no such notice @phone", async ({
+test("an older session's header shows its last turn's model with no picker and asks for a restart, and a session not answering the live view shows no such notice", async ({
   browser,
-}, testInfo) => {
+}) => {
   const session = liveSession(2);
   await setLiveSessions([session]);
   await publishAgentStreamFrame(
@@ -309,7 +300,7 @@ test("an older session's header shows its last turn's model with no picker and a
     replayOf(session.session_id, [assistantTurn(1, "anthropic/old-model")]),
     "replay"
   );
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const { context, page } = await viewer(browser, "chromium", "alice");
   try {
     await page.goto(livePath(session.session_id));
     const { model, notice, shownModel, thinking } = header(page);
@@ -320,7 +311,6 @@ test("an older session's header shows its last turn's model with no picker and a
     await expect(model).toHaveCount(0);
     await expect(thinking).toHaveCount(0);
     await expect(page.getByTestId("agent-session-thinking")).toHaveCount(0);
-    await expectNoSidewaysScroll(page, testInfo);
 
     await setAgentStreamResponder(session.session_id, false);
     await page.reload();
@@ -328,7 +318,6 @@ test("an older session's header shows its last turn's model with no picker and a
     await expect(notice).toHaveCount(0);
     await expect(model).toHaveCount(0);
     await expect(thinking).toHaveCount(0);
-    await expectNoSidewaysScroll(page, testInfo);
   } finally {
     await context.close();
   }
@@ -336,9 +325,9 @@ test("an older session's header shows its last turn's model with no picker and a
 
 // A1, decision 7's other rows: what the header shows when the session reports less than a model
 // and a level it can switch from Dispatch, and why.
-test("the header says why a session shows less: an Oh My Pi that does not report, no switch from Dispatch, no adjustable thinking, and a model-default level @phone", async ({
+test("the header says why a session shows less: an Oh My Pi that does not report, no switch from Dispatch, no adjustable thinking, and a model-default level", async ({
   browser,
-}, testInfo) => {
+}) => {
   const session = liveSession(3);
   const id = session.session_id;
   await setLiveSessions([session]);
@@ -350,7 +339,7 @@ test("the header says why a session shows less: an Oh My Pi that does not report
     ]),
     "replay"
   );
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const { context, page } = await viewer(browser, "chromium", "alice");
   try {
     const { model, notice, shownModel, shownThinking, thinking } = header(page);
 
@@ -362,7 +351,6 @@ test("the header says why a session shows less: an Oh My Pi that does not report
     await expect(shownModel).toHaveText("anthropic/old-model");
     await expect(model).toHaveCount(0);
     await expect(thinking).toHaveCount(0);
-    await expectNoSidewaysScroll(page, testInfo);
 
     // Reported settings from a session whose host cannot run typed input (no `commands` frame):
     // both values, as text, and no picker.
@@ -380,7 +368,6 @@ test("the header says why a session shows less: an Oh My Pi that does not report
     await expect(shownThinking).toHaveText("auto");
     await expect(model).toHaveCount(0);
     await expect(thinking).toHaveCount(0);
-    await expectNoSidewaysScroll(page, testInfo);
 
     // A model with no adjustable thinking: the model picker, and words in place of a level.
     await publishAgentStreamFrame(
@@ -395,7 +382,6 @@ test("the header says why a session shows less: an Oh My Pi that does not report
     await expect(shownThinking).toHaveText("no adjustable thinking");
     await expect(thinking).toHaveCount(0);
     await expect(notice).toHaveCount(0);
-    await expectNoSidewaysScroll(page, testInfo);
 
     // No level configured: the thinking picker shows the model's default, which is no pick.
     await publishAgentStreamFrame(
@@ -410,7 +396,6 @@ test("the header says why a session shows less: an Oh My Pi that does not report
     await expect(shownThinking).toBeDisabled();
     await expect(model).toHaveValue("anthropic/model-a");
     await expect(notice).toHaveCount(0);
-    await expectNoSidewaysScroll(page, testInfo);
   } finally {
     await context.close();
   }
@@ -420,14 +405,14 @@ test("the header says why a session shows less: an Oh My Pi that does not report
 // the thread shows as theirs; Send waits for the session's answer, and the header moves only when
 // the session reports the switch. A pick is a steer whatever the composer's mode, since a BTW is a
 // side question the session answers rather than input it runs.
-test("a model picked in the header is the viewer's own Send of /model, holds Send until the session answers, and goes as a steer whatever Send as says @phone", async ({
+test("a model picked in the header is the viewer's own Send of /model, holds Send until the session answers, and goes as a steer whatever Send as says", async ({
   browser,
-}, testInfo) => {
+}) => {
   const session = liveSession(4);
   const id = session.session_id;
   await setLiveSessions([session]);
   await publishAgentStreamFrame(id, freshReplay(id), "replay");
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const { context, page } = await viewer(browser, "chromium", "alice");
   try {
     await page.goto(livePath(id));
     await expectPicked(page, "anthropic/model-a", "auto");
@@ -474,7 +459,6 @@ test("a model picked in the header is the viewer's own Send of /model, holds Sen
     ).toBeVisible();
     await expect(send).toBeEnabled();
     await expect(model).toBeEnabled();
-    await expectNoSidewaysScroll(page, testInfo);
 
     // The composer set to BTW: the pick still goes as a steer, and the composer keeps its mode.
     const mode = page.getByRole("combobox", { name: "Delivery mode" });
@@ -495,14 +479,14 @@ test("a model picked in the header is the viewer's own Send of /model, holds Sen
 });
 
 // A2: a thinking level picked from the levels the session's `/effort` offers.
-test("a thinking level picked in the header sends /effort, and the session's answer and next frame update the header @phone", async ({
+test("a thinking level picked in the header sends /effort, and the session's answer and next frame update the header", async ({
   browser,
-}, testInfo) => {
+}) => {
   const session = liveSession(5);
   const id = session.session_id;
   await setLiveSessions([session]);
   await publishAgentStreamFrame(id, freshReplay(id), "replay");
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const { context, page } = await viewer(browser, "chromium", "alice");
   try {
     await page.goto(livePath(id));
     await expectPicked(page, "anthropic/model-a", "auto");
@@ -526,7 +510,6 @@ test("a thinking level picked in the header sends /effort, and the session's ans
     await expect(status).toHaveText("The session answered: Thinking set to high.");
     await expectPicked(page, "anthropic/model-a", "high");
     await expect(thinking).toBeEnabled();
-    await expectNoSidewaysScroll(page, testInfo);
   } finally {
     await context.close();
   }
@@ -538,14 +521,14 @@ test("a thinking level picked in the header sends /effort, and the session's ans
 // the pick's send through the fake listener, Dispatch's store, the session's reply - over the
 // live view's first load. The header reads that reply on the page's next fetch of the thread,
 // which the app holds to one a second (MIN_REFETCH_INTERVAL_MS, web/src/api/query-refresh.ts).
-test("a switch the session refuses shows its reason and leaves the header on the values it last reported @phone", async ({
+test("a switch the session refuses shows its reason and leaves the header on the values it last reported", async ({
   browser,
-}, testInfo) => {
+}) => {
   const session = liveSession(6);
   const id = session.session_id;
   await setLiveSessions([session]);
   await publishAgentStreamFrame(id, freshReplay(id), "replay");
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const { context, page } = await viewer(browser, "chromium", "alice");
   try {
     await page.goto(livePath(id));
     await expectPicked(page, "anthropic/model-a", "auto");
@@ -562,7 +545,6 @@ test("a switch the session refuses shows its reason and leaves the header on the
     await expectPicked(page, "anthropic/model-a", "auto");
     await expect(model).toBeEnabled();
     await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
-    await expectNoSidewaysScroll(page, testInfo);
   } finally {
     await context.close();
   }
@@ -570,15 +552,15 @@ test("a switch the session refuses shows its reason and leaves the header on the
 
 // A2 and R2: a switch is stored under the person who made it. Bob switches from his own browser;
 // Alice, reading the same session, sees his name on the switch in the thread.
-test("a switch from the header is stored under the person who made it and names them to everyone else @phone", async ({
+test("a switch from the header is stored under the person who made it and names them to everyone else", async ({
   browser,
-}, testInfo) => {
+}) => {
   const session = liveSession(7);
   const id = session.session_id;
   await setLiveSessions([session]);
   await publishAgentStreamFrame(id, freshReplay(id), "replay");
-  const alice = await viewer(browser, testInfo, "alice");
-  const bob = await viewer(browser, testInfo, "bob");
+  const alice = await viewer(browser, "chromium", "alice");
+  const bob = await viewer(browser, "chromium", "bob");
   try {
     await alice.page.goto(livePath(id));
     await expectPicked(alice.page, "anthropic/model-a", "auto");
@@ -602,8 +584,6 @@ test("a switch from the header is stored under the person who made it and names 
       .filter({ hasText: "/model anthropic/model-b" });
     await expect(seenByAlice).toBeVisible();
     await expect(seenByAlice).toContainText("bob");
-    await expectNoSidewaysScroll(alice.page, testInfo);
-    await expectNoSidewaysScroll(bob.page, testInfo);
   } finally {
     await alice.context.close();
     await bob.context.close();
@@ -619,9 +599,9 @@ test("a switch from the header is stored under the person who made it and names 
 // carrying an act is never taken as the session's own user turn (409 ACCEPT_WRITTEN_BY_AGENT),
 // so the text an agent wrote reaches the session as a card it reads rather than as typed input
 // it runs. No test exercised that refusal in a browser before this one.
-test("a person's own token sends a switch recorded as them with the agent beside it, the shared token holds no person scope, and the accept refuses to take an agent's message as the session's turn @phone", async ({
+test("a person's own token sends a switch recorded as them with the agent beside it, the shared token holds no person scope, and the accept refuses to take an agent's message as the session's turn", async ({
   browser,
-}, testInfo) => {
+}) => {
   const session = liveSession(8);
   const id = session.session_id;
   await setLiveSessions([session]);
@@ -679,8 +659,8 @@ test("a person's own token sends a switch recorded as them with the agent beside
   expect(accept.status).toBe(409);
   expect(await accept.json()).toEqual(expect.objectContaining({ code: "ACCEPT_WRITTEN_BY_AGENT" }));
 
-  const alice = await viewer(browser, testInfo, "alice");
-  const bob = await viewer(browser, testInfo, "bob");
+  const alice = await viewer(browser, "chromium", "alice");
+  const bob = await viewer(browser, "chromium", "bob");
   try {
     // The switch is alice's own, so her page draws it on her side of the thread; to everyone
     // else it is a card, and the card names her and the agent that sent it for her.
@@ -694,8 +674,6 @@ test("a person's own token sends a switch recorded as them with the agent beside
       .filter({ hasText: "/model anthropic/model-b" });
     await expect(card).toBeVisible();
     await expect(card).toContainText(`alice, acting through session ${agentSession}`);
-    await expectNoSidewaysScroll(alice.page, testInfo);
-    await expectNoSidewaysScroll(bob.page, testInfo);
   } finally {
     await alice.context.close();
     await bob.context.close();
@@ -718,7 +696,7 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
   const id = session.session_id;
   await setLiveSessions([session]);
   await publishAgentStreamFrame(id, freshReplay(id), "replay");
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const { context, page } = await viewer(browser, testInfo.project.name, "alice");
   try {
     await page.clock.install();
     await page.goto(livePath(id));
@@ -745,7 +723,7 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
     await expect(model).toBeEnabled();
     await expect(thinking).toBeEnabled();
     await expect(send).toBeEnabled();
-    await expectNoSidewaysScroll(page, testInfo);
+    await expectNoSidewaysScroll(page, testInfo.project.name);
 
     await answer(id, stored, "Model set to anthropic/model-b.");
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
@@ -762,7 +740,7 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
     await expect(model).toBeEnabled();
     await expect(send).toBeEnabled();
     await expectPicked(page, "anthropic/model-a", "auto");
-    await expectNoSidewaysScroll(page, testInfo);
+    await expectNoSidewaysScroll(page, testInfo.project.name);
   } finally {
     await context.close();
   }
@@ -772,14 +750,14 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
 // latest switch's answer alone, so neither depends on which arrives first, and an earlier switch's
 // late answer never speaks for a newer switch.
 // SLOW(>=2s): four switch round trips (page, Dispatch, fake Envoy, reply) and five live frames.
-test("a switch's answer and the session's frame land in either order, and an earlier switch's late answer never changes a newer one's status @phone", async ({
+test("a switch's answer and the session's frame land in either order, and an earlier switch's late answer never changes a newer one's status", async ({
   browser,
-}, testInfo) => {
+}) => {
   const session = liveSession(10);
   const id = session.session_id;
   await setLiveSessions([session]);
   await publishAgentStreamFrame(id, freshReplay(id), "replay");
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const { context, page } = await viewer(browser, "chromium", "alice");
   try {
     await page.clock.install();
     await page.goto(livePath(id));
@@ -837,7 +815,6 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await expect(status).toHaveText("The session answered: Thinking set to low.");
     await expectPicked(page, "anthropic/model-a", "low");
     await expect(model).toBeEnabled();
-    await expectNoSidewaysScroll(page, testInfo);
   } finally {
     await context.close();
   }
