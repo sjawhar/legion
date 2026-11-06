@@ -172,8 +172,10 @@ func cloneTestDatabase(t *testing.T, prefix, template string) string {
 	return name
 }
 
-// dropTestDatabase drops name without waiting for it; TestMain waits for every drop. Drops in
-// flight together share one checkpoint.
+// dropTestDatabase drops name without waiting for it; TestMain waits for every drop before it
+// drops the template and returns. Dropping a database forces a checkpoint and waits for it,
+// which a test that waited would spend on its own clock; drops in flight together share one
+// checkpoint.
 func dropTestDatabase(name string) {
 	shared.drops.Go(func() {
 		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {

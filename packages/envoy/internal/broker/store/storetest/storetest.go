@@ -18,8 +18,11 @@
 // runs a Postgres service runs a container deleted with the job, with fsync, full_page_writes and
 // synchronous_commit off.
 //
-// Nothing is handed from one test to the next: a test's database is dropped by its own cleanup,
-// so no test can be given a database another test wrote in.
+// Nothing is handed from one test to the next: a test's database is dropped once the test ends,
+// so no test can be given a database another test wrote in. The drop runs in the background, and
+// Main waits for the drops before it drops the template and returns, so no database outlives the
+// package: dropping a database forces a checkpoint and waits for it, and a test that waited for
+// its own drop spent on its clock the time the server's one checkpointer took to reach it.
 //
 // The harness changes no Postgres setting: fsync, full_page_writes and max_wal_size belong to
 // the whole server DatabaseURLEnv names, which can hold other databases, and a change to them
@@ -209,9 +212,11 @@ func Main(m *testing.M) int {
 	return code
 }
 
-// dropDatabase drops name without waiting for it; Main waits for every drop. Drops in flight
-// together share one checkpoint. It forces the drop, since a test may have left a session of its
-// own on the database.
+// dropDatabase drops name without waiting for it; Main waits for every drop before it drops the
+// template and returns. Dropping a database forces a checkpoint and waits for it, which a test
+// that waited would spend on its own clock (the package comment); drops in flight together share
+// one checkpoint. It forces the drop, since a test may have left a session of its own on the
+// database.
 func dropDatabase(name string) {
 	shared.drops.Go(func() {
 		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {

@@ -25,9 +25,10 @@
 // outlives the run.
 //
 // A test's database is dropped in the background once the test ends, and Main waits for the
-// drops. Dropping a database forces a checkpoint and waits for it, and every package testing
-// against the same server queues on its one checkpointer: a test that waited for its own drop
-// spent that queue's time on its clock.
+// drops before it drops the template and returns, so no database outlives the package. Dropping
+// a database forces a checkpoint and waits for it, and every package testing against the same
+// server queues on its one checkpointer: a test that waited for its own drop spent that queue's
+// time on its clock.
 package storetest
 
 import (
@@ -156,8 +157,10 @@ func Main(m *testing.M) int {
 	return code
 }
 
-// dropDatabase drops name without waiting for it; Main waits for every drop. Drops in flight
-// together share one checkpoint.
+// dropDatabase drops name without waiting for it; Main waits for every drop before it drops the
+// template and returns. Dropping a database forces a checkpoint and waits for it, which a test
+// that waited would spend on its own clock (the package comment); drops in flight together share
+// one checkpoint.
 func dropDatabase(name string) {
 	shared.drops.Go(func() {
 		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
