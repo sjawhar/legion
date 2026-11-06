@@ -91,19 +91,22 @@ launcher and its `gh`, a script that runs `legion gh`. Nothing else of Legion's 
 jj of 0.38 or later — the jj bound it refuses to boot below (`resolveTools`, naming
 `LEGION_JJ_PATH`, its own override for the jj it runs) — and the real `gh` (`LEGION_GH_PATH`, or the
 first `gh` on its `PATH`, refused when that is a script), which every pane is told as `LEGION_GH_PATH`. A pane's GitHub identity is
-a set of files that binary reads, one directory per GitHub owner of the project: the daemon writes
-gh's own `hosts.yml` (an App installation token, user `x-access-token`) and `config.yml` under
-`<state_dir>/secrets/<claim>-gh/<owner>` (0700, files 0600) when it opens the pane — the role's App
-token for the issue's repository's owner, and that App's token narrowed to reading contents, pull
-requests, Actions and metadata for every other owner (an owner whose installation has not been
+a set of files that binary reads, one directory per GitHub owner of the project and, under the
+issue's own owner, one more per other repository the project serves there: the daemon writes gh's
+own `hosts.yml` (an App installation token, user `x-access-token`) and `config.yml` under
+`<state_dir>/secrets/<claim>-gh/<dir>` (0700, files 0600) when it opens the pane — in the issue
+owner's own directory the role's App token for the issue's repository and no other, and in every
+other directory that App's token narrowed to reading contents, pull requests, Actions and metadata
+over the repositories that directory names (an owner whose installation has not been
 granted Actions gets the other three) — names the issue owner's directory as `GH_CONFIG_DIR`
 and the bundle's root as `LEGION_GH_OWNERS_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set
-empty so nothing outranks the files, and rewrites each owner's `hosts.yml` in place every minute
-from its cached leases (the log lines `tmux runtime: github credential written` and `github
-credential refreshed`, with the claim, role, App, `expiresAt` and the owners written); a pane it
-adopted after a restart is refreshed for the owner the daemon records for its claim, never one read
-from the pane's directory. `legion gh` runs the real gh with `GH_CONFIG_DIR` at the directory of the
-owner the command targets, read as gh reads it, with pflag's rules, from the real gh's own help of
+empty so nothing outranks the files, and rewrites each directory's `hosts.yml` in place every
+minute from its cached leases (the log lines `tmux runtime: github credential written` and `github
+credential refreshed`, with the claim, role, App, `expiresAt` and the directories written); a pane
+it adopted after a restart is refreshed for the repository its claim's issue works, read from the
+daemon's own state, never one read from the pane's directory. `legion gh` runs the real gh with
+`GH_CONFIG_DIR` at the directory of the repository the command targets where the bundle holds one,
+and of its owner otherwise, the target read as gh reads it, with pflag's rules, from the real gh's own help of
 each command down to its leaf (`-R`/`--repo` before or after the command, a repository or owner
 argument, before `--` or as a clone's or fork's first after it, a `github.com` URL argument — for a
 `pr` command or `agent-task view` only a pull request's, since gh reads any other as a branch of
@@ -137,11 +140,12 @@ which the wrapper's tables know (`packages/daemon/cmd/legion/testdata`, with the
 regenerates it when that pin moves; `.github/scripts/check-gh-version.sh` fails the build until
 the saved help is the pin's).
 The shared clone's `credential.helper` is `!legion git-credential` with `credential.useHttpPath`
-on, so a pane's `git` and `jj git push` read the hosts.yml of the owner in the path git asks about
-and nothing else. The real gh is a compiled program, so when the first `gh` on the daemon's `PATH`
+on, so a pane's `git` and `jj git push` read the hosts.yml of the repository in the path git asks
+about where the bundle holds its directory, the owner's otherwise, and nothing else.
+The real gh is a compiled program, so when the first `gh` on the daemon's `PATH`
 is a script (a `gh` wrapper of the box's own, as the devbox's login `PATH` heads with, or asdf's
 shim), boot refuses it, naming it and `LEGION_GH_PATH` (`RefuseScriptGH`): run as the real gh, a
-wrapper would answer in place of the owner's App token. Set `LEGION_GH_PATH` to the real gh's
+wrapper would answer in place of the role's App token. Set `LEGION_GH_PATH` to the real gh's
 install path (`mise which gh` or `asdf which gh` prints it). The check reads scripts only: mise's
 shim is compiled and passes, and where mise has no gh for the directory it runs the next `gh` on
 `PATH`, which in a pane is the pane's own `legion gh`, so a shims directory is no real gh either.

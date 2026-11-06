@@ -422,7 +422,7 @@ What each part is for:
   names the old repository. The loader refuses a pair whose two names are one repository, a
   repository renamed twice, a chain of two pairs (`a/b` to `c/d` with `c/d` to `e/f`), and one
   owner's repositories moved to two owners (`a/b` to `c/d` with `a/e` to `f/g`), since the gh
-  directory a worker reads is keyed by an owner and holds one installation's token; several
+  bundle holds one directory for that owner and one installation's token in it; several
   repositories of one owner may move to one owner, and a rename inside the owner (`a/b` to `a/c`)
   counts as a move to that owner, so `a/b` to `a/c` beside `a/e` to `f/g` is refused.
   `legion start --check-config` prints one line
@@ -467,8 +467,8 @@ What each part is for:
 - **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role, in its own
   namespaces,
   runs before each start of its Oh My Pi. It runs in the role's working directory with the role's
-  environment, and its `git`
-  answers `https://github.com` for your project's owners with the role's App token. Oh My Pi starts
+  environment, and its `git` answers `https://github.com` for your project's repositories with the
+  role's App token: write for the issue's own repository, read for every other. Oh My Pi starts
   only once it exits 0; a failure is a failed launch, and its output is in the role's log. Under
   this runtime it must fetch nothing: a clone in a role's launch context ends the pod's gVisor
   sandbox a few seconds in, so install skills with `skills_repository` below and leave `setup` to
