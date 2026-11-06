@@ -691,6 +691,83 @@ func TestAMethodOrPathTheEntryDoesNotAllowIsRefused(t *testing.T) {
 	}
 }
 
+// TestAPathThatWalksOutOfTheAllowedPrefixIsRefused: the entry's allow list is a path prefix, and
+// a path that leaves that prefix through a dot-dot segment is outside it however it is spelled.
+// A reader that resolves dot segments first, which is what RFC 3986's remove_dot_segments says a
+// URI means, routes "/v1/../admin/things" as "/admin/things", so a proxy that reads the prefix
+// off the literal path carries the value to a path the entry forbids. The row asserts the
+// property the airlock exists for: no request that leaves the prefix reaches the service with
+// the real value in it.
+func TestAPathThatWalksOutOfTheAllowedPrefixIsRefused(t *testing.T) {
+	for _, row := range []struct{ name, path string }{
+		{"a dot-dot segment", "/v1/../admin/things"},
+		{"a dot-dot segment after a deeper path", "/v1/things/../../admin/things"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			r := newRig(t, Options{})
+			client := r.client(workerPlaceholder)
+			answer, body := r.get(client, "https://"+boundHost+row.path, "Authorization", "Bearer "+workerPlaceholder)
+			for _, seen := range r.requests() {
+				if strings.Contains(seen.Header.Get("Authorization"), workerValue) {
+					t.Fatalf("GET %s reached the service as %s with the real value in Authorization; want the value never to leave on a path outside the entry's allow prefix", row.path, seen.Path)
+				}
+			}
+			if answer.StatusCode != http.StatusForbidden {
+				t.Fatalf("GET %s answered %d %q; want 403", row.path, answer.StatusCode, strings.TrimSpace(body))
+			}
+		})
+	}
+}
+
+// TestABoundHostOnAnotherPortCarriesNoValue: an entry binds a host, and every name the decision
+// compares - the CONNECT target, the TLS name and the Host header - is a name with no port in
+// it, so port 443 is the only port the rules speak about. A command that opens its CONNECT on
+// another port of a bound host and writes its Host header without the port makes all three
+// agree, and the value must still not leave on that connection: another port of one name is
+// another service.
+func TestABoundHostOnAnotherPortCarriesNoValue(t *testing.T) {
+	r := newRig(t, Options{})
+	r.dialTo[net.JoinHostPort(boundHost, "8443")] = r.service.Addr()
+
+	conn, err := net.Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatalf("dial the proxy port: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if _, err := fmt.Fprintf(conn, "CONNECT %s:8443 HTTP/1.1\r\nHost: %s:8443\r\n%s\r\n", boundHost, boundHost, basic(workerPlaceholder)); err != nil {
+		t.Fatalf("write the CONNECT: %v", err)
+	}
+	reader := bufio.NewReader(conn)
+	answer, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read the CONNECT answer: %v", err)
+	}
+	if answer.StatusCode == http.StatusOK {
+		// The proxy opened something. Whether it decrypted the connection is what the rest of
+		// the row reads: a plain tunnel to the stand-in answers a certificate this client does
+		// not trust, and a decrypted one answers the proxy's own authority.
+		pool := x509.NewCertPool()
+		pool.AddCert(r.authority.Certificate())
+		decrypted := tls.Client(conn, &tls.Config{ServerName: boundHost, RootCAs: pool})
+		if err := decrypted.Handshake(); err == nil {
+			if _, err := fmt.Fprintf(decrypted, "GET /v1/things HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n", boundHost, workerPlaceholder); err != nil {
+				t.Fatalf("write the request: %v", err)
+			}
+			if err := decrypted.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+				t.Fatalf("set the read deadline: %v", err)
+			}
+			if _, err := http.ReadResponse(bufio.NewReader(decrypted), nil); err != nil {
+				t.Logf("the request on port 8443 was not answered: %v", err)
+			}
+		}
+	}
+	for _, seen := range r.requests() {
+		if strings.Contains(seen.Header.Get("Authorization"), workerValue) {
+			t.Fatalf("a call on port 8443 of %s reached the service with the real value in Authorization (Host %q); want the value to leave on port 443 alone", boundHost, seen.Host)
+		}
+	}
+}
+
 // TestARequestThatAlreadyCarriesTheValueIsRefused: a command that holds the real value learnt it
 // somewhere other than this swap, so the airlock refuses the request rather than carrying it.
 func TestARequestThatAlreadyCarriesTheValueIsRefused(t *testing.T) {
