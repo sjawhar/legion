@@ -358,6 +358,12 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 			roster = s.routeRosterOrUnknown(r.Context())
 		}
 		if judged && !roster.answered {
+			// No route can be judged, so a filter for a judged state refuses rather than answer
+			// a list that would read as "every route reaches someone" (or "nobody's does").
+			if roster.reason == model.RouteReasonRefilling {
+				writeEnvoyRefilling(w, roster.retryAfter)
+				return
+			}
 			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable,
 				"the Envoy listener did not answer, so Dispatch cannot tell which routes reach a live session; route_status=unknown lists the routed issues")
 			return
@@ -516,18 +522,27 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if read.Route != nil {
-		read.IssueRouteReach = s.routeRosterOrUnknown(r.Context()).reach(read.Route)
+	// One roster read serves both answers beside the issue: where its route reaches, and what
+	// state the session holding its claim is in. An issue with neither costs no listener call.
+	if read.Route != nil || issueClaimSession(read.Claim) != "" {
+		roster := s.routeRosterOrUnknown(r.Context())
+		read.IssueRouteReach = roster.reach(read.Route)
+		read.IssueClaimLiveness = roster.claimLiveness(read.Claim, time.Now())
 	}
 	WriteJSON(w, http.StatusOK, read)
 }
 
 // issueDetail is everything GET /api/v1/issues/{key} answers, in the shape its response carries:
-// readIssue fills every field but the route's reach, which getIssue takes from the roster, and the
-// batch test builds one from the sequential loaders, so one type is the encoding all three answer.
+// readIssue fills every field but the route's reach and the claim's liveness, which getIssue takes
+// from the roster, and the batch test builds one from the sequential loaders, so one type is the
+// encoding all three answer.
 type issueDetail struct {
 	model.Issue
 	model.IssueRouteReach
+	// IssueClaimLiveness sits beside the issue rather than inside its claim: model.IssueClaim
+	// is the payload of issue.claimed and issue.released, and a state read at this moment
+	// must never be stored in one (model.IssueClaimLiveness carries the rest of the reason).
+	model.IssueClaimLiveness
 	Progress  model.IssueProgress `json:"progress"`
 	Artifacts []model.Artifact    `json:"artifacts"`
 	OpenAsks  []issueOpenAsk      `json:"open_asks"`

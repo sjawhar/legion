@@ -373,6 +373,17 @@ func (s *chainSend) sent() bool {
 	return s.state != unsent && s.state != held && !s.fenced && !skipped
 }
 
+// heldByHolder is the hold behind a send that sent nothing and failed nothing: a role forward its
+// holder's resolution held pending (roleForward.err), which never left this process, so it is a
+// wait for the holder to answer rather than a publish failure (Deps.RoleForwardsHeld,
+// waitForHolders). Every other send reports nil, a role forward NATS answered among them.
+func (s *chainSend) heldByHolder() *roleForward {
+	if forward := s.dest.forward; forward != nil && forward.err != nil {
+		return forward
+	}
+	return nil
+}
+
 // chain is the sends of one owner's events to one destination key, in id order. Its next send is
 // made only once the one before it reached its destination. owner is whose lane the chain runs
 // in: a batch settles and releases an owner once every chain of that owner has finished
@@ -511,8 +522,10 @@ func planChains(events []*batchEvent) []*chain {
 // a send past the publisher hold's deadline) stops the batch: no further send of any chain is
 // made. So does ctx ending; the answers already in are still read, and every other send in flight
 // is lost. Each send that did not reach its destination is counted once as it settles, under the
-// reason it came to (deps.countPublishFailure); a send the hold's deadline fenced and one ctx's
-// end cut count nothing, neither being an outcome NATS gave.
+// reason it came to (deps.countPublishFailure), and a role forward its holder's resolution held
+// pending under that holder's state instead (deps.countRoleForwardHeld), being a wait and no
+// publish failure; a send the hold's deadline fenced and one ctx's end cut count nothing, neither
+// being an outcome NATS gave.
 //
 // A send NATS refuses (bus.ErrRefused) is made once more with the event's payload left out
 // (standInEnvelope), on the same chain and in the same place, so a reader hears which event it
@@ -618,17 +631,17 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 			send.state = lost
 		default:
 			// Counted under the reason the send came to (countPublishFailure): a send the server
-			// refused under this connection's own publish permissions is a denial; a role forward
-			// its holder's resolution held pending sent nothing at all, and is counted under that
-			// holder rather than as a failure of the bus; a forward NATS took whose holder sent no
-			// receipt is unanswered, which the request reports as a receipt timeout with its
-			// publish confirmed; every other failure, an unconfirmed publish among them, is a
-			// failure.
-			switch forward := send.dest.forward; {
+			// refused under this connection's own publish permissions is a denial; a forward NATS
+			// took whose holder sent no receipt is unanswered, which the request reports as a
+			// receipt timeout with its publish confirmed; every other failure, an unconfirmed
+			// publish among them, is a failure. A role forward its holder's resolution held
+			// pending is none of them: it sent nothing and nothing failed, so it is counted a
+			// hold under that holder's state (countRoleForwardHeld) and is no publish failure.
+			switch hold := send.heldByHolder(); {
 			case errors.Is(err, bus.ErrPublishDenied):
 				deps.countPublishFailure("denied")
-			case forward != nil && forward.err != nil:
-				deps.countPublishFailure("holder")
+			case hold != nil:
+				deps.countRoleForwardHeld(hold.heldState)
 			case errors.Is(err, bus.ErrReceiptTimeout) && !errors.Is(err, bus.ErrPublishUnconfirmed):
 				deps.countPublishFailure("unanswered")
 			default:

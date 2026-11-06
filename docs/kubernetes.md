@@ -2637,6 +2637,8 @@ The launcher starts each role generation through the hidden `legion launcher rol
 Inside them `/var/run/legion/roles` is covered by an empty memory filesystem, and the role's own gh, private, state and agent-secrets directories are bound back at the fixed paths `/var/run/legion/gh`, `/var/run/legion/private`, `/var/run/legion/state` and `/var/run/legion/agent-secrets`;
 its launcher token is bound nowhere, so no role's process reads it, and no role sees a sibling's directories.
 `/home/legion` is an overlay whose lower is the image's and whose upper and work directories are the role's on `role-homes` (a work directory of each generation's own), with every mount the container holds under `/var/run/legion/home` bound back on top at its own path under `/home/legion`, and `/var/run/legion/home` itself then covered.
+The mount carries `userxattr`, so gVisor writes a renamed directory's opaque mark in the `user.overlay.` attribute namespace, which the role's own upper layer keeps and the role may write (`homeOverlayOptions`, `roleinit_linux.go`);
+without it the mark goes to `trusted.overlay.opaque`, which a task in the role's nested user namespace may not write, and gVisor panics when that write is refused, which ends the pod's whole sandbox.
 The lower layer has no mount under it because Linux refuses an overlay over one with mounts locked under it from a more privileged namespace, which every container mount is inside a role's user namespace;
 gVisor allows it today, and the layout does not lean on that.
 `/tmp` and `/var/tmp` are binds of the role's own directories on `role-homes`;
@@ -4296,6 +4298,12 @@ A phase worker or sub-architect pod that dies mid-task
 — is relaunched by the daemon itself, as the same agent one generation later (`legion-<issue>-<role>-g<n+1>`, its command carrying `--resume=<the recorded session>`), and prompted with the daemon's catch-up rather than a replay of the interrupted task (LEGION-179).
 The death is seen twice over: at once, when the pod's worker stream closes and the daemon's one reconnect (`connect` awaiting a fresh registration for `worker_rpc_timeout_seconds`) finds none;
 and, for a death the stream never reported, on the next resync tick, which probes every located, ready-confirmed worker claim with the rules above.
+Either judgement is a probe's, never the closed stream by itself — a daemon restart closes every stream while the agents run on — and when a probe says the process is gone the daemon sends the Envoy listener `DELETE /v1/sessions/<the session the claim registered>?if_not_registered_after=<the moment that probe judged, in unix milliseconds>`.
+That clean stop makes the listener read the session `gone` at once, rather than `unresponsive` until the gone horizon ends, so the role claim that session held is released at the role reaper's next pass instead of an hour later, and the issue claims it held become another agent's to take at once instead of 20 minutes after it last registered (dispatch://INFRA-392).
+The moment is a condition, not a label, because the very decision that asks for the stop goes on to relaunch the claim under the same session id:
+the listener deletes the registration only while it was last written at or before that moment, under the same compare-and-swap it deletes at a read revision with, so a stop that lands after the relaunch has registered is refused there — `200 {"deleted":false,"reason":…}`, which the daemon logs as the registration it kept — rather than taking a working session's registration away.
+The request is bounded at 5 seconds, so a stop the listener does not answer is abandoned rather than left in flight.
+A listener that refuses the stop or cannot be reached costs nothing but that promptness, and the daemon logs it.
 Each death counts one `launchFailures`, so a pod that keeps dying before its `/worker/ready` reaches `worker-died` at `MAX_LAUNCH_FAILURES` exactly like a boot that never confirms; a confirmed ready resets the count.
 A finished worker whose pod dies while idle
 — no longer its issue's active phase, nothing queued for it
@@ -5625,9 +5633,9 @@ The session's pi-legion extension registers on `POST /legion/v1/claims/register`
 The daemon records `controllerLocator: {runtime, external: true, sessionId, registeredAt}` (`legion state
 --json`, `GET /legion/v1/state`), `runtime` being the daemon's own.
 On every orphan sweep it reads `GET /v1/roles/legion-<project>-controller` from the Envoy listener with its bearer.
-The controller is alive while the holder is the recorded session and its `last_seen` is within `max(worker_boot_timeout_seconds, 4 × 90 s)`, which is 360 s at the defaults.
-It is gone when the role is unheld or expired, held by another session, or last seen that long ago.
-It is unknown, never gone, when the listener is unreachable, refuses with anything but a 404, or answers a body the probe cannot read.
+The controller is alive while the listener names the recorded session as the role's holder, which it does only for a session inside its own live window (`ENVOY_SESSION_LIVE_WINDOW`, 5 minutes by default); the daemon keeps no staleness window of its own to drift from it.
+It is gone when the listener answers 404 for a role nobody claimed or for a holder it reports `gone`, when another session holds the role, and when a listener of an earlier release answers 404 naming no `holder_state` at all.
+It is unknown, never gone, when the listener reports the holder `unresponsive` — past the live window but inside the gone horizon, its claim kept, which a session stalled under load reads as — and when the listener is unreachable, refuses with anything but a 404, or answers a body the probe cannot read.
 
 **Re-running and failing.**
 Running the command again mints a new capability and takes the role.

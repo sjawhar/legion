@@ -1,6 +1,6 @@
 module github.com/sjawhar/envoy
 
-go 1.27.1
+go 1.27.3
 
 require (
 	authelia.com/provider/oauth2 v0.3.3

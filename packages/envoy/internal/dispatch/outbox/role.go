@@ -15,7 +15,6 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
-	"github.com/sjawhar/envoy/internal/store"
 )
 
 // roleReceiptTimeout bounds the wait for a role holder's answer to a forward: its empty receipt,
@@ -29,21 +28,24 @@ const roleReceiptTimeout = 5 * time.Second
 var errNoRoleReaders = errors.New("the outbox has no role-claim or session reader")
 
 // roleForward is how a role route of one event reaches the role's holder: Dispatch resolves the
-// holder itself (roles.ResolveHolder, the resolution the listener's role lane uses) and forwards
-// to the holder's agent subject, so nothing of Dispatch's crosses notifications.role.*. Exactly one
-// of four holds:
+// holder itself (roles.ResolveHolder, the one resolution the listener's role routes and its role
+// lane use) and forwards to the holder's agent subject, so nothing of Dispatch's crosses
+// notifications.role.*. Exactly one of four holds:
 //
-//   - keptFor names a role no live holder can take, whose copy is kept on that role's kept lane
-//     for the holder that claims it next (keptOrSkipped, send), and is empty for every other
-//     forward;
+//   - keptFor names a role no claim holds, whose copy is kept on that role's kept lane for the
+//     holder that claims it next (keptOrSkipped, send), and is empty for every other forward;
 //   - skip names why the destination counts as reached with nothing sent: the holder is the
 //     event's own actor (the listener's echo skip), or the role token is one no claim can name,
 //     which is kept for nobody;
-//   - err names why the destination stays pending, backed off with an attempt counted and retried:
-//     the claim or the holder's session could not be read, the release failed, the claim churned
-//     past the resolution's bound, the claim was kept although its holder is gone, or the holder has
-//     not heartbeated within session.ClaimStaleAfter;
+//   - err names why the destination stays pending, backed off with an attempt counted and
+//     retried, with heldState naming the holder's state behind it: the claim or the holder's
+//     session could not be read (heldStateUnresolved), the holder is unresponsive
+//     (session.Unresponsive), or nothing dates the holder at all (heldStateUndated);
 //   - otherwise the envelope is forwarded to holder with a Request (sendChains).
+//
+// No arm of it takes anything from the holder: a claim stands until the listener's role-claim
+// reaper finds its holder gone, so a stalled holder's role is still its own when it answers again
+// (dispatch://INFRA-392).
 //
 // holder is the claim's holder whenever it is known, so the destination's key is the holder's agent
 // subject (destination.key) even while it stays pending; a keep carries none, since it reaches no
@@ -55,7 +57,19 @@ type roleForward struct {
 	streamAck bool
 	skip      string
 	err       error
+	heldState string
 }
+
+// The states a forward is held on that are no session state of the holder's: the resolution never
+// reached one. They are label values of the hold counter (Deps.RoleForwardsHeld) and words of the
+// line a held event's back-off writes (waitForHolders), so they stay short and lower case, as
+// session.State's own words are.
+const (
+	// heldStateUndated: the holder has no session record and nothing dates it.
+	heldStateUndated = "undated"
+	// heldStateUnresolved: the claim or the holder's session could not be read.
+	heldStateUnresolved = "unresolved"
+)
 
 // roleResolution is one role's holder as a batch resolved it.
 type roleResolution struct {
@@ -64,28 +78,29 @@ type roleResolution struct {
 }
 
 // resolveRole resolves role's holder as the outbox reads it, within ctx: the role and session
-// buckets directly (Deps.RoleClaims, Deps.Sessions), any registered session its holder, and a
-// claim whose holder is gone released and that release logged. It is the one resolution a batch's
-// open (resolveRoleHolders) and the handover behind a keep (handOverKept) share, so the liveness
-// rule and that line are written once.
+// buckets directly (Deps.RoleClaims, Deps.Sessions), and the holder judged by the state its own
+// last registration puts it in, with a holder that is not answering logged and its claim left
+// exactly as it is. It is the one resolution a batch's open (resolveRoleHolders) and the handover
+// behind a keep (handOverKept) share, so the liveness rule and that line are written once.
 func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution, error) {
 	if deps.RoleClaims == nil || deps.Sessions == nil {
 		return roles.Resolution{}, errNoRoleReaders
 	}
-	// Any registered session is the holder here: one that has stopped heartbeating is found
-	// stale by forwardOf, and stays pending rather than losing its claim.
-	resolution, err := roles.ResolveHolder(ctx, deps.RoleClaims, deps.Sessions, role, roles.Registered)
+	resolution, err := roles.ResolveHolder(ctx, deps.RoleClaims, deps.Sessions, role)
 	if err == nil && resolution.State == roles.Lapsed {
-		slog.Info("dispatch outbox: a role's holder is gone", "role", role, "holder", resolution.Holder,
-			"claim_released", resolution.Release == store.ExpiredRoleClaimReleased)
+		slog.Info("dispatch outbox: a role's holder is not answering", "role", role,
+			"holder", resolution.Holder, "holder_state", resolution.HolderState,
+			"last_seen", resolution.LastSeen, "claim_released", false)
 	}
 	return resolution, err
 }
 
 // resolveRoleHolders resolves the holder of every role a batch's events route to and have not
 // reached yet, once per role and every role at once, within ctx (resolveRole), and gives each
-// such role destination its forward (forwardOf). Events that are not due are resolved too: their
-// unreached role destinations hold later events back from the holder's agent subject.
+// such role destination its forward (forwardOf). It reads the role and session buckets directly
+// (Deps.RoleClaims, Deps.Sessions) and writes to neither: a holder that is not answering keeps
+// its claim. Events that are not due are resolved too: their unreached role destinations hold
+// later events back from the holder's agent subject.
 func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 	var routed []string
 	seen := map[string]struct{}{}
@@ -116,65 +131,70 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 		})
 	}
 	wg.Wait()
-	now := time.Now()
 	for _, event := range events {
 		for index := range event.destinationsOf {
 			dest := &event.destinationsOf[index]
 			if result, ok := resolved[dest.role]; ok {
-				dest.forward = forwardOf(dest.role, event.item, result.resolution, result.err, now)
+				dest.forward = forwardOf(dest.role, event.item, result.resolution, result.err)
 			}
 		}
 	}
 }
 
 // forwardOf maps a role's resolution to how item reaches it, as the listener's role lane maps the
-// same resolution to its delivery outcomes:
+// same resolution to its delivery outcomes, but for the gone holder below, which the lane does not
+// keep for:
 //
 //   - no claim (the listener's no_holder): kept on the role's kept lane for its next holder;
-//   - a claim whose holder's session is gone: the claim is released, and a release that finds a
-//     fresh claim in its place resolves the role once more, two reads of the claim in all
-//     (roles.ResolveHolder, resolutionAttempts); once released, or found already gone, kept as an
-//     unclaimed role is; a claim the store kept (the listener's "holder is not live") and one
-//     replaced again by the second read (roles.Churned) stay pending;
+//   - a holder whose own record is past the gone horizon (session.Gone, dated by that record or
+//     by what the lookup remembers of it): kept as an unclaimed role is, since the listener's
+//     role-claim reaper releases that claim - the one release there is - and the holder that
+//     claims the role next is handed the copy. The listener keeps for no lapsed claim at all
+//     (roleKeepable), refusing it 404 holder_lapsed, so this is the one resolution the two keep
+//     differently;
+//   - a holder past the live window and within that horizon (session.Unresponsive), where the
+//     listener's delivery reports delivery_failed: pending, so the event waits for the session to
+//     answer again rather than being published to nobody, and nothing is kept, since the claim
+//     stands and the copy would wait for a claim that never comes;
+//   - a holder nothing dates - no record in the session bucket and no memory of one - pending
+//     too: a bucket's maximum age can be shorter than the gone horizon, so a record it no longer
+//     holds says the bucket forgot the session, not that the session died;
 //   - a read that failed (the listener's lookup failures): pending;
 //   - the holder is item's own actor session (the listener's echo skip): reached, nothing sent;
-//   - a holder whose last heartbeat is older than session.ClaimStaleAfter: pending, where the
-//     listener's delivery releases the claim; the session is still registered, so the outbox keeps
-//     its claim and retries until it heartbeats again or its entry expires and the claim is
-//     released;
 //   - otherwise a forward to the holder.
 //
-// A claim the restart grace retained is the one no-holder case that is not kept: that holder
-// keeps its claim and writes no new one, so a copy kept for it would wait for a claim that never
-// comes. It stays the pending error above.
+// A holder that is only unresponsive is the one no-holder case that is not kept: it keeps its
+// claim and writes no new one, so a copy kept for it would wait for a claim that never comes, and
+// the stream holds the forward for the session itself. It stays the pending error above.
 //
 // The listener's capability check (frameDeliveryMode) does not apply: a Dispatch envelope's payload
 // is the event itself, which has no top-level delivery key, so the listener reads it as an untagged
 // send that every holder takes.
-func forwardOf(role string, item contracts.Envelope, resolution roles.Resolution, err error, now time.Time) *roleForward {
+func forwardOf(role string, item contracts.Envelope, resolution roles.Resolution, err error) *roleForward {
 	if err != nil {
-		return &roleForward{holder: resolution.Holder, err: fmt.Errorf("resolve the role's holder: %w", err)}
+		return &roleForward{holder: resolution.Holder, heldState: heldStateUnresolved,
+			err: fmt.Errorf("resolve the role's holder: %w", err)}
 	}
+	holder := resolution.Holder
 	switch resolution.State {
 	case roles.Unclaimed:
 		return keptOrSkipped(role, "the role has no claim")
 	case roles.Lapsed:
-		if resolution.Release == store.ExpiredRoleClaimReleased || resolution.Release == store.ExpiredRoleClaimMissing {
-			return keptOrSkipped(role, "the role's holder is gone and its claim released")
+		if resolution.LastSeen == 0 {
+			return &roleForward{holder: holder, heldState: heldStateUndated, err: fmt.Errorf(
+				"the role's holder %s has no session record and nothing dates it", holder)}
 		}
-		return &roleForward{holder: resolution.Holder, err: fmt.Errorf("the role's holder %s is gone and its claim was kept", resolution.Holder)}
-	case roles.Churned:
-		return &roleForward{err: errors.New("the role's claim changed on every read")}
+		if resolution.HolderState == session.Gone {
+			return keptOrSkipped(role, "the role's holder is gone")
+		}
+		return &roleForward{holder: holder, heldState: string(resolution.HolderState), err: fmt.Errorf(
+			"the role's holder %s is %s: it has not heartbeated since %s",
+			holder, resolution.HolderState, time.UnixMilli(resolution.LastSeen).UTC().Format(time.RFC3339))}
 	}
-	holder := resolution.Holder
 	if item.SourceSession != "" && item.SourceSession == holder {
 		return &roleForward{holder: holder, skip: "the role's holder is the event's actor"}
 	}
-	entry := resolution.Entry
-	if !roles.Fresh(entry, now) {
-		return &roleForward{holder: holder, err: fmt.Errorf("the role's holder %s has not heartbeated within %s", holder, session.ClaimStaleAfter)}
-	}
-	return &roleForward{holder: holder, streamAck: entry.Port != 0}
+	return &roleForward{holder: holder, streamAck: resolution.Entry.Port != 0}
 }
 
 // keptOrSkipped is how a role route no live holder can take reaches the role's next holder: a
@@ -366,7 +386,7 @@ func handOverKeptCopy(ctx context.Context, deps Deps, sender bus.Sender, role st
 	if err != nil {
 		return fmt.Errorf("resolve the holder of role %s, which a copy was just kept for: %w", role, err)
 	}
-	handover := forwardOf(role, item, resolution, nil, time.Now())
+	handover := forwardOf(role, item, resolution, nil)
 	if handover.keptFor != "" || handover.skip != "" || handover.err != nil {
 		return nil
 	}
