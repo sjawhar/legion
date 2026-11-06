@@ -139,15 +139,11 @@ var settingsEmitted = map[string]string{
 	"Project.MergeQueueRole":                         "projects.<KEY>.merge_queue_role",
 	"Project.Merge":                                  "projects.<KEY>.merge",
 	"Project.SlackChannels":                          "projects.<KEY>.slack_channels",
-	"Project.Deploys":                                "projects.<KEY>.deploys",
 	"Project.Memory":                                 "projects.<KEY>.memory",
 	"Project.ProductionCheck":                        "projects.<KEY>.production_check",
 	"Memory.Mode":                                    "projects.<KEY>.memory.mode",
 	"Memory.ConfigFiles":                             "projects.<KEY>.memory.config_files",
 	"Memory.InstructionsPath":                        "projects.<KEY>.memory.instructions",
-	"Deploy.Repo":                                    "projects.<KEY>.deploys[].repo",
-	"Deploy.Workflow":                                "projects.<KEY>.deploys[].workflow",
-	"Deploy.Step":                                    "projects.<KEY>.deploys[].step",
 	"MergeRules.ByHand":                              "projects.<KEY>.merge.by_hand",
 	"PathPattern.Expression":                         "projects.<KEY>.merge.by_hand[]",
 	"Gates.Design":                                   "gates.design",
@@ -184,6 +180,7 @@ var settingsExcluded = map[string]string{
 	"PodConfig.ServiceAccount":      "runtime.kubernetes.pod: the operator's ServiceAccount, which every pod runs as and reads from its own spec",
 	"Kubernetes.PluginsFromBinary":  "derived: where the settled plugins pair came from, not a setting",
 	"PathPattern.Regexp":            "compiled from Expression, not a setting",
+	"Config.Warnings":               "not a setting: the loader's own lines for the operator about a key the file still sets and this daemon no longer reads, which `legion start` logs and `--check-config` prints",
 }
 
 // Every exported field of every struct the walk reaches (settingsConfigTypes) is named in exactly
@@ -308,7 +305,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	projects := keysOf(t, top["projects"])
 	assertKeys(t, "settings.projects", projects, []string{"LEGION", "WIDGETS"})
 	assertKeys(t, "settings.projects.WIDGETS", keysOf(t, projects["WIDGETS"]), []string{
-		"merge_queue_role", "merge", "slack_channels", "deploys", "memory", "production_check",
+		"merge_queue_role", "merge", "slack_channels", "memory", "production_check",
 	})
 
 	// (c) Nothing planted reaches the wire, and no key of a credential's shape does either.
@@ -386,12 +383,6 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := []string{"C0123ABCD", "C0123ABCE"}; !slices.Equal(settings.Projects["LEGION"].SlackChannels, want) {
 		t.Errorf("projects.LEGION.slack_channels = %q, want %q", settings.Projects["LEGION"].SlackChannels, want)
-	}
-	if want := []DeploySettings{{Repo: "sjawhar/legion", Workflow: ".github/workflows/release.yaml", Step: "Apply"}}; !slices.Equal(settings.Projects["LEGION"].Deploys, want) {
-		t.Errorf("projects.LEGION.deploys = %+v, want %+v", settings.Projects["LEGION"].Deploys, want)
-	}
-	if deploys := settings.Projects["WIDGETS"].Deploys; deploys == nil || len(deploys) != 0 {
-		t.Errorf("projects.WIDGETS.deploys = %#v, want the empty list a project with no deploy shows", deploys)
 	}
 	if want := map[string]string{"pool-capacity": "the pool is sized by hand for the admission cap"}; !maps.Equal(settings.Capabilities.Decided, want) {
 		t.Errorf("capabilities.decided = %q, want %q", settings.Capabilities.Decided, want)

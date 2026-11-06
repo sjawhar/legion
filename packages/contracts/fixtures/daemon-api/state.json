@@ -547,13 +547,6 @@
           "C0123ABCD",
           "C0123ABCE"
         ],
-        "deploys": [
-          {
-            "repo": "sjawhar/legion",
-            "workflow": ".github/workflows/release.yaml",
-            "step": "Apply"
-          }
-        ],
         "memory": {
           "config_files": []
         },
@@ -568,7 +561,6 @@
           ]
         },
         "slack_channels": [],
-        "deploys": [],
         "memory": {
           "config_files": []
         },
