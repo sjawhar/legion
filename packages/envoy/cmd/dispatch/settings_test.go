@@ -1830,6 +1830,24 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_CI_RECONCILE_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.DeliveryReconcileInterval != 0 {
+				t.Errorf("DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL unset: DeliveryReconcileInterval = %v, want 0 (delivery.ReconcileInterval's five minutes)", boot.DeliveryReconcileInterval)
+			}
+			const quick = 2 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                       "1",
+				"DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL": quick.String(),
+			})
+			if boot.DeliveryReconcileInterval != quick {
+				t.Errorf("DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL: DeliveryReconcileInterval = %v, want %v", boot.DeliveryReconcileInterval, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {
 				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=1: ListenerRosterUncached false")
