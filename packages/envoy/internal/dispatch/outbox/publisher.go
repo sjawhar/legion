@@ -36,13 +36,16 @@ const (
 	// loadCommentRecipients so a malformed cycle (comments.reply_to has no acyclicity constraint)
 	// cannot spin the recursive query and stall the outbox scan.
 	maxCommentThreadDepth = 32
-	// mentionPendingDelay is how long an event waits when a session route held its copy back for
-	// a mention whose send is still undecided (destinations.leftToMention): long enough for the
-	// handler that holds the send to settle it, short enough that the copy follows a failed send
-	// promptly. The wait is bounded: a pending attempt counts as undecided only while its send is
-	// live (model.MentionLiveSQL), for model.DeliveryClaimLapse after its comment committed and
-	// no longer, whoever holds it; past that lease the outbox holds the session's copy as a
-	// comment_fallback_copies row and publishes the event (destinations.leftTo).
+	// mentionPendingDelay is how long an event waits when a copy of it was held back for a
+	// mention whose send is still undecided - a session route's own copy
+	// (destinations.leftToMention), or a role route's copy that would be kept for a role nobody
+	// holds, which waits on every mention of the comment (resolveRoleHolders): long enough for
+	// the handler that holds the send to settle it, short enough that the copy follows a failed
+	// send promptly. The wait is bounded: a pending attempt counts as undecided only while its
+	// send is live (model.MentionLiveSQL), for model.DeliveryClaimLapse after its comment
+	// committed and no longer, whoever holds it; past that lease the outbox holds the session's
+	// copy as a comment_fallback_copies row and publishes the event (destinations.leftTo), and
+	// keeps the role's copy with whatever settled by then.
 	mentionPendingDelay = 2 * time.Second
 	// recordTimeout bounds the write of a batch's or a fallback pass's outcome (recordBatch,
 	// recordFallbackCopies), which a stopping process still makes after its context has ended: one
@@ -458,14 +461,16 @@ const (
 	// backedOff: the event failed, and waits retry.Delay of its attempts before it is tried again.
 	backedOff outcomeState = "backed_off"
 	// blocked: the event reached what it could, and a destination of it waits on an earlier event
-	// of its owner that has not reached it, or a session's copy of it was held back for a mention
-	// still being sent (destinations.leftToMention), or both. It falls due when the earliest of
-	// its blockers does, and mentionPendingDelay after the record at the latest when a copy waits
-	// on a mention, with no attempt counted, and its sends then follow its blockers'. Nothing
-	// failed, and an attempt counts live for no longer than model.DeliveryClaimLapse after its
-	// comment committed, whoever holds it - past that lease its copy becomes a fallback row and
-	// the event publishes (publishFallbackCopies) - so waiting on a mention cannot run the event
-	// to its dead-letter count.
+	// of its owner that has not reached it, or a copy of it was held back for a mention still
+	// being sent - a mentioned session's own (destinations.leftToMention), or the copy a role
+	// route would keep for a role nobody holds (resolveRoleHolders) - or both. It falls due when
+	// the earliest of its blockers does, and mentionPendingDelay after the record at the latest
+	// when a copy waits on a mention, with no attempt counted, and its sends then follow its
+	// blockers'. Nothing failed, and an attempt counts live for no longer than
+	// model.DeliveryClaimLapse after its comment committed, whoever holds it - past that lease a
+	// session's copy becomes a fallback row and the event publishes (publishFallbackCopies), and
+	// the role's copy is kept - so waiting on a mention cannot run the event to its dead-letter
+	// count.
 	blocked outcomeState = "blocked"
 	// released: the event was not tried to the end, because NATS was unreachable, the
 	// connection was replaced or the process is stopping, so it is due again at once, with no
@@ -499,9 +504,11 @@ type outcome struct {
 // could not all be resolved otherwise, or a send of which NATS answered with a failure, is backed
 // off - below ERROR when every failure behind it is a role forward its holder's resolution held
 // pending (waitForHolders), since such an event is waiting for a session, not failing. Otherwise
-// one with a destination held back, or a session's copy held back for a mention
-// still being sent (batchEvent.mentionPending), is blocked: on its blockers (holdBack), and for
-// mentionPendingDelay at most when its copy waits on a mention; and one with neither is published.
+// one with a destination held back, or a copy held back for a mention still being sent - a
+// mentioned session's own, or the copy a role route would keep for a role nobody holds
+// (batchEvent.mentionPending) - is blocked: on its blockers (holdBack), and for
+// mentionPendingDelay at most when a copy of it waits on a mention; and one with neither is
+// published.
 // A held-back copy so blocks the event only when no send of it failed or was lost: a denied or
 // failed send backs the event off with its attempt counted, and a lost one releases it, as they
 // would without the mention.
@@ -965,7 +972,10 @@ func eventDestinations(ctx context.Context, deps Deps, item *batchEvent, look lo
 // forwards to that holder, or keeps for the role's next one, carries the key of the mention of
 // the session it reaches, as a session route's copy does (destination.settledKeys,
 // roleFallbackKey, roleForward.keep); it carries the failed mentions beside them
-// (destination.mentionKeys), which are what a kept copy's own stored key is chosen from.
+// (destination.mentionKeys), which are what a kept copy's own stored key is chosen from, and
+// whether a mention of the comment was still live when the batch read them
+// (destination.liveMention, mentionDeliveries.anyLive), which holds a keep of that copy back
+// until the settled mentions are all of them.
 func addRoute(d *destinations, route *string) error {
 	if route == nil || *route == "" {
 		return nil
@@ -977,7 +987,8 @@ func addRoute(d *destinations, route *string) error {
 	switch parsed.Kind {
 	case "role":
 		d.addDestination(destination{subject: contracts.RoleTopicPrefix + parsed.ID, label: "publish route", id: *route,
-			role: parsed.ID, mentionKeys: d.mentions.fallbackKeys, settledKeys: d.mentions.settledKeys})
+			role: parsed.ID, mentionKeys: d.mentions.fallbackKeys, settledKeys: d.mentions.settledKeys,
+			liveMention: d.mentions.anyLive()})
 	case "session":
 		d.addSession(parsed.ID, "publish route", *route)
 	default:

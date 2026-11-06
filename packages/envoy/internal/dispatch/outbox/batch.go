@@ -259,7 +259,11 @@ func readRows(ctx context.Context, deps Deps, inFlight []string) (pending []pend
 // beside it, by a role route alone as well: the dedupe key of every mentioned session's own
 // settled mention, a delivered one included (mentionDeliveries.settledKeys), which is what the
 // holder's own key is chosen from and what a copy kept for a role no live holder can take
-// carries for whoever forwards it on (roleForward.keep).
+// carries for whoever forwards it on (roleForward.keep). liveMention is read beside them, by a
+// role route alone again: an attempt of one of the comment's mentions was still live when the
+// batch read them (mentionDeliveries.anyLive), so the settled ones are not all of them yet and a
+// keep of this copy waits for the attempt's lease to end one way or the other
+// (resolveRoleHolders).
 type destination struct {
 	subject     string
 	label       string
@@ -268,6 +272,7 @@ type destination struct {
 	dedupeKey   string
 	mentionKeys map[string]string
 	settledKeys map[string]string
+	liveMention bool
 	forward     *roleForward
 }
 
@@ -312,9 +317,12 @@ type batchEvent struct {
 	// destinationsOf are every destination the event has; resolveErr is why the list ends short,
 	// when it does, and resolveLost that the error is the batch's context ending (a
 	// recipient read the process's stop cancelled), which releases the event rather than backing
-	// it off; mentionPending is a session's copy left out of the list for a mention still being
-	// sent, which blocks the event (eventDestinations, settleEvent). A copy so left out is no
-	// destination of the event, so it holds none of the owner's later events back.
+	// it off; mentionPending is a copy left out of the list for a mention still being sent, which
+	// blocks the event (eventDestinations, settleEvent): a mentioned session's own copy, left out
+	// by the mention rule (destinations.leftTo), or a role route's copy that would be kept for a
+	// role nobody holds, left out until no mention of the comment is live, since the map it
+	// stores keys the holder that claims the role next (resolveRoleHolders). A copy so left out
+	// is no destination of the event, so it holds none of the owner's later events back.
 	delivered      map[string]struct{}
 	destinationsOf []destination
 	resolveErr     error

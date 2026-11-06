@@ -89,9 +89,10 @@ type unfenced struct{}
 
 func (unfenced) Deadline() time.Time { return time.Now().Add(time.Hour) }
 
-// errMentionPending is what publish returns when the event's destinations held a mentioned
-// session's copy back for a mention still being sent (destinations.leftToMention), and nothing
-// else kept the event from finishing: the batch blocks such an event for mentionPendingDelay
+// errMentionPending is what publish returns when the event's destinations held a copy back for a
+// mention still being sent - a mentioned session's own (destinations.leftToMention), or the copy
+// a role route would keep for a role nobody holds (resolveRoleHolders) - and nothing else kept
+// the event from finishing: the batch blocks such an event for mentionPendingDelay
 // (settleEvent).
 var errMentionPending = errors.New("a mention's delivery is still undecided")
 
@@ -119,7 +120,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 		return err
 	}
 	list, mentionPending, resolveErr := eventDestinations(ctx, deps, single, found)
-	single.destinationsOf = list
+	single.destinationsOf, single.mentionPending = list, mentionPending
 	resolveRoleHolders(ctx, deps, []*batchEvent{single})
 	sender := deps.Publisher.WindowUntil(nil)
 	var failures []error
@@ -150,7 +151,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err := errors.Join(append(failures, resolveErr)...); err != nil {
 		return err
 	}
-	if mentionPending {
+	if single.mentionPending {
 		return errMentionPending
 	}
 	return nil
