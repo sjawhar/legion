@@ -27,6 +27,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/sjawhar/legion/daemon/internal/testlog"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // jwkThumbprint is the RFC 7638 thumbprint of the ECDSA JWK a JWS header embeds.
@@ -255,14 +256,9 @@ func tokenFile(t *testing.T, token string) string {
 // eventually polls fn until it returns true or the deadline passes, failing the test otherwise.
 func eventually(t *testing.T, fn func() bool, msg string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return
-		}
-		time.Sleep(time.Millisecond)
+	if !testwait.Holds(5*time.Second, time.Millisecond, fn) {
+		t.Fatalf("timed out waiting: %s", msg)
 	}
-	t.Fatalf("timed out waiting: %s", msg)
 }
 
 // withCredential gives c an already-won credential directly, bypassing the login, for tests whose

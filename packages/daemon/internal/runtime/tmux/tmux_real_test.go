@@ -41,6 +41,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 var (
@@ -611,12 +612,8 @@ func (r *rig) workspace(issue string) string {
 
 func eventually(t *testing.T, within time.Duration, what string, done func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for !done() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for %s", within, what)
-		}
-		time.Sleep(50 * time.Millisecond)
+	if !testwait.Holds(within, 50*time.Millisecond, done) {
+		t.Fatalf("timed out after %s waiting for %s", within, what)
 	}
 }
 
@@ -726,24 +723,28 @@ func descendant(t *testing.T, root int, name string) int {
 func readReport(t *testing.T, workspace string, pid int) map[string]any {
 	t.Helper()
 	path := filepath.Join(workspace, fmt.Sprintf("standin-%d.json", pid))
-	deadline := time.Now().Add(30 * time.Second)
-	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
-		deadline = testDeadline.Add(-time.Second)
-	}
-	for {
-		raw, err := os.ReadFile(path)
-		if err == nil {
-			var report map[string]any
-			if err := json.Unmarshal(raw, &report); err != nil {
-				t.Fatalf("the stand-in's report at %s: %v", path, err)
-			}
-			return report
+	bound := 30 * time.Second
+	if testDeadline, ok := t.Deadline(); ok {
+		if left := time.Until(testDeadline) - time.Second; left < bound {
+			bound = left
 		}
-		if !errors.Is(err, os.ErrNotExist) || time.Now().After(deadline) {
-			t.Fatalf("read the stand-in's report at %s: %v", path, err)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
+	// The read's own answer is the failure text, so err is the wait's verdict: it holds the last
+	// "no such file" when the bound passes, and any other error the moment the read returns it.
+	var raw []byte
+	var err error
+	testwait.Holds(bound, testwait.Poll, func() bool {
+		raw, err = os.ReadFile(path)
+		return err == nil || !errors.Is(err, os.ErrNotExist)
+	})
+	if err != nil {
+		t.Fatalf("read the stand-in's report at %s: %v", path, err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatalf("the stand-in's report at %s: %v", path, err)
+	}
+	return report
 }
 
 func hasKillPane(argvs [][]string) bool {

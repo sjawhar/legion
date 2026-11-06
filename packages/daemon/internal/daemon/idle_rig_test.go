@@ -35,6 +35,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -839,15 +840,11 @@ func (r *idleWakeRig) logged(msg string, attributes map[string]string) int {
 // which is a minute, so the package helper's one-minute cap is too short here.
 func idleRigEventually(t *testing.T, within time.Duration, what string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-5*time.Second).Before(deadline) {
-		deadline = testDeadline.Add(-5 * time.Second)
-	}
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
+	bound := within
+	if testDeadline, ok := t.Deadline(); ok {
+		if left := time.Until(testDeadline) - 5*time.Second; left < bound {
+			bound = left
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s", what)
+	testwait.WithinPolling(t, bound, 50*time.Millisecond, what, condition)
 }

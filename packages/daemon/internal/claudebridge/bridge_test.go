@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // fakeClaudeEnv makes the test binary a stand-in for `claude -p` in stream-json: it records every
@@ -316,10 +317,8 @@ func (r *rig) recorded() string {
 // waitFor waits up to 10 s for holds, failing with what it waited for.
 func (r *rig) waitFor(what string, holds func() bool) {
 	r.t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); !holds(); time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			r.t.Fatalf("waited 10s for %s; the bridge logged:\n%s\nClaude Code recorded:\n%s", what, r.log, r.recorded())
-		}
+	if !testwait.Holds(10*time.Second, 5*time.Millisecond, holds) {
+		r.t.Fatalf("waited 10s for %s; the bridge logged:\n%s\nClaude Code recorded:\n%s", what, r.log, r.recorded())
 	}
 }
 

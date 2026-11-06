@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // kubernetesConfig is testConfig under runtime: kubernetes, its client a kubeconfig whose current
@@ -814,25 +815,32 @@ func TestTheNatsSeedReachesTheSandboxRuntimeAsTheProvidersSecrets(t *testing.T) 
 // awaitHealthz returns once the daemon answers /healthz, and fails if it exits first.
 func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
+	var err error
+	var exited error
+	var gone bool
+	answered := testwait.Holds(15*time.Second, 20*time.Millisecond, func() bool {
+		var response *http.Response
+		response, err = pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return
+				return true
 			}
 		}
 		select {
-		case err := <-done:
-			done <- err
-			t.Fatalf("the daemon exited before it answered /healthz: %v", err)
+		case exited = <-done:
+			done <- exited
+			gone = true
+			return true
 		default:
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the daemon never answered /healthz: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
+		return false
+	})
+	if gone {
+		t.Fatalf("the daemon exited before it answered /healthz: %v", exited)
+	}
+	if !answered {
+		t.Fatalf("the daemon never answered /healthz: %v", err)
 	}
 }
 

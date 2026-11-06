@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // stubCodegraph puts a fake `codegraph` executable first on PATH. Its `status --json` reports
@@ -139,12 +141,7 @@ esac
 
 func waitFor(t *testing.T, done func() bool, what string) {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		if done() {
-			return
-		}
-	}
-	t.Fatalf("timed out waiting for %s", what)
+	testwait.WithinPolling(t, 10*time.Second, 20*time.Millisecond, what, done)
 }
 
 // TestWarmCodegraphIndexNeverFailsWhenTheCliIsMissing proves the acceptance criterion directly:

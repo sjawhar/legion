@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -481,14 +482,7 @@ func idleRigDeliveredOnce(t *testing.T, rig *idleWakeRig, issue idleRigIssue, me
 // loop that is itself a wake does not send a hundred of them a second.
 func idleRigUntil(t *testing.T, within time.Duration, what string, attempt func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		if attempt() {
-			return
-		}
-		time.Sleep(time.Second)
-	}
-	t.Fatalf("timed out waiting for %s", what)
+	testwait.WithinPolling(t, within, time.Second, what, attempt)
 }
 
 // awaitTask waits until the issue's woken role has been given a task carrying want.

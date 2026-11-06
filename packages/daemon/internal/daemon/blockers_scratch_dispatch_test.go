@@ -806,27 +806,29 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 // last poll read — what Legion was doing instead.
 func settled(t *testing.T, d *daemon, what string, want func(api.State) bool) (api.State, string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Minute)
-	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-20*time.Second).Before(deadline) {
-		deadline = testDeadline.Add(-20 * time.Second)
+	bound := time.Minute
+	if testDeadline, ok := t.Deadline(); ok {
+		if left := time.Until(testDeadline) - 20*time.Second; left < bound {
+			bound = left
+		}
 	}
-	for {
-		status, body := d.request(http.MethodGet, "/legion/v1/state", nil, false)
+	var state api.State
+	var body []byte
+	if !testwait.Holds(bound, 20*time.Millisecond, func() bool {
+		status, read := d.request(http.MethodGet, "/legion/v1/state", nil, false)
+		body = read
 		if status != http.StatusOK {
 			t.Fatalf("GET the state = %d; body %s", status, body)
 		}
-		var state api.State
+		state = api.State{}
 		if err := json.Unmarshal(body, &state); err != nil {
 			t.Fatalf("decode the state %s: %v", body, err)
 		}
-		if want(state) {
-			return state, string(body)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Legion did not %s; its state is %s", what, body)
-		}
-		time.Sleep(20 * time.Millisecond)
+		return want(state)
+	}) {
+		t.Fatalf("Legion did not %s; its state is %s", what, body)
 	}
+	return state, string(body)
 }
 
 // blockedOn is what the state says issue waits on, and whether it names it at all.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/wait"
 )
@@ -277,20 +278,15 @@ func holdSerializerThenLock(t *testing.T, store *Store, lock string, step func()
 	}
 	done := make(chan error, 1)
 	go func() { done <- step() }()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	if !testwait.Holds(5*time.Second, 20*time.Millisecond, func() bool {
 		var waiting int
 		if err := store.Pool().QueryRow(ctx, `select count(*) from pg_stat_activity
 			where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'`).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
-		if waiting > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the cleanup step never waited for the serializer (it returned %v)", <-done)
-		}
-		time.Sleep(20 * time.Millisecond)
+		return waiting > 0
+	}) {
+		t.Fatalf("the cleanup step never waited for the serializer (it returned %v)", <-done)
 	}
 	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

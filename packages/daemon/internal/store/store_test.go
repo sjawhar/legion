@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // testDSN is the devbox and CI Postgres the store tests run against. Without it
@@ -1040,14 +1041,15 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 // lock, and returns nil; or, when done reports that statement's end first, returns its error.
 func waitForALockWait(t *testing.T, store *Store, marker string, done <-chan error) error {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	var ended error
+	if !testwait.Holds(10*time.Second, testwait.Poll, func() bool {
 		select {
 		case err := <-done:
-			if err == nil {
-				return errors.New("finished without waiting on a lock")
+			ended = err
+			if ended == nil {
+				ended = errors.New("finished without waiting on a lock")
 			}
-			return err
+			return true
 		default:
 		}
 		var waiting bool
@@ -1055,14 +1057,11 @@ func waitForALockWait(t *testing.T, store *Store, marker string, done <-chan err
 			where pid <> pg_backend_pid() and wait_event_type = 'Lock' and strpos(query, $1) > 0)`, marker).Scan(&waiting); err != nil {
 			t.Fatalf("read pg_stat_activity: %v", err)
 		}
-		if waiting {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no statement containing %q waited on a lock", marker)
-		}
-		time.Sleep(10 * time.Millisecond)
+		return waiting
+	}) {
+		t.Fatalf("no statement containing %q waited on a lock", marker)
 	}
+	return ended
 }
 
 // A duplicate ready_merge enqueue (a reopen at READY's head) reuses the durable row. It keeps the

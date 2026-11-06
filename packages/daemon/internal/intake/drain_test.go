@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -163,19 +164,23 @@ func TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent(t *testing.
 	})
 	defer stop()
 
-	deadline := time.Now().Add(10 * time.Minute)
-	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-5*time.Second).Before(deadline) {
-		deadline = testDeadline.Add(-5 * time.Second)
+	bound := 10 * time.Minute
+	if testDeadline, ok := t.Deadline(); ok {
+		if left := time.Until(testDeadline) - 5*time.Second; left < bound {
+			bound = left
+		}
 	}
-	for githubWaiting(t, consumers) != 0 {
+	if !testwait.Holds(bound, 20*time.Millisecond, func() bool {
+		if githubWaiting(t, consumers) == 0 {
+			return true
+		}
 		if begun := counter.begun.Load(); begun > drainLegion {
 			t.Fatalf("%d transactions begun with %d messages still waiting, want one for each of the %d Legion events and none for any other",
 				begun, githubWaiting(t, consumers), drainLegion)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the backlog of %d events is not drained after %s: %d still wait", len(backlog), time.Since(started).Round(time.Millisecond), githubWaiting(t, consumers))
-		}
-		time.Sleep(20 * time.Millisecond)
+		return false
+	}) {
+		t.Fatalf("the backlog of %d events is not drained after %s: %d still wait", len(backlog), time.Since(started).Round(time.Millisecond), githubWaiting(t, consumers))
 	}
 	drained := time.Since(started)
 	stop()
