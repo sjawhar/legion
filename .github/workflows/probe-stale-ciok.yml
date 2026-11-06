@@ -1,0 +1,21 @@
+name: probe-stale-ciok
+on:
+  push:
+    branches: ['probe/infra1066-k27b']
+permissions:
+  checks: write
+jobs:
+  post:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Post a stale failing ci-ok, as the early POST of a run later re-run green would leave
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \
+            -f name=ci-ok -f head_sha="$SHA" -f status=completed -f conclusion=failure \
+            -f 'output[title]=a stale failing ci-ok' \
+            -f 'output[summary]=INFRA-1066 k27: stands in for the early failing POST of a run that was then re-run green.' \
+            --jq '"PROBE_STALE id=\(.id) suite=\(.check_suite.id) conclusion=\(.conclusion)"'
