@@ -92,7 +92,7 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	ownRun := make(chan struct{})
 	var ownOnce sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if servedMapping(t, w, r, own[:strings.Index(own, "-")]) {
+		if servedBootCall(t, w, r, own[:strings.Index(own, "-")]) {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/issues/"+own) {

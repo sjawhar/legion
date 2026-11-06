@@ -14,7 +14,7 @@ import (
 )
 
 // liveRepo is the repository the project's Dispatch mapping serves (workflowConfig's
-// servedMapping), which every issue a live proof and the idle rig seed is on.
+// servedBootCall), which every issue a live proof and the idle rig seed is on.
 const liveRepo = "acme/widgets"
 
 // liveDispatch is workflowConfig's Dispatch stand-in — the repository mapping and an empty issue
@@ -106,7 +106,7 @@ func (b *liveDispatch) handoff(key, word, session string) string {
 }
 
 func (b *liveDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if servedMapping(b.t, w, req, b.project) {
+	if servedBootCall(b.t, w, req, b.project) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

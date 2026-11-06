@@ -1142,7 +1142,7 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	key := cfg.Project + "-3"
 	var once sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues/"+key {
@@ -1319,7 +1319,7 @@ func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	cfg := workflowConfig(t, natsURL)
 	var requests atomic.Int64
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
@@ -1364,7 +1364,7 @@ func TestRunWaitsForTheRepositoryMappingThroughADispatchOutage(t *testing.T) {
 			http.Error(w, "no healthy upstream", http.StatusServiceUnavailable)
 			return
 		}
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
@@ -1393,7 +1393,7 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 	cfg := testConfig(t)
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case servedMapping(t, w, r, cfg.Project):
+		case servedBootCall(t, w, r, cfg.Project):
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues":
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode([]any{}); err != nil {
@@ -1470,11 +1470,20 @@ func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppR
 	return !r.missing[key], nil
 }
 
-// servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
-// its webhook App check, Dispatch's GitHub App installed on every repository, and reports whether
-// r asked for either.
-func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
+// servedBootCall answers the calls every boot makes of Dispatch, whatever the test is about:
+// the repository mapping, acme/widgets the default of project; the webhook App check, Dispatch's
+// GitHub App installed on every repository; and the publish of the project's gated design steps,
+// which the boot queues for its own project (daemon.queueGatedStepsPublish) and the outbox's
+// first sweep sends. It reports whether it answered r. A board that leaves the publish to its own
+// default arm fails the test with an unexpected request and leaves the outbox row retrying, which
+// is what this helper exists to stop: the publish belongs to no test here.
+func servedBootCall(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
 	t.Helper()
+	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/projects/") &&
+		strings.HasSuffix(r.URL.Path, "/gated-steps") {
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
 	if r.Method != http.MethodGet {
 		return false
 	}
