@@ -530,7 +530,8 @@ go run ./cmd/dispatch-seed --database-url <url> [--scale <f>] [--no-migrate]
 `--scale 0.01` is about 200 issues and is what the CI test runs.
 The command migrates the database itself with `store.Migrate`, as the other subcommands do, and never by booting a server, whose background loops would write to the data set it is building;
 `--no-migrate` skips that step for a database somebody else migrated from another commit, which is what a before-and-after measurement across two commits needs.
-Seed replies inherit their parent's owner and ask thread. The writer stores the comment each reply answers when `comments.answers` is present, and can seed the schema before that column with `--no-migrate`.
+Seed replies inherit their parent's owner and ask thread.
+The writer stores the comment each reply answers when `comments.answers` is present, and can seed the schema before that column with `--no-migrate`.
 It refuses a database that already holds a `projects` or an `issues` row, naming what it found:
 it writes fixed keys, so a second run over the same rows would fail halfway through.
 
@@ -1668,7 +1669,8 @@ A comment write climbs the reply chain to the head of the thread before it store
 A reply whose `answers` and `reply_to` name the same comment is listed once, by `replies_to`, wherever `replies_to` is listed; an explicit `answers` query still lists it.
 A reply listed under a current comment block is not also listed as an answer to the whole comment, including when that comment is nested; explicit `answers` queries still return it.
 The column is nullable with no default, a catalog change that rewrites no row, and its foreign key to `comments(id)` matches `reply_to`'s (`0001`), so the add holds `comments` `ACCESS EXCLUSIVE` for milliseconds and the partial index `comments_answers` holds `SHARE` while it builds.
-Migration `20261105083800_comments_answers_text` adds the partial expression index on `answers::text` used by graph reads and backlink counts, retaining the UUID index for foreign-key checks. It holds `comments` `SHARE` while the index builds, rewrites no row, and its census answers `0`.
+Migration `20261105083800_comments_answers_text` adds the partial expression index on `answers::text` used by graph reads and backlink counts, retaining the UUID index for foreign-key checks.
+It holds `comments` `SHARE` while the index builds, rewrites no row, and its census answers `0`.
 Re-stating the view holds `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a reference read waits behind it.
 The arm list it re-states is `20261101183525`'s, with the new arm beside the comment reply arm, and it is the arm list a later migration re-states from.
 The release before it names the column in no statement and writes every reply with `reply_to` alone, so a reply written during the roll, or after a rollback, carries no `answers` and reads as a reply to its thread's head, which is what every release before this one shows.
@@ -2022,13 +2024,16 @@ Native issue creation rejects a near copy of an open issue of the same project w
 An issue title is at most 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming), on creation and on a retitle, and a longer one is `400 CAP_EXCEEDED` before the near-copy check runs.
 The check scores the project's issues whose status is not `done`, less the new issue's ancestors (its parent and every issue above it), on the share of the new text's rarest words that a candidate's title vector and its primary document's latest vector hold together:
 the terms are the related-item check's own (`pickRelatedTerms`, `api/related_terms.go`), and the statement drives from them into `issues.search` and `document_search`, so each term is one probe of a GIN index and no candidate's spec vector is read more than once per term.
-Every lexeme an issue key contributes is dropped from those terms, so a spec that cites the nearest issue it ruled out is not refused for citing it, and a text of fewer than three terms is not judged at all: the score is a share of those terms, and one or two of them carry no evidence.
+Every lexeme an issue key contributes is dropped from those terms, so a spec that cites the nearest issue it ruled out is not refused for citing it.
+A text whose picked terms number fewer than `duplicateMinTerms` (3), or that holds no more than three lexemes of its own, is not scored at all: a share of one or two terms is 1.0 against any issue that holds them.
+Such a text is judged by equality instead (`duplicateEqualLexemesQuery`): the gate refuses an open issue of the project, outside the new issue's ancestors, whose title lexemes and whose primary document's lexemes are exactly the new title's and the new spec's as Dispatch would store it, and it names nothing else.
 A candidate at or above `duplicateRefuseScore` refuses the create; the closest one at or above `duplicateNudgeScore` and below the refusal is named to the filer as `advice.suggestions.likely_duplicate`, which refuses nothing.
 Both bars are set by `TestNearCopyRefusalReplay` over a frozen export of a project's history (`scripts/near-copy-replay.sh`), and a change to the term picker or to the scoring statement invalidates that calibration.
 A candidate's snippet marks the words its title shares with the new one, and the `POSSIBLE_DUPLICATE` message quotes a candidate's whole title.
-The check runs once for every create, forced or not, in a read transaction of its own bounded by `forcedTitleMatchTimeout` (one second) on the context and by `statement_timeout` inside it:
-one bound, because two would have a read of 1.2 s refuse an unforced create while recording for a forced one that the check did not answer.
-An unforced create whose check does not answer is `500`, as a failed check has always been; a forced one goes in, and its `issue.created` event records `forced` with an empty `past`.
+The check runs once for every create, forced or not, in a read transaction of its own bounded by `duplicateGateTimeout` (500 ms) on the context and by `statement_timeout` inside it:
+one bound, because two would have a read of 700 ms refuse an unforced create while recording for a forced one that the check did not answer.
+A create whose check does not answer is written either way, forced or not, and the `201` says so in `advice.suggestions.near_copy_check`: the create went in without the near-copy check an unforced create otherwise meets.
+A forced one also records `forced` with an empty `past` on its `issue.created` event, which is how the weekly audit tells it from an override.
 
 `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` run the related-item check once the write has committed, and so does each decision block a document edit (`POST /api/v1/artifacts/{id}/edits`) adds, on the block's question (the check replaced LEGION-550's 300 ms keyword suggestions).
 The check never refuses the write, but the response waits for it, at most 5 s (`relatedCheckAllowance`);

@@ -78,72 +78,26 @@ while (($# > 0)); do
 done
 [[ -n "$project" && -n "$output" ]] || usage
 readonly project output from to
-: "${DISPATCH_URL:?DISPATCH_URL must name the Dispatch server to read}"
-: "${DISPATCH_TOKEN_FILE:?DISPATCH_TOKEN_FILE must name a file holding a Dispatch token}"
-[[ -r "$DISPATCH_TOKEN_FILE" ]] || {
-  printf 'DISPATCH_TOKEN_FILE is not readable: %s\n' "$DISPATCH_TOKEN_FILE" >&2
-  exit 2
-}
-for command in curl jq; do
-  command -v "$command" >/dev/null || {
-    printf '%s is required\n' "$command" >&2
-    exit 1
-  }
-done
+scripts_dir="$(cd "$(dirname "$0")" && pwd)"
+readonly scripts_dir
+# shellcheck source-path=SCRIPTDIR source=lib/dispatch-export.sh
+. "${scripts_dir}/lib/dispatch-export.sh"
 
-umask 077
-readonly base="${DISPATCH_URL%/}/api/v1"
-workdir="$(mktemp -d "${TMPDIR:-/tmp}/near-copy-replay.XXXXXX")"
-readonly workdir
-trap 'rm -rf "$workdir"' EXIT
+# dispatch_export_open checks DISPATCH_URL, DISPATCH_TOKEN_FILE, curl and jq, sets base and
+# workdir, takes the EXIT trap that removes workdir, and writes the token header curl reads.
+# get, uri, times, list_issue_keys, list_events and markdown come from the same file: this
+# export and related-recall.sh read a Dispatch project the same way, from one copy of it.
+dispatch_export_open near-copy-replay
+readonly base workdir
 mkdir "$workdir/issues" "$workdir/events"
-# The token reaches curl through a header file, so it never sits on a command line.
-printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' <"$DISPATCH_TOKEN_FILE")" >"$workdir/auth"
 
-# get prints the JSON body of GET <path> under /api/v1, or fails naming the status. The export
-# is thousands of reads over several minutes, so a Dispatch that restarts in the middle of one
-# must not end it: curl retries a refused connection for about two minutes before the read fails.
-get() {
-  local status
-  status="$(curl --silent --show-error --retry 12 --retry-delay 10 --retry-all-errors \
-    --retry-connrefused --max-time 120 \
-    -H "@$workdir/auth" -o "$workdir/body" -w '%{http_code}' "${base}$1")"
-  case "$status" in
-    2??) cat "$workdir/body" ;;
-    *)
-      printf 'GET %s answered %s\n' "$1" "$status" >&2
-      return 1
-      ;;
-  esac
-}
-
-uri() { jq -rn --arg value "$1" '$value | @uri'; }
-
-# Dispatch writes times with as many fraction digits as they need; padded to six, two times
-# compare as text, which every comparison below relies on.
-readonly times='def t: if . == null then . else sub("Z$"; "") | split(".") | .[0] + "." + ((.[1] // "") + "000000")[0:6] + "Z" end;'
 pad() { jq -rn --arg value "$1" "$times"'$value | t'; }
 window_from="$(pad "$from")"
 window_to="$(pad "$to")"
 readonly window_from window_to
 
-# Every issue of the project, all statuses, one page at a time.
-: >"$workdir/keys"
-offset=0
-while :; do
-  page="$(get "/issues?project=$(uri "$project")&limit=250&offset=${offset}")"
-  jq -r '.issues[].key' <<<"$page" >>"$workdir/keys"
-  count="$(jq '.issues | length' <<<"$page")"
-  total="$(jq '.total' <<<"$page")"
-  offset=$((offset + count))
-  if ((count == 0 || offset >= total)); then
-    break
-  fi
-done
-if [[ ! -s "$workdir/keys" ]]; then
-  printf 'project %s has no issues\n' "$project" >&2
-  exit 1
-fi
+# Every issue of the project, all statuses.
+list_issue_keys "$project" "$workdir/keys"
 readonly issues_read="$(wc -l <"$workdir/keys")"
 
 # One file per issue: the fields the replay needs, with its primary document's versions (number
@@ -162,18 +116,6 @@ while read -r key; do
     printf 'read %d of %d issues\n' "$read_count" "$issues_read" >&2
   fi
 done <"$workdir/keys"
-
-# events writes every event of an issue to one file, one JSON object per line.
-events() {
-  local after=0 page
-  : >"$workdir/events/$1"
-  while :; do
-    page="$(get "/issues/$(uri "$1")/events?after=${after}&limit=200")"
-    jq -c '.[]' <<<"$page" >>"$workdir/events/$1"
-    (("$(jq length <<<"$page")" == 200)) || break
-    after="$(jq '.[-1].seq' <<<"$page")"
-  done
-}
 
 # histories reads an issue's four histories from its events. Each history is the value at each
 # point it changed, oldest first, and the first entry is the issue as it was created, so a replay
@@ -219,7 +161,7 @@ ancestors_now() {
 
 event_count=0
 while read -r key; do
-  events "$key"
+  list_events "$key" "$workdir/events/$key"
   jq -sc "$histories" "$workdir/events/$key" >"$workdir/events/$key.histories"
   if [[ "$(jq -r '.ancestors // "null"' "$workdir/events/$key.histories")" == "null" ]]; then
     jq -c --argjson ancestors "$(ancestors_now "$key")" '.ancestors = $ancestors' \
@@ -243,11 +185,6 @@ done <"$workdir/keys"
 jq -r '.[] | .query' "$workdir/pairs.json" >>"$workdir/queries"
 sort -u "$workdir/queries" -o "$workdir/queries"
 readonly query_count="$(wc -l <"$workdir/queries")"
-
-# markdown writes one version of an issue's primary document to a file, byte for byte.
-markdown() {
-  get "/artifacts/$(uri "$(jq -r .spec_artifact "$workdir/issues/$1.json")")/versions/$2" | jq -j .markdown >"$3"
-}
 
 # The versions each issue needs: version 1 (the text it was filed with, which a query replays and
 # which is also a candidate's text until its first edit), the latest created at or before the

@@ -20,11 +20,13 @@ A create that went past Dispatch's near-copy refusal with `--force` carries `for
 `issue.created` event, with `past` naming the issues the refusal named. A forced create the
 refusal would not have stopped carries nothing, so this is a count of overrides, not of uses of
 `--force`. A `past` that is the empty list is a create whose check did not answer: report those
-apart, since nobody forced past anything there.
+apart, since nobody forced past anything there. Each form reads as itself on the `issue.created`
+line: an override ends `forced past <keys>`, and a create whose check did not answer ends
+`forced, the near-copy check did not answer`.
 
 ```bash
 dispatch issues --project <PROJECT> --all
-dispatch read --issue <KEY> --all-events   # the issue.created line ends `forced past <keys>`
+dispatch read --issue <KEY> --all-events   # read the issue.created line
 ```
 
 `--all-events` is not optional: a bare `dispatch read` prints the last ten events alone, and on
@@ -46,12 +48,18 @@ descendants. A tree closed inside the window counts at its close.
 
 ```bash
 dispatch issues --project <PROJECT> --label legion --all
-dispatch read --issue <ROOT>           # Links: child_of gives the parent of each issue
+dispatch read --issue <KEY>                          # Referenced by: child_of names its children
+dispatch issues --project <PROJECT> --parent <KEY>   # the same children, one level at a time
 ```
+
+`Links: child_of` on that read gives the issue's own parent, never its children, so walk down
+instead: read the root, take each `child_of` row under `Referenced by:` as a child, and read each
+child the same way until a read names none. `dispatch issues --parent` lists one level in one
+request and is the shorter walk on a wide tree.
 
 Count each tree's descendants at any depth, and report the trees in five buckets: 0, 1-2, 3-5,
 6-10, and 11 or more. Count the parked descendants of each bucket too: a descendant in `backlog`
-or `icebox`. Name the recount command beside the numbers, since a reader checks them against
+or `icebox`. Name the recount commands beside the numbers, since a reader checks them against
 Dispatch's own parent links.
 
 The report and, when you lead a stream that keeps a scoreboard, the stream's scoreboard artifact
@@ -59,11 +67,15 @@ both carry the two measures, under the keys `forced_creates_by_filer` and `tree_
 
 ## 3. The nudges
 
-Ask the architect of each tree the counts name to fold what can ride in an open pull request:
+Ask the architect of each tree the counts name to fold what can ride in an open pull request.
+Both rules below count only a tree with at least one open descendant, a descendant whose status
+is not `done`. A tree whose descendants are all closed has nothing left to fold, and a nudge
+sent to one asks its architect to fold work that is already finished.
 
-- a tree with more than 8 descendants in all, or more than 2 levels below its root;
-- a tree that filed a child no red-team verdict names. The verdict is a comment on the root whose
-  first line reads `Red-team verdict for <root key>:`
+- a tree with at least one open descendant, and more than 8 descendants in all or more than 2
+  levels below its root;
+- a tree with at least one open descendant that filed a child no red-team verdict names. The
+  verdict is a comment on the root whose first line reads `Red-team verdict for <root key>:`
   (`skill://legion-architect/references/decomposition.md`). Read the root's comments with
   `dispatch read --issue <ROOT> --all-events` and the replies under each verdict comment; a child
   named in none of them was filed without the check.
@@ -94,7 +106,7 @@ List every nudge you sent in the day's report.
 
 For each open issue of the project, read the related items of its title and spec through the
 no-write related route, leaving the issue, its ancestors and its descendants out, and judge
-whether each pair those issues' own events do not already settle is the same work.
+whether each pair the two issues' own records do not already settle is the same work.
 
 The project holds hundreds of open issues and one related read takes about a second, so a serial
 pass is ten minutes of HTTP before any judging. Shard the open list and dispatch one
@@ -104,19 +116,25 @@ it found with its evidence, and you judge and fold them yourself.
 Give each scout the shard's keys and these commands:
 
 ```bash
-dispatch read --issue <KEY>                    # its title, its spec's artifact, its Links:
+dispatch read --issue <KEY>                    # title, spec artifact, Links:, Referenced by:
 dispatch doc-read --issue <KEY>                # the spec text the related read uses
 dispatch related --project <PROJECT> --title '<its title>' --text-file - \
   --exclude-issue <KEY> --exclude-issue <each ancestor> --exclude-issue <each descendant>
 ```
 
 `--exclude-issue` is repeatable and takes up to 50 issues; the issue itself, its ancestors and its
-descendants all go in one call. Ask each scout for, per issue, every related item that is an issue
-with the reason it looks like the same work, and nothing else: no comment, no close, no message.
+descendants all go in one call. The read names both: a `child_of` row under `Links:` is the
+issue's own parent, read again on that parent for the next ancestor up, and each `child_of` row
+under `Referenced by:` is a child, read again on each child for the next level down. Ask each
+scout for, per issue, every related item that is an issue with the reason it looks like the same
+work, and nothing else: no comment, no close, no message.
 
-A pair is settled, and is skipped rather than proposed, when the two issues' events already say
-so: one was closed as a duplicate of the other, one was reopened after such a close, or one was
-made a child of the other. Read those from `dispatch read --issue <KEY>`'s `Events:`.
+A pair is settled, and is skipped rather than proposed, when the two issues already say so: one
+was closed as a duplicate of the other, one was reopened after such a close, or one was made a
+child of the other. Read the first two from `dispatch read --issue <KEY> --all-events`'s
+`Events:`: the close's reason is the `message.created` line just before `issue.closed`, and a
+reopen is an `issue.updated` line that moves the status off `done`. No `Events:` line reports a
+parent change, so read the third from the same read's `Links:` and `Referenced by:`.
 
 Fold each pair you judge the same work by the duplicate rule of `skill://dispatch-first`: keep the
 issue with the spec, copy to it what only the other has, and close the other
@@ -125,4 +143,4 @@ or another holder's claim, is not yours to close: comment the kept issue's name 
 pair inside a Legion tree goes to that tree's architect with `envoy_publish`, which decides it.
 
 The report lists every pair you judged the same work, with what you did about it, and every pair
-you skipped with the event that settles it.
+you skipped with what settles it: the event, or the parent link.
