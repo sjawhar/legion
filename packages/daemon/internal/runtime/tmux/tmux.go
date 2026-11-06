@@ -34,7 +34,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
@@ -94,14 +93,10 @@ type Options struct {
 	// variable, hold no gh files, and the refresher does nothing.
 	GitHubCredential runtime.GitHubCredential
 	// ControllerCredential is the daemon's function for the controller's own gh bundle
-	// (appauth.ControllerCredential), which answers by default owner where GitHubCredential
-	// answers by repository: the controller works no repository, so a bundle asked for by one
-	// would take its default from the first owner the project serves, sorted, and a project that
-	// gained an owner sorting before it would move a running controller's default away from the
-	// directory its launch fixed as GH_CONFIG_DIR. The refresher asks it for the owner the pane's
-	// launch recorded (trackedProcess.ghDefault); a launch asks for none, taking the first owner,
-	// which is the default it then records. Required with GitHubCredential.
-	ControllerCredential func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error)
+	// (appauth.ControllerCredential). The refresher asks it for the owner the pane's launch
+	// recorded (trackedProcess.ghDefault); a launch asks for none, taking the first owner, which
+	// is the default it then records. Required with GitHubCredential.
+	ControllerCredential runtime.ControllerCredential
 	// GH is the real gh's absolute path, which the daemon resolves at boot and every pane is told
 	// as LEGION_GH_PATH: the `legion gh` wrapper first on the pane's PATH runs it with the gh
 	// directory of the repository a command names, or of its owner. Required with GitHubCredential.
@@ -181,7 +176,7 @@ type Runtime struct {
 	gitHubCredential runtime.GitHubCredential
 	// controllerCredential is the controller pane's bundle by default owner
 	// (Options.ControllerCredential), set with gitHubCredential and nil without it.
-	controllerCredential func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error)
+	controllerCredential runtime.ControllerCredential
 	gh                   string
 	claimRepository      func(ctx context.Context, token claim.Token) (ghrepo.Repository, error)
 	launchers            map[runtime.Backend]Launcher

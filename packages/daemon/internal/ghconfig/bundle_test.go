@@ -151,16 +151,16 @@ func TestWriteBundleWritesAndPrunesRepositoryDirectories(t *testing.T) {
 	}
 }
 
-// IsDir takes the two shapes a bundle directory has and nothing else; IsOwner stays the stricter
-// rule for the callers that mean an owner, the bundle's Default among them.
-func TestIsDirTakesAnOwnerOrOneOfItsRepositories(t *testing.T) {
+// IsDirName takes the two shapes a bundle directory has and nothing else; IsOwner stays the
+// stricter rule for the callers that mean an owner, the bundle's Default among them.
+func TestIsDirNameTakesAnOwnerOrOneOfItsRepositories(t *testing.T) {
 	for name, want := range map[string]bool{
 		"acme": true, "acme-labs": true, "acme/widgets": true, "acme/gadgets.io": true, "acme/x_1-2": true,
 		"": false, "Acme": false, "acme_labs": false, "-acme": false, "acme/": false, "/widgets": false,
 		"acme/Widgets": false, "acme/.": false, "acme/..": false, "acme/a/b": false, "../x": false,
 	} {
-		if got := IsDir(name); got != want {
-			t.Errorf("IsDir(%q) = %t, want %t", name, got, want)
+		if got := IsDirName(name); got != want {
+			t.Errorf("IsDirName(%q) = %t, want %t", name, got, want)
 		}
 	}
 	for name, want := range map[string]bool{"acme": true, "acme/widgets": false, "Acme": false} {

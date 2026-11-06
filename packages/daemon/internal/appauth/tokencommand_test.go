@@ -274,7 +274,7 @@ func TestTokenModeKeepsTokensOutOfLogsAndErrors(t *testing.T) {
 	var stderr bytes.Buffer
 	leaky := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: `echo "denied for ghs_abcdefghijklmnopqrstuvwxyz0123" >&2; exit 3`}},
 		Options{Now: func() time.Time { return now }, Stderr: &stderr})
-	_, err := leaky.runTokenCommand(context.Background(), Implement, leaky.apps.Implement, "acme", []string{"legion"}, false)
+	_, err := leaky.runTokenCommand(context.Background(), leaky.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: []string{"legion"}})
 	if err == nil || strings.Contains(err.Error(), "ghs_abc") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("error = %v, want the stderr with its token redacted", err)
 	}
@@ -290,7 +290,7 @@ func TestTokenModeKeepsTokensOutOfLogsAndErrors(t *testing.T) {
 	huge := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: "yes ghs_secret_value_padding"}}, Options{Now: func() time.Time { return now }})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err = huge.runTokenCommand(ctx, Implement, huge.apps.Implement, "acme", []string{"legion"}, false)
+	_, err = huge.runTokenCommand(ctx, huge.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: []string{"legion"}})
 	if err == nil || !strings.Contains(err.Error(), "printed more than") || ctx.Err() != nil {
 		t.Fatalf("a command printing without end = %v (ctx %v), want the over-limit refusal before the deadline", err, ctx.Err())
 	}
@@ -334,13 +334,13 @@ func TestTokenModeACallerDeadlineNeitherKillsNorRepeatsTheCommand(t *testing.T) 
 	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	var transient *TransientError
-	if _, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", []string{"legion"}, false); !errors.Is(err, ErrCommandPending) || !errors.As(err, &transient) {
+	if _, err := tokens.runTokenCommand(short, tokens.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: []string{"legion"}}); !errors.Is(err, ErrCommandPending) || !errors.As(err, &transient) {
 		t.Fatalf("a caller past its deadline = %v, want a transient ErrCommandPending", err)
 	}
 	if err := os.WriteFile(gate, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := tokens.runTokenCommand(context.Background(), Implement, tokens.apps.Implement, "acme", []string{"legion"}, false)
+	got, err := tokens.runTokenCommand(context.Background(), tokens.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: []string{"legion"}})
 	if err != nil || got["acme"].token != "ghs_x" {
 		t.Fatalf("the next caller = %v, %v; want the running command's release", got, err)
 	}
@@ -359,13 +359,13 @@ func TestTokenModeACallerAfterTheRunFinishedGetsItsResult(t *testing.T) {
 	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: command}}, Options{Now: func() time.Time { return now }})
 	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", []string{"legion"}, false); !errors.Is(err, ErrCommandPending) {
+	if _, err := tokens.runTokenCommand(short, tokens.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: []string{"legion"}}); !errors.Is(err, ErrCommandPending) {
 		t.Fatalf("a caller past its deadline = %v, want ErrCommandPending", err)
 	}
 	time.Sleep(800 * time.Millisecond)
 	later, cancelLater := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancelLater()
-	got, err := tokens.runTokenCommand(later, Implement, tokens.apps.Implement, "acme", []string{"legion"}, false)
+	got, err := tokens.runTokenCommand(later, tokens.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: []string{"legion"}})
 	if err != nil || got["acme"].token != "ghs_x" {
 		t.Fatalf("the caller after the run finished = %v, %v; want the finished run's release", got, err)
 	}
@@ -471,7 +471,7 @@ func TestTokenModeCommandEnvironmentAndDeadline(t *testing.T) {
 	t.Setenv(TokenCommandReadOnly, "inherited")
 	command := fmt.Sprintf(`env >%q; printf '{"installations":{"acme":{"installation_id":1,"token":"ghs_x","expires_at":"%s"}}}'`, seen, now.Add(time.Hour).Format(time.RFC3339))
 	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: command}}, Options{Now: func() time.Time { return now }})
-	if _, err := tokens.runTokenCommand(context.Background(), Implement, tokens.apps.Implement, "acme", []string{"legion", "nats-server"}, false); err != nil {
+	if _, err := tokens.runTokenCommand(context.Background(), tokens.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: []string{"legion", "nats-server"}}); err != nil {
 		t.Fatal(err)
 	}
 	env, _ := os.ReadFile(seen)
@@ -485,7 +485,7 @@ func TestTokenModeCommandEnvironmentAndDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	var transient *TransientError
-	if _, err := slow.runTokenCommand(ctx, Implement, slow.apps.Implement, "acme", []string{"legion"}, false); !errors.As(err, &transient) {
+	if _, err := slow.runTokenCommand(ctx, slow.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: []string{"legion"}}); !errors.As(err, &transient) {
 		t.Fatalf("a command past its deadline = %v, want a transient error", err)
 	}
 }
@@ -593,7 +593,7 @@ func TestTokenModeTwoRepositoryScopesOfOneOwnerDoNotShareOneRun(t *testing.T) {
 	defer tokens.Close()
 	for _, repos := range [][]string{{"alpha"}, {"beta"}, {"alpha"}} {
 		short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		_, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", repos, true)
+		_, err := tokens.runTokenCommand(short, tokens.apps.Implement, mintRequest{role: Implement, owner: "acme", repos: repos, read: true})
 		cancel()
 		if !errors.Is(err, ErrCommandPending) {
 			t.Fatalf("the run for %q = %v, want ErrCommandPending while it goes on", repos, err)

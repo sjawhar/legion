@@ -295,19 +295,16 @@ func GitHubHostsKey(dir string) string { return githubHostsPrefix + ghKeyTail(di
 func GitHubConfigKey(dir string) string { return githubConfigPrefix + ghKeyTail(dir) }
 
 // GitHubHostsDir is the bundle directory a role Secret's key names the hosts.yml of, and whether
-// key is such a key at all: GitHubHostsKey read backwards, so a pod's gh projection can be read
-// as the directories it holds (movedGhOwners). One key of the pair names each directory, the
-// config one naming the same, so the hosts keys alone answer the whole set.
+// key is such a key at all: GitHubHostsKey read backwards, the first dot of the tail turned back
+// into the slash ghKeyTail wrote, so a pod's gh projection can be read as the directories it
+// holds (movedGhDirs). One key of the pair names each directory, the config one naming the same,
+// so the hosts keys alone answer the whole set.
 func GitHubHostsDir(key string) (dir string, ok bool) {
 	tail, ok := strings.CutPrefix(key, githubHostsPrefix)
 	if !ok {
 		return "", false
 	}
-	owner, repo, nested := strings.Cut(tail, ".")
-	if !nested {
-		return tail, true
-	}
-	return owner + "/" + repo, true
+	return strings.Replace(tail, ".", "/", 1), true
 }
 
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the

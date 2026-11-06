@@ -56,7 +56,7 @@ func GitHubCredential(tokens Tokens, repos func() []ghrepo.Repository, renames g
 		}
 		dflt := strings.ToLower(repo.Owner())
 		if dflt == "" {
-			dflt = slices.Min(slices.Collect(maps.Keys(owners)))
+			dflt = firstOwner(owners)
 		}
 		return mintBundle(ctx, tokens, appRole, role, dflt, dirs)
 	}
@@ -74,7 +74,7 @@ func GitHubCredential(tokens Tokens, repos func() []ghrepo.Repository, renames g
 // controller asks for its default over the API, and a default is no authority to read another
 // owner's repositories. A project with no owner at all is runtime.ErrNoGitHubOwner, which the
 // route answers as a daemon with nothing to act as.
-func ControllerCredential(tokens Tokens, repos func() []ghrepo.Repository, renames ghrepo.Renames) func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+func ControllerCredential(tokens Tokens, repos func() []ghrepo.Repository, renames ghrepo.Renames) runtime.ControllerCredential {
 	return func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
 		appRole := AppRoleFor(claim.RoleController)
 		dirs, owners, err := bundleDirs(repos, renames, ghrepo.Repository{})
@@ -89,7 +89,7 @@ func ControllerCredential(tokens Tokens, repos func() []ghrepo.Repository, renam
 			return ghconfig.Bundle{}, fmt.Errorf("the %s App for %s: %w", appRole, claim.RoleController, runtime.ErrNoGitHubOwner)
 		}
 		if owner == "" {
-			owner = slices.Min(slices.Collect(maps.Keys(owners)))
+			owner = firstOwner(owners)
 		}
 		return mintBundle(ctx, tokens, appRole, claim.RoleController, owner, dirs)
 	}
@@ -136,13 +136,14 @@ type dirLease struct {
 }
 
 // scope is what two directories hold the one lease under: the lease's kind and what it reaches,
-// compared lowercased as the Manager caches it (leaseScope). A configured rename's two owner
-// directories share one scope, as do the repository directories under them.
-func (d dirLease) scope() string {
+// as the Manager keys its cache (leaseScope), so the grouping here and the Manager's are the one
+// rule. A configured rename's two owner directories share one scope, as do the repository
+// directories under them.
+func (d dirLease) scope(role AppRole) scope {
 	if d.write {
-		return "write\x00" + strings.ToLower(d.repo.String())
+		return leaseScope(false, role, d.repo.Owner(), []string{d.repo.Name()})
 	}
-	return "read\x00" + d.owner + "\x00" + strings.Join(d.repos, "\x00")
+	return leaseScope(true, role, d.owner, d.repos)
 }
 
 // mint asks tokens for the lease, as the App role.
@@ -163,6 +164,12 @@ func (d dirLease) where() string {
 	return d.owner + " (" + strings.Join(d.repos, ", ") + ")"
 }
 
+// firstOwner is the first of the bundle's owner directories, sorted: the default of a bundle
+// whose caller named no owner of its own. Both callers refuse an empty set before they ask.
+func firstOwner(owners map[string]bool) string {
+	return slices.Min(slices.Collect(maps.Keys(owners)))
+}
+
 // bundleDirs is the one description of a role's gh bundle: every directory it holds, sorted by
 // name, with the lease each one carries, and dirOwners, the owner directories the bundle holds —
 // the mapping's owners lowercased, every owner a configured rename moved a repository away from
@@ -179,7 +186,7 @@ func (d dirLease) where() string {
 // The conflict a rename between two owners of the project makes is left to the mapping's load,
 // which warns of it once per load (the daemon's logRenameOwnerConflicts), so this is a pure
 // function of its inputs and may be built per call. A directory name ghconfig would refuse
-// (ghconfig.IsDir) is an error: a bundle is refused rather than written from a name that is not
+// (ghconfig.IsDirName) is an error: a bundle is refused rather than written from a name that is not
 // one.
 func bundleDirs(repos func() []ghrepo.Repository, renames ghrepo.Renames, repo ghrepo.Repository) (dirs []bundleDir, dirOwners map[string]bool, err error) {
 	owners, served := map[string]bool{}, map[string][]string{}
@@ -235,7 +242,7 @@ func bundleDirs(repos func() []ghrepo.Repository, renames ghrepo.Renames, repo g
 	}
 	slices.SortFunc(dirs, func(a, b bundleDir) int { return strings.Compare(a.name, b.name) })
 	for _, dir := range dirs {
-		if !ghconfig.IsDir(dir.name) {
+		if !ghconfig.IsDirName(dir.name) {
 			return nil, dirOwners, fmt.Errorf("the gh bundle directory %q is no lowercased GitHub login or owner/repository", dir.name)
 		}
 	}
@@ -248,10 +255,10 @@ func bundleDirs(repos func() []ghrepo.Repository, renames ghrepo.Renames, repo g
 // never the token.
 func mintBundle(ctx context.Context, tokens Tokens, appRole AppRole, role claim.Role, dflt string, dirs []bundleDir) (ghconfig.Bundle, error) {
 	bundle := ghconfig.Bundle{Default: dflt, Dirs: make(map[string]ghconfig.Rendered, len(dirs))}
-	minted := make(map[string]ghconfig.Rendered, len(dirs))
+	minted := make(map[scope]ghconfig.Rendered, len(dirs))
 	for _, dir := range dirs {
-		scope := dir.hold.scope()
-		entry, held := minted[scope]
+		key := dir.hold.scope(appRole)
+		entry, held := minted[key]
 		if !held {
 			lease, err := dir.hold.mint(ctx, tokens, appRole)
 			if err != nil {
@@ -262,7 +269,7 @@ func mintBundle(ctx context.Context, tokens Tokens, appRole AppRole, role claim.
 				return ghconfig.Bundle{}, fmt.Errorf("mint the %s%s App lease for %s on %s: %w", how, appRole, role, dir.hold.where(), err)
 			}
 			entry = ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt)
-			minted[scope] = entry
+			minted[key] = entry
 		}
 		bundle.Dirs[dir.name] = entry
 	}

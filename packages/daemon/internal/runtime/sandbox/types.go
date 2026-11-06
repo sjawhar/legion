@@ -12,7 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -231,21 +230,18 @@ type Options struct {
 	// nil Tokens.
 	GitHubCredential runtime.GitHubCredential
 	// ControllerCredential is the daemon's function for the controller's own gh bundle
-	// (appauth.ControllerCredential), which answers by default owner where GitHubCredential
-	// answers by repository: a controller works no repository, so a bundle rendered for one
-	// would take its default from the first owner the project serves, sorted, and a project that
-	// gains an owner sorting before it would leave every refresh of a running controller refused
-	// against the default its Secret records. The refresher asks it for the owner the Secret
-	// holds (refreshGitHubCredential); a launch asks for none, taking the first owner, which is
-	// the default the Secret then records. Required: configure refuses nil as it refuses a nil
+	// (appauth.ControllerCredential). The refresher asks it for the owner the Secret holds
+	// (refreshGitHubCredential); a launch asks for none, taking the first owner, which is the
+	// default the Secret then records, and a refresh whose render names another default is
+	// refused rather than written. Required: configure refuses nil as it refuses a nil
 	// GitHubCredential.
-	ControllerCredential func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error)
+	ControllerCredential runtime.ControllerCredential
 	// GitHubDirs are the directories the gh bundle of a pod created now for repo would hold
 	// (appauth.GitHubDirs), sorted: one per GitHub owner the daemon serves, lowercased and with
 	// every configured rename alias, and one more under the owner of repo for each other
 	// repository that owner serves. A running pod's projection is fixed at the directories of its
 	// creation (manifest's volumes), so a directory this answers that the pod's volume does not
-	// name is a pod whose gh lacks it (movedGhOwners); repo is the pod's own, read from its
+	// name is a pod whose gh lacks it (movedGhDirs); repo is the pod's own, read from its
 	// workspace fetch (fetchRepository), and the zero Repository for a pod that fetches none, the
 	// controller's. It is read on every drift evaluation, so it must be cheap and must mint
 	// nothing. Required: configure refuses nil as it refuses a nil GitHubCredential.

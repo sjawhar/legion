@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // gitHubRefreshInterval is how often refreshGitHubCredentials walks the pod store. The daemon's
@@ -76,8 +77,11 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		if owner == nil {
 			continue
 		}
+		// The pod's own repository is read once here, for every role of it: it is the pod's, not
+		// the role's, and a bundle is rendered for it (refreshGitHubCredential).
+		repo, _ := fetchRepository(pod)
 		for _, role := range kind.roles() {
-			r.refreshGitHubCredential(ctx, pod, owner.UID, role)
+			r.refreshGitHubCredential(ctx, pod, owner.UID, role, repo)
 		}
 		if _, issue := kind.(issuePod); issue && fetchUnfinished(pod) {
 			r.refreshProvisioningToken(ctx, pod, owner.UID)
@@ -147,17 +151,18 @@ func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod,
 }
 
 // refreshGitHubCredential is one role's refresh (refreshGitHubCredentials): the role's Secret in
-// the pod, owned by the Sandbox with uid.
+// the pod, owned by the Sandbox with uid, rendered for repo, the pod's own repository its caller
+// read off its workspace fetch once for every role of the pod.
 //
-// A workflow role's credential is rendered for the pod's own repository, read from its
-// workspace-fetch argument (fetchRepository). It is not the Secret's recorded default, which
-// names an owner and so could never name a repository: a bundle rendered from an owner alone
-// would mint nothing, every mint now naming the repositories it reaches. A pod the previous
-// daemon created carries no repository in its Secret and needs none, since its fetch argument
-// names it, so its refresh keeps working and no live issue is stopped. What such a pod lacks is
-// the repository directories of a bundle built now, which a pod's gh projection is fixed at and
-// only a new pod can gain: that is the drift check's business (movedGhOwners), which opens an
-// update round whose workers push before the pod is replaced.
+// A workflow role's credential is rendered for that repository, and not for the Secret's
+// recorded default, which names an owner and so could never name a repository: a bundle
+// rendered from an owner alone would mint nothing, every mint now naming the repositories it
+// reaches. A pod the previous daemon created carries no repository in its Secret and needs
+// none, since its fetch argument names it, so its refresh keeps working and no live issue is
+// stopped. What such a pod lacks is the repository directories of a bundle built now, which a
+// pod's gh projection is fixed at and only a new pod can gain: that is the drift check's
+// business (movedGhDirs), which opens an update round whose workers push before the pod is
+// replaced.
 //
 // The controller's is fetched by owner instead (Options.ControllerCredential), the one its
 // Secret records: it works no repository, so a bundle asked for by repository would take its
@@ -169,7 +174,7 @@ func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod,
 // The Secret's recorded default is what the bundle is held to either way: a render whose default
 // is another owner is refused rather than written, since the pod's GH_CONFIG_DIR was fixed at
 // that directory.
-func (r *Runtime) refreshGitHubCredential(ctx context.Context, pod *corev1.Pod, uid types.UID, role claim.Role) {
+func (r *Runtime) refreshGitHubCredential(ctx context.Context, pod *corev1.Pod, uid types.UID, role claim.Role, repo ghrepo.Repository) {
 	sandbox := pod.Name
 	name := roleSecretName(sandbox, role)
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
@@ -201,7 +206,6 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, pod *corev1.Pod, 
 	if role == claim.RoleController {
 		bundle, err = r.controllerCredential(minting, owner)
 	} else {
-		repo, _ := fetchRepository(pod)
 		bundle, err = r.gitHubCredential(minting, role, repo)
 	}
 	cancel()

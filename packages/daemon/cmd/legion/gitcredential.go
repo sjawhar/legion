@@ -33,11 +33,10 @@ var gitCredentialStdin io.Reader = os.Stdin
 // repository's own directory of LEGION_GH_OWNERS_DIR, `<owner>/<repo>`, where the bundle holds
 // one, from the owner's directory otherwise (repositoryGHConfigDir), and from nothing else. A
 // repository the bundle holds no directory for — the one the role writes to, every repository of
-// an owner it writes to none of before the bundle held one per repository, and a name no bundle
-// directory can hold — is the owner's directory's to answer, as it was when the bundle held the
-// owners alone. Any other host or protocol, a request with no path, a path whose owner is no
-// GitHub login or one the bundle holds no directory for, an unset LEGION_GH_OWNERS_DIR, and a
-// hosts.yml with no token answer nothing, exit 1, naming why on stderr, and git, which every
+// an owner it writes to none of, and a name no bundle directory can hold — is the owner's
+// directory's to answer. Any other host or protocol, a request with no path, a path whose owner
+// is no GitHub login or one the bundle holds no directory for, an unset LEGION_GH_OWNERS_DIR,
+// and a hosts.yml with no token answer nothing, exit 1, naming why on stderr, and git, which every
 // shared clone tells credential.interactive=false, then fails rather than prompts. `store` and
 // `erase` change nothing: the daemon is the one writer of the gh files.
 func runGitCredential(_ context.Context, args []string, stdout, stderr io.Writer) int {
@@ -128,13 +127,12 @@ func readCredentialRequest(r io.Reader) map[string]string {
 
 // repositoryGHConfigDir is the gh directory the bundle under ownersDir answers for owner's
 // repository repo: the repository's own, `<owner>/<repo>`, whose token reaches that one
-// repository, where the bundle holds it, and the owner's own otherwise, which is what answered
-// for every repository before a bundle held a directory per repository. A repo no bundle
-// directory could be named for (ghconfig.IsDir) is one the bundle holds none for, so it answers
-// the owner's rather than refusing. An owner the bundle holds no directory for at all is refused
-// (ownerGHConfigDir): it is no owner of this project.
+// repository, where the bundle holds it, and the owner's own otherwise. A repo no bundle
+// directory could be named for (ghconfig.IsDirName) is one the bundle holds none for, so it
+// answers the owner's rather than refusing. An owner the bundle holds no directory for at all is
+// refused (ownerGHConfigDir): it is no owner of this project.
 func repositoryGHConfigDir(ownersDir, owner, repo string) (string, error) {
-	if name := owner + "/" + ghRepositoryName(repo); repo != "" && ghconfig.IsDir(name) {
+	if name := owner + "/" + ghRepositoryName(repo); repo != "" && ghconfig.IsDirName(name) {
 		if dir := ghconfig.Dir(ownersDir, name); isGHConfigDir(dir) {
 			return dir, nil
 		}

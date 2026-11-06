@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -243,6 +244,8 @@ type Manager struct {
 	identities        map[string]GitIdentity
 	pendingIdentities map[string]*pendingIdentity
 	commands          map[string]*commandRun
+	// keys holds each App private key parsed, by its PEM text (generateJWT).
+	keys map[string]*rsa.PrivateKey
 
 	// warnedMissingActions holds the read scopes, each naming an App role and an owner and no
 	// repository, whose owner has already had missingActionsMessage written for it.
@@ -304,6 +307,7 @@ func New(apps config.GitHubApps, options Options) *Manager {
 		identities:           map[string]GitIdentity{},
 		pendingIdentities:    map[string]*pendingIdentity{},
 		commands:             map[string]*commandRun{},
+		keys:                 map[string]*rsa.PrivateKey{},
 		warnedMissingActions: map[scope]bool{},
 	}
 }
@@ -317,7 +321,7 @@ func (m *Manager) Token(ctx context.Context, role AppRole, repo ghrepo.Repositor
 	if repo.IsZero() {
 		return Lease{}, fmt.Errorf("the %s App's token names no repository to act on", role)
 	}
-	return m.lease(ctx, role, repo.Owner(), []string{repo.Name()}, false, writePermissions[role])
+	return m.lease(ctx, mintRequest{role: role, owner: repo.Owner(), repos: []string{repo.Name()}, permissions: writePermissions[role]})
 }
 
 // ReadToken is Token for a token narrowed to repos on owner and to readPermissions, cached under
@@ -331,7 +335,7 @@ func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string, rep
 	if len(repos) == 0 {
 		return Lease{}, fmt.Errorf("the %s App's read-only token for %s names no repository to read", role, owner)
 	}
-	return m.lease(ctx, role, owner, repos, true, readPermissions)
+	return m.lease(ctx, mintRequest{role: role, owner: owner, repos: repos, read: true, permissions: readPermissions})
 }
 
 // Forgetter drops the leases a token source holds for an App role and owner, so the next one is
@@ -394,24 +398,47 @@ func askedRepositories(role AppRole, owner string, names []string) ([]string, er
 	return slices.Compact(asked), nil
 }
 
-// lease serves the cached lease of the scope role, owner, repos and read name while more than
-// refreshWindow remains, and otherwise mints one with permissions, sharing one exchange among
+// mintRequest is one ask for a lease, built by Token and ReadToken and carried whole through the
+// mint: the App role the token is minted as, the owner whose installation mints it, the
+// repositories it reaches, whether it is the read token, and the permissions GitHub is asked
+// for. lease settles the repositories as a token request carries them (askedRepositories) before
+// anything else reads them, so the request body, the cache key and the token-command run key all
+// name the one set.
+type mintRequest struct {
+	role        AppRole
+	owner       string
+	repos       []string
+	read        bool
+	permissions map[string]string
+}
+
+// scope is the key the request's lease is cached and awaited under (leaseScope).
+func (r mintRequest) scope() scope { return leaseScope(r.read, r.role, r.owner, r.repos) }
+
+// lease serves the cached lease of the request's scope while more than refreshWindow remains,
+// and otherwise mints one with the permissions the request names, sharing one exchange among
 // concurrent callers. A caller that waited on another's mint, which ended only because that
 // caller's own deadline did (a context error, or ErrCommandPending), asks again under its own
 // context rather than take that caller's failure as its own.
-func (m *Manager) lease(ctx context.Context, role AppRole, owner string, repos []string, read bool, permissions map[string]string) (Lease, error) {
-	owner = strings.TrimSpace(owner)
-	if owner == "" {
+//
+// A mint that succeeds also drops every lease the cache holds that has expired. The cache is
+// keyed by the repositories a lease reaches, so a mapping that changes over a long-lived
+// daemon's life leaves entries no caller asks for again, and an expired one can never be served:
+// a lease is served only while more than refreshWindow remains.
+func (m *Manager) lease(ctx context.Context, request mintRequest) (Lease, error) {
+	request.owner = strings.TrimSpace(request.owner)
+	if request.owner == "" {
 		return Lease{}, fmt.Errorf("GitHub App owner must not be empty")
 	}
-	asked, err := askedRepositories(role, owner, repos)
+	asked, err := askedRepositories(request.role, request.owner, request.repos)
 	if err != nil {
 		return Lease{}, err
 	}
 	if len(asked) == 0 {
-		return Lease{}, fmt.Errorf("the %s App's token for %s names no repository to reach", role, owner)
+		return Lease{}, fmt.Errorf("the %s App's token for %s names no repository to reach", request.role, request.owner)
 	}
-	cacheKey := leaseScope(read, role, owner, asked)
+	request.repos = asked
+	cacheKey := request.scope()
 	for {
 		now := m.now()
 		m.mu.Lock()
@@ -435,10 +462,12 @@ func (m *Manager) lease(ctx context.Context, role AppRole, owner string, repos [
 		m.pending[cacheKey] = waiting
 		m.mu.Unlock()
 
-		lease, err := m.mint(ctx, role, owner, asked, read, permissions)
+		lease, err := m.mint(ctx, request)
+		minted := m.now()
 		m.mu.Lock()
 		if err == nil {
 			m.leases[cacheKey] = lease
+			maps.DeleteFunc(m.leases, func(_ scope, held Lease) bool { return !held.ExpiresAt.After(minted) })
 		}
 		waiting.lease, waiting.err = lease, err
 		delete(m.pending, cacheKey)
@@ -454,37 +483,37 @@ func callerEnded(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCommandPending)
 }
 
-// mint mints role's installation token for repos on owner. An installation the daemon found that
+// mint mints the request's installation token. An installation the daemon found that
 // answers the exchange 404 was removed since (errInstallationGone): it is forgotten and looked for
 // once more, so a removed App answers ErrNotInstalled and an App installed there again mints on
 // its new installation. A configured installation answering 404 is not installed either.
-func (m *Manager) mint(ctx context.Context, role AppRole, owner string, repos []string, read bool, permissions map[string]string) (Lease, error) {
-	app, err := m.app(role)
+func (m *Manager) mint(ctx context.Context, request mintRequest) (Lease, error) {
+	app, err := m.app(request.role)
 	if err != nil {
 		return Lease{}, err
 	}
 	if app.TokenCommand != "" {
-		return m.mintFromCommand(ctx, role, app, owner, repos, read)
+		return m.mintFromCommand(ctx, app, request)
 	}
-	installation, err := m.installation(ctx, role, app, owner)
+	installation, err := m.installation(ctx, request.role, app, request.owner)
 	if err != nil {
 		return Lease{}, err
 	}
-	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())
+	jwt, err := m.generateJWT(app.AppID, app.PrivateKey, m.now())
 	if err != nil {
 		return Lease{}, err
 	}
-	lease, err := m.exchangeRead(ctx, jwt, installation, role, owner, repos, read, permissions)
-	if errors.Is(err, errInstallationGone) && configuredInstallation(app, owner) == "" {
-		m.forgetInstallation(role, owner)
-		if installation, err = m.installation(ctx, role, app, owner); err != nil {
+	lease, err := m.exchangeRead(ctx, jwt, installation, request)
+	if errors.Is(err, errInstallationGone) && configuredInstallation(app, request.owner) == "" {
+		m.forgetInstallation(request.role, request.owner)
+		if installation, err = m.installation(ctx, request.role, app, request.owner); err != nil {
 			return Lease{}, err
 		}
-		lease, err = m.exchangeRead(ctx, jwt, installation, role, owner, repos, read, permissions)
+		lease, err = m.exchangeRead(ctx, jwt, installation, request)
 	}
 	if errors.Is(err, errInstallationGone) {
-		m.forgetInstallation(role, owner)
-		return Lease{}, fmt.Errorf("%w: %s's installation %s on %s answers %w", ErrNotInstalled, role, installation, owner, err)
+		m.forgetInstallation(request.role, request.owner)
+		return Lease{}, fmt.Errorf("%w: %s's installation %s on %s answers %w", ErrNotInstalled, request.role, installation, request.owner, err)
 	}
 	if err != nil {
 		return Lease{}, err
@@ -506,18 +535,17 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, repos []
 // either stays the failure it is. A second refusal is the caller's error and names a set actions
 // is not in, so no cause is blamed on the missing grant.
 //
-// The write set names actions too (writePermissions, for `gh run rerun`), and read is what keeps
-// this to the read token, as the request body that named no permissions at all did before the
-// write token named its own: a write token minted without actions would take a re-run away from
-// every role silently, where the refusal says what the installation does not hold.
-func (m *Manager) exchangeRead(ctx context.Context, jwt, installation string, role AppRole, owner string, repos []string, read bool, permissions map[string]string) (Lease, error) {
-	lease, err := m.exchange(ctx, jwt, installation, repos, permissions)
-	if !errors.Is(err, errNarrowingRefused) || !read || permissions[optionalReadPermission] == "" {
+// The write set names actions too (writePermissions, for `gh run rerun`), and the request's read
+// is what keeps this to the read token: a write token minted without actions would take a re-run
+// away from every role silently, where the refusal says what the installation does not hold.
+func (m *Manager) exchangeRead(ctx context.Context, jwt, installation string, request mintRequest) (Lease, error) {
+	lease, err := m.exchange(ctx, jwt, installation, request.repos, request.permissions)
+	if !errors.Is(err, errNarrowingRefused) || !request.read || request.permissions[optionalReadPermission] == "" {
 		return lease, err
 	}
-	lease, err = m.exchange(ctx, jwt, installation, repos, withoutOptionalRead(permissions))
+	lease, err = m.exchange(ctx, jwt, installation, request.repos, withoutOptionalRead(request.permissions))
 	if err == nil {
-		m.warnMissingActions(role, owner, repos)
+		m.warnMissingActions(request.role, request.owner, request.repos)
 	}
 	return lease, err
 }
@@ -611,7 +639,7 @@ var errNarrowingRefused = errors.New("the installation does not reach the reposi
 var ErrNotInstalled = errors.New("github_app_not_installed")
 
 func (m *Manager) discoverInstallations(ctx context.Context, app config.GitHubApp) (map[string]string, error) {
-	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())
+	jwt, err := m.generateJWT(app.AppID, app.PrivateKey, m.now())
 	if err != nil {
 		return nil, err
 	}

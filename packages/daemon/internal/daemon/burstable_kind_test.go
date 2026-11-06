@@ -143,7 +143,7 @@ func burstableLiveRuntime(ctx context.Context, cfg config.Config, rc *rest.Confi
 	}
 	// The stand-in bundle holds the launch's own owner and no other, so the proof's project
 	// serves none of its own: every pod it makes projects what it was launched with, and no pod
-	// has drifted from a directory the daemon serves (sandbox's movedGhOwners).
+	// has drifted from a directory the daemon serves (sandbox's movedGhDirs).
 	opts.GitHubDirs = func(ghrepo.Repository) []string { return nil }
 	opts.Mapped = func() []ghrepo.Repository { return []ghrepo.Repository{burstableLiveRepository} }
 	opts.Agent = burstableLiveStub

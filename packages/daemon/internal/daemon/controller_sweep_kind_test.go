@@ -102,7 +102,10 @@ func controllerSweepKindRuntime(ctx context.Context, cfg config.Config, listener
 	}
 	opts.Agent = controllerSweepKindStub
 	repos := func() []ghrepo.Repository { return nil }
-	return sandboxRuntime(rc, opts, repos, ghrepo.Renames{})(ctx, listener, listener.Addr(), outboxTokens{}, nil, st, noRepositories)
+	// The proof maps no repository and configures no rename, so the mapping's rule
+	// (repositories.serving) answers every provisioning token's repository as it is recorded.
+	serving := newRepositories(cfg.Project, ghrepo.Renames{}).serving
+	return sandboxRuntime(rc, opts, repos, serving, ghrepo.Renames{})(ctx, listener, listener.Addr(), outboxTokens{}, nil, st, noRepositories)
 }
 
 // controllerSweepKindSpec is the project controller's launch as the proof makes it: the

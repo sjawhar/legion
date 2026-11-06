@@ -49,25 +49,30 @@ func (s *selectors) repository(value, what string) error {
 	return err
 }
 
-// owner records the owner value names and no repository: the command reaches whatever of that
-// owner's gh resolves, so its directory is the owner's own.
+// ownerAlone records owner as named with no repository of it (ownerOnly), the one recording both
+// owner and pairOwner make: the command reaches whatever of that owner's gh resolves, so its
+// directory is the owner's own.
+func (s *selectors) ownerAlone(owner, what string) {
+	s.add(owner, what)
+	s.ownerOnly = true
+}
+
+// owner records the owner value names and no repository.
 func (s *selectors) owner(value, what string) error {
 	owner, err := checkedOwner(value, what, s.api)
 	if err == nil {
-		s.add(owner, what)
-		s.ownerOnly = true
+		s.ownerAlone(owner, what)
 	}
 	return err
 }
 
 // pairOwner records the owner of value, OWNER/TEAM or OWNER/NUMBER, and no repository: a team and
-// a project are none of the owner's repositories, so the command reaches whatever of that owner's
-// gh resolves. The pair is read as a repository's name only to take the owner out of it.
+// a project are none of the owner's repositories. The pair is read as a repository's name only
+// to take the owner out of it.
 func (s *selectors) pairOwner(value, what string) error {
 	owner, _, err := repositoryTarget(value, what, s.api)
 	if err == nil {
-		s.add(owner, what)
-		s.ownerOnly = true
+		s.ownerAlone(owner, what)
 	}
 	return err
 }

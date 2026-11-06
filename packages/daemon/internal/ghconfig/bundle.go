@@ -39,11 +39,11 @@ var repositoryName = regexp.MustCompile(`^[a-z0-9._-]{1,100}$`)
 // which GH_CONFIG_DIR names, and the owner a `gh` or a git-credential request names.
 func IsOwner(owner string) bool { return ownerLogin.MatchString(owner) }
 
-// IsDir says whether name is a directory a bundle may hold: a lowercased owner login (IsOwner),
-// or that login and one of its repositories as `<owner>/<repo>`, both lowercased. A GitHub login
-// holds no slash and a repository name holds none either, so the one slash of a name splits it
-// exactly.
-func IsDir(name string) bool {
+// IsDirName says whether name is a directory a bundle may hold: a lowercased owner login
+// (IsOwner), or that login and one of its repositories as `<owner>/<repo>`, both lowercased. A
+// GitHub login holds no slash and a repository name holds none either, so the one slash of a
+// name splits it exactly.
+func IsDirName(name string) bool {
 	owner, repo, nested := strings.Cut(name, "/")
 	if !IsOwner(owner) {
 		return false
@@ -61,14 +61,14 @@ func (b Bundle) DirNames() []string { return slices.Sorted(maps.Keys(b.Dirs)) }
 
 // Validate refuses a bundle with no Default, a Default absent from Dirs or that is not a
 // lowercased GitHub login — GH_CONFIG_DIR always names an owner's directory, never a
-// repository's — or a directory that is neither shape a bundle holds (IsDir), each name being a
+// repository's — or a directory that is neither shape a bundle holds (IsDirName), each name being a
 // path under the bundle's root.
 func (b Bundle) Validate() error {
 	if b.Default == "" {
 		return errors.New("gh bundle names no default owner")
 	}
 	for _, name := range b.DirNames() {
-		if !IsDir(name) {
+		if !IsDirName(name) {
 			return fmt.Errorf("gh bundle directory %q is no lowercased GitHub login or owner/repository", name)
 		}
 	}

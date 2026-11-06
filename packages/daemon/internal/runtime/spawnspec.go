@@ -47,6 +47,16 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 // (appauth.AppRoleFor). A project with no GitHub owner at all to mint for is ErrNoGitHubOwner.
 type GitHubCredential func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error)
 
+// ControllerCredential is the daemon's one function a runtime calls for the project controller's
+// own gh bundle (appauth.ControllerCredential), which answers by default owner where
+// GitHubCredential answers by repository: a controller works no repository, so a bundle asked
+// for by one would take its default from the first owner the project serves, sorted, and a
+// project that gained an owner sorting before it would move a running controller's default away
+// from the directory its launch fixed as GH_CONFIG_DIR. A refresh asks it for the owner the
+// controller's launch recorded; a launch asks for none, taking the first owner, which is the
+// default it then records.
+type ControllerCredential func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error)
+
 // ErrNoGitHubOwner is a GitHubCredential's refusal when there is no GitHub owner to mint for: a
 // project whose repositories none of the Apps can act on, and a caller that names no owner. A
 // controller then runs with gh acting as nobody, its gh directory empty.

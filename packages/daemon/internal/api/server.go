@@ -429,18 +429,22 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 // whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
 // one rule, read here over the repositories this server already holds
 // (Options.GitHubRepositories) rather than written a second time.
+//
+// The repositories are read once per call, the first time a configured pair asks about an
+// owner, and compared without case as GitHub compares owners. A server built with no
+// repositories — a test's, a daemon with no GitHub Apps — owns none.
 func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
-	return s.renames.Serving(recorded, s.ownsOwner)
-}
-
-// ownsOwner is whether owner is an owner of the project's repositories, compared without case as
-// GitHub compares owners. A server built with no repositories — a test's, a daemon with no
-// GitHub Apps — owns none.
-func (s *server) ownsOwner(owner string) bool {
-	if s.githubRepositories == nil {
-		return false
-	}
-	return slices.ContainsFunc(s.githubRepositories(), func(r ghrepo.Repository) bool { return strings.EqualFold(r.Owner(), owner) })
+	var repos []ghrepo.Repository
+	read := false
+	return s.renames.Serving(recorded, func(owner string) bool {
+		if !read {
+			if s.githubRepositories != nil {
+				repos = s.githubRepositories()
+			}
+			read = true
+		}
+		return slices.ContainsFunc(repos, func(r ghrepo.Repository) bool { return strings.EqualFold(r.Owner(), owner) })
+	})
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,

@@ -52,7 +52,6 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -110,7 +109,7 @@ type Runtime struct {
 	adoptTimeout                   time.Duration
 	tokens                         ProvisionTokens
 	gitHubCredential               runtime.GitHubCredential
-	controllerCredential           func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error)
+	controllerCredential           runtime.ControllerCredential
 	gitHubDirs                     func(repo ghrepo.Repository) []string
 	store                          Store
 	conns                          runtime.Conns

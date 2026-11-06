@@ -6,9 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -184,7 +182,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Accepted, cfg.RepositoryRenames)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Accepted, p.repositories.serving, cfg.RepositoryRenames)
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -481,14 +479,17 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // (appauth.ControllerCredential), which a controller's refresh asks by the default owner its pod
 // was launched with, and the directory set those directories
 // are compared with (appauth.GitHubDirs), which the runtime reads a running pod's gh projection
-// against, with the workflow's mapping as the repositories its repository caches follow (mapped),
-// with the store's own workspace bundles as what a replacement pod's launcher is sent and what
-// its restore drops, and registers its launcher acceptor on the stream listener. A daemon with no
-// GitHub Apps hands it neither tokens nor a mapping, and sandbox.New's own refusal names what is
-// missing. Boot has already run the cluster check (plan.clusterCheck): Agent Sandbox is installed
-// and no Sandbox of a layout before this one — per-claim pods, or issue pods on one tree volume —
-// remains.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, repos func() []ghrepo.Repository, renames ghrepo.Renames) runtimeFactory {
+// against, with serving as the rule every provisioning token's repository is read through
+// (repositories.serving, the mapping's own, so a configured rename's mint follows the owner
+// whose installation holds the repository now), with the workflow's mapping as the repositories
+// its repository caches follow (mapped), with the store's own workspace bundles as what a
+// replacement pod's launcher is sent and what its restore drops, and registers its launcher
+// acceptor on the stream listener. A daemon with no GitHub Apps hands it neither tokens nor a
+// mapping, and sandbox.New's own refusal names what is missing. Boot has already run the cluster
+// check (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this
+// one — per-claim pods, or issue pods on one tree volume — remains.
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options, repos func() []ghrepo.Repository,
+	serving func(ghrepo.Repository) ghrepo.Repository, renames ghrepo.Renames) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
@@ -502,7 +503,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, repos func() []ghrepo
 		// answered for that bundle again.
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
-			opts.Tokens = implementTokens{apps: apps, serving: servingRepository(repos, renames)}
+			opts.Tokens = implementTokens{apps: apps, serving: serving}
 			opts.GitHubCredential = appauth.GitHubCredential(apps, repos, renames)
 			opts.ControllerCredential = appauth.ControllerCredential(apps, repos, renames)
 			opts.GitHubDirs = func(repo ghrepo.Repository) []string { return appauth.GitHubDirs(repos, renames, repo) }
@@ -513,20 +514,6 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, repos func() []ghrepo
 		}
 		listener.SetLauncherResolver(rt.LauncherResolver())
 		return rt, nil
-	}
-}
-
-// servingRepository is the repository GitHub holds a recorded one under now, as the mapping's own
-// rule reads it (ghrepo.Renames.Serving, repositories.serving): the other name of its configured
-// pair where the project owns that name's owner and not the recorded one's, and the recorded
-// repository otherwise, which is every repository of a deployment that configures no rename. The
-// owners it reads are the mapping's, which changes as Dispatch's mapping does, so it is read per
-// mint rather than once.
-func servingRepository(repos func() []ghrepo.Repository, renames ghrepo.Renames) func(ghrepo.Repository) ghrepo.Repository {
-	return func(repo ghrepo.Repository) ghrepo.Repository {
-		return renames.Serving(repo, func(name string) bool {
-			return slices.ContainsFunc(repos(), func(r ghrepo.Repository) bool { return strings.EqualFold(r.Owner(), name) })
-		})
 	}
 }
 

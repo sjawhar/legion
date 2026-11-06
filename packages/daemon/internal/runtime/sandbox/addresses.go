@@ -354,7 +354,7 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // mount holding every named role's overlays and the project's memory overlays in role's container
 // (movedRoleOverlays), the secrets broker's enrollment its next generation is started against
 // (movedEnrollment), the whole session store it was created under (movedSessionStore), and the
-// gh directories its gh volume projects (movedGhOwners). Each is fixed for the
+// gh directories its gh volume projects (movedGhDirs). Each is fixed for the
 // pod's life, so the pod must be replaced for the role to run as one launched now — but each
 // leaves the workers already in the pod running and able to reach this daemon, so each is a
 // reason to open a round (PodDrift) and ask them to push, where replacing the pod under them
@@ -374,13 +374,13 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 	if store, ok := r.movedSessionStore(pod); ok {
 		moved = append(moved, store)
 	}
-	if dirs, ok := r.movedGhOwners(pod, role); ok {
+	if dirs, ok := r.movedGhDirs(pod, role); ok {
 		moved = append(moved, dirs)
 	}
 	return moved
 }
 
-// movedGhOwners is the gh directories the daemon serves now (r.gitHubDirs, appauth.GitHubDirs)
+// movedGhDirs is the gh directories the daemon serves now (r.gitHubDirs, appauth.GitHubDirs)
 // that role's gh volume of the pod projects none of; ok is whether it lacks any. That volume is
 // one Secret projection whose items are fixed when the pod is created (volumes), one pair of keys
 // per directory of the launch, while the role Secret those keys come from gains a directory's
@@ -402,8 +402,9 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 // directory the daemon serves now as lacking, and the first owner its project gains remakes it.
 // The comparison runs one way only: a directory the pod holds that the daemon no longer serves
 // costs the pod a stale directory and nothing more, and must never be worth remaking a pod and
-// deleting its disk for.
-func (r *Runtime) movedGhOwners(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
+// deleting its disk for. The daemon's set comes sorted (Options.GitHubDirs), and the pod's is
+// sorted here, so each is searched and named in one order.
+func (r *Runtime) movedGhDirs(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
 	name := roleVolume(ghVolume, role)
 	at := slices.IndexFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == name })
 	if at < 0 {
@@ -417,14 +418,17 @@ func (r *Runtime) movedGhOwners(pod *corev1.Pod, role claim.Role) (movedAddress,
 			}
 		}
 	}
+	slices.Sort(held)
 	repo, _ := fetchRepository(pod)
 	served := r.gitHubDirs(repo)
-	lacking := slices.ContainsFunc(served, func(dir string) bool { return !slices.Contains(held, dir) })
+	lacking := slices.ContainsFunc(served, func(dir string) bool {
+		_, found := slices.BinarySearch(held, dir)
+		return !found
+	})
 	if !lacking {
 		return movedAddress{}, false
 	}
-	slices.Sort(held)
-	return movedAddress{where: name, held: ghDirsName(held), handed: ghDirsName(slices.Sorted(slices.Values(served)))}, true
+	return movedAddress{where: name, held: ghDirsName(held), handed: ghDirsName(served)}, true
 }
 
 // ghDirsName names a set of gh directories as one string, each name in order; "(unset)" for none,

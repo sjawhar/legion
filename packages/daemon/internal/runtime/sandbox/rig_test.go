@@ -175,7 +175,7 @@ var servedDirs = slices.Sorted(slices.Values(append(slices.Clone(staticDirs), ad
 // servedDirs, and every bundle it renders holds addedOwner's read-only files beside the
 // directories staticCredential always renders, as the daemon's own two answers move together
 // (appauth.GitHubDirs and appauth.GitHubCredential read one mapping). A pod created before it
-// projects no directory for the new owner and never will (movedGhOwners).
+// projects no directory for the new owner and never will (movedGhDirs).
 func servingAddedOwner(o *Options) {
 	o.GitHubDirs = func(ghrepo.Repository) []string { return servedDirs }
 	o.GitHubCredential = func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {

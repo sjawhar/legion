@@ -148,7 +148,7 @@ func TestAControllerPodWhoseGhVolumeLacksAServedOwnerIsReplacedByItsNextLaunch(t
 // every `gh` call of the controller against that owner's repositories runs unauthenticated, and
 // only a new pod projects the owner's files.
 //
-// So movedGhOwners reads a gh volume that is an empty directory as holding no directory: a served
+// So movedGhDirs reads a gh volume that is an empty directory as holding no directory: a served
 // owner makes it a moved address, and because the controller's pod is the one pod no round
 // covers and holds no issue disk, its next launch replaces it. Were the empty directory read as
 // lacking nothing, driftedInPod would be empty, the observation Alive, and every launch would
@@ -242,11 +242,11 @@ func TestAnOwnerlessControllerIsKeptWhileItsProjectStaysOwnerless(t *testing.T) 
 	}
 }
 
-// The two pods movedGhOwners must leave alone whatever the daemon serves. A pod with no gh volume
+// The two pods movedGhDirs must leave alone whatever the daemon serves. A pod with no gh volume
 // of the role at all is no pod of this runtime's making, and the runtime cannot say what it holds.
 // A pod projecting an owner the daemon no longer serves is ahead of the daemon, not behind it: a
 // stale directory costs nothing, and remaking the pod would delete the issue's disk for it.
-func TestMovedGhOwnersLeavesAPodItCannotJudgeAndOneAheadOfTheDaemon(t *testing.T) {
+func TestMovedGhDirsLeavesAPodItCannotJudgeAndOneAheadOfTheDaemon(t *testing.T) {
 	g := newRig(t, nil)
 	name := roleVolume(ghVolume, claim.RoleTester)
 	for what, spec := range map[string]corev1.PodSpec{
@@ -255,19 +255,19 @@ func TestMovedGhOwnersLeavesAPodItCannotJudgeAndOneAheadOfTheDaemon(t *testing.T
 			Secret: &corev1.SecretVolumeSource{Items: ghItemsFor(append([]string{"zeta"}, staticDirs...)...)},
 		}}}},
 	} {
-		if moved, ok := g.r.movedGhOwners(&corev1.Pod{Spec: spec}, claim.RoleTester); ok {
+		if moved, ok := g.r.movedGhDirs(&corev1.Pod{Spec: spec}, claim.RoleTester); ok {
 			t.Errorf("%s: moved %q, want the pod left where it is", what, moved.String())
 		}
 	}
 }
 
 // The directories a pod created now would hold depend on the pod's own repository — the owner it
-// writes to holds one directory per other repository that owner serves — so movedGhOwners reads
+// writes to holds one directory per other repository that owner serves — so movedGhDirs reads
 // that repository off the pod's workspace fetch (fetchRepository) rather than guessing it, and
 // asks for the owner-only set of a pod that fetches none, the controller's. A daemon that has
 // since gained a sibling repository of the pod's own owner moves the pod's gh address: only a
 // new pod projects the directory it holds the narrowed token in.
-func TestMovedGhOwnersReadsThePodsOwnRepository(t *testing.T) {
+func TestMovedGhDirsReadsThePodsOwnRepository(t *testing.T) {
 	var asked []string
 	served := func(repo ghrepo.Repository) []string {
 		asked = append(asked, repo.String())
@@ -282,11 +282,11 @@ func TestMovedGhOwnersReadsThePodsOwnRepository(t *testing.T) {
 	controller := g.spawn(controllerSpec(t))
 	asked = nil
 
-	moved, ok := g.r.movedGhOwners(g.pod(issue.Sandbox.Name), claim.RoleArchitect)
+	moved, ok := g.r.movedGhDirs(g.pod(issue.Sandbox.Name), claim.RoleArchitect)
 	if !ok || !strings.Contains(moved.String(), "sjawhar/other") {
 		t.Errorf("the issue pod moved = %t, %q; want the sibling repository's directory named as lacking", ok, moved.String())
 	}
-	if _, ok := g.r.movedGhOwners(g.pod(controller.Sandbox.Name), claim.RoleController); ok {
+	if _, ok := g.r.movedGhDirs(g.pod(controller.Sandbox.Name), claim.RoleController); ok {
 		t.Error("the controller's pod, which fetches no repository, moved though it holds every owner the daemon serves")
 	}
 	if want := []string{spec.Repository.String(), "/"}; !slices.Equal(asked, want) {
