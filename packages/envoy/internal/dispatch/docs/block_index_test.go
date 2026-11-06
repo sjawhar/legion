@@ -2244,14 +2244,14 @@ const retireVector = "array_fill(0.1::real, array[1536])::vector"
 func TestRetirementReachesEachWholeTextRowThroughItsPrimaryKey(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
-	exec := func(statement string, args ...any) {
-		t.Helper()
-		if _, err := database.Pool.Exec(ctx, statement, args...); err != nil {
-			t.Fatalf("seed the embeddings: %v", err)
-		}
-	}
 	for _, owner := range wholeTextOwners {
 		t.Run(owner.kind, func(t *testing.T) {
+			exec := func(statement string, args ...any) {
+				t.Helper()
+				if _, err := database.Pool.Exec(ctx, statement, args...); err != nil {
+					t.Fatalf("seed the embeddings: %v", err)
+				}
+			}
 			// Each group is a set of whole-text rows named by what their owner's windows are:
 			// the first two retire, the rest stand. "twice" holds two windows of one owner, the
 			// shape that must still cost one row of the batch and one deletion.
