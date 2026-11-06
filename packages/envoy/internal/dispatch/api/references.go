@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -220,9 +219,10 @@ var questionSourceKinds = []string{"artifact", "ask", "comment", "message"}
 // two sources or more carry is 409 ID_AMBIGUOUS, and one nothing carries is the 404 of a source
 // whose text belongs to no document, which is also the answer for a direct message and for any
 // source that is on no document. The id arrives in the query string, which the prefix layer
-// does not touch, so this route canonicalizes a whole uuid of its own: Postgres refuses
-// `urn:uuid:<uuid>` on the uuid columns the read below binds it to, and the raw value would
-// answer 500 where the canonical spelling answers the document or this route's 404.
+// does not touch: that layer rewrites path values alone, so a prefix is resolved here. A whole
+// uuid written in one of uuid.Parse's other spellings is canonicalized by the read itself
+// (refs.ScopeOf, canonicalUUID), which is the one place it is canonicalized, so this route
+// hands on what it was given and `urn:uuid:<uuid>` answers as the canonical id answers.
 func (s *server) getReferenceQuestions(w http.ResponseWriter, r *http.Request) {
 	_, human, err := s.optionalActor(r)
 	if err != nil {
@@ -251,10 +251,6 @@ func (s *server) getReferenceQuestions(w http.ResponseWriter, r *http.Request) {
 		if whole != "" {
 			id = whole
 		}
-	} else if parsed, err := uuid.Parse(id); err == nil {
-		// A whole uuid is no id written short (text.IsIDPrefix refuses one), so the two arms
-		// are exclusive and an id is parsed once however it is written.
-		id = parsed.String()
 	}
 	document, err := refs.ScopeOf(r.Context(), s.deps.Store.Pool, kind, id)
 	if err != nil {

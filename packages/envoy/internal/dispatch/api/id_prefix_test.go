@@ -701,14 +701,14 @@ func TestTheQuestionMapRouteAnswersEverySourceKind(t *testing.T) {
 }
 
 // The id the question map takes arrives in the query string, which the prefix layer never
-// touches: that layer rewrites path values alone (resolveIDPrefixes), so this route
-// canonicalizes its own `?id=` (getReferenceQuestions) and refs.ScopeOf binds the canonical
-// spelling of whatever it is given. Without both, `urn:uuid:<uuid>` reaches a uuid column as
-// written, Postgres refuses it ("invalid input syntax for type uuid", SQLSTATE 22P02) and the
-// read answers 500 where the canonical id answers the document; the braced spelling, which
-// Postgres does read, answers that document under a name in braces rather than the id every
-// other read of it carries. Every spelling of one id answers what the canonical id answers,
-// and one nothing carries this route's own 404.
+// touches: that layer rewrites path values alone (resolveIDPrefixes), so the canonical
+// spelling of one written another of uuid.Parse's ways is the read's own to bind
+// (refs.ScopeOf, canonicalUUID), the one place it is canonicalized. Without it,
+// `urn:uuid:<uuid>` reaches a uuid column as written, Postgres refuses it ("invalid input
+// syntax for type uuid", SQLSTATE 22P02) and the read answers 500 where the canonical id
+// answers the document; the braced spelling, which Postgres does read, answers that document
+// under a name in braces rather than the id every other read of it carries. Every spelling of
+// one id answers what the canonical id answers, and one nothing carries this route's own 404.
 func TestTheQuestionMapRouteReadsEveryUuidSpellingAsTheCanonicalID(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "QMU", "A spec with a question", "# Spec\n\nA passage.")

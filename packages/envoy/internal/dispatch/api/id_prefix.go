@@ -94,10 +94,6 @@ func (s *server) resolveIDPrefixes(route apiRoute, handler http.HandlerFunc) htt
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		canonicalizeUUIDPath(r, "id")
-		if !entry.resolves() {
-			handler(w, r)
-			return
-		}
 		var id, blockID string
 		if entry.Kind != "" {
 			if value := r.PathValue("id"); text.IsIDPrefix(value) {
@@ -109,6 +105,9 @@ func (s *server) resolveIDPrefixes(route apiRoute, handler http.HandlerFunc) htt
 				blockID = value
 			}
 		}
+		// Nothing to look up: a value that is no id written short, and every value of a row that
+		// resolves nothing, whose Kind is empty and Blocks false. For either, the canonicalized
+		// id is the whole of this layer's work, with no query and no actor resolved.
 		if id == "" && blockID == "" {
 			handler(w, r)
 			return

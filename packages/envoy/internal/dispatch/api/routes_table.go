@@ -198,9 +198,12 @@ var writeClasses = map[string]writeScope{
 // per route and not per kind. BlockNotFound is the same for the {block_id}. notFoundNone is the
 // route that answers no 404 at all for an id it does not hold, which then keeps that answer.
 //
-// Reason is why a route resolves nothing, written exactly where Kind is empty and Blocks is
-// false: an id of a kind refs.ResolvePrefix does not read, which stays what its handler already
-// makes of it.
+// Reason is why a route looks up no prefix, written exactly where Kind is empty and Blocks is
+// false: an id of a kind refs.ResolvePrefix does not read, so nothing is looked for and the
+// handler makes of the value what it always made of it. Such a route is wrapped all the same,
+// because its {id} is still rewritten to the canonical spelling where it is a whole uuid
+// written another of uuid.Parse's ways, as it is on every route that takes an id
+// (canonicalizeUUIDPath).
 type idRoute struct {
 	Kind          string
 	WithinIssue   bool
@@ -216,8 +219,9 @@ type idRoute struct {
 // the caller asked for, and it answers 204 whatever ask the id names.
 const notFoundNone = "none"
 
-// resolves reports whether the route reads a prefix at all, which is what makes Reason required
-// and what decides whether register wraps it (resolveIDPrefixes).
+// resolves reports whether the route looks a prefix up at all, which is what makes Reason
+// required. It does not decide the wrapping: register wraps every route idRoutes names, since
+// one that resolves nothing still has its {id} canonicalized there (resolveIDPrefixes).
 func (route idRoute) resolves() bool { return route.Kind != "" || route.Blocks }
 
 // idRoutes is, by "<method> <pattern>", what the {id} and {block_id} of every route that
@@ -305,8 +309,10 @@ var idRoutes = map[string]idRoute{
 	"GET /api/v1/issues/{key}/messages/{id}":                 {Kind: "message", WithinIssue: true, NotFound: "NOT_FOUND"},
 
 	// The routes whose id names none of the five kinds a prefix shortens — an ask, a comment,
-	// a message, a document, a document block — so the value reaches the handler exactly as
-	// it is written and the handler answers for it as it always has.
+	// a message, a document, a document block — so no prefix is looked for and the handler
+	// answers for the value as it always has. A whole uuid an {id} spells another of
+	// uuid.Parse's ways is still rewritten to the canonical spelling, as it is on every route
+	// that takes an id (canonicalizeUUIDPath).
 	"GET /api/v1/broadcasts/{id}":                   {Reason: "a broadcast id: one send to many sessions"},
 	"POST /api/v1/credential-grants/{id}/revoke":    {Reason: "a credential grant id"},
 	"POST /api/v1/credential-requests/{id}/approve": {Reason: "a credential request id"},
@@ -391,9 +397,11 @@ type routeScopeSet []string
 // person hold neither.
 //
 // A route that takes an id written short needs no scope of its own for it: the prefix layer
-// (resolveIDPrefixes, idRoutes) runs before this gate and only rewrites the path value, so a
-// short id reaches exactly the scopes the whole id reaches, and a row that needs none with a
-// whole id needs none with a prefix.
+// (resolveIDPrefixes, idRoutes) runs inside this gate - register wraps the gate around it, so
+// the row's scopes are the first thing a request is held to and a credential that holds none is
+// refused before any id is read - and it only rewrites the path value, so a short id reaches
+// exactly the scopes the whole id reaches, and a row that needs none with a whole id needs none
+// with a prefix.
 var routeScopes = map[string]routeScopeSet{
 	// The rows that read or write what belongs to the calling person: their inbox, their own
 	// answers and replies, their read marks, their conversations with sessions, and the people

@@ -619,7 +619,7 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 // reindexOwedText drains one row of the re-index queue (refs.RefsGrammarOwed), the text an older
 // build indexed without the whole grammar, and reports whether it did: a comment, an ask or an
 // issue message through the queue's own re-index (refs.ReindexOwed), a document by owing it a
-// block index (oweDocumentIndex), which is the whole of its re-index, and a `scope` row, which
+// block index (drainOwedDocument), which is the whole of its re-index, and a `scope` row, which
 // names a document whose question blocks moved, through a re-index of every source whose text
 // belongs to that document (reindexScope). The last two name no text of their own, which is why
 // refs.ReindexOwed answers an error for either rather than settling such a row. Each row is
@@ -630,7 +630,7 @@ func (s *Service) reindexOwedText(ctx context.Context, source refs.Owed) (bool, 
 	case "comment", "ask", "message":
 		return refs.ReindexOwed(ctx, s.store.Pool, source, s.serverURL)
 	case "artifact":
-		return s.oweDocumentIndex(ctx, source.ID, &source)
+		return s.drainOwedDocument(ctx, source)
 	case "scope":
 		if err := s.reindexScope(ctx, source.ID); err != nil {
 			return false, err
@@ -650,27 +650,37 @@ func (s *Service) reindexOwedText(ctx context.Context, source refs.Owed) (bool, 
 // and because a document an older build's version write left owed is indexed by that batch in this
 // same tick.
 //
-// With source set it is one row of the queue: the row is settled first and only while it holds the
-// enqueued_at it was listed with, in the transaction that owes the index, so a write that lands
-// meanwhile leaves the row owed and owes nothing. A document that is gone owes no index and has
-// its row settled with it. It reports whether it drained the row.
-func (s *Service) oweDocumentIndex(ctx context.Context, artifactID string, source *refs.Owed) (bool, error) {
+// A document that is gone owes no index: the row is written from the artifacts table, so nothing
+// is inserted for one. exec is the pool for a caller that owes the index on its own
+// (reindexScope), and the transaction that settles a queue row for the drain
+// (drainOwedDocument), which must owe the index and settle the row together or do neither.
+func oweDocumentIndex(ctx context.Context, exec refs.Execer, artifactID string) error {
+	if _, err := exec.Exec(ctx, `
+		insert into document_block_versions (artifact_id) select id from artifacts where id = $1::uuid
+		on conflict (artifact_id) do update set version = null
+	`, artifactID); err != nil {
+		return fmt.Errorf("owe document %s a block index: %w", artifactID, err)
+	}
+	return nil
+}
+
+// drainOwedDocument drains one `artifact` row of the re-index queue by owing its document a block
+// index (oweDocumentIndex), which is the whole of that document's re-index, and reports whether it
+// drained the row. The row is settled first and only while it holds the enqueued_at it was listed
+// with, in the transaction that owes the index, so a write that lands meanwhile leaves the row
+// owed and owes nothing. A document that is gone has its row settled all the same.
+func (s *Service) drainOwedDocument(ctx context.Context, source refs.Owed) (bool, error) {
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	if source != nil {
-		settled, err := refs.SettleOwed(ctx, tx, *source)
-		if err != nil || !settled {
-			return false, err
-		}
+	settled, err := refs.SettleOwed(ctx, tx, source)
+	if err != nil || !settled {
+		return false, err
 	}
-	if _, err := tx.Exec(ctx, `
-		insert into document_block_versions (artifact_id) select id from artifacts where id = $1::uuid
-		on conflict (artifact_id) do update set version = null
-	`, artifactID); err != nil {
-		return false, fmt.Errorf("owe document %s a block index: %w", artifactID, err)
+	if err := oweDocumentIndex(ctx, tx, source.ID); err != nil {
+		return false, err
 	}
 	return true, tx.Commit(ctx)
 }
@@ -706,7 +716,7 @@ func (s *Service) reindexScope(ctx context.Context, doc string) error {
 		if !found || !refs.HoldsQuestionCandidate(body, s.serverURL) {
 			continue
 		}
-		if _, err := s.oweDocumentIndex(ctx, source.ID, nil); err != nil {
+		if err := oweDocumentIndex(ctx, s.store.Pool, source.ID); err != nil {
 			return err
 		}
 	}
