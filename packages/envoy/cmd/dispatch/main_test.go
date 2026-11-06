@@ -1101,7 +1101,12 @@ func TestMain(m *testing.M) {
 //
 // A second line names the memory bounds the document service derives from the limit the runtime
 // then holds (docs.BoundsForLimit), so an operator reads from the boot log what the pod's rooms,
-// applies and decodes are held to; a process with no limit runs at the 4 GiB calibration.
+// cold reads and whole-document copies are held to; a process with no limit runs at the 4 GiB
+// calibration. The five figures that line names are every field of docs.MemoryBounds, so the row
+// below reads them from BoundsForLimit at the limit it expects rather than from constants of its
+// own: what this test holds is that the boot logs the bounds of the limit it took, named and
+// complete. TestTheBootLineNamesTheBoundsItsGoMemoryLimitGives holds those figures themselves to
+// the numbers, out of a real process.
 func TestTheGoMemoryLimitIsNinetyPercentOfTheContainers(t *testing.T) {
 	// Either variable in the runner's environment would skip the provider (setGoMemoryLimit).
 	for _, variable := range []string{"GOMEMLIMIT", "AUTOMEMLIMIT"} {
@@ -1113,14 +1118,7 @@ func TestTheGoMemoryLimitIsNinetyPercentOfTheContainers(t *testing.T) {
 	previous := debug.SetMemoryLimit(-1)
 	t.Cleanup(func() { debug.SetMemoryLimit(previous) })
 	const noLimitLine = "dispatch: no go memory limit set: no container memory limit readable"
-	calibration := map[string]any{
-		"level": "INFO", "msg": "dispatch: the document service's memory bounds",
-		"go_memory_limit_bytes": float64(3865470566), "room_budget_bytes": float64(2147483648),
-		"document_read_cache_bytes": float64(268435456), "pressure_reserve_bytes": float64(268435456),
-		"apply_heap_bytes": float64(393705335), "copy_heap_bytes": float64(393705336),
-		"heap_slack_bytes": float64(393705335), "apply_too_heavy_bytes": float64(1181116006),
-		"peer_write_queue_bytes": float64(62914560),
-	}
+	calibration := boundsLine(3865470566)
 	for _, row := range []struct {
 		name     string
 		provider memlimit.Provider
@@ -1135,14 +1133,7 @@ func TestTheGoMemoryLimitIsNinetyPercentOfTheContainers(t *testing.T) {
 		{"a container limited to 32Gi, as the production pod is", memlimit.Limit(32 << 30), 30923764531, map[string]any{
 			"level": "INFO", "msg": "dispatch: go memory limit set from the container's",
 			"container_limit_bytes": float64(34359738368), "go_memory_limit_bytes": float64(30923764531),
-		}, map[string]any{
-			"level": "INFO", "msg": "dispatch: the document service's memory bounds",
-			"go_memory_limit_bytes": float64(30923764531), "room_budget_bytes": float64(17179869185),
-			"document_read_cache_bytes": float64(268435456), "pressure_reserve_bytes": float64(2147483648),
-			"apply_heap_bytes": float64(3775992080), "copy_heap_bytes": float64(3775992082),
-			"heap_slack_bytes": float64(3775992080), "apply_too_heavy_bytes": float64(11327976242),
-			"peer_write_queue_bytes": float64(62914560),
-		}},
+		}, boundsLine(30923764531)},
 		{"a container whose memory is not limited", func() (uint64, error) { return 0, memlimit.ErrNoLimit }, math.MaxInt64, map[string]any{
 			"level": "INFO", "msg": noLimitLine, "reason": memlimit.ErrNoLimit.Error(),
 		}, calibration},
@@ -1181,6 +1172,23 @@ func TestTheGoMemoryLimitIsNinetyPercentOfTheContainers(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// boundsLine is the boot line the document service's memory bounds at limit make
+// (setGoMemoryLimit, docs.BoundsForLimit), as the JSON handler of the test above decodes it:
+// every figure a whole number, so each reads back as a float64. It names the five fields of
+// docs.MemoryBounds and nothing else, and the equality the test makes of whole maps is what
+// holds the line to naming no sixth figure and dropping none of these five.
+func boundsLine(limit int64) map[string]any {
+	bounds := docs.BoundsForLimit(limit)
+	return map[string]any{
+		"level": "INFO", "msg": "dispatch: the document service's memory bounds",
+		"go_memory_limit_bytes":     float64(bounds.Limit),
+		"room_budget_bytes":         float64(bounds.RoomBudget),
+		"document_read_cache_bytes": float64(bounds.DocumentReadCache),
+		"load_slots":                float64(bounds.LoadSlots),
+		"peer_write_queue_bytes":    float64(bounds.PeerWriteQueue),
 	}
 }
 

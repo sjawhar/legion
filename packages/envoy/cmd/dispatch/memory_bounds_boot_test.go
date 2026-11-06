@@ -11,10 +11,18 @@ import (
 
 // A real Dispatch process derives the document service's memory bounds from the Go memory limit
 // it holds and names each of them in a line of its boot log, so what an operator reads there is
-// what that pod's rooms, applies and decodes are held to. The two limits are the production pod's
-// - 90 per cent of its 32Gi, where the room budget is 16 GiB and the budget admits hundreds of
-// mebibyte documents rather than thirty-seven - and the 4 GiB pod these figures were calibrated
-// on, whose bounds are the constants every drive under the `memory` tag is written against.
+// what that pod's rooms, cold reads and whole-document copies are held to. The two limits are the
+// production pod's - 90 per cent of its 32Gi, where the room budget is 16 GiB and the pod builds
+// sixteen whole-document copies at once rather than one - and the 4 GiB pod these figures were
+// calibrated on, whose bounds are the constants every drive under the `memory` tag is written
+// against.
+//
+// The line names five figures, which is every field of docs.MemoryBounds: the limit it adopted,
+// the room budget, the cold reads' cache, the pod's load concurrency and ygo's per-peer write
+// queue. That is four fewer than before the cut, which named the pressure reserve, the apply
+// heap, the copy heap, the heap slack and the apply-too-heavy bound besides, and named no load
+// concurrency; the five mechanisms those bounded are one now, the load slots (INFRA-179). The
+// count below holds the line to naming these five and nothing else.
 //
 // Both are given as GOMEMLIMIT rather than left to the container, as the memory drives give it
 // (podGoMemoryLimit): a test runner's own control group is not a pod's.
@@ -29,23 +37,15 @@ func TestTheBootLineNamesTheBoundsItsGoMemoryLimitGives(t *testing.T) {
 			"go_memory_limit_bytes":     30_923_764_531,
 			"room_budget_bytes":         17_179_869_185,
 			"document_read_cache_bytes": 268_435_456,
-			"pressure_reserve_bytes":    2_147_483_648,
-			"apply_heap_bytes":          3_775_992_080,
-			"copy_heap_bytes":           3_775_992_082,
-			"heap_slack_bytes":          3_775_992_080,
-			"apply_too_heavy_bytes":     11_327_976_242,
-			"peer_write_queue_bytes":    62_914_560,
+			"load_slots":                16,
+			"peer_write_queue_bytes":    73_400_320,
 		}},
 		{"the 4 GiB pod the figures are calibrated on", 3_865_470_566, map[string]int64{
 			"go_memory_limit_bytes":     3_865_470_566,
 			"room_budget_bytes":         2_147_483_648,
 			"document_read_cache_bytes": 268_435_456,
-			"pressure_reserve_bytes":    268_435_456,
-			"apply_heap_bytes":          393_705_335,
-			"copy_heap_bytes":           393_705_336,
-			"heap_slack_bytes":          393_705_335,
-			"apply_too_heavy_bytes":     1_181_116_006,
-			"peer_write_queue_bytes":    62_914_560,
+			"load_slots":                1,
+			"peer_write_queue_bytes":    73_400_320,
 		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -56,8 +56,7 @@ func TestTheBootLineNamesTheBoundsItsGoMemoryLimitGives(t *testing.T) {
 			logged := memoryBoundsLine(t, process.Output.String())
 			for _, field := range []string{
 				"go_memory_limit_bytes", "room_budget_bytes", "document_read_cache_bytes",
-				"pressure_reserve_bytes", "apply_heap_bytes", "copy_heap_bytes",
-				"heap_slack_bytes", "apply_too_heavy_bytes", "peer_write_queue_bytes",
+				"load_slots", "peer_write_queue_bytes",
 			} {
 				got, named := logged[field]
 				if !named {

@@ -679,11 +679,11 @@ func documentFrame(room string, tag uint64, payload []byte) []byte {
 // dialDocument connects to the document's room as a person's browser does: signed in, read-write
 // at the server's schema version (schemaReadOnly).
 // The server answers the upgrade only once it has admitted the browser and loaded the document
-// (Service.ServeHTTP), and a burst of browsers to documents at the bound
-// queues behind the counts of their stored versions and the loads, which share the copy-heap
-// bound (storedCountWeight, podCopyHeaps) and two processors, so a browser waits for that answer as
-// long as a browser does rather than the 45 seconds gorilla's default dialer gives up after. An
-// upgrade the server answers with an HTTP status in place of the socket is an *upgradeRefused.
+// (Service.ServeHTTP), and a burst of browsers to large documents queues behind their rooms'
+// loads, which take the pod's load slots one at a time (docs' loadSlots, one slot at the
+// calibration) and share two processors, so a browser waits for that answer as long as a browser
+// does rather than the 45 seconds gorilla's default dialer gives up after. An upgrade the server
+// answers with an HTTP status in place of the socket is an *upgradeRefused.
 func (p *memoryServer) dialDocument(artifactID string) (*gws.Conn, error) {
 	address := "ws" + strings.TrimPrefix(p.base, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
 	dialer := gws.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: 10 * time.Minute}
@@ -735,11 +735,14 @@ type browser struct {
 	leaveOnce sync.Once
 }
 
-// browserAnswer is one frame the room sent in answer: a SyncStatus's flag, a Pong, or a SyncStep2's
-// update, which is the room's whole state for a browser that asked with nothing.
+// browserAnswer is one frame the room sent in answer: a SyncStatus's flag, a Pong, or a sync
+// message's payload with the kind of message it came in. A room answers a SyncStep1 with its
+// state in a series of Update messages and one SyncStep2 last, so a reader that wants the
+// room's whole state reads until that SyncStep2 and applies each in turn (browser.state).
 type browserAnswer struct {
 	tag    uint64
 	status uint64
+	kind   int
 	state  []byte
 }
 
@@ -823,11 +826,18 @@ func (b *browser) read() {
 			}
 		case framePong:
 		case frameSync:
+			// A room answers a SyncStep1 with its state in Update messages targeting 64 KiB
+			// each, every one of which integrates on its own, and one SyncStep2 last carrying
+			// only what no Update could (sjawhar/ygo v1.55.1-sami.3, CHANGELOG, "The websocket
+			// provider answers a peer's SyncStep1 with the room's state in bounded frames
+			// instead of one message"). Both are answers here, with the kind they came in, so
+			// state can apply the series in order; the room's own SyncStep1, which carries a
+			// state vector and no state, is not.
 			kind, update, err := ygsync.ReadSyncMessage(decoder.RemainingBytes())
-			if err != nil || kind != ygsync.MsgSyncStep2 {
+			if err != nil || (kind != ygsync.MsgSyncStep2 && kind != ygsync.MsgUpdate) {
 				continue
 			}
-			answer.state = update
+			answer.kind, answer.state = kind, update
 		default:
 			continue
 		}
@@ -883,18 +893,33 @@ func (b *browser) ping() error {
 	return err
 }
 
-// state is the room's whole state, as a SyncStep2 answers a browser that asks with an empty state
-// vector.
+// state is the room's whole state, as the room answers a browser that asks with an empty state
+// vector. That answer is a series of frames, not one message: Update messages targeting 64 KiB
+// each, every one of which integrates on its own, and one SyncStep2 last carrying only what no
+// Update could, which for most documents is nothing at all (sjawhar/ygo v1.55.1-sami.3). So the
+// browser does what a real client does - applies each frame in turn until the SyncStep2 that
+// ends the answer - and encodes what it is left holding, which is byte for byte what the one
+// SyncStep2 of before carried.
 func (b *browser) state(t *testing.T) []byte {
 	t.Helper()
 	if err := b.write(documentFrame(b.room, frameSync, ygsync.EncodeSyncStep1(crdt.New()))); err != nil {
 		t.Fatalf("ask the room for its state: %v", err)
 	}
-	answer, err := b.await(frameSync)
-	if err != nil {
-		t.Fatalf("read the room's state: %v", err)
+	received := crdt.New()
+	for frames := 1; ; frames++ {
+		answer, err := b.await(frameSync)
+		if err != nil {
+			t.Fatalf("read frame %d of the room's state: %v", frames, err)
+		}
+		if len(answer.state) > 0 {
+			if err := crdt.ApplyUpdateV1(received, answer.state, nil); err != nil {
+				t.Fatalf("apply frame %d of the room's state, %d bytes: %v", frames, len(answer.state), err)
+			}
+		}
+		if answer.kind == ygsync.MsgSyncStep2 {
+			return crdt.EncodeStateAsUpdateV1(received, nil)
+		}
 	}
-	return answer.state
 }
 
 // updateFrame is the frame the editor sends a change in: a sync Update.

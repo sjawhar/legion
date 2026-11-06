@@ -226,11 +226,7 @@ func setGoMemoryLimit(provider memlimit.Provider) int64 {
 		"go_memory_limit_bytes", bounds.Limit,
 		"room_budget_bytes", bounds.RoomBudget,
 		"document_read_cache_bytes", bounds.DocumentReadCache,
-		"pressure_reserve_bytes", bounds.PressureReserve,
-		"apply_heap_bytes", bounds.ApplyHeap,
-		"copy_heap_bytes", bounds.CopyHeap,
-		"heap_slack_bytes", bounds.HeapSlack,
-		"apply_too_heavy_bytes", bounds.ApplyTooHeavy,
+		"load_slots", bounds.LoadSlots,
 		"peer_write_queue_bytes", bounds.PeerWriteQueue)
 	return held
 }
