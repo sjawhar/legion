@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
-  ASK_QUESTION_MAX,
+  DISPATCH_EVENT_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
+  ISSUE_TITLE_MAX,
   zodSchemaApi,
 } from "@legion/contracts";
 import { z } from "zod";
@@ -126,16 +127,31 @@ describe("formatZodIssues", () => {
 
   test("carries the number to trim for an over-limit string and the item count for an array", () => {
     expect(
+      problemsFor("dispatch_issue", { project: "DSP", title: "x".repeat(ISSUE_TITLE_MAX + 50) })
+    ).toEqual([
+      `--title is 50 characters over the ${ISSUE_TITLE_MAX}-character limit ` +
+        `(${ISSUE_TITLE_MAX + 50}/${ISSUE_TITLE_MAX})`,
+    ]);
+    expect(
       problemsFor("dispatch_ask", {
         issue: "DSP-42",
-        question: "x".repeat(ASK_QUESTION_MAX + 50),
+        question: "Which way?",
         options: Array.from({ length: 9 }, (_, index) => ({ label: `o${index}` })),
       })
-    ).toEqual([
-      `--question is 50 characters over the ${ASK_QUESTION_MAX}-character limit ` +
-        `(${ASK_QUESTION_MAX + 50}/${ASK_QUESTION_MAX})`,
-      "--option has 9 items; the limit is 8",
-    ]);
+    ).toEqual(["--option has 9 items; the limit is 8"]);
+  });
+
+  // No tool carries a bound on a question: a long one parses here and goes to Dispatch, which
+  // refuses it in its own words when it is longer than the server's bound.
+  test("a question longer than the server's bound passes the schema", () => {
+    const schema = dispatchToolSchema(specFor("dispatch_ask"), zodSchemaApi(z), { strict: true });
+
+    expect(
+      schema.safeParse({
+        issue: "DSP-42",
+        question: "x".repeat(DISPATCH_EVENT_BODY_MAX + 1),
+      }).success
+    ).toBe(true);
   });
 
   test("passes a cross-field refine message through verbatim and falls back to flag: message", () => {

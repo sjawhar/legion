@@ -484,3 +484,56 @@ test("every prompt and agent that may write says to make its own scratch and del
     ]
   );
 });
+
+// R9: a push moves the branch while the pull request can keep naming the old commit, so the new
+// commit gets no checks (dispatch://INFRA-1318). The step is one wording held across
+// `skill://legion-worker` and the daemon's worker prompt, counted once in each file, so the
+// pinned sentences cannot drift; the prompt also carries text of its own that no pin here holds,
+// and the pins below hold what only the prompt carries and the skill points at. The carve-out
+// that names the step's reads as the one sleep the "never sleep in a loop" rule allows is a
+// second wording, held across the pr-body reference and the implementer's prompt part. The three
+// members the step added to lists elsewhere in these texts are pinned too, since a list no test
+// reads loses its member silently. This shows the text ships, never that a role follows it.
+test("the worker skill tells a role to read the pull request's head after its own push", () => {
+  const sharedWithTheWorkerPrompt = [
+    "skills/legion-worker/SKILL.md",
+    "packages/daemon/internal/prompts/go/worker-common.md",
+  ];
+  const step = [
+    "gh pr view <n> --repo <the issue's repository> --json headRefOid --jq .headRefOid",
+    "about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with a read that gives the pushed commit ending the step there and only the last read deciding a mismatch",
+    "This read is of the pull request's own head and of no check, so the wait it makes is not a wait on CI",
+    "an empty one when your work is complete",
+    "A new head makes every result recorded at the old head older, so record each `before_merge` check again at the new head.",
+    "tell your architect the commit you pushed, the head each read gave and the time of each, and end the turn with a WAITING line naming that answer rather than completing: a phase completed here hands the next role a commit the pull request does not name.",
+    "The push you make to answer an update task is the exception: that task has you answer the daemon and end the turn at once, so make this read in your next turn, before your phase completes.",
+    "The merger pushes nothing, so this step never falls to it; it reports a mismatch it sees to the architect.",
+    "the empty commit that carries the pull request onto the commit you pushed",
+  ];
+  for (const rule of step) {
+    countedOncePerFile(rule, sharedWithTheWorkerPrompt);
+  }
+  countedOncePerFile(
+    "the step's spaced reads of the pull request's head after a push are the one sleep this rule allows, and they read no check",
+    [
+      "skills/legion-worker/references/pr-body.md",
+      "packages/daemon/internal/prompts/go/implementer.md",
+    ]
+  );
+  const onlyInTheWorkerPrompt = ["packages/daemon/internal/prompts/go/worker-common.md"];
+  countedOncePerFile(
+    "`jj -R \"$LEGION_WORKSPACE\" new --no-edit --insert-after @- -m '<issue>: carry the pull request to the pushed commit'`",
+    onlyInTheWorkerPrompt
+  );
+  countedOncePerFile(
+    '`jj -R "$LEGION_WORKSPACE" log -r legion/<issue>@origin --no-graph -T commit_id`',
+    onlyInTheWorkerPrompt
+  );
+  countedOncePerFile("Three waits stand rather than proceed", ["skills/legion-worker/SKILL.md"]);
+  countedOncePerFile("the empty commit that carries it there", [
+    "packages/daemon/internal/prompts/roles/reviewer.md",
+  ]);
+  expect(collapsed(path.join(staged, "legion-worker", "SKILL.md"))).toContain(
+    "When the last read still is not your commit, carry the pull request with a commit of its own, an empty one when your work is complete and an empty one just as much when `@` holds work of yours, since a push of a commit the branch already holds moves no ref; the push section of your role prompt gives the one `jj` recipe, which leaves `@` and everything in it where it is."
+  );
+});

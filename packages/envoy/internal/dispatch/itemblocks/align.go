@@ -35,8 +35,9 @@ type Stored struct {
 // did not change keeps its id and one whose text comes back takes its id back. An ask's answer
 // part is such a block: a later answer is a new answer, by whoever gave it, rather than an edit
 // of the one before it, so a reference to the answer it replaced reads removed where a reference
-// to a reworded option reads changed. A caller that replaces no type passes none.
-func Align(stored []Stored, next []Block, counter int, replaced ...string) ([]string, int) {
+// to a reworded option reads changed. replaced is an argument of its own rather than a variadic,
+// since every caller states what it replaces: a caller that replaces no type passes nil.
+func Align(stored []Stored, next []Block, counter int, replaced []string) ([]string, int) {
 	ids := make([]string, len(next))
 	taken := make([]bool, len(stored))
 	untaken := indexUntaken(stored, taken)

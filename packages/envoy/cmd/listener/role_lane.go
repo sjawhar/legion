@@ -22,7 +22,10 @@ const roleForwardWaitLimit = 4096
 const roleLaneSlowConsumerInterval = 5 * time.Second
 
 // roleForward is one role message the role lane resolved to its holder, every guard passed: item is
-// the message as it arrived and sessionID its holder.
+// the message as it arrived and sessionID its holder. Every forward it makes waits for the
+// holder's receipt: a role message is forwarded only to a holder that reads live (publishRole,
+// roleTopicDelivery), so no role forward is the stored-only kind an unresponsive recipient of an
+// ad-hoc topic takes (confirmTopicRecipient).
 type roleForward struct {
 	item      contracts.Envelope
 	sessionID string
@@ -108,7 +111,7 @@ func (f *roleForwarder) publish(sessionID string) {
 		f.queues[sessionID] = queue[1:]
 		f.mu.Unlock()
 
-		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout)
+		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout, false)
 		if err != nil {
 			f.finish(forward, err)
 			continue
@@ -137,11 +140,16 @@ func (f *roleForwarder) wait(ctx context.Context) bool {
 	return waitWithin(ctx, &f.pending)
 }
 
-// startRoleForward is forwardRole over client: a forward waits for the stream's acknowledgement
-// and the holder's receipt (bus.Client.StartRequestCoreTo).
-func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
-	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
-		forward, err := client.StartRequestCoreTo(subject, item, msgID, timeout)
+// startRoleForward is forwardRole over client: a forward to a holder that answers receipts waits
+// for the stream's acknowledgement and the receipt (bus.Client.StartRequestCoreTo), and one to a
+// holder that answers none for the acknowledgement alone (bus.Client.StartRequestStoredTo).
+func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
+	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
+		start := client.StartRequestCoreTo
+		if storedOnly {
+			start = client.StartRequestStoredTo
+		}
+		forward, err := start(subject, item, msgID, timeout)
 		if err != nil {
 			return nil, err
 		}

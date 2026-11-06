@@ -527,6 +527,7 @@
           "-c",
           "echo fixture-setup"
         ],
+        "skills_repository": "acme/agent-skills",
         "test_postgres": false,
         "repository_cache": {
           "volume": "40Gi",
@@ -632,6 +633,8 @@
     "production_check_hours": 240,
     "pod_update_retask_hours": 1,
     "pod_update_notice_hours": 4,
+    "pod_update_max_open_rounds": 6,
+    "pod_update_rounds_per_minute": 2,
     "review_round_cap": 4,
     "max_fix_attempts": 5,
     "controller": "daemon",
