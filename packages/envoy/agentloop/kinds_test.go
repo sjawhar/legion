@@ -80,6 +80,25 @@ func TestOpenAIChatWithNoQuerySendsNoQueryString(t *testing.T) {
 	}
 }
 
+// A model configured for no reasoning at all reaches Chat Completions as the effort that API
+// defines for it, as it does the Responses API: the loop's own "off" is sent as "none".
+func TestOpenAIChatSendsEffortOffAsNone(t *testing.T) {
+	t.Parallel()
+	s := newStandIn(t, chatStream("stop", chatUsage{Prompt: 2, Completion: 3}, "The note says plum."))
+	f := newFixture(t, s, OpenAIChat, 1)
+	f.req.Model.Effort = "off"
+	if result, err := Run(context.Background(), f.req); err != nil || result.Fault != "" {
+		t.Fatalf("result %+v, %v", result, err)
+	}
+	got := s.requests()
+	if len(got) != 1 {
+		t.Fatalf("%d model calls, want 1", len(got))
+	}
+	if effort := got[0].decoded(t)["reasoning_effort"]; effort != "none" {
+		t.Errorf("the call's reasoning_effort is %v, want none, the API's word for no reasoning", effort)
+	}
+}
+
 // An azure-anthropic run reaches the Messages path under the endpoint's /anthropic service root,
 // is authorized with the endpoint's token as a bearer token and with no API key header, and names
 // the deployment as the model it calls, falling back to the model's own id where the endpoint

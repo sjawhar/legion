@@ -169,7 +169,7 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 		model := openaicompatible.New(req.Model.ID,
 			openaicompatible.WithBaseURL(endpoint.BaseURL), openaicompatible.WithAPIKey(placeholderKey),
 			openaicompatible.WithHTTPClient(client), openaicompatible.WithIncludeUsage(true))
-		return model, openaicompatible.OpenAIOptions{ReasoningEffort: req.Model.Effort}, nil
+		return model, openaicompatible.OpenAIOptions{ReasoningEffort: openaiEffort(req.Model.Effort)}, nil
 	case AzureAnthropic:
 		// The deployment name is given only where it differs from the model id, and the
 		// foundry config owns the base URL, which NewAnthropic applies itself.
@@ -534,15 +534,22 @@ func anthropicOptions(effort string) anthropic.AnthropicOptions {
 	return options
 }
 
+// openaiEffort is the loop's own effort words in OpenAI's: a model asked for no reasoning at all
+// is configured "off", which both of OpenAI's protocols name "none". Every other word is the
+// provider's own and rides as it is.
+func openaiEffort(effort string) string {
+	if effort == "off" {
+		return "none"
+	}
+	return effort
+}
+
 // openaiOptions is a stateless Responses call (store false, the reasoning's encrypted content
 // returned so the next call can carry it) at the model's reasoning effort.
 func openaiOptions(effort string) openai.OpenAIResponsesOptions {
-	if effort == "off" {
-		effort = "none"
-	}
 	store := false
 	return openai.OpenAIResponsesOptions{
-		ReasoningEffort: effort,
+		ReasoningEffort: openaiEffort(effort),
 		Store:           &store,
 		Include:         []string{"reasoning.encrypted_content"},
 	}
