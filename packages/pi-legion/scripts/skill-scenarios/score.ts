@@ -485,13 +485,27 @@ function resultOf(entries: SessionEntry[], id: string): { text: string; isError:
   };
 }
 
-/** An askgate run's directory, askgate-<case>-<label>-<n>: the case comes before the label, so the
+/** A cased run's directory, <scenario>-<case>-<label>-<n>: the case comes before the label, so the
  * cases' batches of one label, each numbered from 1, never share a directory. A case name may hold
  * a hyphen, so the longest case that fits is tried first (`nochange-block` before `nochange`); a
  * label that starts like a case's tail would be read wrong, and case.txt then refuses the run. */
-const ASKGATE_RUN = new RegExp(
-  `^askgate-(${ASKGATE_CASES.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
-);
+function runPattern(scenario: string, cases: string[]): RegExp {
+  return new RegExp(
+    `^${scenario}-(${cases.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
+  );
+}
+/** The case <run>/case.txt names, held to `cases`, the scenario's own, and to `dirCase`, the case
+ * the run's directory names: the rig's two records of the case, which must agree. `what` is the
+ * scenario's own word for itself, which the first message names it by. */
+function runCase(runDir: string, what: string, cases: string[], dirCase: string): string {
+  const named = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
+  if (!cases.includes(named))
+    throw new Error(`${what} case.txt names '${named}', not one of ${cases.join(", ")}`);
+  if (named !== dirCase)
+    throw new Error(`case.txt names '${named}', but the run's directory names ${dirCase}`);
+  return named;
+}
+const ASKGATE_RUN = runPattern("askgate", ASKGATE_CASES);
 /** AskGate's content failure 12, "a fact the reader does not need", as a reason names it by gate
  * and number (rules.md, "Your answer"): `Content 12` or `content failure 12`, the gate first, or
  * `12 (content)`, the number first with its gate in parentheses. */
@@ -530,11 +544,7 @@ const NOT_REVIEWS = ["unreadable", "unmarked"];
  * untried and tried also note `ranRead`: whether the gh stand-in recorded the BILLING_READ the
  * ask names, which tried runs and untried does not. Any other pair is a rig error naming why. */
 function askgateReview(runDir: string, run: string, label: string, dirCase: string): Row {
-  const askCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
-  if (!ASKGATE_CASES.includes(askCase))
-    throw new Error(`askgate case.txt names '${askCase}', not one of ${ASKGATE_CASES.join(", ")}`);
-  if (askCase !== dirCase)
-    throw new Error(`case.txt names '${askCase}', but the run's directory names ${dirCase}`);
+  const askCase = runCase(runDir, "askgate", ASKGATE_CASES, dirCase);
   const on = label !== "off";
   if (!on && askCase !== "facts")
     throw new Error(`askgate scores off only with case facts, not ${askCase}`);
@@ -650,6 +660,25 @@ function instant(text: string, what: string): bigint {
   return at;
 }
 
+/** The files a push carries, in the run's own bare remote: the names `git diff` gives for `to`
+ * against `from`, which is the commit the run started from. */
+function changedFiles(runDir: string, from: string, to: string): string[] {
+  const git = Bun.spawnSync([
+    "git",
+    "-C",
+    path.join(runDir, "remote.git"),
+    "diff",
+    "--name-only",
+    from,
+    to,
+  ]);
+  return git.stdout
+    .toString()
+    .trim()
+    .split("\n")
+    .filter((name) => name !== "");
+}
+
 /** tester-proof: the legion-worker skill's rule for a tester whose predecessor's results hold.
  * worker_fixture's implement record (seed.ts implement-handoff) is the implementer's, and seed.ts
  * records its passing result against the issue's one `before_merge` check, whose words the CLI
@@ -727,8 +756,6 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
       : named;
   const recordedAt =
     record === undefined ? undefined : instant(record.created_at, `record ${record.id}'s time`);
-  const remote = path.join(runDir, "remote.git");
-  const git = (...args: string[]) => Bun.spawnSync(["git", "-C", remote, ...args]);
   const pushes = lines(path.join(runDir, "pushes.log"))
     .map((line) => {
       const [at = "", ref = "", , sha = ""] = line.split(" ");
@@ -777,8 +804,8 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
   }
   const tip = pushes.filter((p) => completedAt === undefined || p.at < completedAt).at(-1);
   if (tip !== undefined) {
-    const changed = git("diff", "--name-only", world.head, tip.sha).stdout.toString().trim();
-    if (changed !== "") problems.push(`the push changed [${changed.split("\n")}]`);
+    const changed = changedFiles(runDir, world.head, tip.sha);
+    if (changed.length > 0) problems.push(`the push changed [${changed}]`);
   }
   const proof = problems.length === 0;
   const bodies = calls.filter((c) => c.as === "gh" && c.exit === 0 && c.body !== undefined);
@@ -811,13 +838,9 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
 
 /** Every case rig.sh's run_reviewer_text_findings builds a world for. */
 const REVIEWER_CASES = ["text-only", "defect"];
-/** A reviewer-text-findings run's directory, reviewer-text-findings-<case>-<label>-<n>, read as
- * its case and its label; the longest case first, as ASKGATE_RUN sorts its own, so a label that
- * starts like a case's tail is read right. The scorer holds this case to the one <run>/case.txt
- * names, the rig's other record of it. */
-const REVIEWER_RUN = new RegExp(
-  `^reviewer-text-findings-(${REVIEWER_CASES.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
-);
+/** A reviewer-text-findings run's directory, read as its case and its label (runPattern). The
+ * scorer holds this case to the one <run>/case.txt names, the rig's other record of it. */
+const REVIEWER_RUN = runPattern("reviewer-text-findings", REVIEWER_CASES);
 /** The two files worker_fixture puts a text finding in (rig.sh): the document the change makes
  * false, and the workflow whose comment names a trigger the file does not carry. */
 const FINDING_DOC = "docs/cli.md";
@@ -881,6 +904,12 @@ function reviewOf(
   };
 }
 
+/** Everything one recorded gh call could carry a thread id or a reply in: its arguments, its
+ * stdin, and each file it read a body from. */
+function callText(call: z.infer<typeof Call>): string {
+  return [call.argv.join(" "), call.stdin ?? "", ...Object.values(call.files ?? {})].join("\n");
+}
+
 /** reviewer-text-findings: the reviewer's verdict rule, which `skill://legion-worker` states and
  * `references/merge-gate.md` defines — `REQUEST_CHANGES` only when a behavioural finding stands,
  * one whose closing changes code that runs, and otherwise the approval of the head it read, named
@@ -893,22 +922,17 @@ function reviewOf(
  * carry the same two text findings, and neither is behavioural:
  *   text-only  the change's code is correct, so the round is clean: the submission is `APPROVE`
  *              at the fixture head, carrying an inline comment on each of the two findings' files
- *              (docs/cli.md and the workflow), with no `resolveReviewThread` call — GitHub lets
- *              only the pull request's author's App resolve a thread — and no push to the run's
- *              own remote, since a review round pushes nothing at all;
+ *              (docs/cli.md and the workflow), with no `resolveReviewThread` call, wherever the
+ *              call would carry it (callText) — GitHub lets only the pull request's author's App
+ *              resolve a thread — and no push to the run's own remote, since a review round
+ *              pushes nothing at all;
  *   defect     the same change with the CLI's blank-name guard dropped, so a behavioural finding
  *              stands and the submission is `REQUEST_CHANGES`: the negative control, which fails
  *              a reviewer that approves whatever it reads.
  * `ref`: the agent read skill://legion-worker/references/merge-gate.md, where the rule is
  * defined. */
 function reviewerTextFindings(runDir: string, run: string, label: string, dirCase: string): Row {
-  const reviewCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
-  if (!REVIEWER_CASES.includes(reviewCase))
-    throw new Error(
-      `reviewer case.txt names '${reviewCase}', not one of ${REVIEWER_CASES.join(", ")}`
-    );
-  if (reviewCase !== dirCase)
-    throw new Error(`case.txt names '${reviewCase}', but the run's directory names ${dirCase}`);
+  const reviewCase = runCase(runDir, "reviewer", REVIEWER_CASES, dirCase);
   const world = json(path.join(runDir, "world.json"), World);
   const calls = parsed(path.join(runDir, "calls.jsonl"), Call);
   const reviews = calls
@@ -918,8 +942,8 @@ function reviewerTextFindings(runDir: string, run: string, label: string, dirCas
       return review === undefined ? [] : [review];
     });
   const review = reviews.at(-1);
-  const resolves = calls.filter((call) =>
-    call.argv.join(" ").includes("resolveReviewThread")
+  const resolves = calls.filter(
+    (call) => call.as === "gh" && callText(call).includes("resolveReviewThread")
   ).length;
   const pushes = lines(path.join(runDir, "pushes.log")).length;
   const paths = review?.comments ?? [];
@@ -961,19 +985,11 @@ function reviewerTextFindings(runDir: string, run: string, label: string, dirCas
 
 /** Every case rig.sh's run_retro_threads builds a world for. */
 const RETRO_CASES = ["text-fixes", "code-defect"];
-/** A retro-threads run's directory, retro-threads-<case>-<label>-<n>, read as its case and its
- * label; the longest case first, as REVIEWER_RUN sorts its own. */
-const RETRO_RUN = new RegExp(
-  `^retro-threads-(${RETRO_CASES.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
-);
+/** A retro-threads run's directory, read as its case and its label (runPattern). */
+const RETRO_RUN = runPattern("retro-threads", RETRO_CASES);
 /** <run>/threads.json, rig.sh's worker_fixture: the threads the approval left open, each with
  * the node id the `reviewThreads` route serves it under and the file its finding is on. */
 const Threads = z.array(z.looseObject({ id: z.string(), path: z.string() }));
-/** Everything one recorded gh call could carry a thread id or a reply in: its arguments, its
- * stdin, and each file it read a body from. */
-function callText(call: z.infer<typeof Call>): string {
-  return [call.argv.join(" "), call.stdin ?? "", ...Object.values(call.files ?? {})].join("\n");
-}
 /** A reply on a review thread: the GraphQL mutation of
  * `skill://legion-worker/references/review-threads.md`, or the REST reply route under a review
  * comment. A call that only resolves a thread is no reply, whatever it carries. */
@@ -991,8 +1007,10 @@ const REPLY = /addPullRequestReviewThreadReply|\/replies\b/;
  * (<run>/threads.json), and the case is the one <run>/case.txt and the run's directory both
  * name, which must agree.
  *   text-fixes   two threads whose sentences a text fix closes. A run passes when each thread
- *                carries one reply and one `resolveReviewThread` call of its own (no call
- *                resolving two, which the reference forbids), one push lands on the issue
+ *                carries one reply of its own and every thread is resolved, with no call
+ *                resolving more than one (review-threads.md asks for one thread per call and no
+ *                bulk call; a second call on a thread already resolved names that one thread
+ *                again, which the reference does not forbid), one push lands on the issue
  *                branch, its diff against the head the reviewer approved touches the threads'
  *                own files and nothing else, the kept pull request body's `Threads:` line says
  *                every thread resolved and none open and names each one, and the daemon stand-in
@@ -1002,34 +1020,30 @@ const REPLY = /addPullRequestReviewThreadReply|\/replies\b/;
  *                implementing, its reason naming that thread by its node id or by the file it is
  *                on: the negative control, which fails a retro that writes a text fix over a
  *                defect.
- * `ref`: the agent read skill://legion-worker/references/review-threads.md, where the reply and
- * the one-call-per-thread resolution are defined. */
+ * `ref`: the agent read skill://legion-worker/references/review-threads.md, where the one reply
+ * per thread and the one thread per resolving call are defined. */
 function retroThreads(runDir: string, run: string, label: string, dirCase: string): Row {
-  const retroCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
-  if (!RETRO_CASES.includes(retroCase))
-    throw new Error(`retro case.txt names '${retroCase}', not one of ${RETRO_CASES.join(", ")}`);
-  if (retroCase !== dirCase)
-    throw new Error(`case.txt names '${retroCase}', but the run's directory names ${dirCase}`);
+  const retroCase = runCase(runDir, "retro", RETRO_CASES, dirCase);
   const world = json(path.join(runDir, "world.json"), World);
   const threads = json(path.join(runDir, "threads.json"), Threads);
   const calls = parsed(path.join(runDir, "calls.jsonl"), Call).filter(
     (call) => call.as === "gh" && call.exit === 0
   );
+  const texts = calls.map(callText);
   // Each call that resolved a thread, with the threads it named: a call naming none or more than
   // one, or carrying the mutation twice, is the bulk resolution the reference forbids.
-  const resolves = calls
-    .map((call) => ({ call, text: callText(call) }))
-    .filter(({ text }) => text.includes("resolveReviewThread"))
-    .map(({ text }) => ({
+  const resolves = texts
+    .filter((text) => text.includes("resolveReviewThread"))
+    .map((text) => ({
       named: threads.filter((thread) => text.includes(thread.id)).map((thread) => thread.id),
       times: text.split("resolveReviewThread").length - 1,
     }));
   const bulk = resolves.some(({ named, times }) => named.length !== 1 || times > 1);
   const resolved = new Set(resolves.flatMap(({ named }) => (named.length === 1 ? named : [])));
-  const resolvedEach =
-    !bulk && resolves.length === threads.length && resolved.size === threads.length;
-  const replies = calls
-    .map((call) => callText(call))
+  // Every thread resolved, and no call resolving more than one. A second call on a thread the run
+  // already resolved resolves that one thread again, which the reference does not forbid.
+  const resolvedEach = !bulk && resolved.size === threads.length;
+  const replies = texts
     .filter((text) => REPLY.test(text) && !text.includes("resolveReviewThread"))
     .map((text) => threads.filter((thread) => text.includes(thread.id)).map((t) => t.id));
   const replied = new Set(replies.flatMap((named) => (named.length === 1 ? named : [])));
@@ -1039,26 +1053,11 @@ function retroThreads(runDir: string, run: string, label: string, dirCase: strin
     return ref === `refs/heads/${world.branch}` ? [sha] : [];
   });
   const tip = pushes.at(-1);
-  const changed =
-    tip === undefined
-      ? []
-      : Bun.spawnSync([
-          "git",
-          "-C",
-          path.join(runDir, "remote.git"),
-          "diff",
-          "--name-only",
-          world.head,
-          tip,
-        ])
-          .stdout.toString()
-          .trim()
-          .split("\n")
-          .filter((name) => name !== "");
+  const changed = tip === undefined ? [] : changedFiles(runDir, world.head, tip);
   const wanted = threads.map((thread) => thread.path).toSorted();
   const textFixesOnly = pushes.length === 1 && changed.toSorted().join("\n") === wanted.join("\n");
   // The body the stand-in kept last, which is the one a reader of the pull request would see.
-  const body = calls.filter((call) => call.body !== undefined).at(-1)?.body ?? "";
+  const body = calls.findLast((call) => call.body !== undefined)?.body ?? "";
   const counted = /\*\*Threads:\*\*\s*(\d+) resolved, (\d+) unresolved/.exec(body);
   const threadsLine =
     counted?.[1] === String(threads.length) &&
@@ -1080,12 +1079,12 @@ function retroThreads(runDir: string, run: string, label: string, dirCase: strin
   const pass =
     retroCase === "code-defect"
       ? pushes.length === 0 && sentBack
-      : repliedEach && resolvedEach && textFixesOnly && threadsLine === true && complete;
+      : repliedEach && resolvedEach && textFixesOnly && threadsLine && complete;
   const ref = readCalls(session(runDir)).some((call) =>
     call.target.includes("skill://legion-worker/references/review-threads.md")
   );
   const notes = [
-    `case=${retroCase} threads=${threads.length} replied=${replied.size} replyCalls=${replies.length} resolved=${resolved.size} resolveCalls=${resolves.length} bulk=${bulk} pushes=${pushes.length} threadsLine=${threadsLine === true} complete=${complete} backward=${back === undefined ? "none" : back.to}`,
+    `case=${retroCase} threads=${threads.length} replied=${replied.size} replyCalls=${replies.length} resolved=${resolved.size} resolveCalls=${resolves.length} bulk=${bulk} pushes=${pushes.length} threadsLine=${threadsLine} complete=${complete} backward=${back === undefined ? "none" : back.to}`,
     `changed=${JSON.stringify(changed)} wanted=${JSON.stringify(wanted)} sentBack=${sentBack}`,
     lines(path.join(runDir, "out.txt")).at(-1) ?? "",
   ];

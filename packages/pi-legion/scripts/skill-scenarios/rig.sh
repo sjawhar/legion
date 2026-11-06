@@ -861,10 +861,12 @@ safe_url() { printf '%s\n' "$1" | sed -E 's,^([a-z]+://[^:/@]+):[^@]*@,\1@,'; }
 # It speaks to Postgres through the bun every command here already runs on, rather than a psql an
 # operator's box may not carry, and it reaches a container's published port as it reaches a given
 # server. URL goes in the environment, never the command line, which every user of the box reads.
-# A failure is bun's own: it prints what Postgres answered and exits 1.
+# A failure is bun's own: it prints what Postgres answered and exits 1. until_true polls this for
+# readiness, so the connect carries a bound of its own, as nats_ready's probe does: a host that
+# takes the connection and never answers holds no caller past five seconds.
 pg_sql() {
   RIG_PG_URL=$1 bun -e '
-const sql = new Bun.SQL({ url: process.env.RIG_PG_URL, max: 1 });
+const sql = new Bun.SQL({ url: process.env.RIG_PG_URL, max: 1, connectionTimeout: 5 });
 try {
   for (const row of await sql.unsafe(Bun.argv[1])) console.log(Object.values(row).join("\t"));
 } finally {
@@ -1061,9 +1063,8 @@ run_measure_before_ask() {
 # SKILL_SCENARIOS_ASKGATE_MODE is the pane's OMP_ASKGATE and <run>/mode.txt; unset, the pane gets
 # no OMP_ASKGATE, so AskGate's verdicts block and its marker checks warn.
 run_askgate() {
-  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing one
+  local name=$1 askCase=$2 mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing one
   case $mode in '' | warn | block) ;; *) fail "SKILL_SCENARIOS_ASKGATE_MODE is '$mode', not warn or block" ;; esac
-  printf '%s\n' "$askCase" >"$R/case.txt"
   [ -z "$mode" ] || printf '%s\n' "$mode" >"$R/mode.txt"
   own_dispatch project
   seed_dispatch askgate
@@ -1528,7 +1529,7 @@ worker_fixture() {
   # The world each case asks for: `round` is the kind of world (a review round's or retro's, empty
   # for tester-proof), and `guard` the CLI's blank-name guard dropped, which R2 of the seeded spec
   # asks for.
-  local round='' guard='' doc_line='' workflow_trigger=''
+  local round='' guard='' doc_line='' workflow_trigger='' blank_name=''
   case $case_name in
   '') ;;
   text-only) round=review ;;
@@ -1571,37 +1572,24 @@ EOF
   g add -A && g commit -qm "init"
   g push -q "$R/remote.git" main
   g checkout -qb "legion/$worker_key"
-  if [ -n "$guard" ]; then
-    cat >"$src/greet.ts" <<'EOF'
+  # The test a name must fail for the CLI to print the usage line: a dropped guard tests only for
+  # a missing argument, so a name of spaces reaches greet() and the CLI greets nobody.
+  blank_name='name === undefined || name.trim() === ""'
+  [ -z "$guard" ] || blank_name='name === undefined'
+  cat >"$src/greet.ts" <<EOF
 export function greet(name: string): string {
-  return `Hello, ${name.trim()}!`;
+  return \`Hello, \${name.trim()}!\`;
 }
 
 if (import.meta.main) {
   const name = Bun.argv[2];
-  if (name === undefined) {
+  if ($blank_name) {
     console.error("usage: greet.ts <name>");
     process.exit(2);
   }
   console.log(greet(name));
 }
 EOF
-  else
-    cat >"$src/greet.ts" <<'EOF'
-export function greet(name: string): string {
-  return `Hello, ${name.trim()}!`;
-}
-
-if (import.meta.main) {
-  const name = Bun.argv[2];
-  if (name === undefined || name.trim() === "") {
-    console.error("usage: greet.ts <name>");
-    process.exit(2);
-  }
-  console.log(greet(name));
-}
-EOF
-  fi
   cat >"$src/greet.test.ts" <<'EOF'
 import { expect, test } from "bun:test";
 import { greet } from "./greet";
@@ -1858,9 +1846,7 @@ run_tester_proof() {
 # what it found. The case is in the run's name and in <run>/case.txt, which reviewerTextFindings
 # reads back and holds to the name.
 run_reviewer_text_findings() {
-  local name=$1 n=$2 index=$3 start=$4 review pr head version
-  review=$(reviewer_case) || exit 1
-  printf '%s\n' "$review" >"$R/case.txt"
+  local name=$1 n=$2 index=$3 start=$4 review=$5 pr head version
   own_dispatch project
   seed_ts tester-proof "$R/fixture.json"
   worker_key=$(jq -r .issue "$R/fixture.json")
@@ -1887,9 +1873,7 @@ run_reviewer_text_findings() {
 # phase the daemon starts it in after the architect's acceptance. The case is in the run's name
 # and in <run>/case.txt, which retroThreads reads back and holds to the name.
 run_retro_threads() {
-  local name=$1 n=$2 index=$3 start=$4 retro pr head version
-  retro=$(retro_case) || exit 1
-  printf '%s\n' "$retro" >"$R/case.txt"
+  local name=$1 n=$2 index=$3 start=$4 retro=$5 pr head version
   own_dispatch project
   seed_ts tester-proof "$R/fixture.json"
   worker_key=$(jq -r .issue "$R/fixture.json")
@@ -1962,15 +1946,17 @@ cmd_run() {
   on_exit stop_run
   rm -rf "$R"
   mkdir -p "$R/bin" "$R/sessions" "$R/cwd" "$R/logs"
+  # The run's own record of its case, which the scorer holds to the name above.
+  [ -z "$run_case" ] || printf '%s\n' "$run_case" >"$R/case.txt"
   cp "$P/built-from" "$R/built-from"
   case $scenario in
   ask-on-message) run_ask_on_message "$name" ;;
   measure-before-ask) run_measure_before_ask "$name" ;;
   tester-proof) run_tester_proof "$name" "$n" "$index" "$start" ;;
-  reviewer-text-findings) run_reviewer_text_findings "$name" "$n" "$index" "$start" ;;
-  retro-threads) run_retro_threads "$name" "$n" "$index" "$start" ;;
+  reviewer-text-findings) run_reviewer_text_findings "$name" "$n" "$index" "$start" "$run_case" ;;
+  retro-threads) run_retro_threads "$name" "$n" "$index" "$start" "$run_case" ;;
   brainstorm) run_brainstorm "$name" ;;
-  askgate) run_askgate "$name" ;;
+  askgate) run_askgate "$name" "$run_case" ;;
   spec-writing | spec-rewrite) run_spec "$scenario" "$name" ;;
   *) fail "unknown scenario $scenario" ;;
   esac

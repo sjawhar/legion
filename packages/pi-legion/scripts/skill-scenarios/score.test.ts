@@ -3191,6 +3191,25 @@ reviewRun("reviewer-text-findings-text-only-head-7", {
   "calls.jsonl": calls([submission(approval())]),
   "pushes.log": `2026-09-30T17:29:25.000Z refs/heads/legion/LWEVAL-1 ${"0".repeat(40)} ${head}\n`,
 });
+// The same resolution sent as the body of `gh api graphql --input`, which the call's arguments
+// never name.
+reviewRun("reviewer-text-findings-text-only-head-8", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([
+    {
+      at: "2026-09-30T17:29:20.000Z",
+      as: "gh",
+      argv: ["api", "graphql", "--input", "resolve.json"],
+      exit: 1,
+      files: {
+        "resolve.json": JSON.stringify({
+          query: 'mutation{resolveReviewThread(input:{threadId:"PRRT_kwDOrig0001"}){thread{id}}}',
+        }),
+      },
+    },
+    submission(approval()),
+  ]),
+});
 // Another label, for the counts.
 reviewRun("reviewer-text-findings-text-only-base-1", {
   "case.txt": "text-only\n",
@@ -3343,6 +3362,8 @@ const retroNames = [
   "retro-threads-text-fixes-head-4",
   "retro-threads-text-fixes-head-5",
   "retro-threads-text-fixes-head-6",
+  "retro-threads-text-fixes-head-7",
+  "retro-threads-text-fixes-head-8",
   "retro-threads-text-fixes-base-1",
   "retro-threads-code-defect-head-1",
   "retro-threads-code-defect-head-2",
@@ -3415,6 +3436,20 @@ retroRun("retro-threads-text-fixes-head-6", {
   "calls.jsonl": calls(closedBoth),
   "pushes.log": pushed(retro.fixed),
   "daemon.log": calls([]),
+});
+// The first thread resolved twice: the second call names that one thread again, and the
+// reference asks only for one thread per call.
+retroRun("retro-threads-text-fixes-head-7", {
+  "calls.jsonl": calls([
+    ...closedBoth,
+    threadResolve([retroIds[0] ?? ""], "2026-09-30T17:34:00.000Z"),
+  ]),
+  "pushes.log": pushed(retro.fixed),
+});
+// A second reply on the first thread: the reference asks for one disposition reply per thread.
+retroRun("retro-threads-text-fixes-head-8", {
+  "calls.jsonl": calls([...closedBoth, threadReply(retroIds[0] ?? "", "2026-09-30T17:34:10.000Z")]),
+  "pushes.log": pushed(retro.fixed),
 });
 // Another label, for the counts.
 retroRun("retro-threads-text-fixes-base-1", {
@@ -3534,6 +3569,12 @@ test("reviewer-text-findings, text-only: a resolveReviewThread call, a push and 
   );
 });
 
+// Catches: a scorer that reads the resolution out of the call's arguments alone, so one sent
+// through `--input` or a here-document goes unseen and a reviewer that resolved a thread passes.
+test("reviewer-text-findings, text-only: a resolveReviewThread in the call's body fails", () => {
+  expect(out).toMatch(/reviewer-text-findings-text-only-head-8\tpass=false\t.*resolveThread=1 /);
+});
+
 // Catches: a scorer that reads only `gh api`, so a `gh pr review` verdict goes unseen.
 test("reviewer-text-findings: a gh pr review carries its event in a flag, and no head or comment", () => {
   expect(out).toMatch(
@@ -3547,7 +3588,7 @@ test("reviewer-text-findings: a gh pr review carries its event in a flag, and no
 // Catches: a scorer that passes any verdict, so the negative control measures nothing.
 test("reviewer-text-findings, defect: an approval fails, and the counts are per case and label", () => {
   expect(out).toMatch(/reviewer-text-findings-defect-head-2\tpass=false\t.*event=APPROVE /);
-  expect(out).toContain("reviewer-text-findings:text-only\thead\t1/7\t0/7\t0\t0\n");
+  expect(out).toContain("reviewer-text-findings:text-only\thead\t1/8\t0/8\t0\t0\n");
   expect(out).toContain("reviewer-text-findings:text-only\tbase\t1/1\t0/1\t0\t0\n");
   expect(out).toContain("reviewer-text-findings:defect\thead\t1/2\t0/2\t1\t0\n");
 });
@@ -3594,6 +3635,16 @@ test("retro-threads, text-fixes: a body still naming the threads open, and no co
   expect(out).toMatch(/retro-threads-text-fixes-head-6\tpass=false\t.*complete=false /);
 });
 
+// Catches: a scorer that holds the resolve calls to the thread count, so a second call on a
+// thread the run already resolved fails a run that broke no rule, and one blind to a second
+// disposition reply on one thread.
+test("retro-threads, text-fixes: a thread resolved twice passes, and one replied to twice fails", () => {
+  expect(out).toMatch(
+    /retro-threads-text-fixes-head-7\tpass=true\t.*resolved=2 resolveCalls=3 bulk=false /
+  );
+  expect(out).toMatch(/retro-threads-text-fixes-head-8\tpass=false\t.*replied=2 replyCalls=3 /);
+});
+
 // Catches: a negative control that passes a retro which writes the text over a defect, which
 // would measure nothing.
 test("retro-threads, code-defect: the move back passes, the text fix fails, and the counts are per case", () => {
@@ -3601,7 +3652,7 @@ test("retro-threads, code-defect: the move back passes, the text fix fails, and 
     /retro-threads-code-defect-head-1\tpass=true\t.*pushes=0 .*backward=implementing/
   );
   expect(out).toMatch(/retro-threads-code-defect-head-2\tpass=false\t.*backward=none/);
-  expect(out).toContain("retro-threads:text-fixes\thead\t1/6\t0/6\t0\t0\n");
+  expect(out).toContain("retro-threads:text-fixes\thead\t2/8\t0/8\t0\t0\n");
   expect(out).toContain("retro-threads:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
   expect(out).toContain("retro-threads:code-defect\thead\t1/2\t0/2\t1\t0\n");
 });
