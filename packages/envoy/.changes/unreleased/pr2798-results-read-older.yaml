@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'Two check results that read older when they should not: a pull request merged under an older attribution rule is judged once more by the rule the running build uses, so one merged while it was credited to nobody is credited to its issue; and a result recorded at a commit no pull request carried yet reads current once a pull request opens at that commit, since reading an issue''s results now asks GitHub itself about such a commit, at most once every five minutes for one repository and commit.'
+time: 2026-11-05T09:55:26.894993684Z
+custom:
+    Issue: pr2798

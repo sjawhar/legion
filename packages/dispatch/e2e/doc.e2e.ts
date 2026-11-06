@@ -44,7 +44,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the spec opens as a formatted, editable document with no source pane @phone", async ({
+test("the spec opens as a formatted, editable document with no source pane", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "READ", name: "Readable" });
@@ -93,30 +93,54 @@ test("the spec opens as a formatted, editable document with no source pane @phon
     expect(paddingLeft).toBeGreaterThan(0);
     // A cell holding an unbreakable token wraps instead of pushing the table into a horizontal
     // scroll, and on a wide desktop the editor is the column's width (the library's `prose` class
-    // would cap it at 65ch, about 600px).
+    // would cap it at 65ch, about 600px). The narrow-screen half is the row below this one.
     expect(
       await table.evaluate((element) => element.scrollWidth - element.clientWidth)
     ).toBeLessThanOrEqual(1);
-    if (testInfo.project.name !== "iphone") {
-      await page.setViewportSize({ width: 1800, height: 1000 });
-      const [editorWidth, articleWidth] = await Promise.all([
-        editor.evaluate((element) => element.getBoundingClientRect().width),
-        documentArticle.evaluate((element) => element.getBoundingClientRect().width),
-      ]);
-      expect(articleWidth).toBeGreaterThan(700);
-      expect(editorWidth).toBeGreaterThanOrEqual(articleWidth - 1);
-    }
+    await page.setViewportSize({ width: 1800, height: 1000 });
+    const [editorWidth, articleWidth] = await Promise.all([
+      editor.evaluate((element) => element.getBoundingClientRect().width),
+      documentArticle.evaluate((element) => element.getBoundingClientRect().width),
+    ]);
+    expect(articleWidth).toBeGreaterThan(700);
+    expect(editorWidth).toBeGreaterThanOrEqual(articleWidth - 1);
     await expect(editor.locator('input[type="checkbox"]')).toBeVisible();
     await expect(editor.locator("pre code")).toBeVisible();
     await expect(page.getByRole("button", { name: /^(Edit|Preview)$/ })).toHaveCount(0);
     await expect(page.getByRole("tabpanel", { name: "Spec" }).locator("textarea")).toHaveCount(0);
 
-    if (testInfo.project.name === "iphone") {
-      expect(
-        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
-      ).toBe(true);
-    }
     await page.screenshot({ path: testInfo.outputPath("rendered-document.png"), fullPage: true });
+  } finally {
+    await alice.close();
+  }
+});
+
+// The narrow-screen half of the row above. The spec's table holds a token nothing can break, the
+// widest thing a document can carry; on a 390 px screen it has to wrap inside its cell rather
+// than push the table, and the page with it, sideways.
+test("a spec whose table holds an unbreakable token keeps the page within the screen @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "only a phone screen is narrower than the token");
+  await createProject({ key: "READ", name: "Readable" });
+  const issue = await createIssue({
+    project: "READ",
+    spec: initialMarkdown,
+    title: "Rendering width",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    const table = documentEditor(page).locator("table");
+    await expect(table).toBeVisible();
+    expect(
+      await table.evaluate((element) => element.scrollWidth - element.clientWidth)
+    ).toBeLessThanOrEqual(1);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
   } finally {
     await alice.close();
   }
@@ -172,9 +196,9 @@ test("reading a document gives its headings ids without versioning it or crediti
   }
 });
 
-test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both @phone", async ({
+test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -205,13 +229,11 @@ test("two users edit the same spec, see each other's text and cursor, and settle
     await typeAtEnd(bobPage, "hello from bob");
     await expect(aliceEditor).toContainText("hello from bob");
 
-    if (testInfo.project.name === "chromium") {
-      // Somewhere other than Alice's caret: a peer's caret on the focused local caret is not
-      // drawn, and a bare click can land at the end of her line.
-      await placeCaret(bobPage, "after", "Use SQLite");
-      await expect(cursorLabel(alicePage, "bob")).toBeVisible();
-      await expect(cursorLabel(bobPage, "alice")).toBeVisible();
-    }
+    // Somewhere other than Alice's caret: a peer's caret on the focused local caret is not
+    // drawn, and a bare click can land at the end of her line.
+    await placeCaret(bobPage, "after", "Use SQLite");
+    await expect(cursorLabel(alicePage, "bob")).toBeVisible();
+    await expect(cursorLabel(bobPage, "alice")).toBeVisible();
 
     await expect
       .poll(() =>
@@ -753,9 +775,9 @@ test("a version deep link renders the comment's original quote highlighted in a 
   }
 });
 
-test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload @phone", async ({
+test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "NAV", name: "Navigation" });
   const target = await createIssue({
     project: "NAV",
@@ -778,12 +800,10 @@ test("clicking a Markdown dispatch:// link in the live editor navigates in-app w
     // resolved target in the hover card instead.
     const link = editor.getByRole("link", { name: "the other issue" });
     await expect(link).toBeVisible();
-    if (testInfo.project.name !== "iphone") {
-      await link.hover();
-      await expect(page.getByRole("tooltip")).toContainText("Navigation target");
-      await page.keyboard.press("Escape");
-      await expect(page.getByRole("tooltip")).toHaveCount(0);
-    }
+    await link.hover();
+    await expect(page.getByRole("tooltip")).toContainText("Navigation target");
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
 
     // A full page reload would reset this marker; an in-app route change preserves it.
     await page.evaluate(() => {

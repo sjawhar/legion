@@ -243,7 +243,13 @@ func TestTheFillCoversEveryDocumentOverMoreThanOneBatch(t *testing.T) {
 // before the write committed, so the row it carries is the older version.
 func TestAVersionCommittedWhileTheFillRunsIsNotReplacedByTheOlderOneItRead(t *testing.T) {
 	ctx := context.Background()
-	handler, database := newTestHandlerWithStore(t)
+	// The version write below is this document's only writer. An upload schedules the document
+	// service's settlement of what it uploaded (artifacts.go, Docs.ScheduleSettlement), 20 ms
+	// later by default here, and a settlement that comes due after that write finds the stored
+	// latest version is not the one its room holds and writes the room's text as a further
+	// version (docs' writeVersionTx), which 20261101182454's trigger puts in document_search in
+	// place of the row this test reads. An hour holds that settlement past the test instead.
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "RACE", "Range survey", "The herd crosses the plateau in spring.")
 	undoDocumentSearch(t, database)
 	notes := uploadIssueDocument(t, handler, issue.Key, "field-notes.md", "# Field notes\n\nQuagga sightings in the north.\n")

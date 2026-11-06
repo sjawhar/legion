@@ -97,6 +97,10 @@ type testServerOptions struct {
 	// embedder wires meaning search (LEGION-549); nil (every test but the meaning search tests'
 	// own) is the deployment with no embedder configured, where search answers keyword-only.
 	embedder embed.Embedder
+	// answerer answers a going request's question (INFRA-1279); nil (every test but the going
+	// routes' own) is the deployment with no model configured, where a run is recorded and its
+	// stream carries the no-model-configured error.
+	answerer Answerer
 	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
 	// deployment with no bucket does.
 	files files.Store
@@ -246,6 +250,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		BrokerTokens:           brokerTokens,
 		AgentStream:            options.agentStream,
 		Embedder:               options.embedder,
+		Answerer:               options.answerer,
 		Files:                  options.files,
 		DashboardEntry:         options.dashboardEntry,
 	})

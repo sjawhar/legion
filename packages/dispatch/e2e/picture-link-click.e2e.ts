@@ -15,12 +15,14 @@ import { asUser } from "./users";
 // The clicks a link inside a document answers, which this spec is its own file for so that
 // they run in Firefox too (e2e/playwright.config.ts): each engine decides them its own way.
 // A picture line the editor cannot draw gives way to a link to the artifact's page
-// (features/doc/picture-view.ts), and the link sits far enough down a real spec that the
-// document's start is off screen: Firefox does not focus a link on mousedown, the editing host
-// takes the focus instead, and the editor then restores its own selection, which a reader who
-// has not clicked into the text yet has at the document's start. Then a document's own link
-// mark, whose address the serializer emptied, which the page itself must open in a new tab on
-// the middle click and the modified click the browser cannot answer for it.
+// (features/doc/picture-view.ts). The link sits far enough down a real spec that the document's
+// start is off screen, and a plain click on it opens what it names. The row carries `@firefox`,
+// the tag the `firefox` project selects by (e2e/playwright.config.ts): Firefox does not focus a
+// link on mousedown, the editing host takes the focus instead, and the editor then restores its
+// own selection, which a reader who has not clicked into the text yet has at the document's
+// start. Then a document's own link mark, whose address the serializer emptied, which the page
+// itself must open in a new tab on the middle click and the modified click the browser cannot
+// answer for it, and whose row carries that same tag.
 
 const agentSession = {
   actor: { kind: "session" as const, id: "e2e-picture-link-click" },
@@ -31,7 +33,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a fallback link far down the document opens the artifact's page on a plain click", async ({
+// @firefox: the engine's focus rule for a click on a link inside the editor.
+test("a fallback link far down the document opens the artifact's page on a plain click @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -86,7 +89,8 @@ async function appendToSpec(artifactId: string, markdown: string): Promise<numbe
   return newest();
 }
 
-test("a fallback link in a past version opens the artifact inside the app, and a middle click opens it in a new tab", async ({
+// @firefox: the engine's own rule for the tab a middle click or a modified click may open.
+test("a fallback link in a past version opens the artifact inside the app, and a middle click opens it in a new tab @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -152,7 +156,8 @@ async function tabOpenedBy(page: Page, open: Promise<unknown>): Promise<string> 
   return address;
 }
 
-test("a middle click and a Ctrl click on a document's own link mark open its target in a new tab", async ({
+// @firefox: the engine's own rule for the tab a middle click or a modified click may open.
+test("a middle click and a Ctrl click on a document's own link mark open its target in a new tab @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });

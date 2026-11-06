@@ -418,11 +418,11 @@ func TestBothKindsOfSessionFollowTheBoxAcrossASignIn(t *testing.T) {
 	// Before the sign-in: the box offers no authority, so both enrol as this machine.
 	hostSession := func(t *testing.T, pid int) {
 		t.Helper()
-		sess, err := newSession(pid, 77, "example-host:"+strconv.Itoa(pid)+":77", nil)
+		sess, err := newSession(pid, 77, "example-host:"+strconv.Itoa(pid)+":77", "", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := b.Enroll(context.Background(), sess); err != nil {
+		if _, _, err := b.EnrollIdentity(context.Background(), sess.identity()); err != nil {
 			t.Fatalf("enrol a host session: %v", err)
 		}
 	}

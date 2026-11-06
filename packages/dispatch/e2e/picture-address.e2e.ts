@@ -109,7 +109,8 @@ async function sendTo(page: Page, address: string, downloads: readonly string[])
     .toEqual({ downloaded: [], path: address });
 }
 
-test("a picture's own address draws the picture and hands the reader no download", async ({
+// @webkit: what a browser sent to a version's own address decides from the answer's headers.
+test("a picture's own address draws the picture and hands the reader no download @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -135,7 +136,9 @@ test("a picture's own address draws the picture and hands the reader no download
   }
 });
 
-test("a video's own address plays the video and hands the reader no download", async ({
+// @webkit: what a browser sent to a version's own address decides from the answer's headers,
+// here a video's.
+test("a video's own address plays the video and hands the reader no download @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });

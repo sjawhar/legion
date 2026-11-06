@@ -204,7 +204,8 @@ async function writeIntoSpec(artifactId: string, markdown: string): Promise<numb
   return newest();
 }
 
-test("a video reference draws a player in the spec editor and in a past version, where a picture stays a picture and a link stays a link @phone", async ({
+// @webkit: the containers and codecs a `<video>` plays, here in the two document editors.
+test("a video reference draws a player in the spec editor and in a past version, where a picture stays a picture and a link stays a link @phone @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -265,7 +266,8 @@ test("a video reference draws a player in the spec editor and in a past version,
   }
 });
 
-test("a video artifact's own page plays it where a picture's page shows the picture @phone", async ({
+// @webkit: the containers and codecs a `<video>` plays, here on the artifact's own page.
+test("a video artifact's own page plays it where a picture's page shows the picture @phone @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -292,7 +294,8 @@ test("a video artifact's own page plays it where a picture's page shows the pict
   }
 });
 
-test("a video reference in a comment draws a player for the picture line and for a reference alone in its block, and stays a link inside a sentence", async ({
+// @webkit: the containers and codecs a `<video>` plays, here in a rendered body.
+test("a video reference in a comment draws a player for the picture line and for a reference alone in its block, and stays a link inside a sentence @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -362,7 +365,8 @@ test("a video reference in a comment draws a player for the picture line and for
 // mouse one back, beside the link rather than inside it (an `<a>` inside an `<a>` is no
 // markup at all): the reference's own words, linking to the same page, pressable and in the
 // tab order.
-test("a video's caption opens its artifact page on a click and on Enter, where a press on the player opens nothing @phone", async ({
+// @webkit: the containers and codecs a `<video>` plays, here under the caption a reader steps to.
+test("a video's caption opens its artifact page on a click and on Enter, where a press on the player opens nothing @phone @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -461,7 +465,8 @@ test("a video's caption opens its artifact page on a click and on Enter, where a
   }
 });
 
-test("a video sent in a direct message draws a player in the conversation on the Agents page", async ({
+// @webkit: the containers and codecs a `<video>` plays, here in a conversation's turn.
+test("a video sent in a direct message draws a player in the conversation on the Agents page @webkit", async ({
   browser,
 }) => {
   const planner = {
@@ -519,7 +524,8 @@ test("a video sent in a direct message draws a player in the conversation on the
   }
 });
 
-test("a video reference in a project document draws a player in its editor", async ({
+// @webkit: the containers and codecs a `<video>` plays, here in a project document's editor.
+test("a video reference in a project document draws a player in its editor @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -555,7 +561,8 @@ test("a video reference in a project document draws a player in its editor", asy
   }
 });
 
-test("an MP4 reference draws a player from a bytes route that answers it inline, by name and in parts", async ({
+// @webkit: the containers and codecs a `<video>` plays, here an MP4's.
+test("an MP4 reference draws a player from a bytes route that answers it inline, by name and in parts @webkit", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -599,7 +606,8 @@ test("an MP4 reference draws a player from a bytes route that answers it inline,
   }
 });
 
-test("a video named by the picture line in a turn whose summary is unread plays, and leaves no dead link", async ({
+// @webkit: the containers and codecs a `<video>` plays, here in a turn whose summary is unread.
+test("a video named by the picture line in a turn whose summary is unread plays, and leaves no dead link @webkit", async ({
   browser,
 }) => {
   const planner = {

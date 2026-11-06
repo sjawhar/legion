@@ -1,0 +1,5 @@
+kind: Fixed
+body: A session's deregistration (`DELETE /v1/interests/<session_id>`, and `POST /v1/interests/unsubscribe` with an empty topic list) releases the role claims the claim view names its session the holder of, rather than reading every claim in the role bucket, so it no longer answers 503 once the bucket holds enough roles for one of those reads to run out the route's budget. A listener whose view cannot be served still falls back to that scan, now bounded by the request, and the role claim reaper skips a role it could not read, delete or release instead of ending the whole pass.
+time: 2026-11-06T02:50:54.330189068Z
+custom:
+    Issue: pr2846

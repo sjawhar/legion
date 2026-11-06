@@ -127,12 +127,19 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
 			}
+			// A pod below memoryContract is below treeContract too, so the body it is served
+			// also lacks `admission.trees` and the issues' `tree`, the two keys contract 51
+			// added (api's withoutTrees): they come off the baseline with the memory group.
+			if !tc.memory {
+				delete(want["admission"].(map[string]any), "trees")
+			}
 			for _, issue := range want["issues"].(map[string]any) {
 				issue := issue.(map[string]any)
 				if !tc.memory {
 					delete(issue, "memoryGroup")
 					delete(issue, "memoryDrawMode")
 					delete(issue, "memoryDrawnAt")
+					delete(issue, "tree")
 				}
 				if tc.rounds {
 					continue
