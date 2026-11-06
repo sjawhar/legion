@@ -21,9 +21,8 @@ import (
 
 // Parse and Render finish in time linear in the text on the shapes that cost quadratic time
 // before LEGION-465. Each shape is timed at growthStep's fraction of its target size and then at
-// the full size (parseFullTarget/renderFullTarget: linear_sizes.go, and a smaller pair under
-// -race, linear_sizes_race.go, so a -count=N run stays well inside go test's own default
-// per-package timeout even there), through growsLinearly (below).
+// the full size (parseFullTarget/renderFullTarget: linear_sizes.go), through growsLinearly
+// (below).
 //
 // What each shape's closure measures is the CPU time this process spends on the call alone
 // (cpuTimeOf), not wall time. A loaded box's scheduler can inflate wall time on either side of a
@@ -53,9 +52,9 @@ import (
 // the parse here is a read-back's, which counts none and reads all of it. Render's target is
 // smaller than parse's (linear_sizes.go): this loop's own ratio check is `<a`'s live linearity
 // measurement, at whatever parseFullTarget/renderFullTarget currently are, not a one-time aside
-// recorded in a comment to go stale - but -race's own per-access instrumentation costs real CPU
-// time a reintroduced O(n²) bug would cost far more of; the margin this loop checks is that
-// difference, not a hang (which perCallDeadline catches on its own, independent of the ratio).
+// recorded in a comment to go stale. The margin it checks is between the CPU time healthy linear
+// work costs and the far greater time a reintroduced O(n²) bug would cost, not a hang (which
+// perCallDeadline catches on its own, independent of the ratio).
 func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	for _, shape := range []string{"a_", "a_b*", "a~b_"} {
 		full := parseFullTarget / len(shape)
@@ -200,9 +199,7 @@ const linearSlack = 3
 //
 // Each shape runs at two sizes through growsLinearly, measuring process CPU time rather than a
 // fixed wall-clock budget. The sizes are eightfold apart, so a quadratic renderer grows 64x where
-// a linear renderer may grow 24x (linearSlack*growthStep). renderFullTarget and parseFullTarget
-// use smaller targets under -race, where the instrumentation makes healthy work slower but cannot
-// change its growth ratio.
+// a linear renderer may grow 24x (linearSlack*growthStep).
 func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	paragraph := func(text string) *Node {
 		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
@@ -308,8 +305,8 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 // A paragraph that reads back in no spelling is written in every spelling runSpellings lists for
 // it, and unreadableRun calls for every family of them. The plain text after it is in each writing,
 // and each distinct writing is read back once (TestRenderReadsEachWritingBackUnderAReaderOnce). It
-// is timed up to renderFullTarget, which -race shrinks, as
-// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText times a render.
+// is timed up to renderFullTarget, as TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText
+// times a render.
 func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 	sizes := []int{16 << 10, 256 << 10, 1 << 20}
 	for _, shape := range []string{

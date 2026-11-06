@@ -18,8 +18,9 @@ import (
 // runs at once, four CI cores to some 3,800 parallel tests, under the race detector besides
 // (dispatch://INFRA-1075). A test whose SUBJECT is a span - Drain closing at its deadline, a
 // request window, a publish's own deadline, HoldsSeed's cost - keeps its own number. The internal
-// test package has a constant of its own by this name (main_test.go).
-const busWait = 30 * time.Second
+// test package has a constant of its own by this name (main_test.go), and the same minute: a
+// give-up bound is cheap when it is generous and red when it is tight.
+const busWait = time.Minute
 
 // relayProxy relays NATS connections to a server, so a test can act on the link between a client
 // and the server. With delay set it holds each new connection that long before it dials the

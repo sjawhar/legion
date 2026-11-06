@@ -425,7 +425,7 @@ func TestIncrementalRenderMatchesTheWholeRenderOnTheFixtures(t *testing.T) {
 	t.Parallel()
 	tally := newSpliceTally()
 	perBlock, rounds := 21, 30
-	if raceEnabled || testing.Short() {
+	if testing.Short() {
 		perBlock, rounds = 7, 10
 	}
 	paths, err := filepath.Glob(filepath.Join("testdata", "corpus", "*.md"))
@@ -577,7 +577,7 @@ func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
 	started := time.Now()
 	tally := newSpliceTally()
 	stride, rounds := 1, 20
-	if raceEnabled || testing.Short() {
+	if testing.Short() {
 		stride, rounds = 16, 4
 	}
 	rng := rand.New(rand.NewPCG(644, 390))

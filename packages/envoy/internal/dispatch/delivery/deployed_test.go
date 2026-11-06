@@ -27,14 +27,13 @@ const (
 	deployedOtherIssue = "DEPL-2"
 )
 
-// seedDeployedIssues writes project DEPL and its two issues, and clears their events, so a run
-// against a database an earlier run left holds only what this test writes. The pull requests and
-// runs are cleared by deliveryTestPool.
+// seedDeployedIssues writes the two deployed issues in the project that owns acme/widgets
+// (seedDeliveryProject), since an attribution holds an issue to the repository the pull request
+// is in, and clears their events, so a run against a database an earlier run left holds only
+// what this test writes. The pull requests and runs are cleared by deliveryTestPool.
 func seedDeployedIssues(t *testing.T, ctx context.Context, pool *store.Pool) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, `insert into projects (key, name) values ('DEPL', 'Deployed') on conflict do nothing`); err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
+	seedDeliveryProject(t, ctx, pool)
 	for _, key := range []string{deployedIssue, deployedOtherIssue} {
 		number, err := strconv.Atoi(strings.TrimPrefix(key, "DEPL-"))
 		if err != nil {
@@ -42,8 +41,8 @@ func seedDeployedIssues(t *testing.T, ctx context.Context, pool *store.Pool) {
 		}
 		if _, err := pool.Exec(ctx, `
 			insert into issues (key, project_key, number, title, status, created_by, rank)
-			values ($1, 'DEPL', $2, $1, 'done', '{"kind":"system","id":"delivery-test"}', $1)
-			on conflict do nothing`, key, number); err != nil {
+			values ($1, $2, $3, $1, 'done', '{"kind":"system","id":"delivery-test"}', $1)
+			on conflict do nothing`, key, deliveryProject, deployedIssueBand+number); err != nil {
 			t.Fatalf("seed issue %s: %v", key, err)
 		}
 		if _, err := pool.Exec(ctx, `delete from events where issue_key = $1`, key); err != nil {

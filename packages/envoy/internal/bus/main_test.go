@@ -19,4 +19,8 @@ func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
 // milliseconds alone takes tens of seconds here. A test whose SUBJECT is a span - Drain closing at
 // its deadline, a request window, a publish's own deadline, HoldsSeed's cost - keeps its own
 // number and does not use this (dispatch://INFRA-1075).
-const busWait = 30 * time.Second
+//
+// A minute, which is what main chose for the longest of these waits when it raised one of them
+// itself: this is a give-up bound rather than a measurement, so the cost of a generous one is a
+// hung test reported a little later, and the cost of a tight one is a red lane.
+const busWait = time.Minute

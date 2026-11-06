@@ -50,8 +50,18 @@ var formattingWords = strings.Fields("one two three alpha beta gamma")
 // transactions, which it never cleans up after, and its browsers' updates, which it does.
 func TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly(t *testing.T) {
 	t.Parallel()
+	// The storm below runs four seeds by 160 steps, and two by 60 under the race detector or
+	// -short, where each round costs several times as much. The read sits in the test rather
+	// than in the helper it passes the sizes to, since that is what makes this test the one
+	// .github/scripts/ci_job_reads.py gives envoy-go's plain full-size run.
+	seeds, steps := []uint64{1, 2, 3, 4}, 160
+	if raceEnabled || testing.Short() {
+		seeds, steps = []uint64{1, 2}, 60
+	}
 	t.Run("a plain run between two marked ones", testAReplicaKeepsARunTheRoomLeftPlain)
-	t.Run("local writes and browser edits interleaved", testAReplicaReplaysInterleavedFormatting)
+	t.Run("local writes and browser edits interleaved", func(t *testing.T) {
+		testAReplicaReplaysInterleavedFormatting(t, seeds, steps)
+	})
 }
 
 // F1. The shape sjawhar/legion#2496's review names: four of the service's own writes leave the
@@ -121,12 +131,8 @@ func testAReplicaKeepsARunTheRoomLeftPlain(t *testing.T) {
 // which the room applies as remote and cleans up after. After every commit the replica, caught up,
 // must stand exactly where the room stands: the same state vector and delete set, and the same
 // delta for every text node of the fragment.
-func testAReplicaReplaysInterleavedFormatting(t *testing.T) {
+func testAReplicaReplaysInterleavedFormatting(t *testing.T, seeds []uint64, steps int) {
 	t.Parallel()
-	seeds, steps := []uint64{1, 2, 3, 4}, 160
-	if raceEnabled || testing.Short() {
-		seeds, steps = []uint64{1, 2}, 60
-	}
 	for _, seed := range seeds {
 		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
 			// Each seed drives a service and a document of its own, so the rounds run beside
