@@ -1436,7 +1436,15 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 // resumed a live session's id is refused the 409 naming the holder, and reads the lookup to see
 // which process holds the role; a request that states no instance, and a claim record that names
 // none, both reach the renewal test rather than a case of their own, since an absent instance
-// matches nothing. A hard claim reads no holder and lands last-claim-wins as it always has.
+// matches nothing. That renewal test is read only while the role claim view can answer
+// (store.Registry.RoleViewErr): nothing but a registration renews a claim, a registration renews
+// through that view, and so a view that cannot answer leaves every claim's renewal ageing with
+// nothing able to move it - a refill longer than the live window would hand a live holder's role
+// to the second process. While it cannot answer, that one arm is the bus-unavailable 503 with
+// Retry-After: 1 naming the view (writeBusUnavailable), and nothing is claimed; a claim from the
+// process the standing claim names rests on no renewal and is granted through it, since it is
+// that holder re-claiming its own role after a listener restart. A hard claim reads no holder and
+// lands last-claim-wins as it always has.
 //
 // A claim that landed also hands the role's kept lane to its new holder: whatever the listener
 // kept while the role had none is forwarded to the claimant (runKeptRoleDrain, which reads the
@@ -1619,6 +1627,28 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 					// older - the same rule, not a case of its own, and so is a request
 					// that states no instance, since an absent instance on either side
 					// matches nothing.
+					//
+					// That reading is only worth anything while renewals can still move.
+					// What moves them is a registration (POST /v1/interests/subscribe),
+					// which renews every claim the registering session holds through the
+					// role claim view (store.Registry.RolesHeldBy); while that view cannot
+					// answer - the state a listener restart leaves for as long as its
+					// first read of the bucket takes - NO registration renews ANY claim,
+					// so every claim's renewal is ageing with nothing able to move it. A
+					// refill longer than the live window would then read a live holder's
+					// claim as abandoned and hand its role to a second process, the very
+					// takeover this branch exists to refuse. So this arm fails closed on
+					// the view's own state (store.Registry.RoleViewErr, the one test of
+					// it, which makes no bucket call), as the route does for any other
+					// read that did not answer: nothing is claimed and nothing is
+					// written, and the claimant retries. The arm above it is not gated -
+					// it rests on no renewal at all, and it is the holder's own process
+					// re-claiming its role after a listener restart, which refusing would
+					// strand.
+					if viewErr := d.registry.RoleViewErr(); viewErr != nil {
+						writeBusUnavailable(w, fmt.Errorf("read role claim view: %w", viewErr))
+						return
+					}
 					supersedable = append(supersedable, holder)
 				default:
 					// A second process of one session id, held off while the first still

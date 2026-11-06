@@ -158,6 +158,84 @@ func TestASecondProcessOfOneSessionIdTakesTheRoleOnceTheClaimsRenewalIsOlderThan
 	}
 }
 
+// The refill this guards: a listener restart leaves the role claim view unable to answer, and
+// nothing renews a claim while it cannot, since a registration renews the claims its session
+// holds through that very view. Every claim's renewal is then ageing with nothing able to move
+// it, so a renewal older than the live window says nothing about the holder, and a refill longer
+// than the window would hand the live holder's role to the second process. The claim fails closed
+// instead, with the 503 the route answers every read that did not answer with, and writes
+// nothing.
+func TestASecondProcessOfOneSessionIdIsRefusedTheRoleWhileTheRoleClaimViewCannotAnswer(t *testing.T) {
+	const (
+		sessionID = "ses_shared_id"
+		role      = "legion-controller"
+	)
+	rig := newRoleClaimProcessRig(t, sessionID)
+	rig.seed(t, sessionID, role, holdingProcess)
+	ageRoleClaim(t, rig.deps, role, 2*rig.deps.sessionLiveWindow)
+	refuseRoleClaimView(t, rig.deps.registry)
+
+	recorder := rig.claim(sessionID, role, secondProcess)
+	if !roleViewUnanswered(recorder) {
+		t.Fatalf("a second process's claim of a stale claim while the role claim view cannot answer: status %d, Retry-After %q, body %s; want the bus-unavailable 503 naming the role claim view's refusal",
+			recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+	}
+	if got := rig.holdingProcessOf(t, role); got != holdingProcess {
+		t.Fatalf("the stored claim names the process %q after the refusal, want the holder's %q: a claim refused for the view writes nothing", got, holdingProcess)
+	}
+}
+
+// What the refusal above weighs is the view's state and not the claim's: the very same request,
+// against the very same record, is granted once the view answers again. The refill is what the
+// claimant waits out, and a registration by the holder landing inside it is what would keep the
+// role where it is.
+func TestASecondProcessOfOneSessionIdTakesTheRoleOnceTheRoleClaimViewAnswersAgain(t *testing.T) {
+	const (
+		sessionID = "ses_shared_id"
+		role      = "legion-controller"
+	)
+	rig := newRoleClaimProcessRig(t, sessionID)
+	rig.seed(t, sessionID, role, holdingProcess)
+	ageRoleClaim(t, rig.deps, role, 2*rig.deps.sessionLiveWindow)
+	answerAgain := refuseRoleClaimView(t, rig.deps.registry)
+	if recorder := rig.claim(sessionID, role, secondProcess); !roleViewUnanswered(recorder) {
+		t.Fatalf("a second process's claim while the role claim view cannot answer: status %d, Retry-After %q, body %s; want the bus-unavailable 503 naming the role claim view's refusal",
+			recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+	}
+
+	answerAgain()
+
+	recorder := rig.claim(sessionID, role, secondProcess)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the same claim once the role claim view answers again: status %d %s, want 200", recorder.Code, recorder.Body.String())
+	}
+	if got := rig.holdingProcessOf(t, role); got != secondProcess {
+		t.Fatalf("the stored claim names the process %q, want the claimant's %q", got, secondProcess)
+	}
+}
+
+// The gate holds off the second process alone. A claim from the process the standing claim names
+// rests on no renewal at all - the claim says it is that process's role - so the refilling view
+// takes nothing from it: this is the holder's own process re-claiming its role after the listener
+// restart that left the view refilling, and refusing it would strand it until the refill ended.
+func TestARoleClaimFromTheProcessTheClaimNamesIsGrantedWhileTheRoleClaimViewCannotAnswer(t *testing.T) {
+	const (
+		sessionID = "ses_shared_id"
+		role      = "legion-controller"
+	)
+	rig := newRoleClaimProcessRig(t, sessionID)
+	rig.seed(t, sessionID, role, holdingProcess)
+	refuseRoleClaimView(t, rig.deps.registry)
+
+	recorder := rig.claim(sessionID, role, holdingProcess)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the holding process's own claim while the role claim view cannot answer: status %d %s, want 200", recorder.Code, recorder.Body.String())
+	}
+	if got := rig.holdingProcessOf(t, role); got != holdingProcess {
+		t.Fatalf("the stored claim names the process %q, want %q", got, holdingProcess)
+	}
+}
+
 // A claim record that names no process - one an earlier build wrote, or one whose claimant stated
 // none - is no match for any claimant, so it is weighed by its renewal alone. It carries none
 // either, so the moment it was claimed is what the window is measured from
