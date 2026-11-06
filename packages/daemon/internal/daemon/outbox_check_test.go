@@ -25,13 +25,14 @@ func checkRoot() record.Issue {
 	return record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
 }
 
-// openCheck is issue's production check on acme/widgets#42 at merge, opened an hour ago with look 1
-// open since, woken by the merge, and bound two weeks out.
+// openCheck is issue's production check on acme/widgets#42 at merge, worked by the implementer —
+// the role every row open before the project could name one carries — opened an hour ago with
+// look 1 open since, woken by the merge, and bound two weeks out.
 func openCheck(issue record.Issue, merge string) record.ProductionCheck {
 	opened := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)
 	return record.ProductionCheck{
 		Issue: issue.Key, Project: issue.Project, Tree: issue.Tree, Repo: "acme/widgets", Number: 42, MergeSHA: merge,
-		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 1, LookOpen: true, LookWakeAt: &opened,
+		Role: claim.RoleImplementer, OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 1, LookOpen: true, LookWakeAt: &opened,
 		LastWakeKind: "merge", LastWakeDetail: merge, LastWakeAt: &opened,
 	}
 }
@@ -440,6 +441,91 @@ func TestSettleRunsARowAgainAtTheMomentItsWaitNames(t *testing.T) {
 				t.Fatalf("retry = attempts=%d next_at=%s error=%q, want one attempt due at %s", attempts, nextAt, lastError, tc.want)
 			}
 		})
+	}
+}
+
+// A check_wake row applies the wake it carries — the look it was named at, the check instance it
+// names and its reason — through the workflow's handlers. The same row run again is a duplicate
+// and applies nothing; the row the workflow queues again while the issue runs is a row of its
+// own, so its apply is fresh rather than this one's duplicate, as a deferred bound's is
+// (checkBound).
+func TestACheckWakeRowAppliesItsWakeAndARequeuedRowAppliesAfresh(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := checkRoot()
+	putOutboxIssue(t, pool, records, root)
+	check := openCheck(root, "a1b2c3d4")
+	check.LookOpen = false
+	putProductionCheck(t, pool, records, check)
+	facts := &outboxFactHandler{}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, handlers: []intake.Handler{facts}, log: quietLogger(), now: time.Now}
+
+	due := record.CheckWakeDue{Look: 1, OpenedAt: check.OpenedAt, Reason: "the deploy has not carried the merge"}
+	row := mustOutboxRow(t, root.Key, due, time.Now())
+	row.ID = 71
+	for range 2 {
+		if err := runner.execute(ctx, row); err != nil {
+			t.Fatalf("check_wake row = %v", err)
+		}
+	}
+	again := mustOutboxRow(t, root.Key, due, time.Now())
+	again.ID = 72
+	if err := runner.execute(ctx, again); err != nil {
+		t.Fatalf("the check_wake row queued again = %v", err)
+	}
+	want := intake.CheckWakeDue{Issue: root.Key, Look: 1, OpenedAt: check.OpenedAt, Reason: "the deploy has not carried the merge"}
+	got := facts.facts()
+	if len(got) != 2 {
+		t.Fatalf("facts applied = %+v, want the row's once and the row queued again's", got)
+	}
+	for i, fact := range got {
+		wake, ok := fact.(intake.CheckWakeDue)
+		if !ok || wake.Issue != want.Issue || wake.Look != want.Look || !wake.OpenedAt.Equal(want.OpenedAt) || wake.Reason != want.Reason {
+			t.Fatalf("fact %d = %+v, want %+v", i, fact, want)
+		}
+	}
+}
+
+// A check_wake row of a check with a look to start starts it through the workflow: the look the
+// row names is the check's, with no look open, so the next look opens with a start row of its
+// own, woken by the row's reason. A row of a check a later merge replaced starts nothing.
+func TestACheckWakeRowStartsTheNextLookAndAReplacedChecksStartsNone(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := checkRoot()
+	putOutboxIssue(t, pool, records, root)
+	check := openCheck(root, "a1b2c3d4")
+	check.LookOpen, check.Role = false, claim.RoleTester
+	putProductionCheck(t, pool, records, check)
+	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: 24 * time.Hour, ProductionCheckRole: claim.RoleTester}, quietLogger())
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, handlers: []intake.Handler{engine}, log: quietLogger(), now: time.Now}
+
+	orphan := mustOutboxRow(t, root.Key, record.CheckWakeDue{Look: 1, OpenedAt: check.OpenedAt.Add(-24 * time.Hour), Reason: "an earlier check's wake"}, time.Now())
+	orphan.ID = 73
+	if err := runner.execute(ctx, orphan); err != nil {
+		t.Fatalf("the replaced check's wake = %v, want it finished without acting", err)
+	}
+	if got := readProductionCheck(t, pool, records, root.Key); got.Looks != 1 || got.LookOpen {
+		t.Fatalf("the check after a replaced check's wake = look %d (open %t), want look 1 still ended", got.Looks, got.LookOpen)
+	}
+
+	row := mustOutboxRow(t, root.Key, record.CheckWakeDue{Look: 1, OpenedAt: check.OpenedAt, Reason: "the deploy has not carried the merge"}, time.Now())
+	row.ID = 74
+	if err := runner.execute(ctx, row); err != nil {
+		t.Fatalf("the check's own wake = %v", err)
+	}
+	got := readProductionCheck(t, pool, records, root.Key)
+	if got.Looks != 2 || !got.LookOpen || got.WakeAt != nil || got.LastWakeDetail != "the deploy has not carried the merge" {
+		t.Fatalf("the check after its wake = %+v, want look 2 open, woken by the row's reason, with no wake standing", got)
+	}
+	var starts int
+	if err := pool.QueryRow(ctx, "select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = 'start'", root.Key).Scan(&starts); err != nil {
+		t.Fatalf("count the start rows of %s: %v", root.Key, err)
+	}
+	if starts != 1 {
+		t.Fatalf("start rows = %d, want the woken look's one", starts)
 	}
 }
 

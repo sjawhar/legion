@@ -520,6 +520,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.autoMergeDisable(ctx, row, value)
 	case record.ReadyMerge:
 		return r.readyMerge(ctx, row, value)
+	case record.CheckWakeDue:
+		return r.checkWake(ctx, row, value)
 	case record.CheckLook:
 		return r.checkLook(ctx, row, value)
 	case record.CheckBound:
@@ -1815,6 +1817,24 @@ func (r *outbox) checkLook(ctx context.Context, row record.OutboxRow, payload re
 	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-look:%s:%s:%d", row.Issue, check.ID(), payload.Look),
 		intake.CheckLookEnded{Issue: row.Issue, Look: payload.Look, Cause: "look bound", OpenedAt: check.OpenedAt}, r.handlers...); err != nil {
 		return fmt.Errorf("end look %d of %s's production check at its bound: %w", payload.Look, row.Issue, err)
+	}
+	return nil
+}
+
+// checkWake is a check's named wake coming due (record.CheckWakeDue): the look the check stands
+// at is woken (intake.CheckWakeDue), which starts the next look where the check is still open at
+// the look and the instance the row names, with no look open and its issue out of the workflow,
+// and otherwise changes nothing or queues the row again, as the workflow decides
+// (workflow.checkWakeDue). The row carries the check instance it was named for, so nothing is
+// read here before the fact: the workflow reads the check in the fact's own transaction, where no
+// report can land between the read and the look it starts. The event is the issue and this row,
+// as the check's bound is (checkBound), since the workflow queues the wake again as a new row
+// while the issue runs again, and that row's apply must be fresh rather than a duplicate of this
+// one's.
+func (r *outbox) checkWake(ctx context.Context, row record.OutboxRow, payload record.CheckWakeDue) error {
+	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-wake:%s:%d", row.Issue, row.ID),
+		intake.CheckWakeDue{Issue: row.Issue, Look: payload.Look, OpenedAt: payload.OpenedAt, Reason: payload.Reason}, r.handlers...); err != nil {
+		return fmt.Errorf("wake %s's production check at look %d: %w", row.Issue, payload.Look, err)
 	}
 	return nil
 }

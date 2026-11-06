@@ -909,20 +909,40 @@ type DaemonBooted struct {
 
 func (DaemonBooted) isFact() {}
 
-// CheckReport is the implementer's report on one look of its closed issue's production check: the
-// `legion` tool's `handoff_complete` on an issue whose check is open (api/handoff.go), carrying no
-// commit. Verdict is pass, pending or fail; Summary is what the implementer saw. Look is the look
-// the route read as the check's current one, so a report of a look its bound or a hold already
-// ended is refused rather than recorded against the look after it.
+// CheckReport is the checking role's report on one look of its closed issue's production check:
+// the `legion` tool's `handoff_complete` on an issue whose check is open (api/handoff.go),
+// carrying no commit. Verdict is pass, pending or fail; Summary is what the agent saw. Look is
+// the look the route read as the check's current one, so a report of a look its bound or a hold
+// already ended is refused rather than recorded against the look after it. WakeAt is when the
+// agent asks for its next look, which a pending on a look that is not the check's last carries
+// and no other report does (the route holds it to that: CHECK_WAKE_REQUIRED,
+// CHECK_WAKE_UNEXPECTED); the engine clamps it and writes the check's one wake row for it.
 type CheckReport struct {
 	Issue   string
 	Claim   claim.Token
 	Look    int
 	Verdict string
 	Summary string
+	WakeAt  *time.Time
 }
 
 func (CheckReport) isFact() {}
+
+// CheckWakeDue is the wake of issue Issue's production check coming due (the check_wake row at
+// ProductionCheck.WakeAt): the next look starts, woken by Reason — what the checking agent named
+// its own next look for on a pending report, or the retry of a look nobody reported. Look is the
+// look the check stood at when the wake was named, so a row of a look the check has since left
+// starts nothing, and OpenedAt the check instance it was named for, so a row of a check a later
+// merge of the same issue replaced — whose looks count from one again — starts nothing either; a
+// zero OpenedAt names none.
+type CheckWakeDue struct {
+	Issue    string
+	Look     int
+	OpenedAt time.Time
+	Reason   string
+}
+
+func (CheckWakeDue) isFact() {}
 
 // CheckLookEnded is a look of issue Issue's production check ending with no report: Cause is
 // `look bound` (the check_look row due at the look's bound), `operator hold` (a check start the

@@ -192,6 +192,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checkReported(ctx, tx, fact)
 	case intake.CheckLookEnded:
 		return e.checkLookEnded(ctx, tx, fact)
+	case intake.CheckWakeDue:
+		return e.checkWakeDue(ctx, tx, fact)
 	case intake.CheckBound:
 		return e.checkBound(ctx, tx, fact)
 	case intake.ListenerWake:

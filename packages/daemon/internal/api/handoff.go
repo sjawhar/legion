@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -21,8 +22,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// HandoffCompleteRequest is what a worker reports when its phase is done, or what the implementer
-// reports on a look of its closed issue's production check. A phase with a handoff (planning,
+// HandoffCompleteRequest is what a worker reports when its phase is done, or what the checking
+// role reports on a look of its closed issue's production check. A phase with a handoff (planning,
 // implementing, testing, reviewing; phase.Handoff) ends with a handoff record on the Dispatch
 // issue, which the worker writes with `dispatch handoff-write` under its own session, and its
 // completion names it: HandoffID and HandoffVersion, which the `legion` tool's handoff_complete
@@ -36,14 +37,19 @@ import (
 // request on its branch, or a merged one recorded (implementationPullRequest:
 // HANDOFF_NO_PULL_REQUEST). A check report carries no commit and no record (nothing was pushed or
 // written) and a Verdict of pass, pending or fail; a tester's completion a Verdict of pass or fail.
+// WakeAt is the check report's alone: on a pending it is when the checking agent asks to be woken
+// for its next look, which no other verdict and no phase completion carries (checkReport). It is a
+// pointer so that a report naming no time and one naming the zero time are one value, both of them
+// a report that named none.
 type HandoffCompleteRequest struct {
-	GrantID        string `json:"grantId"`
-	Summary        string `json:"summary"`
-	Verdict        string `json:"verdict"`
-	Ready          bool   `json:"ready"`
-	Commit         string `json:"commit,omitempty"`
-	HandoffID      string `json:"handoffId,omitempty"`
-	HandoffVersion int    `json:"handoffVersion,omitempty"`
+	GrantID        string     `json:"grantId"`
+	Summary        string     `json:"summary"`
+	Verdict        string     `json:"verdict"`
+	Ready          bool       `json:"ready"`
+	Commit         string     `json:"commit,omitempty"`
+	HandoffID      string     `json:"handoffId,omitempty"`
+	HandoffVersion int        `json:"handoffVersion,omitempty"`
+	WakeAt         *time.Time `json:"wakeAt,omitempty"`
 }
 
 // HandoffCompleteResponse confirms that the completion fact committed. Note is what READY answers
@@ -56,14 +62,17 @@ type HandoffCompleteResponse struct {
 
 // handoffComplete records a phase completion or a production check report (checkReport). The grant
 // is redeemed and the record read before the two are told apart, so an invalid grant is refused
-// before a field only one of them requires: a call by the implementer on its closed issue (phase
-// done, which no role works: the check is the work after the close) is a check report when the
-// issue's check is open, and is refused CHECK_NOT_OPEN otherwise; every other call is a phase
-// completion, held to its commit (the implementer's and the merger's), the Dispatch handoff record
-// a file-backed phase ends with (handoffRecord), its role's verdict rule and the run its claim
-// serves, the implementer's in implementing to an open pull request on its branch or a merged one
-// recorded (implementationPullRequest), and the engine refuses one of a phase its role does not
-// run (HANDOFF_NOT_CURRENT_PHASE).
+// before a field only one of them requires: every call on a closed issue (phase done, which no
+// role works: the check is the work after the close) is a check report, whatever role the grant
+// holds, so a report lands where the check's own refusals are written — CHECK_NOT_OPEN when the
+// issue has no open check, CHECK_ROLE_MISMATCH when the caller is not the role the check records
+// — rather than falling through to the phase path, which would answer a role the check is not
+// for with a missing commit or a forbidden verdict. Every other call is a phase completion, held
+// to its commit (the implementer's and the merger's), the Dispatch handoff record a file-backed
+// phase ends with (handoffRecord), its role's verdict rule and the run its claim serves, the
+// implementer's in implementing to an open pull request on its branch or a merged one recorded
+// (implementationPullRequest), and the engine refuses one of a phase its role does not run
+// (HANDOFF_NOT_CURRENT_PHASE).
 func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	var req HandoffCompleteRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}) {
@@ -100,7 +109,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", "issue is not recorded")
 		return
 	}
-	if grant.Role == claim.RoleImplementer && issue.Phase == phase.Done {
+	if issue.Phase == phase.Done {
 		s.checkReport(w, r, grant, position.check, req)
 		return
 	}
@@ -452,30 +461,66 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 	return true
 }
 
-// checkReport records the implementer's report on a look of its closed issue's production check
-// (intake.CheckReport): the check must be open (CHECK_NOT_OPEN: a done issue whose check closed, or
-// never opened, since nothing merged), and the verdict one of pass, pending or fail
-// (CHECK_VERDICT_REQUIRED). No commit is read: the look pushed nothing. No run is read either: the
-// check fences itself on the issue and the look the route read as the current one, which the
-// engine holds the report to (CHECK_LOOK_NOT_OPEN), rather than on the claim's run, since the look's
-// task is no phase's run and a woken session may hold an older one. The event is the issue, the
-// check (record.ProductionCheck.ID: a later merge of the same issue replaces the check and counts
-// its looks from one again, and the rerun's report on look 1 is a new fact, not the first check's),
-// the look and the verdict: a retried report of the same look is the same fact, and a refusal — the
-// look ended by its bound before the report landed — is recorded as processed under it, so the
-// report of the next look is a new fact.
+// checkReport records the checking role's report on a look of its closed issue's production check
+// (intake.CheckReport). Every refusal below is written before the fact is applied — the apply
+// marks the event processed before any handler runs (intake.ApplyFact) — so a refused report
+// changes nothing, leaves the look open, and the report sent again, corrected, is recorded:
+//
+//   - CHECK_NOT_OPEN: the issue has no open check (a done issue whose check closed, or one never
+//     opened, since nothing merged).
+//   - CHECK_ROLE_MISMATCH: the grant is not the check's own role (record.ProductionCheck.Role,
+//     the role the check opened with). The API is the only layer that holds the caller's role —
+//     intake.CheckReport carries a claim token, not a role — so this is the one place that can
+//     hold a report to the role the check records.
+//   - CHECK_VERDICT_REQUIRED: the verdict is not one of pass, pending or fail.
+//   - CHECK_WAKE_REQUIRED: a pending on a look that is not the check's last (Last) names no
+//     wakeAt. The checking agent names its own next look, and nothing else would start one.
+//   - CHECK_WAKE_UNEXPECTED: a wakeAt where no look follows it — on a pass or a fail, each of
+//     which closes the check, or on a pending on the check's last look, after which the check
+//     closes as not run.
+//
+// No commit is read: the look pushed nothing. No run is read either: the check fences itself on
+// the issue and the look the route read as the current one, which the engine holds the report to
+// (CHECK_LOOK_NOT_OPEN), rather than on the claim's run, since the look's task is no phase's run
+// and a woken session may hold an older one. The event is the issue, the check
+// (record.ProductionCheck.ID: a later merge of the same issue replaces the check and counts its
+// looks from one again, and the rerun's report on look 1 is a new fact, not the first check's),
+// the look and the verdict: a retried report of the same look is the same fact, and a refusal the
+// engine commits — the look ended by its bound before the report landed — is recorded as
+// processed under it, so the report of the next look is a new fact.
 func (s *server) checkReport(w http.ResponseWriter, r *http.Request, grant credential.Grant, check *record.ProductionCheck, req HandoffCompleteRequest) {
 	if check == nil || !check.Open() {
 		writeFailure(w, http.StatusConflict, "CHECK_NOT_OPEN", fmt.Sprintf("%s has no open production check; this completion changed nothing", grant.Issue))
+		return
+	}
+	if grant.Role != check.Role {
+		writeFailure(w, http.StatusConflict, "CHECK_ROLE_MISMATCH", fmt.Sprintf(
+			"%s's production check is the %s's, and this completion is the %s's: only the role the check records reports on it; the record is unchanged, so the check's own role may send this report",
+			grant.Issue, check.Role, grant.Role))
 		return
 	}
 	if req.Verdict != "pass" && req.Verdict != "pending" && req.Verdict != "fail" {
 		writeFailure(w, http.StatusBadRequest, "CHECK_VERDICT_REQUIRED", "a production check report names a verdict of pass, pending or fail")
 		return
 	}
+	if req.Verdict == "pending" && req.WakeAt == nil && !check.Last {
+		writeFailure(w, http.StatusBadRequest, "CHECK_WAKE_REQUIRED", fmt.Sprintf(
+			"a pending report names wakeAt, when the next look of %s's production check is due; look %d stays open and nothing was recorded, so send this report again with a time",
+			grant.Issue, check.Looks))
+		return
+	}
+	if req.WakeAt != nil && (req.Verdict != "pending" || check.Last) {
+		why := fmt.Sprintf("a %s report closes the check", req.Verdict)
+		if req.Verdict == "pending" {
+			why = fmt.Sprintf("look %d is the check's last, after which it closes as not run", check.Looks)
+		}
+		writeFailure(w, http.StatusBadRequest, "CHECK_WAKE_UNEXPECTED", fmt.Sprintf(
+			"this report names wakeAt and no look follows it: %s; send it again without a time, and nothing was recorded", why))
+		return
+	}
 	eventID := fmt.Sprintf("check:%s:%s:%d:%s", grant.Issue, check.ID(), check.Looks, req.Verdict)
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.CheckReport{Issue: grant.Issue, Claim: grant.Claim, Look: check.Looks,
-		Verdict: req.Verdict, Summary: req.Summary}, s.handlers...)
+		Verdict: req.Verdict, Summary: req.Summary, WakeAt: req.WakeAt}, s.handlers...)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")
 		return
