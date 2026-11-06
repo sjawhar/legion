@@ -1,7 +1,9 @@
 // Package embed calls Cohere Embed v4 for Dispatch's meaning search, on AWS Bedrock
-// (BedrockClient) or on Azure AI Foundry (AzureClient), one place per deployment: one vector per
-// (kind, id) searchable unit, embedded after commit through embedqueue's durable retry queue, and
-// one query vector per search request that asks for it.
+// (BedrockClient) or on Azure AI Foundry (AzureClient), one place per deployment: one vector
+// per window of an item's neighbouring blocks (Windows), embedded after commit through
+// embedqueue's durable retry queue, and one query vector per search request that asks for it.
+// A local harness embeds at neither place: DevClient hashes words into a vector and calls
+// nothing.
 package embed
 
 import (
@@ -21,20 +23,17 @@ const (
 	// re-embed; this package does not detect a Dispatch already carrying vectors at another width.
 	// Both places are asked for this width, so a vector from either fits the same column.
 	Dimension = 1536
-	// maxInputChars bounds one text's length before it is sent, by either client. The model's
+	// MaxInputRunes bounds one text's length before it is sent, by either client. The model's
 	// context is generous (128k tokens) but an unbounded document would pay to embed far more
 	// than a search result ever shows; this is a generous multiple of the 4,000-character snippet
 	// window search.go already uses, not a tight limit. It bounds one text in runes
-	// (text.HeadRunes), while DISPATCH_BODY_MAX in packages/contracts/src/dispatch-tools.ts caps a
-	// comment, comment-edit and message body in UTF-16 units, which are never fewer than a text's
-	// runes; so a body at that cap reaches the embedder whole only while DISPATCH_BODY_MAX <=
-	// maxInputChars, and .github/scripts/check-body-embed-limit.sh fails the build when it does
-	// not.
-	maxInputChars = 32000
+	// (text.HeadRunes), and the windows a searchable item is embedded in are built so that none
+	// of them passes it.
+	MaxInputRunes = 32000
 )
 
 // EstimateTokens estimates how many tokens texts will cost one call to the model service, at the
-// same truncation this package applies before sending (maxInputChars, by rune count exactly as
+// same truncation this package applies before sending (MaxInputRunes, by rune count exactly as
 // text.HeadRunes truncates) and the same rough characters-per-token ratio the original "Bedrock
 // capacity" measurement used (4 characters/token, a standard order-of-magnitude estimate for
 // English prose - not Cohere's own tokenizer, which only the model service itself has). Good
@@ -46,26 +45,22 @@ func EstimateTokens(texts []string) int {
 	const charsPerToken = 4
 	total := 0
 	for _, t := range texts {
-		n := utf8.RuneCountInString(t)
-		if n > maxInputChars {
-			n = maxInputChars
-		}
-		total += n
+		total += min(utf8.RuneCountInString(t), MaxInputRunes)
 	}
 	return total / charsPerToken
 }
 
 // BoundedBytes is the UTF-8 byte length of t at the truncation this package applies before sending
-// (maxInputChars runes, the cut text.HeadRunes makes), counted without copying t. A Cohere token
+// (MaxInputRunes runes, the cut text.HeadRunes makes), counted without copying t. A Cohere token
 // is at least one byte, so this bounds the tokens t costs from above, which EstimateTokens does
 // not.
 func BoundedBytes(t string) int {
-	if len(t) <= maxInputChars {
+	if len(t) <= MaxInputRunes {
 		return len(t) // no more runes than bytes, so nothing is cut
 	}
 	runes := 0
 	for i := range t {
-		if runes == maxInputChars {
+		if runes == MaxInputRunes {
 			return i
 		}
 		runes++
@@ -74,7 +69,7 @@ func BoundedBytes(t string) int {
 }
 
 // boundBatch checks one Embed call's texts against a place's batch limit and returns them each
-// truncated to maxInputChars runes (text.HeadRunes), the form both clients send. No texts comes
+// truncated to MaxInputRunes runes (text.HeadRunes), the form both clients send. No texts comes
 // back as nil, nil: a caller answers that call with no vectors and no error, before any other
 // check.
 func boundBatch(texts []string, limit int) ([]string, error) {
@@ -86,7 +81,7 @@ func boundBatch(texts []string, limit int) ([]string, error) {
 	}
 	bounded := make([]string, len(texts))
 	for i, t := range texts {
-		bounded[i] = text.HeadRunes(t, maxInputChars)
+		bounded[i] = text.HeadRunes(t, MaxInputRunes)
 	}
 	return bounded, nil
 }
@@ -132,22 +127,32 @@ type Embedder interface {
 	Limits() Limits
 }
 
-// The places meaning search reaches Cohere Embed v4, as an embedder identity names them
-// (IdentityPlace) and as DISPATCH_EMBEDDER selects them.
+// The places meaning search embeds at, as an embedder identity names them (IdentityPlace) and
+// as DISPATCH_EMBEDDER selects them: Cohere Embed v4 on AWS Bedrock or on Azure AI Foundry, and
+// the local harness's own embedder (DevClient), which DISPATCH_DEV_EMBEDDER builds and no
+// deployment runs.
 const (
 	PlaceBedrock = "bedrock"
 	PlaceAzure   = "azure"
+	PlaceDev     = "dev"
 )
 
 // azureIdentityPrefix begins every AzureClient identity, "azure:<endpoint host>/<deployment>".
 const azureIdentityPrefix = PlaceAzure + ":"
 
+// devIdentityPrefix begins DevClient's identity, "dev:<recipe>".
+const devIdentityPrefix = PlaceDev + ":"
+
 // IdentityPlace names the place and the model an embedder identity records: AzureClient's is
-// "azure:<endpoint host>/<deployment>", whose model is the deployment; any other is a
-// BedrockClient's, whose identity is the Bedrock model id itself.
+// "azure:<endpoint host>/<deployment>", whose model is the deployment; DevClient's is
+// "dev:<recipe>", whose model is the recipe; any other is a BedrockClient's, whose identity is
+// the Bedrock model id itself.
 func IdentityPlace(identity string) (place, model string) {
 	if rest, ok := strings.CutPrefix(identity, azureIdentityPrefix); ok {
 		return PlaceAzure, rest[strings.LastIndex(rest, "/")+1:]
+	}
+	if rest, ok := strings.CutPrefix(identity, devIdentityPrefix); ok {
+		return PlaceDev, rest
 	}
 	return PlaceBedrock, identity
 }

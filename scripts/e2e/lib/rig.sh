@@ -276,13 +276,32 @@ stop_tree() {
   kill -KILL "$pid" 2>/dev/null || true
 }
 
+# run_processes prints every pid of this run still alive: any whose working directory is under
+# $work, and any whose command line names $work. A process whose working directory this user cannot
+# read is another user's, so it is none of the run's and gets no further look, as a kill of it would
+# fail anyway.
+# One `find` reads every /proc/<pid>/cwd link, and the command lines are read by the shell itself:
+# a `readlink` and a `grep` for each of a devbox's thousands of /proc entries cost seconds of every
+# teardown, the sweeps of a checkpoint among them. `%l` is empty for a link find could not read.
 run_processes() {
-  local p cwd
-  for p in /proc/[0-9]*; do
-    cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
+  local p cwd arg entry
+  local -a args
+  while IFS= read -r -d '' entry; do
+    p=${entry%% *}
+    cwd=${entry#* }
+    [ -n "$cwd" ] || continue
     case "$cwd/" in
       "$work"/*) printf '%s\n' "${p#/proc/}"; continue ;;
     esac
-    if grep -qsF "$work" "$p/cmdline" 2>/dev/null; then printf '%s\n' "${p#/proc/}"; fi
-  done
+    args=()
+    { mapfile -d '' -t args <"$p/cmdline"; } 2>/dev/null || continue
+    for arg in ${args[@]+"${args[@]}"}; do
+      case $arg in
+        *"$work"*) printf '%s\n' "${p#/proc/}"; break ;;
+      esac
+    done
+    # find exits 1 for the cwd links it cannot read, every root process's among them, which is no
+    # error here: under the callers' `set -E` an unguarded status would run their ERR trap inside
+    # this substitution and print a warning, or a check's FAIL line, on a run that is going well.
+  done < <(find /proc/[0-9]*/cwd -maxdepth 0 -printf '%h %l\0' 2>/dev/null || :)
 }

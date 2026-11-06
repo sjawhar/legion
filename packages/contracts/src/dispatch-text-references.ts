@@ -10,10 +10,12 @@
  * pipe; the sentence punctuation, emphasis and strikethrough delimiters and unbalanced closing
  * parenthesis after it are dropped. External URLs cite nothing, and neither does a reference
  * whose target id, as the server stores the edge to it, is past MAX_REFERENCE_TARGET_BYTES. A
- * block reference is its document's reference, `#b-` and the block id as `encodeBlockId` writes
- * it (readers take any percent-encoding; an id past MAX_BLOCK_ID_BYTES names nothing), optionally
- * pinned to version N of the document by a trailing `@v<N>`; each `refs` entry for one is written
- * that canonical way.
+ * block reference is its document's, ask's, comment's or issue message's reference, `#b-` and the
+ * block id as `encodeBlockId` writes it (readers take any percent-encoding; an id past
+ * MAX_BLOCK_ID_BYTES names nothing), optionally pinned to version N of the document, or to
+ * revision N of the comment or of the ask's parts, by a trailing `@v<N>` (a message never
+ * changes, so a pinned message block names nothing); each `refs` entry for one is written that
+ * canonical way.
  */
 export const DISPATCH_TEXT_REFERENCES: readonly {
   body: string;
@@ -161,6 +163,55 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "dispatch://CORE/artifact/handbook-md#b-ship-it",
     refs: ["dispatch://CORE/artifact/handbook-md#b-ship-it"],
+  },
+  // A block of an ask, a comment or an issue message, under its item: an ask's part (its
+  // question, an option or its answer) and a comment's (an issue's or a project document's) each
+  // optionally pinned to revision N of the item; a message never changes, so a pinned message
+  // block names nothing. The item's dashboard page names the same block.
+  {
+    body: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
+    refs: ["dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2"],
+  },
+  {
+    body: "see dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1.",
+    refs: ["dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1"],
+  },
+  {
+    body: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    refs: ["dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2"],
+  },
+  { body: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2@v1", refs: [] },
+  {
+    body: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
+    refs: [
+      "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
+    ],
+  },
+  {
+    body: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2@v3",
+    refs: [
+      "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2@v3",
+    ],
+  },
+  {
+    body: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b3",
+    refs: ["dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b3"],
+  },
+  {
+    body: "see dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b3@v2.",
+    refs: ["dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b3@v2"],
+  },
+  {
+    body: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b3",
+    refs: ["dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b3"],
+  },
+  {
+    body: "See https://dispatch.test/issues/CORE-1/comments/11111111-1111-4111-8111-111111111111#b-b2 here.",
+    refs: ["dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2"],
+  },
+  {
+    body: "See https://dispatch.test/issues/CORE-1/asks/22222222-2222-4222-8222-222222222222#b-b3 here.",
+    refs: ["dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b3"],
   },
   // No block: an empty id, another fragment, a versioned document, an issue, an id that is not
   // UTF-8 or decodes to a control character.

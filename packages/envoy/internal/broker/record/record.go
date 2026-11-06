@@ -40,6 +40,7 @@ var (
 	hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?)*$`)
 	servicePattern  = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 	slotPattern     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	idPattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // ValidSlot reports whether slot may name a pod enrollment's slot: one of several independent
@@ -55,6 +56,12 @@ func ValidService(service string) bool {
 	return servicePattern.MatchString(service)
 }
 
+// ValidID reports whether id has a credential-request record id's form, the lowercase-hex SHA-256
+// Body.ID answers, so a caller can refuse anything else before it reads the database with it.
+func ValidID(id string) bool {
+	return idPattern.MatchString(id)
+}
+
 // CanonicalLogin lowercases and trims the name Dispatch signs a person in with, their email (a
 // record created before people were named by email keeps the GitHub login it was decided under).
 // Every login comparison in the module goes through this form on both sides.
@@ -62,8 +69,9 @@ func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
-// HumanActor is the audit actor of a change a person made in Dispatch: "human:" and their
-// canonical login, the person Dispatch's server vouches for from its own signed-in session.
+// HumanActor is the audit actor of a change a person made: "human:" and their canonical login,
+// the person signed in to the broker's own approval page, or, for a machine login's decision or a
+// revoke, the person Dispatch's server vouches for from its own signed-in session.
 func HumanActor(login string) string {
 	return "human:" + CanonicalLogin(login)
 }
@@ -105,8 +113,8 @@ type RequestObject struct {
 	Details    []AuthorizationDetail
 	Reason     string
 	LoginHint  string // machine logins only
-	// LifetimeSeconds is how long an agent-secret grant lasts once granted; nil when it lasts
-	// until the session ends.
+	// LifetimeSeconds is the lifetime the request object signed; nil when it named none, and the
+	// broker then applies its 12-hour default or default-grant=session.
 	LifetimeSeconds *int
 }
 
@@ -121,7 +129,7 @@ func (o RequestObject) Service() string {
 
 // requestClaims is the JSON payload of a credential-request object (RFC 9101 §4 shape, RAR
 // authorization_details per RFC 9396 §2). lifetime_seconds is this broker's own claim: absent, the
-// grant lasts until its session ends. A broker from before it decodes the payload without
+// broker gives the grant 12 hours, or until its session ends under default-grant=session. A broker from before it decodes the payload without
 // refusing unknown claims, so it ignores the claim and grants for its own fixed lifetime; a client
 // that asked for one reads the lifetime the answer echoes to tell.
 type requestClaims struct {

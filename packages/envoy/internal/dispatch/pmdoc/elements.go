@@ -503,20 +503,24 @@ func (p elementListGuard) Continue(node ast.Node, reader gmtext.Reader, pc parse
 }
 
 // elementInlineCounter is an inline parser that parses nothing but counts what goldmark's inline
-// phase makes: tried first at every character an inline parser triggers on, a line's start among
-// them, it charges the nodes the textblock has gained since it last looked - the text goldmark ends
-// there and the node the trigger before made. Once the write's markdown passes its limit it takes
-// the rest of each line as one text, so no further node is made.
+// phase makes: tried first at every character an inline parser other than the linkify guard
+// triggers on, a line's start among them, it charges the nodes the textblock has gained since it
+// last looked - the text goldmark ends there and the node the trigger before made - once the text
+// the guard's last question split off is given back (settleCut), so the guard's own questions
+// charge nothing. Once the write's markdown passes its limit it takes the rest of each line as one
+// text, so no further node is made.
 type elementInlineCounter struct{}
 
-// Trigger is every character the readers' inline parsers trigger on: goldmark's code span, link,
-// autolink, raw HTML and emphasis parsers, and the linkify (a space stands for every space and a
-// line's start), strikethrough, footnote and task list extensions.
-func (elementInlineCounter) Trigger() []byte {
-	return []byte{' ', '*', '_', '~', '(', '`', '[', ']', '!', '<'}
-}
+// inlineTriggers is every character goldmark ends a text at whether or not the linkify guard is
+// asked there: those goldmark's code span, link, autolink, raw HTML and emphasis parsers and the
+// strikethrough, footnote and task list extensions trigger on, and `(` and a space, which stands
+// for every space and a line's start, where goldmark's own linkify parser triggered.
+var inlineTriggers = []byte{' ', '*', '_', '~', '(', '`', '[', ']', '!', '<'}
+
+func (elementInlineCounter) Trigger() []byte { return inlineTriggers }
 
 func (elementInlineCounter) Parse(parent ast.Node, block gmtext.Reader, pc parser.Context) ast.Node {
+	settleCut(pc, parent)
 	count := countedElements(pc)
 	if count == nil {
 		return nil

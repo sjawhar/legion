@@ -58,7 +58,7 @@ func TestTildeRunsReadAsTheEngineReadsThem(t *testing.T) {
 		{`&#126;~a~`, `paragraph: "~" | "a" strike_through`, false},
 		{`~&#126;~`, `paragraph: "~" strike_through`, false},
 		{`~a~&#126;`, `paragraph: "a" strike_through | "~"`, false},
-		// The order the two kinds pair in: the kind whose run was tokenized first, where a run that
+		// The order the two groups pair in: the group whose run was tokenized first, where a run that
 		// can neither open nor close, one in a link's label and one after an escaped `~` count, and
 		// one inside a www URL or a defined footnote call's label does not.
 		{`*a ~b* c~`, `paragraph: "a ~b" emphasis | " c~"`, false},
@@ -72,9 +72,9 @@ func TestTildeRunsReadAsTheEngineReadsThem(t *testing.T) {
 		{`\~~ x* ~~a*b~~c*`, `paragraph: "~~ x* " | "a*b" strike_through | "c*"`, false},
 		{`> **\~~](u)![_![~_`, `paragraph: "**~~](u)![" | "![~" emphasis`, true},
 		{`[**~~**d**~~**](u)`, `paragraph: "d" link(u) strike_through strong`, false},
-		// A `**` run directly after a `~~` opener, inside a `*` pair: main read these as the engine
-		// does (the `**` stays text, struck inside the emphasis), so pairing in separate passes must
-		// not pair the `**` with the outer closer.
+		// A `**` run directly after a `~~` opener, inside a `*` pair: the reader before
+		// sjawhar/legion#2360 read these as the engine does (the `**` stays text, struck inside the
+		// emphasis), so pairing in separate passes must not pair the `**` with the outer closer.
 		{`*~~**b~~*`, `paragraph: "**b" emphasis strike_through`, false},
 		{`p *~~**a~~* q`, `paragraph: "p " | "**a" emphasis strike_through | " q"`, false},
 		{`*x ~~**b~~ y*`, `paragraph: "x " emphasis | "**b" emphasis strike_through | " y" emphasis`, false},

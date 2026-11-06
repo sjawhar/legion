@@ -62,7 +62,9 @@ W, H, FPS = 1280, 720, 30
 BACKGROUND = "0x272822"  # agg's monokai background, so a terminal's padding is invisible
 AGG = ["agg", "--font-size", "30", "--theme", "monokai", "--idle-time-limit", "3600", "--last-frame-duration", "0"]
 CAPTURE_TOLERANCE = 0.05  # how far a browser recording may fall outside its wall-clock bounds
-CAST_SLACK = 1.5  # how much shorter a cast may be than its section: the recorder's start and exit
+CAST_SLACK = 3.0  # how much shorter a cast may be than its section, which ends at the detach that
+# ends the cast: the recorder's start alone, which a loaded machine stretches to a second and a
+# half.
 # How far before a cast's farewell its `end` mark falls: a clip that ends at the farewell can show
 # its cleared screen on its last frame or two (0.067 s).
 FAREWELL_GUARD = 0.2

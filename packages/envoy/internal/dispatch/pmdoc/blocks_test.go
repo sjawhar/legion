@@ -95,7 +95,7 @@ func TestDeleteTextblockRemovesTheBlockWhoseWholeTextIsDeleted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			out, removed, err := DeleteTextblock(doc, r)
+			out, removed, err := deleteTextblock(doc, r)
 			if err != nil || removed != test.removed {
 				t.Fatalf("DeleteTextblock(%q) removed=%t err=%v, want removed=%t", test.quote, removed, err, test.removed)
 			}
@@ -134,7 +134,7 @@ func TestDeleteTextblockHoistsANestedListIntoTheParentBulletsPlace(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			out, removed, err := DeleteTextblock(doc, r)
+			out, removed, err := deleteTextblock(doc, r)
 			if err != nil || !removed {
 				t.Fatalf("DeleteTextblock(Parent) removed=%t err=%v", removed, err)
 			}
@@ -156,7 +156,7 @@ func TestDeleteTextblockRefusesABulletWithOtherContentAndNamesTheItem(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = DeleteTextblock(doc, r)
+	_, _, err = deleteTextblock(doc, r)
 	if !errors.Is(err, ErrListItemContent) || !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), `delete {block:"b2"}`) {
 		t.Fatalf("delete of a bullet with other content = %v, want ErrListItemContent naming delete {block:\"b2\"}", err)
 	}
@@ -165,7 +165,7 @@ func TestDeleteTextblockRefusesABulletWithOtherContentAndNamesTheItem(t *testing
 func TestBlockRangeCoversTheBlock(t *testing.T) {
 	sequentialBlockIDs(t)
 	doc := parseFixture(t, "Intro.\n\n- item\n")
-	r, err := BlockRange(doc, "b2")
+	r, err := blockRange(doc, "b2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestBlockRangeCoversTheBlock(t *testing.T) {
 	if r != (Range{From: 8, To: 8 + nodeSize(doc.Children[1])}) {
 		t.Fatalf("list range = %#v", r)
 	}
-	if _, err := BlockRange(doc, "missing"); !errors.Is(err, ErrTargetNotFound) {
+	if _, err := blockRange(doc, "missing"); !errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("unknown block error = %v, want ErrTargetNotFound", err)
 	}
 }
@@ -222,7 +222,7 @@ func TestMoveBlockRejectsAnAnchorInsideTheMovedBlock(t *testing.T) {
 	if _, err := MoveBlock(doc, "decision", inside, true); !errors.Is(err, ErrMoveInsideItself) {
 		t.Fatalf("quote inside moved block error = %v, want ErrMoveInsideItself", err)
 	}
-	self, err := BlockRange(doc, "decision")
+	self, err := blockRange(doc, "decision")
 	if err != nil {
 		t.Fatal(err)
 	}

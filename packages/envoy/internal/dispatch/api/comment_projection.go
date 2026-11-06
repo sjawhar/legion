@@ -74,10 +74,15 @@ type commentWriteResponse struct {
 
 // commentEventPayload builds the payload of every comment.* event. It takes what the write moved
 // in the reference graph — an empty ReferenceChanges on a transition that writes no body — so a
-// producer whose comment text can cite something cannot append an event that stays silent.
-func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment model.Comment, artifactName string, thread commentEventThread, changes model.ReferenceChanges) (model.CommentEventPayload, error) {
+// producer whose comment text can cite something cannot append an event that stays silent. It
+// reads the block the comment answers (reply_block) as the transaction sees it into comment
+// itself, so a route that answers with the comment answers that block too.
+func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment *model.Comment, artifactName string, thread commentEventThread, changes model.ReferenceChanges) (model.CommentEventPayload, error) {
+	if err := hydrateCommentReplyBlocks(ctx, tx, comment); err != nil {
+		return model.CommentEventPayload{}, fmt.Errorf("load the block comment %s answers: %w", comment.ID, err)
+	}
 	payload := model.CommentEventPayload{
-		Comment:                 comment,
+		Comment:                 *comment,
 		ArtifactName:            artifactName,
 		AskQuestion:             thread.AskQuestion,
 		AskState:                thread.AskState,
@@ -85,6 +90,9 @@ func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment mod
 		ThreadRootID:            thread.ThreadRootID,
 		ReferenceChangesPayload: model.NewReferenceChangesPayload(changes),
 	}
+	// A body is bounded block by block, so it can be longer than one event carries: the event
+	// takes its first part and says so, and a reader gets the rest from the comment itself.
+	payload.Body, payload.BodyTruncated = model.EventBody(comment.Body)
 	if comment.ArtifactID == nil {
 		return payload, nil
 	}

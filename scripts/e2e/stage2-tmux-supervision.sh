@@ -15,7 +15,7 @@
 # work directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
 # Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# postgres:16 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway`, `key-file` or `box-login`)
+# PostgreSQL 18 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway`, `key-file` or `box-login`)
 # picks how the agents reach Anthropic, independently of which devbox this runs on:
 #   - `gateway`: the operator's own hawk login, through the Hawk model gateway at
 #     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh); the
@@ -405,9 +405,9 @@ if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon
   # tmpfs, not the image's anonymous volume: creating a volume is one more moving part the proof
   # does not need, and on a box whose volume subsystem stalls it hangs the run.
-  docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+  docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
     -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion \
-    -p 127.0.0.1::5432 postgres:16 >/dev/null
+    -p 127.0.0.1::5432 mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
   until_true 60 "postgres to accept connections over TCP" \
     docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d legion
   LEGION_E2E_PG_DSN="postgres://legion:legion@127.0.0.1:$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')/legion"

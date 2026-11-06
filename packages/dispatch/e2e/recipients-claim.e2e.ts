@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+
 import { setLiveSessions } from "./agents";
 import {
   claimIssue,
@@ -12,6 +14,7 @@ import {
   putIssueState,
   releaseClaim,
 } from "./api";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -22,6 +25,9 @@ import { asUser } from "./users";
 const asker = { kind: "session" as const, id: "e2e-reach-asker" };
 const claimant = { kind: "session" as const, id: "e2e-reach-claimant" };
 const routed = "e2e-reach-routed";
+// A row that waits out the listener roster (routeRosterTTL, five seconds) sees the refreshed read
+// only on its next probe, and the default ladder probes once a second after the first second.
+const ROSTER = { intervals: [50, 50, 100, 200, 500], timeout: 15_000 };
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -92,7 +98,7 @@ test("the ask card lists the issue's claimant and route, and drops the claimant 
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await expect(dialog).toHaveCount(0);
 
-    // The claimant gives the issue up over the agent API; the open card drops it over SSE.
+    // The claimant gives the issue up over the agent API; the open card drops it over the live socket's event feed.
     await releaseClaim(issue.key, { actor: claimant, as: "agent" });
     await expect(recipients).toContainText("Reaches 2");
     await expect(recipients.locator(`[title='${claimant.id}']`)).toHaveCount(0);
@@ -126,13 +132,14 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
     title: "A roster probe for the reviewer role",
   });
   await patchIssue(probe.key, { route: "role:reviewer" });
-  await expect
-    .poll(async () => (await getIssue(probe.key)).route_holder, { timeout: 15_000 })
-    .toBe(routed);
+  await expect.poll(async () => (await getIssue(probe.key)).route_holder, ROSTER).toBe(routed);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   try {
+    // The card's reads below arrive over the event feed, whose refetch the page holds to one per
+    // second (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+    await page.clock.install();
     await page.goto("/");
     const card = page.getByTestId(`ask-${ask.id}`);
     const recipients = card.getByRole("region", { name: "Recipients" });
@@ -155,8 +162,9 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
     await expect(recipients.getByRole("list", { name: "Followers" })).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 1");
 
-    // A role route set on the issue joins the card over SSE, naming the session holding the role.
+    // A role route set on the issue joins the card over the event feed, naming the role's holder.
     await patchIssue(issue.key, { route: "role:reviewer" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(recipients).toContainText("Reaches 2");
     const roleRow = viaIssue
       .getByRole("listitem")
@@ -188,13 +196,10 @@ test("a role route held by the claimant is counted once, under the claim that na
   // The server keeps one listener roster for up to five seconds (routeRosterTTL), so an earlier
   // read may still answer from the roster before these sessions went live.
   await expect
-    .poll(
-      async () => {
-        const read = await getAsk(ask.id);
-        return [read.claimant, read.route, read.route_holder];
-      },
-      { timeout: 15_000 }
-    )
+    .poll(async () => {
+      const read = await getAsk(ask.id);
+      return [read.claimant, read.route, read.route_holder];
+    }, ROSTER)
     .toEqual([claimant.id, "role:e2e-reach-implementer", claimant.id]);
 
   const alice = await asUser(browser, "alice");
@@ -236,20 +241,21 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   // The server keeps one listener roster for up to five seconds (routeRosterTTL), so an earlier
   // read may still answer from the roster before the asker went live.
   await expect
-    .poll(
-      async () => {
-        const read = await getAsk(ask.id);
-        return [read.route, read.route_status, read.route_holder];
-      },
-      { timeout: 15_000 }
-    )
+    .poll(async () => {
+      const read = await getAsk(ask.id);
+      return [read.route, read.route_status, read.route_holder];
+    }, ROSTER)
     .toEqual(["role:reviewer", "live", asker.id]);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   // The listener answering nothing is forced on the real reads: the issue, the ask's thread and
   // the Inbox rows keep every other field the server sent.
-  const unknownReach = { route_holder: null, route_status: "unknown" };
+  const unknownReach = {
+    route_holder: null,
+    route_status: "unknown",
+    route_status_reason: "unreachable",
+  };
   await page.route(`**/api/v1/issues/${issue.key}`, async (route) => {
     const response = await route.fetch();
     const body = (await response.json()) as Record<string, unknown>;
@@ -308,7 +314,7 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   }
 });
 
-test("a route change in a status write moves the open card's route row without a reload, and the close that follows withdraws the card", async ({
+test("a route change in a status write moves the open card's route row without a reload, and a close that also moves the route withdraws the card the reader is answering in place", async ({
   browser,
 }) => {
   const moved = "e2e-reach-routed-next";
@@ -319,8 +325,9 @@ test("a route change in a status write moves the open card's route row without a
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: asker, as: "agent" }
   );
-  // No claim: a claim's `issue.released` would refresh the card on its own, so only the issue
-  // event of each PATCH carries what moves here.
+  // No claim: a claim's `issue.released` would refresh the card on its own (closing a claimed
+  // issue releases it in the same write), so only the issue events of each PATCH carry what moves
+  // here.
   await patchIssue(issue.key, { route: `session:${routed}` });
   await setLiveSessions([
     { session_id: asker.id, title: "Asker (e2e)" },
@@ -331,13 +338,16 @@ test("a route change in a status write moves the open card's route row without a
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   try {
+    // Both PATCH writes below reach the card over the event feed, whose refetch the page holds to
+    // one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+    await page.clock.install();
     await page.goto("/");
     const card = page.getByTestId(`ask-${ask.id}`);
     const recipients = card.getByRole("region", { name: "Recipients" });
     await expect(recipients).toContainText("Reaches 2");
-    // Focus stays on this toggle inside the card's row. The Inbox lists an open ask only while its
-    // issue is open, but it holds a row the reader's focus is in where they last saw it, so the
-    // card stays mounted in the Inbox after the close below.
+    // From 1280 px this card is the reading column's: the question the Inbox selected when the
+    // page opened, with the list's short rows beside it. The toggle is in the column, so the
+    // reader's hand is on no row at all.
     await recipients.getByRole("button", { name: /^Reaches/ }).click();
     const viaIssue = recipients.getByRole("list", { name: "Via claim or route" });
     const routeRow = (session: string) =>
@@ -347,17 +357,30 @@ test("a route change in a status write moves the open card's route row without a
     // One PATCH sets the new route and moves the status: one `issue.updated` names both, and the
     // card's own thread is what must move.
     await patchIssue(issue.key, { route: `session:${moved}`, status: "in_progress" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(routeRow(moved)).toContainText("Routed next (e2e)");
     await expect(routeRow(moved)).toContainText("via route");
     await expect(recipients.locator(`[title='${routed}']`)).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 2");
 
-    // The close withdraws the open ask: the mounted card says so and lists no recipients, since
-    // nobody can answer it any more.
-    await patchIssue(issue.key, { status: "done" });
+    // The reader starts answering. A question the server drops leaves the Inbox at once, except
+    // where they have typed an answer to it: the column then keeps that question, closed, until
+    // they select another row (INFRA-575, `dispatch://INFRA-575/spec`). That is what holds this
+    // card in front of the close below.
+    const typed = "Ship it once the route lands.";
+    await card.locator("[data-ask-answer]").fill(typed);
+
+    // One PATCH moves the route back and closes the issue. The close withdraws the issue's open
+    // asks: the row leaves the list at once, and the card the reader was answering shows its ask
+    // withdrawn by the closer where it stands, listing no recipient at all - nobody can answer it
+    // any more - with their unsent text kept under it to copy.
+    await patchIssue(issue.key, { route: `session:${routed}`, status: "done" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(card).toContainText("Withdrawn when alice closed the issue");
     await expect(recipients).toHaveCount(0);
     await expect(card).toBeVisible();
+    await expect(page.getByTestId("ask-unsent-answer")).toContainText(typed);
+    await expect(inboxRow(page, ask.id)).toHaveCount(0);
   } finally {
     await alice.close();
   }
@@ -404,8 +427,9 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
     }
     await route.fallback();
   });
-  const streamOpened = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/api/v1/events"
+  const streamOpened = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   const pinnedListRead = () =>
     page.waitForRequest((request) => {
@@ -415,7 +439,9 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
   try {
     const firstPinnedRead = pinnedListRead();
     const navigation = page.goto("/");
-    // The claim must reach an open stream: a cold client's stream replays nothing from before.
+    // The claim goes out once the page's live socket is open and the sidebar has read its pinned
+    // list, so its flush reaches the page while the Inbox load it is timed against is still in
+    // flight, and the rename after it is seen by a pinned list already loaded.
     await Promise.all([firstFetched.promise, streamOpened, firstPinnedRead]);
     expect(staleClaimant).toBeNull();
 

@@ -1,11 +1,15 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -54,6 +58,48 @@ func TestOutboxDropsSupersededStatusWrite(t *testing.T) {
 	}
 }
 
+// A person's handover row (StatusWrite.PersonHandover) answers a person's legion label on a triage
+// root, or a person's approval of a parked labelled root's spec. Its delivery writes todo only
+// while the issue still shows the status the row answered and still carries the label: a person
+// who parked the root since is let stand silently, as any superseded status write is, and one who
+// took the label off withdrew the handover, which is dropped with one log line (R4 of
+// dispatch://LEGION-755 and the plan's D2). A hand-over row of the workflow (HandOver) is not held
+// to the label: TestAHandOverWritesTheStatusAndTheLabelTogether's unlabelled cases PATCH it on.
+func TestOutboxWritesAPersonsHandoverOnlyWhileItsLabelAndStatusStand(t *testing.T) {
+	const dropped = "outbox: a person's handover is not written; the label is gone"
+	for _, tc := range []struct {
+		name     string
+		shown    dispatch.Issue
+		statuses []string
+		logged   int
+	}{
+		{name: "parked since", shown: dispatch.Issue{Key: "LEGION-208", Status: "backlog", Labels: []string{"legion"}, HandedOver: true}},
+		{name: "label gone", shown: dispatch.Issue{Key: "LEGION-208", Status: "triage"}, logged: 1},
+		{name: "label and status stand", shown: dispatch.Issue{Key: "LEGION-208", Status: "triage", Labels: []string{"legion"}, HandedOver: true}, statuses: []string{"todo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}, time.Now())
+			client := &outboxDispatch{issue: tc.shown}
+			var logs bytes.Buffer
+			runner := &outbox{log: slog.New(slog.NewJSONHandler(&logs, nil)), dispatch: client}
+
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if !slices.Equal(client.statuses, tc.statuses) {
+				t.Fatalf("status writes = %v, want %v", client.statuses, tc.statuses)
+			}
+			lines := loggedLines(t, logs.String(), dropped)
+			if len(lines) != tc.logged {
+				t.Fatalf("logged %q %d times, want %d: %s", dropped, len(lines), tc.logged, logs.String())
+			}
+			if tc.logged == 1 && lines[0]["issue"] != "LEGION-208" {
+				t.Fatalf("the drop line names issue %v, want LEGION-208", lines[0]["issue"])
+			}
+		})
+	}
+}
+
 func TestOutboxFinishesMessageAlreadyPostedBeforeCrash(t *testing.T) {
 	row, err := record.NewOutboxRow("LEGION-208", record.MessagePost{Body: "Pull request checks are blocked."}, time.Now())
 	if err != nil {
@@ -72,14 +118,17 @@ func TestOutboxFinishesMessageAlreadyPostedBeforeCrash(t *testing.T) {
 }
 
 type outboxDispatch struct {
-	issue          dispatch.Issue
-	statuses       []string
-	handOvers      []string
-	handOverHook   func() error
-	bodies         []string
-	messages       []string
-	getErr         error
-	statusErr      error
+	issue        dispatch.Issue
+	statuses     []string
+	handOvers    []string
+	handOverHook func() error
+	bodies       []string
+	messages     []string
+	getErr       error
+	statusErr    error
+	// statusApplied makes a SetStatus take the status on the issue the fake's reads answer with,
+	// whatever statusErr then answers: the write Dispatch committed and whose answer was lost.
+	statusApplied  bool
 	messageReadErr error
 	postErr        error
 	approval       dispatch.Approval
@@ -97,6 +146,9 @@ func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, erro
 }
 func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	d.statuses = append(d.statuses, status)
+	if d.statusApplied {
+		d.issue.Status = status
+	}
 	return dispatch.Issue{}, d.statusErr
 }
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
@@ -119,6 +171,9 @@ func (d *outboxDispatch) EventsAfter(context.Context, string, int64) ([]json.Raw
 func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return d.approval, d.approvalErr
 }
+func (d *outboxDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
 	d.buildAsked++
 	return d.build, d.buildErr
@@ -126,6 +181,7 @@ func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *outboxDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
@@ -634,6 +690,244 @@ func TestOutboxMessagePostsItsMarkerAndReturnsReadFailure(t *testing.T) {
 	}
 }
 
+// A Dispatch message post Dispatch refuses the same way on every attempt — one block of the body
+// over Dispatch's own block bound — is finished refused with its architect's notice, as a refused
+// status write is, rather than retried on a backoff for ever with nobody told. An outage is no
+// refusal and still retries.
+func TestAMessagePostDispatchRefusesIsFinishedAndItsArchitectTold(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-208", record.MessagePost{Body: "READY #42 at head\n\nthe rest of the packet"}, time.Now())
+	now := time.Now().UTC()
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
+		Message: "body block 2 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
+	if !permanentRefusal(row, fmt.Errorf("post Dispatch message for LEGION-208: %w", refusal), now) {
+		t.Fatal("a CAP_EXCEEDED post is retried, want it finished refused")
+	}
+	outage := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
+	if permanentRefusal(row, fmt.Errorf("post Dispatch message for LEGION-208: %w", outage), now) {
+		t.Fatal("a 503 post is finished refused, want it retried")
+	}
+	notice := messagePostRefused("LEGION-208", record.MessagePost{Body: "READY #42 at head\n\nthe rest of the packet"}, refusal)
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, "LEGION-208") || !strings.Contains(notice.Reason, "READY #42 at head") ||
+		strings.Contains(notice.Reason, "the rest of the packet") || !strings.Contains(notice.Reason, refusal.Error()) {
+		t.Fatalf("the notice = %+v, want message-refused to the architect naming the issue, the first line alone and Dispatch's refusal", notice)
+	}
+}
+
+// A done write posts its reason as a message before it writes the status, and Dispatch refuses a
+// body past its own bounds on every attempt. The row finishes, and the status is written all the
+// same: it is what the issue's lifecycle stands on, and the daemon's own record already reads
+// done. The architect is told what Dispatch refused, that the status stands, and how the reason
+// began, since the reason is on no issue and nothing else would say so.
+func TestAStatusWriteWhoseReasonDispatchRefusesStillSetsTheStatusAndTellsTheArchitect(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Now().UTC()
+	const reason = "Closed by its architect before its first phase: the human decided no change.\nThe rest of the reason."
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
+		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
+		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
+	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}, postErr: refusal}
+	runner := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: client,
+		now: func() time.Time { return now },
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox: %v", err)
+	}
+
+	if fmt.Sprint(client.statuses) != "[done]" {
+		t.Fatalf("statuses written = %v, want done written though its reason was refused", client.statuses)
+	}
+	var kind string
+	var payload []byte
+	if err := pool.QueryRow(context.Background(), "select kind, payload from outbox").Scan(&kind, &payload); err != nil {
+		t.Fatalf("read the row left behind: %v", err)
+	}
+	if kind != string(record.OutboxKindNotice) {
+		t.Fatalf("the one row left is a %s row, want the status row finished and its architect's notice in its place", kind)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode the notice: %v", err)
+	}
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, "The status done was set on the issue all the same") ||
+		!strings.Contains(notice.Reason, "Closed by its architect before its first phase: the human decided no change.") ||
+		strings.Contains(notice.Reason, "The rest of the reason.") ||
+		!strings.Contains(notice.Reason, refusal.Error()) {
+		t.Fatalf("the notice = %+v, want it naming the status it set, the reason's first line alone and Dispatch's refusal", notice)
+	}
+}
+
+// The status Dispatch itself refuses is set by nothing: the issue keeps the status it has while
+// the daemon's record reads the one the row wrote, and the architect is told that the two
+// disagree from here on.
+func TestAStatusWriteDispatchRefusesTellsTheArchitectTheStatusDidNotLand(t *testing.T) {
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "INVALID_STATUS", Message: "no such status"}
+	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done"},
+		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal), statusWrites{})
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, "The status done is not set, so the issue keeps the status it has") ||
+		!strings.Contains(notice.Reason, "the daemon's own record reads done") {
+		t.Fatalf("the notice = %+v, want it saying the status did not land and that the record disagrees", notice)
+	}
+	if strings.Contains(notice.Reason, "begins") {
+		t.Fatalf("the notice = %+v, want no reason quoted for a write that carried none", notice)
+	}
+}
+
+// A status Dispatch refuses for good after the reason beside it posted leaves the reason on the
+// issue and the status unwritten, so the architect is told two things the other outcomes do not
+// say: that the reason is there already, which nobody should post a second time, and that the
+// issue keeps its old status while the daemon's record reads the new one, a disagreement no
+// retry of the daemon's will settle.
+func TestAStatusRefusedAfterItsReasonPostedTellsTheArchitectTheReasonStands(t *testing.T) {
+	const reason = "Closed by its architect before its first phase: the human decided no change."
+	refusal := &dispatch.Error{Status: http.StatusNotFound, Code: "ISSUE_NOT_FOUND", Message: "no such issue"}
+	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done", Reason: reason},
+		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal), statusWrites{reason: true})
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, "The status done is not set") ||
+		!strings.Contains(notice.Reason, "the daemon's own record reads done") {
+		t.Fatalf("the notice = %+v, want it saying the status did not land and that the record and Dispatch disagree", notice)
+	}
+	if !strings.Contains(notice.Reason, "is on the issue already") || strings.Contains(notice.Reason, "is on no issue") {
+		t.Fatalf("the notice = %+v, want it saying the reason posted beside the status is on the issue", notice)
+	}
+}
+
+// The status of a row whose reason Dispatch refused for good is written by the row itself, so
+// Dispatch failing that write at that moment costs nothing: the failure is no refusal, the row
+// goes back to the outbox on its backoff, and its next run posts the reason again (refused
+// again), writes the status, and finishes the row with its architect's notice. Written once
+// inside the finish, a 5xx at that moment would leave the issue at the status it had while the
+// daemon's record read done, with nobody told.
+func TestAStatusWriteRetriesUntilTheStatusLandsAfterItsReasonIsRefused(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Now().UTC()
+	const reason = "Closed by its architect before its first phase: the human decided no change."
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
+		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
+		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
+	outage := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
+	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}, postErr: refusal, statusErr: outage}
+	runner := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: client,
+		now: func() time.Time { return now },
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox: %v", err)
+	}
+	if fmt.Sprint(client.statuses) != "[done]" {
+		t.Fatalf("statuses written = %v, want the one attempt the first run made", client.statuses)
+	}
+	var kind string
+	var attempts int
+	if err := pool.QueryRow(context.Background(), "select kind, attempts from outbox").Scan(&kind, &attempts); err != nil {
+		t.Fatalf("read the row after the failed status write: %v", err)
+	}
+	if kind != string(record.OutboxKindDispatchStatus) || attempts != 1 {
+		t.Fatalf("the one row is a %s row on attempt %d, want the status row back in the outbox after one attempt", kind, attempts)
+	}
+
+	// Dispatch takes the status on the row's next run, and the row finishes refused with the
+	// architect's notice in its place: the status it set, and the reason that is on no issue.
+	client.statusErr = nil
+	now = now.Add(time.Hour)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox again: %v", err)
+	}
+	if fmt.Sprint(client.statuses) != "[done done]" {
+		t.Fatalf("statuses written = %v, want the retry's write after the first attempt failed", client.statuses)
+	}
+	var payload []byte
+	if err := pool.QueryRow(context.Background(), "select kind, payload from outbox").Scan(&kind, &payload); err != nil {
+		t.Fatalf("read the row left behind: %v", err)
+	}
+	if kind != string(record.OutboxKindNotice) {
+		t.Fatalf("the one row left is a %s row, want the status row finished and its architect's notice in its place", kind)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode the notice: %v", err)
+	}
+	if !strings.Contains(notice.Reason, "The status done was set on the issue all the same") ||
+		!strings.Contains(notice.Reason, refusal.Error()) {
+		t.Fatalf("the notice = %+v, want it naming the status it set and Dispatch's refusal of the reason", notice)
+	}
+}
+
+// A status write Dispatch takes and commits can still answer a failure — a timeout, a reset —
+// and the row, which records nothing of itself until it finishes, retries. Its next run finds
+// the issue already at the status it writes, so there is no second status write to make; the
+// reason beside it is the write still outstanding, and the run that ends the row posts it. A run
+// that returned at the status it found would finish the row as a write that went through, with
+// the close reason on no issue and its architect never told.
+func TestAStatusWriteWhoseAnswerWasLostStillTellsTheArchitectItsRefusedReason(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Now().UTC()
+	const reason = "Closed by its architect before its first phase: the human decided no change."
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
+		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
+		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
+	lost := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
+	// Dispatch takes the first run's status write (statusApplied) and answers the outage all the
+	// same, so the row retries against an issue that already reads done.
+	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"},
+		postErr: refusal, statusErr: lost, statusApplied: true}
+	runner := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: client,
+		now: func() time.Time { return now },
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox: %v", err)
+	}
+	if fmt.Sprint(client.statuses) != "[done]" || client.issue.Status != "done" {
+		t.Fatalf("statuses written = %v and the issue reads %s; want the write Dispatch took before it answered the outage",
+			client.statuses, client.issue.Status)
+	}
+
+	now = now.Add(time.Hour)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox again: %v", err)
+	}
+	if fmt.Sprint(client.statuses) != "[done]" {
+		t.Fatalf("statuses written = %v, want no second write of the status Dispatch already holds", client.statuses)
+	}
+	if len(client.messages) != 2 {
+		t.Fatalf("messages %q, want the reason attempted again on the run that ends the row", client.messages)
+	}
+	var kind string
+	var payload []byte
+	if err := pool.QueryRow(context.Background(), "select kind, payload from outbox").Scan(&kind, &payload); err != nil {
+		t.Fatalf("read the row left behind: %v", err)
+	}
+	if kind != string(record.OutboxKindNotice) {
+		t.Fatalf("the one row left is a %s row, want the status row finished and its architect's notice in its place", kind)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode the notice: %v", err)
+	}
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, "The status done was set on the issue all the same") ||
+		!strings.Contains(notice.Reason, reason) || !strings.Contains(notice.Reason, refusal.Error()) {
+		t.Fatalf("the notice = %+v, want it naming the status that stands, the refused reason and Dispatch's refusal", notice)
+	}
+}
+
 // A controller notice row goes to the controller topic of the daemon's own project, the one its
 // controller subscribes to, and to no issue topic, under the row's own key, as the Notice it is.
 func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
@@ -710,6 +1004,80 @@ func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
 	}
 }
 
+// A merge queue holder the listener calls unresponsive still holds the role: its session is past
+// the live window and inside the gone horizon, so the READY packet is kept and retried on the
+// row's backoff, and no Dispatch message stands in for a delivery that was never lost
+// (dispatch://INFRA-392). The refusal comes from a listener answering as the real one does, since
+// what the packet's fate turns on is how that body is read.
+func TestOutboxMergeQueueKeepsThePacketForAnUnresponsiveHolder(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	row.ID = 61
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"role merge-queue holder ses_mq lapsed; claim retained","reason":"holder_lapsed",`+
+			`"holder":"ses_mq","holder_state":"unresponsive","last_seen":1,"claim_released":false}`)
+	}))
+	defer server.Close()
+	client := &outboxDispatch{}
+	runner := &outbox{notices: notify.New(server.URL, ""), dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+
+	if err := runner.execute(context.Background(), row); !errors.Is(err, notify.ErrHolderUnresponsive) {
+		t.Fatalf("execute = %v, want the packet kept for an unresponsive holder", err)
+	}
+	if len(client.messages) != 0 {
+		t.Fatalf("Dispatch messages = %q, want none while the role's holder is only unresponsive", client.messages)
+	}
+}
+
+// A merge queue holder that does not advertise the packet's delivery mode (403 capability)
+// refuses every attempt until another session holds the role, and the listener's own NATS grant
+// denies every forward (403 with no reason) until an operator changes it, as a role with no holder
+// does: the issue is told the role refused the packet and which holder did, or that the listener
+// was denied the forward and why, and the row is done. A holder that did not confirm the packet in
+// time (504 receipt_timeout or delivery_failed) is retried.
+func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	row.ID = 59
+	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_mq"}: %w`,
+		notify.ErrRefusedByHolder{Holder: "ses_mq"})}
+	client := &outboxDispatch{}
+	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute merge queue publish its holder refused: %v", err)
+	}
+	if got := client.messages; len(got) != 1 ||
+		!strings.HasPrefix(got[0], "merge queue role merge-queue refused the packet: its holder ses_mq does not advertise the delivery mode, at 2026-09-25T03:04:05Z") ||
+		!strings.HasSuffix(got[0], "<!-- legion-outbox:59 -->") {
+		t.Fatalf("Dispatch messages = %q, want one naming the role and the holder that refused the packet", got)
+	}
+
+	denied := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	denied.ID = 60
+	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_mq"`
+	publisher.err = fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
+	if err := runner.execute(context.Background(), denied); err != nil {
+		t.Fatalf("execute merge queue publish the listener was denied: %v", err)
+	}
+	if got := client.messages; len(got) != 2 ||
+		!strings.HasPrefix(got[1], "merge queue role merge-queue: the listener's NATS grant denied the forward ("+denial+"), at 2026-09-25T03:04:05Z") ||
+		!strings.HasSuffix(got[1], "<!-- legion-outbox:60 -->") {
+		t.Fatalf("Dispatch messages = %q, want a second naming the role and the listener's denial", got)
+	}
+
+	for _, reason := range []string{notify.ReasonReceiptTimeout, notify.ReasonDeliveryFailed} {
+		publisher.err = fmt.Errorf("publish notice to notifications.role.merge-queue: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_mq"})
+		var notDelivered notify.ErrNotDelivered
+		if err := runner.execute(context.Background(), row); !errors.As(err, &notDelivered) || notDelivered.Reason != reason {
+			t.Fatalf("merge queue publish answered %s = %v, want the answer as a failure, retried", reason, err)
+		}
+	}
+	if got := client.messages; len(got) != 2 {
+		t.Fatalf("Dispatch messages = %q, want no message for a packet that is retried", got)
+	}
+}
+
 func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -717,14 +1085,15 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 	row := mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 3}, time.Now())
 	version := new(int)
 	*version = 3
-	client := &outboxDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: version}}
+	client := &outboxDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: version, By: dispatch.Actor{Kind: "user", ID: "alice"}}}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, handlers: []intake.Handler{handler}}
 
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute gate seed: %v", err)
 	}
-	if got := handler.facts(); len(got) != 1 || got[0] != (intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 3}) {
-		t.Fatalf("gate facts = %#v, want approved artifact", got)
+	if got := handler.facts(); len(got) != 1 || got[0] != (intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 3,
+		Actor: dispatch.Actor{Kind: "user", ID: "alice"}}) {
+		t.Fatalf("gate facts = %#v, want approved artifact naming who approved it", got)
 	}
 
 	client.approvalErr = errors.New("Dispatch unavailable")
@@ -736,18 +1105,23 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 // The seed reads the version Dispatch holds, which may be later than the one the architect
 // registered: a later version it did not see is still the current one, as the shipped daemon
 // raises the gate to Dispatch's latest version. Approved at that latest version, the gate opens
-// there; approved only at an earlier one, the gate moves to the latest version and stays closed.
+// there; approved only at an earlier one, the gate moves to the latest version and stays closed; a
+// changes request on it closes the gate with its reason. A review carries its reviewer, and a bare
+// version names nobody, since no person's review moved it.
 func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
-	two, one := 2, 1
+	two, one, reason := 2, 1, "name the rollback path"
+	bob := dispatch.Actor{Kind: "user", ID: "bob"}
 	for _, tc := range []struct {
 		name     string
 		approval dispatch.Approval
 		want     intake.DispatchArtifact
 	}{
-		{name: "approved at the later version", approval: dispatch.Approval{State: "approved", LatestVersion: 2, Version: &two},
-			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2}},
-		{name: "approved at the registered version only", approval: dispatch.Approval{State: "stale", LatestVersion: 2, Version: &one},
+		{name: "approved at the later version", approval: dispatch.Approval{State: "approved", LatestVersion: 2, Version: &two, By: bob},
+			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2, Actor: bob}},
+		{name: "approved at the registered version only", approval: dispatch.Approval{State: "stale", LatestVersion: 2, Version: &one, By: bob},
 			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 2}},
+		{name: "changes requested at the later version", approval: dispatch.Approval{State: "changes_requested", LatestVersion: 2, Version: &two, Reason: &reason, By: bob},
+			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested, Version: 2, Reason: reason, Actor: bob}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -1504,9 +1878,13 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	}
 
 	// The architect retries the held phase, and the outbox relaunches the implementer's session.
+	// The retry puts the issue back at work, so admission's own pass gives it the slot its worker
+	// needs (holdSlot); without it the start carrying the retry task would wait in the outbox for
+	// one and never be the row this test watches being retried.
 	if _, err := intake.ApplyFact(ctx, pool, "api", "retry:LEGION-208", intake.RetryOrEscalate{Issue: issue.Key, Decision: intake.RetryDecision}, engine); err != nil {
 		t.Fatalf("apply the retry: %v", err)
 	}
+	holdSlot(t, pool, issue.Key)
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("run the retry's start: %v", err)
 	}
@@ -1533,13 +1911,11 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
 		t.Fatalf("start the turn: %v", err)
 	}
-	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:LEGION-208:implementer:implementing", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: token, Commit: "952c3514"}, engine)
+	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:LEGION-208:implementer:implementing", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: token, Commit: "952c3514", HandoffRecord: "implement-1", HandoffVersion: 1}, engine)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("complete implementing = %+v, %v", result.Refusal, err)
 	}
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 	implementerLaunches := func() int {
 		n := 0
 		for _, call := range rt.Calls() {
@@ -1604,6 +1980,10 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			ctx := context.Background()
 			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"}
 			putOutboxIssue(t, pool, records, issue)
+			// The issue is at work in every phase this drives — reviewing, implementing, testing,
+			// retro — so it holds its admission slot throughout and each start is delivered as
+			// soon as the drain reaches it.
+			holdSlot(t, pool, issue.Key)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 				// The base branch requires no check, so the head's settlement gives no verdict, which an approval does not wait on.
@@ -1654,7 +2034,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Author: reviewApp, Body: "scripted changes requested, round 2"})
 			// A review ends when its reviewer completes it: its handoff is part of the phase.
 			apply("handoff:reviewer:reviewing:1", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
-				Claim: "reviewer", Commit: "review-round-1"})
+				Claim: "reviewer", HandoffRecord: "review-round-1", HandoffVersion: 1})
 			due("the round-2 start")
 			machine, found := sup.Machine(implementer)
 			if !found {
@@ -1691,24 +2071,22 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 
 			// Inside that turn the implementer finishes round 2, and its turn ends after the issue
 			// moved to testing: the round-2 task still pending is the finished phase's, and is dropped.
-			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
+			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2", HandoffRecord: "implement-round-2", HandoffVersion: 2})
 			due("the move to testing")
-			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-				t.Fatalf("end the steer's turn: %v", err)
-			}
+			endTurn(ctx, t, machine, implementer)
 			if got := machine.Claim(); got.State != supervise.StateIdle || got.Pending != nil || len(rt.CallsOf("Suspend")) != 0 {
 				t.Fatalf("after round 2's turn the implementer is %s holding %+v with %d suspensions, want idle, holding nothing, never stopped",
 					got.State, got.Pending, len(rt.CallsOf("Suspend")))
 			}
 
 			// The tester passes, and the reviewer decides.
-			apply("handoff:tester:testing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleTester, Claim: tester, Commit: "test-round-2", Verdict: "pass"})
+			apply("handoff:tester:testing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleTester, Claim: tester, HandoffRecord: "test-round-2", HandoffVersion: 1, Verdict: "pass"})
 			due("the move to reviewing")
 			review := tc.review
 			review.Repo, review.Number, review.CommitID, review.HeadSHA, review.Author = "acme/widgets", 118, head, head, reviewApp
 			apply("review:after-round-2", review)
 			apply("handoff:reviewer:reviewing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
-				Claim: "reviewer", Commit: "review-round-2"})
+				Claim: "reviewer", HandoffRecord: "review-round-2", HandoffVersion: 2})
 			if tc.accept {
 				apply("signoff", intake.SignOff{Issue: issue.Key})
 			}
@@ -1850,7 +2228,7 @@ func TestAProductionCheckLaunchFailureNotifiesTheArchitect(t *testing.T) {
 	runtime.ScriptResume(fake.SpawnResult{Err: errors.New("workspace-init could not fetch the clone")})
 	engine := workflow.New(records, workflow.Config{Project: root.Project, Repositories: testRepositories}, quietLogger())
 	active := &workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}
-	sup.OnTerminal(active.terminal)
+	sup.OnDurableState(active.claimDurableState)
 	_, _ = suspendedImplementer(t, sup, root, supervise.SuspendedByDaemon)
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), log: quietLogger(), now: time.Now}
 
@@ -1975,6 +2353,58 @@ func putOutboxIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issu
 	}); err != nil {
 		t.Fatalf("put workflow issue: %v", err)
 	}
+}
+
+// holdSlot gives each of issues the admission slot its promotion grants it (admit's promoteHolds).
+// A start of a phase worker now queues the row that carries the task with NeedsSlot set, and that
+// row stays unclaimable while no slots row names its issue (record.Store's outboxInOrder), so a
+// fixture whose issue has a worker at work grants it the slot that worker's task is delivered
+// under. Each slot takes the next free index, as the promotion does: the column is unique across
+// every project's slots.
+func holdSlot(t *testing.T, pool *pgxpool.Pool, issues ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		records := record.NewStore()
+		slots, err := records.Slots(ctx, tx)
+		if err != nil {
+			return err
+		}
+		for index, issue := range issues {
+			if err := records.PutSlot(ctx, tx, record.Slot{Issue: issue, Index: len(slots) + index, AdmittedAt: time.Now().UTC()}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("give %v the admission slots their work holds: %v", issues, err)
+	}
+}
+
+// openTree opens tree's lifecycle under the workflow's authority, as admission's promotion of a
+// root does in the transaction that admits it. That row, and not a slot, is what says a tree runs
+// (record.TreeLive) now that a slot counts one issue at work rather than one tree, so every
+// fixture that seeds a running tree opens it as well as granting whatever slots its issues hold.
+// project is the Dispatch project key its issues are recorded under; the lifecycle is keyed by
+// the claim token of it, as every claim and runtime key is.
+func openTree(t *testing.T, pool *pgxpool.Pool, project, tree string) {
+	t.Helper()
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return openTreeTx(context.Background(), tx, project, tree)
+	}); err != nil {
+		t.Fatalf("open the tree lifecycle of %s: %v", tree, err)
+	}
+}
+
+// openTreeTx is openTree inside a transaction the caller owns, for a fixture that seeds a tree's
+// record, its slots and its lifecycle in one write as the promotion does.
+func openTreeTx(ctx context.Context, tx pgx.Tx, project, tree string) error {
+	token, err := claim.ProjectToken(project)
+	if err != nil {
+		return fmt.Errorf("project token of %s: %w", project, err)
+	}
+	_, err = record.NewStore().OpenTreeLifecycle(ctx, tx, token, tree, treelifecycle.AuthorityWorkflow)
+	return err
 }
 
 // outboxTreeStore is the daemon's store on pool, the outbox's tree barrier as production wires it

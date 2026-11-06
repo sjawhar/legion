@@ -9,6 +9,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/crafted"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -37,7 +38,7 @@ func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
 			if err := crdt.ApplyUpdateV1(peer, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
 				return err
 			}
-			return crdt.ApplyUpdateV1(doc, docstest.NestedLinkUpdate(t, peer, docstest.NestedValue(100)), "peer")
+			return crdt.ApplyUpdateV1(doc, docstest.NestedLinkUpdate(t, peer, crafted.NestedValue(100)), "peer")
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

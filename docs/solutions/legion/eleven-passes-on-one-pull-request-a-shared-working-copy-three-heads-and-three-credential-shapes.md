@@ -48,9 +48,10 @@ follows from one decision — never move it.
 forward merge, `skills/legion-worker/references/conflicts-and-rewrites.md`) never touches an existing commit, so it never
 risks another role's working copy either, whichever chain it sits on — and the first rule below
 was no safer against LEGION-118: per `jj help rebase`, `-b X -d D` is defined as `-s roots(D..X)
--d D`, the identical descendant-inclusive set. Merge from the bookmark, not `@`: a handoff split
-leaves `@` empty and undescribed, and `jj git push` refuses a commit with no description. None of
-the workarounds below are needed going forward; what follows records the earlier, rebase-based
+-d D`, the identical descendant-inclusive set. Merge from the bookmark, not `@`: `@` is often an
+empty, undescribed commit, and `jj git push` refuses a commit with no description. Before
+sjawhar/legion#2354 a handoff split left `@` in that state. None of the workarounds below are
+needed going forward; what follows records the earlier, rebase-based
 ones.
 
 - **Rebase by explicit commit id**, `jj rebase -b <commit id> -d main@origin`, not
@@ -97,8 +98,8 @@ two diffs.** Compute both sides against their own fork points, `diff` the two ou
 the non-markdown lines in the rebase comment. If they are empty or a handful of lines you can
 explain, the approval is a confirmation; if not, it is a round. And **retro commits after
 approval**, so approved ≠ current by design — the merger's `jj diff --from <approved> --to <tip>
---summary` must list only `docs/solutions/` paths and retro's removal of `.legion/<issue>/`, which
-is why nothing else may move in retro.
+--summary` must list only `docs/solutions/` paths, which is why nothing else may move in retro.
+Before sjawhar/legion#2354 that diff also listed retro's removal of `.legion/<issue>/`.
 
 ## 3. One active phase per issue, from the worker's seat
 

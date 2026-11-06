@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -144,7 +143,8 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 		event,
 		ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: new("s1"), attemptSessionID: "s1"},
 		model.Actor{Kind: "user", ID: "alice"},
-		true,
+		1,
+		direct.newTakeoverRetry(),
 	)
 	if err != nil {
 		t.Fatalf("complete initial mention after its answer: %v", err)
@@ -213,7 +213,8 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 		event,
 		ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: new("s1"), attemptSessionID: "s1"},
 		model.Actor{Kind: "user", ID: "alice"},
-		true,
+		1,
+		direct.newTakeoverRetry(),
 	)
 	if err != nil {
 		t.Fatalf("complete initial mention after an error reply: %v", err)
@@ -431,6 +432,9 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 // send, so the answer is accepted whether or not the sender ever comes back. The attempt's own
 // receipt is owed by the sender that died and nobody else pays it, but the answer is not lost
 // and the reply is not refused for the life of the comment.
+//
+// A client that gives up no longer strands the attempt - a request's own send outlives its
+// connection - so the row a dead sender leaves is written here directly.
 func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
@@ -449,8 +453,7 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 			stall := listenerState.sends == 2
 			listenerState.Unlock()
 			if stall {
-				// The retry's client gives up while its send is still in flight, so that
-				// process never reaches its settle transaction.
+				// The retry's client gives up while its send is still in flight.
 				time.Sleep(1500 * time.Millisecond)
 			}
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
@@ -465,24 +468,17 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 		"body": "The retry's sender will not come back.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
 
-	abandoned, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
-	defer cancel()
-	payload, err := json.Marshal(map[string]any{"delivery": "steer"})
-	if err != nil {
-		t.Fatalf("encode retry: %v", err)
-	}
-	request := httptest.NewRequest(
-		http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", bytes.NewReader(payload),
-	).WithContext(abandoned)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Dispatch-User", "alice")
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	if recorder.Code == http.StatusCreated {
-		t.Fatalf("the 700ms client should not have seen the 1.5s send complete: body=%s", recorder.Body.String())
+	// The retry's sender claimed attempt 2, named the session, sent the frame and died before its
+	// settle. A client's giving up no longer strands a send (every delivery runs on a context its
+	// client cannot cancel), so the dead process's row is written as it leaves it.
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, claimed_at)
+		values ($1, 'session:s1', 2, 'steer', 's1', 'pending', now())
+	`, comment.ID); err != nil {
+		t.Fatalf("strand attempt 2: %v", err)
 	}
 	if stranded := commentAttemptRow(t, database, comment.ID, "session:s1", 2); stranded != "pending///s1" {
-		t.Fatalf("attempt 2 = %q, want it left pending by the sender that never returned", stranded)
+		t.Fatalf("attempt 2 = %q, want it left pending, naming the session its frame reached", stranded)
 	}
 
 	// The frame did reach the session, and it answers the attempt its sender abandoned.

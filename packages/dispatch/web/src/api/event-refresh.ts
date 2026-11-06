@@ -29,10 +29,10 @@ import type {
 } from "./types";
 
 /**
- * Which cached reads one stream event can change, and nothing else: `eventRefreshTargets` is the
- * whole of it, and `api/query-refresh.ts` decides when each read is fetched. Query keys are the
+ * Which cached reads one event of the feed can change, and nothing else: `eventRefreshTargets` is
+ * the whole of it, and `api/query-refresh.ts` decides when each read is fetched. Query keys are the
  * literal arrays their readers use (the reference reads' builders live in
- * `features/refs/reference-target.ts`; `__tests__/sse.test.ts` holds the two in step).
+ * `features/refs/reference-target.ts`; `__tests__/event-feed.test.ts` holds the two in step).
  *
  * The server says what a write moved where a rule needs it: `changed` and `ancestors` on
  * `issue.created|updated|closed`, `thread_logins` on the writes that can move someone's Replies
@@ -194,12 +194,17 @@ function appendAskReads(targets: RefreshTarget[], event: Event): void {
 }
 
 // A comment event names the comment (a delivery receipt as `comment_id`), the root it replies to,
-// whose read carries its replies, and the ask whose thread holds it.
+// whose read carries its replies, and the ask whose thread holds it. An edit rewrites the
+// comment's blocks, so every read of one of them; a reply that names a block moves that block's
+// read, which lists the reply.
 function appendCommentReads(targets: RefreshTarget[], event: Event): void {
   const id =
     event.type === "comment.delivery" ? event.payload.comment_id : payloadString(event, "id");
   if (id !== undefined) {
     targets.push({ queryKey: ["comment", id] });
+    if (event.type === "comment.edited") {
+      targets.push(commentBlockReads(id));
+    }
   }
   const root = payloadString(event, "reply_to");
   if (root !== undefined) {
@@ -208,6 +213,30 @@ function appendCommentReads(targets: RefreshTarget[], event: Event): void {
   const askID = payloadString(event, "ask_id");
   if (askID !== undefined) {
     targets.push({ queryKey: ["ask", askID] }, { queryKey: ["ask-thread", askID] });
+  }
+  appendRepliedBlock(targets, event);
+}
+
+/**
+ * Every read of a block of comment `id` (`blockQuery`, which each link to the block and its own
+ * panel share, pinned or not), found by its node, `comment/<id>#<block id>`. The node carries the
+ * block's text, which the read keeps until an event refreshes it (`staleTime: Infinity`), and the
+ * server names no block of a comment in `references_changed`: the comment's own edit does. An
+ * issue message is never edited, so its blocks' text never moves.
+ */
+function commentBlockReads(id: string): RefreshTarget {
+  const prefix = `comment/${id}#`;
+  return referencePanels(({ node }) => node.kind === "block" && node.id.startsWith(prefix));
+}
+
+/** The read of the block of a comment or message a reply names (`reply_block`, its node id),
+ *  which lists the reply under the block. */
+function appendRepliedBlock(targets: RefreshTarget[], event: Event): void {
+  const replied = payloadValue(event, "reply_block");
+  const node =
+    typeof replied === "object" && replied !== null ? Reflect.get(replied, "node") : undefined;
+  if (typeof node === "string") {
+    targets.push(referencePanels((read) => read.node.kind === "block" && read.node.id === node));
   }
 }
 
@@ -630,7 +659,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // state's own read always (its `seq` moved), the pinned list only for a pin. Of these the Inbox
     // reads only a snooze, its row's `snoozed_until`, from which its Later band, its banner and the
     // Needs-you badge are all counted: every Inbox read, since the event names no ask (every
-    // signed-in stream carries it). An event without `changed` predates snooze events.
+    // signed-in feed carries it). An event without `changed` predates snooze events.
     if (!isViewer(payloadString(event, "login"), viewer)) {
       return [];
     }
@@ -693,6 +722,12 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
   if (changesReferenceGraph(event)) {
     targets.push({ exact: true, queryKey: ["issue", key, "references"] });
   }
+  if (event.type === "decision.kept") {
+    // A Keep moves one decision's row of the issue's Decisions view and nothing else: it writes
+    // no document version, no ask and no issue field.
+    targets.push({ exact: true, queryKey: ["decisions", key] });
+    return targets;
+  }
 
   if (
     event.type === "issue.created" ||
@@ -722,10 +757,20 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       { queryKey: ["artifacts", key] },
       { queryKey: ["comments", key] },
       // A reference to one of the issue's documents shows its name, kind and latest version.
-      { exact: true, queryKey: ["issue-summary", key] }
+      { exact: true, queryKey: ["issue-summary", key] },
+      // A version of the spec moves which requirements it marks and what serves them, and a
+      // version of the Verification document moves which checks there are: the two reads hang
+      // under the issue's key but are named here, since every issue target is `exact`.
+      { exact: true, queryKey: ["issue", key, "coverage"] },
+      { exact: true, queryKey: ["issue", key, "results"] }
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });
+      // The Decisions view reads two of the issue's documents - its decisions.md for the
+      // decisions and its spec for each link's target - and the event names its document by
+      // name alone, which does not say which the spec is, so every version of the issue
+      // refreshes it. The query exists only while that tab is open.
+      targets.push({ exact: true, queryKey: ["decisions", key] });
     } else {
       // An uploaded document is an `attached_to` edge into its issue.
       targets.push(referencePanel(issueReference));
@@ -747,6 +792,19 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     }
     return targets;
   }
+  // A result is recorded against a check of this issue's Verification document, by the issue the
+  // payload names, which is this one only when the result was recorded here. Both issues' results
+  // reads move: the check's issue lists the new result under its check, and the recording issue
+  // lists the results it recorded. Nothing else reads a result — no document, ask, inbox or
+  // issue detail carries one — and this switch has a default, so the branch is deliberate and
+  // its test pins it.
+  if (event.type === "result.recorded") {
+    targets.push({ exact: true, queryKey: ["issue", key, "results"] });
+    if (event.payload.issue !== key) {
+      targets.push({ exact: true, queryKey: ["issue", event.payload.issue, "results"] });
+    }
+    return targets;
+  }
   if (isAskEvent(event)) {
     targets.push({ queryKey: inboxKey });
     appendAskReads(targets, event);
@@ -754,6 +812,9 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       return targets;
     }
     targets.push({ queryKey: ["asks", key] });
+    // The view lists the spec's open questions beside the decisions, and a decision's turn is
+    // its ask's.
+    targets.push({ exact: true, queryKey: ["decisions", key] });
     if (movesOpenAsks(event)) {
       targets.push({ queryKey: projectsKey }, pinnedRow(key));
     }
@@ -804,6 +865,13 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // Every message read of the issue (a reference to a message, which shows the thread under
     // its root): a reply changes its root's read, and a payload need not name the root.
     targets.push({ queryKey: ["issue-messages", key] }, { queryKey: ["issue-message", key] });
+    appendRepliedBlock(targets, event);
+    return targets;
+  }
+  if (event.type === "handoff.recorded") {
+    // A handoff write lands in the issue's handoff list; its log line is the `["events", key]`
+    // target above.
+    targets.push({ queryKey: ["handoffs", key] });
     return targets;
   }
   if (event.type === "subscription.removed") {
@@ -988,7 +1056,7 @@ function askThreadsOn(issue: string): RefreshTarget {
 }
 
 /**
- * The reads one stream event can change, each a query key (a prefix unless `exact`) and, where
+ * The reads one event of the feed can change, each a query key (a prefix unless `exact`) and, where
  * only some of a family's reads can have moved, a test of the read's data. `signedInLogin` is the
  * viewer's: the per-viewer events and the Replies rule read it.
  */

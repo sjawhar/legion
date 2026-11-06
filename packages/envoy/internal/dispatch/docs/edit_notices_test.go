@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // editNoticeRow is a document's pending edit notice as document_edit_notices holds it, with the
@@ -626,9 +627,7 @@ func TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce(t *testing.T) {
 // versions, so each person's version is in exactly one sent notice's range.
 func TestEditNoticeSweepDuringSettlement(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	service.editNoticeQuiet = 500 * time.Millisecond
@@ -728,9 +727,7 @@ func TestEditNoticeSweepDuringSettlement(t *testing.T) {
 // the sweep does not fail, and the next due notice of the same sweep still goes.
 func TestEditNoticeSweepSkipsDeletedArtifact(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, _ := newTestService(t)
 	gone := createIssueDocument(t, service.store, 5, "Gone.")
 	kept := createIssueDocument(t, service.store, 6, "Kept.")
@@ -982,9 +979,7 @@ func TestOutsideReviewJoinedHumanEditLastHuman(t *testing.T) {
 // then name nobody, rather than pick a person out of the credited names: no window names anyone.
 func TestEditNoticeTwoConnectedOneEditsNamesNobody(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1026,7 +1021,9 @@ func TestEditNoticeASessionPeerEditingBesideAConnectedPersonNamesNobody(t *testi
 
 // The re-read's finding 2: a person's joined write edits the document, and another person types
 // in the browser before that write commits its named version. The browser edit is the later one,
-// so the notice names the person who made it, not the write's own actor.
+// so once a version holds it the notice names the person who made it, not the write's own actor.
+// The named version holds the write's own state alone (captureWrite): the browser edit came after
+// the write read the document, so the settlement that follows the write versions it.
 func TestEditNoticeABrowserEditAfterAJoinedWriteNamesTheBrowserEditor(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -1042,17 +1039,20 @@ func TestEditNoticeABrowserEditAfterAJoinedWriteNamesTheBrowserEditor(t *testing
 		}
 		// Zoe types in the browser while adam's transaction is still open, so her edit is the
 		// later one. Her append waits on the document's advisory lock adam's write holds until it
-		// commits, so her credit is still in flight when adam's named version takes its authors:
-		// that version carries both people, ordered by the room sequence each edit took.
+		// commits, and adam's named version, his write's own state, does not hold it.
 		editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("Second.", "Second, typed by zoe."))
 		_, err := service.NamedVersion(ctx, artifactID, "adam checkpoint", adam)
 		return err
 	}); err != nil {
 		t.Fatalf("adam's joined write with zoe's browser edit inside it: %v", err)
 	}
+	if row, open := readEditNotice(t, service, artifactID); !open || row.lastEditor != adam {
+		t.Fatalf("after adam's named version, notice open=%t last editor = %+v, want adam, whose edit alone it holds", open, row.lastEditor)
+	}
+	settleCurrentGeneration(t, service, artifactID)
 	row, open := readEditNotice(t, service, artifactID)
 	if !open {
-		t.Fatal("the version over adam's write and zoe's browser edit opened no edit notice")
+		t.Fatal("the versions over adam's write and zoe's browser edit opened no edit notice")
 	}
 	if row.lastEditor != zoe {
 		t.Fatalf("last editor = %+v, want zoe, who typed after adam's write", row.lastEditor)
@@ -1092,10 +1092,10 @@ func TestEditNoticeARebuildNamesThePersonWhoRebuiltIt(t *testing.T) {
 }
 
 // recordLatestEditSourceTx records actor as the document's latest edit source and, a person, its
-// latest person sender, as a person's own append does (markUpdateOwedBy). It writes its own
+// latest person sender, as a person's own append does (updateOwedArgs). It writes its own
 // statement because no production writer leaves a document in that state without an edit:
 // persistLastActor, the one writer a test could call here, deliberately leaves the person alone.
-// What markUpdateOwedBy itself writes is held by
+// What an append's own write of that row does is held by
 // TestEditNoticeATwoPeerEditThatLandedClearsTheStoredPerson, through a real append.
 func recordLatestEditSourceTx(t *testing.T, service *Service, artifactID string, actor model.Actor) error {
 	t.Helper()
@@ -1189,8 +1189,8 @@ func TestEditNoticeAClosedAndReopenedIssueNamesTheLaterBrowserEditor(t *testing.
 		t.Fatalf("adam's joined write with zoe's browser edit inside it: %v", err)
 	}
 	waitForLandedAppends(t, service, artifactID)
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
-	service.SetIssueClosed(context.Background(), "DOC-1", false)
+	setIssueClosedHere(t, service, "DOC-1", true)
+	setIssueClosedHere(t, service, "DOC-1", false)
 	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
 		t.Fatalf("load the reopened document: %v", err)
 	}

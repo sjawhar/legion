@@ -3,19 +3,16 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
+import type { WriteBounds } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
-import { whoAmIQuery } from "../../api/queries";
-import type { Ask, UserState } from "../../api/types";
+import { issueQuery, whoAmIQuery } from "../../api/queries";
+import type { Ask } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import { useHeldSend, useHeldSends, useHeldSendsUnder } from "../conversation/held-sends";
+import type { CarriedBlockIds } from "../conversation/send-request";
 import { useProjectArtifact } from "../document/useProjectArtifact";
-import { eventItemId, stateForIssue } from "../issue/pins";
-import {
-  applyPinStateOperation,
-  issueStateTransport,
-  sharedIssueStateWrites,
-} from "../issue/state-write-queue";
+import { writePin } from "../issue/pin-write";
+import { eventItemId } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
@@ -31,9 +28,9 @@ import {
   type MarginItem,
   type MarginItemAction,
   type MarginTab,
+  marginItemBlockId,
   marginItemId,
   marginItemMarkId,
-  marginItemRecord,
   threadMarkId,
   useMarginItems,
   useMarginOwner,
@@ -150,16 +147,7 @@ export function useMarginSheet(): MarginSheetModel {
     if (sheetThreadKey !== undefined) store.discard(marginReplySendKey(sheetThreadKey));
   }, [sheetReplySendingNow, sheetThreadKey, store]);
   const marginRef = useRef<HTMLElement>(null);
-  const issue = useQuery({
-    enabled: issueKey !== undefined,
-    queryKey: ["issue", issueKey],
-    queryFn: () => {
-      if (issueKey === undefined) {
-        throw new Error("Issue margin query requires an issue owner.");
-      }
-      return api.getIssue(issueKey);
-    },
-  });
+  const issue = useQuery({ ...issueQuery(issueKey), enabled: issueKey !== undefined });
   const viewer = useQuery(whoAmIQuery());
   const visibleArtifact =
     documentRoute === undefined
@@ -170,34 +158,7 @@ export function useMarginSheet(): MarginSheetModel {
   const visibleArtifactId = visibleArtifact?.id;
   const removePin = useCallback(
     (id: string) => {
-      if (owner?.kind !== "issue") {
-        return;
-      }
-      const operation = { id, op: "unpin" as const };
-      queryClient.setQueryData<UserState>(["user-state"], (current) => {
-        const issueState = stateForIssue(current, owner.key);
-        return {
-          ...current,
-          [owner.key]: {
-            ...issueState,
-            dismissed: applyPinStateOperation(issueState.dismissed, operation),
-          },
-        };
-      });
-      void sharedIssueStateWrites
-        .enqueue(owner.key, operation, {
-          ...issueStateTransport,
-          onDrained: (key, next) => {
-            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-              ...current,
-              [key]: next,
-            }));
-          },
-          onError: () => {
-            void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-          },
-        })
-        .catch(() => {});
+      if (owner?.kind === "issue") writePin(queryClient, owner.key, { id, op: "unpin" });
     },
     [owner, queryClient]
   );
@@ -205,12 +166,23 @@ export function useMarginSheet(): MarginSheetModel {
     (eventId: number) => removePin(eventItemId({ id: eventId })),
     [removePin]
   );
+  // Only the report of the document whose cards this margin shows. A document the route has
+  // left can stay registered behind the next route's loading view - Suspense keeps the old page
+  // mounted, hidden, until the new page's code has arrived and its throttled reveal commits -
+  // and its report would read a press there as the reader working a placed document; an issue's
+  // Spec stays registered under the Conversation and withdraws its layout, which is what tells
+  // the decisions read that nothing shows them.
+  const placementsPublished =
+    placementsReported &&
+    visibleArtifact !== undefined &&
+    documentBridge?.artifactId === visibleArtifact.id;
   const {
     actionFailure,
     answeredAsksPending,
     asksPending,
     commentsError,
     commentsPending,
+    decisions,
     editComment,
     items,
     marginItems,
@@ -227,13 +199,14 @@ export function useMarginSheet(): MarginSheetModel {
     retryItem,
     threads,
   } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId, {
+    documentShown: placementsPublished,
     held: heldReplyKeys,
   });
   const onEdit = useCallback(
-    async (id: string, body: string) => {
+    async (id: string, body: string, carried: CarriedBlockIds | undefined, bounds: WriteBounds) => {
       setSavingCommentEditId(id);
       try {
-        return await editComment(id, body);
+        return await editComment(id, body, carried, bounds);
       } finally {
         setSavingCommentEditId(undefined);
       }
@@ -494,11 +467,10 @@ export function useMarginSheet(): MarginSheetModel {
     const markIds = selectedItems
       .map((item) => marginItemMarkId(item))
       .filter((markId): markId is string => markId !== undefined);
-    const blockIds = selectedItems
-      .map((item) => marginItemRecord(item).anchor)
-      .flatMap((anchor) =>
-        anchor?.orphaned && typeof anchor.block_id === "string" ? [anchor.block_id] : []
-      );
+    const blockIds = selectedItems.flatMap((item) => {
+      const blockId = marginItemBlockId(item);
+      return blockId === undefined ? [] : [blockId];
+    });
     documentBridge?.setActiveMarks([...new Set(markIds)]);
     documentBridge?.setActiveBlocks(blockIds);
   }, [documentBridge, hoveredItemId, marginItems, selectedItemId]);
@@ -511,16 +483,16 @@ export function useMarginSheet(): MarginSheetModel {
   );
   useEffect(() => {
     const item = marginItems.find((candidate) => marginItemId(candidate) === selectedItemId);
-    const anchor = item === undefined ? undefined : marginItemRecord(item).anchor;
-    if (!anchor?.orphaned || typeof anchor.block_id !== "string") {
+    const blockId = item === undefined ? undefined : marginItemBlockId(item);
+    if (blockId === undefined) {
       selectedBlockFocus.current = undefined;
       return;
     }
-    if (selectedBlockFocus.current === anchor.block_id) {
+    if (selectedBlockFocus.current === blockId) {
       return;
     }
-    selectedBlockFocus.current = anchor.block_id;
-    focusBlock(anchor.block_id);
+    selectedBlockFocus.current = blockId;
+    focusBlock(blockId);
   }, [focusBlock, marginItems, selectedItemId]);
   const onSelectCard = useCallback(
     (id: string) => {
@@ -586,10 +558,7 @@ export function useMarginSheet(): MarginSheetModel {
     // left can stay registered behind the next route's loading view - Suspense keeps the old
     // page mounted, hidden, until the new page's code has arrived and its throttled reveal
     // commits - and its report would read a press there as the reader working a placed document.
-    placementsPublished:
-      placementsReported &&
-      visibleArtifact !== undefined &&
-      documentBridge?.artifactId === visibleArtifact.id,
+    placementsPublished,
     routeItemId,
     routeItemKey,
     setHoveredItemId,
@@ -622,6 +591,7 @@ export function useMarginSheet(): MarginSheetModel {
       asksPending,
       commentsError,
       commentsPending,
+      decisions,
       historicalAsks,
       marginRef,
       isClosed,

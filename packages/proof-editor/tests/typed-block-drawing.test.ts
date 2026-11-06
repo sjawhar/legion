@@ -1,8 +1,12 @@
 /**
- * The default mode (the headless engine without `readOnly`, and the live editor) draws a typed
- * block whose content breaks its ProseMirror content rule as its literal lines, where Milkdown
- * used to drop it silently with all its text (`createNodeInParserFail`), and keeps the parser's
- * directive refusals (INFRA-565).
+ * The headless engine's default mode (without `readOnly`) draws a typed block whose content
+ * breaks its ProseMirror content rule as its literal lines, where Milkdown used to drop it
+ * silently with all its text (`createNodeInParserFail`), and keeps the parser's directive
+ * refusals (INFRA-565). The live editor draws such a block the same way, and decides typed
+ * blocks as the read-only mode does (`liveTypedBlocksRemarkPlugin`): a container directive the
+ * block schema refuses is drawn as its lines too, and a paragraph line that opens like a
+ * directive stays the text it is, where a refusal thrown from a paste let the browser insert the
+ * plain text itself, its lines joined (sjawhar/legion#2433).
  */
 
 import { expect, spyOn, test } from "bun:test";
@@ -210,8 +214,8 @@ test("the live editor draws a pasted ask whose heading sits in a block-level mar
   });
 });
 
-test("the live editor checks an ask's content after the mark plugins have run", async () => {
-  // Checked before the mark plugins, the span would still be raw HTML around the question, and
+test("the live editor decides typed blocks after the mark plugins have run", async () => {
+  // Decided before the mark plugins, the span would still be raw HTML around the question, and
   // a valid ask would be drawn as text.
   await withMarksEditor(
     "",
@@ -223,6 +227,74 @@ test("the live editor checks an ask's content after the mark plugins have run", 
     },
     { blockSchema }
   );
+});
+
+/** An unknown typed block's source, as a reader copies it from another document. */
+const NOTE_DIRECTIVE = ":::note\nhello world\n:::\n";
+
+test("the live editor draws a pasted unknown typed block as its lines", async () => {
+  await withoutParserErrors(async () => {
+    await withMarksEditor(
+      "",
+      ({ view }) => {
+        expect(() => pastePlainText(view, NOTE_DIRECTIVE)).not.toThrow();
+        expect(blocks(view.state.doc)).toEqual([
+          ["paragraph", ":::note"],
+          ["paragraph", "hello world"],
+          ["paragraph", ":::"],
+        ]);
+      },
+      { blockSchema }
+    );
+  });
+});
+
+test("the live editor draws a pasted ask with a refused attribute as its lines", async () => {
+  await withoutParserErrors(async () => {
+    await withMarksEditor(
+      "",
+      ({ view }) => {
+        expect(() => pastePlainText(view, ':::ask{#a1 bogus="x"}\nQ?\n:::')).not.toThrow();
+        expect(nodeTypes(view.state.doc)).not.toContain("ask");
+        expect(blocks(view.state.doc)).toEqual([
+          ["paragraph", ':::ask{#a1 bogus="x"}'],
+          ["paragraph", "Q?"],
+          ["paragraph", ":::"],
+        ]);
+      },
+      { blockSchema }
+    );
+  });
+});
+
+test("the live editor keeps a pasted line that opens like a leaf directive as text", async () => {
+  await withoutParserErrors(async () => {
+    await withMarksEditor(
+      "",
+      ({ view }) => {
+        expect(() => pastePlainText(view, "text\n::note\nmore")).not.toThrow();
+        expect(blocks(view.state.doc)).toEqual([["paragraph", "text\n::note\nmore"]]);
+      },
+      { blockSchema }
+    );
+  });
+});
+
+test("the live editor's markdown import draws an unknown typed block as its lines", async () => {
+  await withoutParserErrors(async () => {
+    await withMarksEditor(
+      "",
+      ({ handle, view }) => {
+        expect(() => handle.setMarkdown(NOTE_DIRECTIVE)).not.toThrow();
+        expect(blocks(view.state.doc)).toEqual([
+          ["paragraph", ":::note"],
+          ["paragraph", "hello world"],
+          ["paragraph", ":::"],
+        ]);
+      },
+      { blockSchema }
+    );
+  });
 });
 
 test("the live editor's markdown import keeps every line of an ask after its list", async () => {
@@ -259,4 +331,23 @@ test("the headless default mode and the live editor read a drawn ask alike", asy
       { blockSchema }
     );
   });
+});
+
+/** An answered decision as a past version's text carries it: the server writes every attribute. */
+const ANSWERED_ASK =
+  ':::ask{#a1 urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-01T00:00:00Z" selected="[&#x22;Option A&#x22;]"}\nWhich one?\n\n- Option A\n- Option B\n:::\n';
+
+test("the live editor's version view keeps an answered decision's server attributes", async () => {
+  await withMarksEditor(
+    "",
+    ({ handle, view }) => {
+      handle.setMarkdown(ANSWERED_ASK);
+      const ask = view.state.doc.child(0);
+      expect(ask.type.name).toBe("ask");
+      expect(ask.attrs.state).toBe("answered");
+      expect(ask.attrs.answered_by).toBe("alice");
+      expect(ask.attrs.selected).toEqual(["Option A"]);
+    },
+    { blockSchema }
+  );
 });

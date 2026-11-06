@@ -37,5 +37,11 @@ a 400-node flowchart; the review's important finding. The fix d9ff6c61 moved it 
 time shows the reason, and the page keeps responding` passes in four engines; the same row against
 the previous head measured a 100 ms page timer at 11,014.8 ms.
 
+**Note 2026-10-28 (sjawhar/legion#2470):** the row never passed CI. A GitHub-hosted runner draws its
+800-node flowchart inside 5 s (runs 40692470398, 40696018569), so the row passed only on a slow
+pod. To time a page while a worker is busy, hold the worker rather than trust a real job of
+uncertain length: the row now serves the worker chunk with a listener in front that holds the
+source and never answers.
+
 The deadline timer still runs on the page's thread, so a machine that sleeps mid-job can refuse a
 diagram that would have drawn; the refusal is cached until reload.

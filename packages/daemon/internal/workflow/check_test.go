@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -45,10 +46,17 @@ type checkRig struct {
 
 func newCheckRig(t *testing.T, builtFrom string) checkRig {
 	t.Helper()
+	return renamedCheckRig(t, builtFrom, ghrepo.Renames{})
+}
+
+// renamedCheckRig is newCheckRig under the deployment's repository equivalence renames
+// (Config.RepositoryRenames): the one line of Config a configured rename changes.
+func renamedCheckRig(t *testing.T, builtFrom string, renames ghrepo.Renames) checkRig {
+	t.Helper()
 	pool := migratedPool(t)
 	clock := &checkClock{now: checkOpened}
 	logged := &bytes.Buffer{}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, RepositoryRenames: renames, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	return checkRig{pool: pool, engine: engine, clock: clock, logged: logged, apply: applyFacts(t, pool, engine)}
 }
@@ -301,6 +309,45 @@ func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	}
 	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 1 {
 		t.Fatalf("check_compare rows from a daemon built from no repository = %+v, want the one", got)
+	}
+}
+
+// A build is compared against an open check whose repository a configured rename pairs with the
+// one the daemon is built from (Config.BuiltFrom), from either side: the check of a tree recorded
+// before the transfer names the repository as it was while the daemon is built from the one it
+// moved to, and a tree recorded after it the other way round, and one build carries both their
+// merges. With no pair configured neither is the build's, as today, and a repository of neither
+// name is never the build's, pair or no pair.
+func TestABuildIsComparedAgainstAChecksRenamedRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name, builtFrom, repo string
+	}{
+		{name: "built from the repository as it was, the check recorded on the one it moved to", builtFrom: "sjawhar/legion", repo: "cybermonklabs/legion"},
+		{name: "built from the repository it moved to, the check recorded on the one it was", builtFrom: "cybermonklabs/legion", repo: "sjawhar/legion"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("the pair configured", func(t *testing.T) {
+				rig := renamedCheckRig(t, tc.builtFrom, renamedLegion)
+				openRootCheck(t, rig, "LEGION-300", tc.repo, "main", 7)
+				openRootCheck(t, rig, "LEGION-301", "acme/widgets", "main", 8)
+				rig.apply("started", intake.ServerStarted{Commit: "b00f0000"})
+				compares := checkCompares(t, rig.pool, "LEGION-300")
+				if len(compares) != 1 || compares[0] != (record.CheckCompare{Look: 1, Cause: "dispatch start", Build: "b00f0000", OpenedAt: checkOpened}) {
+					t.Fatalf("check_compare rows of the check on %s = %+v, want one for look 1 of build b00f0000", tc.repo, compares)
+				}
+				if got := checkCompares(t, rig.pool, "LEGION-301"); len(got) != 0 {
+					t.Fatalf("check_compare rows of the acme/widgets check = %+v, want none: the pair widens nothing else", got)
+				}
+			})
+			t.Run("no pair configured", func(t *testing.T) {
+				rig := renamedCheckRig(t, tc.builtFrom, ghrepo.Renames{})
+				openRootCheck(t, rig, "LEGION-300", tc.repo, "main", 7)
+				rig.apply("started", intake.ServerStarted{Commit: "b00f0000"})
+				if got := checkCompares(t, rig.pool, "LEGION-300"); len(got) != 0 {
+					t.Fatalf("check_compare rows of the check on %s = %+v, want none: it is another repository's", tc.repo, got)
+				}
+			})
+		})
 	}
 }
 
@@ -665,9 +712,8 @@ func TestTheTreesCloseWaitsForAnOpenCheckAndRunsOnceItCloses(t *testing.T) {
 	}
 }
 
-// A done child set back to todo closes its open check as not run before its new run starts: the
-// record alone, since the rerun reuses the implementer's claim and the pod, and the look open at
-// the re-entry is interrupted under the new generation's stamp, as a phase worker's run is.
+// A done child set back to todo closes its open check as not run before its new run starts. The
+// implementer's live claim stays live: the closed check rejects its old look's report.
 func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 	rig := childCheckRig(t, "")
 	seedSlot(t, rig.pool, record.Slot{Issue: "LEGION-208", Index: 0})
@@ -685,8 +731,8 @@ func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 		t.Fatalf("issue_close rows = %v, want none for the implementer the rerun reuses", got)
 	}
 	suspends := superviseRowsOf(t, rig.pool, "LEGION-209", "suspend")
-	if len(suspends) != 1 || suspends[0].Role != claim.RoleImplementer || suspends[0].Generation != 8 {
-		t.Fatalf("suspend rows = %+v, want the open look's implementer interrupted under generation 8", suspends)
+	if len(suspends) != 0 {
+		t.Fatalf("suspend rows = %+v, want none while the child is back in the workflow", suspends)
 	}
 	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 0 {
 		t.Fatalf("issue suspensions = %+v, want none: the pod is the new run's", got)
@@ -779,6 +825,29 @@ func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t
 	}
 	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-303/implementer"] != 1 || got["LEGION-302/implementer"] != 0 {
 		t.Fatalf("issue_close rows = %v, want the child's every claim closed and the parent's none", got)
+	}
+}
+
+// The check task is held to the retired phrases the composed prompts are held to
+// (internal/prompts' TestNoComposedPromptTeachesAnE2ELineOrAProofArray): what a look proves is a
+// result recorded against the issue's after_merge check, so each of the three verdicts asks for
+// `dispatch result` at the merge commit and none asks for the retired Production: line. The task
+// is prose for a pane, so it carries the phrases without their backticks.
+func TestTheCheckTaskAsksForARecordedResultAndNoRetiredLine(t *testing.T) {
+	issue := record.Issue{Key: "LEGION-208", Title: "A production check"}
+	check := record.ProductionCheck{Issue: issue.Key, Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43", OpenedAt: checkOpened, Looks: 1}
+	for _, last := range []bool{false, true} {
+		task := checkTask(issue, check, wakeMerge, "", last)
+		for _, retired := range []string{"Production: line", "pending deploy of", "proof array"} {
+			if strings.Contains(task, retired) {
+				t.Errorf("the check task (last %t) still says %q", last, retired)
+			}
+		}
+		for _, want := range []string{"merge commit merge-43", "dispatch result"} {
+			if !strings.Contains(task, want) {
+				t.Errorf("the check task (last %t) omits %q", last, want)
+			}
+		}
 	}
 }
 

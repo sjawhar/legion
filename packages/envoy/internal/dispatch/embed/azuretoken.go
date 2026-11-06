@@ -13,13 +13,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redirects"
 )
 
 const (
 	// entraDefaultAuthority is Microsoft Entra's public-cloud sign-in host.
 	entraDefaultAuthority = "https://login.microsoftonline.com"
-	// entraScope asks for a token Azure AI services accept.
-	entraScope = "https://cognitiveservices.azure.com/.default"
+	// DefaultEntraScope is the scope Azure AI services accept, and the scope the embedder asks
+	// for; cmd/dispatch names it as the answerer's default too, so a deployment that configures
+	// no scope of its own keeps asking for this one.
+	DefaultEntraScope = "https://cognitiveservices.azure.com/.default"
 	// entraAssertionType says client_assertion is a JWT: the federated token from the token file.
 	entraAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 	// entraRefreshMargin is how long before its expiry a cached token is replaced, so a token
@@ -42,9 +46,15 @@ type EntraConfig struct {
 	// TokenFile holds the federated token Entra trusts for ClientID (a Kubernetes projected
 	// service-account token). It is re-read on every exchange, because the kubelet rotates it.
 	TokenFile string
+	// Scope is the token scope the exchange asks for, DefaultEntraScope for an endpoint Azure AI
+	// services serve. One Azure AI Foundry resource answers on endpoints that take different
+	// scopes, so the caller names the one its endpoint takes rather than this package choosing.
+	Scope string
 	// Authority replaces entraDefaultAuthority; a test points it at a local server.
 	Authority string
-	// HTTPClient replaces http.DefaultClient; a test injects one.
+	// HTTPClient replaces http.DefaultClient; a test injects one. It is never mutated: the
+	// client the exchange is made on is a copy of it that refuses redirects
+	// (redirects.Refused), so the federated assertion reaches the configured authority alone.
 	HTTPClient *http.Client
 }
 
@@ -55,6 +65,7 @@ type EntraTokenSource struct {
 	tokenURL  string
 	clientID  string
 	tokenFile string
+	scope     string
 	http      *http.Client
 	now       func() time.Time
 
@@ -68,8 +79,8 @@ type EntraTokenSource struct {
 // NewEntraTokenSource checks cfg's shape and returns an EntraTokenSource; it makes no call and
 // does not read the token file yet, so a missing file fails the first Embed, not boot.
 func NewEntraTokenSource(cfg EntraConfig) (*EntraTokenSource, error) {
-	if cfg.TenantID == "" || cfg.ClientID == "" || cfg.TokenFile == "" {
-		return nil, errors.New("embed: entra sign-in needs a tenant id, a client id and a token file")
+	if cfg.TenantID == "" || cfg.ClientID == "" || cfg.TokenFile == "" || cfg.Scope == "" {
+		return nil, errors.New("embed: entra sign-in needs a tenant id, a client id, a token file and a scope")
 	}
 	authority := cmp.Or(cfg.Authority, entraDefaultAuthority)
 	base, err := url.Parse(authority)
@@ -79,11 +90,12 @@ func NewEntraTokenSource(cfg EntraConfig) (*EntraTokenSource, error) {
 	if !base.IsAbs() || base.Host == "" {
 		return nil, errors.New("embed: entra authority must be an absolute URL with a host")
 	}
-	client := cmp.Or(cfg.HTTPClient, http.DefaultClient)
+	client := redirects.Refused(cmp.Or(cfg.HTTPClient, http.DefaultClient))
 	return &EntraTokenSource{
 		tokenURL:  strings.TrimRight(authority, "/") + "/" + url.PathEscape(cfg.TenantID) + "/oauth2/v2.0/token",
 		clientID:  cfg.ClientID,
 		tokenFile: cfg.TokenFile,
+		scope:     cfg.Scope,
 		http:      client,
 		now:       time.Now,
 		slot:      make(chan struct{}, 1),
@@ -133,7 +145,7 @@ func (s *EntraTokenSource) exchange(ctx context.Context) (string, time.Duration,
 		"client_id":             {s.clientID},
 		"client_assertion_type": {entraAssertionType},
 		"client_assertion":      {assertion},
-		"scope":                 {entraScope},
+		"scope":                 {s.scope},
 	}
 	ctx, cancel := context.WithTimeout(ctx, entraExchangeTimeout)
 	defer cancel()

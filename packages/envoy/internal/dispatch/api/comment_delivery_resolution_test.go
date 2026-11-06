@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // roleMentionRegistry is the listener state a role-mention retry test moves between requests:
@@ -116,8 +119,10 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 		*attempt.SessionID != "s1" || attempt.State != "failed" || attempt.Error == nil || *attempt.Error != "no live session s1" {
 		t.Fatalf("absent original holder retry = %#v, want the pin kept on a failed no-live-session attempt", attempt)
 	}
-	if registry.lookups != 1 || registry.sessionReads != 1 || len(registry.sent) != 0 {
-		t.Fatalf("absent original holder retry = lookups:%d session reads:%d sends:%#v, want the pin rechecked once, no role re-resolution and no send attempt",
+	// "no live session" is what a listener take-over answers too, so the retry rechecks the pin
+	// on every try of the take-over window before it settles; each read is of s1 itself.
+	if registry.lookups != 1 || registry.sessionReads < 1 || len(registry.sent) != 0 {
+		t.Fatalf("absent original holder retry = lookups:%d session reads:%d sends:%#v, want the pin rechecked on each try, no role re-resolution and no send attempt",
 			registry.lookups, registry.sessionReads, registry.sent)
 	}
 }
@@ -256,8 +261,10 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 	if attempt.Attempt != 1 || attempt.State != "failed" || attempt.SessionID == nil || *attempt.SessionID != "s1" {
 		t.Fatalf("attempt settled during the outage = %#v, want the pin on s1 kept", attempt)
 	}
-	if registry.lookups != 0 || registry.sessionReads != 1 || len(registry.sent) != 0 {
-		t.Fatalf("retry during the outage = lookups:%d session reads:%d sends:%#v, want the pin rechecked directly once and no send attempted",
+	// "no live session" is what a listener take-over answers too, so the retry rechecks the pin
+	// on every try of the take-over window before it settles; each read is of s1 itself.
+	if registry.lookups != 0 || registry.sessionReads < 1 || len(registry.sent) != 0 {
+		t.Fatalf("retry during the outage = lookups:%d session reads:%d sends:%#v, want the pin rechecked directly on each try and no send attempted",
 			registry.lookups, registry.sessionReads, registry.sent)
 	}
 
@@ -560,5 +567,53 @@ func TestMentionDuringAnUnanswerableRegistryReadIsNotRecordedAsNoLiveSession(t *
 		t.Fatalf("delivery error = %q, want the listener's own reason, not an ended session", failure)
 	} else if !strings.Contains(failure, busSilent) {
 		t.Fatalf("delivery error = %q, want it to carry the listener's reason %q", failure, busSilent)
+	}
+}
+
+// dispatch://INFRA-392. A role whose holder missed its heartbeats still has that holder: the
+// listener keeps the claim and answers the lookup with holder_state unresponsive, so the
+// delivery resolves to that session and its frame is stored for it until it answers again.
+// Asked without the selector, the same listener answers 404 holder_lapsed - the answer that
+// used to drop the message - so this also pins the selector every lookup must send.
+//
+// A record the registry itself calls gone is the other half: a 200 is not a live session, and
+// the state, never the status code, says which.
+func TestDeliveryResolvesAnUnresponsiveHolderAndRefusesAGoneOne(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("include") != "unresponsive" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"role reviewer holder s1 lapsed","reason":"holder_lapsed","holder":"s1"}`))
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/roles/reviewer":
+			_, _ = w.Write([]byte(`{"role":"reviewer","holder":"s1","title":"reviewer","holder_state":"unresponsive",` +
+				`"last_seen":1700000000000,"capabilities":["steer"]}`))
+		case "/v1/registry/s2":
+			_, _ = w.Write([]byte(`{"session_id":"s2","title":"retired","state":"gone","last_seen":1600000000000,` +
+				`"capabilities":["steer"]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"no live session"}`))
+		}
+	}))
+	defer listener.Close()
+	served := &server{deps: Deps{Envoy: envoy.New(listener.URL)}, lifetime: context.Background()}
+
+	id, title, refusal := served.resolveDeliveryTarget(
+		context.Background(), model.Route{Kind: "role", ID: "reviewer"}, "steer",
+	)
+	if refusal != "" {
+		t.Fatalf("a role whose holder is unresponsive: refused %q, want it delivered and stored for that holder", refusal)
+	}
+	if id != "s1" || title != "reviewer" {
+		t.Fatalf("resolved %q (%q), want the unresponsive holder s1", id, title)
+	}
+
+	gone, _, refused := served.resolveDeliveryTarget(
+		context.Background(), model.Route{Kind: "session", ID: "s2"}, "steer",
+	)
+	if gone != "s2" || refused != "no live session s2" {
+		t.Fatalf("a session the registry calls gone resolved %q with %q, want it refused as no live session", gone, refused)
 	}
 }

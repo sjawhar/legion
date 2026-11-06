@@ -117,7 +117,7 @@ func parseMyRepliesOwner(r *http.Request) (issue string, artifact *string, err e
 // listMyReplies answers GET /api/v1/me/replies: one page of the caller's unread threads and how
 // many there are in all.
 func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.requireHuman(w, r)
+	caller, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -193,12 +193,11 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 //
 // The transaction locks the thread's owner row `for share` before it touches the caller's row:
 // every writer that moves a user_threads row (a comment, an answer, an issue message) holds that
-// owner `for no key update` before its trigger fires, and the answer route can hold the events'
-// commit-order lock by then too (docs/marks.go's anchor refresh appends an event before the answer's
-// update), so a mark that took the row first could wait on a writer waiting on it. Owner first, then
-// the project the event names, is the order every multi-owner transaction takes (LockOwners).
+// owner `for no key update` before its trigger fires, so a mark that took the row first could wait
+// on a writer waiting on it. Owner first, then the project the event names, is the order every
+// multi-owner transaction takes (LockOwners).
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

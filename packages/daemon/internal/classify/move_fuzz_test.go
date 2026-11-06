@@ -9,24 +9,21 @@ import (
 
 // moveStep is one push of a random history with moves made again, and whether its head arrives:
 // a head the daemon never sees synchronize is skipped, and the next arrival's synchronize names
-// the move from it. These histories name no sender; they are the ones the release before's digests
-// were made from (TestAnArrivalThatNamesNoMoveIsJudgedAsTheReleaseBefore), so they stay as they are.
+// the move from it. These histories name no sender; the release before's digests were made from
+// them (TestAnArrivalThatNamesNoMoveIsJudgedAsTheReleaseBefore).
 type moveStep struct {
 	push   record.ClassifiedPush
 	arrive bool
 }
 
-// movesMadeAgain is one random history: fresh commits, forced returns that undo the move before
-// them, and moves made again, each push a random pusher's, each pair of heads changing the same
-// paths whenever it is pushed.
+// movesMadeAgain is one random history: fresh commits, returns that undo the move before them,
+// and moves made again, each push the implementer's or the review App's.
 func movesMadeAgain(rng *rand.Rand) []moveStep {
 	var steps []moveStep
 	cur, visited := "h0", []string{"h0"}
-	flags := map[[2]string][2]bool{}
 	n := 3 + rng.IntN(6)
 	for k := 1; k <= n; k++ {
 		var to string
-		forced := false
 		var again []string
 		for _, s := range steps {
 			if s.push.Before == cur {
@@ -37,20 +34,14 @@ func movesMadeAgain(rng *rand.Rand) []moveStep {
 		case r == 0 && len(again) > 0:
 			to = again[rng.IntN(len(again))]
 		case r == 1 && len(steps) > 0:
-			to, forced = steps[len(steps)-1].push.Before, true
+			to = steps[len(steps)-1].push.Before
 		default:
-			to, forced = fmt.Sprintf("c%d", k), rng.IntN(4) == 0
+			to = fmt.Sprintf("c%d", k)
 		}
 		if to == cur {
-			to, forced = fmt.Sprintf("c%d", k), false
+			to = fmt.Sprintf("c%d", k)
 		}
-		key := [2]string{cur, to}
-		f, ok := flags[key]
-		if !ok {
-			f = [2]bool{forced, rng.IntN(3) == 0}
-			flags[key] = f
-		}
-		steps = append(steps, moveStep{push: record.ClassifiedPush{Before: cur, SHA: to, Forced: f[0], HandoffOnly: f[1], ByReviewApp: rng.IntN(2) == 0},
+		steps = append(steps, moveStep{push: record.ClassifiedPush{Before: cur, SHA: to, ByReviewApp: rng.IntN(2) == 0},
 			arrive: k == n || rng.IntN(4) != 0})
 		cur = to
 		if !containsHead(visited, to) {

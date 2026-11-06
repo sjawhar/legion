@@ -10,7 +10,7 @@
 # path, which the symlink puts at the fixture root.
 #
 # Run from anywhere: .github/scripts/check-plugin-names.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -151,7 +151,6 @@ representatives=(
   packages/daemon/internal/daemon/imageprobe_test.go
   packages/daemon/cmd/legion/controller_test.go
   .github/workflows/release.yaml
-  .legion/plan.json
 )
 for index in "${!representatives[@]}"; do
   file=${representatives[index]}

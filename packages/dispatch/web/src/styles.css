@@ -246,6 +246,48 @@ a {
   }
 }
 
+/* What an approval request changed since the last approved version, drawn over the rendered
+   document by editor decorations (`features/doc/change-marks.ts` names these four classes; a
+   host that writes classes into mark or block DOM makes ProseMirror read that DOM back as a
+   document edit, so they reach the page as decorations). A changed block is marked by a bar
+   beside it, which hides no word of its text; the words it gained are drawn as the change view's
+   `ins`, and as its `del`, struck through where it stood, both a block removed since the baseline
+   and a run of words a changed block lost, which stands inside that block's surviving text.
+   `theme/classes.ts`'s `diffAdded*` and `diffRemoved*` are those two swatch pairs. */
+.dispatch-doc .dispatch-change-block {
+  box-shadow: inset 2px 0 0 var(--color-emerald-500);
+  padding-left: 0.5rem;
+}
+
+.dispatch-doc .dispatch-change-added {
+  background-color: var(--color-emerald-100);
+  color: var(--color-emerald-950);
+}
+
+.dispatch-doc .dispatch-change-removed,
+.dispatch-doc .dispatch-change-removed-words {
+  background-color: var(--color-rose-100);
+  color: var(--color-rose-950);
+  text-decoration: line-through;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc .dispatch-change-block {
+    box-shadow: inset 2px 0 0 var(--color-emerald-400);
+  }
+
+  .dispatch-doc .dispatch-change-added {
+    background-color: var(--color-emerald-900);
+    color: var(--color-emerald-100);
+  }
+
+  .dispatch-doc .dispatch-change-removed,
+  .dispatch-doc .dispatch-change-removed-words {
+    background-color: var(--color-rose-900);
+    color: var(--color-rose-100);
+  }
+}
+
 /* Proof's mark decorations are document DOM. Class rules avoid Dark Reader rewriting inline
    colours into ProseMirror-observed attribute mutations. */
 .dispatch-doc .mark-comment {
@@ -421,8 +463,9 @@ a {
    nothing can be edited (a read-only render) or once the decision is no longer open. In a body
    the list folds only where the app mounts the card's rows (`useRenderedMarkdown` sets
    `data-dispatch-ask-options`), and it never shows, since nothing there is edited. The child
-   combinators keep a decision's rules to its own content, never a typed block inside a reply or
-   answer note its card renders. */
+   combinators keep an outer decision's rules to its own list, off the list of a typed block nested
+   inside it; a decision inside a reply or answer note its card renders is matched by these rules
+   itself, through that reply's or note's own `.dispatch-markdown` body. */
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask[data-dispatch-ask-options="rows"]
   > [data-proof-block-content]
@@ -445,8 +488,10 @@ a {
    option, so it shows no bullet where nothing is edited: in a body (`.dispatch-markdown`, a reply
    under a document's decision included) and in a read-only document. In an editable document the
    blank item is where the caret is, the option a human is typing (Enter after the question, then
-   `- `), so it shows there and the typed text lands in it. The child combinators keep the rule to
-   the decision's own list, never a typed block inside a reply or answer note its card renders. */
+   `- `), so it shows there and the typed text lands in it. The child combinators keep an outer
+   decision's rule to its own list, off the list of a typed block nested inside it; a decision
+   inside a reply or answer note its card renders is matched by the rule itself, through that
+   reply's or note's own `.dispatch-markdown` body. */
 :is(.dispatch-markdown, .dispatch-doc[data-read-only="true"])
   .proof-typed-block-ask[data-dispatch-ask-malformed="true"]
   > [data-proof-block-content]

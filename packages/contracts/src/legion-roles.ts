@@ -35,13 +35,40 @@ export function isLegionRole(role: string): role is LegionRole {
   return LEGION_ROLES.some((candidate) => candidate === role);
 }
 
+/**
+ * The role that works a phase, the TypeScript mirror of the daemon's own table
+ * (`packages/daemon/internal/workflow/effects.go`, `RoleFor`). A phase no role works —
+ * `admitted`, `awaiting_merge`, `done`, `held`, `unrecorded` — has none, and so has any value
+ * that is not a phase; `accepting` is the tree architect's, and `retro` is the implementer's
+ * second turn on the issue it developed.
+ */
+export function roleForPhase(phase: string): LegionRole | undefined {
+  switch (phase) {
+    case "planning":
+      return "planner";
+    case "implementing":
+    case "retro":
+      return "implementer";
+    case "testing":
+      return "tester";
+    case "reviewing":
+      return "reviewer";
+    case "accepting":
+      return "architect";
+    case "merging":
+      return "merger";
+    default:
+      return undefined;
+  }
+}
+
 export function isLegionProjectToken(project: string): boolean {
   return PROJECT_TOKEN.test(project);
 }
 
 /** The one rule that turns the operator-written `project` (`legion.yaml`'s value, `LEGION_ID`,
- * `sjawhar/legion`) into the Legion project token every role token, secret file, and
- * `LEGION_PROJECT` carries (`sjawharlegion`): lowercased, every non-alphanumeric dropped — the Go
+ * `cybermonklabs/legion`) into the Legion project token every role token, secret file, and
+ * `LEGION_PROJECT` carries (`cybermonklabslegion`): lowercased, every non-alphanumeric dropped — the Go
  * daemon's `claim.ProjectToken` too. The TypeScript daemon, `legion controller start`'s
  * operator-side loader and the Go controller's plugin all apply it, so an operator's copied value
  * lands on the daemon's own controller token; a value that sanitizes to nothing is refused naming

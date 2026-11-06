@@ -149,6 +149,34 @@ func TestListRepoProjectsReadsEveryMappingWithItsDefault(t *testing.T) {
 	}
 }
 
+// Whether Dispatch's GitHub App is installed on a repository is its app-installation route's
+// answer; a Dispatch older than the route answers 404, which the caller tells apart (Missing).
+func TestWebhookAppInstalledReadsDispatchsAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		switch r.URL.Path {
+		case "/api/v1/github/app-installation/acme/widgets":
+			writeJSON(t, w, map[string]bool{"installed": true})
+		case "/api/v1/github/app-installation/acme/gadgets":
+			writeJSON(t, w, map[string]bool{"installed": false})
+		default:
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "NOT_FOUND", "error": "not found"})
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	for repo, want := range map[string]bool{"acme/widgets": true, "acme/gadgets": false} {
+		installed, err := client.WebhookAppInstalled(context.Background(), repo)
+		if err != nil || installed != want {
+			t.Fatalf("WebhookAppInstalled(%s) = %v, %v; want %v", repo, installed, err, want)
+		}
+	}
+	if _, err := client.WebhookAppInstalled(context.Background(), "acme/older"); !Missing(err) {
+		t.Fatalf("WebhookAppInstalled on a Dispatch without the route = %v, want a 404 Missing reports", err)
+	}
+}
+
 // A hand-over is one PATCH carrying the status and an additive legion label under the daemon's
 // actor, so concurrent labels survive and the one event it makes carries both.
 func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {
@@ -275,8 +303,8 @@ func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	}
 }
 
-// The artifact read carries the approval Dispatch derives, the latest review's time and its event's
-// sequence (none from a Dispatch that predates the sequence).
+// The artifact read carries the approval Dispatch derives, who gave the review it shows, the latest
+// review's time and its event's sequence (none from a Dispatch that predates the sequence).
 func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertBearer(t, r)
@@ -286,7 +314,8 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/artifacts/artifact-6":
 			writeJSON(t, w, map[string]any{"id": "artifact-6", "issue_key": "LEGION-6", "approval": map[string]any{
-				"state": "approved", "latest_version": 3, "version": 3, "at": "2026-10-23T18:00:00.123456Z", "seq": 12}})
+				"state": "approved", "latest_version": 3, "version": 3, "at": "2026-10-23T18:00:00.123456Z", "seq": 12,
+				"by": map[string]any{"kind": "user", "id": "alice"}}})
 		case "/api/v1/artifacts/artifact-7":
 			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
 				"state": "awaiting", "latest_version": 4, "version": 3, "at": "2026-10-23T17:00:00Z"}})
@@ -304,16 +333,17 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 		t.Fatalf("read approval: %v", err)
 	}
 	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 || approval.ApprovedLatest() != 3 ||
-		!approval.At.Equal(time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)) || approval.Seq != 12 {
-		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by the review at sequence 12", approval)
+		!approval.At.Equal(time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)) || approval.Seq != 12 ||
+		approval.By != (Actor{Kind: "user", ID: "alice"}) || approval.By.Name() != "user:alice" {
+		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by user:alice, the review at sequence 12", approval)
 	}
 	awaiting, err := client.Approval(context.Background(), "artifact-7")
 	if err != nil {
 		t.Fatalf("read awaiting approval: %v", err)
 	}
-	if awaiting.State != "awaiting" || awaiting.ApprovedLatest() != 0 ||
+	if awaiting.State != "awaiting" || awaiting.ApprovedLatest() != 0 || awaiting.By != (Actor{}) ||
 		!awaiting.At.Equal(time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)) || awaiting.Seq != 0 {
-		t.Fatalf("awaiting approval = %#v, want an open request, its review's time and no sequence", awaiting)
+		t.Fatalf("awaiting approval = %#v, want an open request reviewed by nobody, its review's time and no sequence", awaiting)
 	}
 	draft, err := client.Approval(context.Background(), "artifact-8")
 	if err != nil {
@@ -426,6 +456,41 @@ func TestChangesRequestedLatestNamesOnlyTheLatestVersion(t *testing.T) {
 	}
 	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4)}).ChangesRequestedLatest(); version != 4 || got == "" {
 		t.Fatalf("changes requested with no reason = %d %q, want 4 with Dispatch's default reason", version, got)
+	}
+}
+
+// A handoff record reads back with its issue, phase, version and the actor that wrote it; the body
+// Dispatch answers with is not the daemon's to read. A record Dispatch does not have is Missing.
+func TestHandoffReadsTheRecordAndItsAuthor(t *testing.T) {
+	const id = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		if r.Method != http.MethodGet {
+			t.Fatalf("request = %s %s, want GET", r.Method, r.URL.Path)
+		}
+		if r.URL.Path != "/api/v1/handoffs/"+id {
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "HANDOFF_NOT_FOUND", "error": "handoff not found"})
+			return
+		}
+		writeJSON(t, w, map[string]any{
+			"id": id, "issue_key": "LEGION-6", "phase": "implement", "version": 2,
+			"author":     map[string]any{"kind": "session", "id": "ses_implementer_6", "origin": map[string]any{"title": "implementer"}},
+			"created_at": "2026-10-26T08:00:00Z", "body": `{"schemaVersion":1}`,
+		})
+	}))
+	defer server.Close()
+
+	client := New(server.URL, dispatchToken)
+	handoff, err := client.Handoff(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read handoff: %v", err)
+	}
+	want := Handoff{ID: id, IssueKey: "LEGION-6", Phase: "implement", Version: 2, Author: HandoffAuthor{Kind: "session", ID: "ses_implementer_6"}}
+	if handoff != want {
+		t.Fatalf("handoff = %#v, want %#v", handoff, want)
+	}
+	if _, err := client.Handoff(context.Background(), "00000000-0000-0000-0000-000000000001"); !Missing(err) {
+		t.Fatalf("an unknown handoff = %v, want Dispatch's 404", err)
 	}
 }
 
@@ -561,6 +626,41 @@ func TestMessageBodiesSincePagesNewestFirstUntilTheOutboxWindow(t *testing.T) {
 	}
 	if requests != 2 || len(bodies) != 1 || bodies[0] != "Existing daemon notice." {
 		t.Fatalf("requests=%d bodies=%#v, want one recent message", requests, bodies)
+	}
+}
+
+// An event carries at most the first part of a long body and says so; the whole of it, the outbox
+// marker at its end included, is read from the message itself. A body the event carries whole is
+// read from the event alone, so the common message costs no second request.
+func TestMessageBodiesSinceReadsACutBodyFromItsMessage(t *testing.T) {
+	since := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
+	whole := strings.Repeat("x", 40000) + "\n\n<!-- legion-outbox:7 -->"
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		switch r.URL.Path {
+		case "/api/v1/issues/LEGION-5/events":
+			writeJSON(t, w, []map[string]any{
+				{"seq": 9, "type": "message.created", "created_at": "2026-09-23T01:02:00Z",
+					"payload": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000001", "body": whole[:32000], "body_truncated": true}},
+				{"seq": 8, "type": "message.created", "created_at": "2026-09-23T01:01:00Z",
+					"payload": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000002", "body": "A short daemon notice."}},
+			})
+		case "/api/v1/issues/LEGION-5/messages/f1c0ffee-0000-4000-8000-000000000001":
+			reads++
+			writeJSON(t, w, map[string]any{"message": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000001", "body": whole}, "replies": []any{}})
+		default:
+			t.Fatalf("request = %s %s, want the issue's events or its cut message", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	bodies, err := New(server.URL, dispatchToken).MessageBodiesSince(context.Background(), "LEGION-5", since)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if reads != 1 || len(bodies) != 2 || bodies[0] != whole || bodies[1] != "A short daemon notice." {
+		t.Fatalf("message reads=%d bodies=%d, want the cut body read whole from its message and the short one from its event alone", reads, len(bodies))
 	}
 }
 

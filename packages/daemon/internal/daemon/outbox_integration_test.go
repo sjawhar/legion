@@ -221,7 +221,8 @@ func isolatedOutboxPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(admin.Close)
 	name := "legion_outbox_test_" + outboxSuffix(t)
-	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -299,8 +300,14 @@ func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval,
 	return dispatch.Approval{}, nil
 }
 func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *blockingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *blockingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 func (d *blockingDispatch) count() int {
 	d.mu.Lock()
@@ -337,9 +344,10 @@ func TestOutboxWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.T
 // A status Dispatch refuses outright — the issue is gone, or the status is one it will not take —
 // can never be written, and an issue's status writes run one at a time: retried forever, it held
 // every later status of that issue behind it, so nothing the workflow decided afterwards ever
-// reached the board. The refused row is finished and said so, and the issue's later writes run.
-// What each of them then does is the ordinary rule: this one finds the board at a status neither
-// its own nor the one it was made from, takes that for someone else's move, and leaves it.
+// reached the board. The refused row is finished, its architect is told that the status did not
+// land (statusWriteRefused), and the issue's later writes run. What each of them then does is the
+// ordinary rule: this one finds the board at a status neither its own nor the one it was made
+// from, takes that for someone else's move, and leaves it.
 func TestAPermanentlyRefusedStatusWriteDoesNotHoldBackTheIssuesLaterWrites(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -359,12 +367,23 @@ func TestAPermanentlyRefusedStatusWriteDoesNotHoldBackTheIssuesLaterWrites(t *te
 		runner.now = func() time.Time { return now }
 	}
 
-	var rows int
-	if err := pool.QueryRow(context.Background(), "select count(*) from outbox where issue = 'LEGION-208'").Scan(&rows); err != nil {
+	var kinds []string
+	rows, err := pool.Query(context.Background(), "select kind from outbox where issue = 'LEGION-208' order by id")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if rows != 0 {
-		t.Fatalf("outbox holds %d rows for LEGION-208, want none: the refused row is finished and the one behind it runs", rows)
+	for rows.Next() {
+		var kind string
+		if err := rows.Scan(&kind); err != nil {
+			t.Fatal(err)
+		}
+		kinds = append(kinds, kind)
+	}
+	if rows.Err() != nil {
+		t.Fatal(rows.Err())
+	}
+	if fmt.Sprint(kinds) != "[notice]" {
+		t.Fatalf("outbox holds %v for LEGION-208, want the architect's notice alone: the refused row is finished and the one behind it runs", kinds)
 	}
 	if board.reads < 2 {
 		t.Fatalf("Dispatch was read %d times, want the later write to have run too", board.reads)
@@ -456,8 +475,14 @@ func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval,
 	return dispatch.Approval{}, nil
 }
 func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *refusingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *refusingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 // boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
@@ -494,9 +519,13 @@ func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, er
 	return dispatch.Approval{}, nil
 }
 func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *boardDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *boardDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
 // pool's connections, and the outbox has to keep draining once they are back. A claim that fails
@@ -763,9 +792,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	})
 	prompts := len(conn.Prompts())
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the foreign turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 
 	if got := machine.Claim().Pending; got != nil {
 		t.Fatalf("the finished phase's task is still pending as %+v, want it dropped", got)

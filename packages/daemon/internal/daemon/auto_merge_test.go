@@ -878,9 +878,12 @@ func TestAMergeTheQueueFailsSendsTheIssueBackToImplementing(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-208'").Scan(&at); err != nil || at != string(phase.Implementing) {
 		t.Fatalf("LEGION-208 in %q (%v), want implementing", at, err)
 	}
+	// A start of a phase worker is two rows (workflow.StartOrOwe): the relaunch, which carries no
+	// task and brings the implementer's session back at once, and the row that carries the task
+	// and waits for the issue's admission slot. The task is the one this asserts about.
 	var task string
 	if err := pool.QueryRow(context.Background(), `select payload->>'task' from outbox where kind = 'supervise'
-		and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task); err != nil {
+		and payload->>'op' = 'start' and payload->>'role' = 'implementer' and coalesce(payload->>'task', '') <> ''`).Scan(&task); err != nil {
 		t.Fatalf("read the implementer's start: %v", err)
 	}
 	for _, want := range []string{failedMergeGroupRun, "integration", "failed_checks", "#42"} {
@@ -1154,7 +1157,7 @@ func serveArmable(t *testing.T, g *armableGitHub) *armableGitHub {
 			if g.queued {
 				entry = `{"enqueuedAt":"2026-10-11T00:05:00Z"}`
 			}
-			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":true,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":"ready-head","mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":true,"pullRequest":{"id":"PR_42","state":%q,"title":"feat(daemon): merge the accepted READY head","headRefOid":"ready-head","mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
 				g.state, g.mergeState, time.Now().UTC().Format(time.RFC3339), g.queueRequired, autoMerge, entry)
 		}
 	}))
@@ -1644,7 +1647,7 @@ func pullJSON(state, head, mergeState string) string {
 // pullJSONAt is pullJSON with GitHub's last change to the pull request (its updatedAt) made at
 // updated.
 func pullJSONAt(state, head, mergeState string, updated time.Time) string {
-	return fmt.Sprintf(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`,
+	return fmt.Sprintf(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":%q,"title":"feat(daemon): merge the accepted READY head","headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`,
 		state, head, mergeState, updated.UTC().Format(time.RFC3339))
 }
 

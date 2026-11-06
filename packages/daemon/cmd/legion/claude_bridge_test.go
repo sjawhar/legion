@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claudebridge"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // The command's refusals come before anything starts, each naming what is missing, as a usage error.
@@ -35,17 +37,14 @@ func TestClaudeBridgeRefusesWhatItCannotRun(t *testing.T) {
 			t.Errorf("claude-bridge %q = %d %q, want 2 naming %q and the usage", tc.args, code, stderr.String(), tc.want)
 		}
 	}
-	t.Setenv("CLAUDE_CONFIG_DIR", "relative")
-	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"legion", "claude-bridge", "--", "claude", "--resume", "s"}, &stdout, &stderr); code != 2 ||
-		!strings.Contains(stderr.String(), "CLAUDE_CONFIG_DIR must be an absolute path") {
-		t.Errorf("a relative CLAUDE_CONFIG_DIR = %d %q", code, stderr.String())
-	}
 }
 
 // A claude that cannot be started is the bridge's failure, exit 1, naming it.
 func TestClaudeBridgeNamesAClaudeItCannotStart(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	// The bridge opens its inbox under the process TMPDIR, so a test that runs it in-process
+	// places that directory itself, with room for the inbox's socket.
+	t.Setenv("TMPDIR", testtmp.Dir(t, claudebridge.InboxLongestPath))
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"legion", "claude-bridge", "--", "/nonexistent/claude", "--resume", "s"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "start /nonexistent/claude") {
@@ -146,7 +145,7 @@ func TestClaudeBridgeExitsOnceTheShimHasReadEveryFrame(t *testing.T) {
 		}
 		types = append(types, frame.Type)
 	}
-	if want := []string{"response", "agent_start", "tool_execution_start", "agent_end"}; !slices.Equal(types, want) {
+	if want := []string{"response", "agent_start", "tool_execution_start", "agent_end", "prompt_result"}; !slices.Equal(types, want) {
 		t.Errorf("the shim read frames %q, want %q:\n%s", types, want, p.logged())
 	}
 	if len(left) > 0 {
@@ -183,7 +182,9 @@ type claudeBridgeProcess struct {
 func startClaudeBridge(t *testing.T, script string, stdout *os.File) *claudeBridgeProcess {
 	t.Helper()
 	dir := t.TempDir()
-	p := &claudeBridgeProcess{t: t, tmp: socketDir(t), stderr: filepath.Join(dir, "stderr"), exited: make(chan struct{})}
+	// The bridge runs under a TMPDIR of the test's own, with room for its inbox's socket.
+	p := &claudeBridgeProcess{t: t, tmp: testtmp.Dir(t, claudebridge.InboxLongestPath),
+		stderr: filepath.Join(dir, "stderr"), exited: make(chan struct{})}
 	claude := filepath.Join(dir, "claude")
 	if err := os.WriteFile(claude, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
 		t.Fatal(err)

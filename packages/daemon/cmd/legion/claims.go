@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -23,14 +25,15 @@ import (
 // held phase; with --failed, every failed claim. close is the tree's close, through its root claim,
 // for a tree no workflow issue backs: the root, then every other claim of the tree.
 var claimsCommands = map[string]command{
-	"spawn":   runClaimsSpawn,
-	"deliver": runClaimsDeliver,
-	"suspend": runClaimsSuspend,
-	"resume":  claimRequest("resume"),
-	"stop":    claimRequest("stop"),
-	"retry":   runClaimsRetry,
-	"close":   claimRequest("close"),
-	"list":    runClaimsList,
+	"spawn":          runClaimsSpawn,
+	"deliver":        runClaimsDeliver,
+	"suspend":        runClaimsSuspend,
+	"resume":         claimRequest("resume"),
+	"stop":           claimRequest("stop"),
+	"retry":          runClaimsRetry,
+	"forget-session": runClaimsForgetSession,
+	"close":          claimRequest("close"),
+	"list":           runClaimsList,
 }
 
 func runClaims(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -84,8 +87,13 @@ func decodeAnswer(answer []byte, into any) error {
 	return decoder.Decode(into)
 }
 
-// printClaim is the one line a claim prints as: token, role, issue, state, generation, and the
-// plugin contract its registration declared (0 when none is recorded).
+// printClaim is the one line a claim prints as: token, role, issue, state, generation, the plugin
+// contract its registration declared (0 when none is recorded), and the update round the claim is
+// in with the head its worker reported when it answered (`-` for a claim in no round, and `-` for
+// a head no worker has reported yet). A claim whose idle pod the daemon released prints
+// `suspended:released` for its state (claimStateWord): it is not a suspension anyone is waiting
+// to lift — its next delivery resumes it in a pod of its own — so an operator reading the list
+// must not read it as one.
 func printClaim(w io.Writer, answer []byte) error {
 	var c api.OperatorClaim
 	if err := decodeAnswer(answer, &c); err != nil {
@@ -95,6 +103,10 @@ func printClaim(w io.Writer, answer []byte) error {
 	return nil
 }
 
+// printClaims is the listing: one line for each claim, and under them the one line that says what
+// the daemon's last pod-update sweep decided (podUpdateRoundsLine). That line is printed whenever
+// the command prints at all, over no claims as over many, because an operator served no line
+// cannot tell a daemon holding no issue back from a binary too old to know the limits.
 func printClaims(w io.Writer, answer []byte) error {
 	var list api.OperatorClaims
 	if err := decodeAnswer(answer, &list); err != nil {
@@ -103,11 +115,99 @@ func printClaims(w io.Writer, answer []byte) error {
 	for _, c := range list.Claims {
 		writeClaimLine(w, c)
 	}
+	fmt.Fprintln(w, podUpdateRoundsLine(list.PodUpdateRounds))
 	return nil
 }
 
+// podUpdateRoundsLine is the one line an operator reads for the pod rounds the daemon's last
+// sweep decided (api.PodUpdateRounds): the project's two limits, the issues holding a round under
+// them, and the issues each limit held back. No claim's own line says either half — an issue in a
+// round has every worker of it told to push and start nothing new, and an issue a limit held back
+// is drifted and was posted nothing at all — so a roll an operator thinks is stuck is read here.
+//
+// A daemon that has not swept says so rather than print each list empty, which would read as a
+// sweep that found nothing to do.
+//
+// A daemon that does not report the rounds at all says that instead. decodeAnswer refuses a
+// member this binary does not know but takes a body that leaves one out, so an answer from a
+// release before the daemon served this record decodes with the field nil rather than failing.
+// Read as the zero record it would print the line above, and an operator would be told a daemon
+// that sweeps every minute has not swept yet.
+func podUpdateRoundsLine(rounds *api.PodUpdateRounds) string {
+	if rounds == nil {
+		return "pod update rounds: this daemon does not report them; it is older than this binary"
+	}
+	if !rounds.Swept {
+		return "pod update rounds: the daemon has not swept yet"
+	}
+	return fmt.Sprintf("pod update rounds: max open %s, %s a minute; %s; %s; %s",
+		limitOrNoLimit(rounds.MaxOpenRounds), limitOrNoLimit(rounds.RoundsPerMinute),
+		issuesOrNone("in a round", rounds.InRound),
+		issuesOrNone("waiting on the open-round limit", rounds.WaitingOnMaxOpenRounds),
+		issuesOrNone("waiting on the limit a minute", rounds.WaitingOnRoundsPerMinute))
+}
+
+// limitOrNoLimit is one of the project's two limits as the line prints it: the number legion.yaml
+// sets, or `no limit` for a key it does not set, which asks for no limit rather than one of none.
+func limitOrNoLimit(limit *int) string {
+	if limit == nil {
+		return "no limit"
+	}
+	return strconv.Itoa(*limit)
+}
+
+// namedIssueCap is how many issue keys one list of that line names. One template change drifts
+// every pod of the project at once, so the issues waiting on a limit are a fleet's worth of keys:
+// named in full they would scroll the claims themselves off the operator's screen, and the count
+// in front of them is the whole number either way.
+const namedIssueCap = 20
+
+// issuesOrNone is one list of that line: its name, then `none`, or how many issues it holds and
+// the first of them in key order, with `and <n> more` in place of the rest. It is the shape
+// `legion state` prints its own summaries in (main.go's roundsSummary).
+func issuesOrNone(name string, issues []string) string {
+	if len(issues) == 0 {
+		return name + ": none"
+	}
+	named := issues
+	if len(named) > namedIssueCap {
+		named = append(slices.Clone(named[:namedIssueCap]), fmt.Sprintf("and %d more", len(issues)-namedIssueCap))
+	}
+	return fmt.Sprintf("%s: %d — %s", name, len(issues), strings.Join(named, ", "))
+}
+
 func writeClaimLine(w io.Writer, c api.OperatorClaim) {
-	fmt.Fprintf(w, "%s %s %s %s %d %d\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract)
+	fmt.Fprintf(w, "%s %s %s %s %d %d %s %s\n", c.Token, c.Role, c.Issue, claimStateWord(c), c.Generation, c.PluginContract,
+		orNone(c.UpdateRound), quotedOrNone(c.UpdateHead))
+}
+
+// claimStateWord is the claim's state as the line prints it: `suspended:released` for a claim the
+// idle release suspended, and the state itself for every other claim, whose suspendedBy the
+// operator reads with --json.
+func claimStateWord(c api.OperatorClaim) string {
+	if c.State == string(supervise.StateSuspended) && c.SuspendedBy == string(supervise.SuspendedByReleased) {
+		return c.State + ":" + c.SuspendedBy
+	}
+	return c.State
+}
+
+// orNone is a field a claim need not have, as the line prints it.
+func orNone(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+// quotedOrNone is a field a worker supplies, as the line prints it: Go-quoted, so a newline or any
+// other control character in it is an escape rather than another row of this listing. The head a
+// worker reports when it answers an update round is its own word, which nothing verifies
+// (api.OperatorClaim.UpdateHead).
+func quotedOrNone(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return strconv.Quote(value)
 }
 
 // runClaimsSpawn creates the claim on --role of --issue, in the tree --tree roots, and launches
@@ -170,6 +270,23 @@ func claimRequest(request string) command {
 		}
 		return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/"+request, nil, printClaim)
 	}
+}
+
+// runClaimsForgetSession clears the recorded session of a stopped claim. The operator must name
+// the session being abandoned, so it cannot clear a newly registered session by mistake.
+func runClaimsForgetSession(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	c := newClaimsCall("forget-session", stdout, stderr)
+	token := c.flags.String("claim", "", "the claim's token (required)")
+	session := c.flags.String("session", "", "the claim's recorded session to abandon (required)")
+	if code, ok := c.parse(args, "claim", "session"); !ok {
+		return code
+	}
+	op, ok := c.connect()
+	if !ok {
+		return 1
+	}
+	return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/forget-session",
+		api.ForgetSessionRequest{Session: *session}, printClaim)
 }
 
 // runClaimsRetry retries --claim, or with --failed every claim the daemon holds failed, in the

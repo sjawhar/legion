@@ -10,35 +10,24 @@ import {
 import {
   barAction,
   connectedDot,
+  countDocumentSockets,
   documentEditor,
   markSpan,
   selectEditorText,
   typeAtEnd,
 } from "./editor";
+import { askCard as inboxAskCard, inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
-async function setDocumentSheet(page: Page, project: string, open: boolean): Promise<void> {
-  if (project !== "iphone") {
-    return;
-  }
-  const thread = page.getByRole("dialog", { name: "Thread" });
-  if (!open && (await thread.count()) > 0) {
-    await thread.getByRole("button", { name: "Back" }).click();
-  }
-  const sheet = page.getByTestId("margin-sheet");
-  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
-    await page
-      .getByRole("button", { name: open ? /Open review panel/ : /Close review panel/ })
-      .click();
-  }
-  await expect(sheet).toHaveAttribute("data-expanded", String(open));
-}
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): two browser contexts, two mounted editors on one live document, the reload the
+// row proves the text and the version picker survive, and a full-page screenshot.
 test("documentCollaborationLive", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const alice = await asUser(browser, "alice");
@@ -46,6 +35,7 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
 
   try {
     const alicePage = await alice.newPage();
+    const aliceSockets = countDocumentSockets(alicePage);
     await alicePage.goto("/projects/CORE/documents");
     await alicePage.getByRole("button", { name: "New document" }).click();
     await alicePage.getByRole("textbox", { name: "Title" }).fill("Design notes");
@@ -63,14 +53,30 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
     await typeAtEnd(alicePage, "Alice wrote this.");
     await expect(documentEditor(bobPage)).toContainText("Alice wrote this.");
     await alicePage.reload();
+    // The editor's textbox role is written at the very end of the reload's admission chain - the
+    // `/text` read, the transport chunk, the document socket, that socket's first sync, then the
+    // editor chunk (web ProofDocument's `admit` and its `onSynced`). One assertion on the
+    // editor's text spends a single expect budget on all of it and reports "element(s) not
+    // found" when any step of it is slow, so wait for the reload's own socket and for the editor
+    // that sync builds, each on its own budget.
+    await expect.poll(aliceSockets).toBe(2);
+    await expect(documentEditor(alicePage)).toBeAttached();
     await expect(documentEditor(alicePage)).toContainText("Alice wrote this.");
+    // The picker lists every settled version and the live document. A settlement landing between
+    // a read of the versions and a read of the options moves both, so one poll reads the pair and
+    // compares them against each other rather than against a count read before it.
     await expect
-      .poll(() => getArtifact(artifact.id).then((current) => current.versions.length))
-      .toBeGreaterThan(1);
-    const versionCount = await getArtifact(artifact.id).then((current) => current.versions.length);
-    await expect(
-      alicePage.getByRole("combobox", { name: "Version" }).locator("option")
-    ).toHaveCount(versionCount + 1);
+      .poll(async () => {
+        const [current, options] = await Promise.all([
+          getArtifact(artifact.id),
+          alicePage.getByRole("combobox", { name: "Version" }).locator("option").count(),
+        ]);
+        const versions = current.versions.length;
+        return versions > 1 && options === versions + 1
+          ? "one option per settled version, and one for the live document"
+          : `${options} options for ${versions} settled versions`;
+      })
+      .toBe("one option per settled version, and one for the live document");
     await alicePage.screenshot({
       path: testInfo.outputPath("project-document-live.png"),
       fullPage: true,
@@ -111,7 +117,10 @@ test("picking a file on the Documents tab uploads it at once and lists it", asyn
   }
 });
 
-test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox @phone", async ({
+// SLOW(>=2s): two browser contexts, two mounted editors on one live document, a comment, a
+// suggestion accepted into a named version, an ask answered from bob's Inbox, and a full-page
+// screenshot.
+test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -145,7 +154,6 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await expect(
       documentEditor(bobPage).locator("span[data-proof][data-id]", { hasText: "Comment target" })
     ).toBeVisible();
-    await setDocumentSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "Suggestion target");
     await barAction(alicePage, "Suggest");
     const suggestionComposer = alicePage.getByRole("form", { name: "Comment composer" });
@@ -169,7 +177,6 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
       )
       .toBe(true);
 
-    await setDocumentSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "Ask target");
     await barAction(alicePage, "Ask");
     const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
@@ -187,11 +194,13 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     }
     await expect(markSpan(bobPage, ask.ask.anchor.mark_id)).toContainText(ask.ask.anchor.quote);
     // A document has no assignee, so its question is in nobody's own list: the Inbox reaches it
-    // under the Unassigned filter.
-    await bobPage.goto("/?assignee=unassigned");
-    const inboxDocument = bobPage.getByRole("link", { name: /CORE.*Design notes/ });
-    await expect(inboxDocument).toBeVisible();
-    const inboxAsk = bobPage.getByTestId(`ask-${askId}`);
+    // under the Unassigned filter. The short row names the document the question belongs to,
+    // and the card - which from 1280 px the reading pane draws (INFRA-575) - answers it.
+    // Neither move is a cold load the row proves: bob is already signed in and on the page.
+    await navigateInApp(bobPage, "/?assignee=unassigned");
+    const inboxDocumentRow = inboxRow(bobPage, askId);
+    await expect(inboxDocumentRow.getByRole("link", { name: /CORE.*Design notes/ })).toBeVisible();
+    const inboxAsk = await inboxAskCard(bobPage, askId);
     await inboxAsk.getByLabel("Your answer").fill("Yes, publish it.");
     await inboxAsk.getByRole("button", { name: "Answer" }).click();
     await expect
@@ -199,9 +208,8 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
       .toMatchObject({
         ask: { answer: { text: "Yes, publish it.", user: "bob" }, state: "answered" },
       });
-    await expect(inboxAsk).toHaveCount(0);
-    await bobPage.goto(path);
-    await setDocumentSheet(bobPage, testInfo.project.name, true);
+    await expect(inboxDocumentRow).toHaveCount(0);
+    await navigateInApp(bobPage, path);
     await expect(bobPage.getByText("Yes, publish it.")).toBeVisible();
     await bobPage.screenshot({
       path: testInfo.outputPath("project-document-margin.png"),
@@ -234,9 +242,32 @@ async function expectDotBeside(page: Page, neighbour: string): Promise<void> {
   expect(dotBox.x + dotBox.width).toBeLessThanOrEqual(card.x + card.width);
 }
 
-test("a document's connection dot stays on the line with its version actions @phone", async ({
+test("a document's connection dot stays on the line with its version actions", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProjectDocument("CORE", {
+    content: "# Ask blocks design\n\nThe ask is a node.\n",
+    name: "ask-blocks-design.md",
+  });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ height: 900, width: 1280 });
+    await page.goto("/projects/CORE/documents/ask-blocks-design-md");
+    await expectDotBeside(page, "Name version");
+  } finally {
+    await context.close();
+  }
+});
+
+// The narrow-screen half of the row above, at the two widths the comment on `expectDotBeside`
+// names: the project's own, where at 390 px the picker, Name version and the dot are wider than
+// the header card, and 320 px, where a version view's two buttons and the dot are.
+test("a document's connection dot stays beside its version actions on a narrow screen @phone", async ({
   browser,
 }, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the row above makes the same check at 1280 px");
   await createProject({ key: "CORE", name: "Core" });
   await createProjectDocument("CORE", {
     content: "# Ask blocks design\n\nThe ask is a node.\n",
@@ -246,12 +277,6 @@ test("a document's connection dot stays on the line with its version actions @ph
   const page = await context.newPage();
   const path = "/projects/CORE/documents/ask-blocks-design-md";
   try {
-    if (testInfo.project.name === "chromium") {
-      await page.setViewportSize({ height: 900, width: 1280 });
-      await page.goto(path);
-      await expectDotBeside(page, "Name version");
-      return;
-    }
     await page.goto(path);
     await expectDotBeside(page, "Name version");
     await page.setViewportSize({ height: 800, width: 320 });

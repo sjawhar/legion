@@ -2,23 +2,30 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
 import { createAgentMessage, createMessage, patchIssue } from "./api";
+import { keyedWrite } from "./keyed-writes";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { holdPosts, MESSAGE_REFUSED, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`) holds only
 // because every engine dispatches a closed select's `change` inside the key's own task, where the
 // HTML spec queues it as a task of its own. These rows notice an engine that moves to the spec's
-// queued task: its first arrow or letter would commit at once. So the `webkit` and `firefox`
-// projects run this spec as well as Chromium, and its rows drive keys through `page.keyboard`,
-// which every engine has. The rows that step and then leave the select without Enter run in the
-// same engines, since each engine takes focus out of a select its own way. So do the rows about
-// what the picker and Reply do with a message on its way to the server, and about an issue closed
-// after it was picked.
+// queued task: its first arrow or letter would commit at once. So the six rows below that step a
+// select from the keyboard, or step one and leave it without Enter, carry `@webkit @firefox`, the
+// tags those two projects select by (`playwright.config.ts`), and they drive keys through
+// `page.keyboard`, which every engine has. Each of the three ways of leaving a select is a row of
+// its own, since each engine takes focus out of a select its own way. Every other row of this
+// file is untagged: what the picker and Reply do with a message on its way to the server, and
+// what a pick dispatched from a script does, are the same in every engine, and Chromium asserts
+// them.
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
+
+/** What a row's composer says once Dispatch refuses its message. A server that is down is tried
+ *  again under the send's key, so the rows that need a refusal refuse with Dispatch's verdict. */
+const messageRefused = `Couldn't send — ${MESSAGE_REFUSED.error}`;
 
 /** The send the rows below make, and the path of the one `POST` it produces. A comment and a
  *  direct message share this shape, so the row that calls this names the path it expects. */
@@ -35,7 +42,10 @@ async function sendAndCapturePath(page: Page, field: Locator): Promise<string> {
 test.describe("agents page", () => {
   // The arrows choose and Enter commits, so a reader can pass the first option to reach the
   // second - and the Enter that picks is the picker's, not a newline at the top of the message.
-  test("the arrows move the issue selection and Enter commits it", async ({ browser }) => {
+  // @webkit @firefox: a closed select's `change` dispatched inside the key's own task.
+  test("the arrows move the issue selection and Enter commits it @webkit @firefox", async ({
+    browser,
+  }) => {
     await seedAgents();
     const context = await asUser(browser, "alice");
     try {
@@ -84,7 +94,9 @@ test.describe("agents page", () => {
     ["Shift+Tab", (page: Page) => page.keyboard.press("Shift+Tab")],
     ["a click into the message", (_page: Page, field: Locator) => field.click()],
   ] as const) {
-    test(`a step left by ${way} is dropped, so the select, the toggle and the send name one issue`, async ({
+    // @webkit @firefox: a closed select's `change` dispatched inside the key's own task, left
+    // without Enter the way this engine takes focus out of a select.
+    test(`a step left by ${way} is dropped, so the select, the toggle and the send name one issue @webkit @firefox`, async ({
       browser,
     }) => {
       const issueKey = await seedAgents();
@@ -124,7 +136,8 @@ test.describe("agents page", () => {
   }
 
   // From `No issue` the message is a direct one, so a step left by Tab must not show an issue.
-  test("a step from No issue left by Tab is dropped, and the message goes to the agent directly", async ({
+  // @webkit @firefox: a closed select's `change` dispatched inside the key's own task.
+  test("a step from No issue left by Tab is dropped, and the message goes to the agent directly @webkit @firefox", async ({
     browser,
   }) => {
     await seedAgents();
@@ -156,7 +169,8 @@ test.describe("agents page", () => {
   });
 
   // Type-ahead is a step as the arrows are: the letter moves the selection and Enter commits it.
-  test("type-ahead from the keyboard moves the issue selection and Enter commits it", async ({
+  // @webkit @firefox: a closed select's `change` dispatched inside the key's own task.
+  test("type-ahead from the keyboard moves the issue selection and Enter commits it @webkit @firefox", async ({
     browser,
   }) => {
     await seedAgents();
@@ -339,7 +353,7 @@ test.describe("agents page", () => {
       const field = row.getByRole("textbox", { name: "Comment" });
       const cancelReply = row.getByRole("button", { name: "Cancel reply" });
       const picker = row.getByRole("combobox", { name: "Issue" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
 
       await page.keyboard.press("j");
       await page.keyboard.press("i");
@@ -356,7 +370,7 @@ test.describe("agents page", () => {
       await expect(cancelReply).toBeDisabled();
       refuse();
 
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toHaveValue("Yes");
       await cancelReply.click();
       await expect(row.getByRole("button", { name: "Choose issue" })).toContainText(issueKey);
@@ -396,7 +410,12 @@ test.describe("agents page", () => {
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const reply = row.getByRole("button", { name: "Reply" }).first();
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
+      const sent = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          new URL(request.url()).pathname === `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
@@ -407,7 +426,7 @@ test.describe("agents page", () => {
       await expect(reply).toBeDisabled();
       refuse();
 
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toBeEnabled();
       await expect(field).toHaveValue("Status please");
       await expect(reply).toBeEnabled();
@@ -417,7 +436,16 @@ test.describe("agents page", () => {
           new URL(request.url()).pathname === `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       await row.getByRole("button", { name: "Retry" }).click();
-      expect((await retried).postDataJSON()).toEqual({ body: "Status please", delivery: "aside" });
+      // The same message under a new key: Dispatch keeps the answer it gave a key, so the refused
+      // key would only be answered the refusal again.
+      const first = keyedWrite(await sent);
+      const again = keyedWrite(await retried);
+      expect(first).toEqual({
+        input: { body: "Status please", delivery: "aside" },
+        key: expect.any(String),
+      });
+      expect(again).toEqual({ input: first.input, key: expect.any(String) });
+      expect(again.key).not.toBe(first.key);
     } finally {
       await context.close();
     }
@@ -438,7 +466,7 @@ test.describe("agents page", () => {
       await openAgents(page);
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
       const sent = page.waitForRequest(
         (request) =>
           request.method() === "POST" &&
@@ -462,7 +490,7 @@ test.describe("agents page", () => {
         `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       refuse();
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toHaveValue("Status please");
       await expect(row.getByRole("button", { name: "Cancel reply" })).toHaveCount(0);
     } finally {
@@ -482,7 +510,7 @@ test.describe("agents page", () => {
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
       const sent = page.waitForRequest(
         (request) =>
           request.method() === "POST" &&
@@ -510,7 +538,7 @@ test.describe("agents page", () => {
         `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       refuse();
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toHaveValue("Status please");
       await expect(toggle).toContainText("No issue");
     } finally {
@@ -581,7 +609,7 @@ test.describe("agents page", () => {
       await openAgents(page);
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
       const sent = page.waitForRequest(
         (request) =>
           request.method() === "POST" &&
@@ -605,7 +633,7 @@ test.describe("agents page", () => {
         `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       refuse();
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toHaveValue("Yes");
       await expect(row.getByRole("button", { name: "Cancel reply" })).toBeVisible();
     } finally {
@@ -625,7 +653,7 @@ test.describe("agents page", () => {
       await openAgents(page);
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
-      const notice = row.getByText("Couldn't send — the server is down");
+      const notice = row.getByText(messageRefused);
       const retry = row.getByRole("button", { name: "Retry" });
       let posts = 0;
       page.on("request", (request) => {
@@ -633,7 +661,7 @@ test.describe("agents page", () => {
           posts += 1;
         }
       });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
@@ -676,7 +704,7 @@ test.describe("agents page", () => {
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const discard = row.getByRole("button", { name: "Discard" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
@@ -690,7 +718,7 @@ test.describe("agents page", () => {
       await expect(discard).toHaveCount(0);
       refuse();
 
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toBeEnabled();
       await expect(field).toHaveValue("Status please");
       await expect(row.getByRole("button", { name: "Retry" })).toBeVisible();
@@ -772,20 +800,24 @@ test.describe("agents page", () => {
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
-      const sends: { body: unknown; ok: boolean; path: string }[] = [];
+      const sends: { input: unknown; key: string | undefined; ok: boolean; path: string }[] = [];
       page.on("response", (response) => {
         const request = response.request();
         const path = new URL(request.url()).pathname;
         if (request.method() !== "POST" || !/\/(comments|messages)$/.test(path)) return;
-        sends.push({ body: request.postDataJSON(), ok: response.ok(), path });
+        sends.push({ ...keyedWrite(request), ok: response.ok(), path });
       });
+      // Typed, not filled: the composer tracks its mention and delivery as the keys arrive, and
+      // a `fill` of the same text sends neither (measured).
       const send = async (text: string) => {
         const before = sends.length;
         await field.click();
         await page.keyboard.press("End");
         await page.keyboard.type(text);
         await page.keyboard.press("Control+Enter");
-        await expect.poll(() => sends.length).toBe(before + 1);
+        await expect
+          .poll(() => sends.length, { intervals: [50, 50, 100, 200, 500] })
+          .toBe(before + 1);
       };
 
       await page.keyboard.press("j");
@@ -807,24 +839,30 @@ test.describe("agents page", () => {
       await send("third");
       await expect(field).toHaveValue("");
 
+      // Every send is keyed, each under a key of its own.
       const mentions = [{ target: `session:${plannerSession.session_id}` }];
+      const key = expect.any(String);
       expect(sends).toEqual([
         {
-          body: { body: "@Planner first", delivery: "aside", mentions },
+          input: { body: "@Planner first", delivery: "aside", mentions },
+          key,
           ok: true,
           path: `/api/v1/issues/${issueKey}/comments`,
         },
         {
-          body: { body: "@Planner second", delivery: "aside", mentions },
+          input: { body: "@Planner second", delivery: "aside", mentions },
+          key,
           ok: true,
           path: `/api/v1/issues/${issueKey}/comments`,
         },
         {
-          body: { body: "third", delivery: "aside" },
+          input: { body: "third", delivery: "aside" },
+          key,
           ok: true,
           path: `/api/v1/agents/${plannerSession.session_id}/messages`,
         },
       ]);
+      expect(new Set(sends.map((send) => send.key)).size).toBe(3);
     } finally {
       await context.close();
     }

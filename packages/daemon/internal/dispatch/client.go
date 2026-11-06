@@ -97,6 +97,20 @@ func (c *HTTPClient) ListRepoProjects(ctx context.Context) ([]RepoProject, error
 	return mappings, nil
 }
 
+// WebhookAppInstalled reads GET /api/v1/github/app-installation/{owner}/{repo}: whether
+// Dispatch's GitHub App, the one GitHub sends repo's webhook events through to Envoy, is installed
+// on repo (owner/name). A Dispatch older than the route answers 404, an *Error Missing reports.
+func (c *HTTPClient) WebhookAppInstalled(ctx context.Context, repo string) (bool, error) {
+	owner, name, _ := strings.Cut(repo, "/")
+	var response struct {
+		Installed bool `json:"installed"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/api/v1/github/app-installation/"+url.PathEscape(owner)+"/"+url.PathEscape(name), nil, &response); err != nil {
+		return false, err
+	}
+	return response.Installed, nil
+}
+
 func deref(value *string) string {
 	if value == nil {
 		return ""
@@ -178,7 +192,10 @@ func (c *HTTPClient) EventsAfter(ctx context.Context, key string, after int64) (
 const eventPageLimit = 200
 
 // MessageBodiesSince reads newest-first issue events until the bounded outbox recovery window.
-// Message bodies are carried by message.created events; Dispatch has no message-list route.
+// Message bodies are carried by message.created events, which hold at most the first part of a
+// long body (contracts.DispatchEventBodyMax) and say so with body_truncated; the whole of such a
+// body is read from GET /api/v1/issues/{key}/messages/{id}, since the outbox's marker closes a
+// body and the cut would drop it.
 func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error) {
 	before := int64(0)
 	bodies := []string{}
@@ -205,7 +222,9 @@ func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since t
 				continue
 			}
 			var message struct {
-				Body string `json:"body"`
+				ID            string `json:"id"`
+				Body          string `json:"body"`
+				BodyTruncated bool   `json:"body_truncated"`
 			}
 			if err := json.Unmarshal(event.Payload, &message); err != nil {
 				return nil, fmt.Errorf("decode message.created event %d for %s: %w", event.Seq, key, err)
@@ -213,7 +232,15 @@ func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since t
 			if message.Body == "" {
 				return nil, fmt.Errorf("decode message.created event %d for %s: payload body is required", event.Seq, key)
 			}
-			bodies = append(bodies, message.Body)
+			body := message.Body
+			if message.BodyTruncated {
+				whole, err := c.messageBody(ctx, key, message.ID)
+				if err != nil {
+					return nil, err
+				}
+				body = whole
+			}
+			bodies = append(bodies, body)
 		}
 		if len(events) < eventPageLimit {
 			return bodies, nil
@@ -224,6 +251,26 @@ func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since t
 		}
 		before = next
 	}
+}
+
+// messageBody is the whole stored body of message id on issue key, read from
+// GET /api/v1/issues/{key}/messages/{id}, whose answer is the message with its deliveries and its
+// replies (the Dispatch server's messageRead). It is what an event carrying only the first part of
+// a long body points at.
+func (c *HTTPClient) messageBody(ctx context.Context, key, id string) (string, error) {
+	var response struct {
+		Message struct {
+			Body string `json:"body"`
+		} `json:"message"`
+	}
+	path := "/api/v1/issues/" + url.PathEscape(key) + "/messages/" + url.PathEscape(id)
+	if err := c.request(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return "", fmt.Errorf("read Dispatch message %s of %s: %w", id, key, err)
+	}
+	if response.Message.Body == "" {
+		return "", fmt.Errorf("read Dispatch message %s of %s: the message carries no body", id, key)
+	}
+	return response.Message.Body, nil
 }
 
 // Approval reads GET /api/v1/artifacts/{id} and returns the document's derived approval state and
@@ -257,12 +304,25 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	if response.Approval.Seq != nil {
 		approved.Seq = *response.Approval.Seq
 	}
+	if response.Approval.By != nil {
+		approved.By = Actor(*response.Approval.By)
+	}
 	// Only an open request is named: Dispatch names the ask an older review answered too, which is
 	// no request anyone is asked to act on now.
 	if response.Approval.State == "awaiting" {
 		approved.AskID, approved.WaitingOn = deref(response.Approval.AskID), response.Approval.WaitingOn
 	}
 	return approved, nil
+}
+
+// Handoff reads GET /api/v1/handoffs/{id}: one handoff record with its issue, phase, version and
+// author. A record Dispatch does not have is its 404 HANDOFF_NOT_FOUND (Missing).
+func (c *HTTPClient) Handoff(ctx context.Context, id string) (Handoff, error) {
+	var response handoffResponse
+	if err := c.request(ctx, http.MethodGet, "/api/v1/handoffs/"+url.PathEscape(id), nil, &response); err != nil {
+		return Handoff{}, err
+	}
+	return response.handoff(), nil
 }
 
 // BuildCommit reads GET /healthz and returns the build Dispatch's server fleet serves: its
@@ -491,6 +551,29 @@ type approvalResponse struct {
 	// that predates the sequence, or a review recorded before it kept one, sends no seq.
 	At  *string `json:"at"`
 	Seq *int64  `json:"seq"`
+	// By is who gave the review State shows, and is absent where Dispatch names nobody.
+	By *actor `json:"by"`
+}
+
+// handoffResponse is a handoff record as Dispatch answers it, its body left undecoded: Handoff's
+// callers hold a completion to who wrote which record, never to what it says.
+type handoffResponse struct {
+	ID       string `json:"id"`
+	IssueKey string `json:"issue_key"`
+	Phase    string `json:"phase"`
+	Version  int    `json:"version"`
+	Author   actor  `json:"author"`
+}
+
+// handoff is the record without its body.
+func (r handoffResponse) handoff() Handoff {
+	return Handoff{
+		ID:       r.ID,
+		IssueKey: r.IssueKey,
+		Phase:    r.Phase,
+		Version:  r.Version,
+		Author:   HandoffAuthor{Kind: r.Author.Kind, ID: r.Author.ID},
+	}
 }
 
 type actor struct {

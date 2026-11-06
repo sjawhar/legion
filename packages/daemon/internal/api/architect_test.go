@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/dispatchbody"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
@@ -83,6 +86,10 @@ type statusRecorder struct {
 	// approved.
 	approvals map[string]dispatch.Approval
 	issues    map[string]dispatch.Issue
+	// handoffs is each Dispatch handoff record this fake knows, by id; handoffErr, when set, is
+	// every handoff read's answer instead, Dispatch's trouble.
+	handoffs   map[string]dispatch.Handoff
+	handoffErr error
 	// readFails names the issues whose detail read fails with the error given, as Dispatch's did
 	// for some children in a deployment; the listing still carries them unless listFails is set.
 	readFails map[string]error
@@ -169,15 +176,30 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 		return approval, nil
 	}
 	if version, approved := r.approved[artifactID]; approved {
-		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version}, nil
+		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version, By: dispatch.Actor{Kind: "user", ID: "alice"}}, nil
 	}
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
+}
+
+func (r *statusRecorder) Handoff(_ context.Context, id string) (dispatch.Handoff, error) {
+	if r.handoffErr != nil {
+		return dispatch.Handoff{}, r.handoffErr
+	}
+	handoff, ok := r.handoffs[id]
+	if !ok {
+		return dispatch.Handoff{}, &dispatch.Error{Status: http.StatusNotFound, Code: "HANDOFF_NOT_FOUND", Message: "handoff not found"}
+	}
+	return handoff, nil
 }
 
 func (r *statusRecorder) BuildCommit(context.Context) (string, error) { return "", nil }
 
 func (r *statusRecorder) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+
+func (r *statusRecorder) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 var _ dispatch.Client = (*statusRecorder)(nil)
@@ -939,7 +961,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3,
+			ReviewedBy: dispatch.Actor{Kind: "user", ID: "alice"}, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
@@ -948,8 +971,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 }
 
 // register_gate carries a changes request Dispatch shows on the document's latest version, with its
-// reason and the review's place in the issue's event log, so a request given between the
-// architect's approval request and its registration closes the gate with the architect told. An
+// reason, who asked it and the review's place in the issue's event log, so a request given between
+// the architect's approval request and its registration closes the gate with the architect told. An
 // open request carries no review, and a changes request a newer version superseded carries nothing.
 // Each registration reads the issue's event sequence before the approval, and the read begins at
 // that sequence alone: the latest review's time is that review's, never the read's.
@@ -960,9 +983,9 @@ func TestGateRegistrationCarriesAChangesRequestDispatchAlreadyShows(t *testing.T
 	reason := "name the rollback path"
 	reviewed := time.Date(2026, 10, 23, 17, 0, 0, 123456000, time.UTC)
 	statuses.approvals = map[string]dispatch.Approval{
-		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, At: reviewed, Seq: 6},
+		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, At: reviewed, Seq: 6, By: dispatch.Actor{Kind: "user", ID: "bob"}},
 		open:       {State: "awaiting", LatestVersion: 4, Version: new(3), At: reviewed},
-		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason, At: reviewed, Seq: 5},
+		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason, At: reviewed, Seq: 5, By: dispatch.Actor{Kind: "user", ID: "bob"}},
 	}
 	seedTree(t, h, "LEGION-208")
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
@@ -976,7 +999,7 @@ func TestGateRegistrationCarriesAChangesRequestDispatchAlreadyShows(t *testing.T
 	since := record.EventMark{Seq: 7}
 	want := []intake.Fact{
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason,
-			ChangesRequestedMark: record.EventMark{Seq: 6, At: reviewed}, DispatchVersion: 4, Since: since},
+			ChangesRequestedMark: record.EventMark{Seq: 6, At: reviewed}, ReviewedBy: dispatch.Actor{Kind: "user", ID: "bob"}, DispatchVersion: 4, Since: since},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: open, Version: 4, DispatchVersion: 4, Since: since},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4, DispatchVersion: 5, Since: since},
 	}
@@ -1096,9 +1119,8 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 		t.Fatalf("close facts = %#v", got)
 	}
 
-	// A child is not the root, a sub-architect of the tree is not the root's architect though it
-	// names the root, a phase worker is not the architect, and a reason too long for one message
-	// would never post.
+	// A child is not the root, a sub-architect of the tree is not the root's architect, and a
+	// phase worker is not the architect.
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
 		"grantId": architect.grant(t), "issue": "LEGION-209", "reason": "moot",
 	}, nil), http.StatusForbidden, "ROOT_REQUIRED")
@@ -1110,10 +1132,84 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
 		"grantId": worker.grant(t), "issue": "LEGION-208", "reason": "moot",
 	}, nil), http.StatusForbidden, "ARCHITECT_REQUIRED")
-	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
-		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": strings.Repeat("x", record.MessagePostLimit),
+
+	// The close posts the reason as a message before it writes the status, so a reason whose one
+	// block passes Dispatch's bound is refused here, naming the bound and how far over it is.
+	// Nothing is recorded: no fact reached the intake, so no outbox row carries the close.
+	overBlock := strings.Repeat("x", dispatchbody.BlockUnits)
+	refusal := refused(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": overBlock,
 	}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
-	if got := facts.recorded(); len(got) != 1 {
-		t.Fatalf("refused closes applied facts %#v", got[1:])
+	if want := "block 1 (text) is 48 characters over the 32000-character block limit"; !strings.Contains(refusal, want) {
+		t.Fatalf("refusal = %q, want it naming %q", refusal, want)
 	}
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("the refused close applied %#v, want nothing beyond the first close recorded", got[1:])
+	}
+	if rows := outboxRowsOf(t, h, "LEGION-208"); rows != 0 {
+		t.Fatalf("outbox rows after the refused close = %d, want none", rows)
+	}
+
+	// The bound is on a block, not on the reason: one written as blocks Dispatch takes is applied
+	// whole, however long it is.
+	long := strings.TrimSuffix(strings.Repeat(strings.Repeat("y", 6665)+"\n\n", 6), "\n\n")
+	closedLong := h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": long,
+	}, nil)
+	if closedLong.Code != http.StatusOK {
+		t.Fatalf("close with a reason of six blocks = %d: %s", closedLong.Code, closedLong.Body)
+	}
+	if got := facts.recorded(); len(got) != 2 || got[1] != (intake.CloseRoot{Issue: "LEGION-208", Reason: long}) {
+		t.Fatalf("close facts = %#v, want the 40,000-character reason applied whole", got)
+	}
+}
+
+// The outbox posts a close reason as the row's message with the row's own marker after it
+// (record.MessagePost.Posted), so the route measures that post and not the reason alone. Two
+// reasons Dispatch takes on their own make a post it refuses: one of exactly as many lines as
+// Dispatch holds a body to blocks, where the marker is one block more, and one ending inside an
+// open code fence, where the marker is code inside the last block and carries it over the unit
+// bound. Each is refused at the call, naming the bound, and records nothing: no fact and no
+// outbox row, so the architect's shortened close is applied.
+func TestAnArchitectsCloseIsRefusedWhereTheOutboxsMarkerPassesTheBound(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	for _, tc := range []struct{ name, reason, want string }{
+		{"a reason of as many lines with text in them as Dispatch holds a body to blocks",
+			strings.TrimSuffix(strings.Repeat("y\n\n", dispatchbody.ItemBlocks), "\n\n"),
+			fmt.Sprintf("body is 1 blocks over the %d-block limit", dispatchbody.ItemBlocks)},
+		{"a reason that ends inside an open code fence",
+			"see log\n\n```\n" + strings.Repeat("y", 31980),
+			fmt.Sprintf("block 2 (code_block) is 28 characters over the %d-character block limit", dispatchbody.BlockUnits)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fact := intake.CloseRoot{Issue: "LEGION-208", Reason: tc.reason}
+			if over := dispatchbody.Check(fact.Message()); over != nil {
+				t.Fatalf("the reason on its own = %v, want a body Dispatch takes: the post is what passes the bound", over)
+			}
+			refusal := refused(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+				"grantId": architect.grant(t), "issue": "LEGION-208", "reason": tc.reason,
+			}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
+			if !strings.Contains(refusal, tc.want) {
+				t.Fatalf("refusal = %q, want it naming %q", refusal, tc.want)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("the refused close applied %#v, want nothing recorded", got)
+			}
+			if rows := outboxRowsOf(t, h, "LEGION-208"); rows != 0 {
+				t.Fatalf("outbox rows after the refused close = %d, want none", rows)
+			}
+		})
+	}
+}
+
+// outboxRowsOf is how many rows the outbox holds for issue.
+func outboxRowsOf(t *testing.T, h *harness, issue string) int {
+	t.Helper()
+	var rows int
+	if err := h.store.Pool().QueryRow(context.Background(), "select count(*) from outbox where issue = $1", issue).Scan(&rows); err != nil {
+		t.Fatalf("count the outbox rows of %s: %v", issue, err)
+	}
+	return rows
 }

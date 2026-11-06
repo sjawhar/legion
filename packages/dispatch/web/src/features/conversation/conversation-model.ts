@@ -1,6 +1,7 @@
 import type {
   Comment,
   CommentDelivery,
+  HandoffSummary,
   IssueAskThreadRow,
   Message,
   MessageRead,
@@ -13,14 +14,16 @@ import { rowAnsweredWithError } from "./delivery";
  *  a receipt's is (`DeliveryOutcome`). */
 export type CommentDeliveryAttempt = CommentDelivery & { readonly answeredWithError: boolean };
 
-/** Which conversations the reader asked for. Closed is an answered or resolved ask, or a comment
- *  thread somebody resolved or whose suggestion was accepted or rejected; a message thread is
- *  never closed, so it is listed under All and under Open. */
+/** Which conversations the reader asked for. Closed is an answered or resolved ask, a comment
+ *  thread somebody resolved or whose suggestion was accepted or rejected, or a phase handoff,
+ *  which is a finished record from the moment it is written; a message thread is never closed,
+ *  so it is listed under All and under Open. */
 export type ConversationFilter = "all" | "closed" | "open";
 
 interface ConversationBase {
-  /** `ask:<id>`, `comment:<id>` or `message:<id>`: the card's `data-turn`, the id its pin is
-   *  stored under (`features/issue/pins.ts`), and the tie-break that makes the order total. */
+  /** `ask:<id>`, `comment:<id>`, `message:<id>` or `handoff:<id>`: the card's `data-turn`, the
+   *  id its pin is stored under (`features/issue/pins.ts`), and the tie-break that makes the
+   *  order total. */
   readonly id: string;
   /** The conversation's newest activity: its root, its newest reply, and for an ask its answer
    *  and its resolution. An edit is not activity and never moves a card. */
@@ -31,8 +34,9 @@ interface ConversationBase {
 }
 
 /** One card of the Conversation: an ask with its replies and its answer, a comment thread with
- *  its replies, or a message thread, targeted or not. Each is built from the issue's own entity
- *  list, so a conversation older than any window of the event log is listed like every other. */
+ *  its replies, a message thread, targeted or not, or one version of a phase handoff. Each is
+ *  built from the issue's own entity list, so a conversation older than any window of the event
+ *  log is listed like every other. */
 export type Conversation =
   | (ConversationBase & { readonly kind: "ask"; readonly ask: IssueAskThreadRow })
   | (ConversationBase & {
@@ -51,6 +55,11 @@ export type Conversation =
       readonly replies: readonly Message[];
       /** The first reply a session sent: the card reads "Answered by" that session. */
       readonly answer?: Message;
+    })
+  | (ConversationBase & {
+      readonly kind: "handoff";
+      /** The record without its body: the card fetches the body when the reader expands it. */
+      readonly handoff: HandoffSummary;
     });
 
 /** A message thread's card: the two kinds that render a root message, its deliveries and its
@@ -61,6 +70,8 @@ export interface ConversationInput {
   readonly asks: readonly IssueAskThreadRow[];
   readonly comments: readonly Comment[];
   readonly messages: readonly MessageRead[];
+  /** Every phase handoff of the issue, each version its own entry. */
+  readonly handoffs: readonly HandoffSummary[];
   /** `created_at` of the first event the reader has not read. Without one nothing is unread:
    *  either they have read the issue through its head, or its watermark has not been read. */
   readonly unreadFrom?: string;
@@ -192,8 +203,72 @@ function messageConversation(read: MessageRead, unreadFrom: string | undefined):
   return { ...base, kind: "targeted-message", ...(answer === undefined ? {} : { answer }) };
 }
 
+/** One card per handoff version. Nobody replies to a handoff and no later write changes it, so
+ *  its activity is its own `created_at` and it is closed from the start. */
+function handoffConversation(
+  handoff: HandoffSummary,
+  unreadFrom: string | undefined
+): Conversation {
+  return {
+    at: handoff.created_at,
+    closed: true,
+    handoff,
+    id: conversationItemId("handoff", handoff.id),
+    kind: "handoff",
+    unread: isUnread(handoff.created_at, unreadFrom),
+  };
+}
+
+/** One labelled row of an expanded handoff: a top-level field of its body, or one entry of its
+ *  `proof` list. */
+export interface HandoffField {
+  /** The top-level field the row comes from: its own name, or `proof` for a proof entry. */
+  readonly field: string;
+  /** The field's name, or `proof <n>` for the nth proof entry, counted from 1. */
+  readonly label: string;
+  readonly text: string;
+  /** `text` is indented JSON (an array or an object) rather than a plain value. */
+  readonly json: boolean;
+}
+
+/** A value as a row shows it: a string as itself, an array or an object as indented JSON, and a
+ *  number, a boolean or null as its JSON text. */
+function handoffValue(value: unknown): Pick<HandoffField, "json" | "text"> {
+  if (typeof value === "string") {
+    return { json: false, text: value };
+  }
+  if (value !== null && typeof value === "object") {
+    return { json: true, text: JSON.stringify(value, null, 2) };
+  }
+  return { json: false, text: JSON.stringify(value) };
+}
+
+/** The rows a handoff's body expands to, in the order its session wrote the fields, with a
+ *  `proof` list split into one row per entry. Undefined when the body is not a JSON object,
+ *  which the card then shows as the raw text it is. */
+export function handoffFields(body: string): HandoffField[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  return Object.entries(parsed).flatMap(([field, value]): HandoffField[] =>
+    field === "proof" && Array.isArray(value)
+      ? value.map((entry, index) => ({
+          field,
+          label: `proof ${index + 1}`,
+          ...handoffValue(entry),
+        }))
+      : [{ field, label: field, ...handoffValue(value) }]
+  );
+}
+
 /**
- * The issue's conversations, newest activity first. Each of the three reads returns the issue's
+ * The issue's conversations, newest activity first. Each of the four reads returns the issue's
  * whole set, so the list is complete however old a conversation is; ties break on the card's own
  * id, so the order is total and nothing shuffles between renders.
  */
@@ -201,12 +276,14 @@ export function buildConversations({
   asks,
   comments,
   messages,
+  handoffs,
   unreadFrom,
 }: ConversationInput): Conversation[] {
   const conversations = [
     ...asks.map((ask) => askConversation(ask, unreadFrom)),
     ...commentConversations(comments, unreadFrom),
     ...messages.map((read) => messageConversation(read, unreadFrom)),
+    ...handoffs.map((handoff) => handoffConversation(handoff, unreadFrom)),
   ];
   return conversations.sort(
     (left, right) => compareTimestamps(right.at, left.at) || left.id.localeCompare(right.id)
@@ -215,9 +292,9 @@ export function buildConversations({
 
 /** Whether `conversation` belongs in the bucket `filter` names: an ask is closed once it is
  *  answered, resolved or retracted, a comment thread once it is resolved or its suggestion is
- *  decided, and a message thread never is. A predicate rather than a list pass, so a caller
- *  that also keeps conversations of its own (the Conversation's threads held in hand) walks
- *  the list once and keeps its order. */
+ *  decided, a handoff always is, and a message thread never is. A predicate rather than a list
+ *  pass, so a caller that also keeps conversations of its own (the Conversation's threads held
+ *  in hand) walks the list once and keeps its order. */
 export function matchesFilter(conversation: Conversation, filter: ConversationFilter): boolean {
   return filter === "all" || conversation.closed === (filter === "closed");
 }
@@ -230,13 +307,13 @@ export interface ConversationFocus {
 }
 
 /**
- * The conversation an item id belongs to. A reply under an ask resolves to that ask and a reply
- * in a thread to its root, read off the issue's own lists - each is its whole set, so no
- * per-item fetch can tell the tab anything these do not.
+ * The conversation an item id belongs to. A reply under an ask resolves to that ask, a reply in
+ * a thread to its root, and a handoff id to that version's card, read off the issue's own lists -
+ * each is its whole set, so no per-item fetch can tell the tab anything these do not.
  */
 export function focusConversation(
   itemId: string | undefined,
-  { asks, comments, messages }: Omit<ConversationInput, "unreadFrom">
+  { asks, comments, handoffs, messages }: Omit<ConversationInput, "unreadFrom">
 ): ConversationFocus | undefined {
   if (itemId === undefined) {
     return undefined;
@@ -261,6 +338,9 @@ export function focusConversation(
     if (replies.some((reply) => reply.id === itemId)) {
       return { id: conversationItemId("message", message.id), replyId: itemId };
     }
+  }
+  if (handoffs.some((handoff) => handoff.id === itemId)) {
+    return { id: conversationItemId("handoff", itemId) };
   }
   return undefined;
 }

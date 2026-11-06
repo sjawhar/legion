@@ -1,5 +1,6 @@
 export * from "./actor-label";
 export * from "./agent-stream";
+export * from "./block-schema.generated";
 export * from "./claim-holds";
 export * from "./dispatch-api";
 export * from "./dispatch-block-ref";
@@ -9,7 +10,10 @@ export * from "./dispatch-text-references";
 export * from "./dispatch-text-rules";
 export * from "./dispatch-tools";
 export * from "./envelope";
+export * from "./envoy-session";
+export * from "./going";
 export * from "./legion-roles";
+export * from "./related-forms";
 export * from "./repo";
 export * from "./slack";
 export * from "./subject";

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ func TestReasonNamesEveryClass(t *testing.T) {
 		{"audience", fmt.Errorf("%w: %q, want %q", ErrAudience, []string{"dispatch"}, "envoy"), "audience"},
 		{"expired", fmt.Errorf("%w at 2026-01-01T00:00:00Z", ErrExpired), "expired"},
 		{"cancelled", fmt.Errorf("%w: %v", ErrCancelled, context.Canceled), "cancelled"},
+		{"issuer unavailable", fmt.Errorf("%w: %w", ErrIssuerUnavailable, fmt.Errorf("%w: https://issuer.example/keys answered 503", ErrKeySet)), "unavailable"},
 		{"signature", ErrSignature, "signature"},
 		{"an error carrying no sentinel", errors.New("something else"), "signature"},
 	} {
@@ -49,13 +52,12 @@ func TestVerifyDoesNotCallAnEndedRequestAForgery(t *testing.T) {
 	}
 	token := issuer.Mint(t, signing, issuer.Claims(testSubject, testAudience))
 
-	// The token here is sound, so this case exists only while the key-set fetch
-	// is what fails. go-oidc selects between the caller's ctx.Done() and its own
-	// inflight fetch (jwks.go:230-234), and a local issuer answers so fast that
-	// both are ready and Go picks at random: without this delay the fetch
-	// sometimes wins, the sound token verifies, and the assertion below fails
-	// for a reason that has nothing to do with classification. Over a network
-	// the fetch is the slow side, which is the situation being described.
+	// The token here is sound, so this case exists only while the key-set read
+	// is what fails. It fails for certain: the verifier reads the key set
+	// through *Keys, whose read is one HTTP request made on the caller's own
+	// context, and a request made on a context that has already ended never
+	// reaches the issuer. The delay stands in for the network all the same, so
+	// that a read which somehow did start is still the slow side.
 	issuer.DelayKeys(2 * time.Second)
 
 	// Cancelled before the first Verify, so the key-set fetch is what fails:
@@ -117,5 +119,51 @@ func TestEndedRequestOutranksTheTokensOwnFault(t *testing.T) {
 	}
 	if _, err := verifier.Verify(cancelled, claimBad); Reason(err) != "cancelled" {
 		t.Fatalf("on an ended context the wrong audience = %q, want cancelled", Reason(err))
+	}
+}
+
+// TestAKeySetOutageIsNotAForgery separates the two failures that both used to read "signature".
+// An issuer whose key set cannot be read reaches no verdict at all, so it is
+// ErrIssuerUnavailable, the class Dispatch answers 503 and retries; a token signed by a key the
+// issuer never published is a verdict — it is a token the issuer never signed — so it stays in
+// the signature class, the word an operator reads as a forgery attempt.
+func TestAKeySetOutageIsNotAForgery(t *testing.T) {
+	issuer := oidctest.New(t)
+	keys, signing := keysFor(t, issuer, "signing-key")
+	verifier := NewWithKeys(issuer.URL(), testAudience, keys)
+	sound := issuer.Mint(t, signing, issuer.Claims(testSubject, testAudience))
+
+	// No set has been read yet, so the outage is what answers rather than a cached key: an
+	// issuer that is down stops no verification it does not have to (Keys.Key).
+	issuer.FailKeys(http.StatusInternalServerError)
+	_, err := verifier.Verify(context.Background(), sound)
+	if !errors.Is(err, ErrIssuerUnavailable) {
+		t.Fatalf("Verify while the key set answers 500 = %v, want ErrIssuerUnavailable", err)
+	}
+	if errors.Is(err, ErrSignature) {
+		t.Fatalf("a key-set outage was classified as a signature failure: %v", err)
+	}
+	if got := Reason(err); got != "unavailable" {
+		t.Fatalf("Reason = %q, want %q", got, "unavailable")
+	}
+	if strings.Contains(err.Error(), sound) {
+		t.Errorf("Verify error %q repeats the token", err)
+	}
+
+	issuer.FailKeys(0)
+	if _, err := verifier.Verify(context.Background(), sound); err != nil {
+		t.Fatalf("Verify once the key set reads again: %v", err)
+	}
+
+	forged := issuer.Mint(t, oidctest.NewKey(t, "never-published"), issuer.Claims(testSubject, testAudience))
+	_, err = verifier.Verify(context.Background(), forged)
+	if !errors.Is(err, ErrSignature) {
+		t.Fatalf("a token signed by a key the issuer never published = %v, want ErrSignature", err)
+	}
+	if errors.Is(err, ErrIssuerUnavailable) {
+		t.Fatalf("a key id the issuer publishes nothing under was classified as an outage: %v", err)
+	}
+	if got := Reason(err); got != "signature" {
+		t.Fatalf("Reason = %q, want %q", got, "signature")
 	}
 }

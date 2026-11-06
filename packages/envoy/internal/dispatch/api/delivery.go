@@ -396,8 +396,8 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 		return deliveryPopulation{}, err
 	}
 	// Warned here, once per run, rather than in the compute, which runs again on every expiry.
-	s.productionApplies(pop.applyRuns, pop.jobsByRun, settings.Production())
-	s.productionApplies(pop.windowRuns, pop.windowJobs, settings.Production())
+	s.productionApplies(ctx, pop.applyRuns, pop.jobsByRun, settings.Production())
+	s.productionApplies(ctx, pop.windowRuns, pop.windowJobs, settings.Production())
 
 	sessionIDs := []string{}
 	issueKeys := []string{}
@@ -723,16 +723,17 @@ func deliveryProductionView(jobs []delivery.DeliveryRunJob, production delivery.
 }
 
 // productionApplies is delivery.ProductionApplies for a read. It warns once per run and
-// configuration for the life of the process about each successful run with no listed production
-// job, naming every listed name, and about each run whose production job lists no step named the
-// configured apply step: the timeline and the measures judge the same runs on every read, so a
-// line would otherwise repeat on every page load. A changed list or step is a new key, so a
-// misconfiguration is named again under its new value.
-func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, production delivery.Production) []delivery.Apply {
+// configuration across every process serving the database (firstToWarn) about each successful run
+// with no listed production job, naming every listed name, and about each run whose production
+// job lists no step named the configured apply step: the timeline and the measures judge the same
+// runs on every read, on whichever process the read reached, so a line would otherwise repeat on
+// every page load. A changed list or step is a new key, so a misconfiguration is named again under
+// its new value.
+func (s *server) productionApplies(ctx context.Context, runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, production delivery.Production) []delivery.Apply {
 	judged := delivery.ProductionApplies(runs, jobsByRun, production)
 	names := strings.Join(production.JobNames, "\x00")
 	for _, missing := range judged.Unmatched {
-		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(warnedProductionRun{repo: missing.Run.Repo, runID: missing.Run.RunID, jobNames: names}, struct{}{}); warned {
+		if !s.firstToWarn(ctx, warnedProductionRun{repo: missing.Run.Repo, runID: missing.Run.RunID, jobNames: names}, production.JobNames) {
 			continue
 		}
 		slog.Warn("dispatch delivery: a successfully concluded run has no job matching the configured production_job_names -- it will never count as a deploy",
@@ -740,7 +741,7 @@ func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[in
 	}
 	for _, run := range judged.StepMissing {
 		key := warnedProductionRun{repo: run.Repo, runID: run.RunID, jobNames: names, applyStep: *production.ApplyStep}
-		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(key, struct{}{}); warned {
+		if !s.firstToWarn(ctx, key, production.JobNames) {
 			continue
 		}
 		slog.Warn("dispatch delivery: a run's production job succeeded but lists no step named the configured production_apply_step_name -- it will never count as a deploy",
@@ -749,9 +750,37 @@ func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[in
 	return judged.Applies
 }
 
+// firstToWarn reports whether this process is the one to log the warning key names, jobNames
+// being key's names as a list. This process's warnedUnmatchedRuns answers first, so each process
+// asks the database once per key; then the insert into delivery_run_warnings (migration 0161)
+// decides between processes: only the one whose insert wrote the row logs, and every other finds
+// the row and stays quiet.
+//
+// A database that cannot record the row fails open: the warning is logged anyway, with the error.
+// A repeated warning costs a log line, where a lost one hides a misconfiguration that counts no
+// deploy, ever.
+func (s *server) firstToWarn(ctx context.Context, key warnedProductionRun, jobNames []string) bool {
+	if _, warned := s.warnedUnmatchedRuns.LoadOrStore(key, struct{}{}); warned {
+		return false
+	}
+	err := s.deps.Store.Pool.QueryRow(ctx, `
+		insert into delivery_run_warnings (repo, run_id, job_names, apply_step) values ($1, $2, $3, $4)
+		on conflict do nothing
+		returning true
+	`, key.repo, key.runID, jobNames, key.applyStep).Scan(new(bool))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		slog.Warn("dispatch delivery: could not record a configuration warning for every process, so this process logs it whether or not another already has",
+			"repo", key.repo, "run_id", key.runID, "error", err)
+	}
+	return true
+}
+
 // deliveryIssue is what the timeline reads of one issue a pull request names: its project, title,
 // priority, and effective components (qualified `<project>/<id>`, resolved as every issue read
-// resolves them: the nearest issue on its parent chain that chose, through issueComponentsLateral).
+// resolves them: the nearest issue on its parent chain that chose, through issueComponentsTerms).
 type deliveryIssue struct {
 	project    string
 	title      string
@@ -759,17 +788,24 @@ type deliveryIssue struct {
 	components []string
 }
 
+// deliveryIssueFactsQuery is the pull-request timeline's read of the issues a delivery names,
+// with their components. The text is built once, at start, for the reason issueRowStatement
+// gives.
+var deliveryIssueFactsQuery = `
+		with recursive subjects as (select i.key from issues i where i.key = any($1)),
+		` + issueComponentsTerms + `
+		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
+		from issues i
+		` + issueComponentsJoin + `
+		where i.key = any($1)
+	`
+
 func (s *server) deliveryIssueFacts(ctx context.Context, keys []string) (map[string]deliveryIssue, error) {
 	issues := make(map[string]deliveryIssue, len(keys))
 	if len(keys) == 0 {
 		return issues, nil
 	}
-	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
-		from issues i
-		`+issueComponentsLateral+`
-		where i.key = any($1)
-	`, keys)
+	rows, err := s.deps.Store.Pool.Query(ctx, deliveryIssueFactsQuery, keys)
 	if err != nil {
 		return nil, err
 	}

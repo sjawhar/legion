@@ -77,7 +77,7 @@ func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	installs := &installations{missing: map[string]bool{}, delay: delay}
 	w := &workflowRuntime{mappingChanged: make(chan struct{}, 1),
 		pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", installs: installs,
-		repositories: newRepositories("CAPTURE"), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now),
+		repositories: newRepositories("CAPTURE", ghrepo.Renames{}), defaultBranches: newDefaultBranches(roleTokens{}, nil, github.url, defaultBranchTTL, time.Now),
 		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	if err := w.loadMapping(context.Background()); err != nil {
@@ -90,7 +90,7 @@ func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.consumers, err = intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
+	w.consumers, err = intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: heard, AckWait: ackWait, NakDelay: 10 * time.Millisecond, Logger: w.log,
 		RepositoryMapping: w.mappingChange,
 	})
@@ -99,7 +99,7 @@ func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done, refreshed := make(chan error, 1), make(chan struct{})
-	go func() { done <- w.consumers.Run(ctx, pool) }()
+	go func() { done <- w.consumers.Run(ctx) }()
 	go func() { w.refreshOnMappingChange(ctx); close(refreshed) }()
 	t.Cleanup(func() { cancel(); <-done; <-refreshed })
 

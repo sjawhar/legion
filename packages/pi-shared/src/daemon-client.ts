@@ -1,4 +1,5 @@
 import {
+  type LegionActivityRequest,
   LegionChildRequest,
   LegionControllerGrantRequest,
   LegionControllerRegisterResponse,
@@ -13,9 +14,12 @@ import {
   LegionIssueStatusRequest,
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
+  type LegionReadyForUpdateRequest,
   type LegionReadyRequest,
   LegionRegisterResponse,
   type LegionRegistration,
+  LegionReleaseRecordsRequest,
+  LegionReleaseRecordsResponse,
   LegionRootCloseRequest,
   LegionSignOffRequest,
   type LegionState,
@@ -30,8 +34,12 @@ import type { z } from "zod";
  * The plugin's client for the daemon (`packages/daemon`), the one `extensions/legion.ts` boots
  * every Legion session through.
  *
- * Every response is read through the strict schemas of `@legion/contracts/legion-api`, which the
- * daemon's golden tests hold to its own types; the requests are the claim wire of
+ * Every response is read through the answer schemas of `@legion/contracts/legion-api`, which
+ * ignore a key they do not name: a daemon one contract ahead of this build is read rather than
+ * refused, and the key it added is dropped from the value handed on. A missing field or a field
+ * of a type the schema does not describe is still a refusal, and the daemon's golden tests still
+ * hold the reader to the daemon's own types, by the equality between each golden's parse and its
+ * file in `packages/contracts/src/legion-api.test.ts`. The requests are the claim wire of
  * `packages/daemon/internal/claim/wire.go`, which refuses a member it does not read. There is no
  * secret recovery: the daemon persists a registration's capability before it answers, so a
  * restart forgets no secret.
@@ -52,6 +60,13 @@ export interface RegisterInput {
  * controller's ready carries none. */
 export type ReadyInput = z.input<typeof LegionReadyRequest>;
 
+/** `claim.ReadyForUpdateRequest`: the worker's answer to its pod's update task, saying it has
+ * pushed everything it wants kept and the process holding this claim may be replaced. `round` is
+ * the round the update task named, which the daemon takes the answer for and no other. `head` is
+ * the commit it reports as the head of `legion/<issue>@origin`, left out when the branch is not
+ * there. */
+export type ReadyForUpdateInput = z.input<typeof LegionReadyForUpdateRequest>;
+
 /** `claim.ExitRequest`: the agent reporting its own end, and why. */
 export interface ExitInput {
   readonly claimToken: string;
@@ -61,14 +76,32 @@ export interface ExitInput {
   readonly reason: string;
 }
 
+/** `claim.ActivityRequest`: what a live role's session is doing, which the daemon writes onto its
+ * claim and the idle rule reads (`src/session-activity.ts` builds it). */
+export type ActivityInput = z.input<typeof LegionActivityRequest>;
+
 export interface LegionDaemonClient {
-  readonly state: () => Promise<LegionState>;
+  /** The daemon's whole state. `signal` aborts the request, its answer's body included: a caller
+   * that stops waiting for a daemon that does not answer (the phase reminder's bounded record
+   * check) aborts it rather than leave it open. */
+  readonly state: (options?: { readonly signal?: AbortSignal }) => Promise<LegionState>;
   readonly register: (input: RegisterInput) => Promise<LegionRegistration>;
   /** The same route, for the operator-launched controller: `bootToken` is the capability `legion
    * controller start` fetched, and the answer is the controller's registration. */
   readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
   readonly ready: (input: ReadyInput) => Promise<void>;
+  readonly readyForUpdate: (input: ReadyForUpdateInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
+  /** The session's report of what it is doing, after each of its turns and whenever the report's
+   * content changes. It is authenticated by the claim, as `ready` is, and answers 204. */
+  readonly activity: (input: ActivityInput) => Promise<void>;
+  /** The deployment's idle-release records of one window: every release, resume and hold the
+   * daemon recorded at or after `since`, oldest first. It is authenticated by the claim, as
+   * `activity` is, and the claim's secret rides in the body rather than a query string, which
+   * would carry it into every proxy and access log between the pod and the daemon. */
+  readonly releaseRecords: (
+    input: z.input<typeof LegionReleaseRecordsRequest>
+  ) => Promise<z.output<typeof LegionReleaseRecordsResponse>>;
   readonly grant: (
     input: z.input<typeof LegionGrantRequest>
   ) => Promise<z.output<typeof LegionGrantResponse>>;
@@ -307,8 +340,11 @@ export async function retryWhileDaemonRestarts<T>(
   }
 }
 
-/** `body` read through `schema`, or the reason it is not what the schema describes. */
-function parseStrictly<T>(
+/** `body` read through `schema`, or the reason it is not what the schema describes. The answer
+ * schemas ignore a key they do not name, so a body carrying a field this build's contract has no
+ * name for is read and that field left out of the value; what is refused is a body that is not
+ * JSON, a missing required field, and a field of a type the schema does not describe. */
+function parseBody<T>(
   schema: z.ZodType<T>,
   body: string
 ): { readonly value: T } | { readonly problem: string } {
@@ -337,27 +373,30 @@ export function createLegionDaemonClient(
   const call = async (
     method: "GET" | "POST",
     path: string,
-    body?: object
+    body?: object,
+    signal?: AbortSignal
   ): Promise<{ readonly status: number; readonly text: string }> => {
-    const response = await fetchFn(
-      `${endpoint}${path}`,
-      body === undefined
-        ? undefined
+    const response = await fetchFn(`${endpoint}${path}`, {
+      ...(body === undefined
+        ? {}
         : {
             method,
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
-          }
-    );
+          }),
+      ...(signal === undefined ? {} : { signal }),
+    });
     const text = await response.text();
     if (response.ok) return { status: response.status, text };
-    const refusal = parseStrictly(LegionErrorResponse, text);
+    const refusal = parseBody(LegionErrorResponse, text);
     if ("value" in refusal) {
-      const code =
-        "code" in refusal.value && typeof refusal.value.code === "string"
-          ? refusal.value.code
-          : undefined;
-      throw new LegionDaemonApiError(method, path, response.status, code, refusal.value.error);
+      throw new LegionDaemonApiError(
+        method,
+        path,
+        response.status,
+        refusal.value.code,
+        refusal.value.error
+      );
     }
     throw new LegionDaemonApiError(
       method,
@@ -372,17 +411,18 @@ export function createLegionDaemonClient(
     method: "GET" | "POST",
     path: string,
     schema: z.ZodType<T>,
-    body?: object
+    body?: object,
+    signal?: AbortSignal
   ): Promise<T> => {
-    const { status, text } = await call(method, path, body);
-    const parsed = parseStrictly(schema, text);
+    const { status, text } = await call(method, path, body, signal);
+    const parsed = parseBody(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
     }
     return parsed.value;
   };
 
-  /** Parses the request before it leaves the pane, then parses the route's strict success body. */
+  /** Parses the request before it leaves the pane, then reads the route's success body. */
   const post = <Input, Output>(
     path: string,
     request: z.ZodType<Input>,
@@ -404,12 +444,22 @@ export function createLegionDaemonClient(
   };
 
   return {
-    state: () => read("GET", "/legion/v1/state", LegionStateResponse),
+    state: (options) =>
+      read("GET", "/legion/v1/state", LegionStateResponse, undefined, options?.signal),
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) =>
       read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
+    readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
+    activity: (input) => acknowledge("/legion/v1/claims/activity", input),
+    releaseRecords: (input) =>
+      post(
+        "/legion/v1/claims/release-records",
+        LegionReleaseRecordsRequest,
+        LegionReleaseRecordsResponse,
+        input
+      ),
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) =>
       post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),

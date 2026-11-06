@@ -1,6 +1,6 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   type RefObject,
@@ -34,6 +34,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
+import { AgentListRefilling } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
 import { useSending } from "../../hooks/useSending";
 import { compareTimestamps } from "../../lib/timestamps";
@@ -68,7 +69,13 @@ import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
-import { AgentName, type AgentPart, AgentParts, useAgentText } from "../refs/AgentName";
+import {
+  AgentName,
+  type AgentPart,
+  AgentParts,
+  AgentUnresponsiveNote,
+  useAgentText,
+} from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -76,6 +83,7 @@ import { closestMatching, focusOnDocument } from "../shell/roving";
 import { MD_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
 import {
   type AgentFilters,
@@ -86,9 +94,10 @@ import {
   useAgentSearch,
 } from "./agent-search";
 import { deliveryAttempts } from "./attempts";
-import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
+import { BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
 import { useBroadcastComposition } from "./broadcast-composition";
 import { broadcastSendState, type ComposedBroadcast, composedBroadcast } from "./broadcast-plan";
+import type { BroadcastSend } from "./broadcast-queue";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
@@ -250,19 +259,23 @@ function AgentExchangeReply({
   replyDisabled,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   reply: Message;
   replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
+  const retry = useKeyedWrite({
+    label: (delivery: MessageDeliveryMode) =>
+      `Delivery to ${label} again, as ${MODE_LABELS[delivery]}`,
     onSuccess: () =>
       void queryClient.invalidateQueries({
         queryKey: agentMessagesQuery(agent.session_id).queryKey,
       }),
+    write: (delivery, bounds) => api.createMessageDelivery(reply.id, delivery, bounds),
   });
   const parent = [read.message, ...read.replies].find((item) => item.id === reply.in_reply_to);
   const answer = read.replies.find(
@@ -300,6 +313,7 @@ function AgentExchangeReply({
           ? undefined
           : {
               author: parent.author,
+              block: reply.reply_block,
               excerpt: parent.body,
               ...(parent.issue_key === null
                 ? {}
@@ -322,19 +336,22 @@ function AgentTargetedMessage({
   replyDisabled,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) =>
-      api.createMessageDelivery(read.message.id, delivery),
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
+  const retry = useKeyedWrite({
+    label: (delivery: MessageDeliveryMode) =>
+      `Delivery to ${label} again, as ${MODE_LABELS[delivery]}`,
     onSuccess: () =>
       void queryClient.invalidateQueries({
         queryKey: agentMessagesQuery(agent.session_id).queryKey,
       }),
+    write: (delivery, bounds) => api.createMessageDelivery(read.message.id, delivery, bounds),
   });
   const answer = read.replies.find((reply) => reply.author.kind === "session");
   return (
@@ -410,7 +427,7 @@ function AgentMessageList({
   replyDisabled,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   /** Whether the row is open. Its list stays mounted while it is collapsed, and marks nothing read
    *  there: a reply is read once it is on screen. */
@@ -441,18 +458,21 @@ function AgentMessageList({
     agent.session_id,
     !open || messages.isPending || agentState.isPending ? undefined : rendered
   );
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
   // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
   // make Clear a silent no-op. This hides exactly what the viewer saw.
-  const clear = useMutation({
-    mutationFn: (cutoff: string) => api.putAgentState(agent.session_id, { cleared_before: cutoff }),
+  const clear = useKeyedWrite({
+    write: (cutoff: string, bounds) =>
+      api.putAgentState(agent.session_id, { cleared_before: cutoff }, bounds),
+    label: () => `Conversation with ${label} cleared`,
+    // A landing with no answer to give has the store read every query again.
     onSuccess: (next) => {
       setShowCleared(false);
-      storeAgentState(queryClient, agent.session_id, next);
+      if (next !== null) storeAgentState(queryClient, agent.session_id, next);
     },
   });
-  const text = useAgentText();
-  const label = text.sessionText(agent.session_id, agent.title);
   if (messages.isPending || agentState.isPending) return null;
   if (messages.isError || agentState.isError) {
     return <p className={`mt-3 text-sm ${dangerText}`}>Could not load this conversation.</p>;
@@ -588,7 +608,9 @@ function AgentRow({
   /** A row in a closed fold, or one the filters exclude: still mounted, so a pin, a fold's toggle
    *  or a filter loses nothing it holds. */
   hidden: boolean;
-  liveAgents: readonly Agent[];
+  /** The roster a reply's delivery capabilities are judged against; `undefined` while the agent
+   *  list's read is not current, when every capability is unknown (`capabilitiesForTarget`). */
+  liveAgents: readonly Agent[] | undefined;
   /** Whether the page is at Tailwind's `md` or wider - the width the row's own `md:` classes
    *  switch at - answered once for the whole list rather than once per row: a list of two
    *  hundred rows must not hold two hundred media-query listeners. Below it, on a phone, there
@@ -720,6 +742,13 @@ function AgentRow({
           {agent.roles.map((role) => (
             <LabelPill key={role}>{role}</LabelPill>
           ))}
+          {/* A session that has missed its heartbeats is still listed and still worth
+              messaging, so the row says which it is rather than looking like any other: its
+              name's mark alone is a ring a reader would have to hover. */}
+          <AgentUnresponsiveNote
+            lastSeen={agent.last_seen}
+            state={agent.state === "unresponsive" ? "unresponsive" : "running"}
+          />
         </div>
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <span className={`text-xs ${textMutedOnCanvas}`}>
@@ -808,7 +837,7 @@ function AgentRowDetails({
   expanded: boolean;
   hidden: boolean;
   id: string;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   replyTo: AgentReply | null;
   setReplyTo: (reply: AgentReply | null) => void;
 }): ReactNode {
@@ -1015,7 +1044,9 @@ function SelectionHeader({
  * Send hands the request to the page's queue (`onSend`) at the press: `composed`, which
  * `composedBroadcast` decides - the restored request word for word while one is kept, else the
  * live plan under the composition's key - with the plan the composer shows for it, so a session
- * that has come back since a refused send is shown as not in the request being re-sent.
+ * that has come back since a refused send is shown as not in the request being re-sent. A
+ * selected session the agent list could not vouch for (`unchecked`: missing from a list that is
+ * not current) keeps its place in the send, and its chip says its state is unknown, not gone.
  */
 function BroadcastComposer({
   agents,
@@ -1042,7 +1073,7 @@ function BroadcastComposer({
   selected: ReadonlySet<string>;
 }): ReactNode {
   const { plan } = composed;
-  const { excluded, recipients } = plan;
+  const { excluded, recipients, unchecked } = plan;
   // The selection's own mode, named when it is not the broadcast's usual BTW, so the reader knows
   // what their words become: an Aside, because a selected session takes Aside and not BTW.
   const asideOnly =
@@ -1098,6 +1129,7 @@ function BroadcastComposer({
         {[...selected].map((sessionID) => {
           const agent = agents.find((candidate) => candidate.session_id === sessionID);
           const left = excluded.find((item) => item.sessionID === sessionID);
+          const note = left ?? unchecked.find((item) => item.sessionID === sessionID);
           return (
             <li className="narrow-or-short:shrink-0" key={sessionID}>
               {/* The deselect button keeps the name; the agent's live link sits beside it. */}
@@ -1111,7 +1143,7 @@ function BroadcastComposer({
                     type="button"
                   >
                     {name}
-                    {left === undefined ? "" : ` · ${left.reason}`} ✕
+                    {note === undefined ? "" : ` · ${note.reason}`} ✕
                   </button>
                 )}
                 kind="control"
@@ -1157,7 +1189,12 @@ function BroadcastComposer({
         className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
         describedBy={sendState.notice === null || sendState.refusalOnNotice ? undefined : noticeId}
         onPress={() =>
-          onSend({ input: composed.input, selected: [...selected], picked: !defaulted })
+          onSend({
+            input: composed.input,
+            key: composed.key,
+            picked: !defaulted,
+            selected: [...selected],
+          })
         }
         refusal={refusal}
         refusalShownBy={sendState.refusalOnNotice ? noticeId : undefined}
@@ -1170,7 +1207,7 @@ function BroadcastComposer({
 
 export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
-  const { agents, error, isError, isPending } = useAgents(true, true);
+  const { agents, current, error, isError, isPending, refilling } = useAgents(true, true);
   // One listener for the list, not one per row: every row's directory reads the same answer.
   const mdViewport = useMediaQuery(MD_VIEWPORT_QUERY);
   const inbox = useQuery(inboxQuery());
@@ -1239,7 +1276,7 @@ export function AgentsPage(): ReactNode {
   );
   // A restored request is re-sent word for word until an edit drops it, so its own mode is the one
   // the page shows and sends while it is held.
-  const delivery = composition.restored?.delivery ?? composition.delivery ?? defaultDelivery;
+  const delivery = composition.restored?.input.delivery ?? composition.delivery ?? defaultDelivery;
   const composing = draft.trim() !== "" || selected.size > 0;
   const queue = useBroadcastQueue(composing);
   const restoreRefusal = composing
@@ -1338,7 +1375,7 @@ export function AgentsPage(): ReactNode {
       agent={agent}
       hidden={!foldOpen || !matches(agent)}
       key={agent.session_id}
-      liveAgents={agents}
+      liveAgents={current ? agents : undefined}
       mdViewport={mdViewport}
       needsYou={needsYouBySession.get(agent.session_id) ?? 0}
       onPin={() => togglePin(agent.session_id)}
@@ -1381,8 +1418,9 @@ export function AgentsPage(): ReactNode {
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   // A refresh that fails keeps the list it has: unmounting every row would throw away what each
-  // holds - a draft, a send's refusal, an upload. With no rows there is nothing to keep.
-  if (isError && agents.length === 0) {
+  // holds - a draft, a send's refusal, an upload. With no rows there is nothing to keep. A list
+  // that is refilling is no failure to report, and the page says so in its place.
+  if (isError && agents.length === 0 && !refilling) {
     return <p className={dangerText}>Could not load agents: {error}</p>;
   }
 
@@ -1399,13 +1437,19 @@ export function AgentsPage(): ReactNode {
           </Link>
         </p>
       </header>
-      {isError ? (
+      {refilling ? (
+        <AgentListRefilling className={`mb-3 text-sm ${textSecondaryOnCanvas}`} />
+      ) : isError ? (
         <p className={`mb-3 text-sm ${dangerText}`} role="alert">
           Could not refresh agents: {error}
         </p>
       ) : null}
+      {/* Only a current list says nobody is connected: one that failed or is refilling keeps
+          the rows it had, and an empty one it had says nothing about now. */}
       {agents.length === 0 ? (
-        <EmptyState label="Agents empty state" message="No agents are connected." />
+        current ? (
+          <EmptyState label="Agents empty state" message="No agents are connected." />
+        ) : null
       ) : (
         <>
           <AgentFilterBar
@@ -1421,7 +1465,7 @@ export function AgentsPage(): ReactNode {
             onToggle={() => setSelected((current) => toggleMatching(matching, current))}
             selected={selected}
           />
-          {matching.length === 0 ? (
+          {matching.length === 0 && current ? (
             <EmptyState
               label="Agents filtered empty state"
               message="No agent matches these filters."
@@ -1439,11 +1483,13 @@ export function AgentsPage(): ReactNode {
           {queue.rows.length === 0 ? null : (
             <BroadcastSends
               className="narrow-or-short:mt-3"
+              onDiscard={queue.dismiss}
               onRestore={(row) => {
                 queue.dismiss(row);
-                composition.restore(row.send);
+                if (row.status === "failed") composition.restore(row.send, row.error);
               }}
               onRetry={queue.retry}
+              onStop={queue.stop}
               restoreRefusal={restoreRefusal}
               rows={queue.rows}
             />
@@ -1452,7 +1498,10 @@ export function AgentsPage(): ReactNode {
             <BroadcastComposer
               agents={agents}
               body={draft}
-              composed={composedBroadcast({ ...composition, delivery }, agents)}
+              composed={composedBroadcast(
+                { ...composition, delivery },
+                { agents, current, refilling }
+              )}
               defaulted={composition.delivery === null}
               delivery={delivery}
               onBody={composition.setDraft}
@@ -1467,7 +1516,8 @@ export function AgentsPage(): ReactNode {
           ) : null}
         </div>
       )}
-      <EndedAgentsWithReplies live={agents} />
+      {/* A session the list does not hold has ended only when the list is current. */}
+      {current ? <EndedAgentsWithReplies live={agents} /> : null}
     </section>
   );
 }

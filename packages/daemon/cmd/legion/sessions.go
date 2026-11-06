@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 )
@@ -71,11 +74,12 @@ func (in sessionsInput) open(ctx context.Context, flags *flag.FlagSet, stderr io
 }
 
 // importedClaim is what `legion sessions import` reads of one claim `legion claims list --json`
-// prints: its token, tree and recorded session file. Every other member is the daemon's and
-// ignored, so the list an earlier release prints reads alike.
+// prints: its token, tree, recorded session and recorded session file. Every other member is the
+// daemon's and ignored, so the list an earlier release prints reads alike.
 type importedClaim struct {
 	Token       string `json:"token"`
 	Tree        string `json:"tree"`
+	Session     string `json:"session"`
 	SessionFile string `json:"sessionFile"`
 }
 
@@ -83,14 +87,15 @@ type importedClaim struct {
 // into the session table, before a deployment that kept its sessions as files on its tree volumes
 // turns on a runtime.kubernetes.session_store that keeps sessions in a database, and before those
 // volumes go. It reads the claims `legion claims list --json` printed (--claims, `-` for stdin),
-// each claim of --tree alone
-// when given, and copies each claim's session file into the table whose URL --dsn-file holds,
-// under the path the claim recorded, which is the key Oh My Pi resumes the claim's session by
-// (ompsessions.Import). The file is read at that path, or, with --tree-volume, from the tree volume
-// mounted there (sandbox.SessionOnVolume). It prints one line per claim it copies, then one line
-// for every claim of the whole list, whatever --tree says, whose recorded session the table does
-// not hold (missingSessions), then a count of each outcome. It exits 1 when any claim's session
-// could not be copied (a file it cannot read, or a session the table already holds with other
+// each claim of --tree alone when given, and copies each claim's session file into the table whose
+// URL --dsn-file holds, under the path the claim recorded, which is the key Oh My Pi resumes the
+// claim's session by (ompsessions.Import). The file is read at that path, or, with --tree-volume,
+// from the tree volume mounted there (sandbox.SessionOnVolume). A closed claim whose resume path was
+// cleared but whose session id remains is found under the mounted volume's sessions directory by
+// that id. It prints one line per claim it copies, then one line for every claim of the whole list,
+// whatever --tree says, whose recorded session the table does not hold (missingSessions), then a
+// count of each outcome. It exits 1 when any claim's session could not be copied (a file it cannot
+// read, several files for one closed claim's id, or a session the table already holds with other
 // content) or a recorded session of the claims it was asked to copy is missing from the table; a
 // missing one of another tree is reported and leaves the exit as it is. A rerun copies nothing
 // twice: a session the table already holds byte for byte is reported as copied before.
@@ -116,28 +121,30 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 			continue
 		}
 		matched++
-		if c.SessionFile == "" {
+		outcome, file, err := importClaimSession(ctx, conn, c, *treeVolume)
+		if file == "" {
 			fmt.Fprintf(stdout, "%s recorded no session: nothing to copy\n", c.Token)
 			counts["nothing recorded"]++
 			continue
 		}
-		outcome, err := importSession(ctx, conn, c.SessionFile, *treeVolume)
 		var conflict *ompsessions.ConflictError
+		var ambiguous *sessionFileAmbiguityError
 		switch {
-		case errors.As(err, &conflict):
-			fmt.Fprintf(stdout, "%s refused %s: %v\n", c.Token, c.SessionFile, err)
+		case errors.As(err, &conflict), errors.As(err, &ambiguous):
+			fmt.Fprintf(stdout, "%s refused %s: %v\n", c.Token, file, err)
 			counts["refused"]++
 		case err != nil:
-			fmt.Fprintf(stdout, "%s failed %s: %v\n", c.Token, c.SessionFile, err)
+			fmt.Fprintf(stdout, "%s failed %s: %v\n", c.Token, file, err)
 			counts["failed"]++
 		case outcome.Outcome == ompsessions.Copied:
-			fmt.Fprintf(stdout, "%s copied %s (%s)\n", c.Token, c.SessionFile, outcome.Summary)
+			fmt.Fprintf(stdout, "%s copied %s (%s)\n", c.Token, file, outcome.Summary)
 			counts["copied"]++
 		default:
-			fmt.Fprintf(stdout, "%s copied before %s (identical, %s)\n", c.Token, c.SessionFile, outcome.Summary)
+			fmt.Fprintf(stdout, "%s copied before %s (identical, %s)\n", c.Token, file, outcome.Summary)
 			counts["copied before"]++
 		}
 	}
+
 	if matched == 0 && *tree != "" {
 		fmt.Fprintf(stderr, "legion sessions import: the claims list %s has no claim of %s\n", *input.claimsFile, *tree)
 		return 1
@@ -164,6 +171,73 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 		return 1
 	}
 	return 0
+}
+
+// sessionFileAmbiguityError names the several files that could hold one closed
+// claim's recorded session. Choosing one would make the import non-reproducible.
+type sessionFileAmbiguityError struct {
+	session string
+	files   []string
+}
+
+func (e *sessionFileAmbiguityError) Error() string {
+	return fmt.Sprintf("session %s has multiple files: %s", e.session, strings.Join(e.files, ", "))
+}
+
+// importClaimSession imports c's recorded file, or finds the one file of its
+// retained session id when issue_close has already cleared the resume path.
+func importClaimSession(ctx context.Context, conn *pgx.Conn, c importedClaim, treeVolume string) (importedSession, string, error) {
+	if c.SessionFile != "" {
+		outcome, err := importSession(ctx, conn, c.SessionFile, treeVolume)
+		return outcome, c.SessionFile, err
+	}
+	if c.Session == "" {
+		return importedSession{}, "", nil
+	}
+	volume := treeVolume
+	if volume == "" {
+		volume = sandbox.TreeRoot
+	}
+	source, err := sessionFileForID(c.Session, volume)
+	if err != nil {
+		return importedSession{}, "session " + c.Session, err
+	}
+	outcome, err := importSession(ctx, conn, source, volume)
+	return outcome, source, err
+}
+
+// sessionFileForID finds the session a closed claim recorded, under the mounted
+// tree volume or the default legacy volume root. Oh My Pi writes one session
+// file per working-directory folder as `<timestamp>_<session>.jsonl`.
+func sessionFileForID(session, treeVolume string) (string, error) {
+	if !claudelaunch.IsSessionID(session) {
+		return "", fmt.Errorf("recorded session %q is not a UUID", session)
+	}
+	root := treeVolume
+	if root == "" {
+		root = sandbox.TreeRoot
+	}
+	sessions := filepath.Join(root, sandbox.SessionsSubPath)
+	files, err := filepath.Glob(filepath.Join(sessions, "*", "*_"+session+".jsonl"))
+	if err != nil {
+		return "", fmt.Errorf("find recorded session %s: %w", session, err)
+	}
+	for i, file := range files {
+		cleaned := filepath.Clean(file)
+		relative, err := filepath.Rel(sessions, cleaned)
+		if err != nil || !filepath.IsLocal(relative) {
+			return "", fmt.Errorf("found recorded session %s outside %s", session, sessions)
+		}
+		files[i] = cleaned
+	}
+	switch len(files) {
+	case 0:
+		return "", fmt.Errorf("recorded session %s was not found under %s", session, sessions)
+	case 1:
+		return sandbox.SessionFromVolume(files[0], root)
+	default:
+		return "", &sessionFileAmbiguityError{session: session, files: files}
+	}
 }
 
 // missingSessions are the claims of the list, every tree's, that record a session the table does
@@ -221,19 +295,16 @@ type importedSession struct {
 // importSession copies the session recorded at file into the table: read at file itself, or from
 // the tree volume mounted at treeVolume when one is given, with the file's modification time.
 func importSession(ctx context.Context, conn *pgx.Conn, file, treeVolume string) (importedSession, error) {
-	source := file
+	source, root := file, ""
 	if treeVolume != "" {
 		onVolume, err := sandbox.SessionOnVolume(file, treeVolume)
 		if err != nil {
 			return importedSession{}, err
 		}
 		source = onVolume
+		root = filepath.Join(treeVolume, sandbox.SessionsSubPath)
 	}
-	info, err := os.Stat(source)
-	if err != nil {
-		return importedSession{}, fmt.Errorf("read the session file: %w", err)
-	}
-	content, err := os.ReadFile(source)
+	content, info, err := readSessionFile(source, root)
 	if err != nil {
 		return importedSession{}, fmt.Errorf("read the session file: %w", err)
 	}
@@ -242,4 +313,47 @@ func importSession(ctx context.Context, conn *pgx.Conn, file, treeVolume string)
 		return importedSession{}, err
 	}
 	return importedSession{Outcome: outcome, Summary: ompsessions.Summarize(content)}, nil
+}
+
+// readSessionFile reads one regular session file. When root names a mounted
+// legacy sessions directory, os.Root resolves source beneath its descriptor so
+// a path or symlink cannot escape between validation and the read.
+func readSessionFile(source, root string) ([]byte, os.FileInfo, error) {
+	var (
+		opened *os.File
+		err    error
+	)
+	if root == "" {
+		opened, err = os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, nil, errors.New("refuses a symbolic link")
+		}
+	} else {
+		volume, err := os.OpenRoot(root)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer volume.Close()
+		relative, err := filepath.Rel(root, source)
+		if err != nil {
+			return nil, nil, err
+		}
+		opened, err = volume.Open(relative)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	defer opened.Close()
+	info, err := opened.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, errors.New("is not a regular file")
+	}
+	content, err := io.ReadAll(opened)
+	if err != nil {
+		return nil, nil, err
+	}
+	return content, info, nil
 }

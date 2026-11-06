@@ -54,7 +54,7 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 		t.Fatalf("list --json = %v; want kind github-app, github_owners acme-org and max_grant 1h", got)
 	}
 
-	for _, kind := range []string{policy.KindGoogleLogin, policy.KindGitHubApp} {
+	for _, kind := range []string{policy.KindGoogleLogin, policy.KindGitHubApp, policy.KindAzureLogin} {
 		_, stderr, code = runSecret("retag", "APP_KEY", "--kind", kind)
 		if code != 0 {
 			t.Fatalf("retag %s: exit %d, stderr %q", kind, code, stderr)
@@ -108,7 +108,7 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "KIND") || !strings.Contains(stdout, "MAX_GRANT") || !strings.Contains(stdout, "google-login") || !strings.Contains(stdout, "30m") {
 		t.Fatalf("list: exit %d stdout %q stderr %q; want kind and max-grant", code, stdout, stderr)
 	}
-	for _, kind := range []string{policy.KindGitHubApp, policy.KindGoogleLogin} {
+	for _, kind := range policy.Kinds {
 		args := []string{"retag", "LOGIN_KEY", "--kind", kind}
 		if policy.KindNeedsGitHubOwners(kind) {
 			args = append(args, "--github-owners", "Ada  acme-org")

@@ -1,11 +1,14 @@
 package bus
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -39,10 +42,29 @@ const (
 	SessionBucket = "envoy_sessions"
 	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
 	CIStateBucket = "envoy_ci_state"
+	// DPoPProofBucket holds one record per RFC 9449 proof a listener has already spent, keyed by
+	// the proof's 'jti' and target URI, so a captured proof presented a second time inside its
+	// acceptance window is refused by whichever listener of a deployment receives it
+	// (cmd/listener/brokerauth.go). Its records are the only ones Envoy keeps on a bucket TTL
+	// alone: nothing reads a record back, and a key that has outlived the window its proof could
+	// be presented in says nothing, so each key expires rather than being deleted.
+	DPoPProofBucket = "envoy_dpop_proofs"
 	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 )
+
+// ListenerBuckets reports the KV buckets envoy-listener opens, in the order its NATS grant lists
+// them: the interest and role-claim buckets (internal/store), the session registry
+// (internal/session), the CI state bucket, which only a listener with the GitHub webhook route
+// opens (internal/cistore), and the spent-proof bucket, which only a listener that takes broker
+// access tokens opens (cmd/listener/brokerauth.go). The listener's keeper raises each of them
+// (WithKeptBuckets), and envoy-infra grants the listener and the host each one's calls
+// (packages/envoy/infra/core/permissions.go), so a bucket named here is both kept and granted.
+// Each call returns a fresh slice, so no caller changes another's list.
+func ListenerBuckets() []string {
+	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket, DPoPProofBucket}
+}
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
 // role lanes and the exception lanes.
@@ -51,6 +73,15 @@ const NotificationTopicPrefix = "notifications."
 // ExceptionTopicPrefix begins a delivery's exception lane: a failed or refused delivery is reported
 // on ExceptionTopicPrefix followed by its original topic.
 const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
+
+// LegionWakeTopic is the one topic the listener reports a wake of a released Legion issue pod
+// on: a message published to a role topic with no live holder, a message sent to the agent
+// subject of a session that is gone, and the listener's own `listener_ready`. It is a new leaf
+// under notifications.legion.>, which the stream already carries, so it is retained with no
+// stream change and no new grant. Only the listener sees these, and it does not know which
+// daemon owns a session: every Legion daemon consumes the topic on a durable of its own and acts
+// only on a released claim of its own project.
+const LegionWakeTopic = NotificationTopicPrefix + "legion.wake"
 
 // DispatchDeliveryDurable is the stream's durable consumer Dispatch's delivery intake binds, over
 // every GitHub notification (internal/dispatch/delivery).
@@ -73,14 +104,53 @@ func ListenerQueue(machineID string) string {
 	return "envoy-listener-" + strings.ReplaceAll(machineID, " ", "-")
 }
 
-// ListenerLiveQueue is the queue group the listener of machine machineID subscribes its live lane in
-// (every notifications topic, over core NATS), so NATS hands each message to one of the machine's
-// listeners while a rolling deploy runs two. It must differ from ListenerQueue: NATS merges
-// matching queue subscriptions by queue name across subjects and hands each message to one member,
-// so a live lane in the role lanes' group could take a role message its role lane never sees. A
-// space in the machine id is a hyphen in the name.
-func ListenerLiveQueue(machineID string) string {
-	return "envoy-listener-live-" + strings.ReplaceAll(machineID, " ", "-")
+// RoleLaneQueue is the queue group every listener subscribes the role lanes in, whatever its
+// machine, so NATS hands each role message to one listener and the holder's stream copy is
+// forwarded once. A listener whose NATS user may not subscribe in it (a hub whose grant predates
+// it) subscribes in its machine's group, ListenerQueue, instead (ConnectRoleLane).
+const RoleLaneQueue = "envoy-roles"
+
+// DeliverSubjectPrefix begins the relay subject a listener publishes a session's consumer
+// messages on, DeliverSubject. No stream subject captures it (StreamCaptures), so a relay frame
+// travels over core NATS and the stream stores nothing twice.
+const DeliverSubjectPrefix = NotificationTopicPrefix + "envoy.deliver."
+
+// DeliverSubject is the relay subject of session sessionID: the subject the listener that owns the
+// session publishes each message of its consumer (SessionConsumerName) on, and the session
+// subscribes to. Every message a session gets travels on it; a plain subscription of the session's
+// own carries only a lane receipt, a live ad-hoc topic and the core fallback ("Session consumers"
+// in packages/envoy/AGENTS.md).
+func DeliverSubject(sessionID string) string {
+	return DeliverSubjectPrefix + sessionID
+}
+
+// KeptTopicPrefix begins the listener's kept lane: the role messages it kept because it could not
+// deliver them and the drain cursors over them (cmd/listener/role_keep.go). The listener alone
+// publishes under it and reads it, no session may register a topic under it
+// (ReachesPrivateStreamSubject), and no consumer of the notification stream delivers one: the
+// stream carries the prefix (streamCarriedSubjects) where no consumer filter does
+// (StreamSubjects).
+const KeptTopicPrefix = NotificationTopicPrefix + "envoy.kept."
+
+// KeptRoleSubjectPrefix begins the kept lane of every role (KeptRoleSubject): what a reader of all
+// of them filters the stream's subjects on and reads each role's own token back out of
+// (Client.KeptRoleLanes).
+const KeptRoleSubjectPrefix = KeptTopicPrefix + "role."
+
+// KeptRoleSubject is the kept lane of role: the role messages the listener could not deliver, each
+// held until the role is claimed and then forwarded to the new holder. The role name is written
+// into the segment as contracts.RoleTopicPrefix writes it, unsanitized, so a role's kept subject
+// follows from its role topic.
+func KeptRoleSubject(role string) string {
+	return KeptRoleSubjectPrefix + role
+}
+
+// KeptRoleCursorSubject is the drain cursor of role: how far the listener has read that role's
+// kept lane, so a kept message already forwarded is not forwarded again. The role name is written
+// into the segment as contracts.RoleTopicPrefix writes it, unsanitized, so a role's cursor subject
+// follows from its role topic.
+func KeptRoleCursorSubject(role string) string {
+	return KeptTopicPrefix + "cursor." + role
 }
 
 // streamDuplicateWindow covers the entire retained notification lifetime, so
@@ -97,6 +167,9 @@ func ListenerLiveQueue(machineID string) string {
 // is generated.
 const streamDuplicateWindow = contracts.DeliveryDuplicateWindow
 
+// streamSubjects are the notification subjects the stream carries, and the list every consumer
+// filter over them takes (StreamSubjects). The stream carries one subject more, the listener's own
+// kept lane (streamCarriedSubjects).
 var streamSubjects = []string{
 	"notifications.agent.>",
 	"notifications.dispatch.>",
@@ -111,7 +184,15 @@ var streamSubjects = []string{
 	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
 }
 
-// Every subject of streamSubjects is classified for POST /v1/replay (cmd/listener/replay.go) by
+// streamCarriedSubjects is every subject the stream itself carries: the notification subjects and
+// the listener's kept lane, the role messages it could not deliver and the per-role drain cursors
+// over them. That prefix is the stream's alone and no consumer filter takes it: a kept copy still
+// carries its role topic in the envelope, so a consumer handed one would deliver it as a role
+// message and re-trigger role delivery on every listener. The listener reads the lane itself
+// instead (cmd/listener/role_keep.go).
+var streamCarriedSubjects = slices.Concat(streamSubjects, []string{KeptTopicPrefix + ">"})
+
+// Every subject of streamCarriedSubjects is classified for POST /v1/replay (cmd/listener/replay.go) by
 // whether a topic under it ever carries one agent session's private payload, read from the code
 // that publishes it. A shared subject's topics are replayed to any session that registered them as
 // interests; a private subject's never are, since a registered interest is any topic a caller
@@ -146,6 +227,10 @@ var (
 		// A failed delivery's report, carrying the undelivered message's payload and the session it
 		// was for (cmd/listener publishDeliveryException); a session's own lane included.
 		ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+		// A role message the listener could not deliver, carrying that message's payload and the
+		// holder it was meant for, and the per-role drain cursor over them: no session may
+		// register a topic under it and no replay hands one out.
+		KeptTopicPrefix + ">",
 	}
 )
 
@@ -170,9 +255,18 @@ func ReachesPrivateStreamSubject(sessionID, topic string) bool {
 	return topic != contracts.AgentSubject(sessionID) || strings.ContainsAny(sessionID, "*>")
 }
 
-// StreamSubjects reports the durable notification subjects, excluding role lanes.
+// StreamSubjects reports the notification subjects the stream carries, excluding the role lanes
+// and the listener's kept lane: the list every consumer filter built over the notification
+// subjects uses. The stream's own list, which carries the kept lane too, is StreamCarriedSubjects.
 func StreamSubjects() []string {
 	return slices.Clone(streamSubjects)
+}
+
+// StreamCarriedSubjects reports every subject the stream itself carries (streamCarriedSubjects):
+// the notification subjects and the listener's kept lane. A caller that builds or checks the
+// stream takes it, where a consumer's filter takes StreamSubjects.
+func StreamCarriedSubjects() []string {
+	return slices.Clone(streamCarriedSubjects)
 }
 
 // StreamCaptures reports whether the stream retains a publish to topic: some subject this binary
@@ -182,7 +276,7 @@ func StreamSubjects() []string {
 // literally: a `*` or `>` in it is a character of the topic, not a wildcard, which is what nats.go
 // publishes it as.
 func StreamCaptures(topic string) bool {
-	for _, subject := range streamSubjects {
+	for _, subject := range streamCarriedSubjects {
 		prefix := strings.TrimSuffix(subject, ">")
 		if len(topic) > len(prefix) && strings.HasPrefix(topic, prefix) {
 			return true
@@ -191,17 +285,24 @@ func StreamCaptures(topic string) bool {
 	return false
 }
 
+// streamCfg is the stream this binary creates, before ConnectOwningStream sets its replicas
+// (WithReplicas) and byte limit (WithStreamMaxBytes). Its age equals the duplicate window by
+// construction: the dashboard promises a same-mode retry cannot deliver twice for exactly as long
+// as the stream can still recognise the repeat, and a deployment where the two differed would break
+// that promise. A full stream refuses a new message (DiscardNew) rather than drop a stored one, so a
+// stored message leaves only by age: the stream holds every message it took for the whole window,
+// byte limit or not, and the promise holds. The refused publish's sender gets ErrStreamFull, which
+// is not an ErrRefused: the same publish is taken once age has made room, on a clustered stream
+// too, where a retry under the refused message's MsgId is acknowledged a duplicate with no sequence
+// and the bus sends it once more without the id (ErrNotStored).
 var streamCfg = &nats.StreamConfig{
-	Name:      Stream,
-	Subjects:  streamSubjects,
-	Retention: nats.LimitsPolicy,
-	// Retention equals the duplicate window by construction: the dashboard promises a
-	// same-mode retry cannot deliver twice for exactly as long as the stream can still
-	// recognise the repeat, and a deployment where the two differ would break that promise.
+	Name:       Stream,
+	Subjects:   streamCarriedSubjects,
+	Retention:  nats.LimitsPolicy,
 	MaxAge:     streamDuplicateWindow,
 	Duplicates: streamDuplicateWindow,
+	Discard:    nats.DiscardNew,
 	Storage:    nats.FileStorage,
-	Replicas:   1,
 }
 
 // roleLaneSubjects are the role lanes and their exceptions twin. They travel over core NATS and
@@ -230,6 +331,16 @@ func purgeLegacyRoleMessages(js nats.JetStreamContext) error {
 	return nil
 }
 
+// consumerFilterSubjects is subjects without the listener's kept lane, the list a consumer's
+// filter may carry: the stream's own list holds the kept prefix (streamCarriedSubjects) and no
+// consumer filter ever does, since a kept copy still carries its role topic and a consumer handed
+// one would deliver it as a role message, and a drain cursor is no envelope at all.
+func consumerFilterSubjects(subjects []string) []string {
+	return slices.DeleteFunc(slices.Clone(subjects), func(subject string) bool {
+		return subjectsOverlap(subject, KeptTopicPrefix+">")
+	})
+}
+
 func migrateLegacyConsumerFilters(js nats.JetStreamContext, subjects []string) error {
 	for name := range js.ConsumerNames(Stream) {
 		info, err := js.ConsumerInfo(Stream, name)
@@ -241,7 +352,7 @@ func migrateLegacyConsumerFilters(js nats.JetStreamContext, subjects []string) e
 		}
 		config := info.Config
 		config.FilterSubject = ""
-		config.FilterSubjects = slices.Clone(subjects)
+		config.FilterSubjects = consumerFilterSubjects(subjects)
 		if _, err := js.UpdateConsumer(Stream, &config); err != nil {
 			return err
 		}
@@ -342,16 +453,46 @@ func (r streamReconciliation) log() {
 }
 
 // ensureStreamWithConfig creates the stream with cfg, under a fresh StreamIDMetadataKey, or
-// reconciles the deployed one towards cfg: subjects (reconcileSubjects), retention and duplicate
-// window. The deployed stream's metadata is kept as it is, its StreamIDMetadataKey included; a
-// stream without that key gets one (deployedStreamID). A stream whose subjects, retention and
-// duplicate window already match cfg but that has no key gets only the key: the update writes the
-// stream's own configuration back with the key added, so its replicas, storage, limits and every
-// other setting stay as they are.
+// reconciles the deployed one towards cfg. cfg's Replicas is the deployment's replica count and its
+// MaxBytes the deployment's byte limit, 0 when it sets none.
+//
+// The update starts from the deployed configuration and sets only what this binary owns:
+//   - the subjects (reconcileSubjects);
+//   - the age and the duplicate window, cfg's, and discard, cfg's DiscardNew, so a full stream
+//     refuses a new message and keeps every stored one (a deployed DiscardOld stream is switched);
+//   - the replicas, the deployed count or cfg's when that is more: a start never writes fewer
+//     copies than it read, so a program whose setting is lower (an older setting, or one restarted
+//     before the others) leaves a raised stream it reads as it is, though not one raised after its
+//     read (below); lowering is an operator step that needs every program's setting lowered first;
+//   - the byte limit, the deployed limit or cfg's when that is more, cfg's on a stream with none
+//     and the deployed one when cfg sets none: a start never writes a lower limit than it read, so
+//     an operator's raise stands, and lowering or removing one is an operator step that needs
+//     every program's setting lowered or removed first;
+//   - the metadata, the deployed metadata kept as it is, its StreamIDMetadataKey included; a stream
+//     without that key gets one (identifiedMetadata).
+//
+// Every other deployed setting (storage, placement, compression, the message count and size
+// limits, direct get and the rest) stays as it is. A stream that already holds all of that gets no
+// update, and one that lacks only the key gets its own configuration back with the key added.
+// A refused create or update names the settings it carried (refusedSettings).
 //
 // Every bus.ConnectOwningStream caller runs this on the one stream, and JetStream's stream update
-// has no compare-and-swap, so two starts can each read the stream before either writes. A stream
-// one of them creates first is reconciled by the other, keeping the id it was created with
+// has no compare-and-swap, so two starts can each read the stream before either writes, and the
+// later write wins. A start can therefore lose to a concurrent start with other settings: one that
+// read the stream before this start's write and writes after it puts back the subjects, the
+// copies, the byte limit and the metadata it read. The client this start returns keeps the stream
+// (keepStream): within one keeper period it raises the copies and the byte limit to what its
+// settings ask for where the stream holds less, puts back StreamIDMetadataKey, the age, the
+// duplicate window and discard, and adds back each of its own subjects the stream lost that
+// overlaps none the stream carries, so the race ends at the most copies and the largest byte limit
+// any program asks for. Programs of a deployment with different ENVOY_NATS_REPLICAS or
+// ENVOY_STREAM_MAX_BYTES therefore do not fight over the stream: neither is ever lowered, and the
+// largest stands. Two races show even with the same settings, both of them settled where the
+// update is sent (updateStream): nats-server can leave one of two replica changes proposed at once
+// unanswered (seen with v2.10.29), and every nats-server before v2.12.5 can refuse the later of
+// two updates of one stream as overlapping an existing stream, the stream itself, when the other
+// update lands while the server checks this one (TestTwoStartsRaisingOneStreamAtOnceBothSucceed). A
+// stream one start creates first is reconciled by the other, keeping the id it was created with
 // (AddStream answers ErrStreamNameAlreadyInUse, as its config's id differs). Two that both find no
 // id write the same one, derived from what both read.
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
@@ -364,42 +505,183 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 		}
 		created.Metadata[StreamIDMetadataKey] = id.New()
 		if _, err = js.AddStream(&created); !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
-			return err
+			return refusedSettings(err, nil, &created)
 		}
 		info, err = js.StreamInfo(Stream)
 	}
 	if err != nil {
 		return err
 	}
-	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
-	if info.Config.MaxAge == cfg.MaxAge &&
-		info.Config.Duplicates == cfg.Duplicates &&
-		slices.Equal(info.Config.Subjects, reconciliation.subjects) {
-		if info.Config.Metadata[StreamIDMetadataKey] == "" {
-			identified := info.Config
-			identified.Metadata = identifiedMetadata(info)
-			if _, err = js.UpdateStream(&identified); err != nil {
-				return err
-			}
-		}
+	desired, reconciliation := reconciledStream(info, cfg)
+	if reflect.DeepEqual(desired, info.Config) {
 		reconciliation.log()
 		return nil
 	}
-	desired := *cfg
-	desired.Subjects = reconciliation.subjects
-	desired.Metadata = identifiedMetadata(info)
 	migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
 	if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
 		return err
 	}
-	if _, err = js.UpdateStream(&desired); err != nil {
-		return err
+	if err := updateStream(js, &desired, func(again *nats.StreamInfo) bool {
+		reconciled, _ := reconciledStream(again, cfg)
+		return reflect.DeepEqual(reconciled, again.Config)
+	}); err != nil {
+		return refusedSettings(err, &info.Config, &desired)
 	}
 	reconciliation.log()
 	if migratingRoleLanes {
 		return purgeLegacyRoleMessages(js)
 	}
 	return nil
+}
+
+// reconciledStream is the configuration ensureStreamWithConfig writes over the deployed stream info
+// describes, and the subject reconciliation in it: the deployed configuration with what this binary
+// owns set from cfg (ownedStream) and the subjects reconciled (reconcileSubjects).
+func reconciledStream(info *nats.StreamInfo, cfg *nats.StreamConfig) (nats.StreamConfig, streamReconciliation) {
+	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
+	desired := ownedStream(info, cfg)
+	desired.Subjects = reconciliation.subjects
+	return desired, reconciliation
+}
+
+// keptStream is the configuration the keeper (keepStream) writes over the deployed stream info
+// describes: the deployed configuration with what this binary owns set from cfg (ownedStream) and
+// the deployed subjects with this binary's own added where the keeper may (keptSubjects).
+func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
+	kept := ownedStream(info, cfg)
+	kept.Subjects = keptSubjects(info.Config.Subjects, cfg.Subjects)
+	return kept
+}
+
+// ownedStream is the deployed configuration info describes with every setting this binary owns
+// but the subjects set from cfg, as both a start (reconciledStream) and the keeper (keptStream)
+// write it: the replicas, the deployed count or cfg's when that is more; the byte limit, the
+// deployed limit or cfg's when that is more, cfg's on a stream with none and the deployed one when
+// cfg sets none; the age, the duplicate window and discard, cfg's; and the metadata with a
+// StreamIDMetadataKey (identifiedMetadata). Neither the copies nor the byte limit is ever lowered,
+// so an operator's raise of either stands; lowering one is an operator step once every program's
+// setting is lowered. The age, the window and discard are compiled into the binary, not deployment
+// settings (streamCfg), and every release that runs a keeper compiles the same three (72 hours, 72
+// hours, DiscardNew), so the keeper writing them puts back only what an operator changed. A release
+// that changed one would have its keeper and an older release's each put their own value back
+// every period while both run.
+func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
+	owned := info.Config
+	owned.Replicas = max(info.Config.Replicas, cfg.Replicas)
+	if cfg.MaxBytes > 0 {
+		owned.MaxBytes = max(info.Config.MaxBytes, cfg.MaxBytes)
+	}
+	owned.MaxAge = cfg.MaxAge
+	owned.Duplicates = cfg.Duplicates
+	owned.Discard = cfg.Discard
+	owned.Metadata = identifiedMetadata(info)
+	return owned
+}
+
+// keptSubjects is the subject list the keeper writes: the deployed list, then each of own, this
+// binary's subjects, that the list lacks and that overlaps no deployed subject. It does not check
+// own for a subject that captures a role lane, because no subject this binary compiles captures
+// one, which TestStreamConfigExcludesRoleLanes in stream_config_test.go guarantees. It only adds:
+// unlike a start (reconcileSubjects) it removes and replaces nothing, so two releases with
+// different subject lists never switch the stream back and forth, and a subject of this binary's
+// that another release's overlapping one replaced stays replaced until this binary's next start.
+func keptSubjects(deployed, own []string) []string {
+	kept := slices.Clone(deployed)
+	for _, subject := range own {
+		if slices.ContainsFunc(kept, func(other string) bool { return subjectsOverlap(subject, other) }) {
+			continue
+		}
+		kept = append(kept, subject)
+	}
+	return kept
+}
+
+// updateStream sends update, a whole stream configuration, and succeeds when the server accepts
+// it. Two other answers come of another update of the same stream landing at once rather than of
+// update itself, and after either the stream update names is read again, the update succeeding
+// when the stream holds what the caller asked for (holds):
+//   - an answer that never came (unanswered): nats-server can leave one of two replica changes
+//     proposed at once unanswered (seen with v2.10.29). That update may still land, so it is not
+//     sent again, and a stream that does not hold it returns the update's own error;
+//   - a refusal of the update's subjects as overlapping an existing stream (overlapRefused), which
+//     every nats-server before v2.12.5 can give the later of two updates of one stream: the server
+//     reads the stream's assignment, releases its lock to check the new configuration, and then
+//     looks for an overlap among the account's assignments skipping only the assignment it read,
+//     so an update that lands in between leaves the stream overlapping itself
+//     (jsClusteredStreamUpdateRequest, v2.10.29 server/jetstream_cluster.go; nats-server commit
+//     cb1afd68d014, first released in v2.12.5, skips by name). Nothing was written, so a stream
+//     that does not hold the update is sent it again, the write a server without that race would
+//     have taken after the other, up to overlapSends sends in all. A stream another stream really
+//     does overlap is refused every send, and the last refusal is returned.
+//
+// Any other refusal is the update's own error.
+func updateStream(js nats.JetStreamContext, update *nats.StreamConfig, holds func(*nats.StreamInfo) bool) error {
+	settled := func() bool {
+		again, err := js.StreamInfo(update.Name)
+		return err == nil && holds(again)
+	}
+	var err error
+	for range overlapSends {
+		if _, err = js.UpdateStream(update); !overlapRefused(err) {
+			break
+		}
+		if settled() {
+			return nil
+		}
+	}
+	if unanswered(err) && settled() {
+		return nil
+	}
+	return err
+}
+
+// overlapSends bounds the sends of one update the server refuses as overlapping an existing stream
+// (updateStream). Each such refusal of a stream no other stream overlaps means another update of
+// that stream landed while the server checked this one, so five sends outlast four such updates in
+// a row, and a stream another stream does overlap costs four sends and five stream reads more
+// before its refusal is returned.
+const overlapSends = 5
+
+// jsStreamSubjectOverlap is nats-server's error code for a stream create or update whose subjects
+// overlap an existing stream's (JSStreamSubjectOverlapErr). nats.go names no constant for it.
+const jsStreamSubjectOverlap = 10065
+
+// overlapRefused reports whether err is nats-server's refusal of a stream's subjects as
+// overlapping an existing stream's.
+func overlapRefused(err error) bool {
+	var apiErr *nats.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode == jsStreamSubjectOverlap
+}
+
+// unanswered reports whether err is a JetStream request's wait running out with no answer, rather
+// than the server's refusal.
+func unanswered(err error) bool {
+	return errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// refusedSettings is err, the server's answer to request, a create (deployed nil) or an update of
+// the stream deployed, named with each deployment setting whose value request changes:
+// ReplicasEnvVar when it sets more than one copy the stream does not have (a create, or a raise),
+// StreamMaxBytesEnvVar when it sets a byte limit the stream does not have. The bus is handed the
+// numbers and not where they came from, so the names are those of the settings every deployed
+// program reads them from (WithReplicas, WithStreamMaxBytes). One copy is never named: a server
+// refuses no stream for having one. nil, and a refusal of a request that changes neither, are
+// returned as they are.
+func refusedSettings(err error, deployed, request *nats.StreamConfig) error {
+	if err == nil {
+		return nil
+	}
+	var settings []string
+	if request.Replicas > 1 && (deployed == nil || request.Replicas != deployed.Replicas) {
+		settings = append(settings, fmt.Sprintf("%s=%d", ReplicasEnvVar, request.Replicas))
+	}
+	if request.MaxBytes > 0 && (deployed == nil || request.MaxBytes != deployed.MaxBytes) {
+		settings = append(settings, fmt.Sprintf("%s=%d", StreamMaxBytesEnvVar, request.MaxBytes))
+	}
+	if len(settings) == 0 {
+		return err
+	}
+	return fmt.Errorf("%s: %w", strings.Join(settings, ", "), err)
 }
 
 // identifiedMetadata is a copy of the deployed stream's metadata that holds a StreamIDMetadataKey:

@@ -44,10 +44,8 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 		// A peer writes the answered ask's server attributes into the block first, so the
 		// settlement's own repair finds nothing to write and holds no slot. The peer's observer is
 		// held once it has classified and credited the edit and before it arms a settlement, so
-		// the room's generation stays where the settlement read it. Held before it classifies
-		// anything (beforeObserveUpdate), the edit would be classified by the observer of the
-		// repair's own empty transaction, which drains the room's update log too and arms a
-		// settlement, and the superseded settlement would write no version at all.
+		// the room's generation stays where the settlement read it, and the superseded
+		// settlement would write no version at all.
 		release = holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, func(tree *pmdoc.Node) *pmdoc.Node {
 			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
 				if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id == "ask-block" {
@@ -59,6 +57,7 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 			return tree
 		})
 	}
+	invariant := requireReadUnchangedWhenReused(t, service)
 	settleCurrentGeneration(t, service, artifactID)
 	if release == nil {
 		t.Fatal("settlement never reached the window between its reconciliation and its repair")
@@ -66,6 +65,8 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 	release()
 	service.afterSettleReconcile = nil
 	requireNoSuppressedSlots(t, service, artifactID, "after the repair")
+	// The repair changed the tree the settlement read, so its version renders that tree again.
+	invariant.requireCounts(t, artifactID, 0, 1)
 
 	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
 		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the edited document", versions, versionsBefore+1)
@@ -118,6 +119,7 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 			return tree
 		})
 	}
+	invariant := requireReadUnchangedWhenReused(t, service)
 	settleCurrentGeneration(t, service, artifactID)
 	if release == nil {
 		t.Fatal("settlement never reached the window between its read and its stamp")
@@ -125,6 +127,8 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 	release()
 	service.afterSettleRead = nil
 	requireNoSuppressedSlots(t, service, artifactID, "after the stamp")
+	// The stamp's tree replaced the read, so the version renders the stamp's tree.
+	invariant.requireCounts(t, artifactID, 0, 1)
 
 	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
 		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the appended blocks", versions, versionsBefore+1)

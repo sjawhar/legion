@@ -4,11 +4,27 @@
 # so they share one stage keyed off the root lockfile.
 # Bun is pinned to the version the repo locks, like packages/daemon/docker/worker.Dockerfile:
 # bundler output differs across Bun releases, so a published SPA must not be built by whatever
-# 1.x is newest that day. .github/scripts/check-bun-version.sh keeps this equal to .bun-version.
-ARG BUN_VERSION=1.4.4
-FROM mirror.gcr.io/oven/bun:${BUN_VERSION} AS web
+# 1.x is newest that day. The web stage runs the copy of that Bun, named by digest;
+# .github/scripts/check-bun-version.sh holds that row's upstream tag to .bun-version.
+# ghcr.io/cybermonklabs/legion/ci, the copy of oven/bun:1.4.4 (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS web
 
 WORKDIR /repo
+
+# The row above names a Bun in its text, and an oven/bun image declares its version in no part
+# of its config, so no registry read can hold that label to the bytes it points at
+# (.github/scripts/mirror-ci-images.sh says so where it holds a library/golang row to its own
+# GOLANG_VERSION). This build is where the two meet: it refuses any Bun but the one
+# .bun-version pins, before it installs or builds anything, as the plugin stage of
+# packages/daemon/docker/worker.Dockerfile does through its build script.
+COPY .bun-version .bun-version
+RUN set -eu; \
+    pinned="$(tr -d '[:space:]' < .bun-version)"; \
+    running="$(bun --version)"; \
+    if [ "$running" != "$pinned" ]; then \
+      echo "This stage runs Bun $running, and .bun-version pins $pinned. The row this stage's FROM names is labelled with one Bun and carries another, so that row's label and its bytes disagree. Read the oven/bun row of .github/ci-images.yaml, then write the digest of the Bun the pin names." >&2; \
+      exit 1; \
+    fi
 
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -16,11 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 COPY package.json bun.lock ./
 COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/broker-client/package.json packages/broker-client/package.json
 COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
 COPY packages/pi-legion/package.json packages/pi-legion/package.json
 COPY packages/pi-shared/package.json packages/pi-shared/package.json
-COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
 COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/dispatch/package.json packages/dispatch/package.json
 COPY packages/proof-editor/package.json packages/proof-editor/package.json
@@ -37,9 +53,16 @@ RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 
 # Go version must match go.mod.
-FROM mirror.gcr.io/library/golang:1.27.1-alpine AS build
+# ghcr.io/cybermonklabs/legion/ci, the copy of golang:1.27.3-alpine (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 
 WORKDIR /src
+
+# A `|` between proxy entries makes a go command fall through to the next source after any error,
+# where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+# go.sum holds each module's hash either way, so this is a second path, not a weaker check
+# (sjawhar/legion#2512).
+ENV GOPROXY=https://proxy.golang.org|direct
 
 # The image's third-party notices: go-licenses (pinned in go-third-party-notices.sh) is built in a
 # layer of its own, before the module files, so neither a source change nor a dependency bump
@@ -54,6 +77,13 @@ COPY packages/envoy/internal ./internal
 # listenfd: the inherited listening socket envoy-dispatch and envoy-listener serve on
 # (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD).
 COPY packages/envoy/listenfd ./listenfd
+# going: the chat client, the answer filter and the run the going routes answer with, a package
+# outside internal/ so the daemon can speak the same stream (going/events.go). envoy-dispatch
+# compiles it in, so the build needs it here beside cmd and internal.
+COPY packages/envoy/going ./going
+# migrationid: the rule a store's migration identifiers follow, which internal/pgmigrate reads to
+# name the remedy a collision takes in the set that refused it.
+COPY packages/envoy/migrationid ./migrationid
 # The Go contracts file is generated from packages/contracts/schemas; never
 # trust the copy checked into the tree over a fresh regeneration.
 COPY --from=web /repo/packages/envoy/internal/contracts/generated.go ./internal/contracts/generated.go
@@ -91,9 +121,10 @@ RUN if [ -n "$LEGION_COMMIT" ] && ! printf '%s' "$LEGION_COMMIT" | grep -Eqx '[0
 
 # Minimal runtime — static binary, no shell needed.
 # curl is included for HEALTHCHECK and operational debugging.
-FROM mirror.gcr.io/library/debian:bookworm-slim
+# ghcr.io/cybermonklabs/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
-LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
+LABEL org.opencontainers.image.source=https://github.com/cybermonklabs/legion
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
     && groupadd -r envoy && useradd -r -g envoy envoy \

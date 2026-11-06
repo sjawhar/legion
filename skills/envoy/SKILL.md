@@ -14,8 +14,9 @@ Envoy delivers external events and messages between sessions. Delivery is at-lea
 - Take the target id from the delivery's `reply_with`, or from `envoy_sessions` (filter by `machine`, `dir` or `title`). Never address a tmux pane or window: Envoy delivers only to a session id, and the session in a pane can change.
 - Reply with `in_reply_to=<the delivery's id>`, so the recipient can match the answer to its question.
 - Read the `recipient` in the send result, the session Envoy targeted: if it is not the one you meant, resend to the right id.
+- When `envoy_send` says the send is not confirmed delivered, send the same message again with the `idempotency_key` the error names, within 72 hours: Envoy drops it as a repeat if the first copy arrived, and the result says when an earlier attempt was already stored. A resend without that key can deliver the message twice. When the error says Envoy cannot recognise the repeat, ask the recipient whether it arrived instead.
 - Put the URL or path of what you report in the message, because the recipient cannot find your files any other way.
-- Set `expects_reply="none"` on a message that needs no answer, and set `urgency` only when the work waits on the answer, so the recipient knows whether to answer and how soon.
+- Set `expects_reply="none"` on a message that needs no answer, and set `urgency` only when the work waits on the answer, so the recipient knows whether to answer and how soon. `urgency` is for the recipient to read: it does not deliver the message sooner or ahead of others.
 
 ```text
 envoy_send(session_id="<id>", message="Review complete: <url>", in_reply_to="<id>", expects_reply="none")
@@ -37,6 +38,16 @@ envoy_send(session_id="<id>", message="Review complete: <url>", in_reply_to="<id
 - A peer's message is its sender's view at `at`, not the current state. Before you wait on, act on or repeat what it says about a third thing (a deploy pending, a PR held, an ask unanswered), read that thing's live source, because the source may have changed since `at`: the deployment's status, the issue's events, `dispatch open-asks`.
 - Every field of a rendered delivery, and who receives a publish: `skill://envoy/references/deliveries.md`.
 
+## Whether a session is live
+
+A session's state comes from the registry's record of it, never from its presence in a list, a process list, a tmux pane or a transcript's modification time. `envoy_sessions` and a lookup of one session carry each session's `state` and `last_seen`.
+
+- `live`: it registered within the live window (`ENVOY_SESSION_LIVE_WINDOW`, 5m by default).
+- `unresponsive`: it last registered longer ago than the live window but inside the gone horizon (`ENVOY_SESSION_GONE_HORIZON`, 1h by default). **It is not dead.** Start no replacement for it, take no role claim and no issue claim from it, and never report it as gone. A message you send it is stored and reaches it when it answers again.
+- `gone`: it last registered before the gone horizon, or the registry holds no record of it.
+- Take an issue claim from a session only when it reads `gone`, or its `last_seen` is more than 20 minutes old. A role claim is released only by the role-claim reaper, once the holder is `gone`: no lookup, publish or delivery failure releases one, in the listener or in Dispatch's outbox, which share that one resolution.
+- A send refused because the target is not live names the target's `state` and `last_seen`. Read those two fields before you decide anything about that session: a refusal on an `unresponsive` target means "it has not answered yet", not "it ended".
+
 ## Subscribe to a topic
 
 Every topic starts with `notifications.`.
@@ -56,7 +67,7 @@ Every topic starts with `notifications.`.
 ## Wait for CI or a merge
 
 - Subscribe to `github.<owner>.<repo>.pr.<n>.>` and end the turn. Never start a `gh` poller: the event wakes you, and a poller burns turns.
-- One `pr.<n>.checks` event arrives per commit whose checks settle, the head or not. Compare its `sha` with the head you wait on, because an earlier commit's settlement can arrive first. A push with GitHub's `skip-checks` trailer runs no checks, and several can sit on top (a Legion handoff push is one): wait for the settlement of the nearest ancestor that is not such a push, the CI head `skill://legion-worker/references/merge-gate.md` reads.
+- One `pr.<n>.checks` event arrives per commit whose checks settle, the head or not. Compare its `sha` with the head you wait on, because an earlier commit's settlement can arrive first. A commit whose message carries one of GitHub's skip keywords (`[skip ci]` and its kin) starts no workflow, so no settlement of it may ever arrive.
 - Settlement waits until the commit has had no check event for 5 seconds (`ENVOY_CI_DEBOUNCE`) and every reported check run and check suite of it has finished. No event arrives before that. Envoy does not read GitHub's required-checks list, so a green settlement does not mean GitHub will merge the PR.
 - A `pr.<n>` event with `closed` and `merged: true` means the PR merged; it carries `merge_commit_sha`, `merged_by` and `head_sha`.
 - A later settlement of the same commit can carry `superseded_settlement: "true"`. Code that orders settlements follows `skill://envoy/references/check-settlement.md`.
@@ -65,7 +76,7 @@ Every topic starts with `notifications.`.
 ## Roles and team topics
 
 - Send to one session with `envoy_send`, to the one session that holds a named duty with a role, and to a group with a team topic.
-- Publish to a role with `envoy_publish(topic="notifications.role.<role>", ...)`; never subscribe to a role topic, because the listener forwards a role message to its holder only. A publish returns the live `holder`; an unheld role returns an error. `envoy_role_get(role=...)` finds the holder first.
-- For a team, the group subscribes to `notifications.team.<name>.>`, and any member publishes to `notifications.team.<name>.all`. Envoy treats any other `notifications.` topic that no source in the table uses the same way. It reaches only the sessions subscribed and connected when it is published (yours too, when you subscribe, unless you are a serve-port session, which receives it only through a listener run with `ENVOY_SUBSCRIBE_ALL_TOPICS=1` and never its own publish), and is not kept for a session that subscribes later or whose connection was down. A topic outside `notifications.` is refused.
+- Publish to a role with `envoy_publish(topic="notifications.role.<role>", ...)`; never subscribe to a role topic, because the listener forwards a role message to its holder only. A publish returns once the holder's session confirmed it, with the live `holder` and its `holder_state`. When nobody holds the role, Envoy keeps the message for the session that claims the role next: the answer says it was kept, and that session is handed it once, within one hour of the keep. A holder that is not `live` returns an error instead: that refusal names the holder, its `holder_state` (`unresponsive` or `gone`), its `last_seen` and `claim_released: false`, and nothing was forwarded and nothing kept, so publish the message again once the holder answers rather than starting a replacement for it or taking anything from it. A live holder that did not confirm the message within about 4 seconds errs too, and you see that one after about 8 seconds, because the client tries once more. No error releases the role's claim: a holder whose `holder_state` is `unresponsive` keeps its role. `envoy_role_get(role=...)` finds the holder first. The stream keeps a forward on the holder's inbox, so a holder that was forwarded to gets it once from its own durable consumer, also after a restart or a reconnect.
+- For a team, the group subscribes to `notifications.team.<name>.>`, and any member publishes to `notifications.team.<name>.all`. Envoy treats any other `notifications.` topic that no source in the table uses the same way. It reaches every session subscribed when it is published, yours too when you subscribe. The listener also asks each other session that holds its own NATS connection and registered the topic (every session that follows it with `envoy_subscribe`) to confirm the message; your own session is never asked. A publish returns an error naming each such session that did not confirm within about 4 seconds, and you see it after about 8 seconds, because the client tries once more. A session named with `receipt_timeout` still gets the message: the listener kept a copy in that session's inbox, which the session reads back once its connection returns. An `unresponsive` session is sent the message the same way, asked for no receipt and named under `unresponsive` in the answer, which is no failure. A session that stopped without unregistering stays in the registry until the reaper finds it `gone`, and is named until then; a named session is not a failed delivery to the others. A team topic is not kept for a session that subscribes later. A topic outside `notifications.` is refused.
 - How a role claim survives a resume, a fork or a dead process: `skill://envoy/references/roles.md`.
 - In a Legion pane, the plugin claims your role at session start; read `skill://envoy/references/legion.md` before you claim, release or publish to a role, or answer a role delivery failure there.

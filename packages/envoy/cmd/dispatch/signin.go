@@ -116,18 +116,10 @@ func checkSignInSettings(boot bootConfig, identityMode string) error {
 	return nil
 }
 
-// requireCookieSignIn refuses cookie identity with no way to sign in: a cookie server signs people
-// in through its sign-in issuer, or, under dev sign-in, at /auth/_dev/signin.
-func requireCookieSignIn(boot bootConfig, devSignIn bool) error {
-	if boot.SignInIssuer != "" || devSignIn {
-		return nil
-	}
-	return fmt.Errorf("cookie identity signs people in: %s are required", signInSettingNames())
-}
-
 // signInRule is who boot's sign-in admits: the members of a Cognito pool's group, or the people of
-// a Google Workspace domain; nil when boot configures neither (header identity, or dev sign-in),
-// matching signInFlow.
+// a Google Workspace domain; nil when boot configures neither (header identity, dev sign-in, or a
+// cookie server with no DISPATCH_SIGNIN_* setting, which admits nobody at all), matching
+// signInFlow.
 func signInRule(boot bootConfig) identity.SignInRule {
 	switch {
 	case boot.SignInDomain != "":
@@ -141,9 +133,10 @@ func signInRule(boot bootConfig) identity.SignInRule {
 
 // signInFlow is the sign-in issuer's code flow for boot's DISPATCH_SIGNIN_* settings, asking
 // Google for boot's Workspace domain in domain mode; nil when boot configures no sign-in (header
-// identity, or dev sign-in). It reads nothing: the issuer's discovery document is read when first
-// needed (oidc.CodeFlow.Run, which main starts at boot, or the first request), so a sign-in issuer
-// that is down at boot delays sign-ins and nothing else.
+// identity, dev sign-in, or a cookie server with no DISPATCH_SIGNIN_* setting, which signs nobody
+// in). It reads nothing: the issuer's discovery document is read when first needed
+// (oidc.CodeFlow.Run, which main starts at boot, or the first request), so a sign-in issuer that
+// is down at boot delays sign-ins and nothing else.
 func signInFlow(boot bootConfig) *oidc.CodeFlow {
 	if boot.SignInIssuer == "" {
 		return nil
@@ -184,10 +177,18 @@ func retirePlainRefreshTokens(ctx context.Context, people *store.PgPeopleStore, 
 // requestIdentityFor is how a browser request names its person under boot: a header-identity
 // server takes the header's email; a cookie server verifies its signed session cookie and, with
 // sign-in configured, confirms at least hourly that the person is still in DISPATCH_SIGNIN_GROUP
-// or DISPATCH_SIGNIN_DOMAIN (signInRule).
+// or DISPATCH_SIGNIN_DOMAIN (signInRule). A cookie server with no sign-in setting names nobody
+// (identity.NoBrowserIdentity): nobody can sign in there, and a cookie minted while sign-in was on
+// would otherwise go on naming its person for its thirty days, signed by the deployment's own
+// DISPATCH_SIGNING_KEY and confirmed by nobody. Dev sign-in has no issuer either and keeps its
+// cookie: it mints that cookie itself. That case is read from boot, which says what the
+// deployment configured, and not from signIn.
 func requestIdentityFor(boot bootConfig, signingKey auth.SigningKeys, people auth.PeopleStore, sessions auth.SessionStore, signIn *oidc.CodeFlow) identity.Identity {
 	if boot.IdentityHeader != "" {
 		return identity.HeaderIdentity{Header: boot.IdentityHeader, People: people}
+	}
+	if boot.SignInIssuer == "" && !boot.DevSignIn {
+		return identity.NoBrowserIdentity{}
 	}
 	cookieIdentity := identity.CookieIdentity{SigningKey: signingKey, Sessions: sessions}
 	if signIn != nil {

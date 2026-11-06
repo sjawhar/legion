@@ -144,12 +144,17 @@ func samples(t *testing.T) map[string][]Event {
 		"StreamHello":          {StreamHello{}},
 		"StreamTurnStart":      {StreamTurnStart{}},
 		"StreamTurnEnd":        {StreamTurnEnd{}},
+		"StreamPromptResult":   {StreamPromptResult{}},
 		"StreamClosed":         {StreamClosed{}},
 		"StreamLateRefusal":    {StreamLateRefusal{}},
 		"PromptAcked":          {PromptAcked{}},
 		"PromptRefused":        {PromptRefused{}},
+		"PodUpdateOpen":        {PodUpdateOpen{}},
+		"PodUpdateEnded":       {PodUpdateEnded{}},
 		"StalePlugin":          {StalePlugin{}},
 		"RoleUnheld":           {RoleUnheld{}},
+		"PodUpdateSignalled":   {PodUpdateSignalled{}},
+		"PodUpdateReask":       {PodUpdateReask{}},
 		"RequestSpawn":         {RequestSpawn{}},
 		"RequestRegister":      {RequestRegister{}},
 		"RequestReady":         {RequestReady{}},
@@ -162,6 +167,7 @@ func samples(t *testing.T) map[string][]Event {
 		"RequestOperatorClose": {RequestOperatorClose{}},
 		"RequestRetry":         {RequestRetry{}},
 		"RequestOperatorRetry": {RequestOperatorRetry{}},
+		"RequestForgetSession": {RequestForgetSession{}},
 		"RequestDeliver":       {RequestDeliver{}},
 		"RequestExit":          {RequestExit{}},
 	}
@@ -277,6 +283,8 @@ func fenced(ev Event, c Claim) Event {
 		return StreamTurnStart{Claim: c.Token}
 	case StreamTurnEnd:
 		return StreamTurnEnd{Claim: c.Token}
+	case StreamPromptResult:
+		return StreamPromptResult{Claim: c.Token, DeliveryID: c.Pending.ID, AgentInvoked: true}
 	case StreamClosed:
 		return StreamClosed{Claim: c.Token}
 	case StreamLateRefusal:
@@ -291,6 +299,14 @@ func fenced(ev Event, c Claim) Event {
 		return StalePlugin{Claim: c.Token}
 	case RoleUnheld:
 		return RoleUnheld{Claim: c.Token, Trigger: "publish"}
+	case PodUpdateSignalled:
+		return PodUpdateSignalled{Claim: c.Token, Generation: c.Generation, Session: session, Head: "deadbeef"}
+	case PodUpdateOpen:
+		return PodUpdateOpen{Claim: c.Token, Round: PodRound("a-pod-uid"), Reasons: "image", Task: UpdateTask(PodRound("a-pod-uid"), "image")}
+	case PodUpdateEnded:
+		return PodUpdateEnded{Claim: c.Token}
+	case PodUpdateReask:
+		return PodUpdateReask{Claim: c.Token, Round: PodRound("a-pod-uid")}
 	case RequestSpawn:
 		return RequestSpawn{Claim: c.Token}
 	case RequestRegister:
@@ -309,6 +325,8 @@ func fenced(ev Event, c Claim) Event {
 		return RequestRetry{Claim: c.Token}
 	case RequestOperatorRetry:
 		return RequestOperatorRetry{Claim: c.Token}
+	case RequestForgetSession:
+		return RequestForgetSession{Claim: c.Token, Session: c.Session}
 	case RequestDeliver:
 		return RequestDeliver{Claim: c.Token, Task: "another task"}
 	case RequestExit:
@@ -415,7 +433,8 @@ func TestAnEventForAnotherClaimIsAnError(t *testing.T) {
 func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
-		RequestRetry, RequestOperatorRetry, RequestDeliver, RequestExit:
+		RequestRetry, RequestOperatorRetry, RequestForgetSession, RequestDeliver, RequestExit,
+		PodUpdateSignalled:
 		return true
 	}
 	return false

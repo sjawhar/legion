@@ -475,3 +475,188 @@ func TestMigrationThirteenLetsAGrantLastUntilItsSessionEnds(t *testing.T) {
 		t.Fatalf("grants after 0013: %d with an expiry, %d without (%v), want one of each", withExpiry, withoutExpiry, err)
 	}
 }
+
+// TestMigrationTwentyAdmitsAVMEnrollment runs 0020 over a database 0019 left: a vm enrollment is
+// refused before it and accepted after it, and enrollments_kind_check, under that name, admits
+// exactly session, pod and vm, so box, host and any other kind stay refused.
+func TestMigrationTwentyAdmitsAVMEnrollment(t *testing.T) {
+	ctx := context.Background()
+	tx, apply := migrationSchema(t, "migration_twenty_vm_kind", 20)
+	const credential = "00000000-0000-0000-0000-0000000000c1"
+	if _, err := tx.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
+		values ($1, 'ada@example.com', 'example-host-devbox', 'tp-launcher', '{}'::jsonb, now() + interval '1 day')`, credential); err != nil {
+		t.Fatalf("insert launcher credential: %v", err)
+	}
+	enrol := func(sp pgx.Tx, id, kind string) error {
+		_, err := sp.Exec(ctx, `insert into enrollments (id, kind, runtime_id, thumbprint, launcher_credential_id, lease_expires_at)
+			values ($1, $2, $3, $4, $5, now() + interval '1 hour')`, id, kind, kind+"-1", "tp-"+id, credential)
+		return err
+	}
+	refused := func(when, id, kind string) {
+		t.Helper()
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = enrol(sp, id, kind)
+		if rollback := sp.Rollback(ctx); rollback != nil {
+			t.Fatalf("roll back the %s enrollment's savepoint: %v", kind, rollback)
+		}
+		if err == nil || !strings.Contains(err.Error(), "enrollments_kind_check") {
+			t.Fatalf("a %s enrollment %s = %v, want a violation of enrollments_kind_check", kind, when, err)
+		}
+	}
+	refused("before 0020", "00000000-0000-0000-0000-0000000000e1", "vm")
+
+	apply("0020_vm_enrollment_kind.up.sql")
+
+	const vm = "00000000-0000-0000-0000-0000000000e2"
+	if err := enrol(tx, vm, "vm"); err != nil {
+		t.Fatalf("a vm enrollment after 0020: %v", err)
+	}
+	var got string
+	if err := tx.QueryRow(ctx, `select kind from enrollments where id = $1`, vm).Scan(&got); err != nil || got != "vm" {
+		t.Fatalf("vm enrollment after 0020 = %q (%v), want %q", got, err, "vm")
+	}
+	for i, kind := range []string{"box", "host", "container"} {
+		refused("after 0020", fmt.Sprintf("00000000-0000-0000-0000-0000000000f%d", i), kind)
+	}
+	var definition string
+	if err := tx.QueryRow(ctx, `select pg_get_constraintdef(oid) from pg_constraint
+		where conrelid = 'enrollments'::regclass and conname = 'enrollments_kind_check'`).Scan(&definition); err != nil {
+		t.Fatalf("read enrollments_kind_check after 0020: %v", err)
+	}
+	const want = `CHECK ((kind = ANY (ARRAY['session'::text, 'pod'::text, 'vm'::text])))`
+	if definition != want {
+		t.Fatalf("enrollments_kind_check after 0020 = %q, want %q", definition, want)
+	}
+}
+
+// TestTheBuildBeforeTwentyStillReadsAndWritesItsOwnKinds holds 0020 to a rolling deploy, where the
+// build before it keeps serving over the migrated database: the session and pod rows that build
+// wrote at 0019 survive 0020 unchanged, and the session and pod rows it writes after 0020 are
+// stored and read back as at 0019. It writes a vm row after 0020 as well, so the test fails unless
+// 0020 widened the check: session and pod alone pass under 0012's constraint, which would let an
+// empty 0020 file through.
+func TestTheBuildBeforeTwentyStillReadsAndWritesItsOwnKinds(t *testing.T) {
+	ctx := context.Background()
+	tx, apply := migrationSchema(t, "migration_twenty_previous_build", 20)
+	const credential = "00000000-0000-0000-0000-0000000000c1"
+	if _, err := tx.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
+		values ($1, 'ada@example.com', 'example-host-devbox', 'tp-launcher', '{}'::jsonb, now() + interval '1 day')`, credential); err != nil {
+		t.Fatalf("insert launcher credential: %v", err)
+	}
+	type enrollment struct{ kind, runtimeID, thumbprint string }
+	enrol := func(when, id, kind string) enrollment {
+		t.Helper()
+		row := enrollment{kind: kind, runtimeID: kind + "-" + id[len(id)-2:], thumbprint: "tp-" + id}
+		if _, err := tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, thumbprint, launcher_credential_id, lease_expires_at)
+			values ($1, $2, $3, $4, $5, now() + interval '1 hour')`, id, row.kind, row.runtimeID, row.thumbprint, credential); err != nil {
+			t.Fatalf("insert %s enrollment %s: %v", kind, when, err)
+		}
+		return row
+	}
+	rows := map[string]enrollment{
+		"00000000-0000-0000-0000-0000000000e1": enrol("before 0020", "00000000-0000-0000-0000-0000000000e1", "session"),
+		"00000000-0000-0000-0000-0000000000e2": enrol("before 0020", "00000000-0000-0000-0000-0000000000e2", "pod"),
+	}
+
+	apply("0020_vm_enrollment_kind.up.sql")
+
+	rows["00000000-0000-0000-0000-0000000000e3"] = enrol("after 0020", "00000000-0000-0000-0000-0000000000e3", "session")
+	rows["00000000-0000-0000-0000-0000000000e4"] = enrol("after 0020", "00000000-0000-0000-0000-0000000000e4", "pod")
+	rows["00000000-0000-0000-0000-0000000000e5"] = enrol("after 0020", "00000000-0000-0000-0000-0000000000e5", "vm")
+	for id, want := range rows {
+		var got enrollment
+		if err := tx.QueryRow(ctx, `select kind, runtime_id, thumbprint from enrollments where id = $1`, id).
+			Scan(&got.kind, &got.runtimeID, &got.thumbprint); err != nil || got != want {
+			t.Fatalf("enrollment %s after 0020 = %+v (%v), want %+v", id, got, err, want)
+		}
+	}
+}
+
+// TestMigrationTwentySixRetiresVMEnrollmentsAndDropsTheKind runs 0026 over a database 0025 left,
+// holding a live vm enrollment with a live grant and a pending request under it: the enrollment
+// is revoked and reads as a session from then on, the grant is revoked, the request is
+// cancelled, each of the three is written with its audit row, and the kind is gone from
+// enrollments_kind_check, so no vm row can be written again. The session enrollment beside it is left exactly as it was, which is what says the
+// statement selects on the kind and not on the table.
+func TestMigrationTwentySixRetiresVMEnrollmentsAndDropsTheKind(t *testing.T) {
+	ctx := context.Background()
+	tx, apply := migrationSchema(t, "migration_twentysix_vm_kind", 26)
+	const credential = "00000000-0000-0000-0000-0000000000c1"
+	if _, err := tx.Exec(ctx, `insert into launcher_credentials (id, service, host, key_thumbprint, public_jwk, subject, expires_at)
+		values ($1, 'example-fleet', 'example-project/example-zone-a/example-vm-1', 'tp-launcher', '{}'::jsonb,
+			'example-fleet@example-project.iam.gserviceaccount.com@example-project/example-zone-a/1', now() + interval '1 day')`, credential); err != nil {
+		t.Fatalf("insert launcher credential: %v", err)
+	}
+	enrol := func(id, kind string) {
+		t.Helper()
+		if _, err := tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, thumbprint, launcher_credential_id, lease_expires_at)
+			values ($1, $2, $3, $4, $5, now() + interval '1 hour')`, id, kind, kind+"-1", "tp-"+id, credential); err != nil {
+			t.Fatalf("insert %s enrollment: %v", kind, err)
+		}
+	}
+	const vm = "00000000-0000-0000-0000-0000000000e1"
+	const session = "00000000-0000-0000-0000-0000000000e2"
+	enrol(vm, "vm")
+	enrol(session, "session")
+	const request = "00000000-0000-0000-0000-00000000001a"
+	if _, err := tx.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, rules_version, lifetime_seconds)
+		values ($1,$2,'a secret','pending','v1',3600)`, request, vm); err != nil {
+		t.Fatalf("insert pending request: %v", err)
+	}
+	const grant = "00000000-0000-0000-0000-00000000002a"
+	if _, err := tx.Exec(ctx, `insert into grants (id, request_id, enrollment_id, expires_at)
+		values ($1,$2,$3, now() + interval '1 hour')`, grant, request, vm); err != nil {
+		t.Fatalf("insert grant: %v", err)
+	}
+
+	apply("0026_drop_vm_enrollment_kind.up.sql")
+
+	var revoked bool
+	var kind string
+	if err := tx.QueryRow(ctx, `select revoked_at is not null, kind from enrollments where id=$1`, vm).Scan(&revoked, &kind); err != nil || !revoked || kind != "session" {
+		t.Fatalf("the vm enrollment after 0026 = revoked %t of kind %q (%v), want it retired and read as a session", revoked, kind, err)
+	}
+	if err := tx.QueryRow(ctx, `select revoked_at is null from enrollments where id=$1`, session).Scan(&revoked); err != nil || !revoked {
+		t.Fatalf("the session enrollment after 0026 = live %t (%v), want it untouched", revoked, err)
+	}
+	var grantRevoked bool
+	var revokedBy *string
+	if err := tx.QueryRow(ctx, `select revoked_at is not null, revoked_by from grants where id=$1`, grant).Scan(&grantRevoked, &revokedBy); err != nil ||
+		!grantRevoked || revokedBy == nil || *revokedBy != "broker" {
+		t.Fatalf("the vm enrollment's grant after 0026 = revoked %t by %v (%v), want it revoked by the broker", grantRevoked, revokedBy, err)
+	}
+	var state string
+	if err := tx.QueryRow(ctx, `select state from requests where id=$1`, request).Scan(&state); err != nil || state != "cancelled" {
+		t.Fatalf("the vm enrollment's pending request after 0026 = %q (%v), want cancelled", state, err)
+	}
+	for _, kind := range []string{"enrollment.revoked", "request.cancelled"} {
+		var rows int
+		if err := tx.QueryRow(ctx, `select count(*) from audit where kind=$1 and enrollment_id=$2 and actor='broker'`, kind, vm).Scan(&rows); err != nil || rows != 1 {
+			t.Errorf("audit rows of kind %s for the retired enrollment = %d (%v), want 1", kind, rows, err)
+		}
+	}
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sp.Exec(ctx, `insert into enrollments (id, kind, runtime_id, thumbprint, launcher_credential_id, lease_expires_at)
+		values ('00000000-0000-0000-0000-0000000000e3','vm','vm-2','tp-e3',$1, now() + interval '1 hour')`, credential)
+	if rollback := sp.Rollback(ctx); rollback != nil {
+		t.Fatalf("roll back the refused vm enrollment's savepoint: %v", rollback)
+	}
+	if err == nil || !strings.Contains(err.Error(), "enrollments_kind_check") {
+		t.Fatalf("a vm enrollment after 0026 = %v, want a violation of enrollments_kind_check", err)
+	}
+	var definition string
+	if err := tx.QueryRow(ctx, `select pg_get_constraintdef(oid) from pg_constraint
+		where conrelid = 'enrollments'::regclass and conname = 'enrollments_kind_check'`).Scan(&definition); err != nil {
+		t.Fatalf("read enrollments_kind_check after 0026: %v", err)
+	}
+	const want = `CHECK ((kind = ANY (ARRAY['session'::text, 'pod'::text])))`
+	if definition != want {
+		t.Fatalf("enrollments_kind_check after 0026 = %q, want %q", definition, want)
+	}
+}

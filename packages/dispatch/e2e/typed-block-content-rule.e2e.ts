@@ -65,3 +65,39 @@ test("an ask with a paragraph after its options, pasted as plain text, keeps eve
     await alice.close();
   }
 });
+
+// sjawhar/legion#2433: a block of a type the editor does not know, pasted from the system clipboard, keeps
+// every word as its lines too; the paste handler threw `unknown typed block "note"` and drew
+// nothing.
+test("an unknown typed block pasted as plain text keeps every word as its lines", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openOnEmptyLine(browser);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    await alice.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.evaluate(() => navigator.clipboard.writeText(":::note\nhello world\n:::\n"));
+    const editor = documentEditor(page);
+    // Counts the paste events the key press delivers to the editor, kept on the body where the
+    // editor does not read it, so a press that delivers none fails here, not as a dropped paste.
+    await editor.evaluate((root) => {
+      document.body.dataset.pastes = "0";
+      root.addEventListener("paste", () => {
+        document.body.dataset.pastes = String(Number(document.body.dataset.pastes) + 1);
+      });
+    });
+    await page.keyboard.press("ControlOrMeta+V");
+    await expect(page.locator("body")).toHaveAttribute("data-pastes", "1");
+
+    await expect(editor.locator("p", { hasText: /^:::note$/u })).toBeVisible();
+    await expect(editor.locator("p", { hasText: /^hello world$/u })).toBeVisible();
+    await expect(editor.locator("p", { hasText: /^:::$/u })).toBeVisible();
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toBe("Intro text.\n\n\\:::note\n\nhello world\n\n:::\n");
+    expect(errors).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});

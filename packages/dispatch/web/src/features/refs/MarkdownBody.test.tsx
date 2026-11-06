@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -15,13 +14,14 @@ import type {
 import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { TextAskCard } from "./markdown-cards";
-import { warmMarkdownRenderer } from "./markdown-engine";
-import { resetMermaidDiagrams } from "./mermaid-diagrams";
+import { setParseDeadline, warmMarkdownRenderer } from "./markdown-engine";
+import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import {
-  answerMermaidRequest,
-  type MermaidReply,
-  type MermaidRequest,
-} from "./mermaid-render.worker";
+  flushTasks,
+  type InstalledParseWorker,
+  installFakeParseWorker,
+  restoreParseWorker,
+} from "./parse-worker-fixture";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -51,12 +51,21 @@ const testWindow = window as unknown as HappyDOMWindow;
 let pageBefore = "about:blank";
 
 describe("Dispatch pictures", () => {
+  // Three of the rows below name a document whose slug is 2,683 characters, which puts their
+  // body past `markdownWorkerThreshold` and so in the parse worker's hands. The page's own
+  // `new Worker(…)` names a module this process cannot serve, so these rows drive the faked one
+  // (`parse-worker-fixture.ts`) and answer it: what they prove - a long name drawn and opened -
+  // is proved on the path the dashboard itself takes for a body that size.
+  let worker: InstalledParseWorker;
+
   beforeEach(() => {
+    worker = installFakeParseWorker();
     pageBefore = window.location.href;
     testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
   });
 
   afterEach(() => {
+    restoreParseWorker();
     testWindow.happyDOM.setURL(pageBefore);
   });
 
@@ -75,10 +84,12 @@ describe("Dispatch pictures", () => {
       const shot = await within(view.container).findByRole("img", { name: "shot.png" });
       expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
       expect(shot.getAttribute("loading")).toBe("lazy");
-      // Scaled to the column, never taller than 24rem.
-      expect(shot.className.split(" ")).toEqual(
-        expect.arrayContaining(["max-h-96", "max-w-full", "w-auto", "object-contain"])
+      // At its own size scaled down to the column, with no cap on its height.
+      const classes = shot.className.split(" ");
+      expect(classes).toEqual(
+        expect.arrayContaining(["max-w-full", "w-auto", "h-auto", "object-contain"])
       );
+      expect(classes.some((name) => name.startsWith("max-h-"))).toBe(false);
       expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
       // A picture with no caption is named by its slug.
       const plan = within(view.container).getByRole("img", { name: "plan-png" });
@@ -142,7 +153,7 @@ describe("Dispatch pictures", () => {
     }
   });
 
-  test("a Dispatch picture that pins no version reads as its reference, with the image's thumbnail", async () => {
+  test("a Dispatch picture that pins no version shows its latest version inline", async () => {
     const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
       issueSummary([picture])
     );
@@ -151,18 +162,99 @@ describe("Dispatch pictures", () => {
     );
 
     try {
-      const link = await within(view.container).findByRole("link", { name: "shot.png" });
-      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
-      expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/shot-png");
-      // The plain reference's thumbnail is the latest version, in the 40 px shape.
-      await waitFor(() =>
-        expect(link.querySelector("img")?.getAttribute("src")).toBe(
-          "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"
-        )
-      );
-      expect(link.querySelector("img")?.className.split(" ")).toContain("h-10");
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2");
+      expect(shot.className.split(" ")).toContain("max-w-full");
+      expect(shot.className.split(" ")).not.toContain("h-10");
+      expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
     } finally {
       getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a version-less picture whose latest version fails to load draws the next version", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />
+      </QueryClientProvider>
+    );
+
+    try {
+      const v2 = await within(view.container).findByRole("img", { name: "shot.png" });
+      fireEvent.error(v2);
+      await waitFor(() =>
+        expect(within(view.container).queryByRole("img", { name: "shot.png" })).toBeNull()
+      );
+      // An upload of version 3 refreshes the summary, as its event does.
+      act(() => {
+        queryClient.setQueryData(
+          ["issue-summary", "CORE-1"],
+          issueSummary([{ ...picture, latest_version: 3 }])
+        );
+      });
+      const v3 = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(v3.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a picture line that pins no version and names a document reads as its reference", async () => {
+    const notes: IssueReferenceSummaryDocument = {
+      id: "artifact-notes",
+      kind: "doc",
+      latest_version: 4,
+      name: "notes.md",
+      primary: false,
+      slug: "notes-md",
+    };
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issueSummary([notes]));
+    const view = render(
+      withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-md)" />)
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "notes.md" });
+      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md");
+      expect(view.container.querySelector("img")).toBeNull();
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a plain click on a picture opens it at full size instead of following its link", async () => {
+    const view = render(
+      withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png@v1)" />)
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      const click = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+      shot.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+      const lightbox = document.querySelector<HTMLDialogElement>(
+        '[data-testid="picture-lightbox"]'
+      );
+      expect(lightbox?.open).toBe(true);
+      expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
+      );
+      lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+
+      // Opened again, the layer goes with the body that opened it.
+      shot.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+      view.unmount();
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+    } finally {
       view.unmount();
     }
   });
@@ -256,6 +348,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const shot = await within(view.container).findByRole("img", { name: "shot" });
       expect(shot.getAttribute("src")).toBe(`/api/v1/issues/CORE-1/artifacts/${slug}/versions/1`);
       expect(shot.closest("a")?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}?v=1`);
@@ -297,6 +390,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
       expect(designs).toHaveLength(2);
       for (const link of designs) {
@@ -349,6 +443,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
       expect(designs).toHaveLength(1);
       expect(designs[0]?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
@@ -677,7 +772,9 @@ test("raw unsupported HTML renders as literal text with no element created", asy
   try {
     expect(await within(view.container).findByText("<img src=x onerror=alert(1)>")).not.toBeNull();
     expect(view.container.querySelector("img")).toBeNull();
-    expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true");
+    await waitFor(() =>
+      expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true")
+    );
   } finally {
     view.unmount();
   }
@@ -726,6 +823,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -857,6 +955,7 @@ test("two references in one body each resolve their own inline link and title, r
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -941,6 +1040,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -987,541 +1087,6 @@ test("a body re-renders when its text grows, formatting what has closed since", 
   } finally {
     view.unmount();
   }
-});
-
-/**
- * Stands in for the page's `Worker`, so a test decides what the worker answers and when. Like the
- * real one it posts `{ ready: true }` on a later task once started (or, while `startFails` is
- * set, fires `error` as a worker whose module cannot load does), then answers each request on a
- * later task with `answer`'s reply: the worker module's own `answerMermaidRequest` by default,
- * run on the test's thread; a reply of `undefined` never arrives, as from a worker stuck in a
- * layout. A terminated one posts nothing more.
- */
-class FakeWorker {
-  static created: FakeWorker[] = [];
-  static answer: (request: MermaidRequest) => MermaidReply | undefined = answerMermaidRequest;
-  static startFails = false;
-
-  terminated = false;
-  private readonly listeners: Record<string, ((event: unknown) => void)[]> = {
-    error: [],
-    message: [],
-  };
-
-  constructor() {
-    FakeWorker.created.push(this);
-    const fails = FakeWorker.startFails;
-    setTimeout(() => {
-      if (fails) this.emit("error", new Event("error"));
-      else this.emit("message", { data: { ready: true } });
-    }, 0);
-  }
-
-  addEventListener(type: string, listener: (event: unknown) => void): void {
-    this.listeners[type]?.push(listener);
-  }
-
-  postMessage(request: MermaidRequest): void {
-    setTimeout(() => {
-      const reply = FakeWorker.answer(request);
-      if (reply !== undefined) this.emit("message", { data: reply });
-    }, 0);
-  }
-
-  terminate(): void {
-    this.terminated = true;
-  }
-
-  private emit(type: string, event: unknown): void {
-    if (this.terminated) return;
-    for (const listener of this.listeners[type] ?? []) listener(event);
-  }
-}
-
-// The worker's renderer runs on the test's thread here, under happy-dom, where ELK, which lays out
-// flowcharts, cannot be built; so these draw sequence diagrams, and a dangling edge is refused in
-// validation, before any layout.
-describe("Mermaid diagrams", () => {
-  const pageWorker = globalThis.Worker;
-
-  // The worker, the drawn-source cache and a failure are module state that outlives every render,
-  // so each case starts from a page that has started and drawn nothing.
-  beforeEach(() => {
-    FakeWorker.created = [];
-    FakeWorker.answer = answerMermaidRequest;
-    FakeWorker.startFails = false;
-    globalThis.Worker = FakeWorker as unknown as typeof Worker;
-    resetMermaidDiagrams();
-  });
-
-  afterEach(() => {
-    resetMermaidDiagrams();
-    globalThis.Worker = pageWorker;
-  });
-
-  const fence = (source: string): string => `\`\`\`mermaid\n${source}\n\`\`\`\n`;
-  const figuresIn = (container: HTMLElement): HTMLElement[] =>
-    Array.from(container.querySelectorAll<HTMLElement>("figure.dispatch-mermaid"));
-  const diagramIn = (figure: Element): Element | null | undefined =>
-    figure
-      .querySelector(".dispatch-mermaid-preview")
-      ?.shadowRoot?.querySelector('svg[role="img"][aria-label="Rendered Mermaid diagram"]');
-
-  test("a mermaid block draws its diagram in the preview's shadow root, its source closed behind Mermaid source", async () => {
-    const view = render(
-      <MarkdownBody markdown={`Flow:\n\n${fence("sequenceDiagram\n  Alice->>Bob: Hi")}`} />
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      const [figure] = figuresIn(view.container);
-      const diagram = diagramIn(figure);
-      expect(diagram?.textContent).toContain("Alice");
-      expect(diagram?.textContent).toContain("Hi");
-      expect(figure.querySelector('[role="status"]')).toBeNull();
-      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
-      expect(source?.open).toBe(false);
-      expect(source?.querySelector("summary")?.textContent).toBe("Mermaid source");
-      expect(source?.querySelector("pre code")?.textContent).toContain("Alice->>Bob: Hi");
-      expect(view.container.textContent).toContain("Flow:");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  test("a source the renderer refuses shows the reason and its source open, and no diagram", async () => {
-    const view = render(<MarkdownBody markdown={`Broken:\n\n${fence("graph TD\n  A -->")}`} />);
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      const [figure] = figuresIn(view.container);
-      expect(figure.querySelector('[role="status"]')?.textContent).toMatch(
-        /^Unable to render Mermaid diagram: Dangling Mermaid edge/
-      );
-      expect(figure.querySelector(".dispatch-mermaid-preview")).toBeNull();
-      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
-      expect(source?.open).toBe(true);
-      expect(source?.querySelector("pre code")?.textContent).toContain("A -->");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  test("a dispatch reference in a diagram's label is neither linked nor resolved", async () => {
-    const view = render(
-      withQueries(
-        <MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: see dispatch://CORE-1")} />
-      )
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      const diagram = diagramIn(figuresIn(view.container)[0]);
-      expect(diagram?.textContent).toContain("dispatch://CORE-1");
-      expect(diagram?.querySelector("a")).toBeNull();
-      expect(view.container.querySelector("a")).toBeNull();
-      expect(within(view.container).queryAllByRole("link")).toHaveLength(0);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // The live view re-parses a streamed turn on every frame: a diagram whose fence has not closed
-  // yet stays code, and the diagrams before it in the same body draw.
-  test("a body ending in an unclosed mermaid fence keeps it as code until the fence closes", async () => {
-    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
-    const streaming = "```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo";
-    const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
-      const open = view.container.querySelectorAll("pre");
-      expect(open).toHaveLength(2);
-      const code = open[1];
-      expect(code.textContent).toContain("Carol->>Dave: Yo");
-      expect(code.closest("figure")).toBeNull();
-      view.rerender(<MarkdownBody markdown={`${done}\n${streaming}\n\`\`\`\n`} />);
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
-      expect(diagramIn(figuresIn(view.container)[1])?.textContent).toContain("Carol");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // A link reference definition is no block of the parse, so the diagram is the document's last
-  // block while the source's last line is the definition, not the diagram's closing fence. The
-  // fence did close, so the diagram is finished and draws.
-  test("a closed mermaid fence followed by a link reference definition draws its diagram", async () => {
-    const view = render(
-      <MarkdownBody
-        markdown={`${fence("sequenceDiagram\n  Alice->>Bob: Hi")}\n[spec]: https://example.com/spec\n`}
-      />
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // CommonMark closes a fence only with a line of the opener's character, at least as long as the
-  // opener. A streamed turn's last line that would close some other fence (three backticks under
-  // a four-backtick opener, tildes under a backtick one) leaves the block open, so it stays code.
-  test("a body ending in a line that cannot close its mermaid fence keeps it as code", async () => {
-    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
-    for (const streaming of [
-      "````mermaid\nsequenceDiagram\n  Carol->>Dave: Yo\n```",
-      "```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo\n~~~",
-    ]) {
-      resetMermaidDiagrams();
-      const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
-      try {
-        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
-        expect(figuresIn(view.container)).toHaveLength(1);
-        const code = view.container.querySelectorAll("pre")[1];
-        expect(code?.textContent).toContain("Carol->>Dave: Yo");
-        expect(code?.closest("figure")).toBeNull();
-      } finally {
-        view.unmount();
-      }
-    }
-  });
-
-  // A fence opened inside a quote or a list item is still open while its quote or item runs to
-  // the end of the body, so a diagram streamed there stays code too; closed inside its container,
-  // it draws.
-  test("a mermaid fence still open inside a quote or a list item keeps it as code", async () => {
-    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
-    for (const [streaming, closing] of [
-      ["> ```mermaid\n> sequenceDiagram\n>   Carol->>Dave: Yo", "\n> ```\n"],
-      ["- ```mermaid\n  sequenceDiagram\n    Carol->>Dave: Yo", "\n  ```\n"],
-    ] as const) {
-      resetMermaidDiagrams();
-      const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
-      try {
-        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
-        expect(figuresIn(view.container)).toHaveLength(1);
-        const code = view.container.querySelectorAll("pre")[1];
-        expect(code?.textContent).toContain("Carol->>Dave: Yo");
-        expect(code?.closest("figure")).toBeNull();
-        view.rerender(<MarkdownBody markdown={`${done}\n${streaming}${closing}`} />);
-        await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
-      } finally {
-        view.unmount();
-      }
-    }
-  });
-
-  // A line ends at a lone CR too, as micromark reads it, so a body written with CR endings keeps
-  // a diagram still being written inside its quote or list item as code.
-  test("a mermaid fence still open inside a quote or a list item of a body with lone-CR line ends keeps it as code", async () => {
-    const done = "```mermaid\rsequenceDiagram\r  Alice->>Bob: Hi\r```\r";
-    for (const [streaming, closing] of [
-      ["> ```mermaid\r> sequenceDiagram\r>   Carol->>Dave: Yo", "\r> ```\r"],
-      ["- ```mermaid\r  sequenceDiagram\r    Carol->>Dave: Yo", "\r  ```\r"],
-    ] as const) {
-      resetMermaidDiagrams();
-      const view = render(<MarkdownBody markdown={`Lead\r${done}\r${streaming}`} />);
-      try {
-        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
-        expect(figuresIn(view.container)).toHaveLength(1);
-        const code = view.container.querySelectorAll("pre")[1];
-        expect(code?.textContent).toContain("Carol->>Dave: Yo");
-        expect(code?.closest("figure")).toBeNull();
-        view.rerender(<MarkdownBody markdown={`Lead\r${done}\r${streaming}${closing}`} />);
-        await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
-      } finally {
-        view.unmount();
-      }
-    }
-  });
-
-  // A code block keeps its source's lone CRs and the renderer splits lines at LF alone, so the
-  // source reaches the worker with its line ends read as LF, and the diagram draws, not refused.
-  test("a mermaid block of a body with lone-CR line ends draws its diagram", async () => {
-    const view = render(
-      <MarkdownBody markdown={"Lead\r```mermaid\rsequenceDiagram\r  Alice->>Bob: Hi\r```\r"} />
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
-      expect(view.container.querySelector('[role="status"]')).toBeNull();
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // A body's `:::` directive is parsed read-only, so a fence inside one follows the same rule: open
-  // it stays code, and closed it draws.
-  test("a mermaid fence inside a directive keeps it as code while open and draws once closed", async () => {
-    const streaming = ":::note\n```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo";
-    const view = render(<MarkdownBody markdown={streaming} />);
-    try {
-      await waitFor(() =>
-        expect(view.container.querySelector("pre code")?.textContent).toContain("Carol->>Dave: Yo")
-      );
-      // Long enough for a draw the open fence must not start to have landed.
-      await Bun.sleep(50);
-      expect(figuresIn(view.container)).toHaveLength(0);
-      view.rerender(<MarkdownBody markdown={`${streaming}\n\`\`\`\n`} />);
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Carol");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  test("a body whose source changes or that unmounts before the worker answers draws only the newest source", async () => {
-    // With the engine loaded the body paints in its layout effect, so only the worker is late.
-    await warmMarkdownRenderer();
-    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: First")} />);
-    const gone = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Erin->>Finn: Gone")} />);
-    // Each superseded code block stays in an element of its own, the one the re-paint replaced
-    // and the one the unmount removed; only the cancel keeps a late draw from wrapping it.
-    const first = view.container.querySelector("pre");
-    const gonePre = gone.container.querySelector("pre");
-    try {
-      expect(first?.textContent).toContain("First");
-      expect(gonePre?.textContent).toContain("Gone");
-      expect(figuresIn(view.container)).toHaveLength(0);
-      gone.unmount();
-      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Carol->>Dave: Second")} />);
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Second");
-      // The worker answers in the order the bodies asked, so both earlier answers have arrived.
-      expect(first?.closest("figure")).toBeNull();
-      expect(gonePre?.closest("figure")).toBeNull();
-      expect(FakeWorker.created).toHaveLength(1);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  test("a source drawn before draws in the layout effect that paints its body", async () => {
-    await warmMarkdownRenderer();
-    const source = fence("sequenceDiagram\n  Alice->>Bob: Again");
-    const first = render(<MarkdownBody markdown={source} />);
-    try {
-      await waitFor(() => expect(figuresIn(first.container)).toHaveLength(1));
-    } finally {
-      first.unmount();
-    }
-    const again = render(<MarkdownBody markdown={`Again:\n\n${source}`} />);
-    try {
-      expect(figuresIn(again.container)).toHaveLength(1);
-      expect(diagramIn(figuresIn(again.container)[0])?.textContent).toContain("Again");
-    } finally {
-      again.unmount();
-    }
-  });
-
-  test("a diagram draws from the worker's answer alone: the page never runs the renderer", async () => {
-    const draw = spyOn(mermaidRenderer, "renderMermaidMarkup");
-    FakeWorker.answer = ({ id }) => ({
-      id,
-      markup: '<svg xmlns="http://www.w3.org/2000/svg"><text>From the worker</text></svg>',
-    });
-    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Hi")} />);
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toBe("From the worker");
-      expect(draw).not.toHaveBeenCalled();
-    } finally {
-      draw.mockRestore();
-      view.unmount();
-    }
-  });
-
-  test("a source the worker has not drawn within the time limit is refused, and a fresh worker draws the next", async () => {
-    resetMermaidDiagrams(50);
-    const draw = spyOn(mermaidRenderer, "renderMermaidMarkup");
-    FakeWorker.answer = (request) =>
-      request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
-    const view = render(
-      <MarkdownBody markdown={`Big:\n\n${fence("sequenceDiagram\n  Stuck->>Bob: Hi")}`} />
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      const [figure] = figuresIn(view.container);
-      expect(figure.querySelector('[role="status"]')?.textContent).toBe(
-        "Unable to render Mermaid diagram: it did not finish within 0.05 seconds"
-      );
-      expect(figure.querySelector(".dispatch-mermaid-preview")).toBeNull();
-      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
-      expect(source?.open).toBe(true);
-      expect(source?.querySelector("pre code")?.textContent).toContain("Stuck->>Bob: Hi");
-      // Terminating the worker is what stops a real layout.
-      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true]);
-
-      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: After")} />);
-      await waitFor(() =>
-        expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("After")
-      );
-      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true, false]);
-      // The renderer ran for the next source, inside the stand-in worker; the refused source
-      // never reached it, on the page's thread or any other.
-      const drawn = draw.mock.calls.map(([drawnSource]) => drawnSource);
-      expect(drawn.some((drawnSource) => drawnSource.includes("After"))).toBe(true);
-      expect(drawn.some((drawnSource) => drawnSource.includes("Stuck"))).toBe(false);
-    } finally {
-      draw.mockRestore();
-      view.unmount();
-    }
-  });
-
-  // The worker draws one source at a time and a slow one holds it for the whole time limit. A
-  // source whose every body re-painted or unmounted before the worker reached it is shown by no
-  // one, so it is never sent: a reader who leaves a page of slow diagrams does not wait for them
-  // on the next page.
-  test("a source no body still waits for is never sent to the worker", async () => {
-    await warmMarkdownRenderer();
-    resetMermaidDiagrams(60_000);
-    const sent: string[] = [];
-    FakeWorker.answer = (request) => {
-      sent.push(request.source);
-      return request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
-    };
-    const left = render(
-      <MarkdownBody
-        markdown={`${fence("sequenceDiagram\n  Stuck->>Bob: Hi")}\n${fence("sequenceDiagram\n  Gone->>Bob: Hi")}`}
-      />
-    );
-    try {
-      await waitFor(() => expect(sent.some((source) => source.includes("Stuck"))).toBe(true));
-    } finally {
-      left.unmount();
-    }
-    const next = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Next")} />);
-    try {
-      await waitFor(() =>
-        expect(diagramIn(figuresIn(next.container)[0] ?? next.container)?.textContent).toContain(
-          "Next"
-        )
-      );
-      expect(sent.some((source) => source.includes("Gone"))).toBe(false);
-    } finally {
-      next.unmount();
-    }
-  });
-
-  // The live view re-paints a turn on every frame while text after a finished diagram streams:
-  // each paint cancels the draw and asks for the same source again in one commit, so the source
-  // the worker is drawing keeps its place and its draw.
-  test("a body re-painted while the worker draws its source neither stops the worker nor sends the source again", async () => {
-    await warmMarkdownRenderer();
-    resetMermaidDiagrams(60_000);
-    const sent: MermaidRequest[] = [];
-    FakeWorker.answer = (request) => {
-      sent.push(request);
-      return undefined;
-    };
-    // Holds the page's listener, so the test sends the answer once the re-paints are done.
-    const listeners: ((event: unknown) => void)[] = [];
-    class HeldWorker extends FakeWorker {
-      override addEventListener(type: string, listener: (event: unknown) => void): void {
-        super.addEventListener(type, listener);
-        if (type === "message") listeners.push(listener);
-      }
-    }
-    globalThis.Worker = HeldWorker as unknown as typeof Worker;
-    const diagram = fence("sequenceDiagram\n  Alice->>Bob: Streamed");
-    const view = render(<MarkdownBody markdown={diagram} />);
-    try {
-      await waitFor(() => expect(sent).toHaveLength(1));
-      for (const after of ["More", "More text", "More text after it"]) {
-        view.rerender(<MarkdownBody markdown={`${diagram}\n${after}`} />);
-        await Bun.sleep(10);
-      }
-      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([false]);
-      expect(sent).toHaveLength(1);
-      expect(figuresIn(view.container)).toHaveLength(0);
-
-      for (const listener of listeners) listener({ data: answerMermaidRequest(sent[0]) });
-      await waitFor(() =>
-        expect(diagramIn(figuresIn(view.container)[0] ?? view.container)?.textContent).toContain(
-          "Streamed"
-        )
-      );
-      expect(view.container.textContent).toContain("More text after it");
-      expect(sent).toHaveLength(1);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // The time limit is a minute here, so the next body's diagram drawing within `waitFor`'s second
-  // proves it never waited for the source no body shows.
-  test("unmounting the only body whose source the worker is drawing stops the worker, caches nothing, and a fresh worker draws the next", async () => {
-    await warmMarkdownRenderer();
-    resetMermaidDiagrams(60_000);
-    const sent: string[] = [];
-    FakeWorker.answer = (request) => {
-      sent.push(request.source);
-      return request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
-    };
-    const stuck = fence("sequenceDiagram\n  Stuck->>Bob: Hi");
-    const left = render(<MarkdownBody markdown={stuck} />);
-    try {
-      await waitFor(() => expect(sent).toHaveLength(1));
-    } finally {
-      left.unmount();
-    }
-    const next = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Next")} />);
-    try {
-      await waitFor(() =>
-        expect(diagramIn(figuresIn(next.container)[0] ?? next.container)?.textContent).toContain(
-          "Next"
-        )
-      );
-      // Terminating the worker is what stops a real layout.
-      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true, false]);
-    } finally {
-      next.unmount();
-    }
-    // Nothing was cached for the stopped source: the same body mounted again shows it as code and
-    // asks the worker for it again.
-    const back = render(<MarkdownBody markdown={stuck} />);
-    try {
-      expect(figuresIn(back.container)).toHaveLength(0);
-      await waitFor(() =>
-        expect(sent.filter((source) => source.includes("Stuck"))).toHaveLength(2)
-      );
-    } finally {
-      back.unmount();
-    }
-  });
-
-  test("a worker that fails to start leaves every block as code, logs once, and is tried again once the window is online", async () => {
-    await warmMarkdownRenderer();
-    FakeWorker.startFails = true;
-    const logged = spyOn(console, "error").mockImplementation(() => {});
-    const failures = () =>
-      logged.mock.calls.filter(
-        ([message]) => typeof message === "string" && message.startsWith("Showing Mermaid source")
-      );
-    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: One")} />);
-    try {
-      await waitFor(() => expect(failures()).toHaveLength(1));
-      // A streamed turn paints again on every frame; no paint starts a worker or logs again.
-      for (const word of ["Two", "Three", "Four"]) {
-        view.rerender(<MarkdownBody markdown={fence(`sequenceDiagram\n  Alice->>Bob: ${word}`)} />);
-        await Bun.sleep(10);
-      }
-      expect(failures()).toHaveLength(1);
-      expect(FakeWorker.created).toHaveLength(1);
-      expect(figuresIn(view.container)).toHaveLength(0);
-      expect(view.container.querySelector("pre code")?.textContent).toContain("Four");
-
-      FakeWorker.startFails = false;
-      window.dispatchEvent(new Event("online"));
-      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Five")} />);
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Five");
-      expect(FakeWorker.created).toHaveLength(2);
-      expect(failures()).toHaveLength(1);
-    } finally {
-      logged.mockRestore();
-      view.unmount();
-    }
-  });
 });
 
 // Each list is parted from the next by a plain paragraph, so each parses as its own list.
@@ -1607,4 +1172,720 @@ test("a task item draws one disabled checkbox, ticked as its source is, in every
   } finally {
     view.unmount();
   }
+});
+
+/** The element a body is painted into (`markdownClassName`), which carries `data-markdown-pending`
+ *  while the worker owes its formatting and `data-markdown-fallback` when the parser refused it. */
+function markdownElement(container: HTMLElement): HTMLElement {
+  return container.firstElementChild as HTMLElement;
+}
+
+/** Both marks are React state: the commit that clears `data-markdown-pending`, and the one that
+ *  sets `data-markdown-fallback`, are queued when the painter's last piece is in, after the
+ *  painter has written the body itself straight into the element. A row that waits on what the
+ *  painter wrote - its items, its paragraphs, its text - is therefore through that wait before
+ *  the commit lands, so a read of a mark the commit changes is waited for rather than read at
+ *  once (sjawhar/legion#2519). */
+function pendingMark(container: HTMLElement): string | null {
+  return markdownElement(container).getAttribute("data-markdown-pending");
+}
+
+function fallbackMark(container: HTMLElement): string | null {
+  return markdownElement(container).getAttribute("data-markdown-fallback");
+}
+
+/** The body's own list items, not an `ask` block's options, so a row counts what it wrote. */
+function topItems(container: HTMLElement): HTMLElement[] {
+  return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > ul > li"));
+}
+
+/** A list longer than the threshold, under a lead line that is the row's own, so no row reads
+ *  the answer the engine cached for another row's body. */
+const longItems = Math.ceil(markdownWorkerThreshold / "- x\n".length) + 200;
+
+function longBody(lead: string): string {
+  return `${lead}\n\n${"- x\n".repeat(longItems)}`;
+}
+
+/** A body past the threshold written as plain paragraphs, with no list in it, so the rows below
+ *  count what one task of a paint puts in without the body's finishing pass moving anything
+ *  after it. */
+const paragraphs = Math.ceil(markdownWorkerThreshold / "x\n\n".length) + 200;
+
+function paragraphBody(lead: string): string {
+  return `${lead}\n\n${"x\n\n".repeat(paragraphs)}`;
+}
+
+/** The body's own paragraphs, the lead one included. */
+function topParagraphs(container: HTMLElement): HTMLElement[] {
+  return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > p"));
+}
+
+/** The text standing in the element beside its blocks: a body's own literal text, which a paint
+ *  replaces rather than stands behind. */
+function looseText(container: HTMLElement): string {
+  return Array.from(markdownElement(container).childNodes)
+    .filter((node) => node.nodeName === "#text")
+    .map((node) => node.textContent ?? "")
+    .join("");
+}
+
+/** The next task, so a row reads what one slice of a paint left in the element: the task that
+ *  slice queued is ahead of this one, so exactly one of them has run when it resolves. */
+function nextTask(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 0);
+  return promise;
+}
+
+/** Every count of the body's own paragraphs the element passes through from the call on, in
+ *  order and from its own changes rather than from what a task happens to leave; the call it
+ *  answers with ends the watch and gives them. */
+function paragraphCounts(element: HTMLElement): () => number[] {
+  const counts: number[] = [];
+  let count = element.querySelectorAll(":scope > p").length;
+  const take = (records: MutationRecord[]): void => {
+    for (const record of records) {
+      for (const node of Array.from(record.removedNodes)) {
+        count -= node.nodeName === "P" ? 1 : 0;
+      }
+      for (const node of Array.from(record.addedNodes)) {
+        count += node.nodeName === "P" ? 1 : 0;
+      }
+      counts.push(count);
+    }
+  };
+  const watch = new MutationObserver(take);
+  watch.observe(element, { childList: true });
+  return () => {
+    take(watch.takeRecords());
+    watch.disconnect();
+    return counts;
+  };
+}
+
+/** What the element held when the paint that replaced a part-built one took it over. That paint
+ *  empties the element a node at a time before its first batch, so what it took is the top of
+ *  the run of counts falling to nothing (`MarkdownBody`'s `paintBlockInSlices`). */
+function heldWhenEmptied(counts: readonly number[]): number {
+  let at = counts.lastIndexOf(0);
+  while (at > 0 && counts[at - 1] === counts[at] + 1) {
+    at -= 1;
+  }
+  return counts[at];
+}
+
+/**
+ * A body longer than `markdownWorkerThreshold` is parsed in a Web Worker (sjawhar/legion#2519),
+ * so the reader's own thread is free while the heaviest body on the page parses. These rows are
+ * what a reader sees of that: the text at once, the formatting when the answer lands, their
+ * place in the body kept across it, and - whatever becomes of the worker - a formatted body in
+ * the end. `data-markdown-fallback` keeps its one meaning, a body the parser itself refused.
+ */
+describe("A long body parsed in the worker", () => {
+  beforeEach(async () => {
+    await warmMarkdownRenderer();
+  });
+
+  afterEach(restoreParseWorker);
+
+  test("paints its text at once, marked pending, then its formatted body", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A list the worker is parsing");
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      // The reader has the body's own text while the worker parses it: readable, selectable,
+      // and never the failure marker.
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(view.container.textContent).toBe(markdown);
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(topItems(view.container)).toHaveLength(0);
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(view.container.textContent).not.toContain("- x");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The worker answers with the document as plain JSON, and the page builds a document of its own
+  // schema from it. `Schema.nodeFromJSON` cannot: it checks each attribute against its type, and
+  // the Markdown parser writes `title: null` for a picture with no title where the schema's
+  // `image.title` is a string, so every body holding a picture would be refused. This row is what
+  // fails if the page reaches for `nodeFromJSON` again.
+  test("rebuilds a body holding a picture, which its own parser writes a null title for", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody(
+      "A picture over a list\n\n![shot.png](dispatch://CORE-1/artifact/shot-png@v1)"
+    );
+    const view = render(withQueries(<MarkdownBody markdown={markdown} />));
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      const shot = view.container.querySelector("[data-dispatch-picture]");
+      expect(shot?.getAttribute("data-dispatch-picture")).toBe(
+        "dispatch://CORE-1/artifact/shot-png@v1"
+      );
+      expect(shot?.getAttribute("data-picture-caption")).toBe("shot.png");
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The live view hands each streamed delta to the same body as a longer `markdown`. Between the
+  // delta and the worker's answer the reader keeps the paint they were reading: a turn that
+  // flipped back to its source text on every delta would be unreadable while it streamed.
+  test("keeps the formatted body it painted when its text grows, until the new answer lands", async () => {
+    const worker = installFakeParseWorker();
+    const first = longBody("A turn still streaming");
+    const grown = `${first}${"- y\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+
+      view.rerender(<MarkdownBody markdown={grown} />);
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(topItems(view.container)).toHaveLength(longItems);
+      expect(view.container.textContent).not.toContain("- x");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 50));
+      expect(topItems(view.container).at(-1)?.textContent).toBe("y");
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A turn streaming into the live view hands the same body a longer source every frame. The
+  // frame the worker has already started on cannot be taken back, so the page waits for that one
+  // answer and posts the frame the reader is waiting for in its place, rather than one message
+  // per frame: the worker is made to parse exactly one stale frame. That frame is the newest
+  // parse the reader can be given until the stream pauses, so it is painted when it lands, and
+  // the element stays marked pending because the frame they are on is still owed. A queue that
+  // posted each frame as it arrived would have the worker parse every one of them
+  // (sjawhar/legion#2519).
+  test("gives the worker one stale frame while a turn streams, and paints it while the newest is owed", async () => {
+    const worker = installFakeParseWorker();
+    const first = longBody("A turn streaming past the worker");
+    const grown = `${first}${"- y\n".repeat(50)}`;
+    const grownAgain = `${grown}${"- z\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await worker.waitForRequests(1);
+      view.rerender(<MarkdownBody markdown={grown} />);
+      view.rerender(<MarkdownBody markdown={grownAgain} />);
+      await flushTasks();
+      // The worker holds the frame it started on and nothing else: neither frame written since
+      // was posted behind it.
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first]);
+
+      // The stale frame's answer lands. It is what the reader is shown, and the frame they are
+      // on takes its place in the worker.
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first, grownAgain]);
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 100));
+      expect(topItems(view.container).at(-1)?.textContent).toBe("z");
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // What a reader watching a long turn sees. The live view renders up to ten frames a second
+  // (`AgentThread.tsx`), and a parse of a long body takes longer than the gap between two of
+  // them, so every frame cancels the parse of the frame before it. An element that took only
+  // the answer to the frame it is on would be shown nothing for as long as the stream ran: each
+  // answer would land for a frame already replaced. The answer to a frame this element asked
+  // for is painted instead, however many frames have been written since, so the body grows one
+  // parse behind the stream (sjawhar/legion#2519).
+  test("grows through a stream whose frames outrun the worker, a parse behind it", async () => {
+    const worker = installFakeParseWorker();
+    const frames = [0, 1, 2, 3, 4].map(
+      (frame) => `${longBody("A turn the worker cannot keep up with")}${"- y\n".repeat(frame * 20)}`
+    );
+    const view = render(<MarkdownBody markdown={frames[0]} />);
+
+    try {
+      await worker.waitForRequests(1);
+      // Two more frames are written while the worker is still on the first: the reader is shown
+      // the frame it was holding, and the newest takes its place.
+      view.rerender(<MarkdownBody markdown={frames[1]} />);
+      view.rerender(<MarkdownBody markdown={frames[2]} />);
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBe("true");
+
+      // The stream writes on while that frame is parsed, and the body grows again.
+      view.rerender(<MarkdownBody markdown={frames[3]} />);
+      view.rerender(<MarkdownBody markdown={frames[4]} />);
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 40));
+      expect(pendingMark(view.container)).toBe("true");
+
+      // The stream stops. The frame the reader is on is the one the worker is holding, and the
+      // body ends on it, marked neither pending nor as the fallback.
+      await act(() => worker.answer(2));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 80));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // Every edit of a long comment, and a streamed turn that crossed the threshold after a short
+  // paint, is a source the element does not hold - and 16,000 elements of it. Put in with one
+  // `replaceChildren` that is 918-971 ms of WebKit's thread (`MarkdownBody.tsx`, `ATTACH_BATCH`),
+  // so what decides is the source, not whether anything is painted here already
+  // (sjawhar/legion#2519).
+  test("slices the paint of a changed source into a body it already shows formatted", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A long comment before its edit");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      // The task the answer lands in puts in one batch of the body and hands the thread back.
+      // A paint of the whole body in one task - what a repaint of the source already painted
+      // here gets - would have every paragraph of it in by now.
+      expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 51);
+
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A sliced paint empties the element before its first batch and fills it 500 nodes a task, so
+  // between those tasks the element holds part of a body. A frame arriving in the middle of one
+  // must not stop it: the next render is pending and keeps whatever the element holds, so the
+  // reader would be left with a truncated prefix - 250 of 1,511 paragraphs in the deep review's
+  // reproduction - until that frame's own answer and its whole paint landed. The paint goes on
+  // to the end instead, which is the newest body the reader can be shown while the frame they
+  // are on is still owed (sjawhar/legion#2519).
+  test("goes on filling a body when the next frame arrives mid-paint, rather than leaving part of one", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A long comment the reader is watching");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const editedAgain = `${edited}${"z\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      // The paint of the edit has emptied the element and is filling it a batch at a task: what
+      // the element holds now is part of a body, fewer blocks than the paint before it left.
+      await waitFor(() =>
+        expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1)
+      );
+
+      // The next frame lands mid-paint. The body being painted still arrives whole, and the
+      // element stays marked pending, since that frame is owed.
+      view.rerender(<MarkdownBody markdown={editedAgain} />);
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(2));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 101));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The same frame mid-paint, on an element that had nothing painted in it when the paint
+  // began: a reader opening the live session view while a long turn streams gets a pending
+  // first render and a frame every 100 ms, so the first frame lands while the first paint is
+  // still filling the element. A paint is stopped by nothing but the paint that replaces it, so
+  // the element must be left to it: the new frame's own text written here would stand in front
+  // of the batches still arriving behind it, and that is what the reader would read until that
+  // frame's answer and its whole paint landed (sjawhar/legion#2519).
+  test("writes no text beside a paint filling a freshly mounted element when a frame arrives", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A turn a reader opened while it streamed");
+    const grown = `${first}${"y\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      // Nothing is painted here and nothing is painting: the reader has the body's own text,
+      // which is what a first render owes them.
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(looseText(view.container)).toBe(first);
+      expect(topParagraphs(view.container)).toHaveLength(0);
+
+      await act(() => worker.answer(0));
+      // One task at a time up to the first batch, which is where the paint replaces that text.
+      for (let task = 0; task < 50 && topParagraphs(view.container).length === 0; task += 1) {
+        await act(nextTask);
+      }
+      const landed = topParagraphs(view.container).length;
+      expect(landed).toBeGreaterThan(0);
+      expect(landed).toBeLessThan(paragraphs + 1);
+
+      // The frame arrives in the middle of that paint.
+      view.rerender(<MarkdownBody markdown={grown} />);
+      // No text of that frame stands beside the blocks still arriving: about 2,800 characters
+      // of it would otherwise read in front of them, so the count is what this asserts.
+      expect(looseText(view.container).length).toBe(0);
+      expect(topParagraphs(view.container).length).toBeGreaterThanOrEqual(landed);
+
+      // The paint still puts its whole body in, with no text of the new frame beside it, and
+      // the element stays pending because that frame is owed.
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+      expect(looseText(view.container).length).toBe(0);
+      expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      expect(looseText(view.container).length).toBe(0);
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // What the paint that replaces a part-built one leaves on the way through. The answer to the
+  // frame after it is the one thing that stops a paint short, and the painter puts back what
+  // the element held before it started (`MarkdownBody`'s `paintBlockInSlices`), so what the
+  // replacing paint takes over is the whole body the reader was reading, never the few hundred
+  // paragraphs the stopped one had put in. Every task of this row leaves the element holding
+  // all of that body or a growing part of the new one (sjawhar/legion#2519).
+  test("holds none or all of the body it was reading while a part-built paint is replaced", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A body a reader is reading");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const editedAgain = `${edited}${"z\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      // Frame N is painted part-way: the element holds some of it, fewer blocks than the body
+      // the reader was reading.
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      await waitFor(() =>
+        expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1)
+      );
+
+      // Frame N+1 answers mid-paint, which is what stops that paint. Its own paint empties the
+      // element before its first batch, and what it empties is what the stopped one left.
+      const changes = paragraphCounts(markdownElement(view.container));
+      view.rerender(<MarkdownBody markdown={editedAgain} />);
+      await act(() => worker.answer(2));
+
+      // Every task from there to the end of that paint: the whole body the reader had, or a
+      // part of the new one, which only grows.
+      const seen: number[] = [];
+      for (let task = 0; task < 200; task += 1) {
+        seen.push(topParagraphs(view.container).length);
+        if (seen.at(-1) === paragraphs + 101) {
+          break;
+        }
+        await act(nextTask);
+      }
+      expect(seen.at(-1)).toBe(paragraphs + 101);
+      const filling = seen.findIndex((count) => count !== paragraphs + 1);
+      expect(seen.slice(0, filling)).toEqual(seen.slice(0, filling).map(() => paragraphs + 1));
+      expect(seen.slice(filling)).toEqual([...seen.slice(filling)].sort((a, b) => a - b));
+      expect(new Set(seen.slice(filling)).size).toBe(seen.length - filling);
+      expect(heldWhenEmptied(changes())).toBe(paragraphs + 1);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A body the engine already has the answer for is rendered in the commit that mounts it, never
+  // pending on the worker - and is still built across tasks, so between them the element holds
+  // part of a body. It carries the marker all the same, which is what a reader's surface, and
+  // every browser row that waits for a body to settle, reads to know the body is not all there.
+  test("marks a body painted in slices from the answer cache as pending until its last piece", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = paragraphBody("A body the engine has already parsed");
+    const first = render(<MarkdownBody markdown={markdown} />);
+    await act(() => worker.answer(0));
+    await waitFor(() => expect(topParagraphs(first.container)).toHaveLength(paragraphs + 1));
+    first.unmount();
+
+    const view = render(<MarkdownBody markdown={markdown} />);
+    try {
+      // The answer came from the cache: the worker was asked for this body once, on the mount
+      // before.
+      expect(worker.requests).toHaveLength(1);
+      expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1);
+      expect(pendingMark(view.container)).toBe("true");
+
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The body's finishing pass (`finishBlock`) runs on the sliced path as it does on the
+  // whole-body one: a task item draws its checkbox, ticked as its source is, and a tight item's
+  // paragraph is unwrapped so the item reads as one line.
+  test("draws its task checkboxes and unwraps its tight items when it is painted in slices", async () => {
+    const worker = installFakeParseWorker();
+    const pairs = Math.ceil(markdownWorkerThreshold / "- [ ] todo\n- [x] done\n".length) + 50;
+    const markdown = `A long task list\n\n${"- [ ] todo\n- [x] done\n".repeat(pairs)}`;
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(pairs * 2));
+
+      const items = topItems(view.container);
+      const boxes = items.map((item) => item.querySelector<HTMLInputElement>("input"));
+      expect(boxes.every((box) => box?.type === "checkbox" && box.disabled)).toBe(true);
+      expect(boxes.map((box) => box?.checked)).toEqual(
+        Array.from({ length: pairs * 2 }, (_unused, at) => at % 2 === 1)
+      );
+      // Each item is tight, so none of them keeps a paragraph of its own.
+      expect(items.some((item) => item.querySelector("p") !== null)).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The parser refusing a body is the one final failure, and the only thing
+  // `data-markdown-fallback` says: pending before it was interim, never a failure.
+  test("ends as its literal text, marked as the fallback, where the parser refuses it", async () => {
+    const worker = installFakeParseWorker();
+    const refused =
+      'A body with <span data-dispatch="bogus">a span</span> this schema has no node for';
+    const markdown = longBody(refused);
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(fallbackMark(view.container)).toBe("true"));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(view.container.textContent).toBe(markdown);
+      expect(topItems(view.container)).toHaveLength(0);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ends formatted on the page's own thread when no worker can be created", async () => {
+    const worker = installFakeParseWorker({ refuseToCreate: true });
+    const view = render(<MarkdownBody markdown={longBody("A page that allows no worker")} />);
+
+    try {
+      // The page parses it itself: the reader waits, and then reads the body as a list. A
+      // worker that cannot be created is never the parser refusing the body.
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(worker.created).toBeGreaterThan(0);
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ends formatted on the page's own thread when the worker crashes", async () => {
+    const worker = installFakeParseWorker();
+    const view = render(<MarkdownBody markdown={longBody("A worker that crashes")} />);
+
+    try {
+      await act(() => worker.crash(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // Nothing ever answers this body. The engine's deadline ends with the body parsed on the page;
+  // this row shortens it through `setParseDeadline`, the seam `resetMermaidDiagrams` is for the
+  // diagram renderer's own limit, so it proves what the deadline ends in without waiting out the
+  // page's own 10 s. The 25 s below is room for a loaded runner, not a second bound.
+  test("ends formatted on the page's own thread when the worker misses its deadline", async () => {
+    const worker = installFakeParseWorker();
+    setParseDeadline(50);
+    const view = render(<MarkdownBody markdown={longBody("A worker that never answers")} />);
+
+    try {
+      await worker.waitForRequests(1);
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems), {
+        interval: 250,
+        timeout: 25_000,
+      });
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      setParseDeadline();
+      view.unmount();
+    }
+  }, 40_000);
+
+  // The other end of the same deadline. An element keeps its place on the parse the worker is
+  // holding when it goes (`keepIfPosted`), which is how a streaming turn is shown the frame the
+  // worker was on; what that place must not buy is the body parsed on the reader's own thread
+  // once the deadline fires, since the element it was for has gone and `useRenderedMarkdown`
+  // throws such an answer away - the freeze a reader who navigated away would feel for a body
+  // nobody is looking at (sjawhar/legion#2519). A parse on the page would have cached its
+  // answer, so the mount below would need no worker at all; it asks for one, which is what says
+  // the page parsed nothing.
+  test("parses nothing on the page when the deadline passes for a body its reader left", async () => {
+    const worker = installFakeParseWorker();
+    setParseDeadline(50);
+    const markdown = longBody("A body left with the worker");
+    const left = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await worker.waitForRequests(1);
+    } finally {
+      left.unmount();
+    }
+    // Well past the deadline, which fires with the element gone and its place still on the job.
+    const pastTheDeadline = Promise.withResolvers<void>();
+    setTimeout(pastTheDeadline.resolve, 300);
+    await pastTheDeadline.promise;
+
+    const back = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await worker.waitForRequests(2);
+      expect(worker.requests[1]?.markdown).toBe(markdown);
+      expect(worker.workers).toHaveLength(2);
+      expect(pendingMark(back.container)).toBe("true");
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(back.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(back.container)).toBeNull());
+      expect(fallbackMark(back.container)).toBeNull();
+    } finally {
+      setParseDeadline();
+      back.unmount();
+    }
+  }, 20_000);
+
+  // Every paint recomputes the ask hosts, so a body whose decision card arrives late draws it
+  // from the answer it already has: the card is a dependency of the render, never a new parse.
+  test("repaints for a new decision card without sending the body a second time", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = `:::ask{urgency="high"}\n${askBody}\n${longBody("A decision above a list")}`;
+    const view = render(
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <TextAskCard.Provider value={undefined}>
+          <MarkdownBody markdown={markdown} />
+        </TextAskCard.Provider>
+      </MemoryRouter>
+    );
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      const shell = await findAskShell(view.container);
+      expect(within(shell).queryByText("Decision")).toBeNull();
+      expect(worker.requests).toHaveLength(1);
+
+      view.rerender(withAskCard(<MarkdownBody markdown={markdown} />));
+      const carded = await findAskShell(view.container);
+      expect(await within(carded).findByText("Decision")).toBeDefined();
+      await flushTasks();
+
+      expect(worker.requests).toHaveLength(1);
+      expect(topItems(view.container)).toHaveLength(longItems);
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // One body on two surfaces is one request with two waiters (the Conversation's card and the
+  // hover card of a reference to it both draw the same comment). A surface that goes away takes
+  // its own waiter and nothing else: the body stays with the worker, and the answer reaches the
+  // surface the reader is still looking at.
+  test("answers the surface still mounted when another drops the same body first", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A body two surfaces draw");
+    const leaving = render(<MarkdownBody markdown={markdown} />);
+    const staying = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await waitFor(() => expect(pendingMark(staying.container)).toBe("true"));
+      await worker.waitForRequests(1);
+      expect(worker.requests).toHaveLength(1);
+
+      leaving.unmount();
+      await flushTasks();
+      expect(worker.requests).toHaveLength(1);
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(staying.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(staying.container)).toBeNull());
+      expect(fallbackMark(staying.container)).toBeNull();
+    } finally {
+      staying.unmount();
+    }
+  });
+
+  // A surface that starts drawing a body the worker has already answered - the hover card of a
+  // reference the reader points at after the card below it formatted - reads the answer the
+  // engine kept, so it is formatted from its first paint and the worker hears nothing.
+  test("paints a body whose answer already landed, without asking the worker again", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A body answered before the second surface drew it");
+    const first = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(first.container)).toHaveLength(longItems));
+    } finally {
+      first.unmount();
+    }
+    await flushTasks();
+
+    const later = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await waitFor(() => expect(topItems(later.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(later.container)).toBeNull());
+      expect(fallbackMark(later.container)).toBeNull();
+      await flushTasks();
+      expect(worker.requests).toHaveLength(1);
+    } finally {
+      later.unmount();
+    }
+  });
 });

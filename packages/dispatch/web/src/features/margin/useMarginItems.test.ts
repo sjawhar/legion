@@ -5,8 +5,16 @@ import { createElement, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
-import type { Artifact, Comment, Event } from "../../api/types";
+import type {
+  Artifact,
+  Comment,
+  Decision,
+  DecisionLink,
+  Event,
+  IssueDecisions,
+} from "../../api/types";
 import {
   anchoredThreadComments,
   fetchPinnedEvents,
@@ -512,7 +520,7 @@ test("two accepts in one tick reach the server one after the other, in click ord
     // A second press of the same button before its answer is one request, not two.
     fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(1));
-    expect(acceptComment).toHaveBeenLastCalledWith("A");
+    expect(acceptComment).toHaveBeenLastCalledWith("A", keyedAttempt);
     await waitFor(() => expect(actionState().pending).toEqual(["A", "B"]));
 
     await act(async () => {
@@ -520,7 +528,7 @@ test("two accepts in one tick reach the server one after the other, in click ord
       await saves[0]?.promise;
     });
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
-    expect(acceptComment).toHaveBeenLastCalledWith("B");
+    expect(acceptComment).toHaveBeenLastCalledWith("B", keyedAttempt);
     await waitFor(() => expect(actionState().pending).toEqual(["B"]));
 
     await act(async () => {
@@ -559,7 +567,7 @@ test("a failed action drops the clicks queued behind it and shows its error", as
     // The queue is gone, not stuck: the next click goes straight out.
     fireEvent.click(screen.getByRole("button", { name: "Accept C" }));
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
-    expect(acceptComment).toHaveBeenLastCalledWith("C");
+    expect(acceptComment).toHaveBeenLastCalledWith("C", keyedAttempt);
   } finally {
     unmount();
     acceptComment.mockRestore();
@@ -611,7 +619,8 @@ function actionFailureShown(): { message: string; retryable: boolean } | null {
 
 // A failed action says what failed. A refusal of what an accept would write carries the API's own
 // reason and offers no Retry, since the same request is refused every time; any other answer from
-// the API shows its reason and can be retried; a failure with no answer keeps the generic line.
+// the API shows its reason and can be retried; a failure with no answer keeps the generic line. A
+// 5xx is no answer at all: the action is tried again under its key, and nothing shows as failed.
 test("a failed action carries the API's reason, and a refusal of what it writes offers no retry", async () => {
   for (const { error, want } of [
     {
@@ -653,13 +662,6 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
       want: { message: "the suggestion's text is still loading", retryable: true },
     },
     {
-      error: new ApiError(503, {
-        code: "DOC_SERVICE_UNAVAILABLE",
-        error: "document service unavailable",
-      }),
-      want: { message: "document service unavailable", retryable: true },
-    },
-    {
       error: new Error("offline"),
       want: { message: "Could not save this action.", retryable: true },
     },
@@ -673,5 +675,160 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
       unmount();
       acceptComment.mockRestore();
     }
+  }
+
+  const acceptComment = spyOn(api, "acceptComment")
+    .mockRejectedValueOnce(
+      new ApiError(503, { code: "DOC_SERVICE_UNAVAILABLE", error: "document service unavailable" })
+    )
+    .mockResolvedValueOnce({} as never);
+  const { unmount } = renderActionButtons();
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+    await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2), { timeout: 3_000 });
+    expect(actionFailureShown()).toBeNull();
+    const [first, again] = acceptComment.mock.calls.map(([, bounds]) => bounds.key);
+    expect(again).toBe(first);
+  } finally {
+    unmount();
+    acceptComment.mockRestore();
+  }
+});
+
+function decisionLink(fromBlock: string, to: string): DecisionLink {
+  return {
+    created_at: "2026-10-01T00:00:00Z",
+    created_version: 1,
+    from_block: fromBlock,
+    stale: false,
+    to: { block_id: to, id: `CORE-1/spec#${to}`, kind: "block" },
+  };
+}
+
+function decisionOf(
+  blockId: string,
+  links: DecisionLink[],
+  { replaced = false, unsure = false }: { replaced?: boolean; unsure?: boolean } = {}
+): Decision {
+  return {
+    asks: [],
+    block_id: blockId,
+    changed_at: "2026-10-02T00:00:00Z",
+    changed_version: 2,
+    heading: `Decision ${blockId}`,
+    kept: null,
+    kind: "agent",
+    links,
+    ref: `dispatch://CORE-1/artifact/decisions-md#b-${blockId}`,
+    replaced,
+    text: "We decided.",
+    text_sha256: `sum-${blockId}`,
+    unsure,
+    waiting_review: true,
+  };
+}
+
+const issueDecisions: IssueDecisions = {
+  decisions: [
+    // One decision that links two spec blocks, one of them from two of its own blocks.
+    decisionOf("d-1", [
+      decisionLink("d-1", "p-a"),
+      decisionLink("d-1-para", "p-b"),
+      decisionLink("d-1-list", "p-b"),
+    ]),
+    decisionOf("d-2", [decisionLink("d-2", "p-b")], { unsure: true }),
+    // A replaced decision shaped nothing the spec says now.
+    decisionOf("d-3", [decisionLink("d-3", "p-a")], { replaced: true }),
+    // A spec block the document has not placed yet: after every placed one.
+    decisionOf("d-4", [decisionLink("d-4", "p-c")]),
+  ],
+  document: "dispatch://CORE-1/artifact/decisions-md",
+  open_questions: [],
+};
+
+function DecisionItems({ document }: { document: Artifact }) {
+  const { decisions, items } = useMarginItems(
+    { key: "CORE-1", kind: "issue" },
+    "comments",
+    document,
+    new Map(),
+    new Map([
+      ["p-b", { pos: 4, top: 40 }],
+      ["p-a", { pos: 12, top: 72 }],
+    ]),
+    undefined,
+    { documentShown: true }
+  );
+  return createElement(
+    "output",
+    { "aria-label": "Margin decisions" },
+    JSON.stringify({
+      decisions: decisions.map((item) => [
+        item.blockId,
+        item.decision.block_id,
+        item.decision.unsure,
+      ]),
+      items: items.map(marginItemId),
+    })
+  );
+}
+
+function renderDecisionItems(document: Artifact) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["comments", "CORE-1"], []);
+  queryClient.setQueryData(["asks", "CORE-1"], []);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["user-state"], {});
+  return render(
+    createElement(
+      MemoryRouter,
+      { initialEntries: ["/issues/CORE-1/spec"] },
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(DecisionItems, { document })
+      )
+    )
+  );
+}
+
+test("each decision is a margin item beside every spec block it links, in the spec's order", async () => {
+  const getIssueDecisions = spyOn(api, "getIssueDecisions").mockResolvedValue(issueDecisions);
+  const view = renderDecisionItems(artifact);
+  try {
+    await waitFor(() =>
+      expect(JSON.parse(screen.getByLabelText("Margin decisions").textContent ?? "")).toEqual({
+        decisions: [
+          ["p-b", "d-1", false],
+          ["p-b", "d-2", true],
+          ["p-a", "d-1", false],
+          ["p-c", "d-4", false],
+        ],
+        items: ["decision:d-1:p-b", "decision:d-2:p-b", "decision:d-1:p-a", "decision:d-4:p-c"],
+      })
+    );
+    expect(getIssueDecisions).toHaveBeenCalledWith("CORE-1");
+  } finally {
+    view.unmount();
+    getIssueDecisions.mockRestore();
+  }
+});
+
+test("an issue document that is not its spec reads no decisions and shows none", async () => {
+  const getIssueDecisions = spyOn(api, "getIssueDecisions").mockResolvedValue(issueDecisions);
+  const view = renderDecisionItems({ ...artifact, id: "notes", primary: false, slug: "notes" });
+  try {
+    await waitFor(() =>
+      expect(JSON.parse(screen.getByLabelText("Margin decisions").textContent ?? "")).toEqual({
+        decisions: [],
+        items: [],
+      })
+    );
+    expect(getIssueDecisions).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getIssueDecisions.mockRestore();
   }
 });

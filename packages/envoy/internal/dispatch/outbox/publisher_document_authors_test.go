@@ -182,7 +182,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.edited", Actor: alice, Payload: map[string]any{
-					"id": "00000000-0000-0000-0000-000000000006", "anchor": anchorOn(doc), "suppressed_authors": nil,
+					"id": "00000000-0000-0000-0000-000000000006", "anchor": anchorOn(doc),
 				}}, ""
 			},
 			wantAgents: []string{"notifications.agent.session-writer"},
@@ -193,7 +193,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
 					"id": "00000000-0000-0000-0000-000000000007", "anchor": anchorOn(doc),
-					"mentions": mentionsOf("session-writer"), "suppressed_authors": []any{"session-writer"},
+					"mentions": mentionsOf("session-writer"),
 				}}, ""
 			},
 			deliveries: map[string]string{"session-writer": "sent"},
@@ -205,14 +205,14 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
 					"id": "00000000-0000-0000-0000-000000000015", "anchor": anchorOn(doc),
-					"mentions": mentionsOf("session-writer"), "suppressed_authors": []any{"session-writer"},
+					"mentions": mentionsOf("session-writer"),
 				}}, ""
 			},
 			deliveries: map[string]string{"session-writer": "failed"},
 			wantAgents: []string{"notifications.agent.session-writer", "notifications.agent.session-editor"},
 		},
 		{
-			name: "a reply on a project document reaches its thread's author, not the document's",
+			name: "a reply on a project document reaches its thread's author and the document's writer",
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				doc := seedDocument(t, database, nil, "plan", writer, []model.Actor{writer})
 				root := seedDocumentComment(t, database, doc, model.Actor{Kind: "session", ID: "session-root"})
@@ -220,7 +220,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 					"id": "00000000-0000-0000-0000-000000000008", "reply_to": root,
 				}}, "plan"
 			},
-			wantAgents: []string{"notifications.agent.session-root"},
+			wantAgents: []string{"notifications.agent.session-root", "notifications.agent.session-writer"},
 		},
 		{
 			name: "a reply to an ask on a project document reaches the ask's followers, not the document's writer",
@@ -288,30 +288,26 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 
 // The author routes skip the event's own actor wherever they find it, so a writer is never told
 // of its own comment even should an agent's comment notify.
-func TestPublishAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing.T) {
+func TestAddAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
 	editor := model.Actor{Kind: "session", ID: "session-editor"}
 	doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
-	publisher := &recordingPublisher{}
 	event := model.Event{
 		IssueKey: new("T-1"),
 		Type:     "comment.created",
 		Actor:    writer,
 		Payload:  map[string]any{"id": "00000000-0000-0000-0000-000000000012", "anchor": anchorOn(doc)},
 	}
-	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.comment.created"}
-	if err := publishAuthorRoutes(context.Background(), Deps{Store: database, Publisher: publisher}, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
-		t.Fatalf("publish author routes: %v", err)
-	}
-	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{"notifications.agent.session-editor"}) {
+	if got := routeTopics(t, database, event, addAuthorRoutes); !slices.Equal(got, []string{"notifications.agent.session-editor"}) {
 		t.Fatalf("author routes = %v, want the document's other writer alone", got)
 	}
 }
 
 // A person's spec edit, once its quiet window ends, reaches each session the document credits once
-// and the issue's route once, and never the person: a person has no Envoy topic, and the edit's
+// and the issue's route once - its role route forwarded to the role's holder (heldRoles), which
+// carries the role's topic - and never the person: a person has no Envoy topic, and the edit's
 // own actor is skipped. The event names its document by the payload's artifact_id, as the notice
 // sweep writes it (docs.sendEditNotice).
 func TestAPersonsSpecEditReachesEachSessionThatWroteTheSpecOnce(t *testing.T) {
@@ -334,7 +330,7 @@ func TestAPersonsSpecEditReachesEachSessionThatWroteTheSpecOnce(t *testing.T) {
 		t.Fatal("a person's artifact.human_edited does not notify, so no route would carry it")
 	}
 	publisher := &recordingPublisher{}
-	if err := publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", routing{route: &route}, map[string]struct{}{}); err != nil {
+	if err := publish(context.Background(), withHeldRoles(Deps{Store: database, Publisher: publisher}), event, "", routing{route: &route}, map[string]struct{}{}); err != nil {
 		t.Fatalf("publish artifact.human_edited: %v", err)
 	}
 	topics := topicsOf(publisher.all())

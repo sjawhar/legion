@@ -15,7 +15,7 @@ see the same issues, in the same state, as they change. Every change Dispatch re
 event that agents can subscribe to; [how the pieces fit together](/legion/how-it-fits/) shows where
 Dispatch sits beside Legion and the Secrets Broker.
 
-![The Inbox, listing open asks under Waiting on you and Waiting on agents](/legion/media/dispatch/inbox.png)
+![The Dispatch Inbox in two columns: the open questions as short rows on the left, and the selected question, a decision block, open in its own document on the right.](/legion/media/dispatch/inbox.png)
 
 ## Who uses it
 

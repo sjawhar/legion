@@ -1,14 +1,15 @@
 import type { Query, QueryClient, QueryKey } from "@tanstack/react-query";
 
-/** Whether a query is owned by Dispatch's live delivery socket rather than refreshed by events. */
+/** Whether a query is owned by a live socket subscription (a delivery view) rather than refreshed
+ *  by events. */
 export function isLiveQuery(query: Pick<Query, "meta">): boolean {
   return query.meta?.live === true;
 }
 
 /**
- * The one refresh scheduler: what happens to the queries an event batch names (`api/sse.ts` asks,
- * `api/event-refresh.ts` decides which). It never cancels a request, and it fetches one query at
- * most once a second:
+ * The one refresh scheduler: what happens to the queries an event batch names (`api/event-feed.ts`
+ * asks, `api/event-refresh.ts` decides which). It never cancels a request, and it fetches one
+ * query at most once a second:
  *
  * - an inactive query is marked stale only, and fetches when something mounts it;
  * - a query already fetching is fetched again once that fetch settles, so the answer composed
@@ -20,7 +21,7 @@ export function isLiveQuery(query: Pick<Query, "meta">): boolean {
  * When a fetch takes longer than the interval, the in-flight rule wins: the next fetch starts when
  * it settles. A refresh is owed from the moment it is asked for, and any fetch that begins later -
  * one this scheduler starts, a mount's, a mutation's - pays it. The live-owned queries
- * (`meta.live`, `api/delivery-live.ts`) are never touched: their socket keeps them current.
+ * (`meta.live`, `api/live-socket.ts`) are never touched: their subscription keeps them current.
  */
 
 /** The shortest gap between the starts of two fetches of one query that this scheduler starts. */
@@ -124,7 +125,7 @@ function schedulerFor(queryClient: QueryClient): SchedulerState {
 
 /**
  * Starts recording when each query's fetches begin, so the first refresh after a page's own loads
- * already keeps the interval. `useEventStream` calls it once its stream starts; `refreshQueries`
+ * already keeps the interval. `useEventFeed` calls it once it subscribes; `refreshQueries`
  * starts it too, for any caller that has not.
  */
 export function trackQueryFetches(queryClient: QueryClient): void {
@@ -201,7 +202,7 @@ function driveAfter(
 
 /**
  * Refreshes the queries `targets` reach, or, with no targets, every query the app holds but the
- * live-owned ones (the whole-cache refresh after a gap in the stream, or an event this build cannot
+ * live-owned ones (the whole-cache refresh after a gap in the feed, or an event this build cannot
  * read), through the rules above.
  */
 export function refreshQueries(queryClient: QueryClient, targets?: readonly RefreshTarget[]): void {

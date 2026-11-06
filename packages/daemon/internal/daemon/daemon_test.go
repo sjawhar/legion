@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -48,6 +49,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -61,7 +64,7 @@ func testDSN(t *testing.T) string {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/daemon/")
 	}
@@ -69,15 +72,11 @@ func testDSN(t *testing.T) string {
 }
 
 // shortTempDir is a state directory short enough for the worker stream's unix socket: a socket
-// path is bounded at 108 bytes, and t.TempDir() spells the whole test name.
+// path is bounded at 108 bytes, and t.TempDir() spells the whole test name. The budget asked of
+// testtmp.Dir is streamSocket, the socket daemon.go binds under the state directory.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "lgd")
-	if err != nil {
-		t.Fatalf("make a state directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, streamSocket)
 }
 
 // testConfig is a daemon of its own: its project name is unique, so the boots and claims it
@@ -213,23 +212,34 @@ func holdPortOn(t *testing.T, host string) int {
 	return port
 }
 
-// heldSocket holds a loopback port the kernel chooses and returns a descriptor of its own for the
-// listening socket, with that port: the socket stays listening once the listener is closed, so no
-// other process can take the port before whatever is handed the descriptor serves it. The
-// descriptor is closed when t ends, if its caller has not closed it first.
-func heldSocket(t *testing.T) (*os.File, int) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+// takeSocket binds address, whose port may be 0 for one the kernel chooses, and returns a
+// descriptor of its own for the listening socket, with the port it holds: the socket stays
+// listening once the listener is closed, so no other process can take the port before whatever is
+// handed the descriptor serves it. A port another process holds is the bind's error.
+func takeSocket(address string) (*os.File, int, error) {
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		t.Fatalf("hold a loopback port: %v", err)
+		return nil, 0, err
 	}
+	port := listener.Addr().(*net.TCPAddr).Port
 	file, err := listener.(*net.TCPListener).File()
 	_ = listener.Close()
 	if err != nil {
-		t.Fatalf("take the held socket's descriptor: %v", err)
+		return nil, 0, fmt.Errorf("take the descriptor of %s: %w", address, err)
+	}
+	return file, port, nil
+}
+
+// heldSocket holds a loopback port the kernel chooses (takeSocket). The descriptor is closed when
+// t ends, if its caller has not closed it first.
+func heldSocket(t *testing.T) (*os.File, int) {
+	t.Helper()
+	file, port, err := takeSocket("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
 	}
 	t.Cleanup(func() { _ = file.Close() })
-	return file, listener.Addr().(*net.TCPAddr).Port
+	return file, port
 }
 
 // rebindHeldPorts hands cfg a freshly held API port. A daemon that has stopped closed the
@@ -524,8 +534,8 @@ func TestTheStateCarriesTheDaemonsSettingsAndNoSecret(t *testing.T) {
 // (api.State.HeldOutboxRows, contract 28). The architect's accepted retry_or_escalate of a held
 // phase enqueues the implementer's start while the issue's lifecycle lane is still running an
 // earlier row of the issue — here the planner's suspend, under a live lease — so GET
-// /legion/v1/state lists the start, by kind and id, with the row it waits on; once that row's lease
-// has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
+// /legion/v1/state lists each row the start is, by kind and id, with the row it waits on; once
+// that row's lease has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
 // route applies it with (intake.ApplyFact): the API-only daemon this harness boots carries no
 // workflow runtime, and so no lane that would run the rows the test seeds.
 func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T) {
@@ -570,19 +580,42 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("apply the retry = %+v, %v; want it accepted", result.Refusal, err)
 	}
-	var start int64
-	if err := st.Pool().QueryRow(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start'", issue, string(record.OutboxKindSupervise)).Scan(&start); err != nil {
-		t.Fatalf("read the retry's start row: %v", err)
+	// A phase worker's start is two outbox rows (workflow.StartOrOwe): the relaunch, which brings
+	// the held role's session back carrying no task, and the row that carries its task. Both are
+	// lifecycle rows of the issue, so the suspend under a live lease holds both of them.
+	var starts []int64
+	rows, err := st.Pool().Query(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start' order by id", issue, string(record.OutboxKindSupervise))
+	if err != nil {
+		t.Fatalf("read the retry's start rows: %v", err)
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan a start row: %v", err)
+		}
+		starts = append(starts, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the retry's start rows: %v", err)
+	}
+	if len(starts) != 2 {
+		t.Fatalf("the retry queued %d start rows, want its relaunch and its task", len(starts))
 	}
 
 	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
 	got := d.state().HeldOutboxRows
-	if len(got) != 1 || got[0].WaitedSeconds < 0 {
-		t.Fatalf("heldOutboxRows = %+v, want the retry's start alone, with a wait of zero or more seconds", got)
+	if len(got) != len(starts) {
+		t.Fatalf("heldOutboxRows = %+v, want the retry's two start rows alone", got)
 	}
-	got[0].WaitedSeconds = 0
-	if want := (api.HeldOutboxRow{ID: start, Kind: "supervise", Issue: issue, WaitsOn: running}); got[0] != want {
-		t.Fatalf("heldOutboxRows[0] = %+v, want %+v", got[0], want)
+	for i, id := range starts {
+		if got[i].WaitedSeconds < 0 {
+			t.Fatalf("heldOutboxRows[%d] = %+v, want a wait of zero or more seconds", i, got[i])
+		}
+		got[i].WaitedSeconds = 0
+		if want := (api.HeldOutboxRow{ID: id, Kind: "supervise", Issue: issue, WaitsOn: running}); got[i] != want {
+			t.Fatalf("heldOutboxRows[%d] = %+v, want %+v", i, got[i], want)
+		}
 	}
 
 	if _, err := st.Pool().Exec(ctx, "update outbox set lease_until = now() - interval '1 minute' where id = $1", running); err != nil {
@@ -1458,15 +1491,25 @@ func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppR
 }
 
 // servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
-// reports whether r asked for it.
+// its webhook App check, Dispatch's GitHub App installed on every repository, and reports whether
+// r asked for either.
 func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
 	t.Helper()
-	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/settings/repo-projects" {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	var body any
+	switch {
+	case r.URL.Path == "/api/v1/settings/repo-projects":
+		body = []map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/github/app-installation/"):
+		body = map[string]bool{"installed": true}
+	default:
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode([]map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}); err != nil {
-		t.Errorf("write the repository mapping: %v", err)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Errorf("write %s: %v", r.URL.Path, err)
 	}
 	return true
 }

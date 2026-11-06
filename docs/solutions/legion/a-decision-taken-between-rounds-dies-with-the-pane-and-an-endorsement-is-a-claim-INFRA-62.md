@@ -23,14 +23,16 @@ related_issues:
 # A decision taken between rounds dies with the pane, an endorsement is a claim, and a changed number is a search of the file
 
 - **Write a between-rounds decision into a durable artefact, not only into a message.** A role's
-  Envoy history does not survive its process; a relaunched pane rejoins with the committed handoffs
-  and the task text it is re-sent, which may be an older round's. A decision that exists only in
-  chat therefore reaches a worker that was alive for it and nobody else. The reviewer or architect
-  who takes it puts it in the next review body and in `review.json`; one that overrides something a
-  committed handoff already records says so there, because the handoff is what a recreated pane
-  reads.
-- **After a recreation, or when the task text and the committed handoff disagree with anything you
-  were told, ask the owning role which is current before acting.** The committed file is the right
+  Envoy history does not survive its process; a relaunched pane rejoins with its issue's handoff
+  records and the task text it is re-sent, which may be an older round's. A decision that exists
+  only in chat therefore reaches a worker that was alive for it and nobody else. The reviewer or
+  architect who takes it puts it in the next review body and in the review handoff; one that
+  overrides something an earlier handoff already records says so there, because the handoff is
+  what a recreated pane reads. Before sjawhar/legion#2354 each handoff was a committed
+  `.legion/<issue>/<phase>.json` file. A handoff is a versioned record on the Dispatch issue now,
+  read with `dispatch handoff-read`.
+- **After a recreation, or when the task text and the handoff record disagree with anything you
+  were told, ask the owning role which is current before acting.** The record is the right
   default and still a snapshot of the moment it was written. One message costs less than a round.
 - **An endorsement in a review is a claim and belongs in the same evidence bracket as a finding.** A
   reviewer who agrees with a passage's conclusion stops checking its reasoning, and the endorsement

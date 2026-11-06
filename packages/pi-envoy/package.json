@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/pi-envoy",
-  "version": "11.6.0",
+  "version": "16.12.1",
   "license": "Apache-2.0",
   "type": "module",
   "omp": {
@@ -9,11 +9,14 @@
     ],
     "skills": [
       "dist/skills"
+    ],
+    "bin": [
+      "bin"
     ]
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sjawhar/legion"
+    "url": "https://github.com/cybermonklabs/legion"
   },
   "files": [
     "dist",
@@ -24,7 +27,7 @@
     "prepack": "../../scripts/pi-plugin-prepack.sh",
     "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --path-ignore-patterns=extensions/card-delivery-omp.test.ts && bun test ./extensions/card-delivery-omp.test.ts",
     "lint": "bunx biome lint extensions/ src/"
   },
   "devDependencies": {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -306,6 +307,72 @@ func TestTurnStartCarriesTheDeliveryIDOnlyWhenTheFrameDid(t *testing.T) {
 	}
 }
 
+// Oh My Pi's prompt_result names the `prompt` command's own request id, which Prompt builds from
+// the delivery id (promptDelivery): that is how the event names the delivery an agent_end never
+// could. A result for a request no prompt of this daemon's sent names no delivery and is dropped,
+// as every other line the daemon does not supervise on is.
+func TestAPromptResultNamesTheDeliveryItsRequestIDCarries(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	frame, result := h.prompt(p, "delivery-1", "verify #41")
+	p.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: true})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	p.send(shimwire.AgentEnd{})
+	p.send(shimwire.PromptResult{ID: "a-request-no-prompt-carried", AgentInvoked: true})
+	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: true})
+	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: false, Error: &shimwire.PromptError{Message: "no model"}})
+	want := []Event{
+		TurnEnd{Claim: testClaim},
+		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", AgentInvoked: true},
+		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", Error: "no model"},
+	}
+	for _, want := range want {
+		if got := h.next(); got != want {
+			t.Fatalf("event = %#v, want %#v", got, want)
+		}
+	}
+}
+
+// A turn whose provider request ran out of retries ends with a prompt_result Oh My Pi writes in
+// full: `status: "error"` and an error object of its PromptError, not a string. The line here is
+// the pinned binary's own shape, written verbatim rather than through the Go frame, so this test
+// reads what Oh My Pi writes however this package models it. The daemon must take it: a result
+// it drops is a prompt the supervisor waits on for the life of the process, and the next task
+// for that claim is refused as pending behind it. So the result reaches the supervisor with its
+// reason, and the connection takes the next delivery.
+func TestATurnThatEndedInAProviderErrorStillReportsItsResult(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	first, result := h.prompt(p, "delivery-1", "implement the plan")
+	p.send(shimwire.Response{ID: first.ID, Command: shimwire.TypePrompt, Success: true})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	p.send(shimwire.AgentEnd{})
+	p.writeRaw(`{"type":"prompt_result","id":"` + first.ID + `","agentInvoked":true,"status":"error",` +
+		`"error":{"message":"429 Too Many Requests","provider":"anthropic","model":"claude-opus-4-5","httpStatus":429,"retryable":true},` +
+		"\"sessionSettled\":true}\n")
+	for _, want := range []Event{
+		TurnEnd{Claim: testClaim},
+		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", AgentInvoked: true, Error: "429 Too Many Requests"},
+	} {
+		if got := h.next(); got != want {
+			t.Fatalf("event = %#v, want %#v", got, want)
+		}
+	}
+
+	// The connection negotiated its protocol on the first prompt, so the next delivery is a
+	// prompt frame and nothing else.
+	next := async(func() error { return h.conn().Prompt(context.Background(), "delivery-2", "test the change") })
+	second := p.expect(shimwire.TypePrompt).(shimwire.Prompt)
+	p.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: true})
+	if err := awaitResult(t, next); err != nil {
+		t.Fatalf("the delivery after the failed turn: %v", err)
+	}
+}
+
 // An agent_start can precede the ack of the prompt that caused it; the event is emitted when
 // the frame arrives, and Prompt still returns on the ack (worker-rpc.test.ts:349-365).
 func TestAStartThatPrecedesTheAckIsStillEmitted(t *testing.T) {
@@ -564,38 +631,6 @@ func TestGetStateRefusesAnAnswerWithoutIsStreaming(t *testing.T) {
 	}
 }
 
-// Abort sends OMP's abort frame and returns on OMP's answer; the turn's end is the agent_end that
-// follows the answer, which is still a TurnEnd. A refusal is the agent's answer, never a refused
-// prompt.
-func TestAbortReturnsOnTheAnswerAndTheTurnEndsOnItsAgentEnd(t *testing.T) {
-	h := startListener(t, harnessOptions{})
-	p := h.connect(testToken)
-	conn := h.conn()
-	result := async(func() error { return conn.Abort(context.Background()) })
-	p.negotiate()
-	request := p.expect(shimwire.TypeAbort).(shimwire.Abort)
-	if request.ID == "" {
-		t.Fatal("the abort frame carries no request id, so its answer could not be told apart")
-	}
-	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeAbort, Success: true})
-	if err := awaitResult(t, result); err != nil {
-		t.Fatalf("Abort = %v, want nil on OMP's answer", err)
-	}
-	p.send(shimwire.AgentEnd{})
-	if event := h.next(); event != (TurnEnd{Claim: testClaim}) {
-		t.Fatalf("event after the abort's answer = %#v, want the agent_end's TurnEnd", event)
-	}
-
-	refused := async(func() error { return conn.Abort(context.Background()) })
-	request = p.expect(shimwire.TypeAbort).(shimwire.Abort)
-	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeAbort, Success: false, Error: "no"})
-	err := awaitResult(t, refused)
-	var refusal *RefusedError
-	if !errors.As(err, &refusal) || errors.Is(err, runtime.ErrPromptRefused) {
-		t.Fatalf("a refused abort = %v, want a *RefusedError that is not a refused prompt", err)
-	}
-}
-
 // Negotiation is protocol v2, sent once per connection — before the first request OMP answers,
 // so every holder of a runtime.Conn gets a negotiated stream without asking for it.
 func TestNegotiationIsSentOnceAheadOfTheFirstAgentRequest(t *testing.T) {
@@ -698,6 +733,60 @@ func TestAdoptWorkingCopyAsksTheShimAndReadsItsResult(t *testing.T) {
 
 	if err := conn.AdoptWorkingCopy(context.Background(), runtime.GitIdentity{}, time.Second); err == nil {
 		t.Fatal("AdoptWorkingCopy sent a frame with no identity")
+	}
+}
+
+// The push check is a request the shim answers itself, with one entry per workspace; a shim built
+// before it forwards the frame to its agent, whose refusal is runtime.ErrRescueUnsupported, and a
+// shim that answers and could not run the check is a refusal like any other.
+func TestRescueUnpushedAsksTheShimAndTellsAnOldShimApart(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	conn := h.conn()
+	request := runtime.RescueRequest{Branch: "legion/LEGION-484-rescue-9d3f0c7a", WorkspaceTimeout: 2 * time.Second, Timeout: 3 * time.Second}
+	var report []runtime.WorkspaceRescue
+	ask := func() <-chan error {
+		return async(func() (err error) {
+			report, err = conn.RescueUnpushed(context.Background(), request)
+			return err
+		})
+	}
+
+	result := ask()
+	frame := p.expect(shimwire.TypeRescueUnpushed).(shimwire.RescueUnpushed)
+	if frame.Branch != request.Branch || frame.WorkspaceTimeoutMs != 2000 || frame.TimeoutMs != 3000 || frame.ID == "" {
+		t.Fatalf("rescue-unpushed frame = %#v", frame)
+	}
+	p.send(shimwire.RescueUnpushedResult{ID: frame.ID, OK: true, Workspaces: []shimwire.RescueWorkspace{
+		{Dir: "/legion/workspaces/acme/widgets/legion-484", Status: "rescued", Branches: []shimwire.RescueBranch{{Name: request.Branch + "-1", Commit: "c0ffee"}}},
+	}})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("RescueUnpushed: %v", err)
+	}
+	want := []runtime.WorkspaceRescue{{Dir: "/legion/workspaces/acme/widgets/legion-484", Status: runtime.RescueRescued,
+		Branches: []runtime.RescuedBranch{{Name: request.Branch + "-1", Commit: "c0ffee"}}}}
+	if fmt.Sprint(report) != fmt.Sprint(want) {
+		t.Fatalf("report = %+v, want %+v", report, want)
+	}
+
+	result = ask()
+	frame = p.expect(shimwire.TypeRescueUnpushed).(shimwire.RescueUnpushed)
+	p.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypeRescueUnpushed, Success: false, Error: "Unknown command: rescue-unpushed"})
+	if err := awaitResult(t, result); !errors.Is(err, runtime.ErrRescueUnsupported) {
+		t.Fatalf("RescueUnpushed answered by the agent's refusal = %v, want ErrRescueUnsupported", err)
+	}
+
+	result = ask()
+	frame = p.expect(shimwire.TypeRescueUnpushed).(shimwire.RescueUnpushed)
+	p.send(shimwire.RescueUnpushedResult{ID: frame.ID, OK: false, Error: "worker-shim: LEGION_WORKSPACE is not set; no disk to check"})
+	err := awaitResult(t, result)
+	var refused *RefusedError
+	if !errors.As(err, &refused) || errors.Is(err, runtime.ErrRescueUnsupported) || !strings.Contains(refused.Reason, "LEGION_WORKSPACE") {
+		t.Fatalf("RescueUnpushed refused by the shim = %v, want a RefusedError carrying its reason", err)
+	}
+
+	if _, err := conn.RescueUnpushed(context.Background(), runtime.RescueRequest{Branch: "main", WorkspaceTimeout: time.Second, Timeout: time.Second}); !errors.Is(err, shimwire.ErrMalformedFrame) {
+		t.Fatalf("RescueUnpushed for a branch outside legion/ = %v, want the frame's own refusal", err)
 	}
 }
 

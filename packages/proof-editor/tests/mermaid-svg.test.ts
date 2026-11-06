@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { renderMermaidMarkup } from "../src/mermaid-render";
-import { mermaidSvgElement, sanitizeMermaidSvg } from "../src/mermaid-svg";
+import { mermaidSvgElement, sanitizeMermaidSvg, showMermaidSvg } from "../src/mermaid-svg";
 
 // The document is passed in and never installed as `globalThis.document`: ELK, which lays out
 // flowcharts and state diagrams, fails to build while a global `document` exists. That is also
@@ -81,6 +81,38 @@ describe("mermaidSvgElement", () => {
     expect(() => mermaidSvgElement("<div>not a diagram</div>", document)).toThrow(
       "Invalid SVG output"
     );
+  });
+});
+
+describe("showMermaidSvg", () => {
+  test("keeps one shadow root holding the sheet and the latest diagram only", () => {
+    const host = document.createElement("div") as unknown as HTMLElement;
+    const attachShadow = host.attachShadow.bind(host);
+    let attached = 0;
+    host.attachShadow = (init) => {
+      attached++;
+      return attachShadow(init);
+    };
+    const diagram = (id: string) =>
+      mermaidSvgElement(
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect id="${id}" width="4" height="4"/></svg>`,
+        document
+      );
+    const sheet = "svg{display:block}";
+    const second = diagram("second");
+
+    showMermaidSvg(host, diagram("first"), sheet);
+    showMermaidSvg(host, second, sheet);
+
+    expect(attached).toBe(1);
+    const root = host.shadowRoot;
+    expect(root?.mode).toBe("open");
+    const children = Array.from(root?.children ?? []);
+    expect(children.map((child) => child.localName)).toEqual(["style", "svg"]);
+    expect(children[0]?.textContent).toBe(sheet);
+    expect(children[1]?.querySelector("rect")?.id).toBe("second");
+    expect(children[1]).not.toBe(second);
+    expect(host.children).toHaveLength(0);
   });
 });
 

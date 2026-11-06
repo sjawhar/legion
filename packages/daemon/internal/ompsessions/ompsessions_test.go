@@ -186,3 +186,215 @@ func TestConnectNamesTheFileOrTheAddressAndNeverThePassword(t *testing.T) {
 		t.Errorf("Connect of an unreachable database = %v, want its address and not its password", err)
 	}
 }
+
+// claudeTranscript is a Claude Code transcript's path, the key its role launcher keeps it under,
+// and claudeRecord its phase-reminder record's.
+const (
+	claudeTranscript = "/legion/scratch/state/implementer/claude/projects/-legion-workspaces-legion-208/0b9c2f4e-2d3a-4c55-9a1e-6f7d8e9a0b1c.jsonl"
+	claudeRecord     = "/legion/scratch/state/implementer/claude/legion-phase-stall-0b9c2f4e-2d3a-4c55-9a1e-6f7d8e9a0b1c.json"
+)
+
+// connectWithTables is a connection to a fresh database that holds Oh My Pi's two tables, as a
+// writer of Append and Replace makes them once it connects.
+func connectWithTables(t *testing.T) *pgx.Conn {
+	t.Helper()
+	conn := connect(t)
+	if err := CreateTables(context.Background(), conn); err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+// partsOf is the parts the table holds under path, by offset.
+func partsOf(t *testing.T, conn *pgx.Conn, path string) map[int64]string {
+	t.Helper()
+	rows, err := conn.Query(context.Background(), "SELECT start_offset, content FROM omp_session_files_parts WHERE path = $1", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	parts := map[int64]string{}
+	for rows.Next() {
+		var offset int64
+		var content string
+		if err := rows.Scan(&offset, &content); err != nil {
+			t.Fatal(err)
+		}
+		parts[offset] = content
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return parts
+}
+
+// A Claude Code session is written in Oh My Pi's own form, so Read and Oh My Pi read it back as
+// written: a whole write is the row with no content of its own, byte_len its size in bytes and
+// mtime_ms the file's, and the bytes as parts of at most 1 MiB, none splitting a character; an
+// append is one part at the old byte_len, which grows by the part's bytes, mtime_ms moving with it.
+func TestAClaudeSaveWritesOhMyPisOwnForm(t *testing.T) {
+	conn := connectWithTables(t)
+	ctx := context.Background()
+	// A multi-byte character straddles the 1 MiB mark, so the split backs off to before it.
+	line := strings.Repeat("a", partBytes-1) + "—" + "\n"
+	written := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	if err := Replace(ctx, conn, claudeTranscript, Absent, []byte(line), written); err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	var byteLen, mtimeMs int64
+	row := "SELECT content, byte_len, mtime_ms FROM omp_session_files WHERE path = $1"
+	if err := conn.QueryRow(ctx, row, claudeTranscript).Scan(&content, &byteLen, &mtimeMs); err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || byteLen != int64(len(line)) || mtimeMs != written.UnixMilli() {
+		t.Errorf("row = content %q, byte_len %d, mtime_ms %d; want none of its own, %d, %d", content, byteLen, mtimeMs, len(line), written.UnixMilli())
+	}
+	if parts := partsOf(t, conn, claudeTranscript); len(parts) != 2 || parts[0] != line[:partBytes-1] || parts[partBytes-1] != "—\n" {
+		t.Errorf("a whole write of %d bytes left %d parts, want the bytes before the character at 0 and the rest at %d", len(line), len(parts), partBytes-1)
+	}
+	appended := `{"type":"assistant","message":"noted"}` + "\n"
+	later := written.Add(time.Minute)
+	if err := Append(ctx, conn, claudeTranscript, int64(len(line)), []byte(appended), later); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, row, claudeTranscript).Scan(&content, &byteLen, &mtimeMs); err != nil {
+		t.Fatal(err)
+	}
+	if byteLen != int64(len(line)+len(appended)) || mtimeMs != later.UnixMilli() {
+		t.Errorf("after an append the row has byte_len %d, mtime_ms %d; want %d, %d", byteLen, mtimeMs, len(line)+len(appended), later.UnixMilli())
+	}
+	if parts := partsOf(t, conn, claudeTranscript); parts[int64(len(line))] != appended {
+		t.Errorf("the append's part at %d is %q, want %q", len(line), parts[int64(len(line))], appended)
+	}
+	if read, ok, err := Read(ctx, conn, claudeTranscript); err != nil || !ok || string(read) != line+appended {
+		t.Errorf("Read = %d bytes, %t, %v; want the %d bytes written", len(read), ok, err, len(line+appended))
+	}
+	if at, ok, err := Written(ctx, conn, claudeTranscript); err != nil || !ok || !at.Equal(later) {
+		t.Errorf("Written = %v, %t, %v; want the append's %v", at, ok, err, later)
+	}
+}
+
+// A writer saves only over what it last saved: a writer whose view is stale, of a row another
+// writer made or grew since, is refused naming both lengths, and the row reads as the other writer
+// left it.
+func TestAClaudeSaveRefusesAStaleWriter(t *testing.T) {
+	conn := connectWithTables(t)
+	ctx := context.Background()
+	first, second := "{\"n\":1}\n", "{\"n\":2}\n"
+	if err := Replace(ctx, conn, claudeTranscript, Absent, []byte(first), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	held := func() string {
+		read, _, err := Read(ctx, conn, claudeTranscript)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(read)
+	}
+	stale := map[string]func() error{
+		"a whole write of a row it saw none of": func() error {
+			return Replace(ctx, conn, claudeTranscript, Absent, []byte("{\"stale\":1}\n"), time.Now())
+		},
+		"an append at a length the row has left": func() error {
+			return Append(ctx, conn, claudeTranscript, 3, []byte("{\"stale\":2}\n"), time.Now())
+		},
+		"a whole write over a length the row has left": func() error {
+			return Replace(ctx, conn, claudeTranscript, 3, []byte("{\"stale\":3}\n"), time.Now())
+		},
+	}
+	for name, write := range stale {
+		var moved *MovedError
+		if err := write(); !errors.As(err, &moved) || moved.Held != int64(len(first)) || !strings.Contains(err.Error(), claudeTranscript) {
+			t.Errorf("%s = %v, want a MovedError naming the session and the %d bytes it holds", name, err, len(first))
+		}
+		if got := held(); got != first {
+			t.Errorf("after %s the session reads %q, want %q as its writer left it", name, got, first)
+		}
+	}
+	if err := Append(ctx, conn, claudeTranscript, int64(len(first)), []byte(second), time.Now()); err != nil {
+		t.Fatalf("an append by the writer that saved the row = %v", err)
+	}
+	if got := held(); got != first+second {
+		t.Errorf("the session reads %q, want %q", got, first+second)
+	}
+	if err := Append(ctx, conn, claudeTranscript+".absent", Absent, []byte(second), time.Now()); err == nil {
+		t.Error("an append to a session the table holds no row for was taken")
+	}
+}
+
+// A Claude Code row beside an Oh My Pi one never leaves a NULL byte_len, which would stop every Oh
+// My Pi process at its index load, and every row's byte_len is its bytes as Oh My Pi measures
+// them; the Oh My Pi session reads, and was written, exactly as before.
+func TestAClaudeRowHasAByteLenBesideAnOhMyPiRowLeftAsItWas(t *testing.T) {
+	conn := connectWithTables(t)
+	ctx := context.Background()
+	imported := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	if _, err := Import(ctx, conn, sessionPath, []byte(session), imported); err != nil {
+		t.Fatal(err)
+	}
+	transcript := "{\"type\":\"user\",\"message\":\"remember the nonce — BETA\"}\n"
+	if err := Replace(ctx, conn, claudeTranscript, Absent, []byte(transcript), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(ctx, conn, claudeTranscript, int64(len(transcript)), []byte("{}\n"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Replace(ctx, conn, claudeRecord, Absent, []byte(`{"state":"open","count":2}`), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := conn.Query(ctx, "SELECT f.path, f.byte_len, octet_length(f.content) + "+
+		"coalesce((SELECT sum(octet_length(p.content)) FROM omp_session_files_parts p WHERE p.path = f.path), 0) FROM omp_session_files f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	measured := 0
+	for rows.Next() {
+		var path string
+		var byteLen *int64
+		var bytes int64
+		if err := rows.Scan(&path, &byteLen, &bytes); err != nil {
+			t.Fatal(err)
+		}
+		measured++
+		if byteLen == nil || *byteLen != bytes {
+			t.Errorf("row %s has byte_len %v, want its %d bytes", path, byteLen, bytes)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if measured != 3 {
+		t.Errorf("the table holds %d rows, want the Oh My Pi session and the two Claude Code files", measured)
+	}
+	if read, ok, err := Read(ctx, conn, sessionPath); err != nil || !ok || string(read) != session {
+		t.Errorf("the Oh My Pi session reads %q, %t, %v; want it as imported", read, ok, err)
+	}
+	if at, ok, err := Written(ctx, conn, sessionPath); err != nil || !ok || !at.Equal(imported) {
+		t.Errorf("the Oh My Pi session was written %v, %t, %v; want %v", at, ok, err, imported)
+	}
+}
+
+// Content Postgres cannot keep as text is refused by Postgres itself, naming the session, as
+// Import's is, and nothing is written: neither a first whole write nor an append to a saved row.
+func TestAClaudeSaveRefusesContentNoTextValueHolds(t *testing.T) {
+	conn := connectWithTables(t)
+	ctx := context.Background()
+	refused := func(what string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "write session "+claudeTranscript) || !strings.Contains(err.Error(), "invalid byte sequence") {
+			t.Errorf("%s = %v, want the write of %s refused for its invalid byte sequence", what, err, claudeTranscript)
+		}
+	}
+	refused("a whole write holding a NUL byte", Replace(ctx, conn, claudeTranscript, Absent, []byte("{}\x00\n"), time.Now()))
+	if _, found, _ := Written(ctx, conn, claudeTranscript); found {
+		t.Fatal("a refused whole write wrote the row")
+	}
+	if err := Replace(ctx, conn, claudeTranscript, Absent, []byte("{}\n"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	refused("an append holding a NUL byte", Append(ctx, conn, claudeTranscript, 3, []byte("{\x00}\n"), time.Now()))
+	if read, _, _ := Read(ctx, conn, claudeTranscript); string(read) != "{}\n" {
+		t.Errorf("after a refused append the session reads %q, want it as saved", read)
+	}
+}

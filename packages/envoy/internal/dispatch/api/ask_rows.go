@@ -9,8 +9,10 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // askRowColumns are docs.AskColumns plus the documents a block ask, a quoted anchor or an
@@ -20,9 +22,13 @@ const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary,
 	aa.project_key, aa.slug, aa.name, aa.is_primary,
 	pa.project_key, pa.slug, pa.name, pa.is_primary`
 
-const askRowFrom = `from asks a
+// askRowFrom is a var, not a const, because its anchor join is built from store.CastableUUID: a
+// stored anchor resolves to the document its artifact_id casts to, whatever the spelling, and one
+// whose artifact_id casts to no uuid resolves to no document instead of failing the read with
+// SQLSTATE 22P02.
+var askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
-	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+	left join artifacts aa on aa.id = ` + store.CastableUUID(`a.anchor->>'artifact_id'`) + `
 	left join artifacts pa on pa.id = (a.approval->>'artifact_id')::uuid`
 
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that
@@ -40,10 +46,13 @@ const lastReplyJoin = `
 		left join lateral (` + newestReply + `) lr on true`
 
 // approvalMoved says the ask aliased a is an approval request a version moved past the version its
-// agent last handed to the human. waitingOnExpression and describeAsk, which reads it for a reply's
+// agent last handed to the human. A request that names two documents is moved when either of them
+// is: each document of approval.documents carries its own version and requested_version, and the
+// first of them is the pair approval.version and approval.requested_version repeat.
+// waitingOnExpression and describeAsk, which reads it for a reply's
 // waiting_on (commentThreadTarget.waitingOnAfter), share it.
 const approvalMoved = `(a.kind = 'approval'
-		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint)`
+		and jsonb_path_exists(a.approval, '$.documents[*] ? (@.requested_version < @.version)'))`
 
 // waitingOnExpression is the one turn rule every open-ask read, the Inbox order, a document's
 // awaiting approval and the approval route's hand-back decision share; a reply's own waiting_on
@@ -87,7 +96,7 @@ func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) 
 // never carry WaitingOn.
 const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression + ` as waiting_on`
 
-const askReadFrom = askRowFrom + lastReplyJoin
+var askReadFrom = askRowFrom + lastReplyJoin
 
 // nullableAskArtifactRef holds the nullable columns of one optional document an ask names - a
 // quoted anchor's or an approval request's artifact_id, both resolved through a left join that
@@ -152,19 +161,115 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 	if len(asks) == 0 {
 		return nil
 	}
-	ids := make([]string, 0, len(asks))
-	for _, ask := range asks {
-		ids = append(ids, ask.ID)
-	}
-	counts, err := refs.BacklinkCounts(ctx, q, "ask", ids, refs.AskBacklinkExclusions)
+	counts, err := refs.BacklinkCounts(ctx, q, "ask", distinctAskIDs(asks), refs.AskBacklinkExclusions)
 	if err != nil {
 		return err
 	}
+	applyAskBacklinkCounts(asks, counts)
+	return nil
+}
+
+// applyAskBacklinkCounts stamps each ask with its count, zero included, from what the count
+// query answered: attachAskBacklinkCounts for one ask, and queueAskDetails for every list of
+// asks.
+func applyAskBacklinkCounts(asks []*model.Ask, counts map[string]int) {
 	for _, ask := range asks {
 		count := counts[ask.ID]
 		ask.ReferencedByCount = &count
 	}
+}
+
+// queueAskDetails queues in b what every listed ask carries beside its row - its identity event,
+// its inbound graph-edge count, and the part ids of its options and of its answer with its part
+// revision - and returns the apply that stamps them onto the asks once the batch is closed. The
+// three statements are queued in that order wherever an ask is read: the issue read queues them
+// beside its other reads (readIssueDetails), and a read of its own sends them as a batch of its
+// own (loadAskDetails). No ask queues nothing and its apply stamps nothing. A node kind refs
+// declares no counting arms for is refused as the count is queued, which queues nothing and
+// answers nothing itself, so the apply reports that refusal.
+func queueAskDetails(b *pgx.Batch, asks []*model.Ask) func() error {
+	askIDs := distinctAskIDs(asks)
+	openedEventIDs := make(map[string]int64, len(askIDs))
+	counts := map[string]int{}
+	partIDs := make([]refs.AskIDs, len(asks))
+	events.QueueOpenedEventIDs(b, askIDs, openedEventIDs)
+	countsErr := refs.QueueBacklinkCounts(b, "ask", askIDs, refs.AskBacklinkExclusions, counts)
+	refs.QueueAskPartIDs(b, asks, partIDs)
+	return func() error {
+		if countsErr != nil {
+			return countsErr
+		}
+		if err := applyOpenedEventIDs(asks, openedEventIDs); err != nil {
+			return err
+		}
+		applyAskBacklinkCounts(asks, counts)
+		applyAskPartIDs(asks, partIDs)
+		return nil
+	}
+}
+
+// loadAskDetails sends queueAskDetails's statements as a batch of their own on q, for an ask read
+// that queues nothing else: an owner's asks, the Inbox's rows, an event payload's asks. The batch
+// holds q's connection until its results close, so nothing else reads the database in between.
+func loadAskDetails(ctx context.Context, q queryer, asks []*model.Ask) error {
+	batch := &pgx.Batch{}
+	apply := queueAskDetails(batch, asks)
+	if batch.Len() == 0 {
+		return nil
+	}
+	if err := q.SendBatch(ctx, batch).Close(); err != nil {
+		return err
+	}
+	return apply()
+}
+
+// attachAskPartIDs reads, in one query over `ask_blocks`, the part id of every listed ask's
+// options and answer and the ask's current part revision (`refs.AskPartIDs`), so every read
+// that shows an ask's options shows the reference of each: `dispatch://<key>/ask/<id>#b-<part
+// id>`, pinned to the ask's `revision` with `@v<N>`. It is read beside attachAskBacklinkCounts,
+// which every list and detail read of an ask already pays for, and never by a write, whose
+// answer carries no id. A list of asks reads the same ids in its own batch instead
+// (queueAskDetails, over refs.QueueAskPartIDs).
+//
+// Which option or answer each stored part stands for, and what an ask the index has not reached
+// or an option no part stands for carries, is refs.AskPartIDs'.
+func attachAskPartIDs(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if len(asks) == 0 {
+		return nil
+	}
+	partIDs, err := refs.AskPartIDs(ctx, q, asks)
+	if err != nil {
+		return err
+	}
+	applyAskPartIDs(asks, partIDs)
 	return nil
+}
+
+// applyAskPartIDs stamps each ask with the ids read for it, in the asks' own order: the part id
+// of each of its options and of its answer, and the revision its parts have reached. Both halves
+// of the read end here - attachAskPartIDs for one ask or a read of its own, queueAskDetails for
+// a list read in a batch.
+func applyAskPartIDs(asks []*model.Ask, partIDs []refs.AskIDs) {
+	for index, ask := range asks {
+		ask.Revision = partIDs[index].Revision
+		for option := range ask.Options {
+			ask.Options[option].ID = partIDs[index].Options[option]
+		}
+		if ask.Answer != nil {
+			ask.Answer.ID = partIDs[index].Answer
+		}
+	}
+}
+
+// attachAskReadFields is what the read of one ask (getAsk) attaches beyond its row: its inbound
+// graph-edge count (attachAskBacklinkCounts), then the part ids of its options and of its answer
+// with its part revision (attachAskPartIDs). A write attaches neither. A list of asks reads the
+// same fields, with their identity events, in one batch instead (queueAskDetails, loadAskDetails).
+func attachAskReadFields(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if err := attachAskBacklinkCounts(ctx, q, asks); err != nil {
+		return err
+	}
+	return attachAskPartIDs(ctx, q, asks)
 }
 
 func (s *server) loadAskAnchorArtifact(

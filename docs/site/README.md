@@ -1,9 +1,20 @@
 # Legion documentation site
 
-The source of <https://sjawhar.github.io/legion/>: an [Astro Starlight](https://starlight.astro.build/)
-site covering Legion, Dispatch and the Secrets Broker. `.github/workflows/docs.yaml` builds it on
-every pull request that touches `docs/site/`, `packages/` or `skills/`, and publishes it to GitHub
-Pages on every push to `main`.
+The source of the site GitHub Pages serves this repository at, <https://cybermonklabs.github.io/legion/>
+today and derived from the repository the build runs in (`repo-paths.ts`, from
+`.github/scripts/repo-paths.sh`): an [Astro Starlight](https://starlight.astro.build/)
+site covering Legion, Dispatch and the Secrets Broker. The `docs` job of `.github/workflows/ci.yaml`
+builds it on every pull request and merge group whose change its `docs` filter matches.
+`.github/workflows/docs-pages.yaml` builds it on every push to `main` whose change the same list
+matches (its `paths:`, which `.github/scripts/check-ci-filters.sh` holds equal to the `docs` filter)
+and publishes that build to GitHub Pages.
+
+Docs-selecting pushes to `main` build and deploy in push order: the workflow's runs share one
+concurrency group, `pages`, which runs one at a time and queues the rest first in, first out. GitHub
+bounds that queue at 100 waiting runs, and a `paths:` filter skips a push whose diff holds more than
+3,000 files when none of the first 3,000 matches, so a push can go unbuilt. If a push is dropped or
+its build fails, the site stays at the last one published until the next docs-selecting push
+deploys it again.
 
 ## Run it
 
@@ -45,5 +56,5 @@ refuses relative links (`errorOnRelativeLinks`, its default) or, with that off, 
 | `astro.config.mjs` | Site URL and base, sidebar, and plugins (Mermaid, the link validator, sidebar labels). |
 
 How to write a page, the generator contract and where media goes are on the published site's
-[Contributing to these docs](https://sjawhar.github.io/legion/contributing/) page, whose source is
+[Contributing to these docs](https://cybermonklabs.github.io/legion/contributing/) page, whose source is
 `src/content/docs/contributing.md`.

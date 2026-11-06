@@ -40,6 +40,12 @@ session (a comment's mention, sent through the Envoy listener), apply these rule
   is recorded `failed` though the send may have landed, so the session gets two copies under
   different dedupe keys.
 
+**Note 2026-10-28 (#2395):** the outbox's batch model renamed what the evidence below names.
+The predicate is `destinations.leftToMention`, the mention deliveries are one `loadMentionDeliveries`
+statement per batch (`outbox/lookups.go`), and `settleEvent` records an event with a held-back copy
+`blocked`, due `mentionPendingDelay` after the record at the latest (`next_attempt_at` alone, no
+attempt counted), the outcome an event held back by an earlier one gets. The rule is unchanged.
+
 ## Evidence
 
 - In `outbox/publisher.go`, `attempt.leftToMention` is the one predicate. It reads

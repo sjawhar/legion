@@ -29,6 +29,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/stream"
@@ -38,6 +39,7 @@ import (
 // and holds it to the case's reservation and QoS class, as the API server recorded them. It writes
 // `<case> <namespace>/<pod> <legion.yaml>` per case to LEGION_E2E_RESULT for the script.
 func TestABurstableIssuePodRendersLive(t *testing.T) {
+	fixtureenv.Live(t)
 	env := map[string]string{}
 	for _, name := range []string{"LEGION_E2E_KUBECONFIG", "LEGION_E2E_KUBE_CONTEXT", "LEGION_E2E_IMAGE", "LEGION_E2E_STREAM_HOST", "LEGION_E2E_WORK", "LEGION_E2E_RESULT"} {
 		if env[name] = os.Getenv(name); env[name] == "" {

@@ -118,6 +118,7 @@ test("a Legion pane's server registers on its transcript, claims its role, serve
     expect(tools.map(({ name }) => name)).toEqual([
       ...envoyToolSpecs.map(({ name }) => name),
       "legion",
+      "legion_phase_hook",
     ])
     await expect(
       client.callTool({ name: "legion", arguments: { op: "read_record", issue: "LEGION-208" } }),

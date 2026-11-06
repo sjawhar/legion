@@ -21,8 +21,8 @@ import (
 // Frame is one frame exactly as the session published it. Its shape belongs to the session and
 // the dashboard (packages/contracts/src/agent-stream.ts); the relay never parses it. A nil Frame
 // is reserved where frames are delivered (Subscribe below): it is the relay ending a viewer's
-// stream (api/agent_stream.go), which Memory.Drop alone produces, and no source publishes one as
-// a session's own output. Replay's nil is a different answer, an empty history.
+// subscription (api/live_agent.go), which Memory.Drop alone produces, and no source publishes one
+// as a session's own output. Replay's nil is a different answer, an empty history.
 type Frame []byte
 
 // controlReplay asks a session for the history it can still replay; controlWatch tells it a

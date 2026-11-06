@@ -44,12 +44,15 @@ trigger goes away. Then look for input that is now lost without any error.
 
 ## Evidence
 
-- `packages/proof-editor/src/typed-block-drawing.ts:69-97` (moved there from `read-only-directives.ts` by INFRA-565): `placeholders`, with the mark case at `:76`, and `fitsContentRule`, with the `createAndFill` call at `:97`; `:166-188` is the innermost-first decision.
+- `packages/proof-editor/src/typed-block-drawing.ts:65-93` (moved there from `read-only-directives.ts` by INFRA-565): `placeholders`, with the mark case at `:72`, and `fitsContentRule`, with the `createAndFill` call at `:93`; `:162-184` is the innermost-first decision.
 - INFRA-565 found the same loss in the editor's default mode, where nothing had stopped throwing:
   the headless engine without `readOnly` and the live editor dropped an `:::ask` holding a
-  heading, pasted or imported, with all its text. Default mode now runs the same check after
-  `remarkTypedBlocks` (`remarkUnfitTypedBlocks`) and, in the live editor, after the mark plugins
-  (`unfitTypedBlocksRemarkPlugin` in `src/lib.ts`); `packages/dispatch/e2e/typed-block-content-rule.e2e.ts`
+  heading, pasted or imported, with all its text. The headless default mode now runs the same
+  check after `remarkTypedBlocks` (`remarkUnfitTypedBlocks`), and the live editor runs it after
+  the mark plugins (`liveTypedBlocksRemarkPlugin` in `src/lib.ts`, since sjawhar/legion#2433 the read-only
+  parse's drawing decision, `remarkDecideTypedBlocks` with the shared `acceptedTypedBlock`, against
+  the editor's schema, keeping the `server` attributes that `remarkReadOnlyDirectives` drops);
+  `packages/dispatch/e2e/typed-block-content-rule.e2e.ts`
   pastes the block in a browser and keeps every word.
 - The tester's red test (commit `ee272bb6`) used an ask that holds a list and then an unknown
   `:::note`. Round 1's read-only parse rendered only `Lead` from it. Round 1's unit tests used a

@@ -35,7 +35,10 @@ plugin() {
   case "$1" in
   @sjawhar/pi-envoy)
     entry=envoy
-    skills=(asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy)
+    skills=(
+      agent-secrets asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy outside-message
+      plain-words
+    )
     ;;
   @sjawhar/pi-legion)
     entry=legion

@@ -108,7 +108,7 @@ regression lock. The reviewer's fast-follow for #1089 (fold the merge-group test
 
 A merge that touches `packages/envoy/**` runs `Release Envoy Listener`
 (`.github/workflows/release-envoy-listener.yaml`, `on: push: branches: [main]` with that path
-filter) and publishes `ghcr.io/sjawhar/legion/envoy:<merge sha>` and `:latest`. But
+filter) and publishes `ghcr.io/cybermonklabs/legion/envoy:<merge sha>` and `:latest`. But
 `packages/envoy/deploy/scripts/autodeploy.sh` runs `up -d --no-deps dispatch` only (lines 108 and
 145): the **listener** container keeps the old image until the operator restarts it on the new tag.
 Until then the pre-fix behaviour continues in production — one `merge_group checks_requested` and

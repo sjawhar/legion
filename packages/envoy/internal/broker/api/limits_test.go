@@ -6,14 +6,15 @@ package api
 import (
 	"testing"
 
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
-// mountedRereadBuckets are the two shared buckets a broker process can mount: cmd/broker mounts
-// GCPRereadOverallLimit under gcp-secret-manager and DefaultRereadOverallLimit otherwise. Both
-// rows below run over both of them, because the per-address limit is derived from whichever one
-// this process has, and a property that held for only one of the two would be exactly the bug
-// the derivation exists to fix.
+// mountedRereadBuckets are the two stores' shared reread sizings at MinReplicas: cmd/broker
+// divides the Secret Manager fleet budget under gcp-secret-manager and the default one
+// otherwise, and RereadOverallFor derives each pod's own bucket from whichever of the two the
+// process has. Both rows below run over both of them, because the per-address limit is derived
+// from whichever one this process mounts, and a property that held for only one of the two
+// would be exactly the bug the derivation exists to fix.
 var mountedRereadBuckets = []struct {
 	name    string
 	overall ratelimit.Limit
@@ -54,10 +55,10 @@ func TestOneAddressNeverSustainsMoreThanHalfTheMountedRereadBucket(t *testing.T)
 // address gets (DefaultRereadBurst), which no replica count and no store divides.
 //
 // It is asserted here rather than through an answer's Retry-After because Retry-After cannot
-// carry it: retryAfterSeconds rounds a bucket's Every up to whole seconds, so a header could not
-// tell a derived 600 ms from a chosen 1 s should a later resize of either shared bucket ever go
-// sub-second. The behavioural row reads the header, which is right for what it proves; an exact
-// duration has to be read where it is computed.
+// carry it: ratelimit.RetryAfterSeconds rounds a bucket's Every up to whole seconds, so a header
+// could not tell a derived 600 ms from a chosen 1 s should a later resize of either shared
+// bucket ever go sub-second. The behavioural row reads the header, which is right for what it
+// proves; an exact duration has to be read where it is computed.
 func TestRereadLimitForDerivesTheAddressBucketFromTheMountedOne(t *testing.T) {
 	for _, mounted := range mountedRereadBuckets {
 		t.Run(mounted.name, func(t *testing.T) {

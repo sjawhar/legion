@@ -1,10 +1,11 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
+import { type FakeLiveSockets, installFakeLiveSockets } from "../../__tests__/live-socket-harness";
 import { api } from "../../api/client";
-import * as live from "../../api/live";
+import { liveSocketFor } from "../../api/live-socket";
 import type { Agent } from "../../api/types";
 import { AgentConversationPage } from "./AgentConversationPage";
 import * as conversation from "./conversation";
@@ -43,17 +44,25 @@ const spies = [
   spyOn(api, "listAgents"),
   spyOn(api, "listAgentMessages"),
   spyOn(api, "getMyAgentState"),
-  spyOn(live, "readEventStream"),
   spyOn(conversation, "toThreadMessages"),
 ];
+let sockets: FakeLiveSockets;
+let queryClient: QueryClient | undefined;
+
+beforeEach(() => {
+  sockets = installFakeLiveSockets();
+});
 
 afterEach(() => {
   cleanup();
   for (const spy of spies) spy.mockRestore();
+  if (queryClient !== undefined) liveSocketFor(queryClient).close();
+  queryClient = undefined;
+  sockets.restore();
 });
 
 function renderPage() {
-  const queryClient = new QueryClient({
+  queryClient = new QueryClient({
     defaultOptions: { queries: { gcTime: 0, retry: false, staleTime: 0 } },
   });
   return render(
@@ -71,8 +80,8 @@ test("a conversation the runtime cannot convert costs the thread, not the page a
   spyOn(api, "listAgents").mockResolvedValue([agent]);
   spyOn(api, "listAgentMessages").mockResolvedValue([]);
   spyOn(api, "getMyAgentState").mockResolvedValue({});
-  // The stream never opens: this test is about rendering, and an open stream would retry.
-  spyOn(live, "readEventStream").mockReturnValue(new Promise<void>(() => undefined));
+  // The tab's socket never opens: this test is about rendering, and a session's answer is not
+  // needed to build the runtime.
   spyOn(conversation, "toThreadMessages").mockImplementation(() => {
     throw new Error("Unsupported user message part type: reasoning");
   });

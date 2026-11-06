@@ -41,7 +41,7 @@ test("a user preference stays at its caller default until login, then follows th
     expect(window.localStorage.getItem(aliceKey)).toBe("board");
     expect(window.localStorage.getItem(undefinedKey)).toBeNull();
 
-    await act(async () => whoAmIResult.resolve({ kind: "user", login: "alice" }));
+    await act(async () => whoAmIResult.resolve({ event_head: "0", kind: "user", login: "alice" }));
     await waitFor(() => expect(screen.getByRole("button").textContent).toBe("board"));
 
     fireEvent.click(screen.getByRole("button"));

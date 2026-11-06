@@ -8,8 +8,9 @@ import (
 
 // The state's `blocked` is every issue Legion is waiting to start behind a Dispatch issue nobody
 // has finished — a waiting root and a child held at `admitted` alike — in one array in issue-key
-// order, each with the keys it waits on. The root is in `waiting` as well, which keeps its own
-// meaning: the roots' waiting line, which no held child is part of.
+// order, each with the keys it waits on. The root is in `waiting` as well, the admission line,
+// which since dispatch://INFRA-980 carries children as well as roots; `trees` stands between the
+// two, so the three are checked together as the wire orders them.
 func TestTheStateCarriesBlockedRootsAndChildrenInOneArray(t *testing.T) {
 	encoded, err := json.Marshal(Admission{
 		Cap:     2,
@@ -23,7 +24,7 @@ func TestTheStateCarriesBlockedRootsAndChildrenInOneArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal the admission: %v", err)
 	}
-	want := `"waiting":["LEGION-211"],` +
+	want := `"waiting":["LEGION-211"],"trees":[],` +
 		`"blocked":[{"issue":"LEGION-209","blockedBy":["LEGION-300"]},` +
 		`{"issue":"LEGION-211","blockedBy":["LEGION-301","LEGION-302"]}]`
 	if !strings.Contains(string(encoded), want) {
@@ -32,7 +33,7 @@ func TestTheStateCarriesBlockedRootsAndChildrenInOneArray(t *testing.T) {
 }
 
 // Both the list and each row's keys are arrays on the wire, empty rather than null: the plugin's
-// strict reader refuses a null, and an admission with nothing blocked is the common case.
+// reader refuses a null, and an admission with nothing blocked is the common case.
 func TestTheStatesBlockedIsNeverNull(t *testing.T) {
 	encoded, err := json.Marshal(Admission{Cap: 2})
 	if err != nil {

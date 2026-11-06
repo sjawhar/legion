@@ -183,9 +183,12 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 		state != string(supervise.StateWorking) || tree != rootKey {
 		t.Fatalf("the implementer's stored claim at the carry = %s in %s, %v; want working in %s", state, tree, err, rootKey)
 	}
+	// Promotion queues two rows per start (workflow.StartOrOwe): the relaunch, which brings the
+	// role's session back at once carrying no task, and the row that carries the task and waits
+	// for the issue's admission slot. One start means one of the second kind.
 	var starts int
 	if err := pool.QueryRow(ctx, `select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = 'start'
-		and payload->>'role' = 'implementer' and payload->>'generation' = '2'`, childKey).Scan(&starts); err != nil || starts != 1 {
+		and payload->>'role' = 'implementer' and payload->>'generation' = '2' and coalesce(payload->>'task', '') <> ''`, childKey).Scan(&starts); err != nil || starts != 1 {
 		t.Fatalf("the carry's promotion queued %d starts of the implementer at generation 2, %v; want one", starts, err)
 	}
 
@@ -227,9 +230,7 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 			t.Fatalf("fired %d stop timeouts after the operator's suspend, want the held suspension's one", fired)
 		}
 	default:
-		if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-			t.Fatalf("end the implementer's turn: %v", err)
-		}
+		endTurn(ctx, t, machine, implementer)
 	}
 	if got := machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != wantBy ||
 		got.Session != "ses-implementer" || got.SessionFile != "/tmp/implementer.jsonl" {
@@ -245,7 +246,8 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 	// its phase's resume task at the new generation.
 	var task string
 	if err := pool.QueryRow(ctx, `select payload->>'task' from outbox where kind = 'supervise' and issue = $1
-				and payload->>'op' = 'start' and payload->>'role' = 'implementer' and (payload->>'generation')::int = 2`, childKey).Scan(&task); err != nil {
+				and payload->>'op' = 'start' and payload->>'role' = 'implementer' and (payload->>'generation')::int = 2
+				and coalesce(payload->>'task', '') <> ''`, childKey).Scan(&task); err != nil {
 		t.Fatalf("read the implementer's start at generation 2: %v", err)
 	}
 	if want := "Issue: " + childKey + ". Phase: implementing. Resume the existing phase work."; !strings.Contains(task, want) {

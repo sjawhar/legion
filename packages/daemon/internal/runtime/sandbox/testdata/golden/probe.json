@@ -48,7 +48,7 @@
                 "value": "/var/run/legion/providers/OMP_SESSION_SQL_DSN"
               }
             ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "image": "ghcr.io/cybermonklabs/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "probe",
             "resources": {
               "limits": {

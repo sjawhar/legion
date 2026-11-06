@@ -1,7 +1,9 @@
-import { access, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
+import { expect, type Locator, type Page, type TestInfo, test } from "@playwright/test";
+
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
+import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
 
 import {
   createAsk,
@@ -10,23 +12,31 @@ import {
   createIssueArtifact,
   createProject,
   dashboardOrigin,
+  editArtifact,
   getArtifactText,
 } from "./api";
 import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { signIn } from "./users";
 
-const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
-const diagramPath = join(fixtureDirectory, "diagram.png");
-const notesPath = join(fixtureDirectory, "notes.md");
 const tinyPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0eAAAAABJRU5ErkJggg==";
 
-test.beforeAll(async () => {
-  await mkdir(fixtureDirectory, { recursive: true });
-  await access(diagramPath).catch(() => writeFile(diagramPath, Buffer.from(tinyPng, "base64")));
-  await writeFile(notesPath, "# Review notes\n\nThese notes replace the initial spec.\n");
-});
+// The files a row uploads are written in that row's own output directory, which Playwright gives
+// each row of each worker (`testInfo.outputPath`): two workers running these rows at once would
+// otherwise write one path in the checkout, and a run must leave no file changed under e2e/.
+async function diagramFile(testInfo: TestInfo): Promise<string> {
+  const path = testInfo.outputPath("diagram.png");
+  await writeFile(path, Buffer.from(tinyPng, "base64"));
+  return path;
+}
+
+async function notesFile(testInfo: TestInfo): Promise<string> {
+  const path = testInfo.outputPath("notes.md");
+  await writeFile(path, "# Review notes\n\nThese notes replace the initial spec.\n");
+  return path;
+}
 
 test.beforeEach(async ({ context }) => {
   await resetDatabase();
@@ -55,6 +65,8 @@ function postAsPage(page: Page, path: string, data?: object) {
   return page.request.post(path, { data, headers: { Origin: dashboardOrigin } });
 }
 
+// SLOW(>=2s): three real uploads with the versions they build, the artifact page's version list
+// and comparison, and the references and phone layout read after them.
 test("artifacts upload, version, references, and phone layout @phone", async ({
   page,
 }, testInfo) => {
@@ -74,14 +86,15 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await openArtifacts(page, testInfo.project.name === "iphone");
 
   const upload = page.getByLabel("Upload artifact");
-  await upload.setInputFiles(diagramPath);
+  const diagramUpload = await diagramFile(testInfo);
+  await upload.setInputFiles(diagramUpload);
   await confirmUpload(page);
   const diagram = page.getByTestId("artifact-diagram-png");
   await expect(diagram).toContainText("diagram.png");
   await expect(diagram).toContainText("1 version");
   await expect(diagram.getByRole("img", { name: "diagram.png version 1" })).toBeVisible();
 
-  await upload.setInputFiles(diagramPath);
+  await upload.setInputFiles(diagramUpload);
   await confirmUpload(page);
   await expect(diagram).toContainText("2 versions");
   await expect(diagram.getByRole("link", { name: "Download version 2" })).toHaveAttribute(
@@ -93,7 +106,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await expect(diagram.getByRole("button", { name: "Show all versions" })).toHaveCount(0);
   await expect(page.getByLabel("Filter artifacts")).toBeVisible();
 
-  await page.goto(`/issues/${issue.key}/artifacts/diagram-png`);
+  await navigateInApp(page, `/issues/${issue.key}/artifacts/diagram-png`);
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/diagram-png`);
   await expect(page.getByTestId("artifact-header")).toContainText("diagram.png");
   expect(sockets()).toBe(1);
@@ -113,10 +126,10 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await expect(compare).toContainText("From · Version");
   await expect(compare).toContainText("To · Version");
 
-  await page.goto(`/issues/${issue.key}`);
+  await navigateInApp(page, `/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");
 
-  await upload.setInputFiles(notesPath);
+  await upload.setInputFiles(await notesFile(testInfo));
   await confirmUpload(page);
   const notes = page.getByTestId("artifact-notes-md");
   await expect(notes).toContainText("notes.md");
@@ -131,7 +144,8 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await createComment(issue.key, {
     body: `See dispatch://${issue.key}/artifact/diagram-png before deciding.`,
   });
-  await page.reload();
+  // No reload: both citations reach the open page on its event feed, and the panel below reads
+  // what the feed left.
   await openArtifacts(page, testInfo.project.name === "iphone");
 
   await diagram.getByRole("link", { name: "diagram.png" }).click();
@@ -146,6 +160,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await diagramReferencedBy.getByRole("link", { name: `Comment · ${issue.key}` }).click();
   await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/comments/`));
 
+  // One cold load, so the notes.md panel below is read by a page that cached nothing.
   await page.goto(`/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");
   await notes.getByRole("link", { name: "notes.md" }).click();
@@ -155,7 +170,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await expect(notesReferencedBy).toContainText(
     `See dispatch://${issue.key}/artifact/notes-md@v1 before deciding.`
   );
-  await page.goto(`/issues/${issue.key}`);
+  await navigateInApp(page, `/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");
   await page.screenshot({ path: testInfo.outputPath("artifacts-tab.png"), fullPage: true });
 
@@ -169,7 +184,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
     await openNavigation.click();
     await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
     await page.getByRole("button", { name: "Close navigation" }).click();
-    await page.goto(`/issues/${issue.key}`);
+    await navigateInApp(page, `/issues/${issue.key}`);
     const openMargin = page.getByRole("button", { name: /review panel/i });
     if ((await openMargin.getAttribute("aria-expanded")) === "true") {
       await openMargin.click();
@@ -191,19 +206,60 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   }
 });
 
-test("the artifacts tab filter narrows rows by name and kind @phone", async ({
+// The From/To compare of a document shows what changed as the change view, word by word. It is
+// seeded on a document that is not the issue's primary one, because `ArtifactRoutePanel` mounts
+// `ArtifactDetails` - the version history and this compare - only off the primary document's own
+// route (`isPrimaryDocumentArtifactRoute`, `features/refs/routes.ts`).
+test("the version history compares two versions of a document with the change view", async ({
   page,
-}, testInfo) => {
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "# Lease handover\n\nThe spec itself is the primary document.\n",
+    title: "Version compare",
+  });
+  const notes = await createIssueArtifact(issue.key, {
+    content: "# Review notes\n\nThe ledger keeps three leases.\n",
+    name: "notes.md",
+  });
+  await editArtifact(
+    notes.artifact.id,
+    {
+      ops: [
+        {
+          find: "The ledger keeps three leases.",
+          op: "replace",
+          with: "The ledger keeps seven leases.",
+        },
+      ],
+      summary: "Seven leases",
+    },
+    { as: "agent" }
+  );
+
+  await page.goto(`/issues/${issue.key}/artifacts/notes-md`);
+  const compare = page.getByRole("region", { name: "Compare versions for notes.md" });
+  await compare.getByRole("button", { name: "Show comparison" }).click();
+  await compare.getByLabel("Compare notes.md from").selectOption("1");
+  await compare.getByLabel("Compare notes.md to").selectOption("2");
+  const changed = compare.getByTestId("change-view").locator('[data-change="changed"]');
+  await expect(changed).toHaveCount(1);
+  await expect(changed.locator("del")).toHaveText(["three"]);
+  await expect(changed.locator("ins")).toHaveText(["seven"]);
+});
+
+test("the artifacts tab filter narrows rows by name and kind", async ({ page }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Artifact filtering" });
   await page.goto(`/issues/${issue.key}`);
-  await openArtifacts(page, testInfo.project.name === "iphone");
+  await openArtifacts(page, false);
 
   const upload = page.getByLabel("Upload artifact");
-  await upload.setInputFiles(diagramPath);
+  await upload.setInputFiles(await diagramFile(testInfo));
   await confirmUpload(page);
   await expect(page.getByTestId("artifact-diagram-png")).toBeVisible();
-  await upload.setInputFiles(notesPath);
+  await upload.setInputFiles(await notesFile(testInfo));
   await confirmUpload(page);
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 
@@ -221,7 +277,9 @@ test("the artifacts tab filter narrows rows by name and kind @phone", async ({
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 });
 
-test("an uploaded document is linked from the Activity tab and counted on its own tab @phone", async ({
+// SLOW(>=2s): a real upload the live feed counts into the tab, and the keyboard tour of five
+// tabs with each tab's box measured, at 390 px and back.
+test("an uploaded document is linked from the Activity tab and counted on its own tab", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -236,11 +294,11 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     name,
   });
 
-  // The live event stream refreshes the issue and its tabs: no reload.
+  // The live event feed refreshes the issue and its tabs: no reload.
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
   const tabs = tablist.getByRole("tab");
-  await expect(tabs).toHaveCount(5);
+  await expect(tabs).toHaveCount(8);
   const insideTablist = async (tab: Locator) => {
     const [listBox, box] = await Promise.all([tablist.boundingBox(), tab.boundingBox()]);
     expect(listBox).not.toBeNull();
@@ -251,16 +309,33 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
       (listBox?.x ?? 0) + (listBox?.width ?? 0) + 0.5
     );
   };
-  // Five tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
+  // Eight tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
   // sideways there (as it already did at 360 px). No label is shortened to buy the room, every
   // tab is reachable from the keyboard, each is scrolled fully into view as it takes focus, and
   // each keeps its 44 px touch target.
   const viewport = page.viewportSize();
   await page.setViewportSize({ height: viewport?.height ?? 800, width: 390 });
-  await expect(tabs).toHaveText(["Spec", "Conversation", "Children", "Artifacts2", "Activity"]);
+  await expect(tabs).toHaveText([
+    "Spec",
+    "Verification",
+    "Plan",
+    "Conversation",
+    "Children",
+    "Artifacts2",
+    "Activity",
+    "Decisions",
+  ]);
   expect(await tablist.evaluate((node) => node.scrollWidth > node.clientWidth + 0.5)).toBe(true);
   await page.getByRole("tab", { name: "Spec" }).focus();
-  for (const label of ["Conversation", "Children", "Artifacts (2)", "Activity"] as const) {
+  for (const label of [
+    "Verification",
+    "Plan",
+    "Conversation",
+    "Children",
+    "Artifacts (2)",
+    "Activity",
+    "Decisions",
+  ] as const) {
     await page.keyboard.press("ArrowRight");
     const tab = page.getByRole("tab", { exact: true, name: label });
     await expect(tab).toBeFocused();
@@ -362,9 +437,7 @@ test("an out-of-schema document names its repair and uploads replacement markdow
 // the text it read on the first visit. The second admission reads the text afresh and shows the
 // repair; connecting on the cached text would open a socket into a tree outside the schema. The
 // count is this document's sockets alone: the issue's own spec holds a socket of its own.
-test("an out-of-schema document does not reconnect from cached text @phone", async ({
-  page,
-}, testInfo) => {
+test("an out-of-schema document does not reconnect from cached text", async ({ page }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Do not reconnect from stale text" });
   const upload = await createIssueArtifact(issue.key, {
@@ -376,7 +449,7 @@ test("an out-of-schema document does not reconnect from cached text @phone", asy
   const openDocument = () => row.getByRole("link", { name: "cached-repair.md" }).click();
 
   await page.goto(`/issues/${issue.key}`);
-  await openArtifacts(page, testInfo.project.name === "iphone");
+  await openArtifacts(page, false);
   // A page load would drop this marker, and the page's cached reads with it.
   await page.evaluate(() => Object.assign(window, { __e2eNavMarker: true }));
   await openDocument();
@@ -417,6 +490,9 @@ test("a mounted editor does not reconnect into a document made unreadable while 
     name: "reconnect-repair.md",
   });
 
+  // The reconnect below waits a draw from [0, RECONNECT_SPREAD_MS) set at the previous open
+  // (`web/src/features/doc/connection.ts`), which the page's own clock spends.
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
   await expect(documentEditor(page)).toContainText("before");
   await expect.poll(sockets).toBe(1);
@@ -431,6 +507,9 @@ test("a mounted editor does not reconnect into a document made unreadable while 
   );
   expect(corrupted.status()).toBe(204);
   await transport.release();
+  // Exactly the spread: a longer jump would arm the refusal's next re-admission and open a third
+  // socket, which is the count this row reads.
+  await page.clock.fastForward(RECONNECT_SPREAD_MS);
 
   await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
   await expect(documentEditor(page)).toBeHidden();
@@ -454,6 +533,9 @@ test("an edit typed while the socket was down survives a text refetch the server
     name: "offline-edit.md",
   });
 
+  // Two page timers below are the page's, not the server's: the read's two retries
+  // (`QUERY_RETRY_DELAY_MS`) and the reconnect draw from [0, RECONNECT_SPREAD_MS).
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
   await expect(documentEditor(page)).toContainText("before");
 
@@ -473,15 +555,27 @@ test("an edit typed while the socket was down survives a text refetch the server
       status: 503,
     });
   });
-  // A tab that becomes visible reopens the event stream. The page has received no event, so it
-  // reopens with no `since`, which the server never answers `X-Dispatch-Event-Replay: complete`,
-  // and the reconnect refreshes every query the page holds, the document's text among them; the
-  // app retries a 5xx twice before it fails the read.
-  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-  await expect.poll(() => refused).toBeGreaterThanOrEqual(3);
+  // A comment anchored in the document names it, so its event refreshes the document's reads, its
+  // text among them; the app retries a 5xx twice before it fails the read. A drop of the page's
+  // live socket would not: Dispatch replays every event the page missed (`replay_complete`), so a
+  // gap that replay covers refreshes nothing.
+  await createComment(issue.key, {
+    anchor: { artifact: upload.artifact.slug, quote: "before" },
+    body: "On the text.",
+  });
+  // Each refusal arms the next retry, so the jump repeats until the read has been given up.
+  await expect
+    .poll(
+      async () => {
+        await page.clock.runFor(QUERY_RETRY_DELAY_MS + 50);
+        return refused;
+      },
+      { intervals: [50, 50, 100, 200, 500] }
+    )
+    .toBeGreaterThanOrEqual(3);
   // The third answer fails the read; nothing on a page that keeps its editor marks that moment, so
-  // the page is given a moment to render the failure before what it shows is read.
-  await page.waitForTimeout(500);
+  // the page is given a moment of real time to render the failure before what it shows is read.
+  await sleep(250);
   await expect(documentEditor(page)).toBeVisible();
   await expect(documentEditor(page)).toContainText("offline edit");
   await expect(page.getByRole("button", { name: "Rebuild from the latest version" })).toHaveCount(
@@ -491,6 +585,7 @@ test("an edit typed while the socket was down survives a text refetch the server
 
   await page.unroute(textRoute);
   await transport.release();
+  await page.clock.fastForward(RECONNECT_SPREAD_MS);
   await expect
     .poll(async () => (await getArtifactText(upload.artifact.id)).markdown)
     .toBe("before\n\noffline edit\n");

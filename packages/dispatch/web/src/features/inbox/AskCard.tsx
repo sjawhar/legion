@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 
-import { type ArtifactOwner, api } from "../../api/client";
+import { type ArtifactOwner, api, type WriteBounds } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
@@ -65,10 +65,14 @@ import { EarlierApproval } from "./EarlierApproval";
 import { clearReplyDraft } from "./reply-drafts";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
-const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
+const answerAsk = (id: string, input: AnswerAskInput, bounds: WriteBounds): Promise<Ask> =>
+  api.answerAsk(id, input, bounds);
 const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
-const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
-  api.createComment(issueKey, input);
+const createReply = (
+  issueKey: string,
+  input: CreateCommentInput,
+  bounds: WriteBounds
+): Promise<Comment> => api.createComment(issueKey, input, bounds);
 
 export interface AskCardProps {
   artifactSlug?: string;
@@ -90,14 +94,18 @@ export interface AskCardProps {
    *  editor shows the question, and the block is the link's target, so the card renders only
    *  what the block lacks — who asked and when, the exchange, and the composer or the record. */
   frame?: AskFrame;
-  answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
+  answerAsk?: (id: string, input: AnswerAskInput, bounds: WriteBounds) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
   getAskThread?: (id: string) => Promise<AskRead>;
   /** Data the Inbox response already hydrated for the first card render. */
   initialThread?: AskRead;
   /** Timestamp of the Inbox snapshot that supplied initialThread. */
   initialThreadUpdatedAt?: number;
-  createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  createReply?: (
+    issueKey: string,
+    input: CreateCommentInput,
+    bounds: WriteBounds
+  ) => Promise<Comment>;
   /** Whether an approval ask's label also links its document and version. Default `true`: the
    *  Inbox, the drawer and the Conversation name it. The margin passes `false` — the reader is
    *  already on that document, so the link would point at the page under it. */
@@ -208,6 +216,7 @@ export function AskCard({
     submitGuard,
     threadQuery,
     trimmedAnswer,
+    unsentAnswer,
   } = useAskAnswerForm({
     answer,
     ask,
@@ -259,6 +268,21 @@ export function AskCard({
       answerFieldRef.current?.focus();
     }
   }, [reasonFieldShown]);
+  // Opening the disclosure is a move into the field it reveals, whoever opened it: the reader's
+  // own click, and the Inbox's Enter, which presses this same control (`Inbox.tsx`). The field
+  // is drawn by the render the press schedules, so the focus can only be this effect's - the
+  // opener runs before React has committed the box and would focus nothing. Only an open by the
+  // disclosure itself focuses, which is why the intent is recorded as the control is pressed: an
+  // option that opens the disclosure for its own words, and a change that seeds the note, leave
+  // the reader where they are.
+  const focusNoteOnOpen = useRef(false);
+  useEffect(() => {
+    if (!focusNoteOnOpen.current) return;
+    focusNoteOnOpen.current = false;
+    if (ownWordsOpen) {
+      answerFieldRef.current?.focus();
+    }
+  }, [ownWordsOpen]);
   // A control that disables itself under the reader's focus - Ask back while sending and once
   // its text is sent - would have the browser drop focus to the document body (in the Inbox, out
   // of the row, which then lets the row go) with nothing the card could act on afterwards; the
@@ -475,6 +499,20 @@ export function AskCard({
           markRef={answerIsNewest ? markNewest : undefined}
           onChangeAnswer={canChangeAnswer ? startChanging : undefined}
         />
+        {unsentAnswer === "" ? null : (
+          <div
+            className={`mt-3 rounded-xl border p-3 ${borderDefault}`}
+            data-testid="ask-unsent-answer"
+          >
+            <p className={`text-xs ${textMutedOnSurface}`}>
+              This question closed before you sent your answer, so it was not sent. Your text is
+              here to copy.
+            </p>
+            <p className={`mt-1 text-sm whitespace-pre-wrap ${textPrimaryOnSurface}`}>
+              {unsentAnswer}
+            </p>
+          </div>
+        )}
         {answerFailure === null ? null : <QueryError message={answerFailure.message} />}
         {referencedByNode}
         {threadNode}
@@ -490,10 +528,12 @@ export function AskCard({
           ? "relative mt-3"
           : `relative rounded-xl border-l-4 shadow-sm ${isCompact ? "px-3 pt-4 pb-3" : "px-4 pt-5 pb-4"} ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${askUrgencyAccent[displayedAsk.urgency]}`
       }
-      // The one handle on a card as a whole: a page-level key that must not fire while the reader
-      // is answering an ask (the issue page's priority digits, beside this card's own options)
-      // asks for it by name rather than matching a test id.
-      data-ask-card=""
+      // The one handle on a card as a whole, carrying the question the card draws: a page-level
+      // key that must not fire while the reader is answering an ask (the issue page's priority
+      // digits, beside this card's own options) matches the bare attribute, and the Inbox's
+      // answer keys find the selected question's own card by its value (`answerHand` in
+      // `Inbox.tsx`). Neither asks for a test id.
+      data-ask-card={displayedAsk.id}
       data-testid={`ask-${displayedAsk.id}`}
     >
       {hasUrgencyNotch ? (
@@ -684,7 +724,15 @@ export function AskCard({
                 aria-controls={`${answerFieldId}-disclosure`}
                 aria-expanded={ownWordsOpen}
                 className={`min-h-11 text-sm font-medium ${textSecondaryOnSurface}`}
-                onClick={() => setOwnWordsOpen((open) => !open)}
+                // The Inbox's Enter opens this disclosure to reach the answer box behind it,
+                // and finds the control by this handle, as it finds the box by
+                // `data-ask-answer` and an option by `data-ask-option` (`Inbox.tsx`).
+                data-ask-note-disclosure=""
+                onClick={() => {
+                  // Opening it is a move into the field behind it; closing it moves nowhere.
+                  focusNoteOnOpen.current = !ownWordsOpen;
+                  setOwnWordsOpen(!ownWordsOpen);
+                }}
                 type="button"
               >
                 Add a note or answer in your own words

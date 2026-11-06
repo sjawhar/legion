@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the
@@ -48,16 +49,14 @@ func buildAgentSecrets(t *testing.T) string {
 	return binary
 }
 
-// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
-// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+// shortTempDir is a directory of the test's own, removed when the test ends, with room under it
+// for the longest path these tests put there: the default helper socket a test's XDG_RUNTIME_DIR
+// holds, agent-secrets/helper.sock (hostmode_test.go). TMPDIR places it, and the helper falls
+// back to /tmp for that length alone, where t.TempDir()'s path carries the whole of the test's
+// name and passes the 107 bytes a unix socket path holds (docs/testing.md).
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ast")
-	if err != nil {
-		t.Fatalf("make a temporary directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, filepath.Join("agent-secrets", "helper.sock"))
 }
 
 // brokerCounters records how many times fakeBroker served each route, so a test can assert on
@@ -73,6 +72,26 @@ type brokerCounters struct {
 	pendingPoll   chan struct{}
 	noSettings    bool
 	settings      *Settings
+	released      *string
+}
+
+// releaseValue makes POST /v1/grants/grant-granted/values answer value for GRANT_ME in place of
+// the default, so a test can release a value of a shape of its own, such as one that ends in a
+// line ending.
+func (c *brokerCounters) releaseValue(value string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.released = &value
+}
+
+// releasedValue is what that route answers with: what releaseValue chose, else the default.
+func (c *brokerCounters) releasedValue() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.released != nil {
+		return *c.released
+	}
+	return "topsecretvalue123"
 }
 
 func (c *brokerCounters) sessionID() string {
@@ -118,20 +137,32 @@ func (c *brokerCounters) servedSettings() *Settings {
 }
 
 // fakePending are fakeBroker's never-resolving pending requests, keyed by the name that asks for
-// each: its request id, its record, and the approver its answers carry. PENDING_UNNAMED's carry
-// none, as a broker from before the approver field answers.
-var fakePending = map[string]struct{ requestID, recordID, approver string }{
-	"PENDING_ME":      {"req-pending", "rec-pending-1", "ada@example.com"},
-	"PENDING_ANYONE":  {"req-pending-anyone", "rec-pending-anyone", record.AnyoneApprover},
-	"PENDING_UNNAMED": {"req-pending-unnamed", "rec-pending-unnamed", ""},
+// each: its request id, its record, the approver its answers carry, and whether they carry the
+// record's page on the broker as approve_url, <fake broker>/approve/<record>. PENDING_ME_NO_PAGE
+// answers as a broker from before that page, which carries none, and PENDING_UNNAMED as one from
+// before the approver field, which names none. No real broker answers with the page and no
+// approver, since approve_url is the newer field, but the waiting line has a sentence for that
+// pair and PENDING_UNNAMED is what checks it.
+var fakePending = map[string]struct {
+	requestID, recordID, approver string
+	page                          bool
+}{
+	"PENDING_ME":         {"req-pending", "rec-pending-1", "ada@example.com", true},
+	"PENDING_ANYONE":     {"req-pending-anyone", "rec-pending-anyone", record.AnyoneApprover, true},
+	"PENDING_UNNAMED":    {"req-pending-unnamed", "rec-pending-unnamed", "", true},
+	"PENDING_ME_NO_PAGE": {"req-pending-no-page", "rec-pending-no-page", "ada@example.com", false},
 }
 
-// pendingAnswer is fakeBroker's answer for a fakePending entry, request fields included or not.
-func pendingAnswer(name string, request bool) map[string]any {
+// pendingAnswer is fakeBroker's answer for a fakePending entry, request fields included or not;
+// base is the fake broker's own URL, which its approve_url names.
+func pendingAnswer(name, base string, request bool) map[string]any {
 	p := fakePending[name]
 	answer := map[string]any{"state": "pending", "grant_id": nil, "record_id": p.recordID}
 	if p.approver != "" {
 		answer["approver"] = p.approver
+	}
+	if p.page {
+		answer["approve_url"] = base + "/approve/" + p.recordID
 	}
 	if request {
 		answer["request_id"] = p.requestID
@@ -190,8 +221,8 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
 				"grant_id": "grant-granted", "record_id": nil, "approver": nil,
 			})
-		case "PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED":
-			writeJSON(w, pendingAnswer(name, true))
+		case "PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED", "PENDING_ME_NO_PAGE":
+			writeJSON(w, pendingAnswer(name, audience, true))
 		case "APPROVED_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-approved", "state": "granted",
@@ -250,11 +281,11 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				return
 			}
 		}
-		writeJSON(w, pendingAnswer(name, false))
+		writeJSON(w, pendingAnswer(name, audience, false))
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"values":     map[string]string{"GRANT_ME": "topsecretvalue123"},
+			"values":     map[string]string{"GRANT_ME": counters.releasedValue()},
 			"expires_at": time.Now().Add(time.Hour),
 		})
 	})
@@ -433,39 +464,126 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	}
 }
 
-// pendingSentences is the sentence each fakePending request's wait names whom it waits on and where
-// they decide it with, keyed by the name that asks for it and then by AGENT_SECRETS_APPROVE_URL:
-// unset (the Inbox), or the record's page under https://dispatch.example/. PENDING_UNNAMED's
-// broker names no approver, so its sentence says so.
-var pendingSentences = map[string]map[string]string{
-	"PENDING_ME": {
-		"":                          "waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox",
-		"https://dispatch.example/": "waiting for ada@example.com to approve it in Dispatch: https://dispatch.example/credentials/rec-pending-1",
-	},
-	"PENDING_ANYONE": {
-		"":                          "waiting for anyone signed in to Dispatch to approve it under Credential requests in their Inbox",
-		"https://dispatch.example/": "waiting for anyone signed in to Dispatch to approve it: https://dispatch.example/credentials/rec-pending-anyone",
-	},
-	"PENDING_UNNAMED": {
-		"":                          "waiting for approval under Credential requests in the Dispatch Inbox; the broker does not say whose",
-		"https://dispatch.example/": "waiting for approval in Dispatch: https://dispatch.example/credentials/rec-pending-unnamed; the broker does not say whose",
-	},
+// TestExecFormReleasesALineEndingUntouchedAndSaysSo is the end-to-end of the two above: the real
+// child of the real binary gets a released value that ends in a line ending exactly as the
+// broker served it — compared as a digest, so no value is in this test's output — and the exec
+// form says so on standard error, after its source line and before the child's own output, only
+// when a released value ends in one. A value that is meant to end in a newline, a PEM among
+// them, is delivered whole and named just the same (dispatch://INFRA-1042).
+func TestExecFormReleasesALineEndingUntouchedAndSaysSo(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	for name, tc := range map[string]struct {
+		released string
+		warns    bool
+	}{
+		"one trailing newline":  {released: "topsecretvalue123\n", warns: true},
+		"trailing CRLF":         {released: "topsecretvalue123\r\n", warns: true},
+		"lone carriage return":  {released: "topsecretvalue123\r", warns: true},
+		"a PEM-shaped value":    {released: "-----BEGIN KEY-----\nabc\n-----END KEY-----\n", warns: true},
+		"no trailing newline":   {released: "topsecretvalue123", warns: false},
+		"a newline inside only": {released: "first\nsecond", warns: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			broker, counters := fakeBroker(t)
+			defer broker.Close()
+			counters.releaseValue(tc.released)
+			stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
+				"GRANT_ME", "--", "sh", "-c", `printf %s "$GRANT_ME" | sha256sum; echo the-child-ran >&2`)
+			// Nothing below prints stdout or stderr: this case's released value is in neither
+			// unless the very regression this test exists to catch has happened, and
+			// redactSecrets hides only the default fixture. Each failure says what was wrong
+			// instead: an exit code, a digest, which assertion about the two lines failed.
+			if exit != 0 {
+				t.Fatalf("exit = %d, want 0", exit)
+			}
+			sum := sha256.Sum256([]byte(tc.released))
+			want, fields := hex.EncodeToString(sum[:]), strings.Fields(stdout)
+			if len(fields) == 0 {
+				t.Fatalf("the child printed no digest at all")
+			}
+			if fields[0] != want {
+				// The token is not printed: a regression that puts the value where the digest
+				// belongs would print it. Its own digest tells two failures apart and discloses
+				// nothing.
+				got := sha256.Sum256([]byte(fields[0]))
+				t.Fatalf("what the child printed first is not the value's digest %s; sha256 of what it did print: %s", want, hex.EncodeToString(got[:]))
+			}
+			lines := strings.SplitAfter(stderr, "\n")
+			if len(lines) < 2 || !strings.HasPrefix(lines[0], "agent-secrets: GRANT_ME from ") {
+				t.Fatalf("the first of %d stderr lines is not the source line", len(lines))
+			}
+			if warned := strings.Contains(stderr, "end in a line ending"); warned != tc.warns {
+				t.Fatalf("a line-ending warning: %v, want %v", warned, tc.warns)
+			}
+			if tc.warns && !strings.HasPrefix(lines[1], "agent-secrets: GRANT_ME end in a line ending") {
+				t.Fatalf("the second stderr line is not the warning, so it does not come before the child's own output")
+			}
+			if !strings.Contains(stderr, "the-child-ran") {
+				t.Fatalf("the child's own stderr line is missing")
+			}
+			// This case's own value, whole and ending aside, in either stream is the leak.
+			for _, part := range []string{tc.released, strings.TrimRight(tc.released, "\r\n")} {
+				if part != "" && strings.Contains(stdout+stderr, part) {
+					t.Fatalf("the released value reached this command's own output")
+				}
+			}
+		})
+	}
+}
+
+// pendingSentences is the sentence each fakePending request's wait names whom it waits on and
+// where they decide it with, keyed by the name that asks for it. <broker> stands for the fake
+// broker's URL. A request whose answer carries approve_url names that page on the broker; one
+// whose answer carries none names its approver and no page at all. Neither sentence depends on
+// AGENT_SECRETS_APPROVE_URL, which the two tests below set to Dispatch's origin and to nothing
+// around every row. The *_UNNAMED broker names no approver, so its sentence says so.
+var pendingSentences = map[string]string{
+	"PENDING_ME":         "waiting for ada@example.com to approve it on the secrets broker: <broker>/approve/rec-pending-1",
+	"PENDING_ANYONE":     "waiting for anyone signed in to the secrets broker to approve it: <broker>/approve/rec-pending-anyone",
+	"PENDING_UNNAMED":    "waiting for approval on the secrets broker: <broker>/approve/rec-pending-unnamed; the broker does not say whose",
+	"PENDING_ME_NO_PAGE": "waiting for ada@example.com to approve it on the secrets broker",
+}
+
+// TestAPendingRequestWithoutABrokerPageNamesItsApproverAlone pins all three sentences waitingOn
+// writes when the broker's answer carries no approve_url: each names the approver the broker
+// named, or says the broker named none, and names no page. PENDING_ME_NO_PAGE runs the third of
+// them through the real binary in the two tests below; the other two have no fixture of their
+// own, and this is what holds their wording.
+func TestAPendingRequestWithoutABrokerPageNamesItsApproverAlone(t *testing.T) {
+	person, anyone := "ada@example.com", record.AnyoneApprover
+	for _, row := range []struct {
+		name     string
+		approver *string
+		want     string
+	}{
+		{"no approver", nil, "waiting for approval on the secrets broker; the broker does not say whose"},
+		{"anyone signed in", &anyone, "waiting for anyone signed in to the secrets broker to approve it"},
+		{"a person", &person, "waiting for ada@example.com to approve it on the secrets broker"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if got := waitingOn(row.approver, ""); got != row.want {
+				t.Errorf("waitingOn = %q, want %q", got, row.want)
+			}
+		})
+	}
 }
 
 // TestExecFormPendingExitsSeventyFiveWithNoChild also pins what the wait says, and that it says it
 // before it waits: the request id and the bound, then whom it waits on and where they decide it —
-// the approver the broker names (a person, or anyone signed in to Dispatch), and the record's
-// Dispatch page under AGENT_SECRETS_APPROVE_URL, or the Inbox when that is unset. The fake broker
-// holds the first status poll until the test has read those two lines from the command's stderr,
-// so lines printed only once the wait ends never arrive in time.
+// the approver the broker names (a person, or anyone signed in), and the record's page on the
+// broker its answer names as approve_url. A broker that names no page leaves the approver alone.
+// The fake broker holds the first status poll until the test has read those two lines from the
+// command's stderr, so lines printed only once the wait ends never arrive in time.
 func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, counters := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	for _, name := range []string{"PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED"} {
-		for approveURL, sentence := range pendingSentences[name] {
+	for name, sentence := range pendingSentences {
+		sentence = strings.ReplaceAll(sentence, "<broker>", broker.URL)
+		for _, approveURL := range []string{"", "https://dispatch.example/"} {
 			t.Run(name+" "+approveURL, func(t *testing.T) {
 				requestID := fakePending[name].requestID
 				announced := make(chan struct{})
@@ -530,16 +648,17 @@ func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 
 // TestRequestAndStatusNameWhomAPendingRequestWaitsOn pins the text forms of request and status for
 // a pending request: after its id and state, the same sentence the exec form's wait prints, naming
-// the approver the broker names and where they decide it; request exits 75 and status 0, as
-// before.
+// the approver the broker names and the page on the broker where they decide it, which a broker
+// that names none leaves out; request exits 75 and status 0, as before.
 func TestRequestAndStatusNameWhomAPendingRequestWaitsOn(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	for _, name := range []string{"PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED"} {
-		for approveURL, sentence := range pendingSentences[name] {
+	for name, sentence := range pendingSentences {
+		sentence = strings.ReplaceAll(sentence, "<broker>", broker.URL)
+		for _, approveURL := range []string{"", "https://dispatch.example/"} {
 			t.Run(name+" "+approveURL, func(t *testing.T) {
 				env := []string{"AGENT_SECRETS_APPROVE_URL=" + approveURL}
 				requestID := fakePending[name].requestID
@@ -797,6 +916,94 @@ func TestBuildChildEnvKeepsOnlyTheSessionIdentity(t *testing.T) {
 	}
 }
 
+// TestReleasedValuesReachTheChildExactlyAsStored: a stored value may legitimately be several
+// lines, a PEM document among them, so the exec form injects every value byte for byte, line
+// endings and all.
+func TestReleasedValuesReachTheChildExactlyAsStored(t *testing.T) {
+	for name, value := range map[string]string{
+		"one trailing newline":   "sk-live-abc\n",
+		"trailing CRLF":          "sk-live-abc\r\n",
+		"two trailing newlines":  "sk-live-abc\n\n",
+		"no trailing newline":    "sk-live-abc",
+		"a newline inside":       "first\nsecond",
+		"only a newline":         "\n",
+		"a lone carriage return": "sk-live-abc\r",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := buildChildEnv(nil, map[string]string{"GRANT_ME": value})
+			// Compared as digests, and reported as digests: a failure here is a value that came
+			// out other than it went in, which is the one thing not to print.
+			want := []string{"GRANT_ME=" + value}
+			gotSum, wantSum := sha256.Sum256([]byte(strings.Join(got, "\n"))), sha256.Sum256([]byte(strings.Join(want, "\n")))
+			if gotSum != wantSum {
+				t.Fatalf("child env sha256 = %s, want %s: the value must be injected as stored", hex.EncodeToString(gotSum[:]), hex.EncodeToString(wantSum[:]))
+			}
+		})
+	}
+}
+
+// TestWarnTrailingNewlineNamesEverySecretThatEndsInALineEnding: a one-line credential stored with
+// the trailing newline of whatever produced it is invisible where it is written and expensive
+// where it is read — a caller that sends it unstripped gets a rejected HTTP header, and the error
+// reporting that can quote the whole secret (dispatch://INFRA-1042). The exec form says so on
+// standard error before the command runs, naming each such secret in a stable order and never any
+// part of a value, and says nothing when no value ends in one. No failure below prints what was
+// written or any value: the one worth catching is a line that holds a value.
+func TestWarnTrailingNewlineNamesEverySecretThatEndsInALineEnding(t *testing.T) {
+	for name, tc := range map[string]struct {
+		values map[string]string
+		want   []string
+		quiet  bool
+	}{
+		"one trailing newline":  {values: map[string]string{"GRANT_ME": "sk-live-abc\n"}, want: []string{"GRANT_ME"}},
+		"trailing CRLF":         {values: map[string]string{"GRANT_ME": "sk-live-abc\r\n"}, want: []string{"GRANT_ME"}},
+		"lone carriage return":  {values: map[string]string{"GRANT_ME": "sk-live-abc\r"}, want: []string{"GRANT_ME"}},
+		"two of three, sorted":  {values: map[string]string{"B_KEY": "sk-bbbbbb\n", "A_KEY": "sk-aaaaaa\n", "C_KEY": "sk-cccccc"}, want: []string{"A_KEY", "B_KEY"}},
+		"a newline inside only": {values: map[string]string{"GRANT_ME": "first\nsecond"}, quiet: true},
+		"none":                  {values: map[string]string{"GRANT_ME": "sk-live-abc"}, quiet: true},
+		"no secrets at all":     {values: nil, quiet: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stderr strings.Builder
+			warnTrailingNewline(&stderr, tc.values)
+			said := stderr.String()
+			// No failure below prints what was written. The line is meant to hold no value, so
+			// the failure that matters most here is the one where it holds one, and printing it
+			// then is the disclosure this whole change is about. Each failure says what was
+			// wrong, with a digest where two outputs must be told apart.
+			digest := func(s string) string {
+				sum := sha256.Sum256([]byte(s))
+				return hex.EncodeToString(sum[:])
+			}
+			if tc.quiet {
+				if said != "" {
+					t.Fatalf("it wrote %d bytes (sha256 %s), want nothing at all", len(said), digest(said))
+				}
+				return
+			}
+			if !strings.HasPrefix(said, "agent-secrets: "+strings.Join(tc.want, ", ")+" end in a line ending") {
+				t.Fatalf("the line does not open by naming exactly %v in order (sha256 %s)", tc.want, digest(said))
+			}
+			if strings.Count(said, "\n") != 1 || !strings.HasSuffix(said, "\n") {
+				t.Fatalf("it wrote %d newlines, want exactly one and it last", strings.Count(said, "\n"))
+			}
+			// The line is independent of the bodies: the same names with the same endings and
+			// wholly different values say exactly the same thing, which no substring check of a
+			// short value could establish (a short value can appear in the sentence's own words).
+			var other strings.Builder
+			changed := make(map[string]string, len(tc.values))
+			for name, value := range tc.values {
+				ending := value[len(strings.TrimRight(value, "\r\n")):]
+				changed[name] = "zzzzzzzzzzzzzzzzzzzz" + ending
+			}
+			warnTrailingNewline(&other, changed)
+			if other.String() != said {
+				t.Fatalf("the line changed with the values: sha256 %s became %s", digest(said), digest(other.String()))
+			}
+		})
+	}
+}
+
 // runExecForm runs the exec form of GRANT_ME against broker from keyDir with no helper to fall
 // back to (the runtime dir is empty and AGENT_SECRETS_HELPER_SOCK is empty), returning its exit
 // code, stderr and how long it took. extraEnv comes last, so it can override any of that.
@@ -838,8 +1045,8 @@ func TestEnrollWaitRidesOutTheLaunchersSetup(t *testing.T) {
 	keyDir := t.TempDir()
 	marker := writePendingMarker(t, keyDir, 0)
 
-	// The launcher writes each file whole (enroll's writeFileAtomic), so a waiting call never reads
-	// one half-written; the fixture does the same.
+	// The launcher writes each file whole (writeFileAtomic), so a waiting call never
+	// reads one half-written; the fixture does the same.
 	setupDone := make(chan error, 1)
 	go func() {
 		time.Sleep(time.Second)

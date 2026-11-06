@@ -181,6 +181,13 @@ the consuming end's check tells a reader what is refused but not why that shape 
 made — and check it at the consuming end too, because the producer is not the only one who can
 hand the consumer a commit.
 
+Since sjawhar/legion#2667 the bump carries a second file by design: `tag` also sets the
+`"version"` line of bun.lock's workspace entry for the package (awk, no bun), because a bump of the
+manifest alone left that line behind and every fresh checkout's `bun install` rewrote it. The
+contract widened with it at both ends: HEAD's tree may differ from its parent's in the manifest,
+bun.lock or both and nothing else, and bun.lock must be its parent's copy with that one line set,
+compared byte for byte; the resolver re-sets each conflicted file of the two on main's copy.
+
 Two more couplings a future editor of this script should know: `push-main`'s `rebase --continue`
 creates a commit and therefore needs `user.name`/`user.email`, which only the `tag` case sets —
 fine while the workflow always runs `tag` then `push-main` in one job, and caught by the guarded

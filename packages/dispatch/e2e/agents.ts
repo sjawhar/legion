@@ -1,8 +1,11 @@
+import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { expect, type Locator, type Page } from "@playwright/test";
 
-import type { CreateBroadcastInput } from "../web/src/api/types";
+import type { BroadcastCreated, CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { harnessPorts } from "./harness-ports";
+import { type KeyedWrite, keyedWrite, watchWrites } from "./keyed-writes";
+import { sessionIds } from "./session-ids";
 
 export interface FakeSession {
   session_id: string;
@@ -19,15 +22,17 @@ export interface FakeSession {
   topics?: string[];
 }
 
-/** A request to the harness's fake Envoy. The harness (e2e/harness-start.ts) starts this listener
- *  for local and deployed runs, so fixture state reaches whichever Dispatch server the suite
- *  targets. */
+/** A request to a fake Envoy, by default this process's own lane's. The harness
+ *  (e2e/harness-start.ts) starts that listener for local and deployed runs, so fixture state
+ *  reaches whichever Dispatch server the suite targets; `port` is for the one process that
+ *  addresses every lane's rather than its own (e2e/preflight.ts). */
 async function fixtureRequest(
   path: string,
   method: "GET" | "PATCH" | "PUT",
-  body?: object
+  body?: object,
+  port: number = harnessPorts().fakeEnvoy.port
 ): Promise<Response> {
-  const response = await fetch(`http://127.0.0.1:${harnessPorts().fakeEnvoy.port}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     method,
@@ -39,17 +44,26 @@ async function fixtureRequest(
 }
 
 /** Clears all mutable fake Envoy state between e2e rows. */
-export async function resetFakeEnvoy(): Promise<void> {
-  await fixtureRequest("/__fixture/reset", "PUT");
+export async function resetFakeEnvoy(port?: number): Promise<void> {
+  await fixtureRequest("/__fixture/reset", "PUT", undefined, port);
 }
 
-export async function setLiveSessions(rows: FakeSession[]): Promise<void> {
-  await fixtureRequest("/__fixture/sessions", "PUT", rows);
+export async function setLiveSessions(rows: FakeSession[], port?: number): Promise<void> {
+  await fixtureRequest("/__fixture/sessions", "PUT", rows, port);
 }
 
 export async function setSessionSendStatus(sessionID: string, status: 200 | 404): Promise<void> {
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
     send_status: status,
+  });
+}
+
+/** Holds every send to the session `ms` before the fake Envoy answers it, as a listener slow to
+ *  take it would; 0 answers at once again. Dispatch's listener client gives up on an answer at
+ *  5 s, so a hold that is to end in a delivery stays under that. */
+export async function setSessionSendDelay(sessionID: string, ms: number): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
+    send_delay_ms: ms,
   });
 }
 
@@ -77,34 +91,112 @@ export async function setSessionRecord(sessionID: string, record: SessionRecord)
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { record });
 }
 
+/** The state the fake listener's record puts a seeded session in. `gone` is not one of them: a
+ *  session the listener holds no record of at all is `setSessionRecord(id, "absent")`. */
+export type SessionState = "live" | "unresponsive";
+
+/** Puts a seeded session past the listener's live window, or back inside it, without reseeding.
+ *  An `unresponsive` session is still listed, still holds its roles and claims and is still
+ *  delivered to; every answer about it carries that state, and `GET /v1/sessions` and the
+ *  per-session route answer for it only when the caller asks with `include=unresponsive`, as
+ *  Dispatch's own listener client always does (dispatch://INFRA-392). Pair it with
+ *  `setSessionLastSeen` wherever the row's age matters: Dispatch dates the silence by that
+ *  heartbeat and adds its claim grace to it. */
+export async function setSessionState(sessionID: string, state: SessionState): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { state });
+}
+
+/** The heartbeat every answer reports for a seeded session, in epoch milliseconds, in place of
+ *  the read's own time: what an unresponsive session's silence is dated from, and what Dispatch
+ *  adds `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` to for the moment its claim comes free. */
+export async function setSessionLastSeen(sessionID: string, lastSeen: number): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
+    last_seen: lastSeen,
+  });
+}
+
+/** How the fake listener answers its two list reads (`GET /v1/sessions`, `GET /v1/interests/`):
+ *  `ok` from the fixture; `refilling` with the real listener's refilling answer (503,
+ *  `Retry-After: 5`, code `refilling`), which Dispatch reports as `ENVOY_REFILLING`; `down` with a
+ *  503 that carries no code, which Dispatch reports as `ENVOY_UNAVAILABLE`. Every other route
+ *  answers as before, and a session reseed keeps the state; `resetFakeEnvoy` puts it back to
+ *  `ok`. */
+export type ListsState = "ok" | "refilling" | "down";
+
+export async function setListsState(state: ListsState): Promise<void> {
+  await fixtureRequest("/__fixture/lists", "PUT", { state });
+}
+
 export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   return (await fixtureRequest("/__fixture/sends", "GET")).json() as Promise<
     Record<string, unknown>[]
   >;
 }
 
-/** Every broadcast request the page posts from here on, in order, as the body it sent - a route
- *  that fulfils a request itself still lists it. */
-export function postedBroadcasts(page: Page): CreateBroadcastInput[] {
-  const posted: CreateBroadcastInput[] = [];
-  page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
-      posted.push(request.postDataJSON() as CreateBroadcastInput);
-    }
-  });
-  return posted;
+/** Whether a body the page posted is a broadcast's input. */
+export function isBroadcastInput(body: unknown): body is CreateBroadcastInput {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    "body" in body &&
+    typeof body.body === "string" &&
+    "delivery" in body &&
+    DELIVERY_CAPABILITIES.some((mode) => mode === body.delivery) &&
+    "session_ids" in body &&
+    Array.isArray(body.session_ids) &&
+    body.session_ids.every((id) => typeof id === "string")
+  );
 }
 
-/** Refuses every broadcast POST the way an unreachable Envoy listener does, until `allow()`. The
- *  selected sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
+/** Every broadcast request the page posts from here on, in order, as the body it sent and the
+ *  `Idempotency-Key` it sent it under - a route that fulfils a request itself still lists it. */
+export function postedBroadcasts(page: Page): KeyedWrite<CreateBroadcastInput>[] {
+  return watchWrites(page, "POST", "/api/v1/broadcasts", isBroadcastInput);
+}
+
+/** Every broadcast the page sends from here on, in order: each press, Retry and Restore draft, as
+ *  the body and key it sent. A repeat is not a send of its own: Dispatch answers a broadcast
+ *  before it delivers, and while that answer still shows a recipient whose one attempt is pending,
+ *  the page asks again under the same key (`broadcast-queue.ts`), so the POSTs of one send
+ *  outnumber it. A POST under the key of an answer that left a recipient pending is that repeat,
+ *  and is not listed; `postedBroadcasts` lists every POST. */
+export function broadcastSends(page: Page): KeyedWrite<CreateBroadcastInput>[] {
+  const sends: KeyedWrite<CreateBroadcastInput>[] = [];
+  const owed = new Set<string | undefined>();
+  const isBroadcastPost = (request: { method(): string; url(): string }) =>
+    request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/broadcasts";
+  page.on("request", (request) => {
+    if (!isBroadcastPost(request)) return;
+    const send = keyedWrite(request, isBroadcastInput);
+    if (!owed.delete(send.key)) sends.push(send);
+  });
+  page.on("response", async (response) => {
+    if (!isBroadcastPost(response.request()) || !response.ok()) return;
+    const created = (await response.json()) as BroadcastCreated;
+    const pending = created.recipients.some(
+      ({ message: { deliveries } }) => deliveries.length === 1 && deliveries[0]?.state === "pending"
+    );
+    if (pending) owed.add(response.request().headers()["idempotency-key"]);
+  });
+  return sends;
+}
+
+/** The reason `refuseBroadcasts` gives, which a refused row shows after `Could not send to N
+ *  agents: `. */
+export const BROADCAST_REFUSED = "no selected session can receive this message";
+
+/** Refuses every broadcast POST as Dispatch does one no selected session can receive (400
+ *  `BROADCAST_EMPTY`), until `allow()`. A broadcast tries a failed fetch, a 5xx or a 429 again
+ *  under its key until Dispatch answers, so a refusal is a 4xx of Dispatch's own. The selected
+ *  sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
 export async function refuseBroadcasts(page: Page): Promise<{ allow: () => void }> {
   let refusing = true;
   await page.route("**/api/v1/broadcasts", (route) =>
     refusing && route.request().method() === "POST"
       ? route.fulfill({
-          body: JSON.stringify({ code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
+          body: JSON.stringify({ code: "BROADCAST_EMPTY", error: BROADCAST_REFUSED }),
           contentType: "application/json",
-          status: 503,
+          status: 400,
         })
       : route.fallback()
   );
@@ -115,10 +207,14 @@ export async function refuseBroadcasts(page: Page): Promise<{ allow: () => void 
   };
 }
 
+/** A persisted interest row to seed, served by the fake listener as given. `updated_at` is the
+ *  row's own last write; `last_seen` is the session's last heartbeat as the listener still knows
+ *  it, absent when the listener has lost it. */
 export interface FakeInterest {
   session_id: string;
   topics: string[];
   updated_at?: number;
+  last_seen?: number;
 }
 
 export async function setInterests(rows: FakeInterest[]): Promise<void> {
@@ -145,7 +241,7 @@ export const plannerSession: FakeSession = {
   dir: "/srv/planner",
   machine_id: "box-1",
   roles: ["planner"],
-  session_id: "planner-session",
+  session_id: sessionIds.planner,
   title: "Planner",
 };
 export const reviewerSession: FakeSession = {
@@ -153,7 +249,7 @@ export const reviewerSession: FakeSession = {
   dir: "/srv/reviewer",
   machine_id: "box-1",
   roles: ["reviewer"],
-  session_id: "reviewer-session",
+  session_id: sessionIds.reviewer,
   title: "Reviewer",
 };
 

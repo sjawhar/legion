@@ -34,10 +34,12 @@ the architect claims it, so the issue shows it as claimed by Legion's session.
 
 The architect grows the spec into a design and writes each open question as a decision block, which
 reaches the assignee's Inbox. Once every block is answered, it asks for approval with a summary.
+The Inbox opens the request in its reading column: the spec as the version to approve, with
+**Approve** and **Request changes** above it.
 
 ![The spec's design with an open decision block: the architect's question, its recommendation, and two options to answer.](/legion/media/legion/decision-block.png)
 
-![The architect's request to approve the spec in the Inbox, with its summary and the Approve and Request changes options.](/legion/media/legion/spec-approval.png)
+![The architect's request to approve the spec, selected in the Inbox's reading column: Approve and Request changes at the head of the column, and the version it asks about below them.](/legion/media/legion/spec-approval.png)
 
 ## 4. The phases run
 
@@ -57,8 +59,8 @@ as the review App. In Dispatch, the issue's header links the pull request.
 
 ## 6. The acceptance
 
-When the reviewer approves, the architect reads the evidence (the tester's handoff, the pull
-request's two `E2E` lines, the approval of the head) and accepts the change with a comment on the
+When the reviewer approves, the architect reads the evidence (the tester's handoff, each check of
+the issue with its latest result, the approval of the head) and accepts the change with a comment on the
 issue, which moves it to `retro`; a change that falls short goes back to the implementer or the
 tester instead. Retro runs next.
 
@@ -78,9 +80,9 @@ the pull request merged.
 After the close the implementer gets the production check in its live session. It asks your deploy
 role to carry the merge and waits for no reply; when production does not carry the merge yet it
 reports `pending`, its pod goes, and the daemon wakes it when Dispatch reports the pull request
-deployed. The look that finds the merge in production drives the change and records it on the pull
-request's `Production:` line, naming the merge commit and what woke the look. A closed issue takes
-no comment, so the record is on the pull request.
+deployed. The look that finds the merge in production drives the change and records the result of
+the issue's `after_merge` check, naming the merge commit and what woke the look, with that
+result's line on the pull request. A closed issue takes such a result and no other write.
 
 ## The operator's view
 

@@ -3,12 +3,14 @@ package gcp_test
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	gcpsdk "github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp"
 	randomsdk "github.com/pulumi/pulumi-random/sdk/v4/go/random"
+	tailscalesdk "github.com/pulumi/pulumi-tailscale/sdk/go/tailscale"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/require"
@@ -20,8 +22,9 @@ import (
 )
 
 const (
-	dispatchType       = "envoy-infra:gcp:Dispatch"
-	randomProviderType = "pulumi:providers:random"
+	dispatchType          = "envoy-infra:gcp:Dispatch"
+	randomProviderType    = "pulumi:providers:random"
+	tailscaleProviderType = "pulumi:providers:tailscale"
 
 	dispatchEnvoyImage     = "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	dispatchTailscaleImage = "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
@@ -38,7 +41,6 @@ func dispatchArgs() *gcp.DispatchArgs {
 		TailnetDnsName:      "example-tailnet.ts.net",
 		Tags:                []string{"tag:example-dispatch"},
 		TailnetAuthKey:      pulumi.String("tskey-auth-example-0123456789"),
-		TailnetService:      pulumi.String("svc:example-dispatch"),
 		EnvoyImage:          dispatchEnvoyImage,
 		TailscaleImage:      dispatchTailscaleImage,
 		CloudSqlProxyImage:  dispatchProxyImage,
@@ -72,11 +74,49 @@ func dispatchBrokerAndAppArgs(t *testing.T) *gcp.DispatchArgs {
 }
 
 const (
+	// inClusterNatsURL is the NATS hub's own Service in the pods' cluster, the address
+	// natsInCluster is for: with it set the app and the listener dial this themselves.
+	inClusterNatsURL = "nats://envoy-hub.envoy.svc.cluster.local:4222"
+	// dispatchNatsReplicas and dispatchStreamMaxBytes are the two JetStream numbers the tests
+	// set: three copies of every stream and bucket, and a 64 MiB stream limit. Neither is any
+	// binary's default, so a container carrying one carries what the input asked for.
+	dispatchNatsReplicas   = 3
+	dispatchStreamMaxBytes = 64 << 20
+	// dispatchSocks5Proxy is the front door's SOCKS5 Service, the address both NATS clients
+	// carry without natsInCluster, and frontDoorPodURN and frontDoorServiceURN the two children
+	// each waits for in that mode.
+	dispatchSocks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
+	frontDoorPodURN     = "urn:pulumi:s::p::" + dispatchType + "$kubernetes:apps/v1:Deployment::example-dispatch-tailnet"
+	frontDoorServiceURN = "urn:pulumi:s::p::" + dispatchType + "$kubernetes:core/v1:Service::example-dispatch-tailnet"
+)
+
+// setInClusterNats turns natsInCluster on and points natsUrl at the hub's in-cluster Service,
+// which the two NATS clients then dial directly instead of through the front door's SOCKS5 proxy.
+func setInClusterNats(a *gcp.DispatchArgs) {
+	yes := true
+	a.NatsInCluster = &yes
+	a.NatsUrl = pulumi.String(inClusterNatsURL)
+}
+
+// setNatsNumbers sets natsReplicas and streamMaxBytes, the two settings both NATS clients carry
+// in either mode.
+func setNatsNumbers(a *gcp.DispatchArgs) {
+	a.NatsReplicas = pulumi.IntRef(dispatchNatsReplicas)
+	a.StreamMaxBytes = pulumi.IntRef(dispatchStreamMaxBytes)
+}
+
+const (
 	azureEmbedEndpoint  = "https://example-resource.services.ai.azure.com/models"
 	azureEmbedKeySecret = "projects/example-project/secrets/example-azure-embed-key"
 	azureTenantID       = "example-azure-tenant-id"
 	azureClientID       = "example-azure-client-id"
 	azureIssuer         = "https://container.googleapis.com/v1/projects/example-project/locations/us-central1/clusters/example-dispatch"
+	// azureChatEndpoint, chatEndpointURL and chatTokenSecret are the answerer's two forms: the
+	// chat deployment of the same Azure AI Foundry resource the embedder's endpoint names, and an
+	// OpenAI-shaped service with the Secret Manager secret holding the bearer token it presents.
+	azureChatEndpoint = "https://example-resource.services.ai.azure.com/models"
+	chatEndpointURL   = "https://example-chat.internal.example/v1"
+	chatTokenSecret   = "projects/example-project/secrets/example-chat-token"
 )
 
 // setAzureEndpoint sets the Azure embedder's endpoint and quota, which come together, and no
@@ -93,13 +133,40 @@ func setAzureKey(a *gcp.DispatchArgs) {
 	a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret)
 }
 
+// setAzureSignIn sets the shared keyless Azure sign-in, which whichever of the embedder and the
+// answerer is on Azure reads.
+func setAzureSignIn(a *gcp.DispatchArgs) {
+	a.AzureTenantId = pulumi.String(azureTenantID)
+	a.AzureClientId = pulumi.String(azureClientID)
+}
+
 // setAzureFederation sets the Azure embedder with the keyless form of credential, a deployment
 // named, and the default audience.
 func setAzureFederation(a *gcp.DispatchArgs) {
 	setAzureEndpoint(a)
 	a.AzureEmbedDeployment = pulumi.String("example-embed-deployment")
-	a.AzureTenantId = pulumi.String(azureTenantID)
-	a.AzureClientId = pulumi.String(azureClientID)
+	setAzureSignIn(a)
+}
+
+// setAzureChat sets the Azure answerer: the chat endpoint, the quota and the deployment that come
+// with it, the api-version and the scope that endpoint's inference family takes, and the shared
+// sign-in it takes no API key beside. It sets no embedder input, so meaning search stays on
+// Bedrock: that mixed deployment is what the shared sign-in exists for.
+func setAzureChat(a *gcp.DispatchArgs) {
+	a.AzureChatEndpoint = pulumi.String(azureChatEndpoint)
+	a.AzureChatDeployment = pulumi.String("example-chat-deployment")
+	a.AzureChatTokensPerMinute = pulumi.IntRef(120000)
+	a.AzureChatApiVersion = pulumi.StringRef("2024-05-01-preview")
+	a.AzureChatScope = pulumi.StringRef("https://cognitiveservices.azure.com/.default")
+	setAzureSignIn(a)
+}
+
+// setChatEndpoint sets the answerer's other form: the base URL, the model each request names, and
+// the Secret Manager secret whose value the pod mounts as the bearer token file.
+func setChatEndpoint(a *gcp.DispatchArgs) {
+	a.ChatEndpoint = pulumi.String(chatEndpointURL)
+	a.ChatModel = pulumi.StringRef("example-chat-model")
+	a.ChatTokenSecret = pulumi.String(chatTokenSecret)
 }
 
 func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
@@ -108,24 +175,56 @@ func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumit
 
 func runDispatchNamed(t *testing.T, name string, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
 	t.Helper()
+	if !providers {
+		return runDispatchWithProviders(t, name, args)
+	}
+	return runDispatchWithProviders(t, name, args, newGCPProvider, newRandomProvider, newTailscaleProvider)
+}
+
+// newGCPProvider, newRandomProvider and newTailscaleProvider declare the three providers a
+// Dispatch program gives the component, each under the name the registration golden holds.
+func newGCPProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
+	return gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
+}
+
+func newRandomProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
+	return randomsdk.NewProvider(ctx, "random-example", &randomsdk.ProviderArgs{})
+}
+
+func newTailscaleProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
+	return tailscalesdk.NewProvider(ctx, "tailscale-example", &tailscalesdk.ProviderArgs{})
+}
+
+// runDispatchWithProviders runs args through the mock engine with the providers the program
+// declares, registered in the order given and passed to the component together. With none given
+// the component is called with no providers option at all, which is how a program that declares
+// none reaches it.
+func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) (*pulumitest.Mocks, error) {
+	t.Helper()
 	m := newMocks()
-	err := m.Run(func(ctx *pulumi.Context) error {
+	return m, runDispatchOnMocks(t, m, name, args, providers...)
+}
+
+// runDispatchOnMocks is runDispatchWithProviders on mocks the caller owns, so a test can set
+// Mocks.Preview before the program runs.
+func runDispatchOnMocks(t *testing.T, m *pulumitest.Mocks, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) error {
+	t.Helper()
+	return m.Run(func(ctx *pulumi.Context) error {
+		var declared []pulumi.ProviderResource
+		for _, newProvider := range providers {
+			provider, err := newProvider(ctx)
+			if err != nil {
+				return err
+			}
+			declared = append(declared, provider)
+		}
 		var opts []pulumi.ResourceOption
-		if providers {
-			gcpProvider, err := gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
-			if err != nil {
-				return err
-			}
-			randomProvider, err := randomsdk.NewProvider(ctx, "random-example", &randomsdk.ProviderArgs{})
-			if err != nil {
-				return err
-			}
-			opts = append(opts, pulumi.Providers(gcpProvider, randomProvider))
+		if len(declared) > 0 {
+			opts = append(opts, pulumi.Providers(declared...))
 		}
 		_, err := gcp.NewDispatch(ctx, name, args, opts...)
 		return err
 	})
-	return m, err
 }
 
 func TestDispatchSettingsApplyDefaults(t *testing.T) {
@@ -261,7 +360,7 @@ func TestDispatchRefusesAPprofPortBeforeRegistering(t *testing.T) {
 	args.PprofPort = pulumi.IntRef(70000)
 	m, err := runDispatch(t, args, true)
 	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: pprofPort 70000 must be a port number 1-65535")
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 }
 
 func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
@@ -289,7 +388,6 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "a namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(strings.Repeat("a", 64)) }, err: []string{"namespace", "DNS label"}},
 		{name: "an allowed namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{strings.Repeat("a", 64)} }, err: []string{"allowedNamespaces[0]", "DNS label"}},
 		{name: "no tailnet auth key", edit: func(a *gcp.DispatchArgs) { a.TailnetAuthKey = nil }, err: []string{"tailnetAuthKey", "required"}},
-		{name: "no tailnet service", edit: func(a *gcp.DispatchArgs) { a.TailnetService = nil }, err: []string{"tailnetService", "required"}},
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
 		{name: "no sign-in client secret", edit: func(a *gcp.DispatchArgs) { a.SignInClientSecret = nil }, err: []string{"signInClientSecret", "required"}},
@@ -345,6 +443,11 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
 		{name: "fewer than one front-door replica", edit: func(a *gcp.DispatchArgs) { a.FrontDoorReplicas = pulumi.IntRef(0) }, err: []string{"frontDoorReplicas 0", "at least 1"}},
 		{name: "fewer than one listener replica", edit: func(a *gcp.DispatchArgs) { a.ListenerReplicas = pulumi.IntRef(-1) }, err: []string{"listenerReplicas -1", "at least 1"}},
+		{name: "no NATS copies", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(0) }, err: []string{"natsReplicas 0", "is below 1", "leave it unset for one copy"}},
+		{name: "a negative NATS copy count", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(-1) }, err: []string{"natsReplicas -1", "is below 1", "leave it unset for one copy"}},
+		{name: "more NATS copies than NATS keeps", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(6) }, err: []string{"natsReplicas 6", "is above 5, the most copies NATS keeps"}},
+		{name: "a stream byte limit of none", edit: func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(0) }, err: []string{"streamMaxBytes 0", "is below 1", "leave it unset for no limit"}},
+		{name: "a negative stream byte limit", edit: func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(-1) }, err: []string{"streamMaxBytes -1", "is below 1", "leave it unset for no limit"}},
 		{name: "a pprof port of 0", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(0) }, err: []string{"pprofPort 0", "1-65535", "leave it unset"}},
 		{name: "a negative pprof port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(-1) }, err: []string{"pprofPort -1", "1-65535"}},
 		{name: "a pprof port past 65535", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(65536) }, err: []string{"pprofPort 65536", "1-65535"}},
@@ -500,9 +603,10 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an Azure deployment without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedDeployment = pulumi.String("example-embed-deployment") }, err: []string{"azureEmbedEndpoint is required when azureEmbedDeployment is set"}},
 		{name: "an Azure quota without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedTokensPerMinute = pulumi.IntRef(300000) }, err: []string{"azureEmbedEndpoint is required when azureEmbedTokensPerMinute is set"}},
 		{name: "an Azure key without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret) }, err: []string{"azureEmbedEndpoint is required when azureEmbedKeySecret is set"}},
-		{name: "an Azure tenant without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureTenantId = pulumi.String(azureTenantID) }, err: []string{"azureEmbedEndpoint is required when azureTenantId is set"}},
-		{name: "an Azure client without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureClientId = pulumi.String(azureClientID) }, err: []string{"azureEmbedEndpoint is required when azureClientId is set"}},
-		{name: "an Azure audience without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureFederationAudience = pulumi.StringRef("api://example-audience") }, err: []string{"azureEmbedEndpoint is required when azureFederationAudience is set"}},
+		// The sign-in is shared, so it takes either endpoint and is refused with neither.
+		{name: "an Azure tenant without either endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureTenantId = pulumi.String(azureTenantID) }, err: []string{"azureEmbedEndpoint or azureChatEndpoint is required when azureTenantId is set", "whichever of the embedder and the answerer is on Azure"}},
+		{name: "an Azure client without either endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureClientId = pulumi.String(azureClientID) }, err: []string{"azureEmbedEndpoint or azureChatEndpoint is required when azureClientId is set"}},
+		{name: "an Azure audience without either endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureFederationAudience = pulumi.StringRef("api://example-audience") }, err: []string{"azureEmbedEndpoint or azureChatEndpoint is required when azureFederationAudience is set"}},
 		{name: "both Azure credential forms", edit: func(a *gcp.DispatchArgs) {
 			setAzureFederation(a)
 			a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret)
@@ -524,6 +628,50 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			setAzureFederation(a)
 			a.AzureFederationAudience = pulumi.StringRef("")
 		}, err: []string{"azureFederationAudience is empty", "api://AzureADTokenExchange"}},
+		{name: "an Azure chat deployment without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureChatDeployment = pulumi.String("example-chat-deployment") }, err: []string{"azureChatEndpoint is required when azureChatDeployment is set"}},
+		{name: "an Azure chat api-version without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureChatApiVersion = pulumi.StringRef("2024-05-01-preview") }, err: []string{"azureChatEndpoint is required when azureChatApiVersion is set"}},
+		{name: "an Azure chat scope without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureChatScope = pulumi.StringRef("https://ai.azure.com/.default") }, err: []string{"azureChatEndpoint is required when azureChatScope is set"}},
+		{name: "an Azure chat quota without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureChatTokensPerMinute = pulumi.IntRef(120000) }, err: []string{"azureChatEndpoint is required when azureChatTokensPerMinute is set"}},
+		{name: "a chat model without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.ChatModel = pulumi.StringRef("example-chat-model") }, err: []string{"chatEndpoint is required when chatModel is set"}},
+		{name: "a chat token without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.ChatTokenSecret = pulumi.String(chatTokenSecret) }, err: []string{"chatEndpoint is required when chatTokenSecret is set"}},
+		{name: "both answerer forms", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			setChatEndpoint(a)
+		}, err: []string{"chatEndpoint is set with azureChatEndpoint", "one deployment names one answerer"}},
+		{name: "an Azure chat endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatTokensPerMinute = nil
+		}, err: []string{"azureChatTokensPerMinute is required when azureChatEndpoint is set"}},
+		{name: "a zero Azure chat quota", edit: func(a *gcp.DispatchArgs) { setAzureChat(a); a.AzureChatTokensPerMinute = pulumi.IntRef(0) }, err: []string{"azureChatTokensPerMinute 0", "positive integer"}},
+		{name: "a negative Azure chat quota", edit: func(a *gcp.DispatchArgs) { setAzureChat(a); a.AzureChatTokensPerMinute = pulumi.IntRef(-1) }, err: []string{"azureChatTokensPerMinute -1", "positive integer"}},
+		{name: "an Azure chat endpoint without its deployment", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatDeployment = nil
+		}, err: []string{"azureChatDeployment is required when azureChatEndpoint is set"}},
+		{name: "an Azure chat endpoint without the sign-in", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureTenantId, a.AzureClientId = nil, nil
+		}, err: []string{"azureChatEndpoint needs the keyless Azure sign-in", "takes no API key"}},
+		{name: "an empty Azure chat api-version", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatApiVersion = pulumi.StringRef("")
+		}, err: []string{"azureChatApiVersion is empty", "sends no api-version"}},
+		{name: "an empty Azure chat scope", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatScope = pulumi.StringRef("")
+		}, err: []string{"azureChatScope is empty", "leave it unset"}},
+		{name: "a chat endpoint without its token", edit: func(a *gcp.DispatchArgs) {
+			setChatEndpoint(a)
+			a.ChatTokenSecret = nil
+		}, err: []string{"chatTokenSecret is required when chatEndpoint is set"}},
+		{name: "a chat endpoint without its model", edit: func(a *gcp.DispatchArgs) {
+			setChatEndpoint(a)
+			a.ChatModel = nil
+		}, err: []string{"chatModel is required when chatEndpoint is set"}},
+		{name: "an empty chat model", edit: func(a *gcp.DispatchArgs) {
+			setChatEndpoint(a)
+			a.ChatModel = pulumi.StringRef("")
+		}, err: []string{"chatModel is empty"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -544,7 +692,7 @@ func TestDispatchRefusesInvalidInputBeforeRegistering(t *testing.T) {
 	args.Hostname = "dispatch-"
 	m, err := runDispatch(t, args, true)
 	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: hostname`)
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 }
 
 func TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering(t *testing.T) {
@@ -559,6 +707,26 @@ func TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering(t *testing.T) {
 	})
 	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch needs a "random" provider in its providers option`)
 	require.Equal(t, []string{gcpProviderType}, m.Types())
+}
+
+// Only a Dispatch with a front door declares the Tailscale Service, so only that mode needs a
+// tailscale provider, and the component says so before it registers anything of its own: a
+// front-door consumer that declares none is refused where it can still fix its program, rather
+// than halfway through an update. A sandbox builds no front door and declares no such Service,
+// so the gcp and random providers alone are enough for it — what the resolver's own comment and
+// the component's README promise a sandbox consumer, and what would otherwise make every
+// sandbox program declare a provider it never uses.
+func TestDispatchRequiresATailscaleProviderOnlyWithAFrontDoor(t *testing.T) {
+	t.Run("with a front door", func(t *testing.T) {
+		m, err := runDispatchWithProviders(t, "example-dispatch", dispatchArgs(), newGCPProvider, newRandomProvider)
+		require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch needs a "tailscale" provider in its providers option`)
+		require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types(),
+			"the program's own two providers registered and nothing of the component's")
+	})
+	t.Run("a sandbox", func(t *testing.T) {
+		_, err := runDispatchWithProviders(t, "example-dispatch", dispatchSandboxArgs(), newGCPProvider, newRandomProvider)
+		require.NoError(t, err, "a sandbox declares no Tailscale Service, so it needs no tailscale provider")
+	})
 }
 
 // Every plain string input of the component has a row; the seed is found as bus.HoldsSeed finds
@@ -609,6 +777,18 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 			setAzureFederation(a)
 			a.AzureFederationAudience = pulumi.StringRef("api://" + lower)
 		}},
+		{"a seed as the Azure chat api-version", "azureChatApiVersion", func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatApiVersion = pulumi.StringRef(seed)
+		}},
+		{"a seed inside the Azure chat scope", "azureChatScope", func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatScope = pulumi.StringRef("https://" + lower + ".azure.com/.default")
+		}},
+		{"a seed as the chat model", "chatModel", func(a *gcp.DispatchArgs) {
+			setChatEndpoint(a)
+			a.ChatModel = pulumi.StringRef(seed)
+		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := dispatchArgs()
@@ -638,7 +818,7 @@ func TestDispatchRefusesASeedInTheComponentName(t *testing.T) {
 			m, err := runDispatchNamed(t, row.dispatch, dispatchArgs(), true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch: the component's name holds an nkey seed (not echoed)")
 			require.NotContains(t, strings.ToUpper(err.Error()), seed)
-			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types(),
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types(),
 				"nothing registered beyond the test's providers")
 		})
 	}
@@ -647,33 +827,61 @@ func TestDispatchRefusesASeedInTheComponentName(t *testing.T) {
 // natsUrl is an Input, checked inside the ApplyT that renders the listener's environment: core's
 // Env names its own inputs (natsUrls by index, socks5Proxy), neither of which gcp:Dispatch has,
 // so the component maps each refusal onto natsUrl, a core.InputError, and wraps it with its type
-// and name — it never panics, which would kill the provider process.
+// and name — it never panics, which would kill the provider process. With natsInCluster there is
+// no proxy whose refusal to map: the component refuses a local URL itself, before core's Env is
+// reached, and names natsUrl there too, since the pods would be dialling themselves.
 func TestDispatchRefusesABadNatsURLOnceItResolves(t *testing.T) {
 	seed, _ := testnats.User(t)
 	rows := []struct {
 		name, url, want string
+		// inCluster rows go through the component alone: gcp.DispatchListenerEnvError renders
+		// the SOCKS5 mode, which is the only mode that helper has.
+		inCluster bool
 	}{
-		{"a loopback URL", "nats://127.0.0.1:4222", "natsUrl names a local NATS server"},
-		{"a URL holding a seed", "nats://example:" + seed + "@example-hub.example-tailnet.ts.net:4222", "natsUrl holds an nkey seed (not echoed)"},
+		{name: "a loopback URL", url: "nats://127.0.0.1:4222", want: "natsUrl names a local NATS server"},
+		{name: "a URL holding a seed", url: "nats://example:" + seed + "@example-hub.example-tailnet.ts.net:4222", want: "natsUrl holds an nkey seed (not echoed)"},
+		{name: "a loopback URL with natsInCluster", url: "nats://127.0.0.1:4222", inCluster: true,
+			want: "natsUrl names a local NATS server; with natsInCluster the pods dial it directly"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			err := gcp.DispatchListenerEnvError("example-dispatch", row.url)
-			var input *core.InputError
-			require.ErrorAs(t, err, &input)
-			require.Equal(t, "natsUrl", input.Input)
-			require.ErrorContains(t, err, row.want)
+			if !row.inCluster {
+				err := gcp.DispatchListenerEnvError("example-dispatch", row.url)
+				var input *core.InputError
+				require.ErrorAs(t, err, &input)
+				require.Equal(t, "natsUrl", input.Input)
+				require.ErrorContains(t, err, row.want)
+				require.NotContains(t, err.Error(), "natsUrls")
+				require.NotContains(t, err.Error(), "socks5Proxy")
+				require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			}
+
+			args := dispatchArgs()
+			if row.inCluster {
+				setInClusterNats(args)
+			}
+			args.NatsUrl = pulumi.String(row.url)
+			_, err := runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.want)
 			require.NotContains(t, err.Error(), "natsUrls")
 			require.NotContains(t, err.Error(), "socks5Proxy")
 			require.NotContains(t, strings.ToUpper(err.Error()), seed)
-
-			args := dispatchArgs()
-			args.NatsUrl = pulumi.String(row.url)
-			_, err = runDispatch(t, args, true)
-			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.want)
-			require.NotContains(t, strings.ToUpper(err.Error()), seed)
 		})
 	}
+}
+
+// databaseWaitsFor is an ordering value, so nothing renders it and no child takes it; it is still
+// refused when it holds an nkey seed, as every other Input of the component is, once it resolves
+// and before the instance is registered with its dependencies. The refusal names the input and
+// never echoes the value.
+func TestDispatchRefusesASeedInDatabaseWaitsFor(t *testing.T) {
+	seed, _ := testnats.User(t)
+	args := dispatchArgs()
+	args.DatabaseWaitsFor = pulumi.String(seed)
+
+	_, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: databaseWaitsFor holds an nkey seed (not echoed)")
+	require.NotContains(t, strings.ToUpper(err.Error()), seed)
 }
 
 func TestDispatchRegistersItsCloudResources(t *testing.T) {
@@ -819,6 +1027,140 @@ func TestDispatchListenerSecretHoldsOnlyItsAPIToken(t *testing.T) {
 	// listener's own token and no other password the component registers.
 	data, _ := pulumitest.Plain(secret.Inputs["stringData"])
 	require.Equal(t, map[string]any{"ENVOY_API_TOKEN": "example-dispatch-listener-token-result"}, normalizedProperty(data))
+}
+
+// dispatchSigningKeySets are the four states of a rotation, in the order an operator applies
+// them: today's one key, the add, the promote and the drop. Each is a whole state of the input,
+// since the component sees one state and never the one before it.
+var dispatchSigningKeySets = [][]int{{0}, {0, 1}, {1, 0}, {1}}
+
+// signingKeyName is the RandomPassword a generation is registered under: generation 0 keeps the
+// name the single signing key always had, so a running deployment's key is never replaced, and a
+// generation above 0 carries its number.
+func signingKeyName(generation int) string {
+	if generation == 0 {
+		return "example-dispatch-signing-key"
+	}
+	return "example-dispatch-signing-key-" + strconv.Itoa(generation)
+}
+
+// signingKeyResults is the exact DISPATCH_SIGNING_KEY generations must render: the mock engine
+// computes a RandomPassword's result as <name>-result, so the expected bytes are written from the
+// names alone, and one generation renders its result with nothing around it.
+func signingKeyResults(generations []int) string {
+	results := make([]string, 0, len(generations))
+	for _, generation := range generations {
+		results = append(results, signingKeyName(generation)+"-result")
+	}
+	return strings.Join(results, " ")
+}
+
+// dispatchSigningKey is the DISPATCH_SIGNING_KEY of the <hostname>-dispatch Secret, with every
+// output and secret wrapper off.
+func dispatchSigningKey(t *testing.T, m *pulumitest.Mocks) string {
+	t.Helper()
+	value := unwrappedProperty(dispatchSecretData(t, m)["DISPATCH_SIGNING_KEY"])
+	require.True(t, value.IsString(), "DISPATCH_SIGNING_KEY resolved to a %s", value.TypeString())
+	return value.StringValue()
+}
+
+// registeredSigningKeys is every RandomPassword whose name begins the signing key's, in
+// registration order: the set the component holds, and nothing else it generates.
+func registeredSigningKeys(m *pulumitest.Mocks) []pulumitest.Registration {
+	var out []pulumitest.Registration
+	for _, registration := range registrationsOf(m, "random:index/randomPassword:RandomPassword") {
+		if strings.HasPrefix(registration.Name, "example-dispatch-signing-key") {
+			out = append(out, registration)
+		}
+	}
+	return out
+}
+
+// The Secret carries the key set the server reads: the named generations' results in the list's
+// order with one space between them, which is what auth.ParseSigningKeys splits back into the
+// keys, the first of them signing. One generation renders that result alone, no separator and no
+// wrapper, so the Secret's bytes are what a deployment running one key already has.
+func TestDispatchRendersItsSigningKeySetInOrder(t *testing.T) {
+	for _, generations := range dispatchSigningKeySets {
+		t.Run(fmt.Sprint(generations), func(t *testing.T) {
+			args := dispatchArgs()
+			args.SigningKeyGenerations = generations
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			require.Equal(t, signingKeyResults(generations), dispatchSigningKey(t, m))
+		})
+	}
+}
+
+// Exactly the generations the list names are registered, under exactly their names, and no other
+// signing key is. A generation the list drops registers nothing, so the random provider destroys
+// that key and no later apply brings it back; a generation it keeps is the key it always was. The
+// mock engine records a registration when the SDK's goroutine reaches it, so the set is what is
+// asserted here and the order the server reads the keys in is the Secret's, pinned by
+// TestDispatchRendersItsSigningKeySetInOrder.
+func TestDispatchRegistersASigningKeyPerGeneration(t *testing.T) {
+	for _, generations := range dispatchSigningKeySets {
+		t.Run(fmt.Sprint(generations), func(t *testing.T) {
+			args := dispatchArgs()
+			args.SigningKeyGenerations = generations
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			want := make([]string, 0, len(generations))
+			for _, generation := range generations {
+				want = append(want, signingKeyName(generation))
+			}
+			got := make([]string, 0, len(want))
+			for _, registration := range registeredSigningKeys(m) {
+				got = append(got, registration.Name)
+			}
+			require.ElementsMatch(t, want, got, "exactly the named generations are registered, and no other signing key is")
+		})
+	}
+}
+
+// With the default inputs the component registers the one signing key it always registered, under
+// the name and the arguments it always had, and the Secret carries that one result with nothing
+// around it. This is what says the first apply of this release plans no change to a running
+// deployment's key, so the release signs nobody out; only a live pulumi preview against the real
+// stack can prove what that stack would plan.
+func TestDispatchDefaultSigningKeySetIsTodaysOneKey(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	keys := registeredSigningKeys(m)
+	require.Len(t, keys, 1)
+	require.Equal(t, "example-dispatch-signing-key", keys[0].Name)
+	// The whole input map, so a keeper, another length or a special-character setting fails here.
+	require.Equal(t, map[string]any{"length": float64(64), "special": false},
+		normalizedProperty(resource.NewProperty(keys[0].Inputs)))
+	require.Equal(t, "example-dispatch-signing-key-result", dispatchSigningKey(t, m))
+}
+
+// Two refusals, each a core.InputError naming signingKeyGenerations and naming the generation and
+// its position: a negative generation, which names no resource, and a repeated one, which would
+// render the same key twice and which the server refuses at its boot, so the component refuses it
+// here rather than shipping a Secret no pod can start on.
+func TestDispatchRefusesABadSigningKeyGeneration(t *testing.T) {
+	rows := []struct {
+		name        string
+		generations []int
+		want        string
+	}{
+		{"negative", []int{0, -1}, "signingKeyGenerations[1] is generation -1, which names no resource: a generation is 0, the key a running deployment already holds, or a number above it"},
+		{"repeated", []int{0, 1, 0}, "signingKeyGenerations[2] repeats generation 0, which would render the same key twice; the server refuses a repeated DISPATCH_SIGNING_KEY entry at boot"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			args.SigningKeyGenerations = row.generations
+			_, err := gcp.ResolveDispatch(args)
+			require.EqualError(t, err, row.want)
+			var input *core.InputError
+			require.ErrorAs(t, err, &input)
+			require.Equal(t, "signingKeyGenerations", input.Input)
+		})
+	}
 }
 
 // dispatchWorkloads are the component's three Deployments, each with the input that sets its
@@ -1146,18 +1488,17 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	const roleType, bindingType = "kubernetes:rbac.authorization.k8s.io/v1:Role", "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 	require.Len(t, registrationsOf(m, roleType), 1, "the component registers one Role")
-	require.Len(t, registrationsOf(m, bindingType), 1, "the component registers one RoleBinding")
+	require.Len(t, registrationsOf(m, roleBindingType), 1, "the component registers one RoleBinding")
 	role := m.Named(t, roleType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, []any{map[string]any{
 		"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{"example-dispatch-tailnet-tls"},
 		"verbs": []any{"get", "patch"},
 	}}, role["rules"])
-	binding := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
+	binding := m.Named(t, roleBindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "example-dispatch-tailnet-tls"}, binding["roleRef"])
 	require.Equal(t, []any{map[string]any{"kind": "ServiceAccount", "name": "example-dispatch-tailnet", "namespace": "dispatch"}}, binding["subjects"])
-	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, bindingType)...) {
+	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, roleBindingType)...) {
 		for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
 			require.NotContains(t, s, "tailscale-state", "%s %s", r.Type, r.Name)
 		}
@@ -1186,6 +1527,46 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 	}
 }
 
+// On a preview that creates the front door's TLS Role, its binding's roleRef name is unknown until
+// the Role has an ID, so pulumi-kubernetes sends the API server no dry run of the binding, which an
+// account without the bind verb (a consumer's CI account may be one) would see refused as "not found"
+// while the Role does not exist. On an apply the binding names the Role.
+//
+// Both surfaces are read: the component under the mock engine, and the component as the plugin
+// serves it through Construct, which is the artifact a consumer installs and the path its
+// pulumi preview takes.
+func TestDispatchFrontDoorBindingWaitsForItsRoleOnPreview(t *testing.T) {
+	for _, surface := range []struct {
+		name string
+		run  func(t *testing.T, m *pulumitest.Mocks) error
+	}{
+		{"component", func(t *testing.T, m *pulumitest.Mocks) error {
+			return runDispatchOnMocks(t, m, "example-dispatch", dispatchArgs(), newGCPProvider, newRandomProvider, newTailscaleProvider)
+		}},
+		{"plugin", func(t *testing.T, m *pulumitest.Mocks) error {
+			_, err := constructDispatchOnMocks(t, m, dispatchConstructBaseInputs())
+			return err
+		}},
+	} {
+		for _, preview := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/preview=%v", surface.name, preview), func(t *testing.T) {
+				m := newMocks()
+				m.Preview = preview
+				require.NoError(t, surface.run(t, m))
+				ref := m.Named(t, roleBindingType, "example-dispatch-tailnet-tls").Inputs["roleRef"].ObjectValue()
+				require.Equal(t, "Role", ref["kind"].StringValue())
+				name := ref["name"]
+				if preview {
+					// The mock monitor unmarshals inputs without keeping unknowns, so an unknown arrives as null.
+					require.True(t, name.IsNull() || name.IsComputed(), "roleRef name on a preview = %v, want unknown until the Role exists", name)
+				} else {
+					require.Equal(t, "example-dispatch-tailnet-tls", name.StringValue())
+				}
+			})
+		}
+	}
+}
+
 // The TLS Secret holds what cert-publish writes and nothing the program declares: it is registered
 // with no data and with its data ignored, so no preview plans to undo a published certificate, and
 // no pod template carries its checksum, so a renewed certificate rolls no pod.
@@ -1209,42 +1590,30 @@ func TestDispatchFrontDoorTLSSecretHoldsOnlyWhatThePodsPublish(t *testing.T) {
 		"the front door's pods mount the Secret, so the Deployment waits for it")
 }
 
-// tailnetService names the Tailscale Service the front door hosts, and the pods host
-// svc:<hostname>, whose name the certificate and the URL carry: once it resolves to anything else,
-// the run fails naming the input and never the value.
-func TestDispatchRefusesATailnetServiceOtherThanItsOwn(t *testing.T) {
-	for _, value := range []string{"svc:another-service", "another-service", "svc:example-dispatch-other"} {
-		t.Run(value, func(t *testing.T) {
-			args := dispatchArgs()
-			args.TailnetService = pulumi.String(value)
-			_, err := runDispatch(t, args, true)
-			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: tailnetService must be svc:example-dispatch")
-			require.NotContains(t, err.Error(), value)
-		})
-	}
-}
-
 // requireWaitsForTheFrontDoor fails unless deployment is created after the front door's pod and
 // its Service, the two a caller of the SOCKS5 proxy needs.
 func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, dials string) {
 	t.Helper()
 	deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:apps/v1:Deployment::example-dispatch-tailnet",
-		dials+" is created after the pod running the SOCKS5 proxy")
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Service::example-dispatch-tailnet",
-		dials+" dials the proxy at its Service, not at the pod")
+	require.Contains(t, deps, frontDoorPodURN, dials+" is created after the pod running the SOCKS5 proxy")
+	require.Contains(t, deps, frontDoorServiceURN, dials+" dials the proxy at its Service, not at the pod")
 }
 
-// envoy-dispatch serves without NATS: its /healthz readiness reads only Postgres, reporting nats
-// false, and its bus clients connect in the background once the front door's proxy answers. So an
-// app pod started before the front door and its Service would still go ready, serving without
-// the bus until the proxy answers; the app waits for the front door only so that it starts
-// connected.
-func TestDispatchAppWaitsForTheFrontDoor(t *testing.T) {
+// The two workloads that dial the proxy no longer order alike, and dispatchArgs leaves
+// natsInCluster unset, the only mode where there is a front door to wait for. envoy-dispatch
+// serves without the bus — /healthz reads Postgres alone, reporting nats false, and its bus
+// clients connect in the background once the proxy answers — so its wait bought only a
+// connected start, and during the cutover, where the front door is deliberately away while the
+// database's availability type changes, the server must come back inside that stop rather than
+// behind the front door. The listener still waits, for the reason
+// TestDispatchListenerWaitsForTheFrontDoor gives.
+func TestDispatchAppDoesNotWaitForTheFrontDoor(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	requireWaitsForTheFrontDoor(t, m, "example-dispatch", "the app")
+	app := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
+	require.NotContains(t, app, frontDoorPodURN, "the server comes back inside the front door's stop, not behind it")
+	require.NotContains(t, app, frontDoorServiceURN, "the server comes back inside the front door's stop, not behind it")
 }
 
 // envoy-listener dials the hub through the same proxy and exits on a failed initial connect
@@ -1258,24 +1627,200 @@ func TestDispatchListenerWaitsForTheFrontDoor(t *testing.T) {
 	requireWaitsForTheFrontDoor(t, m, "example-dispatch-listener", "the listener")
 }
 
+// Switching the Cloud SQL instance's availability type updates it in place rather than replacing
+// it (dispatch_cloud.go names the provider's line), so Cloud SQL restarts the instance once, and
+// the name readers reach Dispatch at must come back only once that restart is over, never while
+// the database is away. Both halves of that name therefore wait for the instance: the Tailscale
+// Service svc:example-dispatch itself, which is the name, and the front door's Deployment, whose
+// pods advertise it and terminate its TLS.
+func TestDispatchTheFrontDoorWaitsForTheDatabaseInstance(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	instanceURN := "urn:pulumi:s::p::" + dispatchType + "$gcp:sql/databaseInstance:DatabaseInstance::example-dispatch"
+	require.Contains(t, m.Named(t, "tailscale:index/service:Service", "example-dispatch").RPC.GetDependencies(), instanceURN,
+		"the Tailscale Service is declared only once the instance's restart is over")
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(), instanceURN,
+		"the front door's pods come back only once the instance's restart is over")
+}
+
+// The front door advertises the Tailscale Service from its pods, and a node that advertises a
+// Service before it exists is not approved when it appears: it sits unapproved for
+// tailnetAdvertiseStuckSeconds with the name answering nowhere. So both halves of the front door
+// register after the Service the component declares — the serve config the pods serve that name
+// by, and the Deployment whose pods advertise it and terminate its TLS.
+func TestDispatchTheFrontDoorWaitsForItsTailscaleService(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	serviceURN := "urn:pulumi:s::p::" + dispatchType + "$tailscale:index/service:Service::example-dispatch"
+	require.Contains(t, m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").RPC.GetDependencies(), serviceURN,
+		"the serve config, which the pods serve the Service's name by, is created after that Service")
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(), serviceURN,
+		"a pod that advertises the Service before it exists is not approved when it appears")
+}
+
+// The Service the component declares is the name every reader reaches Dispatch at: svc: and the
+// hostname, so the Service and the nodes that advertise it can never be named differently; tcp:443
+// alone, the one port the front door terminates TLS on; and no tags. The OAuth client that creates
+// the Service may request no tags — Tailscale refuses the ones it may not set — the hosts' own tag
+// is what auto-approves them as the Service's hosts, and a tailnet policy grants the Service by
+// its name.
+func TestDispatchDeclaresItsTailscaleService(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	service := m.Named(t, "tailscale:index/service:Service", "example-dispatch")
+	require.Equal(t, "svc:example-dispatch", normalizedProperty(service.Inputs["name"]))
+	require.Equal(t, []any{"tcp:443"}, normalizedProperty(service.Inputs["ports"]),
+		"the front door terminates TLS on 443 and publishes no other port")
+	require.NotContains(t, service.Inputs, resource.PropertyKey("tags"),
+		"the Service requests no tags: the client that creates it may not set the component's own")
+}
+
+// The Service's Protect follows deletionProtection, the input that already guards the cluster and
+// the database, and is true when the consumer sets nothing: no resource option of a consumer's own
+// program reaches a component's child, so a hard-coded Protect could be undone only by a state
+// edit and deleting a Dispatch would need one. Shaped as the cluster-only mode's own pair
+// (TestDispatchClusterOnlyPassesDeletionProtectionToTheCluster).
+func TestDispatchProtectsItsTailscaleServiceWithDeletionProtection(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		set  *bool
+		want bool
+	}{
+		{"unset", nil, true},
+		{"false", pulumi.BoolRef(false), false},
+		{"true", pulumi.BoolRef(true), true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DeletionProtection = row.set
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			require.Equal(t, row.want, m.Named(t, "tailscale:index/service:Service", "example-dispatch").RPC.GetProtect())
+		})
+	}
+}
+
 // A listener bound to 0.0.0.0 refuses to start without a bearer. The app reaches the listener and
 // the proxy over the network, each running in pods of its own.
 func TestDispatchListenerIsAuthenticated(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	const socks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
 	listenerToken := map[string]any{"name": "example-dispatch-listener", "key": "ENVOY_API_TOKEN"}
-	listener := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
+	listener := listenerEnv(t, m)
 	require.Equal(t, "example-dispatch", listener["ENVOY_MACHINE_ID"])
 	require.Equal(t, "0.0.0.0", listener["ENVOY_LISTEN_HOST"])
 	require.Equal(t, listenerToken, listener["ENVOY_API_TOKEN"])
-	require.Equal(t, socks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
+	require.Equal(t, dispatchSocks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
 
-	app := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
+	app := appEnv(t, m)
 	require.Equal(t, "http://example-dispatch-listener.dispatch.svc.cluster.local:9020", app["ENVOY_URL"])
 	require.Equal(t, listenerToken, app["ENVOY_TOKEN"])
-	require.Equal(t, socks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+	require.Equal(t, dispatchSocks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+}
+
+// dispatchNatsEnvs are the environments of the two containers that dial the NATS hub, the app's
+// envoy-dispatch and the listener's envoy-listener, keyed by container name.
+func dispatchNatsEnvs(t *testing.T, m *pulumitest.Mocks) map[string]map[string]any {
+	t.Helper()
+	return map[string]map[string]any{
+		"envoy-dispatch": appEnv(t, m),
+		"envoy-listener": listenerEnv(t, m),
+	}
+}
+
+// dispatchNatsSettings are the NATS settings one container's environment holds: of the five keys
+// the two clients share, the ones that are there, an absent key left out rather than read as an
+// empty value, so a key one side does not render never matches the other side's empty one.
+func dispatchNatsSettings(env map[string]any) map[string]any {
+	settings := map[string]any{}
+	for _, key := range []string{"NATS_URLS", "ENVOY_ALLOW_REMOTE_NATS", "ENVOY_NATS_SOCKS5_PROXY", "ENVOY_NATS_REPLICAS", "ENVOY_STREAM_MAX_BYTES"} {
+		if value, ok := env[key]; ok {
+			settings[key] = value
+		}
+	}
+	return settings
+}
+
+// With natsInCluster both NATS clients dial natsUrl themselves, so neither names the front door's
+// proxy at all: the key is absent, not empty, since ENVOY_NATS_SOCKS5_PROXY="" is a setting the
+// binaries would read as a proxy to use. The two JetStream numbers are independent of the mode and
+// reach both containers here.
+func TestDispatchInClusterNatsDropsTheProxyAndCarriesTheNumbers(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	setNatsNumbers(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.Equal(t, inClusterNatsURL, env["NATS_URLS"], container)
+		require.Equal(t, "1", env["ENVOY_ALLOW_REMOTE_NATS"], container)
+		require.Equal(t, strconv.Itoa(dispatchNatsReplicas), env["ENVOY_NATS_REPLICAS"], container)
+		require.Equal(t, strconv.Itoa(dispatchStreamMaxBytes), env["ENVOY_STREAM_MAX_BYTES"], container)
+		require.NotContains(t, env, "ENVOY_NATS_SOCKS5_PROXY", "%s dials the hub itself", container)
+	}
+}
+
+// natsInCluster alone renders neither number: unset, each binary keeps one copy and sets no byte
+// limit (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes), which the variable's absence gives.
+func TestDispatchInClusterNatsRendersNoNumbersWhenUnset(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.NotContains(t, env, "ENVOY_NATS_REPLICAS", "%s keeps one copy", container)
+		require.NotContains(t, env, "ENVOY_STREAM_MAX_BYTES", "%s sets no byte limit", container)
+	}
+}
+
+// The two numbers are inputs of their own: with natsInCluster unset they reach both containers
+// beside ENVOY_NATS_SOCKS5_PROXY, the hub still being dialled through the front door's Service.
+func TestDispatchNatsNumbersKeepTheProxyPath(t *testing.T) {
+	args := dispatchArgs()
+	setNatsNumbers(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.Equal(t, strconv.Itoa(dispatchNatsReplicas), env["ENVOY_NATS_REPLICAS"], container)
+		require.Equal(t, strconv.Itoa(dispatchStreamMaxBytes), env["ENVOY_STREAM_MAX_BYTES"], container)
+		require.Equal(t, dispatchSocks5Proxy, env["ENVOY_NATS_SOCKS5_PROXY"], container)
+	}
+}
+
+// The app's NATS settings are a list written out by hand in appEnv and the listener's come out of
+// core.ListenerConfig.Env: two renderings of one deployment's bus, which this is what keeps from
+// drifting apart. Each mode is compared as the settings present with their values, so a key one
+// container leaves out never passes for the other's empty value.
+func TestDispatchAppAndListenerAgreeOnNats(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		edit     func(*gcp.DispatchArgs)
+		settings int
+	}{
+		{"through the front door's proxy", func(*gcp.DispatchArgs) {}, 5},
+		{"dialling the hub in the cluster", setInClusterNats, 4},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			setNatsNumbers(args)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			envs := dispatchNatsEnvs(t, m)
+			app := dispatchNatsSettings(envs["envoy-dispatch"])
+			require.Len(t, app, row.settings, "the app carries every NATS setting this mode renders")
+			require.Equal(t, app, dispatchNatsSettings(envs["envoy-listener"]),
+				"the two NATS clients of one deployment carry the same settings")
+		})
+	}
 }
 
 // A stopping listener pod keeps answering /v1 while its removal from Service example-dispatch-
@@ -1428,6 +1973,32 @@ func TestDispatchPoliciesFenceTheProxyAndTheListener(t *testing.T) {
 		policyIngressPods(t, m, "example-dispatch-listener", 9020))
 }
 
+// With natsInCluster nothing of the SOCKS5 path is rendered: no Service publishes 1055, no
+// front-door pod runs the proxy, the front door's NetworkPolicy admits nobody (1055 was its only
+// rule), and neither workload waits for the front door — the negative of
+// requireWaitsForTheFrontDoor, since there is no proxy left to be up before them. The front door
+// itself still runs: it hosts the Tailscale Service every reader reaches Dispatch at.
+func TestDispatchInClusterNatsLeavesNoSocks5Path(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for _, registration := range registrationsOf(m, "kubernetes:core/v1:Service") {
+		require.NotEqual(t, "example-dispatch-tailnet", registration.Name, "no Service publishes the proxy's port")
+	}
+	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
+	require.NotContains(t, frontDoorEnv(t, podContainer(t, template, "tailscale")), "TS_SOCKS5_SERVER",
+		"no front-door pod runs the proxy")
+	require.Empty(t, policyIngressRules(t, m, "example-dispatch-tailnet", 0),
+		"the front door's policy is still there and admits nothing at all")
+	for _, deployment := range []string{"example-dispatch", "example-dispatch-listener"} {
+		deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
+		require.NotContains(t, deps, frontDoorPodURN, deployment+" waits for no front-door pod")
+		require.NotContains(t, deps, frontDoorServiceURN, deployment+" dials no proxy at a Service")
+	}
+}
+
 // The front door's serve config, ConfigMap example-dispatch-serve's serve.json, hosts the
 // Tailscale Service svc:example-dispatch, terminating TLS for its name on 443 and proxying to the
 // app's Service.
@@ -1520,6 +2091,37 @@ func TestDispatchListenerPodMatchesGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+}
+
+// dispatchRegistrations renders every registration the mock engine recorded as one line holding
+// the registration's type, its name and the URN of the parent it was registered under. A read,
+// which the engine records with no register request, renders an empty parent. The lines are
+// sorted: the Go SDK registers each resource from a goroutine of its own, so the order the engine
+// sees them in is the scheduler's and differs from run to run, and only the set of registrations
+// is the component's to decide.
+func dispatchRegistrations(m *pulumitest.Mocks) string {
+	registrations := m.Registrations()
+	lines := make([]string, 0, len(registrations))
+	for _, registration := range registrations {
+		parent := ""
+		if registration.RPC != nil {
+			parent = registration.RPC.GetParent()
+		}
+		lines = append(lines, fmt.Sprintf("%s %s parent=%s\n", registration.Type, registration.Name, parent))
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "")
+}
+
+// This golden is the component's declaration: every resource the default inputs register, and the
+// name and the parent each is given, captured before the cluster-only mode existed. A change that
+// leaves the default path alone leaves this file byte-identical, so a failure says the default
+// path moved — a resource renamed, reparented, added or dropped — and the fix is the component,
+// never the golden.
+func TestDispatchRegistrationsMatchTheGolden(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.Equal(t, readGolden(t, "dispatch-registrations.golden"), dispatchRegistrations(m))
 }
 
 // Every workload's pods keep apart at any replica count, over that Deployment's own selector:
@@ -1914,7 +2516,7 @@ func TestDispatchRefusesAnAzureMisconfigurationBeforeRegistering(t *testing.T) {
 	setAzureEndpoint(args)
 	m, err := runDispatch(t, args, true)
 	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: azureEmbedEndpoint needs one credential")
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 }
 
 // Unset, the Azure inputs leave no trace: no key SecretProviderClass and no accessor beyond the
@@ -2009,6 +2611,71 @@ func TestDispatchPodWithAzureFederationMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-azure-federation.golden")
 }
 
+// The mixed deployment this group exists for: meaning search stays on Bedrock, so the pod carries
+// no DISPATCH_EMBEDDER, and the server answers on an Azure chat deployment, so it carries
+// DISPATCH_ANSWERER=azure, the endpoint, the deployment, the quota, the api-version and the scope,
+// and the shared sign-in, whose projected token the answerer alone now reads.
+func TestDispatchPodWithAzureAnswererMatchesGolden(t *testing.T) {
+	args := dispatchArgs()
+	setAzureChat(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-azure-answerer.golden")
+}
+
+// The answerer's other form: the pod carries DISPATCH_ANSWERER=endpoint, the endpoint, the model
+// and DISPATCH_CHAT_TOKEN_FILE naming the bearer token mounted from its own SecretProviderClass,
+// and no Azure variable at all.
+func TestDispatchPodWithChatEndpointMatchesGolden(t *testing.T) {
+	args := dispatchArgs()
+	setChatEndpoint(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-chat-endpoint.golden")
+}
+
+// The endpoint answerer's token is read at run time from Secret Manager: its own
+// SecretProviderClass, written to the file token the pod mounts at /var/run/secrets/chat-token,
+// and one per-secret accessor for the pods' principal, on that secret alone, which the app's
+// Deployment waits for. The Azure answerer registers neither: it signs in with the projected
+// token and stores no secret.
+func TestDispatchRegistersTheChatTokenSecretOnlyWithTheEndpointForm(t *testing.T) {
+	args := dispatchArgs()
+	setChatEndpoint(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	class := m.Named(t, "kubernetes:secrets-store.csi.x-k8s.io/v1:SecretProviderClass", "example-dispatch-chat-token").Inputs.Mappable()
+	require.Equal(t, "example-dispatch-chat-token", class["metadata"].(map[string]any)["name"])
+	spec := class["spec"].(map[string]any)
+	require.Equal(t, "gke", spec["provider"])
+	require.Equal(t, "- resourceName: "+chatTokenSecret+"/versions/latest\n  path: token\n", spec["parameters"].(map[string]any)["secrets"])
+	var members []string
+	for _, r := range registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember") {
+		members = append(members, r.Name)
+	}
+	require.ElementsMatch(t, []string{"example-dispatch-nats-seed-accessor", "example-dispatch-chat-token-accessor"}, members)
+	inputs := m.Named(t, "gcp:secretmanager/secretIamMember:SecretIamMember", "example-dispatch-chat-token-accessor").Inputs.Mappable()
+	require.Equal(t, chatTokenSecret, inputs["secretId"])
+	require.Equal(t, "roles/secretmanager.secretAccessor", inputs["role"])
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies(), chatTokenAccessorURN)
+	for _, other := range []string{"example-dispatch-listener", "example-dispatch-tailnet"} {
+		require.NotContains(t, m.Named(t, "kubernetes:apps/v1:Deployment", other).RPC.GetDependencies(), chatTokenAccessorURN,
+			"%s mounts no chat token", other)
+	}
+
+	args = dispatchArgs()
+	setAzureChat(args)
+	m, err = runDispatch(t, args, true)
+	require.NoError(t, err)
+	require.Len(t, registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember"), 1, "only the NATS seed's accessor exists")
+	for _, r := range m.Registrations() {
+		require.NotEqual(t, "example-dispatch-chat-token", r.Name)
+	}
+}
+
+// chatTokenAccessorURN is the endpoint answerer's accessor, which the app's Deployment waits for.
+const chatTokenAccessorURN = "urn:pulumi:s::p::" + dispatchType + "$gcp:secretmanager/secretIamMember:SecretIamMember::example-dispatch-chat-token-accessor"
+
 // azureFederationVolume is the keyless form's projected volume in the app's pod template.
 func azureFederationVolume(t *testing.T, template map[string]any) map[string]any {
 	t.Helper()
@@ -2035,10 +2702,12 @@ func TestDispatchProjectsTheTokenForTheGivenAudience(t *testing.T) {
 	}}}}, volume["projected"])
 }
 
-// Either form reaches the app's envoy-dispatch container alone: the listener's and the front
+// Every form reaches the app's envoy-dispatch container alone: the listener's and the front
 // door's pods are exactly as without it.
 func TestDispatchAzureLeavesTheOtherWorkloadsUnchanged(t *testing.T) {
-	for name, set := range map[string]func(*gcp.DispatchArgs){"key": setAzureKey, "federation": setAzureFederation} {
+	for name, set := range map[string]func(*gcp.DispatchArgs){
+		"key": setAzureKey, "federation": setAzureFederation, "azure answerer": setAzureChat, "chat endpoint": setChatEndpoint,
+	} {
 		t.Run(name, func(t *testing.T) {
 			args := dispatchArgs()
 			set(args)
@@ -2125,7 +2794,7 @@ func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
 			row.edit(args)
 			m, err := runDispatch(t, args, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
-			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 		})
 	}
 }
@@ -2235,7 +2904,7 @@ func TestDispatchRefusesEphemeralStorageBeforeRegistering(t *testing.T) {
 			row.edit(args)
 			m, err := runDispatch(t, args, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
-			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 		})
 	}
 }
@@ -2243,6 +2912,8 @@ func TestDispatchRefusesEphemeralStorageBeforeRegistering(t *testing.T) {
 const (
 	podDisruptionBudgetType = "kubernetes:policy/v1:PodDisruptionBudget"
 	priorityClassType       = "kubernetes:scheduling.k8s.io/v1:PriorityClass"
+	roleType                = "kubernetes:rbac.authorization.k8s.io/v1:Role"
+	roleBindingType         = "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 )
 
 // safeToEvict reports whether deployment's pod template carries the cluster autoscaler's
@@ -2403,7 +3074,7 @@ func TestDispatchRefusesABudgetBeforeRegistering(t *testing.T) {
 			row.edit(args)
 			m, err := runDispatch(t, args, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
-			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 		})
 	}
 }

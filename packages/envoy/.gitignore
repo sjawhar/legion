@@ -13,6 +13,9 @@ deploy/compose/nats/nats-*.conf
 # The Dispatch e2e harness's server binary and its build lock (packages/dispatch/e2e/run-server.sh)
 /dispatch-e2e
 /.dispatch-e2e.lock
+# Its dev OIDC issuer's, under DISPATCH_E2E_SIGNIN=oidc (packages/dispatch/e2e/run-signin-issuer.sh)
+/dev-oidc-issuer-e2e
+/.dev-oidc-issuer-e2e.lock
 
 # Host deployment settings (secrets) — see deploy/README.md
 deploy/compose/.env

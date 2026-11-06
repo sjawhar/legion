@@ -1,15 +1,35 @@
-import { afterEach } from "bun:test";
+import { afterAll, afterEach, jest } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
 // this in-memory one, which keeps IndexedDB's transaction ordering.
 import "fake-indexeddb/auto";
 import { notifyManager } from "@tanstack/react-query";
 import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
+import { resetReachability } from "../api/reachability";
 import type { BlockSchema } from "../api/types";
 import { blockSchemaCache } from "../features/doc/schema";
+import { resetAnswerDrafts } from "../features/inbox/answer-drafts";
+import { resetOutstandingAnswers } from "../features/inbox/outstanding-answers";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
+import { resetPinState } from "../features/issue/pin-write";
+import { resetWriteStorage } from "../features/writes/write-storage";
+import { type Writes, watchWriteStores } from "../features/writes/write-store";
+import { guardWritesToNetwork, writesThatReachedNetwork } from "./network-guard";
+import { resetRouteAnswers } from "./send-answers";
 
 GlobalRegistrator.register();
+
+// Testing Library reads a global `jest` to tell whether fake timers are installed:
+// `jestFakeTimersAreEnabled` (@testing-library/dom@10.4.1, dist/@testing-library/dom.esm.js:171)
+// begins `if (typeof jest !== 'undefined' && jest !== null)`. Bun's `jest` is a module binding
+// from `bun:test` and no global, so without this line every `waitFor` and `findBy*` under
+// `jest.useFakeTimers()` takes the real-clock path and polls timers the test is holding still:
+// a wait whose node is already there passes by its first synchronous check, and a wait that
+// needs the clock to move can never end. That is what dispatch://INFRA-983 measured on a 2-core
+// pod, where four of its files fail 16 tests without this line; on the pod this line was written
+// in, nothing discriminates it, so `testing-library-fake-timers.test.tsx` holds it in place by
+// asserting the global rather than by timing a wait, and says so.
+(globalThis as unknown as { jest: typeof jest }).jest = jest;
 
 // Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
 // starts already holding the checked-in server schema: every MarkdownBody, ask card, and
@@ -17,6 +37,21 @@ GlobalRegistrator.register();
 // wants a different schema replaces it through its own `api.getBlockSchema` spy before the
 // first render in its file.
 void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSchema);
+
+// A route a test answers (`answerRoute`) is that test's: the next test answers its own.
+afterEach(resetRouteAnswers);
+
+// A unit test's write that reaches the network fails its test (`network-guard.ts`: `fetch` and
+// the uploads' `XMLHttpRequest` both), and one a write loop makes after the file's last test -
+// a retry no test is left to fail - fails the file.
+guardWritesToNetwork();
+const reportReachedNetwork = () => {
+  const reached = writesThatReachedNetwork();
+  if (reached.length === 0) return;
+  throw new Error(`writes reached the network, answered by nothing: ${reached.join(", ")}`);
+};
+afterEach(reportReachedNetwork);
+afterAll(reportReachedNetwork);
 
 class WebSocketStub {
   binaryType = "arraybuffer";
@@ -59,6 +94,40 @@ Object.defineProperty(Node.prototype, Bun.inspect.custom, {
 // so assertions after setQueryData do not wait on a stalled timer.
 notifyManager.setScheduler((callback) => callback());
 
-// Ask-reply drafts live in a module-level store that outlives every render, so a draft one test
-// leaves behind would pre-fill the next test's composer for the same ask id.
+// Ask-reply and ask-answer drafts live in module-level stores that outlive every render, so a
+// draft one test leaves behind would pre-fill the next test's composer or answer box for the
+// same ask id. An answer still out when a test ends is held in one of its own
+// (`outstanding-answers.ts`), which would keep the next test's reading column on that ask id.
 afterEach(resetReplyDrafts);
+afterEach(resetAnswerDrafts);
+afterEach(resetOutstandingAnswers);
+
+// A write a test leaves out keeps writing what it keeps, and the next test's signed-in app would
+// take it up again (`Writes.resume`): each test's are let go, their trying stopped first, since a
+// store outlives its test and would go on retrying into the tests and files after it
+// (`watchWriteStores`). Without this, one process running every file leaves writes retrying into
+// later files - sends to an agent session (`POST /api/v1/agents/<session>/messages`) and asks'
+// answers (`POST /api/v1/asks/<id>/answer`), in numbers that vary from run to run - each reaching
+// the network guard in whichever test is running then, and every such run fails. So is the issue
+// state the last pin answered let go, which the next pin would otherwise write over.
+const madeStores = new Set<Writes>();
+watchWriteStores((store) => madeStores.add(store));
+afterEach(() => {
+  for (const store of madeStores) store.clear();
+  madeStores.clear();
+});
+afterEach(resetWriteStorage);
+afterEach(resetPinState);
+// Whether Dispatch could be reached is the page's to learn afresh: a request one test failed would
+// otherwise make the next test's first answer start every waiting write's backoff over.
+afterEach(resetReachability);
+
+// A fake clock a test installed is put back here as well as in that test's own `finally`, because
+// Bun keeps it across files: a test that installs it and then fails before its `try` - an awaited
+// helper of its own, say - would otherwise leave every later test in the process, and every later
+// file, with timers that never fire, so one regression reads as timeouts everywhere and the real
+// failure is buried. This runs after the hooks above, and `useRealTimers` on a test that
+// installed nothing does nothing.
+afterEach(() => {
+  jest.useRealTimers();
+});

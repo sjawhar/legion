@@ -21,10 +21,11 @@ related_issues:
   rules are already satisfied (cli/cli#13880; the CLI only passes the request to GitHub). Treat it as
   the merge itself. Run it only after every gate of your own has accepted — in Legion, the moment the
   daemon accepts the merger's `handoff_complete` with `ready: true`, in the same turn, never before
-  and never from a later role — because each refusal that gate can still give (the design gate, a
-  head carrying `.legion/<issue>/`, a conflict, a check not green) names a condition an armed request
-  would merge through. A child issue's merger cannot even read its root's design gate (`designGate`
-  is on the root's record alone), so "check the gate yourself, then arm" is not available to it.
+  and never from a later role — because each refusal that gate can still give (the design gate, an
+  unreviewed change above the approved head, a conflict, a check not green) names a condition an
+  armed request would merge through. A child issue's merger cannot even read its root's design gate
+  (`designGate` is on the root's record alone), so "check the gate yourself, then arm" is not
+  available to it.
 - `--match-head-commit` is checked when the request is made, not when the merge lands: an armed
   request survives a later push. Any head that is no longer the one READY named therefore needs an
   explicit disarm. In Legion the daemon makes it, not a role (`packages/daemon/internal/ghautomerge`,

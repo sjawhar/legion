@@ -110,37 +110,66 @@ type CIObservation struct {
 // check runs and suites are folded into durable per-head state; neither emits a
 // raw webhook envelope.
 func GithubCIObservations(event string, body map[string]any) []CIObservation {
-	prs := githubCIPullRequests(event, body)
-	if len(prs) == 0 {
-		return nil
-	}
-	// The CI event name is also the key of its object in the body.
-	key := event
-	sha := nestedString(body, key, "head_sha")
-	if sha == "" {
-		return nil
+	numbers := githubCIPullRequests(event, body)
+	if len(numbers) == 0 {
+		// A check suite GitHub runs on a pull request's head carries that head's ref even when it
+		// lists no pull request, so the head branch attributes what pull_requests leaves
+		// unattributed (githubCIHeadBranchPullRequest).
+		number := githubCIHeadBranchPullRequest(event, body)
+		if number == "" {
+			return nil
+		}
+		numbers = []string{number}
 	}
 	owner, repo := githubRepo(body)
+	// The CI event name is also the key of its object in the body.
+	obs, ok := GithubCIObservation(event, mapValue(body[event]), owner, repo, numbers[0])
+	if !ok {
+		return nil
+	}
+	out := make([]CIObservation, 0, len(numbers))
+	for _, number := range numbers {
+		obs.Number = number
+		out = append(out, obs)
+	}
+	return out
+}
+
+// GithubCIObservation maps one GitHub check-run or check-suite object (event is "check_run" or
+// "check_suite") to the observation the CI store records under owner/repo and pull request
+// number. ok is false when the object carries nothing recordable.
+//
+// object is the object itself, not the webhook body that carries it: GitHub's REST listing
+// GET /repos/{owner}/{repo}/commits/{sha}/check-runs returns the same shape outside any webhook,
+// so a reconcile pass over that listing and the webhook produce the same observation for the same
+// object. The number comes from the caller, because that listing returns a short check_suite with
+// no head_branch to attribute by.
+func GithubCIObservation(event string, object map[string]any, owner, repo, number string) (CIObservation, bool) {
+	sha := stringValue(object["head_sha"])
+	if sha == "" {
+		return CIObservation{}, false
+	}
 	// The listener writes an observation to its CI store with a publish, so each text it copies is
 	// capped like an envelope's.
-	text := func(path ...string) string {
-		return truncateWithEllipsis(nestedString(body, append([]string{key}, path...)...), maxEnvelopeTextRunes)
+	text := func(key string) string {
+		return truncateWithEllipsis(stringValue(object[key]), maxEnvelopeTextRunes)
 	}
 	obs := CIObservation{
 		Owner:      owner,
 		Repo:       repo,
+		Number:     number,
 		SHA:        sha,
-		AppID:      nestedNumberString(body, key, "app", "id"),
+		AppID:      nestedNumberString(object, "app", "id"),
 		Status:     text("status"),
 		Conclusion: text("conclusion"),
 	}
 	if event == "check_run" {
-		checkRunID := githubPositiveUint64(nested(body, key, "id"))
+		checkRunID := githubPositiveUint64(object["id"])
 		if checkRunID == 0 {
-			log.Printf("github ci check run skipped: invalid id=%v", nested(body, key, "id"))
-			return nil
+			log.Printf("github ci check run skipped: invalid id=%v", object["id"])
+			return CIObservation{}, false
 		}
-		obs.CheckName = checkName(nestedString(body, key, "name"))
+		obs.CheckName = checkName(stringValue(object["name"]))
 		obs.CheckRunID = checkRunID
 		obs.URL = text("html_url")
 		obs.ObservedAt = text("completed_at")
@@ -148,21 +177,16 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 			obs.ObservedAt = text("started_at")
 		}
 		if obs.CheckName == "" {
-			return nil
+			return CIObservation{}, false
 		}
 	} else {
-		obs.SuiteID = nestedNumberString(body, key, "id")
+		obs.SuiteID = nestedNumberString(object, "id")
 		obs.ObservedAt = text("updated_at")
 		if obs.SuiteID == "" {
-			return nil
+			return CIObservation{}, false
 		}
 	}
-	out := make([]CIObservation, 0, len(prs))
-	for _, pr := range prs {
-		obs.Number = pr
-		out = append(out, obs)
-	}
-	return out
+	return obs, true
 }
 
 // checkName is a check's name as the CI store keys it: whole, or past maxEnvelopeTextRunes its first
@@ -175,6 +199,40 @@ func checkName(name string) string {
 	}
 	digest := sha256.Sum256([]byte(name))
 	return truncateWithEllipsis(name, maxEnvelopeTextRunes) + " " + hex.EncodeToString(digest[:8])
+}
+
+// ReviewerVerdict is what the shared rule says about one check run's name and the App that
+// created it, against the review App's id.
+type ReviewerVerdict int
+
+const (
+	// VerdictNotAVerdict: the check is not a verdict check (`tester`, `architect`); record it.
+	VerdictNotAVerdict ReviewerVerdict = iota
+	// VerdictNoReviewerApp: a verdict check while the review App's id is unset; drop it.
+	VerdictNoReviewerApp
+	// VerdictUntrusted: a verdict check another App created; drop it.
+	VerdictUntrusted
+	// VerdictTrusted: a verdict check the review App created; record it.
+	VerdictTrusted
+)
+
+// ReviewerVerdictDecision decides one check run: a verdict check says a review passed or failed,
+// so it is recorded only when the review App created it. The caller logs what it drops; the rule
+// itself logs nothing, so every caller of it decides alike.
+//
+// The rule is about check runs only. A check suite has no name, and its recorder runs before the
+// gate, so a suite never goes through it.
+func ReviewerVerdictDecision(checkName, appID, reviewerAppID string) ReviewerVerdict {
+	if checkName != "tester" && checkName != "architect" {
+		return VerdictNotAVerdict
+	}
+	if reviewerAppID == "" {
+		return VerdictNoReviewerApp
+	}
+	if appID != reviewerAppID {
+		return VerdictUntrusted
+	}
+	return VerdictTrusted
 }
 
 func GithubIsBotSender(body map[string]any) bool {
@@ -517,6 +575,12 @@ func githubCIEvent(event string) bool {
 // the run's id, then the job's.
 var githubActionsJobURL = regexp.MustCompile(`^https://github\.com/[^/]+/[^/]+/actions/runs/(\d+)/job/(\d+)$`)
 
+// githubPullHeadRef is the head branch GitHub gives a check suite it runs on a pull request's
+// head: the ref that head is fetched by. The number is anchored and admits no leading zero,
+// because the CI store keys a record by the number as it is written, and `refs/pull/007/head`
+// would key a second record beside the one the webhook's own pull_requests list keys.
+var githubPullHeadRef = regexp.MustCompile(`^refs/pull/([1-9][0-9]*)/head$`)
+
 // githubActionsJob reports whether a webhook is a finished GitHub Actions job on the repository's
 // default branch, of a run with no pull request, and its run and job ids: a completed check_run
 // that lists no pull request, from the GitHub Actions App, whose check suite's head_branch is the
@@ -562,6 +626,30 @@ func githubCIPullRequests(event string, body map[string]any) []string {
 		}
 	}
 	return nums
+}
+
+// githubCIHeadBranchPullRequest is the pull request a CI event's check suite names through its
+// head branch, and "" when it names none. GitHub leaves a check suite's pull_requests list empty
+// whenever it cannot resolve the pull request itself (a fork's head above all), and the listener
+// then has nothing to key the observation by; the suite's head_branch still carries the ref the
+// pull request's head is fetched by, so it attributes the event where pull_requests cannot. Only
+// refs/pull/<n>/head does: refs/pull/<n>/merge is GitHub's merge commit, a merge queue's branch
+// is the queue's own, and a branch push names no pull request at all.
+func githubCIHeadBranchPullRequest(event string, body map[string]any) string {
+	var branch string
+	switch event {
+	case "check_run":
+		branch = nestedString(body, "check_run", "check_suite", "head_branch")
+	case "check_suite":
+		branch = nestedString(body, "check_suite", "head_branch")
+	default:
+		return ""
+	}
+	match := githubPullHeadRef.FindStringSubmatch(branch)
+	if match == nil {
+		return ""
+	}
+	return match[1]
 }
 
 func githubCommentBody(event string, body map[string]any) string {
@@ -797,8 +885,14 @@ func githubPayload(event string, body map[string]any) string {
 			"before": stringValue(body["before"]),
 			// sender is the account whose push the synchronize reports (the webhook's sender): the
 			// daemon takes the move's push by it.
-			"sender":           nestedString(body, "sender", "login"),
-			"head_ref":         nestedString(body, "pull_request", "head", "ref"),
+			"sender":   nestedString(body, "sender", "login"),
+			"head_ref": nestedString(body, "pull_request", "head", "ref"),
+			// head_repo is the repository the head branch lives in, which is this repository for a
+			// branch of it and another for a fork's. Dispatch attributes a check result's currency
+			// to a pull request only when the two are the same, since anyone may open a fork's pull
+			// request at any commit and title it after an issue (delivery's headAttribution). GitHub
+			// sends null for it once a fork is deleted, which normalizes to the empty string.
+			"head_repo":        nestedString(body, "pull_request", "head", "repo", "full_name"),
 			"base_ref":         nestedString(body, "pull_request", "base", "ref"),
 			"merged":           strconv.FormatBool(boolValue(nested(body, "pull_request", "merged"))),
 			"merge_commit_sha": nestedString(body, "pull_request", "merge_commit_sha"),
@@ -819,7 +913,6 @@ func githubPayload(event string, body map[string]any) string {
 		}
 		addCappedBody(data, issueBody)
 	case "push":
-		changedPaths, truncated := githubPushChangedPaths(body)
 		data = map[string]string{
 			"kind":   "push",
 			"repo":   repo,
@@ -828,16 +921,10 @@ func githubPayload(event string, body map[string]any) string {
 			"before": stringValue(body["before"]),
 			"pusher": nestedString(body, "pusher", "name"),
 			// sender is the account that pushed, as a pull request's synchronize names it.
-			"sender":                  nestedString(body, "sender", "login"),
-			"head_subject":            firstNonEmptyLine(nestedString(body, "head_commit", "message")),
-			"commit_count":            strconv.Itoa(len(sliceValue(body["commits"]))),
-			"compare_url":             stringValue(body["compare"]),
-			"changed_paths":           strings.Join(changedPaths, "\n"),
-			"changed_paths_truncated": strconv.FormatBool(truncated),
-			// forced is always "true" or "false": a force push's commits are listed from the merge
-			// base, so its changed paths do not describe what it did to the head it replaced, and a
-			// consumer tells an older listener, which sends no forced, from a push that was not forced.
-			"forced": strconv.FormatBool(boolValue(body["forced"])),
+			"sender":       nestedString(body, "sender", "login"),
+			"head_subject": firstNonEmptyLine(nestedString(body, "head_commit", "message")),
+			"commit_count": strconv.Itoa(len(sliceValue(body["commits"]))),
+			"compare_url":  stringValue(body["compare"]),
 		}
 	case "workflow_run":
 		headBranch := nestedString(body, "workflow_run", "head_branch")
@@ -1375,63 +1462,16 @@ func slackFilesSuffix(files []any) string {
 	return fmt.Sprintf(" (%d file(s): %s)", len(files), first(label, 80))
 }
 
-// maxPushChangedPaths caps the unique paths a push payload lists, and maxPushChangedPathRunes caps
-// their text, newlines included: git bounds no path's length, and the envelope carries the list
-// whole, so a count alone does not keep it under NATS's max payload. A push past either sets
-// changed_paths_truncated so a consumer never mistakes a capped list for the whole change. The
-// budget lists a hundred paths of about 320 runes each.
-const (
-	maxPushChangedPaths     = 100
-	maxPushChangedPathRunes = 32 << 10
-)
-
-// githubPushChangedPaths collects the unique paths across every pushed commit's added, removed,
-// and modified lists, in first-seen order, capped at maxPushChangedPaths and
-// maxPushChangedPathRunes. A path is listed whole or not at all, so the list ends at the first
-// unique path past either cap, and truncated reports that one was seen; repeats of an
-// already-listed path never count. Only commits[] is read — head_commit is one of them.
-func githubPushChangedPaths(body map[string]any) (paths []string, truncated bool) {
-	seen := map[string]struct{}{}
-	runes := 0
-	for _, item := range sliceValue(body["commits"]) {
-		commit := mapValue(item)
-		for _, key := range [...]string{"added", "removed", "modified"} {
-			for _, value := range sliceValue(commit[key]) {
-				path := stringValue(value)
-				if path == "" {
-					continue
-				}
-				if _, dup := seen[path]; dup {
-					continue
-				}
-				size := utf8.RuneCountInString(path)
-				if len(paths) > 0 {
-					size++ // the newline that joins it to the list
-				}
-				if len(paths) == maxPushChangedPaths || runes+size > maxPushChangedPathRunes {
-					return paths, true
-				}
-				seen[path] = struct{}{}
-				paths = append(paths, path)
-				runes += size
-			}
-		}
-	}
-	return paths, false
-}
-
 // payloadJSON encodes a webhook payload without its empty fields. Every value is copied from the
 // webhook and the listener publishes the envelope whole, so each is capped at maxEnvelopeTextRunes
-// (a body, which says it was cut, caps itself first); only changed_paths, which
-// githubPushChangedPaths bounds by whole paths, runs longer.
+// (a body, which says it was cut, caps itself first).
 func payloadJSON(data map[string]string) string {
 	for key, value := range data {
-		switch {
-		case value == "":
+		if value == "" {
 			delete(data, key)
-		case key != "changed_paths":
-			data[key] = truncateWithEllipsis(value, maxEnvelopeTextRunes)
+			continue
 		}
+		data[key] = truncateWithEllipsis(value, maxEnvelopeTextRunes)
 	}
 	out, _ := json.Marshal(data)
 	return string(out)
@@ -1508,14 +1548,13 @@ func truncateWithEllipsis(s string, maxRunes int) string {
 	return string([]rune(s)[:maxRunes]) + "…"
 }
 
-// maxEnvelopeTextRunes caps each text an envelope copies from its webhook body, but for a push's
-// changed paths, which maxPushChangedPathRunes bounds as a list. The listener publishes an envelope
-// to NATS whole, and a publish larger than the server's max payload (1 MiB by default) fails, so no
-// field may grow with the webhook it came from. The listener checks a delivery's signature, not its
-// fields' lengths, so a field GitHub itself bounds (its interface stops a title at 256 characters)
-// is capped as well as one it does not (a ref, a path, a workflow name, a commit message). A comment
-// or review body, which GitHub allows up to 65,536 characters, is cut without an ellipsis and says
-// so in body_truncated.
+// maxEnvelopeTextRunes caps each text an envelope copies from its webhook body. The listener
+// publishes an envelope to NATS whole, and a publish larger than the server's max payload (1 MiB
+// by default) fails, so no field may grow with the webhook it came from. The listener checks a
+// delivery's signature, not its fields' lengths, so a field GitHub itself bounds (its interface
+// stops a title at 256 characters) is capped as well as one it does not (a ref, a path, a workflow
+// name, a commit message). A comment or review body, which GitHub allows up to 65,536 characters,
+// is cut without an ellipsis and says so in body_truncated.
 const maxEnvelopeTextRunes = 2048
 
 func capBody(s string) (string, bool) {

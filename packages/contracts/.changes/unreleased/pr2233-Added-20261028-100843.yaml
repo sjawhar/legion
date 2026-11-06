@@ -1,9 +1,0 @@
-kind: Added
-body: |-
-    `withdrawn`, a third `AskResolution.kind` beside `retracted` and `resolved`, which the ask event
-    payload schema (`AskEventPayloadSchema`) now parses: Dispatch writes it alone, on each open ask
-    an issue's close withdraws, and reopening the issue opens those asks again. `dispatch_resolve_ask`
-    still takes only `retracted` and `resolved`, so no caller can write one.
-time: 2026-10-28T10:08:43.902986524Z
-custom:
-    Issue: pr2233

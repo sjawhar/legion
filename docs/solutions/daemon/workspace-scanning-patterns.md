@@ -33,10 +33,10 @@ Legion workspaces live at `$XDG_DATA_HOME/legion/workspaces/{owner}/{number}/{wo
 
 ### Always shallow-scan workspace directories
 
-Workspace directories are direct children of `legionPaths.workspacesDir`. Never recurse into them — they contain full repo clones.
+Workspace directories are direct children of `legionPaths.workspacesDir`. Never recurse into them — they contain full repo clones. Check a marker that a checkout always has, such as `.jj`. Before sjawhar/legion#2354 the marker was `.legion`, the handoff directory every workspace carried. A handoff is now a record on the Dispatch issue, and no workspace holds that directory.
 
 ```typescript
-// CORRECT: Shallow scan — enumerate children, check for .legion/
+// CORRECT: Shallow scan — enumerate children, check for the checkout marker
 async function scanForWorkspaceDirs(rootDir: string): Promise<string[]> {
   const entries = await readdir(rootDir, { withFileTypes: true });
   const workspaceDirs: string[] = [];
@@ -44,7 +44,7 @@ async function scanForWorkspaceDirs(rootDir: string): Promise<string[]> {
     if (!entry.isDirectory()) continue;
     const candidate = path.join(rootDir, entry.name);
     const childEntries = await readdir(candidate, { encoding: "utf8" });
-    if (childEntries.includes(".legion")) {
+    if (childEntries.includes(".jj")) {
       workspaceDirs.push(candidate);
     }
   }
@@ -54,7 +54,7 @@ async function scanForWorkspaceDirs(rootDir: string): Promise<string[]> {
 // WRONG: Recursive walk — traverses node_modules, .git, etc.
 async function walk(dir: string) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (entry.name === ".legion") { found.add(dir); continue; }
+    if (entry.name === ".jj") { found.add(dir); continue; }
     await walk(path.join(dir, entry.name)); // 131K dirs instead of 274
   }
 }

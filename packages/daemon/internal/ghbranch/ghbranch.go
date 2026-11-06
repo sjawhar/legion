@@ -23,30 +23,32 @@ import (
 // the read of base or to the create, is an error naming the repository, the ref and GitHub's
 // answer (a *githubrest.Answer, its status and body).
 func Create(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, branch, base string) error {
-	var head struct {
+	var read struct {
 		Object struct {
 			SHA string `json:"sha"`
 		} `json:"object"`
 	}
-	if err := github.Get(ctx, "/git/ref/heads/"+refPath(base), &head); err != nil {
+	if err := github.Get(ctx, "/git/ref/heads/"+refPath(base), &read); err != nil {
 		return fmt.Errorf("read refs/heads/%s of %s: %w", base, repo, err)
 	}
-	if head.Object.SHA == "" {
+	head := read.Object.SHA
+	if head == "" {
 		return fmt.Errorf("read refs/heads/%s of %s: GitHub named no commit", base, repo)
 	}
 
 	ref := "refs/heads/" + branch
-	err := github.Post(ctx, "/git/refs", map[string]string{"ref": ref, "sha": head.Object.SHA}, nil)
+	err := github.Post(ctx, "/git/refs", map[string]string{"ref": ref, "sha": head}, nil)
 	var answer *githubrest.Answer
 	if err == nil || errors.As(err, &answer) && answer.Status == http.StatusUnprocessableEntity && alreadyExists(answer.Body) {
 		return nil
 	}
-	return fmt.Errorf("create %s on %s at %s: %w", ref, repo, head.Object.SHA, err)
+	return fmt.Errorf("create %s on %s at %s: %w", ref, repo, head, err)
 }
 
-// refPath is branch as the path of its ref under /git/ref/heads/: every character a URL path would
-// read as its own syntax (`#`, `?`, `%`, and the rest url.PathEscape escapes) escaped, and each `/`
-// kept, since it separates the ref's own components, so GitHub reads the one ref branch names.
+// refPath is branch as the path of its ref under /git/ref/heads/: every character a URL path
+// would read as its own syntax (`#`, `?`, `%`, and the rest url.PathEscape escapes) escaped, and
+// each `/` kept, since it separates the ref's own components, so GitHub reads the one ref branch
+// names.
 func refPath(branch string) string {
 	return strings.ReplaceAll(url.PathEscape(branch), "%2F", "/")
 }

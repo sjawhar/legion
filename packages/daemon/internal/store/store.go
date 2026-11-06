@@ -6,7 +6,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -84,6 +86,14 @@ func (s *Store) Migrate(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	return s.migrate(ctx, all)
+}
+
+// migrate is Migrate over a given set of migrations, so a test can take a
+// database through the same transactions, lock and version rows with a set it
+// crafts — a migration merged out of order, say — rather than only the set the
+// binary embeds.
+func (s *Store) migrate(ctx context.Context, all []migrations.Migration) (int, error) {
 	applied := 0
 	for _, migration := range all {
 		ran, err := s.apply(ctx, migration)
@@ -97,8 +107,9 @@ func (s *Store) Migrate(ctx context.Context) (int, error) {
 	return applied, nil
 }
 
-// SchemaVersion is the highest migration this database has recorded, and 0 for
-// a database no daemon has migrated yet.
+// SchemaVersion is the highest migration version this database has recorded —
+// one of the numbered migrations, or the 14-digit UTC timestamp of a migration
+// added since — and 0 for a database no daemon has migrated yet.
 func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 	return schemaVersion(ctx, s.pool)
 }
@@ -116,8 +127,11 @@ func schemaVersion(ctx context.Context, db queryRower) (int, error) {
 	if !recorded {
 		return 0, nil
 	}
+	// The cast holds this statement's result at bigint whichever type the column
+	// has, so a connection that read the version before a timestamped migration
+	// widened it is not left with a cached plan whose result type changed.
 	var version int
-	if err := db.QueryRow(ctx, "select coalesce(max(version), 0) from schema_version").Scan(&version); err != nil {
+	if err := db.QueryRow(ctx, "select coalesce(max(version), 0)::bigint from schema_version").Scan(&version); err != nil {
 		return 0, fmt.Errorf("read schema_version: %w", err)
 	}
 	return version, nil
@@ -197,7 +211,12 @@ func (s *Store) apply(ctx context.Context, migration migrations.Migration) (bool
 		if _, err := tx.Exec(ctx, migration.SQL); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version); err != nil {
+		if migration.Version > math.MaxInt32 {
+			if err := widenSchemaVersion(ctx, tx); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, "insert into schema_version (version) values ($1::bigint)", migration.Version); err != nil {
 			return fmt.Errorf("record version %d: %w", migration.Version, err)
 		}
 		ran = true
@@ -209,9 +228,37 @@ func (s *Store) apply(ctx context.Context, migration migrations.Migration) (bool
 	return ran, nil
 }
 
+// widenSchemaVersion makes schema_version.version a bigint when it is still the
+// integer 0001_init created: a 14-digit timestamp version is past int4's
+// 2147483647, so the first such migration a database takes widens the column in
+// its own transaction, before its row goes in. A column already widened is left
+// alone, so this runs once however many timestamped migrations follow, and a
+// database that has yet to create the table (migration 1 is what creates it)
+// has nothing to widen.
+func widenSchemaVersion(ctx context.Context, tx pgx.Tx) error {
+	var dataType string
+	err := tx.QueryRow(ctx, `select data_type from information_schema.columns
+		where table_schema = current_schema() and table_name = 'schema_version' and column_name = 'version'`).Scan(&dataType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read the type of schema_version.version: %w", err)
+	}
+	if dataType != "integer" {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, "alter table schema_version alter column version type bigint"); err != nil {
+		return fmt.Errorf("widen schema_version.version to bigint: %w", err)
+	}
+	return nil
+}
+
 // versionRecorded answers whether this database has already taken a migration.
 // A database without the schema_version table has taken none: migration 1 is
-// what creates it.
+// what creates it. The parameter is a bigint whatever the column still is: a
+// 14-digit version has to reach the comparison to answer that it was never
+// applied, which is what makes the widening below it run.
 func versionRecorded(ctx context.Context, tx pgx.Tx, version int) (bool, error) {
 	exists, err := schemaVersionExists(ctx, tx)
 	if err != nil || !exists {
@@ -219,7 +266,7 @@ func versionRecorded(ctx context.Context, tx pgx.Tx, version int) (bool, error) 
 	}
 	var recorded bool
 	if err := tx.QueryRow(ctx,
-		"select exists (select 1 from schema_version where version = $1)", version,
+		"select exists (select 1 from schema_version where version = $1::bigint)", version,
 	).Scan(&recorded); err != nil {
 		return false, fmt.Errorf("read schema_version: %w", err)
 	}

@@ -1,4 +1,5 @@
 import { type Browser, expect, type Page, test } from "@playwright/test";
+import type { Comment } from "../web/src/api/types";
 
 import { createComment, createIssue, createProject, getAsk, listComments } from "./api";
 import {
@@ -14,13 +15,16 @@ import {
   selectEditorText,
 } from "./editor";
 import { resetDatabase } from "./seed";
-import { refusePosts } from "./sends";
+import { refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 // The margin composer a selection-bar action opens can switch between Comment, Suggest and Ask;
 // the switch retypes the provisional mark the bar wrote (LEGION-363). Alice acts, Bob watches the
 // same document in his own browser.
 const initialMarkdown = "The quick brown fox";
+// Every poll here reads the server or the two editors from Node, so the ladder is this file's
+// own: the default one first looks again 350 ms after a write the server answered in 30.
+const PROBE = { intervals: [50, 50, 100, 200, 500] };
 
 interface Readers {
   alicePage: Page;
@@ -156,7 +160,7 @@ test("a send holds every suggestion control and restores its replacement on refu
     await expect(form.getByRole("button", { name: "Close" })).toBeDisabled();
     refusal();
 
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(replacement).toHaveValue("red");
   });
 });
@@ -177,7 +181,7 @@ test("a send holds every ask control", async ({ browser }) => {
     await expect(form.getByRole("button", { name: "Add option" })).toBeDisabled();
     await expect(form.getByLabel("Option 1 label")).toBeDisabled();
     refusal();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
   });
 });
 
@@ -205,7 +209,7 @@ test("an Escape in Send's task cannot open a margin Discard prompt", async ({ br
 
     await expect(form.getByRole("button", { name: "Discard" })).toHaveCount(0);
     refusal();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
   });
 });
 
@@ -284,12 +288,13 @@ test("undo and redo after a switch write back no comment mark when a sent sugges
       await barAction(alicePage, "Suggest");
       await composer(alicePage).getByLabel("Replacement").fill("red");
       await composer(alicePage).getByRole("button", { exact: true, name: "Send" }).click();
+      let suggestion: Comment | undefined;
       await expect
-        .poll(() =>
-          listComments(issueKey, artifactId).then((items) => items[0]?.suggestion?.replace_with)
-        )
+        .poll(async () => {
+          [suggestion] = await listComments(issueKey, artifactId);
+          return suggestion?.suggestion?.replace_with;
+        }, PROBE)
         .toBe("red");
-      const [suggestion] = await listComments(issueKey, artifactId);
       if (suggestion?.anchor == null) {
         throw new Error("The suggestion has no anchor.");
       }
@@ -361,7 +366,7 @@ test("Comment over text another reader's comment covers goes through, and that c
         .poll(async () => {
           aliceCommentTexts = await markTexts(commentMarks(alicePage));
           return Object.keys(aliceCommentTexts).length;
-        })
+        }, PROBE)
         .toBe(2);
       const aliceMark = Object.keys(aliceCommentTexts).find((id) => id !== bobMark);
       if (aliceMark === undefined) {
@@ -370,7 +375,7 @@ test("Comment over text another reader's comment covers goes through, and that c
       await Promise.all(
         [alicePage, bobPage].map((page) =>
           expect
-            .poll(() => markTexts(commentMarks(page)))
+            .poll(() => markTexts(commentMarks(page)), PROBE)
             .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
         )
       );
@@ -379,16 +384,18 @@ test("Comment over text another reader's comment covers goes through, and that c
       await composer(alicePage).getByLabel("Comment").fill("just brown");
       await composer(alicePage).getByRole("button", { exact: true, name: "Send" }).click();
       await expect
-        .poll(() =>
-          listComments(issueKey, artifactId).then((items) =>
-            items
-              .map((item) => ({
-                body: item.body,
-                mark: item.anchor?.mark_id,
-                quote: item.anchor?.quote,
-              }))
-              .sort((a, b) => a.body.localeCompare(b.body))
-          )
+        .poll(
+          () =>
+            listComments(issueKey, artifactId).then((items) =>
+              items
+                .map((item) => ({
+                  body: item.body,
+                  mark: item.anchor?.mark_id,
+                  quote: item.anchor?.quote,
+                }))
+                .sort((a, b) => a.body.localeCompare(b.body))
+            ),
+          PROBE
         )
         .toEqual([
           { body: "just brown", mark: aliceMark, quote: "brown" },
@@ -397,7 +404,7 @@ test("Comment over text another reader's comment covers goes through, and that c
       await Promise.all(
         [alicePage, bobPage].map((page) =>
           expect
-            .poll(() => markTexts(commentMarks(page)))
+            .poll(() => markTexts(commentMarks(page)), PROBE)
             .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
         )
       );

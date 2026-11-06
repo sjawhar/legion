@@ -104,6 +104,7 @@ func TestEachSuccessfulOperatorClaimRequestLogsOneInfoLine(t *testing.T) {
 	workerSpawn.Issue, workerSpawn.Role = "LEGION-209", claim.RoleImplementer
 	succeeded := []step{
 		{method: http.MethodPost, target: route(architectToken, "suspend"), pattern: "POST /legion/v1/operator/claims/{token}/suspend", claim: architectToken},
+		{method: http.MethodPost, target: route(architectToken, "forget-session"), body: ForgetSessionRequest{Session: "ses_architect"}, pattern: "POST /legion/v1/operator/claims/{token}/forget-session", claim: architectToken},
 		{method: http.MethodPost, target: route(architectToken, "resume"), pattern: "POST /legion/v1/operator/claims/{token}/resume", claim: architectToken},
 		{method: http.MethodPost, target: route(architectToken, "deliver"), body: DeliverRequest{Task: "look at the tree"}, pattern: "POST /legion/v1/operator/claims/{token}/deliver", claim: architectToken},
 		{method: http.MethodPost, target: "/legion/v1/operator/claims", body: workerSpawn, pattern: "POST /legion/v1/operator/claims", claim: worker},
@@ -129,6 +130,16 @@ func TestEachSuccessfulOperatorClaimRequestLogsOneInfoLine(t *testing.T) {
 			if !strings.Contains(lines[i], want) {
 				t.Errorf("operator request line %d is %q, want it to carry %s", i, lines[i], want)
 			}
+		}
+	}
+	for _, want := range []string{
+		`msg="api: operator forgot session"`,
+		"claim=" + string(architectToken),
+		"session=ses_architect",
+		"sessionFile=/sessions/ses_architect.jsonl",
+	} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("operator forget-session log %q does not contain %q", logged.String(), want)
 		}
 	}
 }

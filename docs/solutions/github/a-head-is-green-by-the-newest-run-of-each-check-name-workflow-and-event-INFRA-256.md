@@ -46,5 +46,5 @@ That document says to judge the required set by check name. Name alone is not Gi
 - sjawhar/legion#2234 at `44eab33b`: a queued `pull_request_review_comment` `pr-title` run on the
   head, rollup `SUCCESS`.
 - The rule as implemented in `packages/dispatch/web/src/features/issue/GitHubLink.tsx`
-  (`newestCheckRuns`) matched GitHub's rollup on the 60 newest sjawhar/legion pull requests; the
+  (`newestCheckRuns`) matched GitHub's rollup on the 60 newest cybermonklabs/legion pull requests; the
   any-red rule matched 40.

@@ -49,6 +49,7 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
     priority: null,
     snoozed_until: null,
@@ -76,7 +77,7 @@ function renderPage(
   if (login === null) {
     whoAmI.mockImplementation(() => Promise.withResolvers<never>().promise);
   } else {
-    whoAmI.mockResolvedValue({ kind: "user", login });
+    whoAmI.mockResolvedValue({ event_head: "0", kind: "user", login });
   }
 
   const listProjects = spyOn(api, "listProjects").mockResolvedValue(projects);

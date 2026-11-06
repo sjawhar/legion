@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    The plugin's regenerated `legion/` copy of the `legion-worker` skill's merge gate says a
-    production check of `sjawhar/legion` wakes on Dispatch's `server.started` announcing that every
-    server process serves a build containing the merge, named in the look's task as
-    `Dispatch serving build <sha> on every server process`.
-time: 2026-10-28T09:38:49.788958622Z
-custom:
-    Issue: pr2390

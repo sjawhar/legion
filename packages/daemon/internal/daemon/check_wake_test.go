@@ -564,6 +564,9 @@ func (rig *checkWakeRig) reportPending(t *testing.T) {
 		t.Fatalf("the implementer's pending report = %d %s, want 200", status, body)
 	}
 	sh.send(shimwire.AgentEnd{})
+	// Oh My Pi writes the prompt's result behind that agent_end, and the task retires on it: an
+	// agent_end names no prompt, and a background result's turn ends with one just like it.
+	sh.send(shimwire.PromptResult{ID: prompt.ID, AgentInvoked: true})
 }
 
 // logged is how many of the daemon's log lines say msg with each of attributes, a value compared
@@ -720,21 +723,23 @@ func TestAnOlderDeployRunApplyingAfterTheMergeWakesTheCheck(t *testing.T) {
 
 // A run of the deploy workflow whose Apply was skipped (a preview), one whose Apply finished before
 // the merge, and a run of another workflow of the repository wake nothing: the first two are read
-// from GitHub and found no deploy after the merge, the third is no deploy and is not read at all.
+// from GitHub and found no deploy after the merge, the third is no deploy, acknowledged without a
+// transaction and not read at all. It is published first, so once the consumer, which takes one
+// message at a time in the stream's order, has taken in the two deploy runs, it has handled it.
 // The check stays at its ended look 1, nothing is kept for a next look, and the implementer stays
 // suspended.
 func TestDeployRunsThatDidNotApplyAfterTheMergeWakeNothing(t *testing.T) {
 	rig := newCheckWakeRig(t)
 	rig.boot(t)
 
+	rig.publishGitHub(t, "github-run-ci", 903, checkWakeRun{workflow: checkWakeOtherWorkflow, headSHA: checkWakeAheadBuild, jobs: []string{
+		checkWakeJob(1, "deploy", checkWakeStep("Apply", "success", 10*time.Minute)),
+	}})
 	rig.publishGitHub(t, "github-run-preview", 901, checkWakeRun{workflow: checkWakeDeployWorkflow, headSHA: checkWakeAheadBuild, jobs: []string{
 		checkWakeJob(1, "deploy", checkWakeStep("Plan", "success", 5*time.Minute), checkWakeStep("Apply", "skipped", 6*time.Minute)),
 	}})
 	rig.publishGitHub(t, "github-run-before", 902, checkWakeDeploy(checkWakeBehindBuild, -10*time.Minute))
-	rig.publishGitHub(t, "github-run-ci", 903, checkWakeRun{workflow: checkWakeOtherWorkflow, headSHA: checkWakeAheadBuild, jobs: []string{
-		checkWakeJob(1, "deploy", checkWakeStep("Apply", "success", 10*time.Minute)),
-	}})
-	rig.awaitCompared(t, "github-run-preview", "github-run-before", "github-run-ci")
+	rig.awaitCompared(t, "github-run-preview", "github-run-before")
 
 	if check := rig.check(t); check.Looks != 1 || check.LookOpen || check.LastWakeKind != "merge" || check.PendingCauseKind != "" {
 		t.Fatalf("check = look %d (open %v) woken by %q, pending %q; want look 1 still ended by the merge's look and nothing kept",

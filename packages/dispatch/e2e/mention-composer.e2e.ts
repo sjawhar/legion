@@ -1,4 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
+
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+
 import {
   type FakeSession,
   getSentMessages,
@@ -13,13 +16,14 @@ import {
   createMessage,
   createProject,
   createProjectDocument,
+  getIssueEvents,
   patchIssue,
   resolveComment,
   retryCommentDelivery,
 } from "./api";
 import { barAction, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
@@ -91,7 +95,7 @@ async function sendBesideReply(page: Page, issueKey: string, parent: string): Pr
   await expect(field).toHaveValue("Status please");
   await expect(cancelReply).toHaveCount(0);
   refuse();
-  await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+  await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
   await expect(field).toHaveValue("Status please");
   await expect(cancelReply).toHaveCount(0);
 }
@@ -273,7 +277,7 @@ test("a conversation thread's own reply holds Collapse thread while it is out", 
     await expect(field).toBeDisabled();
     await expect(collapse).toBeDisabled();
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Thread reply");
     await expect(collapse).toBeEnabled();
   } finally {
@@ -330,8 +334,9 @@ test("a docked send out when its issue closes keeps the draft and shows the refu
 // The client's deadline lets go of the controls that would take the reader away from a send; it
 // is not a refusal. A comment that mentions agents can take the server longer than that, and it
 // is still one comment: the deadline offers no Retry, and the answer that follows lands as any
-// answer does.
-test("a docked send the server answers at 35 s posts once and shows once, with no Retry at the deadline", async ({
+// answer does. Each attempt is held to KEYED_SEND_ATTEMPT_MS (15 s), so a 35 s wait asks again,
+// under the same key: every POST carries that one key, and Dispatch makes the comment once.
+test("a docked send the server answers at 35 s is one keyed write and shows once, with no Retry at the deadline", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -361,7 +366,15 @@ test("a docked send the server answers at 35 s posts once and shows once, with n
     await expect(turns.getByText("Slow but sure", { exact: true })).toHaveCount(1);
     await expect(field).toHaveValue("");
     await expect(form.getByText(/^Still sending/)).toHaveCount(0);
-    expect(send.posts()).toBe(1);
+    const keys = send.keys();
+    expect(keys.length).toBeGreaterThan(1);
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    // Every attempt that could reach Dispatch has, and Dispatch made the comment once.
+    await send.settled();
+    expect(
+      (await getIssueEvents(issue.key)).filter((event) => event.type === "comment.created")
+    ).toHaveLength(1);
   } finally {
     await alice.close();
   }
@@ -378,6 +391,10 @@ test("an issue closed and reopened under a docked send leaves that send's compos
 
   try {
     const page = await alice.newPage();
+    // Both status writes below reach the header over the event feed, whose refetch the page holds
+    // to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer its own clock fires, and 1 s is
+    // nowhere near the send's 30 s deadline, which stays out through the row.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const form = page.getByRole("form", { name: "Comment composer" });
     const field = form.getByLabel("Comment");
@@ -387,14 +404,16 @@ test("an issue closed and reopened under a docked send leaves that send's compos
     await expect(field).toBeDisabled();
 
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
     await patchIssue(issue.key, { status: "backlog" }, { login: "bob" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Close issue" })).toBeVisible();
     await expect(field).toHaveValue("Through the close");
     await expect(field).toBeDisabled();
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Through the close");
     await field.fill("Typed after");
     await expect(field).toHaveValue("Typed after");
@@ -430,7 +449,7 @@ test("a thread resolved while its own reply is out stays open with the reply and
     await expect(field).toHaveValue("Reply under a resolve");
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply under a resolve");
     await expect(field).toBeEnabled();
   } finally {
@@ -463,16 +482,20 @@ test("a thread's own reply out when the viewport narrows to a phone keeps its dr
     await page.setViewportSize({ height: 844, width: 390 });
     await expect(field).toHaveValue("Reply through a narrowing");
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply through a narrowing");
   } finally {
     await alice.close();
   }
 });
 
-test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target @phone", async ({
+test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target", async ({
   browser,
 }) => {
+  // Two failed sends run end to end here, the seeded mention's and the Retry's, and each waits
+  // out the listener take-over window before it settles failed: half a second under the
+  // harness's DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW (e2e/run-server.sh), of the twelve seconds
+  // a deployment runs.
   await setLiveSessions([planner]);
   // The mention's first delivery has to FAIL for a retry to be offered at all: a same-mode
   // retry of a delivery that landed is a repeat that is recognised and dropped, so the row no
@@ -502,17 +525,12 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
       body: "Plain reply",
       reply_to: parent.id,
     });
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const phoneThreadOpen = (await phoneThread.count()) > 0;
-    if (phoneThreadOpen) {
-      await expect(card.getByRole("button", { name: "Retry" })).toHaveCount(0);
-    }
     const retry = page.waitForResponse(
       (candidate) =>
         candidate.request().method() === "POST" &&
         candidate.url().endsWith(`/api/v1/comments/${parent.id}/deliveries`)
     );
-    await (phoneThreadOpen ? phoneThread : card).getByRole("button", { name: "Retry" }).click();
+    await card.getByRole("button", { name: "Retry" }).click();
     expect((await retry).request().postDataJSON()).toEqual({
       delivery: "steer",
       target: "session:planner",

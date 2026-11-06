@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -16,7 +17,9 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -44,43 +47,54 @@ const (
 	markStart          = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
 	markEnd            = "\uE001"
 	headlineOptions    = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
+	// searchWindowCandidates is how many nearest windows one window arm takes before its
+	// `distinct on (id)` keeps the nearest window of each item. Every arm is held to
+	// contracts.SearchKindDepth items afterwards (ranked), but a window is not an item: one
+	// long document holds hundreds of them, and at a candidate depth of SearchKindDepth its
+	// windows alone fill the arm, which then yields that one document and every other document
+	// the query matches is lost. Ten times the depth leaves room for a thousand windows, which
+	// is the one document's hundreds and the rest of the page's items beside them, and the arm
+	// still reads them through embeddings_cosine, nearest first.
+	searchWindowCandidates = 10 * contracts.SearchKindDepth
 )
 
-// searchKeywordLegsSQL is the five-kind keyword-ranked union - issue, document, comment, ask,
-// message, each matched via ts_rank_cd against websearch_to_tsquery - shared verbatim by
-// searchQuery's own "kinds" CTE and searchQueryMeaning's "kinds" CTE, where it is unioned with
-// the five meaning_* CTEs below it - this and searchPageAndTailSQL are the one piece of
-// duplication between the two queries. Every
+// searchKeywordLegs is the five-kind keyword-ranked union - issue, document, comment, ask,
+// message, each matched against q.tsq and ranked by rank of its own search column - shared
+// verbatim by searchQueryBody's "kinds" CTE and searchQueryMeaningBody's "kinds" CTE, where it is
+// unioned with the five meaning_* CTEs below it - this and searchPageAndTailSQL are the one piece
+// of duplication between the two queries. rank is search's ts_rank_cd (searchKeywordLegsSQL) or
+// the related-item check's coordination rank (relatedCoordinationRank). Every
 // arm carries 'keyword' as its own list column even here, where searchQuery's own
 // ranked/legs/fused/page CTEs never select list by name, so it rides through unused rather than
 // needing two near-identical copies of this text, one with the column and one without.
 //
 // Column shape after kind, list: issue_key, owner_artifact_id, artifact_id, id, block_id,
-// issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at, own, r.
-// block_id is an ask's typed block only while it is a node of the reference graph
-// (askBlockNodeSQL).
-const searchKeywordLegsSQL = `
+// window_id, covers, issue_title, issue_status, owner_project, owner_slug, owner_name,
+// updated_at, own, r. block_id is an ask's typed block only while it is a node of the reference
+// graph (askBlockNodeSQL). window_id and covers are the embeddings window a meaning arm matched
+// and the blocks its vector covers; a keyword arm matched no window and carries null for both,
+// as it carries 'keyword' as list, so the two unions have one column shape. The ask arm's anchor
+// cast is store.CastableUUID's, which answers the document every spelling of an artifact_id
+// Postgres casts names.
+//
+// The document arm is a named piece of its own (searchDocumentKeywordLeg), so that it can be
+// ranked, read and measured apart from the four arms beside it.
+func searchKeywordLegs(rank func(searchColumn string) string) string {
+	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
+         null::text as window_id, null::text[] as covers,
          i.title as issue_title, i.status as issue_status,
          null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at,
-         i.key = q.own_key as own, ts_rank_cd(i.search, q.tsq) as r
+         i.key = q.own_key as own, ` + rank("i.search") + ` as r
     from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
   union all
-  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
-         i.title, i.status, p.key, a.slug, a.name,
-         coalesce(i.updated_at, v.created_at),
-         false, ts_rank_cd(v.search, q.tsq)
-    from artifacts a
-    left join issues i on i.key = a.issue_key
-    join projects p on p.key = a.project_key
-    join lateral (select v.search, v.created_at from artifact_versions v
-                  where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
-   where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
+` + searchDocumentKeywordLeg(rank) + `
   union all
   select 'comment' as kind, 'keyword', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
+         null::text, null::text[],
          i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, c.created_at),
-         false, ts_rank_cd(c.search, q.tsq)
+         false, ` + rank("c.search") + `
     from comments c
     left join issues i on i.key = c.issue_key
     left join artifacts a on a.id = c.artifact_id
@@ -88,9 +102,10 @@ const searchKeywordLegsSQL = `
    where c.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
   select 'ask' as kind, 'keyword', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
-         coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, ` + askBlockNodeSQL + `,
+         coalesce(k.artifact_id, k.block_artifact_id, ` + store.CastableUUID(`k.anchor->>'artifact_id'`) + `), k.id::text, ` + askBlockNodeSQL + `,
+         null::text, null::text[],
          i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
-         false, ts_rank_cd(k.search, q.tsq)
+         false, ` + rank("k.search") + `
     from asks k
     left join issues i on i.key = k.issue_key
     left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
@@ -98,10 +113,46 @@ const searchKeywordLegsSQL = `
    where k.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
   select 'message' as kind, 'keyword', m.issue_key, null::uuid, null::uuid, m.id::text, null::text,
+         null::text, null::text[],
          i.title, i.status, null::text, null::text, null::text, i.updated_at,
-         false, ts_rank_cd(m.search, q.tsq)
+         false, ` + rank("m.search") + `
     from messages m join issues i on i.key = m.issue_key, q
    where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)`
+}
+
+// searchDocumentKeywordLeg is searchKeywordLegs' document arm, written apart from the four arms
+// beside it so that it can be ranked, read and measured on its own: it is a small part of the
+// cost of every statement that unions it, and a cost that small is legible only when the arm is
+// read apart from theirs.
+//
+// It reads document_search (migration 20261101182447), one row per document holding its latest
+// version's vector under a GIN index, rather than a lateral over artifact_versions: that table's
+// search column has no index and can have none (0010 left it out, and its 5.2 GiB is above what
+// the pre-deploy census lets a migration touch), so an arm reading it tests every document's
+// latest version in turn. The rows are the same ones - 20261101182454's trigger holds
+// document_search at each document's latest version with markdown - and the join to artifacts
+// decides the arm's project, kind and issue.
+//
+// The text carries no newline of its own at either end: searchKeywordLegs joins it to its
+// neighbours with the union the arms are separated by, and a caller running the arm by itself
+// wraps it in a select of its own.
+func searchDocumentKeywordLeg(rank func(searchColumn string) string) string {
+	return `  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
+         null::text, null::text[],
+         i.title, i.status, p.key, a.slug, a.name,
+         coalesce(i.updated_at, v.created_at),
+         false, ` + rank("v.search") + `
+    from document_search v
+    join artifacts a on a.id = v.artifact_id
+    left join issues i on i.key = a.issue_key
+    join projects p on p.key = a.project_key, q
+   where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)`
+}
+
+// searchKeywordLegsSQL is search's own keyword legs, each arm ranked by ts_rank_cd.
+var searchKeywordLegsSQL = searchKeywordLegs(func(searchColumn string) string {
+	return "ts_rank_cd(" + searchColumn + ", q.tsq)"
+})
 
 // askBlockNodeSQL is the block id of ask k's typed block while that block is a node of the
 // reference graph (a document_blocks row of the document holding it), and null otherwise: an id
@@ -111,6 +162,19 @@ const searchKeywordLegsSQL = `
 // keyword one above and meaning_ask_candidates - select it.
 const askBlockNodeSQL = `case when exists (select 1 from document_blocks d where d.artifact_id = k.block_artifact_id and d.block_id = k.block_id) then k.block_id end`
 
+// windowOwnerUUID and windowItemUUID read the item a window belongs to out of the window's own
+// id, "<owner key>#<the first block it covers>": the owner key is the id up to the first #, and
+// it is the artifact id for a document's window and "<kind>/<uuid>" for a comment's, a message's
+// or an ask's (refs.ItemKind.WindowOwnerKey). Each meaning arm joins its item on that item's
+// primary key through one of these, so the planner reaches the row through the key rather than
+// reading the whole table to compare a text it computes per row. The cast is guarded
+// (store.CanonicalUUID) so a window id in any other shape resolves to no item instead of
+// answering SQLSTATE 22P02 for the whole search.
+var (
+	windowOwnerUUID = store.CanonicalUUID(`split_part(e.id, '#', 1)`)
+	windowItemUUID  = store.CanonicalUUID(`split_part(split_part(e.id, '#', 1), '/', 2)`)
+)
+
 // searchPageAndTailSQL is the "page the fused ranking, then stitch back the snippet" tail shared
 // by searchQuery and searchQueryMeaning - the other half of the LEGION-549 round-5 dedup above:
 // identical but for legsSource, the name of the CTE each query's own ranked/fused machinery hands
@@ -118,6 +182,17 @@ const askBlockNodeSQL = `case when exists (select 1 from document_blocks d where
 // row per (kind, id) after reciprocal-rank-summing the keyword and meaning lists together).
 // legsSource is always one of those two Go identifiers below, never caller input, so there is no
 // SQL injection surface in formatting it directly into the query text.
+//
+// The page also names the block a meaning hit matched (hit.block_id, INFRA-370). A meaning leg
+// matched one window of an owner's blocks, and that window covers a run of them (r.covers); the
+// block named is the covered block whose own text ranks highest for the query by ts_rank_cd over
+// the configuration the keyword legs are built with ('english' over search_text), ties broken by
+// the block's place in the window, and so the window's first block when no covered block shares a
+// term with the query. A search for the text of a one-line ask option therefore names the option,
+// not the question that gives the option its context and stands in the same window. The rank runs
+// in the page's own lateral join, over the rows of one page and the few blocks each window covers,
+// never over every candidate; a keyword row and an issue carry no covers, so the join answers
+// nothing for them.
 func searchPageAndTailSQL(legsSource string) string {
 	return fmt.Sprintf(`page as (
   select l.*, f.score, array_position(array['issue', 'document', 'ask', 'comment', 'message'], l.kind) as kind_order
@@ -128,7 +203,7 @@ func searchPageAndTailSQL(legsSource string) string {
 select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
        r.issue_key, r.issue_title, r.issue_status,
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
-       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.score::float8,
+       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, hit.block_id, r.score::float8,
        ts_headline('english',
          search_text(case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
               then substr(txt.text, greatest(1, strpos(lower(txt.text), lower(q.term)) - 1500), 4000)
@@ -150,6 +225,32 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
       when 'message' then (select m.body from messages m where m.id = r.id::uuid)
     end as text
   ) txt on true
+  -- The block of r.covers that matched, if the row carries a window. Each covered block's own
+  -- text comes from the table its indexer writes it to: a document's, a comment's and an ask's
+  -- block texts are kept per version or revision, the latest being the current text. A message
+  -- is never edited and keeps no text table (refs/item_blocks.go's table map), so its block is
+  -- ranked on the excerpt its row holds, the block's first refs.BlockExcerptRunes runes.
+  left join lateral (
+    select covered.block_id
+      from unnest(r.covers) with ordinality as covered(block_id, ord)
+      cross join lateral (
+        select case r.kind
+          when 'document' then (select x.text from document_block_texts x
+                                 where x.artifact_id = r.artifact_id and x.block_id = covered.block_id
+                                 order by x.version desc limit 1)
+          when 'comment' then (select x.text from comment_block_texts x
+                                 where x.comment_id = r.id::uuid and x.block_id = covered.block_id
+                                 order by x.revision desc limit 1)
+          when 'ask' then (select x.text from ask_block_texts x
+                                 where x.ask_id = r.id::uuid and x.block_id = covered.block_id
+                                 order by x.revision desc limit 1)
+          when 'message' then (select x.excerpt from message_blocks x
+                                 where x.message_id = r.id::uuid and x.block_id = covered.block_id)
+        end as text
+      ) block
+     order by ts_rank_cd(to_tsvector('english', search_text(coalesce(block.text, ''))), q.tsq) desc, covered.ord
+     limit 1
+  ) hit on true
  order by r.score desc, r.kind_order, r.updated_at desc, r.id
 `, legsSource)
 }
@@ -169,15 +270,27 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
 // and fused carry no row's text, so the union, the window and the fused score cost nothing per
 // kind's full body; only the page's own rows pay for one lateral fetch of their text and, after
 // that, a snippet. totals is joined outside the page, so a page past the end still answers how
-// many rows the query matches. This is the keyword-only fallback (LEGION-549 degraded mode) and
-// the query runFusedSearch runs for LEGION-550's write-time suggestions, which never calls the
-// embedder at all.
+// many rows the query matches. This is the keyword-only fallback (LEGION-549 degraded mode); the
+// related-item check runs its body, with its keyword arms ranked by relatedCoordinationRank,
+// over its own q.
 //
 // Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
 // $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK.
-var searchQuery = `
+var searchQuery = searchQOpener + searchQueryBody(searchKeywordLegsSQL)
+
+// searchQOpener opens searchQuery and searchQueryMeaning: their q, the query text read as
+// websearch_to_tsquery, its first term ($4) for the snippet window, and the issue key the whole
+// text would be (own_key). The related-item check prefixes the same two bodies with its own q
+// (relatedQOpener), their keyword legs ranked by its idf-weighted coordination rank
+// (relatedCoordinationRank); the rest of each body, the RRF and the page, is search's own.
+const searchQOpener = `
 with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
-kinds as (` + searchKeywordLegsSQL + `
+`
+
+// searchQueryBody is searchQuery after its q, over keywordLegs (searchKeywordLegs): every CTE it
+// reads q from and the page.
+func searchQueryBody(keywordLegs string) string {
+	return `kinds as (` + keywordLegs + `
 ),
 ranked as (
   select *, row_number() over (partition by kind order by own desc, r desc, updated_at desc, id) as pos,
@@ -193,11 +306,58 @@ totals as (
          (select count(*) from fused) as reachable
 ),
 ` + searchPageAndTailSQL("legs")
+}
+
+// searchWindowLimit is the LIMIT a window arm's candidate CTE takes, searchWindowCandidates as
+// SQL. It is written into the statement rather than bound, so that the two queries built from
+// searchQueryMeaningBody keep the parameters they have: the number is this build's own, never a
+// caller's.
+var searchWindowLimit = "limit " + strconv.Itoa(searchWindowCandidates)
+
+// searchMeaningScan is what a meaning query's transaction sets before it runs, both statements
+// local to that transaction and no other:
+//
+//   - hnsw.ef_search: how many nearest vectors the HNSW index walks before the kind, project
+//     and model filters run. pgvector's default, 40, is spent on whichever kind holds the most
+//     vectors - the document windows, tens of thousands of them against one row per issue - so
+//     the issue and message arms are left with few candidates or none, and the project filter
+//     can take the rest. 400 keeps them, at a wider walk of the index paid once per query.
+//   - hnsw.iterative_scan: with it off, an arm whose kind filter rejects every one of those 400
+//     answers nothing at all; relaxed_order keeps scanning until the arm's own LIMIT is met or
+//     hnsw.max_scan_tuples (20,000) is reached. Relaxed rather than strict: every arm re-ranks
+//     its rows by r (distinct on, then ranked), so nothing downstream reads the index's order.
+//
+// Both meaning queries run in a transaction beginMeaningScan opens, and set them there.
+var searchMeaningScan = []string{
+	`set local hnsw.ef_search = 400`,
+	`set local hnsw.iterative_scan = relaxed_order`,
+}
+
+// beginMeaningScan opens the read transaction a meaning query runs in, searchMeaningScan's two
+// settings applied to it: `set local` holds them to this transaction, so a pooled connection
+// carries neither of them back to the next request. The caller ends the transaction, a rollback
+// deferred, since neither query writes; a transaction a setting failed on is rolled back here
+// and never handed back. Search's own query (runMeaningSearch) and the related-item check's
+// (relatedMeaningSearch) both start here, so neither can read the index on other settings than
+// the other.
+func (s *server) beginMeaningScan(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.deps.Store.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, setting := range searchMeaningScan {
+		if _, err := tx.Exec(ctx, setting); err != nil {
+			_ = tx.Rollback(context.WithoutCancel(ctx))
+			return nil, err
+		}
+	}
+	return tx, nil
+}
 
 // searchQueryMeaning extends searchQuery with a second list per kind, ranked by cosine distance
 // to the query's own embedding ($9, a pgvector literal) against embeddings.embedding
 // (0072_embeddings_core.up.sql), rather than ts_rank_cd. Each kind's meaning candidates are their
-// own CTE (meaning_issue_candidates and so on) doing plainly `order by embedding <=> $9 limit $7`
+// own CTE (meaning_issue_candidates and so on) doing plainly `order by embedding <=> $9 limit n`
 // - pgvector's HNSW index serves that shape directly (confirmed by
 // TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan) - rather than joining meaning rows into
 // one shared window spanning every kind, which would force a sequential scan of embeddings once
@@ -214,7 +374,20 @@ totals as (
 // noise, not a weak match, and reaching legs at all would rank it by position exactly as the
 // strongest real match in an empty kind.
 //
-// kinds unions searchKeywordLegsSQL - the same five-arm keyword text searchQuery's own kinds CTE
+// Four of the five arms read windows of neighbouring blocks (INFRA-370: kinds document_block,
+// comment_block, message_block and ask_part), where an issue's arm still reads the issue's one
+// whole-text row. A window's id is "<owner key>#<suffix>", so the item it belongs to is
+// split_part(id, '#', 1) - the artifact id for a document, "<kind>/<uuid>" for a comment, a
+// message or an ask - and each arm projects the item's own kind and id, so fusion still ranks
+// one row per item however many of its windows the index hands back. A window arm takes
+// searchWindowCandidates of them, ten times the items any arm keeps, because one long
+// document's windows would otherwise fill an arm of contracts.SearchKindDepth and leave every
+// other document of the page out. Each arm then keeps the item's
+// nearest window alone (distinct on (id), the highest cosine first) and carries that window's
+// id and covers, the blocks its vector holds, on to legs_unique and the page, which names the
+// one of them that matched (searchPageAndTailSQL).
+//
+// kinds unions searchKeywordLegs - the same five-arm keyword text searchQuery's own kinds CTE
 // uses verbatim, each arm already carrying 'keyword' as list - with the five meaning_* CTEs
 // above. Every leg now carries which list it belongs to (list), and ranked's window partitions by
 // (kind, list): each list keeps its own top $7 and its own position numbering, so a row that
@@ -224,16 +397,19 @@ totals as (
 // keyword list reached, only the meaning list reached, or both, is ranked once, at the sum of
 // whichever lists found it. legs_unique picks one representative row's owner/text-location
 // columns per (kind, id) - both lists' rows carry the same ones, read from the same underlying
-// issue/document/comment/ask/message - before the page is cut and joined back to fused's score.
+// issue/document/comment/ask/message - preferring the row that names a window, since only that
+// row knows which blocks the hit covers, before the page is cut and joined back to fused's score.
 // total is every distinct (kind, id) either list matched, not a sum of list sizes, so an id both
 // lists reach is counted once.
 //
 // Parameters: $1 q, $2 project, $3 limit, $4 firstTerm, $5 headlineOptions, $6 offset,
 // $7 contracts.SearchKindDepth, $8 searchFusionK, $9 the query's embedding (a vector literal),
 // $10 searchMeaningFloor, $11 the query embedder's identity.
-var searchQueryMeaning = `
-with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
-meaning_issue_candidates as (
+var searchQueryMeaning = searchQOpener + searchQueryMeaningBody(searchKeywordLegsSQL)
+
+// searchQueryMeaningBody is searchQueryMeaning after its q, over keywordLegs (searchKeywordLegs).
+func searchQueryMeaningBody(keywordLegs string) string {
+	return `meaning_issue_candidates as (
   select i.key as issue_key, i.key as id, i.title as issue_title, i.status as issue_status, i.updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
@@ -244,85 +420,95 @@ meaning_issue_candidates as (
 ),
 meaning_issue as (
   select 'issue' as kind, 'meaning' as list, issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, id, null::text as block_id,
+         null::text as window_id, null::text[] as covers,
          issue_title, issue_status, null::text as owner_project, null::text as owner_slug, null::text as owner_name, updated_at,
          false as own, r
     from meaning_issue_candidates where r >= $10
 ),
 meaning_document_candidates as (
-  select a.issue_key, a.id, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
+  select a.issue_key, a.id, e.id as window_id, e.covers, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
          coalesce(i.updated_at, v.created_at) as updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join artifacts a on a.id::text = e.id
+    join artifacts a on a.id = ` + windowOwnerUUID + `
     left join issues i on i.key = a.issue_key
     join projects p on p.key = a.project_key
     join lateral (select created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true
-   where e.kind = 'document' and a.kind = 'doc' and e.embedding is not null and e.model = $11 and ($2 = '' or p.key = $2)
+   where e.kind = 'document_block' and a.kind = 'doc' and e.embedding is not null and e.model = $11 and ($2 = '' or p.key = $2)
    order by e.embedding <=> $9::vector
-   limit $7
+   ` + searchWindowLimit + `
 ),
 meaning_document as (
-  select 'document' as kind, 'meaning' as list, issue_key, case when issue_key is null then id else null::uuid end, id, id::text, null::text,
+  select distinct on (meaning_document_candidates.id) 'document' as kind, 'meaning' as list, issue_key, case when issue_key is null then id else null::uuid end, id, id::text, null::text,
+         window_id, covers,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_document_candidates where r >= $10
+   order by meaning_document_candidates.id, r desc, window_id
 ),
 meaning_comment_candidates as (
-  select c.issue_key, c.artifact_id, c.anchor, c.id, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
+  select c.issue_key, c.artifact_id, c.anchor, c.id, e.id as window_id, e.covers, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
          coalesce(i.updated_at, c.created_at) as updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join comments c on c.id::text = e.id
+    join comments c on c.id = ` + windowItemUUID + `
     left join issues i on i.key = c.issue_key
     left join artifacts a on a.id = c.artifact_id
     left join projects p on p.key = a.project_key
-   where e.kind = 'comment' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   where e.kind = 'comment_block' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
    order by e.embedding <=> $9::vector
-   limit $7
+   ` + searchWindowLimit + `
 ),
 meaning_comment as (
-  select 'comment' as kind, 'meaning' as list, issue_key, artifact_id, coalesce(artifact_id, (anchor->>'artifact_id')::uuid), id::text, null::text,
+  select distinct on (meaning_comment_candidates.id) 'comment' as kind, 'meaning' as list, issue_key, artifact_id, coalesce(artifact_id, (anchor->>'artifact_id')::uuid), id::text, null::text,
+         window_id, covers,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_comment_candidates where r >= $10
+   order by meaning_comment_candidates.id, r desc, window_id
 ),
 meaning_ask_candidates as (
-  select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, ` + askBlockNodeSQL + ` as block_id, i.title as issue_title, i.status as issue_status,
+  select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, ` + askBlockNodeSQL + ` as block_id, e.id as window_id, e.covers,
+         i.title as issue_title, i.status as issue_status,
          p.key as owner_project, a.slug as owner_slug, a.name as owner_name, coalesce(i.updated_at, k.created_at) as updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join asks k on k.id::text = e.id
+    join asks k on k.id = ` + windowItemUUID + `
     left join issues i on i.key = k.issue_key
     left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
     left join projects p on p.key = a.project_key
-   where e.kind = 'ask' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   where e.kind = 'ask_part' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
    order by e.embedding <=> $9::vector
-   limit $7
+   ` + searchWindowLimit + `
 ),
 meaning_ask as (
-  select 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
-         coalesce(artifact_id, block_artifact_id, (anchor->>'artifact_id')::uuid), id::text, block_id,
+  select distinct on (meaning_ask_candidates.id) 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
+         coalesce(artifact_id, block_artifact_id, ` + store.CastableUUID(`anchor->>'artifact_id'`) + `), id::text, block_id,
+         window_id, covers,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_ask_candidates where r >= $10
+   order by meaning_ask_candidates.id, r desc, window_id
 ),
 meaning_message_candidates as (
-  select m.issue_key, m.id, i.title as issue_title, i.status as issue_status, i.updated_at,
+  select m.issue_key, m.id, e.id as window_id, e.covers, i.title as issue_title, i.status as issue_status, i.updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join messages m on m.id::text = e.id
+    join messages m on m.id = ` + windowItemUUID + `
     join issues i on i.key = m.issue_key
-   where e.kind = 'message' and e.embedding is not null and e.model = $11 and ($2 = '' or i.project_key = $2)
+   where e.kind = 'message_block' and e.embedding is not null and e.model = $11 and ($2 = '' or i.project_key = $2)
    order by e.embedding <=> $9::vector
-   limit $7
+   ` + searchWindowLimit + `
 ),
 meaning_message as (
-  select 'message' as kind, 'meaning' as list, issue_key, null::uuid, null::uuid, id::text, null::text,
+  select distinct on (meaning_message_candidates.id) 'message' as kind, 'meaning' as list, issue_key, null::uuid, null::uuid, id::text, null::text,
+         window_id, covers,
          issue_title, issue_status, null::text, null::text, null::text, updated_at,
          false, r
     from meaning_message_candidates where r >= $10
+   order by meaning_message_candidates.id, r desc, window_id
 ),
-kinds as (` + searchKeywordLegsSQL + `
+kinds as (` + keywordLegs + `
   union all select * from meaning_issue
   union all select * from meaning_document
   union all select * from meaning_comment
@@ -338,16 +524,17 @@ legs as (
 ),
 fused as (select kind, id, sum(1.0 / ($8 + pos)) as score from legs group by kind, id),
 legs_unique as (
-  select distinct on (kind, id) kind, issue_key, owner_artifact_id, artifact_id, id, block_id,
+  select distinct on (kind, id) kind, issue_key, owner_artifact_id, artifact_id, id, block_id, covers,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at
     from legs
-   order by kind, id
+   order by kind, id, (window_id is null), r desc
 ),
 totals as (
   select (select count(*) from (select distinct kind, id from kinds) u) as total,
          (select count(*) from fused) as reachable
 ),
 ` + searchPageAndTailSQL("legs_unique")
+}
 
 func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -364,7 +551,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	// sends is never refused here, and a project must be a key (an empty one searches every
 	// project). Both ride in the URL; packages/contracts/AGENTS.md "Search limits" says what keeps
 	// it short.
-	if length := len16(searchText); length > contracts.SearchQueryMax {
+	if length := itemblocks.Units16(searchText); length > contracts.SearchQueryMax {
 		tooLong := capExceededError("q", length, contracts.SearchQueryMax)
 		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; "+contracts.SearchQueryHint)
 		return
@@ -408,17 +595,13 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, response)
 }
 
-// runSearch is the search handler's own entry point (unlike runFusedSearch, LEGION-550's
-// write-time suggestions never call this - suggestions never try meaning search, so they never
-// pay for an embedder call or its timeout). The numnode check runs here, before anything else -
-// including before the one model-service call this function ever makes - so a stopword-only or
-// operator-only query (the same shape runFusedSearch's and runMeaningSearch's own checks catch)
-// never pays for an embedding it would throw away; runFusedSearch repeats the same check for its
-// other caller, LEGION-550's write-time suggestions, which never reaches this function at all.
-// It tries meaning search first when an embedder is configured, falling back to keyword-only
-// (runFusedSearch) only when the query's own embedding could not be had - never when the meaning
-// query itself then fails, which is a real error the caller should see as a 500, not something to
-// paper over as a degraded answer.
+// runSearch is the search handler's own entry point. The numnode check runs here, before anything
+// else - including before the one model-service call this function ever makes - so a
+// stopword-only or operator-only query never pays for an embedding it would throw away. It tries
+// meaning search first when an embedder is configured, falling back to keyword-only
+// (runFusedSearchQuery) only when the query's own embedding could not be had - never when the
+// meaning query itself then fails, which is a real error the caller should see as a 500, not
+// something to paper over as a degraded answer.
 func (s *server) runSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
 	var nodes int
 	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
@@ -440,10 +623,8 @@ func (s *server) runSearch(ctx context.Context, q, project string, limit, offset
 
 // runKeywordOnlyDegraded runs the keyword-only fallback and stamps the response Degraded on
 // success: the one thing both of runSearch's fallback branches (no embedder configured, or the
-// query's own embedding failing) do identically. It calls runFusedSearchQuery directly, not
-// runFusedSearch, because runSearch has already run the numnode check before ever reaching
-// here - repeating it would cost a second identical Postgres round trip on every degraded
-// request for no reason.
+// query's own embedding failing) do identically. runSearch has already run the numnode check
+// before ever reaching here.
 func (s *server) runKeywordOnlyDegraded(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
 	response, err := s.runFusedSearchQuery(ctx, q, project, limit, offset)
 	if err == nil {
@@ -452,27 +633,9 @@ func (s *server) runKeywordOnlyDegraded(ctx context.Context, q, project string, 
 	return response, err
 }
 
-// runFusedSearch is the search handler's query, SQL and row-scanning shared with LEGION-550's
-// write-time suggestions (suggestions.go): both read the same fused ranking
-// (sjawhar/legion#1764), the handler bound by its request context and the suggestions call bound
-// by writeSuggestionTimeout instead. q is assumed already validated (length, non-empty after
-// trimming); project empty searches every project. Suggestions is the only caller that still
-// needs this function's own numnode check - runSearch's fallback (runKeywordOnlyDegraded) skips
-// straight to runFusedSearchQuery, since runSearch has already run that check itself.
-func (s *server) runFusedSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
-	var nodes int
-	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
-		return model.SearchResponse{}, err
-	}
-	if nodes == 0 {
-		return model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}, nil
-	}
-	return s.runFusedSearchQuery(ctx, q, project, limit, offset)
-}
-
-// runFusedSearchQuery is runFusedSearch's query itself, assuming nodes > 0 already - the one
-// thing every caller (runFusedSearch, after its own check; runKeywordOnlyDegraded, after
-// runSearch's) must have established first.
+// runFusedSearchQuery runs searchQuery, assuming nodes > 0 already, which its caller
+// (runKeywordOnlyDegraded, after runSearch's check) must have established first. q is assumed
+// already validated (length, non-empty after trimming); project empty searches every project.
 func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
 	started := time.Now()
 	rows, err := s.deps.Store.Pool.Query(ctx, searchQuery, q, project, limit, firstTerm(q), headlineOptions,
@@ -490,15 +653,21 @@ func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, lim
 	return response, nil
 }
 
-// runMeaningSearch is runFusedSearch's counterpart once a query embedding exists: same row
+// runMeaningSearch is runFusedSearchQuery's counterpart once a query embedding exists: same row
 // shape, searchQueryMeaning in place of searchQuery. Its only caller, runSearch, has already run
 // the numnode check before ever reaching here (so it never pays for an embedding it would throw
-// away); this function assumes nodes > 0, unlike runFusedSearch, which repeats that check for
-// its other caller, LEGION-550's write-time suggestions.
+// away); this function assumes nodes > 0.
+//
+// It runs in a read transaction of its own, the one place searchMeaningScan's settings apply
+// (beginMeaningScan).
 func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit, offset int, vector []float32) (model.SearchResponse, error) {
-
 	started := time.Now()
-	rows, err := s.deps.Store.Pool.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
+	tx, err := s.beginMeaningScan(ctx)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	rows, err := tx.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
 		offset, contracts.SearchKindDepth, searchFusionK, embed.Literal(vector), searchMeaningFloor, s.deps.Embedder.Identity())
 	if err != nil {
 		return model.SearchResponse{}, err
@@ -524,6 +693,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 		var ownerKey, ownerTitle, ownerStatus, ownerProject, ownerSlug, ownerArtifactID, ownerName, slug, name *string
 		var primary bool
 		var blockID *string
+		var matchBlockID *string
 		var rank *float64
 		if err := rows.Scan(
 			&response.Total,
@@ -542,6 +712,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 			&primary,
 			&id,
 			&blockID,
+			&matchBlockID,
 			&rank,
 			&headline,
 		); err != nil {
@@ -551,7 +722,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 		if kind == nil {
 			continue
 		}
-		result.Kind, result.ID, result.Rank = *kind, *id, *rank
+		result.Kind, result.ID, result.Rank, result.BlockID = *kind, *id, *rank, matchBlockID
 		if *ownerKind == "issue" {
 			result.Owner = model.SearchOwner{Kind: *ownerKind, Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
 			result.Issue = &model.SearchIssue{Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
@@ -568,7 +739,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 			result.Artifact = &model.SearchArtifact{Slug: *slug, Name: *name}
 		}
 		result.Snippet = markSnippet(*headline)
-		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, q)
+		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, matchBlockID, q)
 		response.Results = append(response.Results, result)
 	}
 	if err := rows.Err(); err != nil {
@@ -630,7 +801,13 @@ func issueDocumentHref(issueHref string, artifact *model.SearchArtifact, primary
 // (blockID, askBlockNodeSQL) names that block in the fragment instead, which a reader of the
 // href reads as the block's node; one whose block is no node names the ask. An item with no
 // document is a Conversation turn, named by its own route so the turn is focused.
-func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id string, blockID *string, query string) string {
+//
+// matchBlock is the block a meaning hit matched (INFRA-370), which a document hit names in its
+// fragment so the reader lands on the passage rather than at the top of the document. A comment,
+// a message and an ask keep the href they had: no item page reads a fragment, and the ask's own
+// fragment names the document block it is typed on, which is another block than the part of the
+// ask that matched.
+func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id string, blockID, matchBlock *string, query string) string {
 	issueHref := "/issues/" + owner.Key
 	// The document a hit belongs beside: a project document's own route, or the issue document
 	// its anchor names. An issue item with no document has none, and keeps its own route.
@@ -645,11 +822,13 @@ func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArti
 	case "issue":
 		return issueHref
 	case "document":
-		if owner.Kind == "document" {
-			return documentHref + "?q=" + url.QueryEscape(query)
+		// A document hit always has its artifact, so documentHref above is its document's.
+		href := documentHref
+		href += "?q=" + url.QueryEscape(query)
+		if matchBlock != nil {
+			href += "#b-" + text.EncodeBlockID(*matchBlock)
 		}
-		// A document hit always has its artifact; reading it here says so.
-		return issueDocumentHref(issueHref, artifact, primary) + "?q=" + url.QueryEscape(query)
+		return href
 	case "comment":
 		if documentHref == "" {
 			return issueHref + "/comments/" + id

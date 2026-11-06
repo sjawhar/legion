@@ -1,5 +1,355 @@
 # Changelog
 
+This file is history: every entry after the last section below stays as a fragment file under
+`.changes/unreleased/`, since this package has no release of its own to carry it.
+
+## [main@0abb1e50da7d] - 2026-11-06
+
+### Added
+
+- `src/envoy-session.ts` declares the six timings of Envoy session registration once:
+  `SESSION_HEARTBEAT_MS` (90000), how often a pane refreshes its listener registration,
+  `SESSION_LIVE_WINDOW_MS` (300000), how long a session's last registration keeps it live to the
+  listener, `SESSION_CLAIM_STALE_MS` (300000), how long a role claim may go unrefreshed before a
+  reader treats its holder as gone, and `LISTENER_CALL_TIMEOUT_MS` (5000),
+  `LISTENER_CALL_RETRY_DELAY_MS` (250) and `LISTENER_CALL_ATTEMPTS` (2), what one whole listener
+  call costs. `scripts/gen-go.ts` emits each as `contracts.SessionHeartbeat`,
+  `contracts.SessionLiveWindow`, `contracts.SessionClaimStale`,
+  `contracts.ListenerCallTimeout`, `contracts.ListenerCallRetryDelay` and
+  `contracts.ListenerCallAttempts`, which the Envoy listener reads and the Legion daemon reads
+  through `github.com/sjawhar/envoy/sessiontiming`. No value changed.
+
+## [main@c5c94dbd542d] - 2026-11-05
+
+### Added
+
+- `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` is how long a holder that has stopped answering keeps its
+  issue claim, generated into Go beside its TypeScript declaration so the two languages cannot
+  disagree about when a claim becomes takeable. `IssueClaimHolderState` (`live`, `unresponsive`,
+  `gone`, `unknown`) and `IssueClaimLiveness` (`holder_state`, `last_seen`, `takeable_at`) carry
+  a claim holder's state on an issue read, beside the claim rather than inside it.
+  `ISSUE_ROUTE_STATUSES` gains `holder_unresponsive`, and `IssueRouteReach` gains
+  `route_status_reason` (`refilling` or `unreachable`), which says why a route reads `unknown`:
+  a listener whose agent list is refilling did answer and will judge the route in a moment,
+  where one that is unreachable did not answer at all.
+
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- No Dispatch tool carries a length of its own. `DISPATCH_BODY_MAX` and `ASK_QUESTION_MAX` are
+  gone, and the server's own bounds take their place: `DISPATCH_BLOCK_UNITS` (32000), one block
+  of a body, `DISPATCH_ITEM_BLOCKS` (32768), how many blocks a body may hold, and
+  `DISPATCH_EVENT_BODY_MAX` (32000), how much of a body one event carries whole and the bound an
+  ask's question and its options share. Each is generated into Go for the server, which refuses
+  a longer write and names what passed the bound, and the Legion daemon reads the two block
+  bounds through the server's own splitter (`github.com/sjawhar/envoy/dispatchbody`), so it
+  refuses a close reason or a READY packet the server would refuse at the call that carries it
+  rather than losing the post. The new `dispatch_limits` spec reads them from the server
+  (`GET /api/v1/limits`, `DispatchLimits`).
+  Every ask instruction gives one rule and states no character count: an ask is short and asks
+  one thing, and its reasoning goes in the document. An event whose body is longer than it
+  carries says `body_truncated`; a search hit carries `block_id`, the block of it a meaning
+  match named; and a document, comment or message block carries `embedding`, where meaning
+  search stands on it.
+
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- LegionOperatorClaimsResponse carries pod_update_rounds: what the daemon's last pod-update sweep decided under the two new legion.yaml limits on opening pod-update rounds — each limit or null for no limit, the issues holding an open round, and the issues each limit held back.
+- Review and approval contracts expose approved content hashes and their provenance; runtime review-event validation preserves both fields. Document-version reads can report the SHA-256 of their stored UTF-8 bytes.
+
+## [main@f06073fb9ef4] - 2026-11-05
+
+### Added
+
+- Each issue of the Legion state carries its tree's memory draw: `memoryGroup`, `memoryDrawMode`
+  and `memoryDrawnAt`, all optional. A tree no draw has reached carries none of the three, and a
+  daemon before contract 49 sends none.
+
+### Fixed
+
+- The schemas that read the Legion daemon's answers now ignore a key they do not name, at every depth, so a plugin one contract behind its daemon reads the state instead of refusing the whole body for one field the daemon added. They still refuse a body that lacks a field they require or carries one of a type they do not describe, a refusal still arrives with its stable code, and every body the plugin sends is still refused for a key its schema does not name. The gate that holds the reader to the daemon's Go wire shape is now an equality between each golden's parse and the file, which names the path of the first key the parse dropped.
+
+## [main@804d3695e12e] - 2026-11-05
+
+### Added
+
+- `DISPATCH_SIGN_IN_REQUIRED` is the code of the `403` Dispatch answers a write by an access
+  token the secrets broker issued that names a session and a service and no person: the machine
+  holding it has signed nobody in, so there is nobody to record the write under. Reads are
+  unaffected, and the refusal's message names `agent-secrets login`. It is generated into Go as
+  `contracts.DispatchSignInRequired`, as `DISPATCH_LOGIN_CHANGED` is, so the server's refusal
+  and every client's reading of it cannot drift apart.
+
+## [main@27c52d310319] - 2026-11-05
+
+### Added
+
+- The Legion daemon API carries an idle issue pod's release: a claim posts what its session is
+  doing to `claims/activity` (whether it runs background work, and when a phase worker's next
+  reminder is due), a claim the daemon suspended because its idle pod was released reads
+  `suspendedBy: released`, and an issue pod reads the deployment's releases, resumes and holds
+  from `claims/release-records`.
+
+## [main@43a994db0ea1] - 2026-11-04
+
+### Changed
+
+- The `Actor` of a person carries `act`, the agent that made the act for them: the session a broker-issued token proved or the caller named, else the personal token's id and name, with the scopes that credential held, a snapshot taken at the act. `AskAnswer` carries it too, `AgentToken` carries its `scopes`, `WhoamiResponse` carries the caller's, and the mint and the new scope edit have input shapes of their own. A 28th tool spec, `dispatch_inbox`, lists what the person's Dispatch Inbox shows - Needs you, Waiting on agents, Later and Credential requests, each with its count and rows - read with the caller's own credential; it is not the Envoy tool `envoy_inbox`.
+
+## [main@6f23228e01f0] - 2026-11-04
+
+### Added
+
+- The envelope's optional `kept_at`: the time Envoy's listener kept an undeliverable role message,
+  carried on the copy it forwards to the role's next holder.
+
+## [main@7ae56d094176] - 2026-11-04
+
+### Added
+
+- The block schema's own shape is declared once, as a JSON Schema in `schemas/block-schema.schema.json`, and generated into Go (`pmdoc/schema_generated.go`) and TypeScript (`src/block-schema.generated.ts`), which the editor and the dashboard import in place of their own copies.
+  A typed block's attributes keep the order `blocks.json` declares them in.
+  New shapes for the verification work: `DocumentRole`, `CheckBlock`, `CheckResult`, `CheckResultCurrency`, `IssueCheckResults`, `IssueCoverage`, `RequirementCoverage`, `ArtifactReviewKind`, `AskApprovalDocument`, and the `result.recorded` event.
+  Three new `dispatch` specs: `dispatch result`, `dispatch results` and `dispatch plan-approve`, and `dispatch request-approval` takes `include_verification`.
+- `DISPATCH_HREF_REFERENCES` names the Decisions tab's page, `/issues/<key>/decisions`, as the issue's `decisions.md` (`dispatch://<key>/artifact/decisions-md`).
+- The daemon's claim shapes carry the update round a claim is in. The state's claim view and the
+  operator's claim body each gain `updateRound` — `pod:<pod uid>`, the round every claim of one
+  pod shares, or `plugin:<daemon contract>`, one claim's own — and `updateHead`, the commit the
+  worker reported as the head of its issue branch at origin when it answered the round. Both are
+  absent while no round is open, and both are the worker's own report, which nothing verifies.
+  Daemon API contract 46 declares them, so a strict reader before it refuses a state that carries
+  either.
+- Phase handoff records on a Dispatch issue: `HandoffSummary` (`id`, `issue_key`, `phase`,
+  `version`, `author`, `created_at`), what `GET /api/v1/issues/{key}/handoffs` lists and
+  `POST /api/v1/issues/{key}/handoffs/{phase}` answers, and `Handoff`, the same with `body`, the
+  exact text the session wrote, as `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and
+  `GET /api/v1/handoffs/{id}` answer it. The `handoff.recorded` event joins `DispatchEvent`, its
+  payload `HandoffRecordedPayload` (`handoff_id`, `phase`, `version`, strict, never the body).
+  `DISPATCH_HANDOFF_BODY_MAX` (262144) is the longest handoff body in UTF-8 bytes, generated into
+  Go as `contracts.DispatchHandoffBodyMax`, which the server enforces as `413 CAP_EXCEEDED`. Two
+  specs join `dispatch-tools.ts`: `dispatch_handoff_write` (`issue`, `phase`, `body`), which
+  refuses before sending a phase that is not a lowercase slug (`^[a-z][a-z0-9-]{0,31}$`) and a body
+  over the cap or not one JSON object, and `dispatch_handoff_read`, the newest handoff of a phase or
+  the version named.
+- `AskOption.id` and `AskAnswer.id` carry the part an ask's option or answer is stored as, and `Ask.revision` the revision a reference to one pins; the block grammar reads a part of an ask (`dispatch://KEY/ask/<id>#b-<part>[@v<N>]`, and an ask's dashboard page with a `#b-` fragment) wherever it reads a block of a comment, and `dispatch comment --reply-to-ask` takes such a reference to answer one part of an ask. A typed block's `block[]` attribute points only at a block of a document, so `blockPointersProblem` refuses a pointer naming a part of an ask as it refuses one naming a block of a comment or a message, each kind named with the article it takes (`"…" is a block of an ask: a block[] attribute points only at a block of a document`).
+- Decision record types: `IssueDecisions`, `Decision`, `DecisionLink`, `DecisionKeep`, `DocumentRead`, and the `decision.kept` event with its payload.
+
+### Changed
+
+- `dispatch project`'s help now says: when a person asks for a project, make the key from its
+  name and create it, and ask the person only when `dispatch projects` shows that the key is in use.
+- `dispatch_read` takes a project with no artifact, which lists the project's documents on no issue, and its description says an issue read lists the issue's documents under `Documents:`.
+- The `legion-api.ts` mirror and the daemon API fixtures are at contract 45.
+  `LegionHandoffCompleteRequest` takes `handoffId` and `handoffVersion`, the Dispatch handoff
+  record a planning, implementing, testing or reviewing completion names, and `commit` is
+  documented as the implementer's and the merger's alone. `PhaseView` carries `handoffRecord`
+  (`{id, version}`), the record its current phase's completion named, which `state.json` shows
+  in place of `handoffCommit`.
+- The `doc-edit` description says a find or quote anchor stays inside one block, and in a table inside one cell, that several cells change with one operation per cell in the same batch, and that an anchor names one cell's text. It says a find opening with a list marker that matches no text as written selects an item of that kind of list whose text starts with the rest, a task box after the marker selecting only a task item in that state, and that a `with` carrying the same kind of marker replaces the item's text under its own number.
+- The daemon state contract carries one more settings key, `settings.repository_renames`: the repository pairs a deployment tells the daemon to treat as one repository wherever it compares a name, each `{from, to}` in configured order, and `[]` when it configures none. The `daemon-api` fixtures carry it.
+- The shared GitHub push golden (`fixtures/github-envelopes/push.json`) no longer carries `changed_paths`, `changed_paths_truncated` or `forced`, which the Envoy listener has stopped sending.
+- The `turn` argument of `dispatch_comment` now says that `human` does not apply to an approval request a newer version moved. Only `dispatch request-approval` hands such a request back, at the current version.
+- `dispatch_request_approval`'s description says that a later version whose text is exactly the
+  approved version's again, such as an accidental edit undone exactly, with no decision block in
+  it decided since, carries the approval, and that a document that then does not read approved
+  needs a request. `WriteAdvice.superseded_approval`, `ArtifactReview`, `ArtifactApproval` and
+  `ArtifactReviewEventPayload` describe that carry and its reason (`Carried forward from the
+  approval of version <N>: this version's text is that version's, unchanged.`).
+
+### Removed
+
+- The fixtures of the daemon's push classification are removed with its classifier of pushes
+  that change handoffs alone, and no `reduceGithubEvent` fixture marks a push as one.
+
+### Fixed
+
+- The `dispatch_artifact` tool description says that an upload of a document's slug makes its next
+  version, as an upload of its name does.
+- `dispatch artifact` refuses `--content` and `--content-file` under a `--name` whose extension
+  is not `.md` or `.markdown` (`rows.jsonl`, `sizes.tsv`), before it sends anything, and the
+  refusal names `--path`. Inline content is always stored as a Markdown document, so such an
+  upload was accepted and came back altered, a JSONL file's lines joined into one paragraph.
+  A name with no extension, such as a document title, is still taken.
+- A `dispatch_comment` call with `turn` and no `reply_to_ask` is now refused with only the
+  turn rule and what to do: pass `reply_to_ask` with the open ask's id, or drop `turn`. The
+  refusal also named the document-owner rule first, even when the call gave exactly one
+  issue. `dispatch_doc_edit`'s precondition refusal and `dispatch_artifact`'s path-or-content
+  refusal likewise name the owner rule only when the owner is wrong.
+
+## [main@6b1524cdb8aa] - 2026-11-01
+
+### Added
+
+- A typed block's `block[]` attribute: `BlockAttributeKind` gains `"block[]"` and
+  `BlockAttributeSchema` gains `targets`, the block types it points at. `parseBlockPointerValue`
+  reads a value (canonical block references joined by exactly one space), and
+  `blockPointerValueProblem` and `blockPointersProblem` say why a value or a list of pointers is
+  refused (a block of a comment or a message with a reason of its own), following the server's
+  wording, with `parseCanonicalBlockReference` and
+  `formatBlockReference` for one reference, tested with Go's `pmdoc.ParseBlockPointerValue` against
+  `DISPATCH_BLOCK_POINTER_VALUES`. `GraphEdgeKind` admits a `block[]` attribute's name beside the
+  structural kinds, the kind of the edges its pointers make.
+- `typedBlockIdAttribute` writes a typed block's id as Go's renderer writes it in the opening line
+  (`pmdoc.TypedBlockIDAttribute`): `#id`, or `id="…"` with `&`, `"`, line feeds and carriage
+  returns as character references when the id is empty or holds a character the `#` shortcut
+  cannot hold (a space, tab, line ending, `"`, `#`, `&`, `'`, `.`, `<`, `=`, `>`, backtick or `}`).
+  Both writers are tested against `DISPATCH_TYPED_BLOCK_ID_SPELLINGS`, whose Go copy is
+  `packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json`.
+
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- `WriteAdvice.superseded_approval` (`{approved_version, version, approved_by}`): the approval a
+  document write superseded, set only on the write whose version replaced the approved one.
+
+## [main@e65900f4438b] - 2026-10-30
+
+### Added
+
+- `dispatch_answers` (`dispatch answers`), with no arguments: every answer and comment a person
+  wrote to this session in the last 72 hours, newest first, in full, the command the per-request
+  list names when it leaves older items out.
+- `SessionAnswer` and `SessionAnswersResponse`, the body of
+  `GET /api/v1/agents/{session_id}/answers` (`{session_id, since, total, items}`): each item is an
+  ask's current answer, a comment or a message a person wrote that Dispatch delivered to the
+  session, with its `relation` (one of `SESSION_ANSWER_RELATIONS`), time, author, full text, an
+  answer's choices and whether it replaced an earlier one, the ask it answers, its owner, its
+  `dispatch://` reference and its deep link; mirrored in Go as `model.SessionAnswer` and
+  `model.SessionAnswersResponse`.
+- `PublishedDispatchEvent` declares the event as Dispatch's outbox publishes it to NATS: the
+  event the API serves, plus the optional `quiet` the payload now carries. `quiet` is whether the
+  event carries nothing for a reader following its owner topic - a delivery receipt, an anchor
+  refresh, settings or per-viewer bookkeeping, a targeted message its session already had, an ask
+  edit that only moved a version, or a version nobody named - and it is what such a reader skips
+  on. `notify`, beside it, answers whether to wake the issue's route, claimant and authors, so an
+  agent's own event is not a wake. It is optional because a frame published before Dispatch
+  stated the field carries none, and a reader judges that frame by `notify` instead. The API's
+  own event shape is unchanged and carries no `quiet`.
+
+### Changed
+
+- `GithubPushSubject` cuts a ref segment that would make the subject longer than 4,032 bytes
+  (`SUBJECT_MAX_BYTES`, the bus's limit) and ends it in `~` and 16 hex digits of the whole ref's
+  SHA-256, so NATS stores a push whatever its ref's length and two refs keep two subjects. The
+  daemon API state schema (contract 43) gains `consumers` and `repositories.withoutWebhookApp`.
+
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- The Dispatch types carry comment and message blocks: `ReplyBlock` and `reply_block` on `Comment` and `Message` and their event payloads, `reply_to_block` and `in_reply_to_block` on the reply inputs, `blocks` and `base_revision` on `EditCommentInput`, `ItemBlocks`, and the shared reference tables' comment and message block forms.
+
+### Changed
+
+- `relatedCheckFormOf` judges which of the related-item check's three forms a `Suggestions`
+  holds, and `relatedCheckModeWords` and `relatedCheckSearchWords` give the words each form
+  names. The CLI's lines and the Dispatch dashboard's new-issue dialog both read this one
+  answer and only word it, so a later change to the outcome enum, the search modes or the
+  branch order reaches both surfaces at once.
+
+## [main@1f5b08286a6d] - 2026-10-29
+
+### Added
+
+- The related-item check's result. `Suggestions` gains `outcome`
+  (`RelatedCheckOutcome`: `found` | `none` | `not_made`), `search` (`RelatedCheckSearch`:
+  `meaning_and_keywords` | `keywords_only`), `search_note`, `search_query` and `title_matches`
+  (`DuplicateCandidate[]`, a forced issue create's title overlaps), each optional so an older
+  server's shape still reads; `missing` stays, set whenever the check was not made.
+  `SearchResult` and `WriteSuggestion` gain `ask?: SearchAsk`, where an ask hit stands
+  (`{state: "open"}`, `{state: "answered", answer}` or `{state: "resolved", resolution, answer?}`).
+  `WriteAdvice` gains `decision_block_checks?: DecisionBlockCheck[]` (`{block_id, question,
+  suggestions}`) for a document edit's new decision blocks. `RelatedCheckInput` is the body of
+  `POST /api/v1/projects/{key}/related`, and `RelatedChecksReport` / `RelatedCheckTiming` the
+  answer of `GET /api/v1/related-checks`. `dispatchToolSpecs` gains `dispatch_related` (the check
+  on a `title` and `text` of a `project`, with `exclude_issue` and `keywords_only`, writing
+  nothing), and `dispatch_issue`, `dispatch_ask` and `dispatch_doc_edit` say the result names what
+  the check found, that it found nothing, or that it was not made and why, after at most five
+  seconds.
+
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- One WebSocket per browser tab at `GET /ws/live` (INFRA-258), with the common `Live*` frames and `LiveView`: a `DeliveryLiveView`, the Dispatch event-feed `EventsLiveView`, or one session's `AgentLiveView`. Delivery views resume with `DeliveryLiveResume` (`seq`, `revs`); events views resume with `EventsLiveResume` (`since`) and begin with `LiveEventsStart`, whose `replay_complete` says whether the subscription replays every event after the resume (a resume at or below the feed's head), so a page owes no refresh for the gap; agent views begin from the session replay. `LiveEventFrame`, `LiveAgentFrame`, and `LiveEnded` complete the new frame family; a `LiveAgentFrame`'s `data` is an `AgentStreamResponder` for its `responder` event and `unknown` for `replay` and `frame`, the session's own JSON, which Dispatch relays unparsed and a page checks before it renders it. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a random age in [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and `LIVE_SOCKET_MAX_SUBSCRIPTIONS` is 64.
+
+  `AuthenticatedUser.event_head`, the decimal id of the newest event when `GET /auth/whoami` answered (INFRA-292). It is required: a page of this release subscribes the event feed on `GET /ws/live`, which only a server that answers the head serves, and the feed starts its first subscription there, so every read the page makes after the sign-in check is covered by a resume.
+
+### Changed
+
+- **Breaking:** a write names its intent by the `Idempotency-Key` request header (`IDEMPOTENCY_KEY_HEADER`) on every `POST` and `PATCH` route, not by a body field (INFRA-258): `CreateBroadcastInput.idempotency_key` is gone, and a body that still carries it is `400 INVALID_JSON`. The key is optional; a repeat under it is answered with the first answer and `IDEMPOTENCY_REPLAYED_HEADER`, a different request under it is `422 KEY_REUSED` (`IDEMPOTENCY_KEY_REUSED`), and a repeat while the first still runs is `409 KEY_IN_FLIGHT` (`IDEMPOTENCY_KEY_IN_FLIGHT`) with `Retry-After: 1`; a 5xx, 401, 408 or 429 is not kept, so the next attempt runs again, unless the first attempt had committed its write, which makes the next attempt `409 KEY_COMMITTED` (`IDEMPOTENCY_KEY_COMMITTED`): the write landed, Dispatch has no answer to replay, and a client treats it as landed. Added `IDEMPOTENCY_KEY_MAX`, `IDEMPOTENCY_KEY_PATTERN`, `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_ANSWER_NOT_KEPT`, `IDEMPOTENCY_KEY_TTL_MS`, `IDEMPOTENCY_LEASE_MS`, `retriesUnderKey`, `answerNotKept`, `IdempotencyLandedCode`, `DISPATCH_LOGIN_HEADER`, and `DISPATCH_LOGIN_CHANGED`.
+
+  **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`, `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`, `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`, `LiveClientFrame`, `LiveError`, `LiveHeartbeat` and `LiveServerFrame`. `LiveSubscribe` is a union by view kind: a `DeliveryLiveView` resumes with a `DeliveryLiveResume`, an `EventsLiveView` with an `EventsLiveResume`, and an `AgentLiveView` with none, which are the only pairings Dispatch accepts. `LiveServerFrame` adds the events and agent views' frames. The frame fixtures move with them: `fixtures/delivery-live/` is now `fixtures/live/`.
+
+## [main@a09a2f257406] - 2026-10-29
+
+### Added
+
+- `AskReach`, the reach every ask read carries, shared by `AskThread` and `AskRead`: `claimant`
+  (the session holding the claim on the ask's issue), `route` (the issue's route, `session:<id>` or
+  `role:<name>`), whom a person's answer and replies on the ask reach beside its followers, and,
+  since it extends `IssueRouteReach`, `route_status` (`live`, `no_holder` or `unknown`) and
+  `route_holder` (the live session that route reaches), resolved per read as on the issue reads, so
+  a reader counts each session once and tells a route nobody holds from one Dispatch could not
+  judge; each is null when absent and on a project document's ask.
+- `withdrawn`, a third `AskResolution.kind` beside `retracted` and `resolved`, which the ask event
+  payload schema (`AskEventPayloadSchema`) now parses: Dispatch writes it alone, on each open ask
+  an issue's close withdraws, and reopening the issue opens those asks again. `dispatch_resolve_ask`
+  still takes only `retracted` and `resolved`, so no caller can write one.
+- `IssueReferenceSummary` and `IssueReferenceSummaryDocument`, the body of
+  `GET /api/v1/issues/{key}/summary`, and `DocumentReferenceSummary`, the body of
+  `GET /api/v1/projects/{key}/artifacts/{slug}/summary`: what a reference to an issue or a
+  document shows, without the full read. `IssueReferenceSummaryDocument.primary` marks the
+  issue's spec, the document a reference to a block of the spec names. The event payloads gain
+  optional fields saying what a write moved: `IssueEventChanges` (`changed`, `ancestors`,
+  `thread_logins`) on `IssueEventPayload`, `ThreadLoginsPayload` (`thread_logins`) on
+  `AskEventPayload`, `CommentEventPayload` and `MessageEventPayload`,
+  `UserStateUpdatedEventPayload.changed` (which names `snoozed` for a snooze or an un-snooze, whose
+  event carries only `login` and `changed`, so `UserStateUpdatedEventPayload.state` is now
+  optional); `IssueEventPayloadSchema` and the ask, comment and message event schemas carry the
+  same optional fields. `ReferenceChangesPayload` gains `references_changed_truncated_kinds`, the
+  kinds a write cut from `references_changed` past the server's cap of 100 targets of each kind,
+  beside the still-named targets of every other kind and `references_changed_truncated: true`.
+  `ChangedReference` gains `kind: "artifact"`, a cited document or file named by its uuid, the
+  optional `ref`, its `dispatch://` address, and `kind: "block"`, a block of a document named by
+  its node id, its `ref` and its document's uuid as `artifact_id`, named when a write moves its
+  citations or its text. Each is absent from an event written before Dispatch sent it, which a
+  reader takes as "anything may have moved".
+
+### Changed
+
+- `dispatch_claim`'s description, which is also `dispatch claim --help`, says that while a session
+  holds the claim a person's answers, comments and messages on the issue reach it directly, a new
+  comment that mentions it arrives once, as the mention, when the mention reached it, and still
+  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
+  twice, and the second copy is the same comment), and that an agent's events and every other
+  change on the issue still need a subscription to it, except in an ask you follow: anyone else's
+  answer, hand-back, resolution or edit of it (other than a quiet edit), and every reply there
+  (new, edited, resolved or reopened), reach you as its follower.
+- The `dispatch_doc_read` description says a read prints every open thread anchored on the
+  document in full after the markdown, an open ask's replies included, and no resolved thread or
+  closed ask (#2366).
+- `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayloadSchema` mean the build every
+  live Dispatch server process serves, announced once each time that build changes, rather than one
+  process's start: a rolling update is announced once its last process of the earlier build has
+  gone, a restart on the announced build is not announced, and a rollback is announced again.
+  `started_at` is the database's time of the announcement, and the event id is
+  `dispatch-server-started-<commit>-<seq>`. The subject and the payload's two fields are unchanged,
+  so the schema still parses every envelope; a shared fixture
+  (`packages/daemon/internal/intake/testdata/dispatch/server-started.json`) holds the Dispatch
+  writer, the daemon's intake and this schema to one envelope.
+- `shortSessionId` reads the Legion daemon's write identity, a session id beginning
+  `legion-daemon:`, whole rather than as `session:` and its first 8 characters, which name nobody,
+  so the shared actor label names the daemon that closed an issue. `dispatch_issue_update`'s
+  description says closing an issue withdraws its open asks and reopening it brings them back, and
+  `dispatch_resolve_ask`'s says a closed issue's asks were withdrawn by its close, that only
+  Dispatch writes `withdrawn`, and that an ask on a closed issue is `409 ISSUE_CLOSED` until the
+  issue reopens.
+
 ## Before changelog fragments
 
 ### Added

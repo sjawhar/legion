@@ -56,10 +56,6 @@ type CIRecorder interface {
 	RecordSuite(context.Context, contracts.CIObservation) error
 }
 
-func reviewerVerdict(name string) bool {
-	return name == "tester" || name == "architect"
-}
-
 // githubMaxBody is the largest webhook body the handler reads: GitHub's documented payload cap,
 // 25 MB, read as MiB so no delivery GitHub sends is refused. A push of a thousand commits is
 // several megabytes, and a refused delivery is lost for good, since a redelivery is the same body.
@@ -103,8 +99,10 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 	return githubHandler(secret, mentionTrigger, reviewerAppID, publisher, ci, newBodyBudget(githubBodyBudget))
 }
 
-// githubHandler is GitHubHandler reading bodies against the given budget.
+// githubHandler is GitHubHandler reading bodies against the given budget. Each handler remembers
+// the failed deliveries it has logged (failedDeliveries).
 func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder, bodies *bodyBudget) http.HandlerFunc {
+	failures := newFailedDeliveries(githubFailuresKept, githubFailureAge)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
@@ -170,23 +168,21 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			for _, o := range obs {
 				if o.CheckName == "" {
 					if err := ci.RecordSuite(answer, o); err != nil {
-						deliveryFailed(w, "github ci suite record", err)
+						failures.deliveryFailed(w, delivery, "github ci suite record", err)
 						return
 					}
 					continue
 				}
-				if reviewerVerdict(o.CheckName) {
-					if reviewerAppID == "" {
-						log.Printf("WARN github ci verdict dropped: ENVOY_REVIEWER_APP_ID is not configured check=%q app_id=%q pr=%s", o.CheckName, o.AppID, o.Number)
-						continue
-					}
-					if o.AppID != reviewerAppID {
-						log.Printf("WARN github ci verdict ignored: untrusted publisher check=%q app_id=%q expected_app_id=%q pr=%s", o.CheckName, o.AppID, reviewerAppID, o.Number)
-						continue
-					}
+				switch contracts.ReviewerVerdictDecision(o.CheckName, o.AppID, reviewerAppID) {
+				case contracts.VerdictNoReviewerApp:
+					log.Printf("WARN github ci verdict dropped: ENVOY_REVIEWER_APP_ID is not configured check=%q app_id=%q pr=%s", o.CheckName, o.AppID, o.Number)
+					continue
+				case contracts.VerdictUntrusted:
+					log.Printf("WARN github ci verdict ignored: untrusted publisher check=%q app_id=%q expected_app_id=%q pr=%s", o.CheckName, o.AppID, reviewerAppID, o.Number)
+					continue
 				}
 				if err := ci.Record(answer, o); err != nil {
-					deliveryFailed(w, "github ci record", err)
+					failures.deliveryFailed(w, delivery, "github ci record", err)
 					return
 				}
 			}
@@ -211,7 +207,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				return
 			}
 			if err := publisher.PublishWithin(answer, item); err != nil {
-				deliveryFailed(w, "github publish", err)
+				failures.deliveryFailed(w, delivery, "github publish", err)
 				return
 			}
 		}

@@ -230,7 +230,7 @@ func TestCache_PreDeliveryAttemptDedupe(t *testing.T) {
 		t.Fatal("first attempt should not be seen")
 	}
 
-	// Record attempt BEFORE calling prompt_async
+	// Record the attempt BEFORE the delivery it names is made
 	attempts.Record(dedupeKey, sessionID)
 
 	// Simulate JetStream redelivery (same dedupe_key) — should be skipped

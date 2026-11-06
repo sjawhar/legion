@@ -1,7 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
-import { api } from "../../api/client";
+import { api, type WriteBounds } from "../../api/client";
 import type { Ask, AskFollower, IssueRouteReach, Subscriber } from "../../api/types";
 import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
@@ -11,9 +11,10 @@ import { RouteReachUnknownMarker, UnreachableRouteMarker } from "../issue/RouteR
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
-const removeAskFollower = (askId: string, sessionId: string): Promise<void> =>
-  api.removeAskFollower(askId, sessionId);
+const removeAskFollower = (askId: string, sessionId: string, bounds: WriteBounds): Promise<void> =>
+  api.removeAskFollower(askId, sessionId, bounds);
 
 const EMPTY_SUBSCRIBERS: readonly Subscriber[] = [];
 
@@ -24,14 +25,14 @@ type AskOwner = Pick<Ask, "artifact_id" | "issue_key">;
 
 /** The subscribers list shared with the owner's header: the issue's Subscribed agents panel
  *  (`IssueHeader`) or the project document page. Same key, so a removal from either surface
- *  refreshes both, and an SSE `subscription.removed` refreshes this card too. */
+ *  refreshes both, and a `subscription.removed` on the live event feed refreshes this card too. */
 function ownerSubscription(owner: AskOwner):
   | {
       id: string;
       label: string;
       list: () => Promise<Subscriber[]>;
       noun: "issue" | "document";
-      remove: (sessionId: string) => Promise<void>;
+      remove: (sessionId: string, bounds: WriteBounds) => Promise<void>;
     }
   | undefined {
   if (owner.issue_key !== null) {
@@ -41,7 +42,7 @@ function ownerSubscription(owner: AskOwner):
       label: key,
       list: () => api.getIssueSubscribers(key),
       noun: "issue",
-      remove: (sessionId) => api.unsubscribeIssueSession(key, sessionId),
+      remove: (sessionId, bounds) => api.unsubscribeIssueSession(key, sessionId, bounds),
     };
   }
   if (owner.artifact_id !== undefined && owner.artifact_id !== null) {
@@ -51,7 +52,7 @@ function ownerSubscription(owner: AskOwner):
       label: "this document",
       list: () => api.getArtifactSubscribers(id),
       noun: "document",
-      remove: (sessionId) => api.unsubscribeArtifactSession(id, sessionId),
+      remove: (sessionId, bounds) => api.unsubscribeArtifactSession(id, sessionId, bounds),
     };
   }
   return undefined;
@@ -65,7 +66,7 @@ export interface AskRecipientsProps {
   followers: readonly AskFollower[];
   owner: AskOwner;
   /** Write seam for tests; defaults to the real API. */
-  removeFollower?: (askId: string, sessionId: string) => Promise<void>;
+  removeFollower?: (askId: string, sessionId: string, bounds: WriteBounds) => Promise<void>;
   /** The ask's issue's route (`session:<id>` or `role:<name>`), from the same thread read. */
   route: string | null;
   /** The live session the route reaches now (the routed session, or the role's holder), from the
@@ -201,17 +202,21 @@ type Confirming =
  * subscribed to the owner's topic family, under `via issue subscription` (or `via document
  * subscription`). Each session is listed and counted once (`reachRows`): as a follower, else as a
  * subscriber, else via the claim, else via the route, so a session keeps the control it has. Each
- * session is drawn by `AgentName`: its name, its running state from the agent registry (not the
- * subscribers endpoint's `live`, a second snapshot taken at another time), and its live link.
- * While the listener did not answer, the route's row carries the issue page's `Route reach
- * unknown` marker, and a role route then reads `Reaches N + route (unknown)` (`reachLabel`). A
- * follower's Unfollow and a subscriber's Unsubscribe each confirm first, name what still reaches
- * the session (a subscription, the claim or the route, or that a role route nobody is known to
- * hold may, while its reach is unknown), and then cut the route that actually delivers; the claim
- * and route rows have no control, since both change on the issue. A subscriber whose only
- * matching topic is wider than this owner (e.g. `notifications.dispatch.>`) names that topic and
- * has no control, as the header's Subscribed agents panel does. When the subscribers fetch fails,
- * the card says so with a retry instead of passing the follower count off as the whole set.
+ * session is drawn by `AgentName`: its name, its state from the agent registry - running,
+ * unresponsive or not running - (not the subscribers endpoint's `live`, a second snapshot taken
+ * at another time; unknown, not offline, while the registry's latest read failed), and its live
+ * link. A session that has missed its heartbeats is still reached and still counted: the
+ * listener stores what is sent to it, so its row differs only by that mark. While the listener
+ * did not answer, the route's row carries the issue page's `Route reach unknown` marker, and a
+ * role route then reads `Reaches N + route (unknown)` (`reachLabel`). A follower's Unfollow and
+ * a subscriber's Unsubscribe each confirm first, name what still reaches the session (a
+ * subscription, the claim or the route, or that a role route nobody is known to hold may, while
+ * its reach is unknown), and then cut the route that actually delivers; the claim and route rows
+ * have no control, since both change on the issue. A subscriber whose only matching topic is
+ * wider than this owner (e.g. `notifications.dispatch.>`) names that topic and has no control,
+ * as the header's Subscribed agents panel does. When the subscribers fetch fails, the card says
+ * so with a retry - the shared refilling notice while Envoy's agent list refills - and counts
+ * nobody, instead of passing the follower count off as the whole set.
  */
 export function AskRecipients({
   askId,
@@ -225,13 +230,15 @@ export function AskRecipients({
 }: AskRecipientsProps): ReactNode {
   const queryClient = useQueryClient();
   const subscription = ownerSubscription(owner);
-  // The subscribers endpoints are human-only; the card only asks once the signed-in principal
-  // is known to be a user, so no other bearer ever cycles on a 403.
+  // The subscribers endpoints need the `person` scope, which a signed-in browser holds; the card
+  // only asks once the sign-in read says the principal is a user, so nothing without the scope
+  // cycles on a 403.
   const human = useIsHuman();
   // Same key as the issue header (`IssueHeader`) and the project document page
   // (`DocumentPage`), so an Inbox of cards on one issue shares one fetch with its header. Each
   // fetch is two Envoy listener round trips (interests + sessions), so it is held fresh for a
-  // while rather than refetched on every mount and focus; SSE invalidation still refreshes it.
+  // while rather than refetched on every mount and focus; the event feed's invalidation still
+  // refreshes it.
   const subscribersQuery = useQuery({
     enabled: subscription !== undefined && human,
     queryKey: ["subscribers", subscription?.id],
@@ -253,19 +260,25 @@ export function AskRecipients({
     routeStatus,
     subscribers: subscriberRows,
   });
+  // `Reaches N` counts nobody from a subscriber read that failed: it says nothing of how many
+  // there are, and the card says why instead.
+  const counted = !subscribersQuery.isError;
   const [confirming, setConfirming] = useState<Confirming | undefined>(undefined);
   const [open, setOpen] = useState(false);
-  const unfollow = useMutation({
-    mutationFn: (sessionId: string) => removeFollower(askId, sessionId),
+  const unfollow = useKeyedWrite({
+    write: (sessionId: string, bounds) => removeFollower(askId, sessionId, bounds),
+    label: (sessionId) => `${text.sessionText(sessionId, undefined)} taken off this ask`,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ask-thread", askId] }),
   });
-  const unsubscribe = useMutation({
-    mutationFn: (sessionId: string) => {
+  const unsubscribe = useKeyedWrite({
+    write: (sessionId: string, bounds) => {
       if (subscription === undefined) {
         throw new Error("Ask recipients unsubscribe requires an owner.");
       }
-      return subscription.remove(sessionId);
+      return subscription.remove(sessionId, bounds);
     },
+    label: (sessionId) =>
+      `${text.sessionText(sessionId, subscribers.find((row) => row.session_id === sessionId)?.title)} unsubscribed from ${subscription?.label ?? "this ask"}`,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["subscribers", subscription?.id] }),
   });
 
@@ -308,7 +321,7 @@ export function AskRecipients({
     <section aria-label="Recipients" className="mt-2">
       <DisclosureToggle
         expanded={open}
-        label={reachLabel({ count, unknownRoute })}
+        label={counted ? reachLabel({ count, unknownRoute }) : "Recipients"}
         onToggle={() => setOpen((shown) => !shown)}
         textClassName={textMutedOnSurface}
       />
@@ -351,7 +364,12 @@ export function AskRecipients({
                     <RouteReachUnknownMarker />
                   ) : row.reaches ? null : (
                     <UnreachableRouteMarker
-                      issue={{ route: row.id, route_holder: null, route_status: routeStatus }}
+                      issue={{
+                        route: row.id,
+                        route_holder: null,
+                        route_status: routeStatus,
+                        route_status_reason: null,
+                      }}
                     />
                   )}
                 </li>
@@ -399,6 +417,7 @@ export function AskRecipients({
       {subscribersQuery.isError ? (
         <div className="mt-2">
           <QueryError
+            error={subscribersQuery.error}
             message="Subscribers unavailable — Envoy listener unreachable."
             onRetry={() => subscribersQuery.refetch()}
             retrying={subscribersQuery.isFetching}

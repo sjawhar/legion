@@ -54,13 +54,14 @@ Two facts about this gate that no skill stated before:
 
 ## What the corrective round looks like above an approved, retro'd head
 
-The branch is in the post-approval shape — `.legion/` gone, `docs/solutions/` committed — and the
-round has to respect it:
+The branch is in the post-approval shape — `docs/solutions/` committed — and the round has to
+respect it. Before sjawhar/legion#2354 that shape also had `.legion/` already deleted, and the
+round could neither recreate the directory nor write a handoff file:
 
-- **Fixes go on top of the retro head.** Never recreate `.legion/`; write no handoff file; the TDD
-  red runs, the re-run proof, and the mechanism chosen go into the PR body's `E2E (implementer)`
-  paragraph (fetched live and patched by section — the tester's line is in it now). The `legion`
-  tool's `handoff_complete` alone reports the round, naming the new head.
+- **Fixes go on top of the retro head.** The TDD red runs, the re-run proof, and the mechanism
+  chosen go into the PR body's `E2E (implementer)` paragraph (fetched live and patched by
+  section — the tester's line is in it now). The round's handoff is a record on the Dispatch
+  issue, and `handoff_complete` reports the round, naming the new head.
 - **Reply on the deep review as a PR comment**, one paragraph per finding naming the fixing
   commit, the red-then-green test titles, and — when the review offered alternatives ("fence the
   launch, or derive the resume from the retained locator") — which one you chose and why. The

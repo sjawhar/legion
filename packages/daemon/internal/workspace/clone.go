@@ -262,11 +262,11 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch str
 }
 
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
-// contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
-// clone. From GitHub the clone is `jj git clone`; from a pod's feed (source.feed) it is a local git
-// clone followed by Jujutsu's import of every commit. The size-following steps share one
-// CloneTimeout, counted on clock from the first's start, each given what remains of it
-// (cloneSteps), not the runner's slow-command budget.
+// contains .jj, record what it holds (RecordHeld), then rename it into place. A killed clone can
+// therefore never appear to be a final clone. From GitHub the clone is `jj git clone`; from a pod's
+// feed (source.feed) it is a local git clone followed by Jujutsu's import of every commit. The
+// size-following steps share one CloneTimeout, counted on clock from the first's start, each given
+// what remains of it (cloneSteps), not the runner's slow-command budget.
 func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, remote, defaultBranch string, source remote) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
@@ -293,7 +293,10 @@ func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, rem
 		_ = os.RemoveAll(temporary)
 	}()
 
-	steps := cloneSteps{clock: clock, deadline: clock.Now().Add(CloneTimeout)}
+	// Every step runs in the clone's parent, the directory os.MkdirAll made above: it is there
+	// before the first step starts, and it outlives them all, where temporary is filled by the
+	// steps themselves and then renamed or removed.
+	steps := cloneSteps{clock: clock, deadline: clock.Now().Add(CloneTimeout), dir: filepath.Dir(cloneDir)}
 	if source.feed != "" {
 		if err := feedClone(ctx, run, steps, temporary, remote, defaultBranch, source); err != nil {
 			return err
@@ -307,6 +310,11 @@ func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, rem
 	}
 	if !complete {
 		return fmt.Errorf("incomplete Jujutsu clone at %s: missing .jj", temporary)
+	}
+	// Before the rename, so a clone in place always carries its record of what it held when it was
+	// made, and a clone with none is one an earlier release made.
+	if err := RecordHeld(ctx, run, temporary); err != nil {
+		return err
 	}
 	if err := os.Rename(temporary, cloneDir); err != nil {
 		if cloneCollision(err) {
@@ -333,13 +341,15 @@ func feedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, rem
 		return err
 	}
 	gitDir := filepath.Join(temporary, ".git")
-	if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + gitDir, "remote", "set-url", "origin", remote}, nil, ""); err != nil {
+	// The clone above made temporary, so this git and the rev-parse below run in the repository
+	// their --git-dir names.
+	if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + gitDir, "remote", "set-url", "origin", remote}, nil, temporary); err != nil {
 		return err
 	}
 	if err := steps.run(ctx, run, []string{"jj", "git", "init", "--colocate", temporary}, nil); err != nil {
 		return err
 	}
-	present, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + defaultBranch}, nil, "")
+	present, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + defaultBranch}, nil, temporary)
 	if err != nil {
 		return fmt.Errorf("run git rev-parse refs/remotes/origin/%s: %w", defaultBranch, err)
 	}
@@ -351,10 +361,14 @@ func feedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, rem
 }
 
 // cloneSteps is the one CloneTimeout the shared clone's size-following steps share, ending at
-// deadline by clock: ProvisionBound budgets one CloneTimeout for workspace-init's clone.
+// deadline by clock: ProvisionBound budgets one CloneTimeout for workspace-init's clone. Each
+// step runs in dir, the directory the shared clone is made beside: a jj that opens no workspace
+// (`jj git clone`, `jj git init --colocate`) would otherwise search upwards from whatever
+// directory the daemon or a test happens to run in and write the repository it finds there.
 type cloneSteps struct {
 	clock    Clock
 	deadline time.Time
+	dir      string
 }
 
 // run runs one size-following step of the shared clone's clone under what remains of the shared
@@ -365,7 +379,7 @@ func (s cloneSteps) run(ctx context.Context, run Runner, argv, env []string) err
 	if left <= 0 {
 		return fmt.Errorf("the shared clone's %s bound ran out before %s", CloneTimeout, strings.Join(argv, " "))
 	}
-	result, err := runCommandTimeout(ctx, run, argv, env, "", left)
+	result, err := runCommandTimeout(ctx, run, argv, env, s.dir, left)
 	_, err = checkedResult(argv, result, err)
 	return err
 }

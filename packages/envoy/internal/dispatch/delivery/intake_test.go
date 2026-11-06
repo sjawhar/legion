@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -56,7 +57,7 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 	// is the server's own and outlives the run, where storetest's clones do not, so a reconcile
 	// pass an earlier run recorded inside ReconcileInterval would make this run's pass skip for
 	// a period it did not serve (duty.Exclusive).
-	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "delivery_reconcile_progress", "delivery_settings", "duty_passes"} {
+	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "pull_request_heads", "default_branch_commits", "delivery_reconcile_progress", "delivery_settings", "duty_passes"} {
 		if _, err := pool.Exec(ctx, "delete from "+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}
@@ -92,6 +93,55 @@ func seedDeliverySettings(t *testing.T, ctx context.Context, pool *store.Pool) D
 		t.Fatalf("seed delivery_settings: %v", err)
 	}
 	return settings
+}
+
+// deliveryProject is the project this package's issue fixtures write their issues in, and
+// deliveryRepo the repository it owns by default. One project owns it because repo_projects'
+// primary key is the repository (migration 0005_repo_projects), so only one project can map
+// acme/widgets, and the attribution now holds a pull request's issue to the repository the pull
+// request is in (delivery's attributionHeld): an issue of a project that maps nothing resolves
+// to no repository and would attribute nobody. The key is a neutral one, since the head, the
+// attribution and the deployed fixtures all seed into it.
+const (
+	deliveryProject = "DLVY"
+	deliveryRepo    = "acme/widgets"
+)
+
+// Each fixture numbers its issues in a band of its own: they share deliveryProject and an issue
+// is unique on (project_key, number) (migration 0001_init), while the keys a failure names —
+// HEAD-<n>, ATTR-<n>, DEPL-<n> — stay each fixture's own.
+const (
+	headIssueBand        = 0
+	attributionIssueBand = 1000
+	deployedIssueBand    = 2000
+)
+
+// seedProjectRepository writes project key, named name, and maps repo to it as that project's
+// default, which is what makes an issue of the project resolve to repo (refs.IssueRepoTerms).
+// Idempotent: the fixtures that call it run per test, and the tests of this package share one
+// database.
+func seedProjectRepository(t *testing.T, ctx context.Context, pool *store.Pool, key, name, repo string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		insert into projects (key, name) values ($1, $2) on conflict do nothing
+	`, key, name); err != nil {
+		t.Fatalf("seed the project: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into repo_projects (repo, project, created_by, is_default)
+		values ($1, $2, '{"kind":"system","id":"delivery-test"}'::jsonb, true)
+		on conflict do nothing
+	`, repo, key); err != nil {
+		t.Fatalf("map the repository to the project: %v", err)
+	}
+}
+
+// seedDeliveryProject writes deliveryProject and maps deliveryRepo to it as its default, so
+// every issue the fixtures seed resolves to the repository their pull requests are in.
+// Idempotent: each fixture calls it, and the tests of this package share one database.
+func seedDeliveryProject(t *testing.T, ctx context.Context, pool *store.Pool) {
+	t.Helper()
+	seedProjectRepository(t, ctx, pool, deliveryProject, "Delivery", deliveryRepo)
 }
 
 // publishPullRequestEnvelope publishes one notifications.github.<owner>.<repo>.pr.<number>
@@ -155,9 +205,7 @@ func awaitAcknowledged(t *testing.T, natsClient *bus.Client) {
 func captureLogs(t *testing.T) func() []map[string]any {
 	t.Helper()
 	var buffer lockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buffer, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&buffer, nil))
 	return func() []map[string]any {
 		var records []map[string]any
 		for _, line := range strings.Split(strings.TrimSpace(buffer.String()), "\n") {
@@ -202,11 +250,21 @@ func pathBaseForTest(workflowPath string) string {
 // test.
 func shrinkIntakeFlowControl(t *testing.T) {
 	t.Helper()
-	messageTimeout, pollInterval := intakeMessageTimeout, settingsPollInterval
-	intakeMessageTimeout, settingsPollInterval = 5*time.Second, time.Second
-	t.Cleanup(func() {
-		intakeMessageTimeout, settingsPollInterval = messageTimeout, pollInterval
-	})
+	messageTimeout := intakeMessageTimeout
+	intakeMessageTimeout = 5 * time.Second
+	t.Cleanup(func() { intakeMessageTimeout = messageTimeout })
+}
+
+// loadedSettingsCache is a settings cache holding what delivery_settings holds now, read once and
+// never again: what an intake under test routes by when nothing changes its settings meanwhile.
+// With no row it holds nothing, as a server's cache does before the settings are first written.
+func loadedSettingsCache(t *testing.T, ctx context.Context, pool *store.Pool) *SettingsCache {
+	t.Helper()
+	settings := newSettingsCache(pool, nil)
+	if !settings.reload(ctx) {
+		t.Fatal("read delivery_settings into the cache")
+	}
+	return settings
 }
 
 // publishWorkflowEnvelope publishes one workflow-run envelope built as Envoy's own GitHub
@@ -247,9 +305,9 @@ func publishWorkflowEnvelope(t *testing.T, natsClient *bus.Client, owner, repo, 
 }
 
 // startIntake runs intake until the test ends, and waits for Run to return before the test's own
-// cleanups go on. Cancelling alone does not: Run reads settingsPollInterval and the intake
-// flow-control vars, and the next test's shrinkIntakeFlowControl writes them, so a Run still
-// unwinding from the previous test is a data race on them.
+// cleanups go on. Cancelling alone does not: Run reads the intake flow-control vars, and the next
+// test's shrinkIntakeFlowControl writes them, so a Run still unwinding from the previous test is a
+// data race on them.
 func startIntake(t *testing.T, intake *Intake) {
 	t.Helper()
 	runCtx, cancel := context.WithCancel(t.Context())

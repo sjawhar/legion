@@ -163,7 +163,7 @@ func TestAskSnoozeHoldsOnePersonUnderAnyCasing(t *testing.T) {
 // A snooze moves only its writer's Inbox, so only that person's other tabs and devices hear of
 // it: each snooze and un-snooze of an issue's or a project document's ask appends a
 // user_state.updated that carries exactly the writer's login and `changed: ["snoozed"]`. Every
-// signed-in stream replays it, so it names neither the ask nor the writer's issue state, nor
+// signed-in feed replays it, so it names neither the ask nor the writer's issue state, nor
 // anyone else - not even another person holding a snooze on the same row. A write that moves
 // nothing announces nothing.
 func TestAskSnoozeAnnouncesItselfToItsWriterAlone(t *testing.T) {
@@ -324,7 +324,7 @@ func TestInboxSurfacesASnoozeWhoseMomentHasPassed(t *testing.T) {
 	}
 }
 
-func TestAskSnoozeRefusesBadInputAndNonHumans(t *testing.T) {
+func TestAskSnoozeRefusesBadInputAndACredentialWithoutThePersonScope(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -368,7 +368,8 @@ func TestAskSnoozeRefusesBadInputAndNonHumans(t *testing.T) {
 		}
 	}
 
-	// The inbox is human-only, so the snooze that folds one of its rows away is too.
+	// The inbox needs the person scope, so the snooze that folds one of its rows away needs it
+	// too, and the deployment's shared token holds none.
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
 		response := sessionRequest(t, handler, method, "/api/v1/me/asks/"+askID+"/snooze", map[string]any{
 			"snoozed_until": future,

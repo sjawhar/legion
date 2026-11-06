@@ -28,13 +28,13 @@ func connAcceptTime(now func() time.Time) func(ctx context.Context, c net.Conn) 
 
 // maxConnAgeHandler sets "Connection: close" on the response to a request whose connection has
 // been open maxAge or longer (age >= maxAge), before next writes anything; net/http's server then
-// closes the connection once that response is written. A request carrying an Upgrade header (a
-// websocket handshake) keeps its connection, since the connection is what it upgrades, and a
-// request whose context holds no accept time (connAcceptTime not wired) passes through untouched.
+// closes the connection once that response is written. A websocket handler hijacks the connection
+// before it writes its own 101 response, so this header is never sent on that connection. A request
+// whose context holds no accept time (connAcceptTime not wired) passes through untouched.
 func maxConnAgeHandler(next http.Handler, maxAge time.Duration, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if accepted, ok := r.Context().Value(connAcceptTimeKey{}).(time.Time); ok &&
-			r.Header.Get("Upgrade") == "" && now().Sub(accepted) >= maxAge {
+			now().Sub(accepted) >= maxAge {
 			w.Header().Set("Connection", "close")
 		}
 		next.ServeHTTP(w, r)

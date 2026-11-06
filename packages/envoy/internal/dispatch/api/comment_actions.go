@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -42,7 +42,7 @@ func (s *server) rejectComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -101,7 +101,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
+	payload, err := s.commentEventPayload(r.Context(), tx, &comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -124,12 +124,17 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
+	// blocks and base_revision are the ids the dashboard editor carried through the edit: each
+	// block's id and where its span starts in body, in UTF-16 code units, against the comment's
+	// revision the editor read them at (refs.IndexItem). Without them the ids follow the text.
 	var input struct {
-		Body string `json:"body"`
+		Body         string               `json:"body"`
+		BaseRevision *int                 `json:"base_revision"`
+		Blocks       []itemblocks.Carried `json:"blocks"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -139,9 +144,17 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
 	}
-	if length := len16(input.Body); length > contracts.DispatchBodyMax {
-		capExceeded(w, "body", length, contracts.DispatchBodyMax)
+	if err := blockBoundError(itemblocks.Check("body", input.Body)); err != nil {
+		s.writeHandlerError(w, err)
 		return
+	}
+	var carried *refs.CarriedEdit
+	if input.Blocks != nil {
+		if input.BaseRevision == nil {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "blocks: requires base_revision, the comment's revision the blocks were read at")
+			return
+		}
+		carried = &refs.CarriedEdit{BaseRevision: *input.BaseRevision, Blocks: input.Blocks}
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -156,7 +169,11 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if comment.Author != actor {
+	// The author is compared as a writer and not field by field: actingPerson hands back the
+	// person with the credential that acted beside them (model.ActorAct), so an agent editing
+	// its person's comment carries an Act the stored author has not, and the person is who the
+	// authorship is about.
+	if !comment.Author.SameAs(actor) {
 		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the comment author may edit it")
 		return
 	}
@@ -178,6 +195,15 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	previousBody := comment.Body
 	comment.Body = input.Body
 	comment.EditedAt = timestampPtr(&editedAt)
+	referenceChanges, err := refs.ReplaceCountedItemEdit(r.Context(), tx, refs.ItemComment, comment.ID, previousBody, comment.Body, s.deps.ServerURL, editedAt, carried)
+	if carriedErr := (*itemblocks.CarriedError)(nil); errors.As(err, &carriedErr) {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, carriedErr.Error())
+		return
+	}
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
@@ -194,12 +220,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	referenceChanges, err := s.replaceEditedReferences(r.Context(), tx, "comment", comment.ID, previousBody, comment.Body)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, referenceChanges)
+	payload, err := s.commentEventPayload(r.Context(), tx, &comment, artifactName, commentEventThread{}, referenceChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -237,7 +258,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	if action == "resolve" {
 		actor, ok = s.requireActor(w, r, input.Actor)
 	} else {
-		actor, ok = s.requireHuman(w, r)
+		actor, ok = s.actingPerson(w, r)
 	}
 	if !ok {
 		return
@@ -393,6 +414,9 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		if summary == "" {
 			summary = fmt.Sprintf("Accepted suggestion: %q → %q", comment.Anchor.Quote, comment.Suggestion.ReplaceWith)
 		}
+		// The version's name rides the artifact.version event, so it takes the part an event
+		// carries: a comment body is bounded block by block and can be far longer than that.
+		summary, _ = model.EventBody(summary)
 		named, err := s.deps.Docs.NamedVersion(documentCtx, comment.Anchor.ArtifactID, summary, actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -410,7 +434,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		events = append(events, versionEvent)
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
+	payload, err := s.commentEventPayload(r.Context(), tx, &comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
