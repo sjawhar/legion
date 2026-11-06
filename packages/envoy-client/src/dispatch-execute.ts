@@ -2648,12 +2648,17 @@ function eventHead(event: Event): string | undefined {
     case "artifact.human_edited":
       return textHead(humanEditHead(event.payload));
     case "issue.created": {
-      // The issues a create went past with --force, which the controller's weekly audit counts
-      // off this line: the event is the only record of an override, and `dispatch read` is the
-      // only surface that shows it.
+      // What a create went past with --force, which the controller's weekly audit counts off
+      // this line: the event is the only record of an override, and `dispatch read` is the only
+      // surface that shows it. The audit counts the two apart, so they read apart: `forced` with
+      // issues is an override of the refusal, `forced` with none is a create whose near-copy
+      // check never answered, and no `forced` is a create the refusal would not have stopped.
       const forced = event.payload.forced;
-      const past = forced === undefined ? [] : forced.past;
-      return `status ${event.payload.status}${past.length === 0 ? "" : ` · forced past ${past.join(", ")}`}`;
+      const head = `status ${event.payload.status}`;
+      if (forced === undefined) return head;
+      return forced.past.length === 0
+        ? `${head} · forced, the near-copy check did not answer`
+        : `${head} · forced past ${forced.past.join(", ")}`;
     }
     case "issue.updated":
     case "issue.closed":

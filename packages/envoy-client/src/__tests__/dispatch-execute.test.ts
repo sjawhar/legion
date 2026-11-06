@@ -12225,6 +12225,70 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  // A forced create whose near-copy check never answered carries `forced` with an empty `past`,
+  // and the weekly audit reports those apart from the overrides
+  // (`skills/legion-controller/references/weekly-audit.md`, "The week's forced creates"). It is
+  // the only record of such a create, so the line says so in words: printing the plain status
+  // line would make it read as a create nobody forced, and the audit's count cannot be made.
+  test("tells a forced create whose near-copy check did not answer from an unforced one", async () => {
+    const createdLine = async (forced: { past: string[] } | undefined): Promise<string> => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            title: "Dispatch issue",
+            status: "open",
+            route: null,
+            open_asks: [],
+            children: [],
+            last_seq: 1,
+          });
+        }
+        if (target.pathname === "/api/v1/issues/DSP-42/events") {
+          return response([
+            {
+              seq: 1,
+              type: "issue.created",
+              issue_key: "DSP-42",
+              actor: {
+                kind: "session",
+                id: "s1",
+                origin: { session_title: "Legion implementer · INFRA-1160" },
+              },
+              created_at: "2026-09-09T00:01:00Z",
+              payload: {
+                key: "DSP-42",
+                status: "triage",
+                ...(forced === undefined ? {} : { forced }),
+              },
+            },
+          ]);
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: "dispatch://DSP-42/log" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return result.text.split("\n").at(-1) ?? "";
+    };
+
+    const created =
+      "- #1 issue.created · session s1 (Legion implementer · INFRA-1160) · 2026-09-09T00:01:00Z · status triage";
+    expect(await createdLine({ past: [] })).toBe(
+      `${created} · forced, the near-copy check did not answer`
+    );
+    expect(await createdLine(undefined)).toBe(created);
+  });
+
   test("reads recent events from a Dispatch log reference, each with the head of its text", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));

@@ -53,7 +53,10 @@ export interface DispatchCliIo {
   readonly fetchImpl?: typeof fetch;
 }
 
-/** Exit codes: written or read, refused or failed, and a usage error. */
+/** Exit codes, as `skill://dispatch` states them: written or read, a refusal, and a usage error.
+ *  REFUSED is a call Dispatch itself turned down (a near copy, an AskGate block, a server
+ *  refusal); an argument this CLI refuses before any request is USAGE, whether the argv named a
+ *  command or not. */
 const OK = 0;
 const REFUSED = 1;
 const USAGE = 2;
@@ -81,9 +84,10 @@ const LITERAL_FORM =
   "AskGate reviews a Dispatch write, and lets it post, only when it is sent as one bash call of literal words: `dispatch <command> <words…>`. Each word is plain text, text in single quotes (also over more than one line), or text in double quotes with no `$`, backtick or `\\`. A `\\` at the end of a line continues the command. Before it, one `cd <path> &&` is permitted; after it, one `2>&1`, one here-document opened with a quoted delimiter (`<<'EOF'`) and one `| head -n N` or `| tail -n N`. For text with `$` or a backtick in it, use `--<field>-file - <<'EOF'`. A variable, `~`, a glob, an assignment, another redirect (`2>/dev/null`, `> file`), another pipe, another command (`;`, `&&`, `||`), a loop, xargs, `bash -c`, a script, an alias, or a process that a program or an eval cell starts carries no marker.";
 
 /** A line that refuses a call before it reaches Dispatch, each at the start of the line:
- *  `dispatch <command> was not called: …` (exit 1, `ToolInputError` and the refusals
- *  `executeDispatchTool` makes before a write), or a usage refusal (exit 2), which is `dispatch: `
- *  and its reason. The CLI's other `dispatch: ` lines refuse nothing: a result's warning
+ *  `dispatch <command> was not called: …` (an argument problem, exit 2, wherever it is found;
+ *  AskGate's block of a write wears the same line and exits 1), or a usage refusal
+ *  (exit 2), which is `dispatch: ` and its reason. The CLI's other `dispatch: ` lines refuse
+ *  nothing: a result's warning
  *  (`dispatch: warning: `), the note that the session's state was not written
  *  (STATE_WRITE_FAILED), and the notice of a file that is not read, printed beside a result. */
 const NOT_CALLED = /^dispatch ([a-z][a-z-]*) was not called: /;
@@ -248,7 +252,7 @@ export async function runDispatchCli(
           [`dispatch: ${parsed.problems.join("\n")}`, "Run dispatch --help."].join("\n"),
           USAGE
         )
-      : refuse(new ToolInputError(parsed.tool, parsed.problems).message, REFUSED, parsed.tool);
+      : refuse(new ToolInputError(parsed.tool, parsed.problems).message, USAGE, parsed.tool);
   }
 
   const hostName =
@@ -303,7 +307,7 @@ export async function runDispatchCli(
       serverUrls: settings?.enabled === true ? dispatchServerUrls(settings) : [],
     });
     if (problems.length > 0) {
-      return refuse(new ToolInputError(parsed.tool, problems).message, REFUSED, parsed.tool);
+      return refuse(new ToolInputError(parsed.tool, problems).message, USAGE, parsed.tool);
     }
     print(JSON.stringify(parsed.args, null, 2));
     return OK;
@@ -519,7 +523,11 @@ export async function runDispatchCli(
       code = OK;
     } else {
       entry = { tool, error: text };
-      code = REFUSED;
+      // An argument the executor refuses (a ref naming another owner, a picture that is not
+      // there, an id that matches no ask) is the same usage error as one the parse refuses, and
+      // `--dry-run` finds exactly these with the call's own check: both exit 2, so a dry run and
+      // its call stay one answer. Everything else here is Dispatch's own refusal or failure.
+      code = error instanceof ToolInputError ? USAGE : REFUSED;
     }
   }
   try {
