@@ -261,8 +261,9 @@ marked with tags or annotations:
 - **`owner`** is `shared`, a person's email in lowercase, the email they sign in to Dispatch with,
   or a service the broker is configured with (`BROKER_SERVICES` or `BROKER_VM_SERVICES`).
 - **`tier`** is `agent` or `human`.
-- **`kind`** is absent for a stored secret. It is `github-app` for a GitHub App key, or
-  `google-login` for a Google authorized-user login. A secret with a kind must have a current value.
+- **`kind`** is absent for a stored secret. It is `github-app` for a GitHub App key,
+  `google-login` for a Google authorized-user login, or `google-service-account` for one Google
+  service account the broker mints a token as. A secret with a kind must have a current value.
 - **`github-owners`** is required on a `github-app` secret, and read on no other kind. It lists
   the GitHub accounts the broker mints installation tokens for, separated by spaces
   (`acme-org ada`) and compared without regard to case, a form both stores hold. A comma, or an
@@ -272,7 +273,19 @@ marked with tags or annotations:
   installation on an account the list does not
   name gets no token. A `github-app` secret without the tag, or with one that names no account, is
   refused `github-owners-missing`.
-- **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
+- **`requesters`** is optional. It names the only people and services that may ask for the secret
+  at all: people by the lowercase email they sign in with, services by the name the deployment
+  registers them under, separated by spaces (`ada@example.com legion-daemon`). A session whose
+  person the list does not name, and a pod whose service it does not name, is denied
+  `requester-not-listed`. A comma, a list that names nobody, an email with a capital letter, or a
+  service the deployment does not register is refused `requesters-malformed`. A secret carrying
+  the tag bounds its grants to an hour: one with no `max-grant`, or a `max-grant` longer than
+  `1h`, is refused `requesters-max-grant`. A `google-service-account` secret's list is exactly
+  its own person owner, and the secret is refused `requesters-not-owner` otherwise, so a secret
+  owned by `shared` or by a service carries no such kind. Set the list with `agent-secrets secret
+  create|retag --requesters "<email> <service>"`.
+- **`max-grant`** is optional, except on a secret whose `requesters` names who may ask: that one
+  needs it, of an hour or less. It is a Go duration of at least one second. A request for that
   secret must ask for a lifetime no longer than the tag; a request with no `--ttl` asks for the
   12-hour default.
 - **`default-grant`** is optional. Its one value is `session`: a request with no `--ttl` whose
@@ -291,7 +304,15 @@ People write the secrets and their tags, not the broker: `agent-secrets secret` 
 changes them under the person's own cloud sign-in, both stores
 ([manage a secret](/legion/broker/guides/manage-a-secret/)).
 
-Who gets a secret follows from those two tags alone:
+A `requesters` list is read before owner and tier. Where a secret carries one, a session whose
+person it does not name, and a pod whose service it does not name, is denied
+`requester-not-listed`, whatever the table below would have given it. An entry holding an `@` is a
+person and is matched against the session's person alone; one holding none is a service and is
+matched against the service the broker verified alone. A pod has no person and a session has no
+service, so each is matched only by an entry of its own sort, and a person whose login reads like
+a service name matches no service entry. A secret with no list is every session's to ask for.
+
+Who gets it then follows from those two tags alone:
 
 | The secret | Its owner's own session | Any other session or pod |
 | --- | --- | --- |
@@ -381,16 +402,20 @@ last good read stays in force. The broker leaves out a secret it cannot serve, a
 on every read
 ([Operating the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner`
 or `tier` tag (an email with a capital letter is malformed), an unknown `kind`, a `github-app`
-secret whose `github-owners` names no account or holds a comma, a malformed
+secret whose `github-owners` names no account or holds a comma, a `requesters` list the broker
+cannot read (`requesters-malformed`), a secret whose `requesters` are listed with no `max-grant`
+or one longer than an hour (`requesters-max-grant`), a `google-service-account` secret whose
+`requesters` are not exactly its own person owner (`requesters-not-owner`), a malformed
 `max-grant`, a name that is not in the form above, a secret encrypted with any key but the
 agent-secrets key, the AWS-managed key included, or a secret with no current value (created without
 one, so none of its versions carries the `AWSCURRENT` label). A request for a secret left out is
 refused `UNKNOWN_SECRET` before anyone is asked to approve it, and a live grant of it releases
 nothing until the broker serves the secret again.
 
-The policy's **version** is the SHA-256 of every served secret's name, owner, tier, source and max
-grant, recorded on every request. A kind secret's source names its kind, so a kind change moves the
-version too.
+The policy's **version** is the SHA-256 of every served secret's name, owner, tier, source, max
+grant and `requesters` list, recorded on every request. A kind secret's source names its kind, so
+a kind change moves the version too, and so does any change to a list. A secret with no list
+writes the same bytes into the digest that it always did.
 
 ## Requests and grants
 
@@ -404,8 +429,9 @@ reason of at most 400 characters. The broker evaluates every name
   secret, asked for by anyone but that service, is denied.
 - Names that need approval must all need the same approver, else the request is refused
   `MIXED_APPROVERS`; request them separately.
-- A **kind secret** has `kind=github-app` or `kind=google-login` and a current stored value. A
-  GitHub App value holds an App identifier and private key. Its release returns a JSON object with
+- A **kind secret** has `kind=github-app`, `kind=google-login` or `kind=google-service-account`,
+  and a current stored value. A GitHub App value holds an App identifier and private key.
+  Its release returns a JSON object with
   one installation token for each installation of the App that is not suspended and is on an
   account its `github-owners` tag lists. A release can narrow that token, with the `github_app`
   body of `POST /v1/grants/{id}/values` or the exec form's `--github-owner`, `--github-repo` and
@@ -419,7 +445,14 @@ reason of at most 400 characters. The broker evaluates every name
   releases a narrowed token only once GitHub's answer shows it holds no more. It narrows that
   release alone; the grant's next release is owner-wide unless it narrows too. A Google login
   value holds an `authorized_user` refresh-token credential. Its release returns a bare access
-  token. The broker reads the stored value for each release, as it reads any secret, and mints from
+  token. A Google service-account value names one account,
+  `{"service_account": "<id>@<project>.iam.gserviceaccount.com"}`, and its release returns a bare
+  access token for that account: the broker impersonates it with its own Google credential
+  through the IAM Service Account Credentials API, and the token it gets back carries the
+  `https://www.googleapis.com/auth/cloud-platform` scope and lasts an hour. That token acts as
+  the account itself, which is why the secret is served to the one person who owns it and its
+  `requesters` tag names exactly that person. The broker reads the stored value for each release,
+  as it reads any secret, and mints from
   it. It never returns the stored App key or refresh token. A token lasts about an hour, so a client
   keeps the release until its `expires_at` rather than asking again for each use. A deleted kind
   secret stops releasing as any deleted secret does. A release GitHub or Google refuses, such as a
@@ -427,7 +460,7 @@ reason of at most 400 characters. The broker evaluates every name
   code, Google's `invalid_rapt` or `rapt_required` subtype (any other is named `unknown`), or the
   class of a failed call, never the upstream's own text, and the broker logs it for its operator.
   A grant ends for good when a release finds its secret's kind changed
-  (removed, or changed to the other kind) or its lifetime over the current `max-grant`: that
+  (removed, or changed to another kind) or its lifetime over the current `max-grant`: that
   release answers `GRANT_NOT_LIVE` and writes a `grant.revoked` audit row by
   `broker:release-recheck`, and the session asks again. A release of a stored secret checks the
   policy again once it has read the store, so a retag to a kind reread during that read releases
@@ -676,3 +709,28 @@ a machine login made under its own credential, a person's revoke from their mach
 service's token login included, or `broker`. No
 record, event or audit row ever holds a secret value.
 [Operating the broker](/legion/broker/operate/#the-audit-record) shows how to read them.
+
+A quarterly **access review** reads those rows over `GET /v1/grant-log`, the one route the caller
+name `access-review` reaches (`BROKER_API_ACCOUNTS`; the names `dispatch` and `listener` do not
+reach it, and the route changes nothing). It answers every `audit` row of a closed period, in the
+order the rows were written, each event naming the session that asked, the person behind it, the
+service the broker verified for that session and the one its credential claimed, the secrets and
+how each was decided, the approver, who decided, the lifetime, the reason the session signed, and
+the detail of a refusal. A period's end must be at least an hour ago, so that every row of it has
+committed before the review reads it. Each decision and each grant end is also one INFO line in
+the broker's log, `broker: grant log`, so a period can be read from the log pipeline without the
+database.
+
+Three things the log does not say, which a reviewer has to be told:
+
+- A grant that ended because its enrollment ended writes no `grant.revoked` row. The end is the
+  enrollment's own row, `enrollment.revoked` or `enrollment.expired`, which does not name the
+  grants one by one.
+- A grant that reaches its own `expires_at` writes no row at all. What says when it ended is its
+  `request.granted` row and that row's `lifetime_seconds`.
+- A minted token — `github-app`, `google-login` and `google-service-account` alike — lives its own
+  hour from the moment it was minted. Revoking the grant stops the next release; it does not
+  revoke a token the broker has already released.
+
+The review reads the `audit` table as it stands. It adds no audit kind and writes no audit row of
+its own: every row it reads is one the broker wrote when it decided.

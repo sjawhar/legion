@@ -22,13 +22,16 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	useAWS(t, local, testAccount, adaSignIn)
 	useStdin(t, "stored-value")
 
-	stdout, stderr, code := runSecret("create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "Acme-Org", "--max-grant", "1h")
+	stdout, stderr, code := runSecret("create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "Acme-Org", "--requesters", "ada@example.com", "--max-grant", "1h")
 	if code != 0 {
 		t.Fatalf("create: exit %d, stderr %q", code, stderr)
 	}
 	tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags)
 	if tags[policy.TagKind] != policy.KindGitHubApp || tags[policy.TagMaxGrant] != "1h" || tags[policy.TagGitHubOwners] != "acme-org" {
 		t.Fatalf("create tags = %v, want kind, github-owners as the broker reads them, and max-grant", tags)
+	}
+	if tags[policy.TagRequesters] != "ada@example.com" {
+		t.Fatalf("create tags = %v, want the requesters list", tags)
 	}
 	if tags[policy.TagRollbackGuard] != policy.RollbackGuardValue {
 		t.Fatalf("create tags = %v, want the rollback guard beside the kind", tags)
@@ -40,6 +43,9 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	stdout, stderr, code = runSecret("show", "APP_KEY")
 	if code != 0 || !strings.Contains(stdout, "kind: github-app") || !strings.Contains(stdout, "github_owners: acme-org") || !strings.Contains(stdout, "max_grant: 1h") {
 		t.Fatalf("show: exit %d stdout %q stderr %q; want kind, github owners and max-grant", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "requesters: ada@example.com") {
+		t.Fatalf("show: stdout %q does not name the requesters", stdout)
 	}
 	stdout, stderr, code = runSecret("list")
 	if code != 0 || !strings.Contains(stdout, "KIND") || !strings.Contains(stdout, "MAX_GRANT") || !strings.Contains(stdout, "github-app") || !strings.Contains(stdout, "1h") {
@@ -113,6 +119,12 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 		if policy.KindNeedsGitHubOwners(kind) {
 			args = append(args, "--github-owners", "Ada  acme-org")
 		}
+		if kind == policy.KindGoogleServiceAccount {
+			// The kind is served to the one person who owns the secret, and a secret whose
+			// requesters are listed bounds its grants to an hour (policy.RequesterRules), so the
+			// retag names both, the max grant as the secret already holds it.
+			args = append(args, "--requesters", "ada@example.com", "--max-grant", "30m")
+		}
 		if _, stderr, code = runSecret(args...); code != 0 {
 			t.Fatalf("retag %s: exit %d, stderr %q", kind, code, stderr)
 		}
@@ -162,6 +174,28 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 		if code != exitUsageError {
 			t.Fatalf("%v: exit %d stderr %q; want usage error", args, code, stderr)
 		}
+	}
+	// The requesters list and the rules it brings with it, each refused before anything is
+	// written: the broker's own reading of the list (policy.ParseRequesters), and its cross-tag
+	// rules (policy.RequesterRules), named as the broker names them.
+	for _, tc := range []struct {
+		want string
+		args []string
+	}{
+		{"spaces, not commas", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "ada@example.com,builder", "--max-grant", "1h"}},
+		{"at least one person or service", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "  ", "--max-grant", "1h"}},
+		{"lowercase sign-in email", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "Ada@Example.com", "--max-grant", "1h"}},
+		{policy.ReasonRequestersMaxGrant, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "ada@example.com"}},
+		{policy.ReasonRequestersMaxGrant, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "ada@example.com", "--max-grant", "2h"}},
+		{policy.ReasonRequestersNotOwner, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h"}},
+	} {
+		_, stderr, code := runSecret(tc.args...)
+		if code != exitUsageError || !strings.Contains(stderr, tc.want) {
+			t.Fatalf("%v: exit %d stderr %q; want a usage error naming %q", tc.args, code, stderr, tc.want)
+		}
+	}
+	if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+		t.Fatal("a refused create made NEW_KEY")
 	}
 }
 
@@ -290,6 +324,68 @@ func TestARetagThatLeavesAGitHubAppSecretWithoutOwnersWritesNothing(t *testing.T
 			}
 		}
 	})
+}
+
+// TestARetagThatLeavesASecretUnservableToItsRequestersWritesNothing: the requesters rules
+// (policy.RequesterRules) hold on retag as on create, against the tags the secret will hold once
+// the write lands, so no retag leaves a secret the broker then refuses for who may ask for it:
+// dropping or lengthening a listed secret's max grant is refused, as is making a secret a
+// google-service-account one whose requesters are not exactly its own person owner. The list is
+// written as the broker reads it, and --requesters none removes it.
+func TestARetagThatLeavesASecretUnservableToItsRequestersWritesNothing(t *testing.T) {
+	listed := policytest.Secret("LISTED_KEY", "ada@example.com", policy.TierAgent, "value")
+	listed.Tags[policy.TagRequesters] = "ada@example.com"
+	listed.Tags[policy.TagMaxGrant] = "1h"
+	local := secrets.NewLocal(listed)
+	startSecretBroker(t, servedBy(local))
+	writes := &countingTagWrites{Local: local}
+	useAWS(t, writes, testAccount, adaSignIn)
+	for _, tc := range []struct {
+		want string
+		args []string
+	}{
+		{policy.ReasonRequestersMaxGrant, []string{"retag", "LISTED_KEY", "--max-grant", "none"}},
+		{policy.ReasonRequestersMaxGrant, []string{"retag", "LISTED_KEY", "--max-grant", "2h"}},
+		{policy.ReasonRequestersNotOwner, []string{"retag", "LISTED_KEY", "--kind", policy.KindGoogleServiceAccount, "--requesters", "builder"}},
+		{policy.ReasonRequestersNotOwner, []string{"retag", "LISTED_KEY", "--kind", policy.KindGoogleServiceAccount, "--owner", policy.OwnerShared}},
+	} {
+		_, stderr, code := runSecret(tc.args...)
+		if code != exitUsageError || !strings.Contains(stderr, tc.want) {
+			t.Fatalf("%v: exit %d stderr %q; want a usage error naming %q", tc.args, code, stderr, tc.want)
+		}
+	}
+	if writes.tags != 0 || writes.untags != 0 {
+		t.Fatalf("refused retags made %d TagResource and %d UntagResource calls, want none", writes.tags, writes.untags)
+	}
+	if _, stderr, code := runSecret("retag", "LISTED_KEY", "--kind", policy.KindGoogleServiceAccount, "--requesters", "Ada@example.com"); code != exitUsageError || !strings.Contains(stderr, "lowercase sign-in email") {
+		t.Fatalf("retag with an uppercase email: exit %d stderr %q; want a usage error naming the lowercase form", code, stderr)
+	}
+	if _, stderr, code := runSecret("retag", "LISTED_KEY", "--kind", policy.KindGoogleServiceAccount, "--requesters", "ada@example.com"); code != 0 {
+		t.Fatalf("retag to a service-account secret its owner may ask for: exit %d stderr %q", code, stderr)
+	}
+	tags := secrets.TagMap(describe(t, local, "LISTED_KEY").Tags)
+	if tags[policy.TagKind] != policy.KindGoogleServiceAccount || tags[policy.TagRequesters] != "ada@example.com" || tags[policy.TagMaxGrant] != "1h" {
+		t.Fatalf("tags = %v, want the service-account kind beside its owner's list and the hour", tags)
+	}
+	if _, stderr, code := runSecret("retag", "LISTED_KEY", "--requesters", "none"); code != exitUsageError || !strings.Contains(stderr, policy.ReasonRequestersNotOwner) {
+		t.Fatalf("removing the list of a service-account secret: exit %d stderr %q; want a usage error naming %s", code, stderr, policy.ReasonRequestersNotOwner)
+	}
+	if _, stderr, code := runSecret("retag", "LISTED_KEY", "--kind", "none"); code != 0 {
+		t.Fatalf("retag --kind none: exit %d stderr %q", code, stderr)
+	}
+	if _, stderr, code := runSecret("retag", "LISTED_KEY", "--requesters", "none"); code != 0 {
+		t.Fatalf("retag --requesters none: exit %d stderr %q", code, stderr)
+	}
+	tags = secrets.TagMap(describe(t, local, "LISTED_KEY").Tags)
+	if _, listed := tags[policy.TagRequesters]; listed {
+		t.Fatalf("tags = %v, want no requesters", tags)
+	}
+	if tags[policy.TagMaxGrant] != "1h" || tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierAgent {
+		t.Fatalf("tags = %v, want the max grant, owner and tier kept", tags)
+	}
+	if _, stderr, code := runSecret("retag", "LISTED_KEY", "--max-grant", "2h"); code != 0 {
+		t.Fatalf("retag --max-grant 2h once no one is listed: exit %d stderr %q", code, stderr)
+	}
 }
 
 // TestAGitHubOwnersListIsWrittenSpaceSeparatedAndACommaIsRefused: on AWS, whose tag values take a
