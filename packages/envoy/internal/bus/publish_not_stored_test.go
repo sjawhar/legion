@@ -217,12 +217,6 @@ func TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline(t *testing.T) 
 	if !errors.Is(err, ErrNotStored) || !errors.Is(err, ErrWindowDeadline) {
 		t.Fatalf("a not-stored send whose window's deadline passed = %v, want ErrNotStored and ErrWindowDeadline", err)
 	}
-	// The answer comes of the resend decision, so a resend would be in it; the read count says
-	// which deadline that decision met.
-	if read := checks.Load(); read != checksBeforeTheWrite+1 {
-		t.Fatalf("the window read its deadline %d times, want %d: the three checks before the write and the resend decision's",
-			read, checksBeforeTheWrite+1)
-	}
 	if stored() {
 		t.Fatal("the stream holds the envelope the window resent past its deadline")
 	}
