@@ -458,7 +458,7 @@ the mark reads `unread` when the probe could not read `retry.modelFallback` unde
 — the probe pod's log says why — and the daemon's report shows the row open).
 An image row the image carries prints `present` with its evidence (`codegraph`'s:
 the CLI on PATH and the plugin enabled in the profile's lock, which a pod's launch loads with extension discovery on).
-A live row prints `reported` (``each session reports it at start; `legion state` renders it: <summary>``:
+A live row prints `reported` (``a claimed session reports it while it runs, so the probe cannot check it; `legion state` renders it: <summary>``:
 the probe proves nothing of it; [The deployment's capability report](#the-deployments-capability-report) says what each session measures), a deployment row `reported` too (the daemon reports it from the deployment's configuration), a withheld row `withheld` with its ruling, and an image row the image lacks `missing` with why.
 A build whose image lacks a capability fails, the probe naming every missing one.
 The daemon's Agent Sandbox runtime runs the same command in a probe Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every boot, and requires `agent-models=resolved`:
@@ -2581,7 +2581,7 @@ Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`
 `packages/daemon/internal/capabilities` is the one list of what a Legion worker can do (LEGION-578:
 every worker is a full agent), 21 rows, each checked at one site.
 The image rows (`eval-js`, `eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`, `claude-code`) are `legion probe-image`'s ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), `present` once the probe passed;
-the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) are proved by each session at its start, which measures them inside its own Oh My Pi and reports them with its ready, and the daemon renders each from what its live sessions reported (LEGION-663;
+the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) are measured by each claimed session while it runs, inside its own Oh My Pi, and reported on a `claims/ready` of its own, and the daemon renders each from what its live sessions reported (LEGION-663, INFRA-927;
 the paragraphs after the deployment rows);
 the withheld rows carry the ruling that keeps them from every worker (`network`:
 dispatch://LEGION-5, the pod is the boundary, except a workload a role starts where its deployment's cluster admits it and the Service fronting it ([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role));
@@ -2621,15 +2621,18 @@ A deployment row is `present` when the deployment satisfies it, `decided` when `
 a decision on a satisfied row is moot and the row reads present), and `open` otherwise, carrying the line that records one.
 A name that is not one of the four is refused at load naming them; a blank reason too.
 
-A live row is proved by each session at its start.
-The Legion extension (`packages/pi-legion/src/capability-report.ts`) measures the six inside Oh My Pi once `claims/register` has answered
-— concurrently, while the jj attribution and the Envoy role claim run
-— and sends the report with `claims/ready` (`capabilities`:
-`measuredAt`, `elapsedMs` and `rows[{name, ok, detail}]`), each check within 8 s and the whole report within 10 s.
+A live row is measured by each claimed session while it runs.
+The Legion extension measures the six inside Oh My Pi (`packages/pi-legion/src/capability-report.ts`) on the 5 s interval that session already runs, under the rule in `packages/pi-legion/src/capability-schedule.ts`: at a tick at which it is idle and no measurement of its own is running, first at the sixth tick for the architect and one tick later for each following role of `LEGION_ROLES` (the merger's is the eleventh, 55 s), so one pod's six roles start their attempts on different ticks;
+each role counts those ticks from its own interval, which starts at its own boot, and a role busy at its due tick measures at its first idle tick instead, so the offset spreads the first attempts rather than keeping two roles' measurements from ever overlapping;
+it sends each report on a `claims/ready` of its own (`capabilities`:
+`measuredAt`, `elapsedMs` and `rows[{name, ok, detail}]`), each check within 8 s and the whole report within 10 s, the budgets unchanged.
+A measurement whose rows are not all present, a report the daemon refuses and a call that fails are each followed by another attempt five ticks later, for at most three measurements in the life of the process;
+a session whose accepted report had every row present measures no more, and a report measured while a turn starts is held and sent at the next idle tick.
+So a role's rows read `unchecked` from its ready until its first idle measurement (30 s to 55 s for a role that is not prompted, and until the first idle tick after its turn for one that is), where before this change a check that lost the boot race read `open` for the session's life (INFRA-927).
 A check that fails, throws or runs past its budget is a failing row carrying the reason, never a stopped session, and the daemon normalises what arrives (a live row the session left out reads `not
 reported by this session`, a name the table has no live row for is dropped, a detail is one line with every credential it quotes redacted, cut at 1024 bytes) and never refuses a ready for what it reports.
 The state route answers without authentication, so the extension cleans each detail the same way before it sends it, and the daemon cleans a report it reads back from the store at boot too.
-The ready after a regained Envoy role re-sends the same report; the controller's ready carries none.
+A boot's ready and the ready after a regained Envoy role carry no report at all, and the controller measures nothing and sends none.
 Each row's check, and the fact a passing one reports:
 
 - `subagents`: `pi.agents` is exposed, the `task` tool is registered, and every agent the registration's `promptAgents` names (the task agents the role's prompts dispatch) is resolved by `discoverAgents` in the workspace and none is in `task.disabledAgents` — `task resolves <n>
