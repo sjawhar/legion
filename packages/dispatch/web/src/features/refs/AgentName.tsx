@@ -19,6 +19,7 @@ import {
   stalledDotBorder,
   unknownDotBorder,
 } from "../../theme/classes";
+import { useAfterTheFirstBatch } from "../doc/first-batch";
 import { askResolutionBadge, askResolutionReason } from "./actor";
 import { type AgentRegistry, type AgentState, useAgentRegistry } from "./agent-registry";
 import { AGENT_LIVE_PATH } from "./routes";
@@ -231,7 +232,13 @@ function SessionAgentName({
   subject: SessionRef;
   variant: AgentVariant;
 }): ReactNode {
-  const registry = useAgentRegistry(true);
+  // Beside an opening document the registry waits for the editor's first batch: what it adds
+  // to this name is the agent's live title and its running mark, and neither is the block the
+  // reader is waiting for (`features/doc/first-batch.ts`). A name inside a panel the reader
+  // has opened reads it at once, because that panel says so (`ReaderIsHere`). Until the read
+  // lands this name is the one every page without the registry shows: the title stamped on the
+  // write, or the short session id.
+  const registry = useAgentRegistry(useAfterTheFirstBatch());
   const { attribution, name, sessionId } = resolveAgent(subject, registry);
   const state = registry.state(sessionId);
   const to = generatePath(AGENT_LIVE_PATH, { sessionId: encodeURIComponent(sessionId) });

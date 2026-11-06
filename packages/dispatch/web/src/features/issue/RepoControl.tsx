@@ -4,6 +4,7 @@ import { type ReactNode, useId, useState } from "react";
 import { api, apiErrorMessage } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
 import { badgeLow, badgePrimary, textSecondaryOnSurface } from "../../theme/classes";
+import { useAfterTheFirstBatch } from "../doc/first-batch";
 import { badgeSelectBadge, badgeSelectOverlay, badgeSelectRailWrapper } from "./badge-select";
 import { useIssueRepo } from "./useIssueRepo";
 
@@ -37,8 +38,13 @@ export function RepoControl({
   resolvedRepo: string | null;
 }): ReactNode {
   const [wanted, setWanted] = useState(false);
+  // Beside an opening document the mappings wait for the editor's first batch, as the other
+  // reads of this header do (`features/doc/first-batch.ts`): the item they fill is a picker in
+  // the details rail, and a reader who reaches for it has the list read then rather than at
+  // the batch.
+  const afterTheFirstBatch = useAfterTheFirstBatch(wanted);
   const mappings = useQuery({
-    enabled: wanted || resolvedRepo === null,
+    enabled: (wanted || resolvedRepo === null) && afterTheFirstBatch,
     queryKey: ["repo-projects"],
     queryFn: () => api.listRepoProjects(),
   });

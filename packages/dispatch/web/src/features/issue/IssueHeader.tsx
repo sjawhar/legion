@@ -57,6 +57,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
+import { ReaderIsHere, useAfterTheFirstBatch } from "../doc/first-batch";
 import { waitingOnHuman } from "../inbox/BlockedOnYou";
 import { issueStatuses, openIssueStatuses, statusLabel } from "../project/board-model";
 import { AgentName, useAgentText } from "../refs/AgentName";
@@ -175,7 +176,12 @@ export function IssueHeader({
   const [subscribersOpen, setSubscribersOpen] = useState(false);
   const [referencesOpen, setReferencesOpen] = useState(false);
   const agentText = useAgentText();
+  // Who is subscribed is a panel of its own, shut until the reader opens it, and its count is
+  // a number beside that toggle: nothing the reader is waiting for while a document opens
+  // beneath it. So the read waits for the editor's first batch, and goes out at once for a
+  // reader who opens the panel first (`features/doc/first-batch.ts`).
   const subscribers = useQuery({
+    enabled: useAfterTheFirstBatch(subscribersOpen),
     queryKey: ["subscribers", issue.key],
     queryFn: () => api.getIssueSubscribers(issue.key),
   });
@@ -697,11 +703,15 @@ export function IssueHeader({
           ))}
         </div>
         {referencesOpen ? (
-          <ReferencedBy
-            className="mt-1 w-full"
-            reference={issueReference}
-            toggle={{ id: referencesPanelId }}
-          />
+          // The reader opened this one, so its graph read goes out now rather than waiting for
+          // the editor's first batch (`features/doc/first-batch.ts`).
+          <ReaderIsHere value={true}>
+            <ReferencedBy
+              className="mt-1 w-full"
+              reference={issueReference}
+              toggle={{ id: referencesPanelId }}
+            />
+          </ReaderIsHere>
         ) : null}
       </div>
       <span className="sr-only" id="issue-route-hint">
@@ -820,11 +830,16 @@ export function IssueHeader({
         </span>
       ) : null}
       {subscribersOpen ? (
-        <SubscribedAgents
-          onUnsubscribe={(sessionId) => unsubscribe.mutate(sessionId)}
-          ownerLabel={issue.key}
-          subscribers={subscriberList}
-        />
+        // The reader is in this panel, so every read inside it - each chip's agent registry
+        // among them - goes out now rather than waiting for the editor's first batch
+        // (`features/doc/first-batch.ts`).
+        <ReaderIsHere value={true}>
+          <SubscribedAgents
+            onUnsubscribe={(sessionId) => unsubscribe.mutate(sessionId)}
+            ownerLabel={issue.key}
+            subscribers={subscriberList}
+          />
+        </ReaderIsHere>
       ) : null}
       {subscribers.isError ? (
         <QueryError

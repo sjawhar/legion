@@ -7,10 +7,18 @@ import type { MarginOwner } from "./useMarginItems";
 /**
  * Every anchored ask on the visible artifact. Document-owned asks arrive from the artifact
  * endpoint; issue-owned asks retain the single per-issue history query.
+ *
+ * `allowed` is the margin's own gate on the read: beside an opening document it waits for the
+ * editor's first batch, unless the reader already has the cards on the screen
+ * (`useMarginItems`, `features/doc/first-batch.ts`).
  */
-export function useAnsweredAsks(owner: MarginOwner | undefined, artifactID: string | undefined) {
+export function useAnsweredAsks(
+  owner: MarginOwner | undefined,
+  artifactID: string | undefined,
+  allowed = true
+) {
   const query = useQuery({
-    enabled: owner !== undefined,
+    enabled: owner !== undefined && allowed,
     queryFn: () => {
       if (owner === undefined) {
         throw new Error("Answered asks require a margin owner.");

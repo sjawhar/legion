@@ -62,6 +62,7 @@ import { colorForLogin } from "./connection";
 import { DocumentPreview, documentPreview, takeTheBuiltBlocks } from "./DocumentPreview";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
+import { theFirstBatchIsAwaited, useAfterTheFirstBatch } from "./first-batch";
 import { currentAddress, firstScreenAwaits } from "./first-screen";
 import type { Highlight } from "./highlight";
 import { liveTextQueryOptions } from "./live-text";
@@ -76,6 +77,12 @@ import { NameVersionDialog } from "./NameVersionDialog";
 import { takeEarlyTextRead } from "./open-document-early";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
+import {
+  keepTheReadersPlace,
+  moveTheScroll,
+  putTheReaderBack,
+  readersBlock,
+} from "./readers-place";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
@@ -84,6 +91,10 @@ import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
 import { useAskCardsDrawnInTasks } from "./useAskCardsDrawnInTasks";
 import { VersionView } from "./VersionView";
+
+/** How a decision block opens in a document's markdown: `:::ask{#<id> …}`. A document whose
+ *  text holds one holds a card the reader answers, which reads the document's asks. */
+const ASK_BLOCK_OPENER = ":::ask";
 
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
 
@@ -192,68 +203,6 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
 function dispatchHrefOf(anchor: Element): string | null {
   const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
   return href?.startsWith("dispatch://") ? href : null;
-}
-
-/** Where a reader is in a document drawn as a run of top-level blocks: the first block the top
- *  of the scrollport is in or above, and how far that block's own top sits from it. `undefined`
- *  where there is nothing to keep: no draw, or a reader still at the document's first block and
- *  above its top, whom any draw of it leaves where they are. */
-interface ReadersBlock {
-  readonly index: number;
-  readonly top: number;
-}
-
-function readersBlock(drawn: HTMLElement | null): ReadersBlock | undefined {
-  if (drawn === null) {
-    return undefined;
-  }
-  const blocks = drawn.children;
-  for (let index = 0; index < blocks.length; index += 1) {
-    const { bottom, top } = blocks[index].getBoundingClientRect();
-    if (bottom > 0) {
-      return index === 0 && top >= 0 ? undefined : { index, top };
-    }
-  }
-  return undefined;
-}
-
-/** What scrolls `element`: the nearest ancestor that scrolls its own content, or the page
- *  itself. A document is the page's own scroll on its page and a column's scroll in a reading
- *  pane, and the reader's place is kept against whichever is carrying them. */
-function whatScrolls(element: HTMLElement): HTMLElement | null {
-  for (let box = element.parentElement; box !== null; box = box.parentElement) {
-    const overflow = window.getComputedStyle(box).overflowY;
-    if ((overflow === "auto" || overflow === "scroll") && box.scrollHeight > box.clientHeight) {
-      return box;
-    }
-  }
-  return null;
-}
-
-/** Scrolls whatever carries `within` by `moved` pixels, so what the reader is looking at stays
- *  on the same line of their screen while the page changes above it. */
-function moveTheScroll(within: HTMLElement, moved: number): void {
-  if (moved === 0) {
-    return;
-  }
-  const scroller = whatScrolls(within);
-  if (scroller === null) {
-    window.scrollBy(0, moved);
-    return;
-  }
-  scroller.scrollTop += moved;
-}
-
-/** Puts the reader back where `place` left them, in a document `drawn` draws the same blocks of
- *  in the same order. A block the new draw does not have - a document edited between the two -
- *  leaves the page where it is, which is the browser's own scroll anchoring rather than a jump
- *  to the wrong words. */
-function putTheReaderBack(drawn: HTMLElement, place: ReadersBlock | undefined): void {
-  const block = place === undefined ? undefined : drawn.children[place.index];
-  if (block === undefined || place === undefined) {
-    return;
-  }
-  moveTheScroll(drawn, block.getBoundingClientRect().top - place.top);
 }
 
 export function ProofDocument({
@@ -402,7 +351,27 @@ export function ProofDocument({
     queryKey: ["artifact", artifact.id, "version", version],
     queryFn: () => api.getArtifactVersion(artifact.id, version ?? 0),
   });
+  // The asks wait for the editor's first batch, as the badges and the artifact above do. What
+  // they draw is the asker of a typed block, which stands in a block the build has to have
+  // made first; read before it they cost the reader a request and a parse in front of the
+  // block they are waiting for (dispatch://INFRA-341, R11). The margin reads the same key for
+  // the same issue, and starts it sooner where its reader has the cards on the screen
+  // (`features/margin/useMarginItems.ts`), so the issue's asks are read once either way.
+  //
+  // A document that holds a decision block is the exception, and it waits for nothing: that
+  // block is a card the reader answers - in their own draw before any editor exists
+  // (`PreviewDecisionCard`), and in every block the build makes after it - and the card is
+  // these asks. Held to the batch it would be answered only once the build released the
+  // thread, since the build's own continuations outrank the task React's update needs
+  // (`@legion/proof-editor`'s `endOfTask`), and a card that grew then would move the reader
+  // off the block their link landed on. So the document's own text decides: one that names an
+  // ask block reads them with the text, one that names none reads them after the batch.
+  const holdsDecisions = useMemo(
+    () => (liveTextQuery.data?.markdown ?? "").includes(ASK_BLOCK_OPENER),
+    [liveTextQuery.data?.markdown]
+  );
   const asksQuery = useQuery({
+    enabled: useAfterTheFirstBatch(holdsDecisions),
     queryKey: owner.kind === "issue" ? ["asks", owner.key] : ["artifact", artifact.id, "asks"],
     queryFn: () =>
       owner.kind === "issue" ? api.listIssueAsks(owner.key) : api.listArtifactAsks(artifact.id),
@@ -674,8 +643,13 @@ export function ProofDocument({
       failed = true;
       setConnection("failed");
       // No editor is coming, so the draw in front of the reader is the document: it paints the
-      // whole of itself again rather than holding the screenful it stopped at.
+      // whole of itself again rather than holding the screenful it stopped at. There is no
+      // first batch to come either, so the page's other reads stop waiting for one
+      // (`first-batch.ts`).
       setEditorBuilding(false);
+      if (page) {
+        theFirstBatchIsAwaited(false);
+      }
       setLoadError(error instanceof Error ? error.message : String(error));
     };
     const teardown = () => {
@@ -781,6 +755,11 @@ export function ProofDocument({
       resizeObserver.observe(handle.view.dom);
       publishPlacements();
       fragment.observeDeep(publishPlacements);
+      // Everything the page draws from here on is drawn under a reader who is already in place:
+      // a panel held behind the editor's first batch, a decision card drawn into its shell, a
+      // diagram the Mermaid worker answers for, a block painting at its own height. None of it
+      // may move what they are looking at (`readers-place.ts`).
+      const releaseTheirPlace = keepTheReadersPlace(handle.view.dom);
       return () => {
         bound = false;
         disposeRefocusRef.current?.();
@@ -788,6 +767,7 @@ export function ProofDocument({
         publishPlacementsRef.current = undefined;
         cancelAnimationFrame(frame);
         cancelAnimationFrame(searchFrame);
+        releaseTheirPlace();
         resizeObserver.disconnect();
         unbindRemoteMarks();
         fragment.unobserveDeep(publishPlacements);
@@ -843,6 +823,11 @@ export function ProofDocument({
           if (block !== undefined) {
             setConnection("failed");
             setAdmission(block);
+            // The document cannot be opened until a repair or a rebuild answers, so no first
+            // batch is coming and the page's other reads stop waiting for one.
+            if (page) {
+              theFirstBatchIsAwaited(false);
+            }
             readmitRef.current = () => {
               readmitRef.current = undefined;
               refusals = 0;
@@ -948,6 +933,13 @@ export function ProofDocument({
                 // the draw's once either has painted, and the reader's words must not slide
                 // under them a batch at a time.
                 onBatch: (built) => {
+                  // The reader has the editor from this task on, so the reads the page held
+                  // behind the first batch go out now (`first-batch.ts`). Said on every batch
+                  // because the first is the only one that changes the answer, and a batch
+                  // costs nothing to say it again.
+                  if (page) {
+                    theFirstBatchIsAwaited(false);
+                  }
                   const preview = documentPreview(parent.parentElement);
                   if (preview === null) {
                     return undefined;

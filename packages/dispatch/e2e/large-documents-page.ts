@@ -71,6 +71,12 @@ declare global {
      *  screen: a block inside the document surface it renders, which is the preview's. Read
      *  against no target, and the number this rig used to read as the editor's. */
     __largeDocumentPageDrawnAt?: number;
+    /** `performance.now()` when the editor's first batch landed, which is the task its root
+     *  was given `data-write-path="live"` in. Undefined until one has (`watchTheReads`). */
+    __largeDocumentFirstBatchAt?: number;
+    /** Every `/api/v1` request the page has made, by when it went out and the path it went
+     *  out on, which is how a row reads the order of the page's reads (`watchTheReads`). */
+    __largeDocumentReads?: { at: number; path: string }[];
     /** When each step of the document's own opening happened, on the page's own clock: the
      *  chain that begins once the issue page has rendered and `ProofDocument` admits
      *  (dispatch://INFRA-341, R11). Every field is `performance.now()` at that step, and each
@@ -508,6 +514,79 @@ export async function watchTheDocument(page: Page): Promise<Announcements> {
     }
   );
   return announcements;
+}
+
+/**
+ * What the page asked Dispatch for and when, and when the editor's first batch landed: the two
+ * facts the rows that read the order of the page's reads are built on (dispatch://INFRA-341,
+ * R11, "the issue page's non-document panels are drawn after the editor's first batch").
+ *
+ * Both come from the page itself. Each read is a `resource` entry of the browser's own
+ * timing, taken through a `PerformanceObserver` rather than off the buffer, which holds 250
+ * entries by default and which a document page fills; `startTime` is when the request went
+ * out, which is the number the order is read on. The first batch is the task the editor's root
+ * is given `data-write-path="live"` in (`@legion/proof-editor`'s `progressive-build.ts`), read
+ * through a `MutationObserver`, whose callback runs at that task's own microtask checkpoint -
+ * before the commit that starts the reads the page held - so a read made at the batch is never
+ * timed as one made before it.
+ */
+export interface PageRead {
+  /** `performance.now()` when the request went out, counted from the start of navigation. */
+  readonly at: number;
+  /** The path it went out on, under `/api/v1`, with its query. */
+  readonly path: string;
+}
+
+export interface ReadsOfThePage {
+  /** `performance.now()` when the editor's first batch landed; undefined where none has. */
+  readonly firstBatchMs: number | undefined;
+  /** Every `/api/v1` request the page has made, in the order the browser timed them. */
+  readonly reads: readonly PageRead[];
+}
+
+/** Installs those two recorders before the page's own scripts. Call it before the navigation
+ *  whose reads the row is about; `readTheReads` reads what they recorded. */
+export async function watchTheReads(page: Page): Promise<void> {
+  await page.addInitScript(
+    ({ live }: { live: string }) => {
+      window.__largeDocumentReads = [];
+      new PerformanceObserver((entries) => {
+        for (const entry of entries.getEntries()) {
+          const url = new URL(entry.name, window.location.origin);
+          if (!url.pathname.startsWith("/api/v1/")) {
+            continue;
+          }
+          window.__largeDocumentReads?.push({
+            at: entry.startTime,
+            path: `${url.pathname.slice("/api/v1".length)}${url.search}`,
+          });
+        }
+      }).observe({ buffered: true, type: "resource" });
+      const noteTheFirstBatch = () => {
+        if (
+          window.__largeDocumentFirstBatchAt === undefined &&
+          document.querySelector(live) !== null
+        ) {
+          window.__largeDocumentFirstBatchAt = performance.now();
+        }
+      };
+      new MutationObserver(noteTheFirstBatch).observe(document, {
+        attributeFilter: ["data-write-path"],
+        attributes: true,
+        childList: true,
+        subtree: true,
+      });
+    },
+    { live: liveEditorSelector }
+  );
+}
+
+/** What the two recorders above have so far. */
+export async function readTheReads(page: Page): Promise<ReadsOfThePage> {
+  return await page.evaluate(() => ({
+    firstBatchMs: window.__largeDocumentFirstBatchAt,
+    reads: window.__largeDocumentReads ?? [],
+  }));
 }
 
 /**

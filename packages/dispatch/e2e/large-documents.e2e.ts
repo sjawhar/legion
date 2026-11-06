@@ -24,6 +24,7 @@
 // page does, not how long it takes.
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { subscribeSession } from "./agents";
 import {
   createAsk,
   createComment,
@@ -55,6 +56,7 @@ import {
   openingDecisionBlockId,
   openingDecisionDocument,
   plainDocument,
+  proseOnlyDocument,
   proseOpening,
   sectionHeading,
   smallDocument,
@@ -62,10 +64,13 @@ import {
 import {
   longTaskTargetMs,
   measureDocument,
+  type PageRead,
   printMeasurement,
+  readTheReads,
   throttleTheCpu,
+  watchTheReads,
 } from "./large-documents-page";
-import { openCommentThread, settledScrollTop } from "./mermaid-helpers";
+import { openCommentThread, settledScrollTop, withoutScrollAnchoring } from "./mermaid-helpers";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -107,6 +112,11 @@ declare global {
      *  the editor would not take one. */
     __readerEdits?: EditMade[];
     __readerEditsRefused?: string;
+    /** What the no-pixels row records about the words its reader is looking at: how far they
+     *  ever moved on the screen, and whether the page above them ever changed height at all,
+     *  which is what makes the row's answer mean anything. `started` is false where the row
+     *  never found its heading. */
+    __readersPlace?: { grew: boolean; moved: number; started: boolean };
   }
 }
 
@@ -1590,6 +1600,344 @@ test("draws the document's first block with the app's code blocked @phone", asyn
     // The app never ran: its own root is empty, and the editor it would build is nowhere.
     await expect(page.locator("#root")).toBeEmpty();
     await expect(page.getByRole("textbox", { name: "Document editor" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// --- The reads the first editable block needs none of ------------------------------------
+//
+// A document address spends its first seconds on one thing, and the three rows below are about
+// everything else the page asks Dispatch for while it does. Measured on this pod, `iphone` at
+// 4x CPU throttling, seven reads went out in front of the first block a reader can type in -
+// 4,328 to 5,493 ms on a load whose preview mounted at 5,611 - and the block needs none of
+// them: they fill the issue page's non-document panels (dispatch://INFRA-341, R11). They are
+// made after the editor's first batch now (`web/src/features/doc/first-batch.ts`).
+//
+// Each row holds the document's socket (`documentTransport`), so the first batch happens when
+// the row says so rather than when a loaded machine gets round to it, and reads the order off
+// the browser's own resource timing (`watchTheReads`). None of them is a measurement: what
+// they prove is which side of the batch a read falls on.
+//
+// Their document holds no decision block (`proseOnlyDocument`), because a decision block in
+// the reader's own draw is a card they can answer before any editor exists and it reads the
+// document's asks and its recipients to do so: a reader who has one on the screen is waiting
+// for those two reads, so they go out there rather than at the batch, which is the rule
+// working rather than failing.
+
+/** The seven, by the path each goes out on. `/references` is the spec's `part_of` read, which
+ *  the page makes only for a reader who has read the document before, so the row that reads it
+ *  opens the spec twice. */
+function readsTheFirstBlockNeedsNone(issueKey: string, project: string): readonly string[] {
+  return [
+    `/issues/${issueKey}/comments`,
+    `/issues/${issueKey}/asks`,
+    "/agents",
+    "/settings/repo-projects",
+    `/projects/${project}/architecture-sources`,
+    `/issues/${issueKey}/subscribers`,
+    "/references",
+  ];
+}
+
+/** Every read the page made on one of `paths`, with its query, in the order the browser timed
+ *  them: what a row names when it says a read went out it should not have. */
+function readsAmong(reads: readonly PageRead[], paths: readonly string[]): PageRead[] {
+  return reads.filter((read) => paths.includes(read.path.split("?")[0] ?? read.path));
+}
+
+/** When each of `paths` went out, in order, by path: every read the page made on that path
+ *  with its query dropped, so one entry means one request. */
+function whenEachWentOut(
+  reads: readonly PageRead[],
+  paths: readonly string[]
+): Map<string, number[]> {
+  const when = new Map<string, number[]>(paths.map((path) => [path, []]));
+  for (const read of readsAmong(reads, paths)) {
+    when.get(read.path.split("?")[0] ?? read.path)?.push(read.at);
+  }
+  return when;
+}
+
+/** Puts the order a row read on its annotations, which the report keeps with the result, and on
+ *  stdout, which `--reporter line` prints as the row runs, exactly as `printMeasurement` does:
+ *  a report says which read went out when rather than only that the row was green. */
+function printTheOrder(
+  what: string,
+  firstBatchMs: number | undefined,
+  when: Map<string, number[]>
+): void {
+  const line = `first batch ${
+    firstBatchMs === undefined ? "never" : `${Math.round(firstBatchMs)} ms`
+  }; ${[...when]
+    .map(
+      ([path, at]) => `${path} ${at.length === 0 ? "never" : `${at.map(Math.round).join(", ")} ms`}`
+    )
+    .join("; ")}`;
+  test.info().annotations.push({ description: line, type: what });
+  console.log(`${what} · ${line}`);
+}
+
+/** How long a row waits, with the socket held and the page settled, before it decides a read
+ *  the page was going to make has not been made. The page's own draw of the document is on the
+ *  screen well inside it, and every panel of the header has rendered. */
+const settledWithTheSocketHeldMs = 10_000;
+
+test("the reads the first editable block needs none of go out after the editor's first batch @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "iphone",
+    "the seven were measured on a phone, where the margin's cards are a sheet the reader opens"
+  );
+  test.setTimeout(300_000);
+  const { issueKey, path } = await seedDocument("specs-order.md", proseOnlyDocument);
+  const paths = readsTheFirstBlockNeedsNone(issueKey, "BIG");
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await watchTheReads(page);
+    const transport = await documentTransport(page, { holding: true });
+    await page.goto(path);
+
+    // The page is up and the reader has the document's own draw; the header has rendered every
+    // panel the held reads belong to; no editor is being built.
+    await expect(page.locator('[aria-label="Document text"] [data-block-id]').first()).toBeVisible({
+      timeout: 120_000,
+    });
+    await expect(page.getByRole("button", { name: /^Subscribers/ })).toBeVisible();
+    await expect(page.locator('[data-testid="issue-components"]')).toBeVisible();
+    await page.waitForTimeout(settledWithTheSocketHeldMs);
+
+    const held = await readTheReads(page);
+    expect(held.firstBatchMs).toBeUndefined();
+    expect(
+      readsAmong(held.reads, paths),
+      "a read the first editable block needs none of went out before the editor's first batch"
+    ).toEqual([]);
+
+    // Released, the editor builds, and every one of them goes out behind its first batch.
+    await transport.release();
+    await expect(editorBeingBuilt(page)).toBeAttached({ timeout: 120_000 });
+    await expect
+      .poll(
+        async () =>
+          [...whenEachWentOut((await readTheReads(page)).reads, paths)].filter(
+            ([, at]) => at.length === 0
+          ).length,
+        { message: "a read the page held behind the first batch never went out", timeout: 120_000 }
+      )
+      .toBe(0);
+
+    const after = await readTheReads(page);
+    const when = whenEachWentOut(after.reads, paths);
+    printTheOrder("reads after the first batch", after.firstBatchMs, when);
+    const firstBatchMs = after.firstBatchMs ?? 0;
+    expect(firstBatchMs).toBeGreaterThan(0);
+    for (const [read, at] of when) {
+      expect(at, `${read} never went out`).not.toHaveLength(0);
+      for (const went of at) {
+        expect(went, `${read} went out before the first batch`).toBeGreaterThan(firstBatchMs);
+      }
+    }
+    // And none of them was made twice: one request per address, whichever panel wanted it.
+    const addresses = readsAmong(after.reads, paths).map((read) => read.path);
+    expect(addresses, "a read went out twice").toHaveLength(new Set(addresses).size);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The other half of the rule: a read is held from a reader who is not waiting for it, never
+// from one who is. The Subscribers panel is the issue header's own, shut until the reader
+// opens it, and opening it reads who is subscribed there and then - with the document's socket
+// still held, so no first batch has happened and none is on its way.
+test("a reader who opens a panel before the first batch has its read started then @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "iphone",
+    "the seven were measured on a phone, where the margin's cards are a sheet the reader opens"
+  );
+  test.setTimeout(300_000);
+  const { issueKey, path } = await seedDocument("specs-reached.md", proseOnlyDocument);
+  const subscribers = `/issues/${issueKey}/subscribers`;
+  const others = readsTheFirstBlockNeedsNone(issueKey, "BIG").filter(
+    (read) => read !== subscribers
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await watchTheReads(page);
+    await documentTransport(page, { holding: true });
+    await page.goto(path);
+
+    const toggle = page.getByRole("button", { name: /^Subscribers/ });
+    await expect(toggle).toBeVisible({ timeout: 120_000 });
+    await page.waitForTimeout(settledWithTheSocketHeldMs);
+    expect((await readTheReads(page)).reads.filter((read) => read.path === subscribers)).toEqual(
+      []
+    );
+
+    await toggle.click();
+    await expect
+      .poll(
+        async () =>
+          (await readTheReads(page)).reads.filter((read) => read.path === subscribers).length,
+        { message: "the panel the reader opened never read its subscribers", timeout: 30_000 }
+      )
+      .toBe(1);
+
+    // And it was the reader's own panel that did it, with no first batch and none of the other
+    // held reads behind it.
+    const reached = await readTheReads(page);
+    printTheOrder(
+      "the reader's own panel",
+      reached.firstBatchMs,
+      whenEachWentOut(reached.reads, [subscribers, ...others])
+    );
+    expect(reached.firstBatchMs).toBeUndefined();
+    expect(
+      [...whenEachWentOut(reached.reads, others)].filter(([, at]) => at.length > 0),
+      "opening one panel started a read belonging to another"
+    ).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// And a page with no document on it holds nothing: there is no first batch to wait for, so
+// every one of those reads goes out as it did before INFRA-341. The issue's Conversation is
+// that page - the same header, the same margin, no document surface - and the row reads it
+// with no socket held at all, because there is no socket to hold.
+test("a page with no document on it makes those reads as it always did @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "iphone",
+    "the seven were measured on a phone, where the margin's cards are a sheet the reader opens"
+  );
+  test.setTimeout(300_000);
+  const { issueKey } = await seedDocument("specs-no-document.md", proseOnlyDocument);
+  // Every one of the seven but the spec's `part_of` read, which belongs to the document this
+  // page does not show.
+  const paths = readsTheFirstBlockNeedsNone(issueKey, "BIG").filter(
+    (read) => read !== "/references"
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await watchTheReads(page);
+    await page.goto(`/issues/${issueKey}/conversation`);
+    await expect(page.getByRole("button", { name: /^Subscribers/ })).toBeVisible({
+      timeout: 120_000,
+    });
+
+    await expect
+      .poll(
+        async () =>
+          [...whenEachWentOut((await readTheReads(page)).reads, paths)].filter(
+            ([, at]) => at.length === 0
+          ).length,
+        { message: "a read of a page with no document on it never went out", timeout: 60_000 }
+      )
+      .toBe(0);
+
+    const made = await readTheReads(page);
+    printTheOrder("no document on the page", made.firstBatchMs, whenEachWentOut(made.reads, paths));
+    // Nothing was ever built, so nothing was ever waited for.
+    expect(made.firstBatchMs).toBeUndefined();
+    await expect(page.locator('.proof-editor[data-write-path="live"]')).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// And the rule the three rows above are held to: a panel the page draws after the reader is in
+// place moves what they are looking at by no pixels (`web/src/features/doc/readers-place.ts`).
+// The panel here is the issue header's Subscribers list, whose read is one of the seven; the
+// row holds that read at the server until the reader is deep in the document, so the panel
+// lands under a page that has stopped moving rather than during the load, which is the state
+// the rule is about. The browser's own scroll anchoring is off (`withoutScrollAnchoring`), as
+// it is in Safari before 27, so what keeps the reader in place is the page's own doing.
+test("a panel arriving while the reader is in a long document moves what they are looking at by no pixels @phone", async ({
+  browser,
+}) => {
+  test.setTimeout(600_000);
+  const { issueKey, path } = await seedDocument("specs-large.md", largeDocument);
+  await subscribeSession(issueKey);
+  // A section well down the document: the heading the reader stops at, and the words the row
+  // measures. Far enough in that the whole header, panel and all, is off their screen.
+  const landmarkText = sectionHeading(Math.floor(documentDiagrams.large / 2));
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const subscribers = Promise.withResolvers<void>();
+    await page.route(`**/api/v1/issues/${issueKey}/subscribers`, async (route) => {
+      await subscribers.promise;
+      await route.continue();
+    });
+    await page.goto(path);
+    await expect(documentEditor(page)).toBeVisible({ timeout: 240_000 });
+    await withoutScrollAnchoring(page);
+
+    // The reader opens the panel - its read is still held, so it is the empty frame of itself -
+    // and reads their way down to the landmark, which is where they are when it lands.
+    await page.getByRole("button", { name: "Subscribers", exact: true }).click();
+    const landmark = documentEditor(page).getByRole("heading", { name: landmarkText });
+    await landmark.scrollIntoViewIfNeeded();
+    await settledScrollTop(page);
+    await landmark.evaluate((heading) => heading.scrollIntoView({ block: "start" }));
+    expect(await settledScrollTop(page)).toBeGreaterThan(10_000);
+
+    // From here the row reads the landmark after every frame the browser paints - a task
+    // scheduled from an animation frame runs once that frame is on the screen - so what it
+    // records is what the reader saw, never a page the correction had not reached yet.
+    await page.evaluate((text: string) => {
+      const heading = [...document.querySelectorAll(".proof-editor h2")].find(
+        (candidate) => candidate.textContent === text
+      );
+      window.__readersPlace = { grew: false, moved: 0, started: heading !== undefined };
+      if (heading === undefined) return;
+      const scrolled = document.scrollingElement?.scrollTop ?? 0;
+      const started = heading.getBoundingClientRect().top;
+      const sample = () => {
+        const place = window.__readersPlace;
+        if (place === undefined) return;
+        const top = heading.getBoundingClientRect().top;
+        const above = top + (document.scrollingElement?.scrollTop ?? 0) - scrolled;
+        place.moved = Math.max(place.moved, Math.abs(top - started));
+        if (Math.abs(above - started) > 0.5) place.grew = true;
+        requestAnimationFrame(() => window.setTimeout(sample, 0));
+      };
+      sample();
+    }, landmarkText);
+
+    subscribers.resolve();
+    await expect(page.getByRole("region", { name: "Subscribed agents" })).toContainText(
+      "e2e-session-title",
+      { timeout: 60_000 }
+    );
+    await expect
+      .poll(async () => (await page.evaluate(() => window.__readersPlace))?.grew, {
+        message: "the panel landing never changed how much page stands above the reader",
+        timeout: 60_000,
+      })
+      .toBe(true);
+
+    // The reader's words stay on the line they were on. Not to the exact float: a scroll offset
+    // is a fraction of a pixel on a page this tall, so the correction lands within one, and a
+    // pixel is the unit a reader has.
+    const place = await page.evaluate(() => window.__readersPlace);
+    expect(place?.started, "the row never found the heading it measures").toBe(true);
+    expect(
+      place?.moved ?? Number.NaN,
+      "the panel moved the words the reader was looking at"
+    ).toBeLessThan(1);
   } finally {
     await alice.close();
   }

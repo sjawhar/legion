@@ -208,15 +208,19 @@ function sectionText(index: number, decision: number | undefined, drawings: bool
  *  through it, about `sections * 2,900` characters long. With `drawings`, every section also
  *  holds a code block and a Mermaid diagram; without them every top-level block it holds
  *  carries an id in every draw of it, which is what a row counting the blocks on the screen
- *  needs (a code block's node view stamps none, `mermaid-code-block-view.ts`). */
-export function syntheticDocument(sections: number, drawings = true): string {
-  const decisions = new Map<number, number>();
-  for (let decision = 1; decision <= decisionBlocks; decision += 1) {
-    decisions.set(decisionSection(decision, sections), decision);
+ *  needs (a code block's node view stamps none, `mermaid-code-block-view.ts`). Without
+ *  `decisions` it holds none at all: a decision block the reader has on their screen before
+ *  any editor exists is a card that reads the document's asks to answer from, so a row about
+ *  what the page reads while it waits for an editor needs a document with nothing on it for a
+ *  reader to answer (`web/src/features/doc/first-batch.ts`). */
+export function syntheticDocument(sections: number, drawings = true, decisions = true): string {
+  const sectionDecisions = new Map<number, number>();
+  for (let decision = 1; decisions && decision <= decisionBlocks; decision += 1) {
+    sectionDecisions.set(decisionSection(decision, sections), decision);
   }
   const written: string[] = [`# ${documentTitle(sections)}`];
   for (let index = 0; index < sections; index += 1) {
-    written.push(sectionText(index, decisions.get(index), drawings));
+    written.push(sectionText(index, sectionDecisions.get(index), drawings));
   }
   return `${written.join("\n\n")}\n`;
 }
@@ -274,6 +278,12 @@ const plainSections = 24;
  *  each block id across the server's draw, the page's own draw and the editor needs
  *  (acceptance A7). */
 export const plainDocument = syntheticDocument(plainSections, false);
+
+/** The same again with no decision block in it, so nothing the reader has on their screen
+ *  before the editor exists is a card waiting on the document's asks: what the rows about
+ *  which reads the page holds behind the editor's first batch need
+ *  (`web/src/features/doc/first-batch.ts`). */
+export const proseOnlyDocument = syntheticDocument(plainSections, false, false);
 
 /** The id of the decision block the document below opens with. */
 export const openingDecisionBlockId = "decision-opening";

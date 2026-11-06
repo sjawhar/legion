@@ -9,6 +9,7 @@ import {
   railHoverBg,
   railText,
 } from "../../theme/classes";
+import { ReaderIsHere } from "../doc/first-batch";
 import { routeHasMargin } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { MarginSheet } from "./MarginSheet";
@@ -53,7 +54,7 @@ export function Margin({
   // Each compose the margin shows - a new one, one a newer selection-bar action had to wait on,
   // or one held for the document the reader came back to - is the reader's to see, so the rail
   // opens for it; collapsing the rail with a compose open keeps it collapsed.
-  const { shownCompose } = useMargin();
+  const { placesItems, shownCompose } = useMargin();
   const handledCompose = useRef(shownCompose);
   useEffect(() => {
     if (shownCompose === handledCompose.current) return;
@@ -150,22 +151,27 @@ export function Margin({
           }}
           tabIndex={0}
         />
-        <MarginSheet
-          collapsed={railShown}
-          desktopControl={
-            isCompactViewport || onCollapsedChange === undefined ? undefined : (
-              <button
-                aria-label="Hide margin"
-                className={`min-h-11 min-w-11 rounded-lg text-sm font-medium ${railHoverBg}`}
-                onClick={() => onCollapsedChange(true)}
-                type="button"
-              >
-                <span aria-hidden="true">›</span>
-              </button>
-            )
-          }
-          model={model}
-        />
+        {/* While the margin lays its cards out beside the document the reader is at them, so
+            every read inside it - an author's agent registry among them - goes out rather than
+            waiting for the editor's first batch (`features/doc/first-batch.ts`). */}
+        <ReaderIsHere value={placesItems}>
+          <MarginSheet
+            collapsed={railShown}
+            desktopControl={
+              isCompactViewport || onCollapsedChange === undefined ? undefined : (
+                <button
+                  aria-label="Hide margin"
+                  className={`min-h-11 min-w-11 rounded-lg text-sm font-medium ${railHoverBg}`}
+                  onClick={() => onCollapsedChange(true)}
+                  type="button"
+                >
+                  <span aria-hidden="true">›</span>
+                </button>
+              )
+            }
+            model={model}
+          />
+        </ReaderIsHere>
       </div>
     </>
   );

@@ -9,6 +9,7 @@ import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
 import { parseIssuePath } from "../refs/routes";
 import { loadDocumentTransport } from "./connection";
 import { leadingBlocks } from "./document-blocks";
+import { theFirstBatchIsAwaited } from "./first-batch";
 import { currentAddress, dropFirstScreen, firstScreenAwaits } from "./first-screen";
 import { liveTextQueryOptions } from "./live-text";
 import { blockSchemaQueryOptions } from "./schema";
@@ -82,8 +83,15 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
   // Every route whose page opens on a document: the Spec tab's, and a named artifact's, which is
   // a document or is nothing to read ahead for.
   if (route?.kind !== "issue" && route?.kind !== "spec" && route?.kind !== "artifact") {
+    // No document, so there is no first batch to hold the page's other reads behind: they go
+    // out as they always did (`first-batch.ts`).
+    theFirstBatchIsAwaited(false);
     return;
   }
+  // A document is coming, so the reads the first editable block needs none of wait for its
+  // first batch. Said here, before React has rendered anything, because the panels that make
+  // them render before the document surface exists (`first-batch.ts`).
+  theFirstBatchIsAwaited(true);
   // The transport chunk - the hocuspocus provider and yjs - asked for here, in the task that
   // asks for the app's own chunk, rather than when `ProofDocument` admits. It is the first
   // thing the editor's half of the load needs and nothing about it depends on the document's
@@ -123,10 +131,13 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
       // A blob artifact, and a slug this issue has no artifact for, open no document.
       if (artifact?.kind === "doc") {
         readTheTextEarly(client, artifact.id, serverDrewTheFirstScreen, bySlug);
+      } else {
+        // Nothing to build an editor from, so nothing to hold the page's other reads behind.
+        theFirstBatchIsAwaited(false);
       }
     })
     // The issue could not be read, so nothing names a document to read ahead for.
-    .catch(() => undefined);
+    .catch(() => theFirstBatchIsAwaited(false));
   // The other read the page showing this document holds its whole render behind: the reader's
   // own issue state, which `IssuePage` waits for beside the issue itself (`useIssueDetail`) and
   // which the shell otherwise asks for only once it has rendered. The document draws inside
