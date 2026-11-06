@@ -1965,11 +1965,9 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 // the mark a restart armed for that ask goes in the same step (dropUpdateTask), so the new
 // round's ask is prompted rather than taken for the work of whatever turn is running.
 //
-// A claim that already holds a task of its own is answered ErrDeliveryPending, which is a wait
-// rather than a fault: the update task must never displace the work in flight. The refusal is
-// swallowed, UpdateTaskedAt is left as it was, and the next tick asks again — which lands as
-// soon as that turn is over. A task a provider error took back is answered the same way, so
-// the round waits until a turn of that task ends with no provider error (queue, askForUpdate).
+// A claim that already holds a task of its own is asked nothing yet: askForUpdate holds the
+// question back and sends the task the claim holds (sendPending), UpdateTaskedAt is left as it
+// was, and the next tick asks again. askForUpdate's doc says why the question waits.
 //
 // The claim is written only where this post changed it: a round the claim was not in, reasons
 // that have grown, or a task this post actually sent. The sweep posts to every claim of every
@@ -2456,7 +2454,7 @@ func podUpdateSignalled(m *Machine, ctx context.Context, ev Event) error {
 // (UpdateTaskedAt), so the next sweep asks rather than waiting out the re-task bound hours away.
 // That sweep asks at once only where the claim holds no task of its own, because the answer this
 // clears is also what was holding that task back (answeredOpenRound): with it gone,
-// askForUpdate's queue meets ErrDeliveryPending and sends the task the claim holds (sendPending),
+// askForUpdate holds the question back and sends the task the claim holds (sendPending),
 // and the round's own ask takes the slot that task's turn frees (takeSlotForUpdate, run by
 // afterTurn). Holding the task back instead would deadlock the slot — nothing else sends it, and
 // the round it waits for cannot end until this worker answers — so what the re-ask costs is one

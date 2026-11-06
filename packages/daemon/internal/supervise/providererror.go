@@ -116,8 +116,7 @@ func (m *Machine) providerErrorClears(ctx context.Context, cause string) error {
 
 // promptRetryDue is the ladder's wait over: the task goes to the same session again. A claim
 // still working the turn whose error armed this is handed nothing here, and the end of that turn
-// sends it (turnEnded). One task is dropped rather than sent: an ask of an update round that
-// another round has replaced, which no session of this claim can answer (sendPending).
+// sends it (turnEnded). What sendPending drops rather than sends, it drops here as well.
 func promptRetryDue(m *Machine, ctx context.Context, _ Event) error {
 	m.log.Info("supervise: the wait after a provider error is over; the task goes again",
 		"delivery", pendingID(m.claim.Pending))

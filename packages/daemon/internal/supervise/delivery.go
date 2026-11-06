@@ -538,8 +538,9 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 
 // retirePending drops the pending delivery, and is the one place a delivery ends: settle calls
 // it for a delivery whose life is over, sendPending for a task the issue's phase has left
-// behind, dropUpdateTask for the ask of a round the claim has left, and queue for the task a
-// newer one replaces. The claim keeps its state — the task is stale, not the agent.
+// behind and for the ask of a round the claim is not in now, dropUpdateTask for the ask of a
+// round that is over, retire for the ask the claim ends with, and queue for the task a newer one
+// replaces. The claim keeps its state — the task is stale, not the agent.
 //
 // A confirmed task of a run leaves the run behind it, and its assignment with it: the worker goes
 // on working it in whatever turn comes next — one an Envoy notice starts, with no delivery of its

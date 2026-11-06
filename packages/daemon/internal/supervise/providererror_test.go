@@ -304,18 +304,19 @@ func TestAnUpdateRoundsQuestionWaitsBehindTheTaskTheLadderKept(t *testing.T) {
 
 	p := h.pending()
 	if p.ID != owed.ID || p.Task != owed.Task {
-		t.Fatalf("pending %+v, want the task the ladder kept, %s: the question is refused behind it", p, owed.ID)
+		t.Fatalf("pending %+v, want the task the ladder kept, %s: the question waits behind it", p, owed.ID)
 	}
 	if p.ProviderErrorRetries != owed.ProviderErrorRetries {
 		t.Errorf("the owed task counts %d sends, want the %d its ladder had", p.ProviderErrorRetries, owed.ProviderErrorRetries)
 	}
-	// The refusal leaves the ask's own clock unset, so the round asks again at the next tick.
+	// Holding the question back leaves the ask's own clock unset, so the round asks again at
+	// the next tick.
 	if tasked := h.claim().UpdateTaskedAt; tasked != nil {
-		t.Errorf("the round recorded an ask at %v, want none: the question was refused", *tasked)
+		t.Errorf("the round recorded an ask at %v, want none: the question was not asked", *tasked)
 	}
 	h.wantPrompts(1)
 
-	// The ladder's wait is over: the kept task goes, and the turn it starts ends with no
+	// The ladder's wait is over: the owed task goes, and the turn it starts ends with no
 	// provider error, which retires it and frees the slot.
 	if message := h.climbs(1, 30*time.Second); !strings.HasSuffix(message, providerErrorTaskText) {
 		t.Fatalf("the prompt the ladder sent is %q, want the task it kept", message)
@@ -325,7 +326,7 @@ func TestAnUpdateRoundsQuestionWaitsBehindTheTaskTheLadderKept(t *testing.T) {
 
 	question := h.wantPrompts(3)[2]
 	if !asksRound(question.DeliveryID, testRound) {
-		t.Errorf("the prompt after the kept task's turn = %+v, want the round's question", question)
+		t.Errorf("the prompt after the owed task's turn = %+v, want the round's question", question)
 	}
 }
 
@@ -378,7 +379,7 @@ func TestAQuestionOfARoundAnotherReplacedIsDroppedRatherThanSentAgain(t *testing
 // a fresh one, and the task the ladder kept is the task that fresh session is sent. The stop
 // takes the claim's timers with it (letGo), so no wait names that task any more — and the task
 // is still the claim's work, not one the claim owes with nothing left to send it, so the phase
-// restart's own task waits behind it (ErrDeliveryPending) until the turn on the kept task
+// restart's own task waits behind it (ErrDeliveryPending) until the turn on the owed task
 // retires it. Only the task R2 names is replaced (replaceable);
 // scripts/e2e/provider-error-retry.sh step 5 is this case live.
 func TestThePhaseRestartsTaskWaitsBehindTheTaskTheLadderKept(t *testing.T) {
@@ -648,8 +649,8 @@ func TestAFailureKeepsTheTaskTheLadderKept(t *testing.T) {
 // its turn is armed. The ladder's own wait went when the timer fired, so nothing but this
 // decides it. The task is in the agent's hands there, so a newer task waits behind it
 // (ErrDeliveryPending). A task replaced in that window would be lost twice over: the turn the
-// kept task started would confirm the task that replaced it, and that turn's end would retire
-// the kept task unsent, with its outbox row already recorded as delivered.
+// owed task started would confirm the task that replaced it, and that turn's end would retire
+// the owed task unsent, with its outbox row already recorded as delivered.
 func TestANewerTaskDoesNotReplaceTheLaddersTaskWhosePromptIsInFlight(t *testing.T) {
 	h := workingClaim(t)
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
