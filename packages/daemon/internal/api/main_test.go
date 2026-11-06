@@ -23,7 +23,7 @@ import (
 var guardKeep = []string{
 	"LEGION_READY_SCOPE_REPO", "LEGION_READY_SCOPE_PR", "LEGION_READY_SCOPE_ISSUE",
 	"LEGION_READY_SCOPE_APPROVED", "LEGION_READY_SCOPE_HEAD",
-	"LEGION_REAL_GITHUB", "LEGION_GH_PATH", "LEGION_READY_SCOPE_REFUSE",
+	realGitHubProofEnabled, "LEGION_GH_PATH", "LEGION_READY_SCOPE_REFUSE",
 }
 
 // TestMain takes out of the process every variable that could lead this package's real git and gh

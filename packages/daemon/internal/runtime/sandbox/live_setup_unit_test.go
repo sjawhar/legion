@@ -1038,18 +1038,21 @@ func (h *helperLog) helper(name string) string {
 func (h *helperLog) repo(name string, keys ...[2]string) string {
 	h.t.Helper()
 	path := filepath.Join(h.dir, name)
+	// Every command here runs under the log's own home, so none of them reads a repository,
+	// configuration or credential of the process that runs the tests.
+	env := fixtureenv.Isolated(h.dir)
 	initialise := exec.Command(h.realGit, "init", "--quiet", path)
 	// The init creates path, so it runs in the log's own directory, which holds it; the configure
 	// below runs in the repository it names with -C, which the init has made by then.
 	initialise.Dir = h.dir
-	initialise.Env = fixtureenv.Isolated(h.dir)
+	initialise.Env = env
 	if output, err := initialise.CombinedOutput(); err != nil {
 		h.t.Fatalf("init %s: %v: %s", name, err, output)
 	}
 	for _, kv := range keys {
 		configure := exec.Command(h.realGit, "-C", path, "config", "--add", kv[0], kv[1])
 		configure.Dir = path
-		configure.Env = fixtureenv.Isolated(h.dir)
+		configure.Env = env
 		if output, err := configure.CombinedOutput(); err != nil {
 			h.t.Fatalf("config %s: %v: %s", kv[0], err, output)
 		}

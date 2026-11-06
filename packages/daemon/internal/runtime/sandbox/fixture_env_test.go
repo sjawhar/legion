@@ -40,8 +40,9 @@ func TestFixtureCommandsIgnoreAPlantedRepository(t *testing.T) {
 		t.Fatalf("git init %s: %v\n%s", target, err, output)
 	}
 	// Everything a pod's environment carries that would move a git away from the directory it runs
-	// in: the repository and working tree themselves, and a command-scope credential helper. t.Setenv
-	// restores each when the test ends.
+	// in: the repository and working tree themselves, and a command-scope credential helper. The
+	// plant goes on after newSetupRig below, which sets GIT_CONFIG_COUNT to 0 for its own purposes
+	// and would leave the block dead; t.Setenv restores each when the test ends.
 	plant := func() {
 		t.Helper()
 		t.Setenv("GIT_DIR", filepath.Join(target, ".git"))
@@ -50,17 +51,17 @@ func TestFixtureCommandsIgnoreAPlantedRepository(t *testing.T) {
 		t.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
 		t.Setenv("GIT_CONFIG_VALUE_0", "!planted-credential-helper")
 	}
-	plant()
 
 	// The target's fingerprint is the three things a stray git would change: its configuration, its
 	// refs and the files of it. Each reading command is isolated too, so the reading never writes
 	// and never follows the plant somewhere else.
 	fingerprint := func() map[string]string {
 		t.Helper()
+		env := fixtureenv.Isolated(home)
 		read := func(args ...string) string {
 			command := exec.Command(realGit, args...)
 			command.Dir = target
-			command.Env = fixtureenv.Isolated(home)
+			command.Env = env
 			output, err := command.Output()
 			if err != nil {
 				t.Fatalf("git %q in the planting target: %v", args, err)
@@ -91,15 +92,13 @@ func TestFixtureCommandsIgnoreAPlantedRepository(t *testing.T) {
 
 	const helper = "!rig-credential-helper"
 	r := newSetupRig(t, private)
-	// newSetupRig sets GIT_CONFIG_COUNT to 0 for its own purposes, which would leave the planted
-	// block dead for everything below; the plant goes back so the rig's commands run against the
-	// whole of a pod's shape.
 	plant()
 	clone := r.plainClone()
 	r.git("-C", clone, "config", "credential.helper", helper)
 
+	after := fingerprint()
 	for name, want := range before {
-		if got := fingerprint()[name]; got != want {
+		if got := after[name]; got != want {
 			t.Errorf("the rig wrote into the planted repository: its %s is now\n%s\nwant the one it had before the rig ran\n%s", name, got, want)
 		}
 	}

@@ -11,9 +11,10 @@ import (
 // configuration (the GIT_CONFIG_* block, which carries a credential helper) and a JJ_CONFIG; a
 // probe that inherited them would answer for that configuration rather than for the pinned jj's
 // own defaults, which is what RequireJJFilters asks about. The test plants those variables and
-// reads the environment the probe would run under. It starts no jj at all, so it needs neither the
-// pinned binary nor a fixtureenv.Guard in a TestMain of this package: reading what a command would
-// inherit proves the same thing as running it, wherever the test runs.
+// reads the command RequireJJFilters starts, which carries its own environment and its own
+// working directory. It starts no jj at all, so it needs neither the pinned binary nor a
+// fixtureenv.Guard in a TestMain of this package: reading what a command would inherit proves
+// the same thing as running it, wherever the test runs.
 func TestTheJJProbeTakesNoVariableOfTheProcess(t *testing.T) {
 	planted := map[string]string{
 		"GIT_DIR":            "/legion/repos/legion/.git",
@@ -28,7 +29,11 @@ func TestTheJJProbeTakesNoVariableOfTheProcess(t *testing.T) {
 	}
 
 	home := t.TempDir()
-	env := probeEnv(home)
+	probe := probeCommand(home)
+	env := probe.Env
+	if probe.Dir != home {
+		t.Errorf("the probe runs in %s, want the empty home %s, since jj opens the closest .jj above the directory it runs in", probe.Dir, home)
+	}
 	for _, entry := range env {
 		key, value, _ := strings.Cut(entry, "=")
 		if want, ok := planted[key]; ok && want == value {

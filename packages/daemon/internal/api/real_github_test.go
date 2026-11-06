@@ -76,7 +76,7 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	clone := exec.Command("git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
 		"clone", "https://github.com/sjawhar/legion-smoke", filepath.Join(scratch, "legion-smoke"))
 	clone.Dir = scratch
-	clone.Env = append(realCLIEnvironment(gh, dirs[appauth.Implement], t.TempDir()), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
+	clone.Env = realCLIEnvironment(gh, dirs[appauth.Implement], t.TempDir())
 	output, err := clone.CombinedOutput()
 	if err != nil {
 		t.Fatalf("clone through gh auth git-credential: %v: %s", err, strings.TrimSpace(string(output)))
