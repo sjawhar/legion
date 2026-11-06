@@ -15,7 +15,7 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `seed-refs`, `refs-shape`, `refs-fetch`, `run`, `loop-seed-plan`, `loop-seed-write`, `loop-seed-check`, `loop-seed-export`, `plan-docs`, `tables`, `seed-finish`, `stub-embed`, `cgroup-merge`, `vm-sample`, `cloudsql-cpu`, `curves`, `codepaths`, `backlog`, `restart-report`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-verify-bundle`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `seed-refs`, `refs-shape`, `refs-fetch`, `run`, `loop-seed-plan`, `loop-seed-write`, `loop-seed-check`, `loop-seed-export`, `plan-docs`, `tables`, `seed-finish`, `stub-embed`, `cgroup-merge`, `vm-sample`, `cloudsql-cpu`, `pg-statements`, `pg-size`, `curves`, `codepaths`, `backlog`, `restart-report`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-verify-bundle`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time; `callRaw` sends a body of any type (a multipart upload), and `callKeyed` and `callRetryKeyed` send a write under an idempotency key |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `seedfinish.go` | `loadgen seed-finish`: the steps after the seed (the wait for the outbox, the wait for the block-index backfill, `vacuum analyze`, the commit-time trigger), which `stack.sh seed` and `cluster.sh seed` both run |
@@ -50,9 +50,11 @@ same step before and after its change, and compares the two rows.
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
 | `cgroup.go` | `loadgen cgroup-merge`: a step's `cgroup.json` from the cluster sampler's `cgroup.jsonl` (cores, working set and per-minute figures per container, and the sampler-gap failure) |
 | `vmsample.go` | `loadgen vm-sample`: one long-lived ssh per virtual machine, each running `vm/sample.sh`, every reading appended to the `cgroup.jsonl` that `cgroup-merge` already merges |
-| `cloudsqlcpu.go` | `loadgen cloudsql-cpu`: a step's Cloud SQL instance CPU over its window, from Cloud Monitoring's `database/cpu/utilization` at its own 60 s alignment, as `cloudsql-cpu.json`. It is where the database's cores come from when the database is an instance and not a container, and pass criterion (h) reads it. |
+| `cloudsqlcpu.go` | `loadgen cloudsql-cpu`: a step's Cloud SQL instance CPU and memory over its window, from Cloud Monitoring's `database/cpu/utilization` and `database/memory/total_usage` at their own 60 s alignment, as `cloudsql-cpu.json`. It is where the database's cores and bytes come from when the database is an instance and not a container, and pass criterion (h) reads it. |
+| `pgstats.go` | `loadgen pg-statements` and `loadgen pg-size`: the step's own `pg-statements.json` (the window's slowest statements, after a reset at its start, and the lock waits its samples of `pg_locks` saw) and `pg-size.json` (the database's size before and after the load) |
 | `cgrouptables.go` | How `tables` and `curves` read a step's `cgroup.json` and `step-failed.json` |
 | `curves.go` | `loadgen curves`: `CURVES.md`, `curves.csv`, `KNEES.md` and `refine.txt` from cluster step directories (the pass rule, the knee rule and the refinement factors) |
+| `stepcheck.go` | `loadgen step-check`: one step directory judged against acceptance A3 of dispatch://INFRA-988, one line per clause, exit 1 on a failed one (The step directory, below) |
 | `curvetrend.go` | `TREND.md`: the hour step's least-squares trend of Dispatch's cores, working set and heap |
 | `codepaths.go` | `loadgen codepaths`: `CODEPATHS.md` and `codepaths.json`, Dispatch's CPU and memory by code path beside the outage |
 | `outage-2026-10-26-buckets.csv` | Production's 10-minute buckets of the outage (Dispatch's cores and memory, mean and max), the default of `codepaths -outage-buckets` |
@@ -1691,6 +1693,8 @@ Every percentile in the harness is the lower nearest rank: the value at index
 | `envelope-<type>.json` | One envelope that a session got on an issue topic, per event type, with a marker when one arrived. |
 | `envelope-agent.<type>.json` | The same for an agent topic. |
 | `relay-frames.csv` | Under consumer delivery, one row per relay frame: the session, the stored subject, the stream sequence, `Envoy-Delivered`, the store time and the receipt time (Unix ns), the event id, whether it was a duplicate, the frame's dedupe identity (the envelope's `event_id`, else its `dedupe_key`) and whether the session answered it `done`. |
+| `pg-statements.json` | Postgres's slowest statements over the step's window and the lock waits beside them, which R6 of dispatch://INFRA-988 asks for; `loadgen pg-statements` writes it (The step's Postgres readings, below). `statements` is the slowest by total time first, each with `query` (normalized by `pg_stat_statements`), `queryid`, `calls`, `total_ms`, `mean_ms`, `rows`, `shared_blks_read` and `shared_blks_hit`, a column the installed extension does not offer being null. `lock_waits` is one entry per (lock, waiter, blocker) its samples of `pg_locks` saw, each with `lock_type`, `target`, `mode`, `waiter_query`, `blocker_query`, `observations`, `first_seen`, `last_seen`, `seen_for_s` and, where the server has `pg_locks.waitstart`, `wait_ms_max` and `wait_ms_mean`, longest wait first. `reset` records the reset at the window's start — its `call`, `result_type`, `ok`, `at`, `returned` and `error` — so a step whose reset failed is not read as a step with few statements, and `lock_samples`, `lock_sample_failures`, `lock_interval_s` and `lock_wait_source` say how the waits were sampled. `loadgen step-check` reads it: the file must be there with at least one statement, and `lock_waits` must be there and may be empty, which is a step where nothing waited. |
+| `pg-size.json` | The database's size in bytes at the step's start and at its end (`start_bytes`, `end_bytes`, with `start_at` and `end_at`), which R6 asks for; the two phases of `loadgen pg-size` write it. `end_bytes` is null until the end phase has run. `loadgen step-check` takes both above 0 and the end at or above the start: a step adds rows and drops no table. |
 | `dispatch.log` | Dispatch's log for the step. |
 | `listener.log`, `nats.log` | The listener's and NATS's logs since their restart in the reset. |
 | `restart.json`, `backlog.json`, `warm.json`, `restart-report.json` | Of a `restart-step.sh` step only: the restart's times and start attempts, the backlog runs' summaries, and the report (The listener restart, above). |
@@ -1704,6 +1708,91 @@ that `-out` names. Under `stack.sh loadgen`, the current directory is `$LOADTEST
 writes `cpu.top.txt`, `cpu.cum.txt`, `heap.top.txt` and `goroutines.summary.txt` in each step
 directory. `-tops=false` does not write these files. `run-series.sh` uses `-tops=false` for the
 series `TABLES.md`, because `run-step.sh` already wrote them for each step.
+
+`loadgen step-check <step dir>` judges one step against acceptance A3 of dispatch://INFRA-988,
+from the step's own files alone, so a step's conformance is read rather than asserted:
+
+```bash
+# One step of a run, judged where the run keeps it:
+"$LOADTEST_ROOT/bin/loadgen" step-check /legion/scratch/tmp/lt/runs/<run>/steps/2x
+```
+
+It prints the step's name, factor and window, then one line per clause, `<clause>: <reading> —
+ok|FAIL|n/a`, and a verdict line; it exits 1 when a clause fails, so a role puts the output
+straight into the check's result. The clauses are:
+
+- **the rates of R5.** First that the step's own targets are R5's rates for the step it stands
+  for — production's own 4 writes and 60 requests a second in the `baseline` population at every
+  factor, and the `loop` population's writes, reads and unit starts each at the step's
+  `config.loop_factor` times R5's 3.5, 38.5 and 1.75 — then that what the step offered met those
+  targets, within 5% both ways: the writes offered, the reads sent, each population's own share
+  of them, the unit starts (the unit sessions of `events.by_class` over the warm-up and the
+  window, which is the span the start schedule runs over), and the unit sessions live at one
+  time (the median of the once-a-second samples against the start rate times a session's life).
+  Both halves are needed: a step run at half its read rate meets the target it was given, and
+  only the first half sees that the target was not the step's.
+- **the bound of R5**: no proposal held more than 30 unit sessions at once
+  (`loop_sessions.most_on_one_proposal`).
+- **every measurement of R6**, each its own clause with its reading: the write latency of each
+  kind and the read latency of each route, the delivery latency from arrival and from commit,
+  the delivery of each session class, the notifications expected, received, lost and duplicate,
+  the session start, subscribe and unsubscribe latencies, the offered and committed rates, the
+  unit sessions at one time and the most on one proposal, the writes a document cap refused, the
+  CPU and memory of Dispatch, the Auth Proxy, each listener, NATS, the load generator
+  (`config.generator_role`'s machine) and Postgres, the requests waiting for a database
+  connection, Postgres's slowest statements and lock waits, Dispatch's CPU profile, and the
+  database's size at the start and the end. A measurement the step's own load leaves nothing to
+  make — a baseline step has no unit session — is `n/a` and no failure; one the step should hold
+  and does not is `FAIL` and is named, with the file it is read from.
+- **a pass or a fail for each criterion of R8**, judged by the spec loop's series rule
+  (`loadgen curves -series loop`, The pass rule and the knee rule, below) read here one step at a
+  time, and its void rule. A criterion with no verdict for want of a file the step should hold —
+  no `cgroup.json` for (d), no `cloudsql-cpu.json` for (h) — fails this check even though the
+  curves draw the step without it: A3 asks that the step's own file say pass or fail.
+
+### The step's Postgres readings
+
+Three readings R6 asks for are the server's own and come from no sampler: the window's slowest
+statements, its lock waits, and the database's size before and after the load. `loadgen
+pg-statements` and `loadgen pg-size` take them, beside the instance's CPU and memory that
+`loadgen cloudsql-cpu` reads from Cloud Monitoring. Both take the database's URL as a file
+(`-pg-file`), as every credential of this package is taken, so no password reaches a command
+line; `vm/vm.sh` writes that file at mode 600 for the step and removes it afterwards.
+
+```bash
+# At the step's start, after the reset and before the load:
+"$LOADTEST_ROOT/bin/loadgen" pg-size -step <step dir> -pg-file <url file> -phase start
+"$LOADTEST_ROOT/bin/loadgen" pg-statements -step <step dir> -pg-file <url file> &
+# At its end, after the load: SIGTERM the watcher, wait for it, then the second size.
+kill -TERM "$!"
+"$LOADTEST_ROOT/bin/loadgen" pg-size -step <step dir> -pg-file <url file> -phase end
+```
+
+`pg-statements` runs for the length of the step. At its start it reads the catalogue — the
+installed `pg_stat_statements`, the columns its version of the view offers, the
+`pg_stat_statements_reset` the server has and what that call returns, and whether `pg_locks`
+carries the `waitstart` Postgres 14 added — and resets the statistics, so the statements it
+reads at the end are this step's own. A database with no `pg_stat_statements`, or a view it
+cannot read a total time from, is refused there and then, with no file written.
+`pg_stat_statements.track` and `.max` are flags of the instance, and they carry no view: the
+extension belongs to the database it was created in, and every reset makes the step's database
+again from the template, so `vm/vm.sh` runs `create extension if not exists
+pg_stat_statements` in the step's database after the reset and before these collectors
+(`pg_collect_start`). A reset the server refused does not stop the step; it is recorded in
+the file's `reset`, so a window whose statistics still hold older steps is not read as a step
+with few statements.
+
+Over the window it reads `pg_locks` every `-interval` (2 s), naming each waiter's blocker from
+the same scan as the run's own sampler does and never calling `pg_blocking_pids`. A lock wait
+that is over leaves no row, so the waits are sampled rather than read once, and each entry says
+how many samples saw it and how long it was in view beside the length `pg_locks.waitstart`
+gives. On SIGTERM or SIGINT it reads the window's `-top` (50) slowest statements, writes
+`pg-statements.json` and exits 0; a run killed before that leaves no file, which is how
+`loadgen step-check` tells a collector that never ran from one that ran and found nothing.
+
+`pg-size -phase start` writes the size before the load and `-phase end` adds the size after it
+to that same file. An end phase with no start file is refused rather than writing a start size
+of 0, which would read as a step that began with an empty database.
 
 ## The tables
 
@@ -2831,9 +2920,9 @@ directory is `${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>`, on th
 | --- | --- |
 | `up --config FILE [--run ID] [--loadgen PATH]` | Starts every container of the specification below by image digest, each on the machine the file puts it on, with its CPU and memory limits and nothing silently defaulted, installs `loadgen` and the stub embedder on the load machine, makes the database `cloudsql.database` names when the instance does not hold it yet, and waits until Dispatch answers `/healthz`. It makes the run directory and names the run. |
 | `check --config FILE [--run ID]` | The read-back: every container's CPU, memory and image, Dispatch's network mode, the instance's own settings from the Cloud SQL Admin API, every machine's run-time limit from the Compute API, every endpoint setting of every container, and that each production address the file names is refused from every machine. One markdown table of expected beside found, and exit 1 on any difference. |
-| `seed --config FILE [--run ID] [--embed-timeout 8h] [--workers 8]` | Both seeds a step draws on: `loop-seed-plan`, `loop-seed-write` on the load machine, `loop-seed-check`, `loop-seed-export`, then the baseline population's own seed (`loadgen seed` on the load machine, into `paths.remote_work`/`seed.json`), then `seed-finish` with the embedding gate, whose one wait covers the items of both seeds; each phase's wall clock and the gate's coverage progress in `<run>/seed.json`; then the template database. A phase is idempotent: a `seed.json` already on the load machine with the deployment's own shape — projects, and at least `load.baseline.sessions` issues, each with a key and its route — is left as it is rather than written a second time. |
+| `seed --config FILE [--run ID] [--embed-timeout 8h] [--workers 8]` | Both seeds a step draws on: `loop-seed-plan`, `loop-seed-write` on the load machine, `loop-seed-check`, `loop-seed-export`, then the baseline population's own seed (`loadgen seed` on the load machine, into `paths.remote_work`/`seed.json`), then `seed-finish` with the embedding gate, whose one wait covers the items of both seeds; each phase's wall clock and the gate's coverage progress in `<run>/seed.json`; then the template database. A deployment is seeded once and every later run adopts that seeding (below). A phase is idempotent: a `seed.json` already on the load machine with the deployment's own shape — projects, and at least `load.baseline.sessions` issues, each with a key and its route — is left as it is rather than written a second time. |
 | `reset --config FILE [--run ID]` | The whole reset (below), its duration recorded. |
-| `step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]` | One step: the reset, the VM sampler, the profiling tunnel (below), `loadgen run` at FACTOR, the profiles fetched from the machine Dispatch runs on, then `cgroup-merge`, `cloudsql-cpu` and `tables`. |
+| `step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]` | One step: the reset, the VM sampler, the profiling tunnel (below), Postgres's own collectors (below), `loadgen run` at FACTOR, the profiles fetched from the machine Dispatch runs on, then `cgroup-merge`, `cloudsql-cpu` and `tables`. A step stopped before its window is out takes its remote work with it (below). |
 | `series --config FILE [--run ID] [--duration 10m] [--long 60m] [--long-warmup 5m]` | The baseline, 1x and 2x at `--long` after a `--long-warmup` warm-up, then the grid 3, 4, 6, 8, 12, 16 and 20 at `--duration`, stopping at the first failing step, then the refinement `loadgen curves` asks for until `refine.txt` is empty. |
 | `collect --config FILE [--run ID]` | `loadgen curves -series loop` over the run's steps, in the order they ran, into `<run>/curves`. |
 | `down --config FILE [--run ID]` | Stops every container and the stub embedder, and removes the run's credential files from the load machine. The machines and the instance are left alone. |
@@ -2851,6 +2940,24 @@ after it starts, and a machine that is gone is no Dispatch failure. `step` reads
 Compute status before the reset and again after the load; any one of them not `RUNNING` removes
 the step's directory, names the machine that stopped, and ends the step with status 3, which
 `series` reports and stops on.
+
+**A deployment is seeded once, and every later run adopts that seeding.** The seed is hours of
+writes — twelve on this deployment — and the template database is named once on the instance, so
+`seed` on a run that holds no record of its own, against an instance that already holds the
+template `cloudsql.template` names, writes nothing: it proves the deployment really is seeded,
+records in that run's `<run>/seed.json` the template it adopted and that it adopted rather than
+wrote it, and exits 0. The proof is read, never assumed — the template's own loop seed id map
+(`public.loadtest_loop_ids`) and the issues of the production seed's projects, counted in the
+template, and both seed files on the load machine, `seed.json` of the shape a step reads and
+`loopseed.seed.json` with its proposals — and a deployment missing any one of them is refused by
+the name of that part, with the reminder that `seed` writes a seeding only on a deployment that
+holds no template. A run that already holds its own `<run>/seed.json` is refused as before.
+Before this, a second run of a seeded deployment could never run a step: `up` made the run,
+`step` refused it (`no <run>/seed.json: vm.sh seed first`), and `seed` refused to write that
+record because the instance already held the template, so the only way through was dropping the
+template and seeding again — twelve hours. A replaced pod, a machine Google stopped at its
+72-hour limit, a rehearsal beside a real run and an operator picking the work up tomorrow each
+make a new run.
 
 `vm.sh` needs `ssh`, `ssh-keygen`, `curl`, `jq`, `psql`, `tar`, `gzip` and `loadgen` on the worker
 pod, and `nc` on the machines.
@@ -3138,6 +3245,55 @@ rehearsal on the deployment. `down` removes that key with the run's other creden
 The tunnel is the harness's, not the deployment's: `up` starts none, `down` stops none, and no row
 of `check`'s table reads it — `check` says so under its table, naming the ports it runs between,
 so a reader is not left looking for it among the deployment's own readings.
+
+### What a step records of Postgres
+
+R6 asks each step for the instance's CPU and memory, its slowest statements and its lock waits,
+and the database's size at the start and at the end of the step. The CPU and the memory are
+`loadgen cloudsql-cpu`'s, from Cloud Monitoring, in the step's `cloudsql-cpu.json`. The other
+three are two collectors of the step's own, which run on this pod and read the instance directly,
+as `cloudsql-cpu` does, over the database's URL in a file of mode 600 under the run's directory
+here that the step removes when it ends. What each of them reads and writes is The step's
+Postgres readings, above; when the step runs them is here:
+
+| When | What runs | What it writes |
+| --- | --- | --- |
+| after the reset of the deployment, before any load | `loadgen pg-size -phase start` | `<step>/pg-size.json`, `start_bytes` |
+| the same moment, for the length of the step | `loadgen pg-statements` | `<step>/pg-statements.json` when the step stops it: `statements`, slowest first, and `lock_waits` |
+| when the load has ended | `loadgen pg-size -phase end` | `end_bytes` in the same file |
+
+Both run **after** the reset, so what a step's statements show is the step's own writes and not
+the reset's: `pg-statements` resets `pg_stat_statements` at its start, then samples `pg_locks`
+while the load runs. A collector that ran and found nothing writes its file with an empty array;
+one that never ran leaves no file, and `loadgen step-check` reads the difference, so neither file
+is written to be tidy. Each one failing is a note and never a step failure, as `cgroup-merge` and
+`cloudsql-cpu` are: what the step measured stands without it.
+
+Before either of them, the step runs `create extension if not exists pg_stat_statements` in the
+step's database. `pg_stat_statements.track` and `.max` are flags of the instance, but the view
+itself belongs to the database the extension was made in, and every reset makes the step's
+database again from the template, so without that statement `pg-statements` refuses at its start
+and the step keeps no statement at all. It is idempotent: a template that already carries the
+extension pays one statement a step.
+
+### Stopping a step
+
+A step stopped before its window is out — an operator's `SIGTERM` or `SIGINT`, a refusal, a
+failure anywhere in it — takes its remote work with it: the `loadgen run` on the load machine,
+the profiling tunnel there, the VM sampler and the Postgres collector on this pod, and the pid
+file of each. Before this, a `series` stopped with a `TERM` left all of it running — the load
+with its whole window to go, loading the deployment the next step would measure — to be killed by
+hand on both machines ([INFRA-988](dispatch://INFRA-988)). Two things do it, because either alone
+leaves half:
+
+- `ssh` carries no signal to the command it runs, so killing the local `ssh` is nothing to the
+  load. The load is started through a small `sh` that records the pid of the `loadgen run`
+  itself on the load machine before it `exec`s it, and the step's stop kills that pid over a
+  connection of its own — `TERM`, then `KILL` after 10 s — and removes the file.
+- A bash script with no trap for a signal dies of it and never runs its `EXIT` trap, so `step`
+  traps `INT` and `TERM` beside `EXIT`, and ends with the status a shell killed by that signal
+  has (130 and 143). The load is waited on in the background, so the trap runs the moment the
+  signal arrives rather than when that `ssh` returns, which for a step's load is an hour away.
 
 ## What this harness does not do
 

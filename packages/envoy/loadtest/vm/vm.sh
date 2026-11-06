@@ -27,12 +27,17 @@
 #       seed` on the load machine, into <remote_work>/seed.json), then seed-finish with the
 #       embedding gate (-url), whose one wait covers the items of both seeds; each phase's wall
 #       clock and the gate's coverage progress recorded in <run>/seed.json; then the template
-#       database.
+#       database. A deployment is seeded once: run it on one that already holds the template
+#       and it writes nothing, proves that seeding is whole -- the id map in the template, the
+#       issues of the production seed, and both seed files on the load machine -- and records
+#       in <run>/seed.json that this run adopted it.
 #   vm.sh reset --config FILE [--run ID]
 #       The whole reset of decision D6, in order, its duration recorded.
 #   vm.sh step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]
-#       One step: the reset, the VM sampler, loadgen run at FACTOR, the profile fetched from the
-#       machine Dispatch runs on, cgroup-merge, cloudsql-cpu and tables.
+#       One step: the reset, the VM sampler, Postgres's own collectors, loadgen run at FACTOR,
+#       the profile fetched from the machine Dispatch runs on, cgroup-merge, cloudsql-cpu and
+#       tables. A step that ends before its window is out -- a refusal, a failure, an operator's
+#       interrupt -- takes its remote work with it.
 #   vm.sh series --config FILE [--run ID] [--duration 10m] [--long 60m] [--long-warmup 5m]
 #       The baseline, 1x and 2x steps at --long after a --long-warmup warm-up, then the grid 3,
 #       4, 6, 8, 12, 16 and 20 at --duration, stopping at the first failing step, then the
@@ -206,6 +211,31 @@
 # (check_route_mixes): a step started without its mix dies at its first second with its whole
 # window booked. The baseline population has no route mix of this file's: -route-mix is the
 # loop's reads alone.
+#
+# What a step records of Postgres, and when it records it. R6 asks each step for the instance's
+# CPU and memory, its slowest statements and its lock waits, and the database's size at the start
+# and at the end, and nothing collected the last four: a step's directory held the load's own
+# files, the profiles, cgroup.json and cloudsql-cpu.json's CPU alone (dispatch://INFRA-988). So
+# beside the sampler a step runs two collectors of its own, both on this pod and both reading the
+# instance directly, as cloudsql-cpu does, with the database's URL in a file of mode 600 under the
+# run's directory here that is removed when the step ends (pg_step_secret): `loadgen pg-size`
+# reads the size after the reset of the deployment and before any load, and again once the load
+# has ended, into <step>/pg-size.json; `loadgen pg-statements` starts with that first read, resets
+# pg_stat_statements so the statements the step shows are the step's own writes and not the
+# reset's, samples the lock waits for the length of the step, and writes <step>/pg-statements.json
+# when the step stops it. Each one failing is a note and never a step failure, as cgroup-merge and
+# cloudsql-cpu are: what the step measured stands without them.
+#
+# A step's stop takes its remote work with it. ssh carries no signal to the command it runs, so a
+# series stopped on this pod with a TERM left `loadgen run` loading the deployment from the load
+# machine with its whole window to go, the local processes that carried it, and the profiling
+# tunnel -- each to be killed by hand, on both machines (dispatch://INFRA-988). Two things
+# together end it. The load is started through an sh that records on that machine the pid of the
+# loadgen itself, the process and not a shell around it, before it execs it (load_pid_file), so a
+# kill over ssh reaches the load rather than an ssh that has already gone; and it is waited on in
+# the background here, so a signal runs this script's trap at once rather than when that ssh
+# returns, which for a step's load is an hour away. run_step traps INT and TERM as well as EXIT,
+# because a bash script with no trap for a signal dies of it and never runs its EXIT trap.
 #
 # The run directory is ${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>: state.json
 # (mode 600, the deployment file's values that the run was started with), the run's OS Login
@@ -1518,7 +1548,18 @@ cmd_seed() {
   workers=${OPT[workers]:-8}
   [[ $workers =~ ^[1-9][0-9]*$ ]] || die "seed: --workers '$workers' is not a count"
   [ ! -f "$RUN_DIR/seed.json" ] || die "seed: run $RUN is seeded already ($RUN_DIR/seed.json)"
-  ! db_exists "$template" || die "seed: the instance already holds the template database $template"
+  # A deployment is seeded once, and every run after the first adopts that seeding. The seed is
+  # twelve hours of writes and the template database is named once on the instance, so a run
+  # made after it -- by a replaced pod, by a machine Google stopped at its 72-hour limit, by a
+  # rehearsal beside a real run, by an operator who picks the work up tomorrow -- can neither
+  # write the seed again nor do without a record of it (run_step). So a run with no record of
+  # its own, on an instance that already holds the template, proves the seeding is whole and
+  # records that it adopted it, writing nothing to the deployment (seed_adopt); only a
+  # deployment that holds no template is seeded here.
+  if db_exists "$template"; then
+    seed_adopt "$template" "$work" "$t0"
+    return 0
+  fi
   : >"$RUN_DIR/seed.phases.jsonl"
   endpoints
   # The three phases below run here and not on the load machine, so they take their credentials
@@ -1559,10 +1600,13 @@ cmd_seed() {
   seed_cleanup
   trap - EXIT
 
+  # adopted: false says this run wrote the seeding the record describes, which the record a
+  # later run adopts (seed_adopt) says the other way round; every other field is the same, so
+  # one reader reads both.
   jq -n --arg at "$(utc_now)" --argjson seconds "$(elapsed_since "$t0")" --arg template "$template" \
     --argjson phases "$(jq -s . "$RUN_DIR/seed.phases.jsonl")" \
     --argjson coverage "$(jq -c . "$RUN_DIR/seedfinish.embed.json" 2>/dev/null || echo null)" \
-    '{finished: $at, seconds: $seconds, template: $template, phases: $phases, embed_progress: $coverage}' >"$RUN_DIR/seed.json"
+    '{finished: $at, seconds: $seconds, template: $template, adopted: false, phases: $phases, embed_progress: $coverage}' >"$RUN_DIR/seed.json"
   note "seed done in $(elapsed_since "$t0") s: template database $template; $RUN_DIR/seed.json"
 }
 
@@ -1602,20 +1646,117 @@ seed_production() {
   on_vm_for 86400 "$LOAD_VM" "$(remote_loadgen)" seed -out "$path" -workers "$workers" "${ENDPOINTS[@]}"
 }
 
+# PRODUCTION_SEED_JSON: the production seed production_seed_shape last read off the load
+# machine, so a caller that needs what is in it -- the projects and the issue count the proof
+# below reads the instance against -- reads the file once rather than twice over ssh.
+PRODUCTION_SEED_JSON=""
+
 # production_seed_shape PATH SESSIONS: the load machine's PATH is a seed.json of the shape a
-# step reads. That is the shape `loadgen run` holds it to -- projects, and issues each with a
-# key and the route the seed gave it (seed.go readSeed) -- with at least SESSIONS issues, since
-# session i works on issue i modulo the issues the seed holds (run.go newStep) and a seed
-# smaller than the step's own session count is a smaller deployment than the baseline's. A file
-# that is not there, that is not readable JSON, or that holds any less, is no seed to keep.
+# step reads, and its text is in PRODUCTION_SEED_JSON. That is the shape `loadgen run` holds it
+# to -- projects, and issues each with a key and the route the seed gave it (seed.go readSeed)
+# -- with at least SESSIONS issues, since session i works on issue i modulo the issues the seed
+# holds (run.go newStep) and a seed smaller than the step's own session count is a smaller
+# deployment than the baseline's. A file that is not there, that is not readable JSON, or that
+# holds any less, is no seed to keep.
 production_seed_shape() {
-  local path=$1 sessions=$2 json
-  json=$(on_vm "$LOAD_VM" cat -- "$path" 2>/dev/null) || return 1
+  local path=$1 sessions=$2
+  PRODUCTION_SEED_JSON=$(on_vm "$LOAD_VM" cat -- "$path" 2>/dev/null) || return 1
   jq -e --argjson sessions "$sessions" '
     (.projects | type == "array" and length > 0)
     and (.issues | type == "array" and length >= $sessions)
     and all(.issues[]; (.key | type == "string" and length > 0) and (.route | type == "string" and length > 0))
-  ' >/dev/null 2>&1 <<<"$json"
+  ' >/dev/null 2>&1 <<<"$PRODUCTION_SEED_JSON"
+}
+
+# loop_seed_proposals PATH: how many proposals the loop seed on the load machine's PATH holds,
+# printed; non-zero when that machine holds no such file, when it is not readable JSON, or when
+# it names no proposal. That file is what `loadgen run -loop-seed` opens on the machine it runs
+# on (loopseed_export.go), and its proposals are the issues the loop population writes on and
+# reads, so a file without one drives no loop step.
+loop_seed_proposals() {
+  local json
+  json=$(on_vm "$LOAD_VM" cat -- "$1" 2>/dev/null) || return 1
+  jq -e -r 'select((.proposals | type) == "array" and (.proposals | length) > 0) | .proposals | length' \
+    2>/dev/null <<<"$json"
+}
+
+# SEED_EVIDENCE: what seed_proof read of a deployment that is seeded already, as one JSON
+# object: the template database with the rows of each thing a step reads out of it, and the two
+# seed files on the load machine with what each of them holds. It is the body of the record a
+# run that adopts that seeding keeps (seed_adopt).
+SEED_EVIDENCE=""
+
+# seed_proof TEMPLATE WORK: this deployment really is seeded -- read, never assumed -- into
+# SEED_EVIDENCE, or a refusal naming the part that is missing.
+#
+# A step draws on four things, and all four are read here: the template database the reset makes
+# every step's database from; the loop seed's id map in that template
+# (public.loadtest_loop_ids), which is what loop-seed-export turned into the records the loop
+# population addresses; the loop seed itself on the load machine, which `loadgen run` opens
+# there as -loop-seed; and the production seed beside it, whose issues the baseline population
+# writes on -- counted in the template as well as named in the file, because a seed file
+# describes a database and is not one. The template is read first, since a proof that assumes
+# its subject proves nothing: cmd_seed reaches this only when the instance holds the template,
+# and the refusal is here for the deployment that holds half a seeding and for a caller of its
+# own.
+seed_proof() {
+  local template=$1 work=$2 sessions production loop_file loop_ids issues named proposals project list=""
+  db_exists "$template" ||
+    die "seed: the instance holds no template database $template, so there is no seeding for run $RUN to adopt: a deployment is seeded once and every run after that adopts it. Run seed on a deployment that holds none and it writes one."
+  loop_ids=$(psql_at "$template" 'select count(*) from public.loadtest_loop_ids') || loop_ids=""
+  [[ $loop_ids =~ ^[1-9][0-9]*$ ]] ||
+    die "seed: the template database $template holds no loop seed id map: public.loadtest_loop_ids answered '${loop_ids:-nothing}' (its own error, if it gave one, is above). Every step's loop population reads the records that map names, so this deployment is seeded in part at most and run $RUN has nothing to adopt. Seed a deployment that holds no template database $template."
+  loop_file=$work/loopseed.seed.json
+  proposals=$(loop_seed_proposals "$loop_file") ||
+    die "seed: the $LOAD_VM VM holds no loop seed at $loop_file, or that file names no proposal. Every step opens it there as -loop-seed, and its proposals are the issues the loop population reads and writes, so this deployment is seeded in part at most and run $RUN has nothing to adopt. Seed a deployment that holds no template database $template."
+  production=$work/seed.json
+  sessions=$(load_value baseline.sessions 400)
+  valid number "$sessions" ||
+    die "the deployment file $CONFIG gives .load.baseline.sessions as '$sessions', which is not a number"
+  production_seed_shape "$production" "$sessions" ||
+    die "seed: the $LOAD_VM VM holds no production seed of the shape a step reads at $production: projects, and at least $sessions issues each with a key and its route. Every step opens it there as -seed and the baseline population draws its writes from it, so this deployment is seeded in part at most and run $RUN has nothing to adopt. Seed a deployment that holds no template database $template."
+  # The issues that file names, in the template itself: the keys a step writes on are rows of
+  # the database the reset makes, and a file left behind by a seeding that was dropped would
+  # otherwise pass for one. Each project key is held to Dispatch's own shape before it reaches
+  # the statement (store/migrations/0001_init.up.sql projects.key).
+  named=$(jq '.issues | length' <<<"$PRODUCTION_SEED_JSON")
+  while read -r project; do
+    [[ $project =~ ^[A-Z][A-Z0-9]{1,9}$ ]] ||
+      die "seed: the production seed $production on the $LOAD_VM VM names the project '$project', which is no Dispatch project key, so it is no seed for run $RUN to adopt."
+    list+="${list:+, }'$project'"
+  done < <(jq -r '.projects[]' <<<"$PRODUCTION_SEED_JSON")
+  issues=$(psql_at "$template" "select count(*) from public.issues where project_key in ($list)") || issues=""
+  { [[ $issues =~ ^[0-9]+$ ]] && ((issues >= named)); } ||
+    die "seed: the template database $template holds '${issues:-nothing}' issues of the projects $list, and the production seed $production on the $LOAD_VM VM names $named of them. The baseline population of every step writes on those issues, so this deployment is seeded in part at most and run $RUN has nothing to adopt. Seed a deployment that holds no template database $template."
+  SEED_EVIDENCE=$(jq -n --arg at "$(utc_now)" --arg template "$template" \
+    --argjson loop_ids "$loop_ids" --argjson issues "$issues" --argjson named "$named" \
+    --arg production "$production" --arg loop_file "$loop_file" --argjson proposals "$proposals" \
+    --argjson projects "$(jq -c '.projects' <<<"$PRODUCTION_SEED_JSON")" \
+    '{read_at: $at, template: $template, loop_ids: $loop_ids, issues: $issues,
+      production_seed: {path: $production, projects: $projects, issues: $named},
+      loop_seed: {path: $loop_file, proposals: $proposals}}')
+}
+
+# seed_adopt TEMPLATE WORK T0: the seeding this deployment already holds, adopted by run RUN,
+# which writes nothing to the deployment. It proves the seeding is whole (seed_proof) and keeps
+# this run's own record of it, which is what a step asks for (run_step) and what a run made
+# after the seeding -- by a replaced pod, by a machine Google stopped at its 72-hour limit, by a
+# rehearsal beside a real run -- has never had.
+seed_adopt() {
+  local template=$1 work=$2 t0=$3
+  seed_proof "$template" "$work"
+  # The record carries what a written one carries -- the template, when it was finished, how
+  # long that took and the phases -- with no phase and no coverage, because this run ran
+  # neither, and adopted: true, so an empty phase list reads as a seeding adopted and not as a
+  # seed that did nothing. What it adds is the readings it was adopted on. The seeding's own
+  # wall clock, phases and embedding coverage stay with the run that wrote them: they are no
+  # part of what a step, a series or a collect reads, which is this record's existence and the
+  # template it names.
+  jq -n --arg at "$(utc_now)" --argjson seconds "$(elapsed_since "$t0")" --arg template "$template" \
+    --argjson evidence "$SEED_EVIDENCE" \
+    '{finished: $at, seconds: $seconds, template: $template, adopted: true, phases: [],
+      embed_progress: null, evidence: $evidence}' >"$RUN_DIR/seed.json"
+  note "seed: run $RUN adopts the seeding this deployment holds already and writes none of its own: template database $template, $(jq -r .loop_ids <<<"$SEED_EVIDENCE") rows in the loop seed's id map, $(jq -r .issues <<<"$SEED_EVIDENCE") issues of the production seed, $(jq -r .loop_seed.proposals <<<"$SEED_EVIDENCE") proposals in $(jq -r .loop_seed.path <<<"$SEED_EVIDENCE") and $(jq -r .production_seed.issues <<<"$SEED_EVIDENCE") issues named in $(jq -r .production_seed.path <<<"$SEED_EVIDENCE"); $RUN_DIR/seed.json"
 }
 
 # ---- reset ------------------------------------------------------------------------------------------
@@ -1879,14 +2020,190 @@ tunnel_stop() {
   return 0
 }
 
-# step_cleanup: the sampler and the tunnel both ended, whatever ended the step. run_step sets it
-# as its EXIT trap before it opens either, so a refusal, an interrupt, a failure of the ssh that
-# carries the load and a failure of anything after it all leave neither behind: a sampler left
-# running holds one ssh per machine open and goes on appending to a finished step's cgroup.jsonl.
+# ---- the step's own Postgres collectors --------------------------------------------------------
+
+# pg_step_secret: the step database's URL in a file of mode 600 under the run's own directory on
+# this pod, its path in PG_STEP_FILE. It is the -pg-file both collectors read, and both run here
+# rather than on a machine, so it is a local_secret and not a remote_secret. The caller removes it
+# when the step ends (pg_step_secret_remove), as the seed removes its own: the run directory is
+# what this pod keeps of a run, and a password in it is a password in whatever that is copied into.
+pg_step_secret() {
+  PG_STEP_FILE=$(local_secret .step-pg-url "$(pg_url "$(cfg .cloudsql.database dispatch)")")
+}
+
+# pg_step_secret_remove: that file removed, once.
+pg_step_secret_remove() {
+  [ -n "${PG_STEP_FILE:-}" ] || return 0
+  rm -f -- "$PG_STEP_FILE"
+  PG_STEP_FILE=""
+}
+
+# pg_collect_start NAME DIR: the database's size before any load, and the collector that reads the
+# statements and the lock waits over the step. Both run after the reset of the deployment, so the
+# size the step starts from is the size the reset left and the statements are the step's own.
+#
+# The extension comes first. pg_stat_statements.track and .max are flags of the instance, but the
+# view itself lives in the database the extension was created in, and the reset makes the step's
+# database again from the template (create database ... template ...), so it holds what the
+# template holds and nothing else. Without this statement loadgen pg-statements refuses at its
+# start, the step keeps no statements at all, and R6's clause for them is FAIL. It is idempotent
+# and costs one statement a step, so a template that already carries the extension pays nothing.
+pg_collect_start() {
+  local name=$1 dir=$2 database
+  database=$(cfg .cloudsql.database dispatch)
+  psql_at "$database" 'create extension if not exists pg_stat_statements' >/dev/null ||
+    note "step $name: creating the pg_stat_statements extension in the database $database failed; loadgen pg-statements will refuse at its start and the step will keep no statements"
+  pg_step_secret
+  loadgen_local pg-size -step "$dir" -pg-file "$PG_STEP_FILE" -phase start ||
+    note "step $name: loadgen pg-size -phase start failed; the step records no size for its database"
+  pg_watch_start "$name" "$dir"
+}
+
+# pg_watch_start NAME DIR: loadgen pg-statements for the length of the step, its pid in
+# PG_WATCH_PID. It resets pg_stat_statements at its start, reads pg_locks while the load runs and
+# writes DIR/pg-statements.json when it is stopped.
+#
+# The binary is started here rather than through loadgen_local for the reason sampler_start gives:
+# a shell function backgrounded with & runs in a subshell of its own, $! is that subshell's pid and
+# not the collector's, and the TERM that stops the step would end the subshell and leave the
+# collector reading the instance. A simple command with an assignment before it is execed by the
+# very process & forked, so PG_WATCH_PID is the collector's own pid.
+pg_watch_start() {
+  local name=$1 dir=$2 bin
+  bin=$(loadgen_bin)
+  LOADTEST_ROOT=$RUN_DIR "$bin" pg-statements -step "$dir" -pg-file "$PG_STEP_FILE" \
+    >>"$RUN_DIR/logs/pg-statements.log" 2>&1 &
+  PG_WATCH_PID=$!
+  note "step $name: Postgres's statements and lock waits are read into $dir/pg-statements.json (pid $PG_WATCH_PID)"
+}
+
+# pg_watch_stop: that collector stopped by its own pid and reaped. It writes its file on TERM and
+# ends 0; one that refused at its start -- no connection, or a database without
+# pg_stat_statements -- is already gone, and its status is the note below rather than a step
+# failure, as every other reading of a step is.
+pg_watch_stop() {
+  [ -n "${PG_WATCH_PID:-}" ] || return 0
+  local pid=$PG_WATCH_PID rc=0
+  PG_WATCH_PID=""
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || rc=$?
+  ((rc == 0)) ||
+    note "loadgen pg-statements ended with exit $rc (its output is $RUN_DIR/logs/pg-statements.log); the step keeps whatever it wrote"
+}
+
+# pg_collect_end NAME DIR: the statements and the lock waits, written by the collector this stops,
+# and the database's size now the load has ended.
+pg_collect_end() {
+  local name=$1 dir=$2
+  pg_watch_stop
+  [ -n "${PG_STEP_FILE:-}" ] || return 0
+  loadgen_local pg-size -step "$dir" -pg-file "$PG_STEP_FILE" -phase end ||
+    note "step $name: loadgen pg-size -phase end failed; the step records no end size for its database"
+}
+
+# ---- the load on the load machine ---------------------------------------------------------------
+
+# load_pid_file: where the pid of a step's own `loadgen run` is kept on the load machine. It is
+# under the run's directory there, which down removes with the run's credential files, so no run
+# reads a pid of another's and nothing a step copies back holds it.
+load_pid_file() { printf '%s/loadgen-run.pid\n' "$(remote_run)"; }
+
+# load_start DIR SECONDS ARGS...: ARGS run on the load machine as the step's load, its output in
+# DIR/loadgen.out and its bound SECONDS, in the background. LOAD_SSH_PID is the local timeout's own
+# pid, which forwards what it is sent to the ssh below it; the pid file on that machine names the
+# loadgen itself, because the sh that writes it then execs the loadgen and keeps its pid.
+load_start() {
+  local dir=$1 seconds=$2 remote_cmd
+  shift 2
+  ssh_cmd
+  # shellcheck disable=SC2016 # expanded by the load machine's sh
+  remote_cmd=$(remote_argv sh -c 'pid_file=$1; shift; echo $$ >"$pid_file"; exec "$@"' sh "$(load_pid_file)" "$@")
+  timeout "$seconds" "${SSH[@]}" "$(vm_ssh "$LOAD_VM")" "$remote_cmd" >"$dir/loadgen.out" 2>&1 &
+  LOAD_SSH_PID=$!
+  LOAD_REMOTE=1
+}
+
+# load_wait: the load's own exit status, when it ends by itself. This wait is where a signal
+# reaches this script while a step runs: bash runs no trap until the command in front of it
+# returns, and the command in front of a step's load runs for the length of the step. The pid
+# stays in LOAD_SSH_PID until the wait returns, because the trap that runs out of this wait is
+# what has to kill it; it is cleared afterwards so nothing kills a pid already reaped, which by
+# then may be another process of this pod.
+load_wait() {
+  local pid=${LOAD_SSH_PID:-} rc=0
+  [ -n "$pid" ] || return 0
+  wait "$pid" || rc=$?
+  LOAD_SSH_PID=""
+  return "$rc"
+}
+
+# load_stop: the local ssh ended, and the loadgen on the load machine killed by the pid it
+# recorded there. Both, because neither does the other's work: the ssh's death leaves the load
+# running on that machine, and the remote kill alone leaves this pod waiting on an ssh with
+# nothing left to carry. It does each thing once, so a step that ends normally and then runs its
+# EXIT trap kills no pid twice.
+load_stop() {
+  local pid=${LOAD_SSH_PID:-}
+  if [ -n "$pid" ]; then
+    LOAD_SSH_PID=""
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  [ -n "${LOAD_REMOTE:-}" ] || return 0
+  LOAD_REMOTE=""
+  load_kill
+  return 0
+}
+
+# load_kill: whatever the step's pid file on the load machine names, ended there, and the file
+# removed -- TERM first, KILL after 10 s, as the tunnel's own kill does. A failure to reach the
+# machine is not raised: a step that cannot ssh has already failed on something louder than this.
+load_kill() {
+  # shellcheck disable=SC2016 # expanded by the load machine's sh
+  on_vm "$LOAD_VM" sh -c '
+    pid=$(cat "$1" 2>/dev/null)
+    if [ -n "$pid" ]; then
+      kill -TERM "$pid" 2>/dev/null
+      i=0
+      while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+        sleep 1
+        i=$((i + 1))
+      done
+      kill -KILL "$pid" 2>/dev/null
+    fi
+    rm -f "$1"
+    exit 0' sh "$(load_pid_file)" >/dev/null 2>&1 || true
+  return 0
+}
+
+# step_cleanup: everything a step started, ended, whatever ended the step -- the load on the load
+# machine with the ssh that carries it, the sampler, Postgres's collector, the step's credential
+# file on this pod and the tunnel. run_step sets it as its EXIT trap before it starts any of them,
+# and step_interrupt runs it on INT and TERM, so a refusal, an interrupt, a failure of the ssh that
+# carries the load and a failure of the collection after it all leave nothing behind: a sampler
+# left running holds one ssh per machine open and goes on appending to a finished step's
+# cgroup.jsonl, and a loadgen left running on the load machine goes on loading the deployment the
+# next step measures. Each part is ended by its own pid and does nothing a second time.
 step_cleanup() {
+  load_stop
   sampler_stop
+  pg_watch_stop
+  pg_step_secret_remove
   tunnel_stop
   return 0
+}
+
+# step_interrupt SIGNAL: a step stopped by a signal. A bash script with no trap for a signal dies
+# of it and never runs its EXIT trap, so an operator's INT or TERM left every remote part of the
+# step alive; these traps run this instead, and it ends the script with the status a shell killed
+# by that signal has, so a caller reads the stop as a stop.
+step_interrupt() {
+  local signal=$1 code=143
+  trap - EXIT INT TERM
+  [ "$signal" != INT ] || code=130
+  note "step ${STEP_NAME:-} is stopped by SIG$signal: the load on the $LOAD_VM VM, the profiling tunnel, the sampler and Postgres's collector are ended with it"
+  step_cleanup
+  exit "$code"
 }
 
 # ---- a step -----------------------------------------------------------------------------------------
@@ -1993,6 +2310,7 @@ fetch_profiles() {
 # record.
 run_step() {
   local name=$1 factor=$2 duration=$3 warmup=$4
+  STEP_NAME=$name
   valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-', and at most 63 of them"
   valid factor "$factor" || die "factor '$factor' is not a number"
   valid duration "$duration" || die "--duration '$duration' is not a whole number of s, m or h"
@@ -2017,18 +2335,24 @@ run_step() {
   reset_deployment "$dir/reset.json"
   # The step's -pprof is the tunnel's loopback address on the load machine, and the tunnel is
   # opened and proven before any load: the sampler inside loadgen run reads Dispatch's pool
-  # acquire waiters through it, and criterion (e) is judged on nothing without them. The EXIT
-  # trap ends both the tunnel and the sampler however the step ends -- a refusal below, an
-  # interrupt, a failure of the ssh that carries the load, a failure of the collection after it.
+  # acquire waiters through it, and criterion (e) is judged on nothing without them. The traps end
+  # every part of the step however the step ends -- a refusal below, an interrupt, a failure of
+  # the ssh that carries the load, a failure of the collection after it -- and INT and TERM are
+  # trapped beside EXIT because a script with no trap for a signal never reaches its EXIT trap.
   endpoints "$(pprof_tunnel_url)"
   seconds=$(($(duration_seconds "$warmup") + $(duration_seconds "$duration") + 20 + RUN_SLACK_SECONDS))
   trap step_cleanup EXIT
+  trap 'step_interrupt INT' INT
+  trap 'step_interrupt TERM' TERM
   if ! tunnel_start "$name"; then
     step_cleanup
     rm -rf -- "$dir"
     die "step $name is refused: $TUNNEL_REFUSAL Without the profiling tunnel loadgen's sampler reads no goroutines, no pool acquire waiters and no heap while the step runs, so pass criterion (e), Dispatch's pool acquire waiters p50 = 0, is FAIL for want of a measurement and the step measures nothing. Its directory is removed, so the step runs again under its own name once the tunnel can be opened."
   fi
   sampler_start
+  # Postgres's own measurements of the step, after the reset so the statements are the step's
+  # own, and before any load so the size is the size the load starts from.
+  pg_collect_start "$name" "$dir"
   # Both populations, in one step: -events and -requests are the step's totals, of which
   # -baseline-events and -baseline-requests are drawn from the production seed (-seed) with the
   # baseline's mix, and the rest from the loop seed (-loop-seed) with the loop's
@@ -2049,9 +2373,13 @@ run_step() {
   )
   [ -z "$ROUTE_MIX_REMOTE" ] || args+=(-route-mix "$ROUTE_MIX_REMOTE")
   args+=("${ENDPOINTS[@]}")
-  on_vm_for "$seconds" "$LOAD_VM" "$remote" "${args[@]}" >"$dir/loadgen.out" 2>&1 || rc=$?
+  load_start "$dir" "$seconds" "$remote" "${args[@]}"
+  load_wait || rc=$?
+  # The statements, the lock waits and the end size, read now the load has ended and before the
+  # step lets go of the credential they are read with.
+  pg_collect_end "$name" "$dir"
   step_cleanup
-  trap - EXIT
+  trap - EXIT INT TERM
   if ! vms_running; then
     note "step $name is discarded: $VMS_STOPPED. A machine that Google stopped at its 72-hour run-time limit is not a Dispatch failure; start it again and run this step over."
     rm -rf -- "$dir"
