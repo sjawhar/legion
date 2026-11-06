@@ -225,7 +225,7 @@ func TestAzureAnthropicMarksTheCacheLikeAnthropic(t *testing.T) {
 		anthropicStream("end_turn", anthropicUsage{Input: 20, Output: 9}, anthropicText("The note says plum.")),
 	)
 	f := newFixture(t, s, AzureAnthropic, 2)
-	f.req.History, f.req.CacheHistory = anthropicHistory(), true
+	f.req.History = anthropicHistory()
 	if result, err := Run(context.Background(), f.req); err != nil || result.Fault != "" {
 		t.Fatalf("result %+v, %v", result, err)
 	}

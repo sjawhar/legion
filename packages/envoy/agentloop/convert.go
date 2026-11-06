@@ -227,8 +227,8 @@ func openaiChatParts(blocks []Block) ([]provider.ContentPart, error) {
 	return parts, nil
 }
 
-// withCacheMark is options with Anthropic's ephemeral cache mark added. The caller asks for the
-// run's cache marks with Request.CacheHistory.
+// withCacheMark is options with Anthropic's ephemeral cache mark added. The run places the
+// marks unless the caller turns them off with Request.NoCache.
 func withCacheMark(options provider.ProviderOptions) provider.ProviderOptions {
 	marked := make(provider.ProviderOptions, len(options)+1)
 	maps.Copy(marked, options)
@@ -238,7 +238,8 @@ func withCacheMark(options provider.ProviderOptions) provider.ProviderOptions {
 
 // markAnthropicHistory puts Anthropic's ephemeral cache mark on the last of the run's first
 // history messages, so the next model call of the run, and the next run within the cache's life,
-// reads the conversation from the cache. The caller asks for it with Request.CacheHistory.
+// reads the conversation from the cache. The run places it unless the caller turns the marks off
+// with Request.NoCache.
 func markAnthropicHistory(messages []provider.Message, history int) {
 	if history > 0 {
 		messages[history-1].ProviderOptions = withCacheMark(messages[history-1].ProviderOptions)
@@ -248,8 +249,8 @@ func markAnthropicHistory(messages []provider.Message, history int) {
 // markOpenAIHistory puts an explicit prompt cache breakpoint at the end of the run's first
 // history messages, on the last part of the last of them that can carry one (a user message's
 // text or file, a tool result): the implicit breakpoint sits after the newest message only, so
-// without it a later run would not read the conversation from the cache. The caller asks for it
-// with Request.CacheHistory.
+// without it a later run would not read the conversation from the cache. The run places it
+// unless the caller turns the marks off with Request.NoCache.
 func markOpenAIHistory(messages []provider.Message, history int) {
 	breakpoint := provider.BuildProviderOptions(openai.OpenAIPartOptions{PromptCacheBreakpoint: &openai.PromptCacheBreakpoint{Mode: "explicit"}})
 	for i := history - 1; i >= 0; i-- {

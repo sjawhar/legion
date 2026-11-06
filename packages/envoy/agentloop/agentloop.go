@@ -217,13 +217,13 @@ type Request struct {
 	Model Model
 	// System is the system prompt.
 	System string
-	// History is the conversation before this turn and Input the new messages of it, so a
-	// caller that re-sends a conversation can mark the stable part of it for caching.
-	// CacheHistory asks for the cache marks the model's provider takes, which this package
-	// places.
-	History      []Message
-	CacheHistory bool
-	Input        []Message
+	// History is the conversation before this turn and Input the new messages of it, so the
+	// stable part of a conversation the caller re-sends is the part marked for caching.
+	// This package places the cache marks the model's provider takes unless NoCache turns
+	// them off: a caller that asks for nothing gets the cheaper call.
+	History []Message
+	NoCache bool
+	Input   []Message
 	// Tools are the tools the model may call.
 	Tools []Tool
 	// Bounds are the limits of the run.

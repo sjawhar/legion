@@ -54,7 +54,7 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if req.CacheHistory {
+	if !req.NoCache {
 		switch {
 		case anthropicKind(kind):
 			markAnthropicHistory(messages, len(history))
@@ -369,7 +369,7 @@ func (r *run) failure() error {
 }
 
 // prepareStep offers no tool on the last allowed call, so that call must answer, and on the
-// kinds Anthropic serves, where the run asks for cache marks, moves the newest message's mark:
+// kinds Anthropic serves, where the run places cache marks, moves the newest message's mark:
 // the history's end keeps the one Run put there, the newest message gets one, and the one an
 // earlier step put on its newest message is taken off (the SDK carries a step's message
 // overrides into later steps; Anthropic allows four marks).
@@ -378,7 +378,7 @@ func (r *run) prepareStep(state aisdk.PrepareStepState) (*aisdk.PrepareStepResul
 	if state.StepNumber == r.req.Bounds.Calls-1 {
 		result.ToolChoice = &provider.ToolChoice{Type: provider.ToolChoiceNone}
 	}
-	if !anthropicKind(r.kind) || !r.req.CacheHistory || len(state.Messages) == 0 {
+	if !anthropicKind(r.kind) || r.req.NoCache || len(state.Messages) == 0 {
 		return result, nil
 	}
 	if state.StepNumber == 0 {

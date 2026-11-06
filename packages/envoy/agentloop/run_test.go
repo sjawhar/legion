@@ -223,7 +223,7 @@ func TestAnthropicMarksTheCacheMovesTheNewestMarkAndForcesTheReplyOnTheLastCall(
 	t.Parallel()
 	s := newStandIn(t, threeCallAnthropic()...)
 	f := newFixture(t, s, AnthropicMessages, 3)
-	f.req.History, f.req.CacheHistory = anthropicHistory(), true
+	f.req.History = anthropicHistory()
 	result, err := Run(context.Background(), f.req)
 	if err != nil {
 		t.Fatal(err)
@@ -328,7 +328,7 @@ func TestOpenAIResponsesReplaysReasoningItemsByteForByteAndSendsTheStepsReasonin
 		openaiStream(openaiUsage{Input: 1100, Cached: 900, Output: 30}, "", stepTwo...),
 	)
 	f := newFixture(t, s, OpenAIResponses, 2)
-	f.req.History, f.req.CacheHistory = openaiHistory(), true
+	f.req.History = openaiHistory()
 	result, err := Run(context.Background(), f.req)
 	if err != nil {
 		t.Fatal(err)
@@ -396,6 +396,94 @@ func TestOpenAIResponsesReplaysReasoningItemsByteForByteAndSendsTheStepsReasonin
 		if !reflect.DeepEqual(native, want) {
 			t.Errorf("step %d's output items\n%v\nwant them as the API sent them\n%v", i+1, native, want)
 		}
+	}
+}
+
+// cacheCall makes a one-call run on kind with that protocol's replayed history, opting out of
+// the cache where optOut says so and setting no cache field at all otherwise, and is the request
+// the provider was given.
+func cacheCall(t *testing.T, kind Kind, optOut bool) recorded {
+	t.Helper()
+	var s *standIn
+	var history []Message
+	if kind == OpenAIResponses {
+		s = newStandIn(t, openaiStream(openaiUsage{Input: 1000, Cached: 900, Output: 20}, "", openaiMessage("msg_1", "It said plum.")))
+		history = openaiHistory()
+	} else {
+		s = newStandIn(t, anthropicStream("end_turn", anthropicUsage{Input: 10, Output: 5}, anthropicText("The note says plum.")))
+		history = anthropicHistory()
+	}
+	f := newFixture(t, s, kind, 1)
+	f.req.History = history
+	if optOut {
+		f.req.NoCache = true
+	}
+	result, err := Run(context.Background(), f.req)
+	if err != nil || result.Fault != "" {
+		t.Fatalf("result %+v, %v", result, err)
+	}
+	got := s.requests()
+	if len(got) != 1 {
+		t.Fatalf("%d model calls, want 1", len(got))
+	}
+	return got[0]
+}
+
+// A caller opts out of the cache rather than into it, so a request that asks for nothing still
+// carries the marks the provider wants: on anthropic-messages the pair of them, at the end of
+// the replayed history and on the newest message, and on openai-responses the explicit
+// breakpoint on the last part of the history that can carry one.
+func TestARequestThatAsksForNothingStillMarksTheCache(t *testing.T) {
+	t.Parallel()
+	t.Run(string(AnthropicMessages), func(t *testing.T) {
+		t.Parallel()
+		r := cacheCall(t, AnthropicMessages, false)
+		if n := countKey(r.decoded(t), "cache_control"); n != 2 {
+			t.Errorf("the call carries %d cache marks, want 2", n)
+		}
+		// The wire's messages: the history's request and model turn (0, 1), then the
+		// new question (2), which is the newest message.
+		if marks := marked(t, r); !reflect.DeepEqual(marks, []int{1, 2}) {
+			t.Errorf("the call marks messages %v, want [1 2] (the history's end and the newest message)", marks)
+		}
+	})
+	t.Run(string(OpenAIResponses), func(t *testing.T) {
+		t.Parallel()
+		r := cacheCall(t, OpenAIResponses, false)
+		if n := countKey(r.decoded(t), "prompt_cache_breakpoint"); n != 1 {
+			t.Errorf("the call carries %d prompt cache breakpoints, want 1", n)
+		}
+		var breakpoints []string
+		for _, item := range inputItems(t, r) {
+			if countKey(item, "prompt_cache_breakpoint") > 0 {
+				breakpoints = append(breakpoints, item["type"].(string)+":"+item["call_id"].(string))
+			}
+		}
+		if !reflect.DeepEqual(breakpoints, []string{"function_call_output:call_h1"}) {
+			t.Errorf("the call's cache breakpoints %v, want one on the history's last tool result", breakpoints)
+		}
+	})
+}
+
+// A request that sets NoCache carries no mark anywhere: neither Anthropic's cache_control, at
+// the history's end or on the newest message, nor an OpenAI Responses prompt cache breakpoint.
+func TestOptingOutOfTheCacheSendsNoMark(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []Kind{AnthropicMessages, OpenAIResponses} {
+		t.Run(string(kind), func(t *testing.T) {
+			t.Parallel()
+			r := cacheCall(t, kind, true)
+			body := r.decoded(t)
+			if n := countKey(body, "cache_control"); n != 0 {
+				t.Errorf("the call carries %d cache marks, want none", n)
+			}
+			if n := countKey(body, "prompt_cache_breakpoint"); n != 0 {
+				t.Errorf("the call carries %d prompt cache breakpoints, want none", n)
+			}
+			if marks := marked(t, r); len(marks) != 0 {
+				t.Errorf("the call marks messages %v, want none", marks)
+			}
+		})
 	}
 }
 
@@ -569,7 +657,7 @@ func TestTheCostSumsEveryCallWithItsCacheWrites(t *testing.T) {
 	t.Parallel()
 	s := newStandIn(t, threeCallAnthropic()...)
 	f := newFixture(t, s, AnthropicMessages, 3)
-	f.req.History, f.req.CacheHistory = anthropicHistory(), true
+	f.req.History = anthropicHistory()
 	result, err := Run(context.Background(), f.req)
 	if err != nil || result.Fault != "" {
 		t.Fatalf("result %+v, %v", result, err)
