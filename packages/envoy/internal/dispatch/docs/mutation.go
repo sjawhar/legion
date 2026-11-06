@@ -1760,8 +1760,16 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // refuses is credited again when its browser resends the edit.
 //
 // The other version taken from the stored document, storing nothing of the room, is a comment's
-// anchor on a closed issue (closedIssueCommentVersion), whose room holds updates the store will
-// never take.
+// anchor on a closed issue (closedIssueCommentAnchor), whose room holds updates the store will
+// never take. It is decided before the room is read, because such a version reads none of it,
+// and before anything is stored rather than from a refused flush: a flush refused part way has
+// already appended the room's earlier updates, the ones the room took inside the margin, and the
+// stored document holds none of them, since storedWithUpdates reads the pool that owns loads and
+// not this transaction. Decided first, the transaction appends nothing of the room at all, and
+// that pool read is exact: this transaction holds the document's advisory lock from the head it
+// read (lockedHead), so the store stands at that head and no append can move it. The mark such a
+// version pins is the store's too: VerifyMark reads the same stored tree for it, so a mark only
+// the room holds is no anchor at all (closedIssueCommentAnchor).
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
 	if write := joinedLiveWrite(ctx, room); write != nil {
@@ -1794,32 +1802,31 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if s.afterCaptureAuthorsTake != nil {
 		s.afterCaptureAuthorsTake(room)
 	}
+	// fromStore is a version taken from the stored document, storing none of the room's updates:
+	// a comment's anchor on a closed issue (closedIssueCommentAnchor), decided before the room is
+	// read at all, since such a version reads none of it, and a room standing behind the durable
+	// head, which only that read can tell.
+	fromStore, err := s.closedIssueCommentAnchor(ctx, tx, room)
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
 	var read []byte
 	var point roomPoint
-	var readErr error
-	// fromStore is a version taken from the stored document, storing none of the room's updates:
-	// a room standing behind the durable head (below), and a comment's anchor on a closed issue
-	// (closedIssueCommentVersion).
-	var fromStore bool
-	err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		if cursor := s.cursorOf(live); cursor != nil && cursor.heldThrough() != head {
-			fromStore = true
-			return
-		}
-		read, point, _, readErr = s.readPoint(room, live)
-	})
-	if readErr != nil {
-		return renderedTree{}, authorCapture{}, readErr
-	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
-	}
 	if !fromStore {
-		closed, err := s.closedIssueCommentVersion(ctx, tx, room)
-		if err != nil {
-			return renderedTree{}, authorCapture{}, err
+		var readErr error
+		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			if cursor := s.cursorOf(live); cursor != nil && cursor.heldThrough() != head {
+				fromStore = true
+				return
+			}
+			read, point, _, readErr = s.readPoint(room, live)
+		})
+		if readErr != nil {
+			return renderedTree{}, authorCapture{}, readErr
 		}
-		fromStore = closed
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
+		}
 	}
 	var tree *pmdoc.Node
 	if fromStore {
@@ -1842,37 +1849,6 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		return renderedTree{}, authorCapture{}, err
 	}
 	return renderedTree{tree: tree, markdown: markdown, offsets: offsets}, capture, nil
-}
-
-// closedIssueCommentVersion is whether the version this transaction is about to write is a
-// comment's anchor on a closed issue: ctx is one of the comment anchor operations
-// WithCommentMarks names (commentMarkAnchor, which SnapshotVersion marks its own context as) and
-// the document's issue is closed. Such a version is taken from the stored document, storing none
-// of the room's updates, for the reason a comment's anchor write forks cold
-// (closedIssueCommentMark, readFork says it): the room of a closed issue on a process that has
-// not heard the close keeps taking its browsers' keystrokes, and the gate refuses a browser
-// update the room took more than closeMargin after the close (gateAppend, appendBrowser), so
-// storing the room's updates would refuse the comment a closed issue takes. The mark that
-// version pins is in the store already - the write that placed it appended it in a transaction
-// of its own - and every other version takes the room's updates as it always has, since this
-// reads nothing for one.
-//
-// It is read here, before the flush, rather than from the flush's own refusal: a flush refused
-// part way has already appended the room's earlier updates, the ones the room took inside the
-// margin, and the stored document a fallback would then read holds none of them, since
-// storedWithUpdates reads the pool that owns loads and not this transaction. Read first, the
-// transaction appends nothing of the room at all, and that same pool read is exact: this
-// transaction holds the document's advisory lock from the head it read (lockedHead), so the
-// store stands at that head and no append can move it.
-func (s *Service) closedIssueCommentVersion(ctx context.Context, tx pgx.Tx, room string) (bool, error) {
-	if !commentMarkAnchor(ctx) {
-		return false, nil
-	}
-	open, err := s.issueOpen(ctx, tx, room)
-	if err != nil {
-		return false, err
-	}
-	return !open, nil
 }
 
 // captureWrite is captureLiveTextAndAuthors for a transaction with a write of its own to room: the

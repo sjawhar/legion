@@ -53,12 +53,13 @@ import (
 type liveWrite struct {
 	artifactID string
 	state      *roomState
-	// ownerOpen is whether the document's owner row, which this transaction took and holds
-	// (joinLiveWrite, lockArtifactOwner), said its issue is open. A comment's anchor on a closed
-	// issue forks cold for it (closedIssueCommentMark, readFork): the room's updates a warm fork
-	// would store ahead of its own are what the append gate refuses on a closed issue
-	// (gateAppend, appendBrowser).
-	ownerOpen bool
+	// ownerClosed is whether the document's owner row, which this transaction took and holds
+	// (joinLiveWrite, lockArtifactOwner), said its issue is closed. A comment's anchor on a
+	// closed issue forks cold for it (closedIssueCommentMark, readFork): the room's updates a
+	// warm fork would store ahead of its own are what the append gate refuses on a closed issue
+	// (gateAppend, appendBrowser). A write that never read that row holds the zero value, which
+	// forks as every write does.
+	ownerClosed bool
 	// clientID authors every item the transaction writes, on fork: the document as the
 	// transaction's one read of it found it, with the transaction's updates applied (forkLive). A
 	// rebuilt fork authors under a new one (rebuildFork), which replaces it.
@@ -259,8 +260,8 @@ func joinedLiveWrite(ctx context.Context, artifactID string) *liveWrite {
 // to it yet, it first has every other process holding a room of the document make that room's
 // updates durable (flushOtherRooms), then takes the document's owner row, refuses a failed room,
 // and then takes the writer slot (see liveWrite). The owner row says whether the document's issue
-// is open, which the write keeps (liveWrite.ownerOpen) for its fork read: a comment's anchor on a
-// closed issue forks cold (closedIssueCommentMark, readFork).
+// is closed, which the write keeps (liveWrite.ownerClosed) for its fork read: a comment's anchor
+// on a closed issue forks cold (closedIssueCommentMark, readFork).
 func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
 	if write := ledger.liveWriteFor(artifactID); write != nil {
 		return write, nil
@@ -281,7 +282,7 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 	if err != nil {
 		return nil, err
 	}
-	write.ownerOpen = open
+	write.ownerClosed = !open
 	return write, nil
 }
 
@@ -500,13 +501,15 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 }
 
 // closedIssueCommentMark is whether write is a comment's anchor on a closed issue: the owner row
-// the transaction took says the issue is closed (joinLiveWrite, liveWrite.ownerOpen), and ctx is
-// marked as that comment's writes (WithCommentMarks). It is the write that forks cold there
-// (readFork says why). The other write a closed issue's document takes, the ask states its
-// issue's lifecycle writes (WriteIssueAskStates), forks as every write does: its asks are the
-// room's business, and the close that makes them writes them before it stamps closed_at.
+// the transaction took says the issue is closed (joinLiveWrite, liveWrite.ownerClosed), and ctx
+// is one of that comment's anchor operations (commentMarkAnchor, the same test the version and
+// the mark read make, closedIssueCommentAnchor). It is the write that forks cold there (readFork
+// says why), and it needs no read of its own for the issue: the owner row is already in hand.
+// The other write a closed issue's document takes, the ask states its issue's lifecycle writes
+// (WriteIssueAskStates), forks as every write does: its asks are the room's business, and the
+// close that makes them writes them before it stamps closed_at.
 func closedIssueCommentMark(ctx context.Context, write *liveWrite) bool {
-	return !write.ownerOpen && commentMarks(ctx)
+	return write.ownerClosed && commentMarkAnchor(ctx)
 }
 
 // roomBehindHead reports whether live, the room resident for a document, stands behind head, the
@@ -855,11 +858,11 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 // mayLoad). A closed issue's document is the one that loads no room for it: the warm-up's load is
 // refused (allowInject), and the settlement ends there, its pending-settlement row left for the
 // resumption once the issue reopens (settleRoomWithin). A load already under way when the write
-// committed was told of the write's
-// versions before the commit (Ledger.takeRoomCursors) and is listed by ygo from before its read
-// of the store, so it is found here and published into: Server.Apply waits for its load. A room
-// that retires between this check and the publish's Apply is loaded again by that Apply, from a
-// store that holds the write, and idles out like any room a write loads.
+// committed was told of the write's versions before the commit (Ledger.takeRoomCursors) and is
+// listed by ygo from before its read of the store, so it is found here and published into:
+// Server.Apply waits for its load. A room that retires between this check and the publish's
+// Apply is loaded again by that Apply, from a store that holds the write, and idles out like any
+// room a write loads.
 //
 // A room that cannot take an update is failed - but not one that refused the publish because it
 // had already failed (ErrServiceUnavailable). By the time such a refusal is handled the recovery

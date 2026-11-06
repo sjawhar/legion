@@ -82,8 +82,8 @@ func commentMarkOperation(ctx context.Context) context.Context {
 }
 
 // commentMarks is whether the caller marked ctx as a comment's writes to a document
-// (WithCommentMarks). A write under it that reaches the document on a closed issue is that
-// comment's anchor, and it forks cold (readFork).
+// (WithCommentMarks). Only commentMarkOperation reads it: what every other caller asks is
+// commentMarkAnchor, which is this inside the operation that marked itself owner-verified.
 func commentMarks(ctx context.Context) bool {
 	marked, _ := ctx.Value(commentMarksContextKey{}).(bool)
 	return marked
@@ -91,11 +91,38 @@ func commentMarks(ctx context.Context) bool {
 
 // commentMarkAnchor is whether ctx is one of the comment anchor operations WithCommentMarks
 // names, inside the operation that made it owner-verified (commentMarkOperation): the reads and
-// writes a closed issue's document takes for a comment, and no other caller's. The version a
-// comment's anchor is pinned to is taken from the stored document there
-// (closedIssueCommentVersion).
+// writes a closed issue's document takes for a comment, and no other caller's. It is the one
+// test of that, which the three decisions a closed issue turns share - the fork a comment's mark
+// is written on (closedIssueCommentMark), the tree its mark_id is verified against and the
+// version its anchor is pinned to (closedIssueCommentAnchor).
 func commentMarkAnchor(ctx context.Context) bool {
 	return commentMarks(ctx) && isOwnerVerified(ctx)
+}
+
+// closedIssueCommentAnchor is whether ctx is a comment's anchor operation (commentMarkAnchor) on
+// a document whose issue is closed, read from q - the caller's transaction where it is inside
+// one (queryFrom). It answers false for every other caller without reading anything, so no
+// version and no mark read outside a comment's anchor pays for it.
+//
+// A closed issue's room holds updates the store will never take: on a process that has not heard
+// the close its browsers are still writable, and the gate refuses a browser update the room took
+// more than closeMargin after the close (gateAppend, appendBrowser). So the comment's anchor
+// reads and writes the stored document alone - the fork its mark is written on (readFork), the
+// tree its mark_id is verified against (VerifyMark) and the version that anchor is pinned to
+// (captureLiveTextAndAuthors) - and all three see the same document. A mark only the room holds
+// is then no anchor: VerifyMark answers ErrAnchorMissing, the API answers 409 ANCHOR_MISSING,
+// and the browser's margin writes the mark again and sends the comment anew (margin-context.tsx,
+// reanchor), by quote once the refused append has closed the room for its issue and its browsers
+// have reconnected read-only (ProofDocument.tsx, the quote-comment action).
+func (s *Service) closedIssueCommentAnchor(ctx context.Context, q Queryer, artifactID string) (bool, error) {
+	if !commentMarkAnchor(ctx) {
+		return false, nil
+	}
+	open, err := s.issueOpen(ctx, q, artifactID)
+	if err != nil {
+		return false, err
+	}
+	return !open, nil
 }
 
 type shutdownLoadContextKey struct{}
