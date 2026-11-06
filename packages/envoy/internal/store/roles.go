@@ -397,6 +397,104 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string)
 	return nil
 }
 
+// RenewRoleClaims stamps the moment clientInstanceID's process last answered on every claim
+// sessionID holds that names that process (RoleClaim.RenewedAt), which is what makes a claim's
+// renewal its holder's heartbeat rather than the instant the role was taken: the listener calls
+// it from POST /v1/interests/subscribe, the registration every client repeats while it runs. The
+// roles it renews are the ones the role claim watcher's copy names (RolesHeldBy), so the set
+// costs no bucket scan, and each renewal reads and writes that role's own record.
+//
+// A registration that states no process (an empty clientInstanceID) renews nothing: an absent
+// instance names no process, so it matches no claim, and a claim naming none is adopted by the
+// process that registers, never by the one that cannot say which it is.
+//
+// Every failure is returned, not raised: a view that cannot answer (ErrRoleViewNotReady, wrapped)
+// after a listener restart, a read or write that did not answer, a record this build cannot read.
+// Each role is attempted whatever the roles before it did, and the errors are joined, so one
+// unreadable claim does not cost the session its other renewals. The caller is a heartbeat and
+// must not fail over any of them (subscribeHandler logs and goes on): a registration refused
+// because the claim view is still refilling would take every session's heartbeat down with it.
+//
+// Each bucket call waits no longer than ctx (bus.Bounded): the route passes its request's own
+// context. A write ctx abandoned may still land after this answer, which is safe - it is
+// conditional on the revision it read and renews that claim alone.
+func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanceID string) error {
+	if clientInstanceID == "" {
+		return nil
+	}
+	roles, err := r.RolesHeldBy(sessionID)
+	if err != nil {
+		return fmt.Errorf("renew %s's role claims: %w", sessionID, err)
+	}
+	var failures []error
+	for _, role := range roles {
+		if err := r.renewRoleClaim(ctx, role, sessionID, clientInstanceID); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// renewRoleClaim writes role's claim back with its renewal moved to now, conditional on the very
+// revision this call read it at, and only while the stored claim still names sessionID as its
+// holder and either names clientInstanceID as the process holding it or names no process at all.
+// That second arm is the adoption of a claim written before claims named a process: the first
+// registration of the session that holds it writes the holder's instance in, and every renewal
+// after that takes the first arm. A claim naming another session or another process is left
+// exactly as it stands - the renewal is the holder's own heartbeat, and no other process's
+// heartbeat may move it - and so is a role with no claim record at all.
+//
+// Only RenewedAt, and on adoption ClientInstanceID, are written: HolderSessionID, ClaimedAt and
+// PreviousSessionID are the claim's own provenance and are carried over untouched, so a renewal
+// never re-dates a claim or rewrites who took it from whom.
+//
+// A lost compare-and-swap (nats.ErrKeyExists for the wrong last sequence, nats.ErrKeyNotFound for
+// a claim deleted in between) means another claim landed after this call read the record. The
+// renewal is dropped and logged, never read again and retried: the record is now another
+// claimant's, and a renewal retried into it would stamp this process's heartbeat on a claim it
+// does not hold. The next registration renews the claim that stands, if it is still this
+// session's.
+func (r *Registry) renewRoleClaim(ctx context.Context, role, sessionID, clientInstanceID string) error {
+	claim, entry, err := r.roleClaim(ctx, role)
+	if err != nil {
+		return fmt.Errorf("renew role %s's claim held by %s: %w", role, sessionID, err)
+	}
+	if entry == nil || claim.HolderSessionID != sessionID {
+		return nil
+	}
+	if claim.ClientInstanceID != "" && claim.ClientInstanceID != clientInstanceID {
+		return nil
+	}
+	renewed := claim
+	renewed.ClientInstanceID = clientInstanceID
+	renewed.RenewedAt = r.now().UnixMilli()
+	data, err := json.Marshal(renewed)
+	if err != nil {
+		return err
+	}
+	epoch := r.roleViewEpoch()
+	roles := r.roles()
+	revision, answered, err := bus.Bounded(ctx, func() (uint64, error) {
+		return roles.Update(role, data, entry.Revision())
+	})
+	switch {
+	case !answered:
+		return fmt.Errorf("renew role %s's claim held by %s: %w", role, sessionID, err)
+	case errors.Is(err, nats.ErrKeyExists), errors.Is(err, nats.ErrKeyNotFound):
+		r.logger().Info("registry dropped a role claim renewal a claim landed under",
+			slog.String("role", role),
+			slog.String("session_id", sessionID),
+			slog.String("client_instance_id", clientInstanceID),
+			slog.Uint64("read_revision", entry.Revision()),
+		)
+		return nil
+	case err != nil:
+		return fmt.Errorf("renew role %s's claim held by %s: %w", role, sessionID, err)
+	}
+	r.setOwnRoleHolder(role, sessionID, revision, epoch)
+	return nil
+}
+
 // RoleClaimRenewedWithin reports whether claim's holder answered for it less than liveWindow ago
 // (RoleClaim.LastAnsweredAt), as of now. It is the one test of a claim's renewal, and every
 // decision that turns on one reads it through this function - this registry's own release and

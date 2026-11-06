@@ -247,3 +247,199 @@ func TestRoleClaimRenewedWithinWeighsEveryClaimAgainstTheWindowItIsGiven(t *test
 		})
 	}
 }
+
+// roleClaimSecondInstance is the second process one session id can be claimed under: another
+// client instance that resumed the session the claim names, which a renewal must not let move
+// the holder's claim.
+const roleClaimSecondInstance = "9b8a7c6d5e4f3a2b9b8a7c6d5e4f3a2b"
+
+// roleClaimPredecessor is the session a seeded claim continues, carried on the claim as
+// provenance: a renewal leaves it exactly as the claim that took the role left it.
+const roleClaimPredecessor = "ses_renewal_predecessor"
+
+// renewableRoleClaim opens a registry whose role claim view answers, since RenewRoleClaims takes
+// the roles it renews from that view, and gives holder role through the process instance names.
+// The claim is a soft one continuing a predecessor, so what a renewal leaves alone - the holder,
+// the moment the role was taken, and whom it was taken from - is all on the record to read back.
+// The returned advance moves the registry's clock that far past the claim, which is where every
+// renewal these cases make lands.
+func renewableRoleClaim(t *testing.T, role, holder, instance string) (*Registry, func(time.Duration)) {
+	t.Helper()
+	conn, cleanup := connectNATS(t)
+	t.Cleanup(cleanup)
+	claimed := time.Date(2026, 11, 6, 9, 30, 0, 0, time.UTC)
+	var elapsed atomic.Int64
+	reg, err := Open(conn, WithReplicas(1), WithClock(func() time.Time { return claimed.Add(time.Duration(elapsed.Load())) }))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+	if _, err := reg.SetRoleWithPrevious(ctx, holder, "example-host", instance, role, roleClaimPredecessor, true, nil); err != nil {
+		t.Fatalf("claim %s for %s: %v", role, holder, err)
+	}
+	return reg, func(since time.Duration) { elapsed.Store(int64(since)) }
+}
+
+// storedRoleClaim reads role's claim back from the bucket, with the revision the record stands at.
+func storedRoleClaim(t *testing.T, reg *Registry, role string) RoleClaim {
+	t.Helper()
+	claim, err := reg.RoleClaim(context.Background(), role)
+	if err != nil {
+		t.Fatalf("read %s's claim: %v", role, err)
+	}
+	return claim
+}
+
+// A registration by the very process a claim names moves that claim's renewal to the moment it
+// registered, which is what makes RenewedAt the holder's heartbeat rather than the instant the
+// role was taken. Everything else on the record is the claim's own provenance and is left as the
+// claim that took the role left it.
+func TestARenewalFromTheProcessTheClaimNamesMovesTheRenewalAndNothingElse(t *testing.T) {
+	const (
+		role     = "legion-controller"
+		holder   = "ses_renewing_holder"
+		beat     = 2 * time.Minute
+		instance = roleClaimInstance
+	)
+	reg, advance := renewableRoleClaim(t, role, holder, instance)
+	claimed := storedRoleClaim(t, reg, role)
+	advance(beat)
+
+	if err := reg.RenewRoleClaims(context.Background(), holder, instance); err != nil {
+		t.Fatalf("renew %s's role claims: %v", holder, err)
+	}
+
+	renewed := storedRoleClaim(t, reg, role)
+	if want := claimed.ClaimedAt + beat.Milliseconds(); renewed.RenewedAt != want {
+		t.Fatalf("the renewed claim was renewed at %d, want %d: the registration's own moment", renewed.RenewedAt, want)
+	}
+	if renewed.HolderSessionID != holder || renewed.ClaimedAt != claimed.ClaimedAt || renewed.PreviousSessionID != roleClaimPredecessor {
+		t.Fatalf("the renewed claim is %+v, want %s's claim of %d continuing %s: a renewal writes the renewal alone",
+			renewed, holder, claimed.ClaimedAt, roleClaimPredecessor)
+	}
+	if renewed.ClientInstanceID != instance {
+		t.Fatalf("the renewed claim names the process %q, want %q", renewed.ClientInstanceID, instance)
+	}
+	if renewed.Revision == claimed.Revision {
+		t.Fatalf("the claim still stands at revision %d: the renewal never reached the bucket", renewed.Revision)
+	}
+	if !slices.Equal(heldRoles(t, reg, holder), []string{role}) {
+		t.Fatalf("the claim view no longer gives %s the role %s after its renewal", holder, role)
+	}
+}
+
+// A claim written before claims named a process names none, and the first registration of the
+// session holding it writes the registering process in: the adoption the live window bounds at
+// one heartbeat. It is still the same claim, taken at the same moment from the same predecessor,
+// so nothing but the process and the renewal is written.
+func TestTheFirstRenewalOfAClaimThatNamesNoProcessAdoptsItForThatProcess(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_adopting_holder"
+		beat   = 2 * time.Minute
+	)
+	reg, advance := renewableRoleClaim(t, role, holder, "")
+	claimed := storedRoleClaim(t, reg, role)
+	if claimed.ClientInstanceID != "" {
+		t.Fatalf("the seeded claim names the process %q, want none: this case is the claim an earlier build wrote", claimed.ClientInstanceID)
+	}
+	advance(beat)
+
+	if err := reg.RenewRoleClaims(context.Background(), holder, roleClaimInstance); err != nil {
+		t.Fatalf("renew %s's role claims: %v", holder, err)
+	}
+
+	adopted := storedRoleClaim(t, reg, role)
+	if adopted.ClientInstanceID != roleClaimInstance {
+		t.Fatalf("the adopted claim names the process %q, want %q: the first registration of its holder adopts it", adopted.ClientInstanceID, roleClaimInstance)
+	}
+	if want := claimed.ClaimedAt + beat.Milliseconds(); adopted.RenewedAt != want {
+		t.Fatalf("the adopted claim was renewed at %d, want %d", adopted.RenewedAt, want)
+	}
+	if adopted.HolderSessionID != holder || adopted.ClaimedAt != claimed.ClaimedAt || adopted.PreviousSessionID != roleClaimPredecessor {
+		t.Fatalf("the adopted claim is %+v, want %s's claim of %d continuing %s: adoption writes the process alone",
+			adopted, holder, claimed.ClaimedAt, roleClaimPredecessor)
+	}
+}
+
+// A renewal is the holder's own heartbeat and moves nothing else: not a claim a second process
+// that resumed the holder's session id registers under, not one the holder's session registers
+// without saying which process it is - an absent instance names no process, so it matches no
+// claim and adopts none either - and not a claim of a session the registration is not for.
+func TestARenewalMovesNoClaimTheRegisteringProcessDoesNotHold(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_held_claim"
+		beat   = 2 * time.Minute
+	)
+	for name, tc := range map[string]struct {
+		claimInstance string
+		session       string
+		instance      string
+	}{
+		"a second process that resumed the holder's session id":             {claimInstance: roleClaimInstance, session: holder, instance: roleClaimSecondInstance},
+		"a registration that states no process":                             {claimInstance: roleClaimInstance, session: holder},
+		"a registration that states no process, on a claim that names none": {session: holder},
+		"a registration of a session the claim does not name":               {claimInstance: roleClaimInstance, session: "ses_another_holder", instance: roleClaimInstance},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg, advance := renewableRoleClaim(t, role, holder, tc.claimInstance)
+			claimed := storedRoleClaim(t, reg, role)
+			advance(beat)
+
+			if err := reg.RenewRoleClaims(context.Background(), tc.session, tc.instance); err != nil {
+				t.Fatalf("a renewal by %s of process %q: %v; want it to pass the claim over, not fail", tc.session, tc.instance, err)
+			}
+
+			if stored := storedRoleClaim(t, reg, role); stored != claimed {
+				t.Fatalf("the claim is now %+v, want it exactly as it stood, %+v", stored, claimed)
+			}
+		})
+	}
+}
+
+// A renewal that loses its conditional write lost it to a claim that landed after the renewal
+// read the record: the record is that claimant's now, so the renewal is dropped where it stands.
+// It is never read again and written into the claim that won, which would stamp this process's
+// heartbeat on a claim it does not hold, and the registration that made it is not failed.
+func TestARenewalThatLosesItsCompareAndSwapWritesNothingAndIsNotRetried(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_raced_holder"
+		winner = "ses_winning_claimant"
+		beat   = 2 * time.Minute
+	)
+	reg, advance := renewableRoleClaim(t, role, holder, roleClaimInstance)
+	advance(beat)
+	racing := &racingUpdateKeyValue{KeyValue: reg.roleKV.Legacy()}
+	racing.beforeFirstUpdate = func() {
+		// A hard claim writes unconditionally, so it lands under the renewal's read and
+		// the renewal's own update meets the bucket's refusal, not one this hook invented.
+		if _, err := reg.SetRoleWithPrevious(context.Background(), winner, "example-host", roleClaimSecondInstance, role, "", false, nil); err != nil {
+			t.Errorf("the claim that wins the race: %v", err)
+		}
+	}
+	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
+
+	if err := reg.RenewRoleClaims(context.Background(), holder, roleClaimInstance); err != nil {
+		t.Fatalf("a renewal that lost its compare-and-swap: %v; want it dropped, not reported", err)
+	}
+
+	if racing.updates != 1 {
+		t.Fatalf("the renewal made %d conditional updates, want exactly one: a lost renewal is never retried", racing.updates)
+	}
+	stored := storedRoleClaim(t, reg, role)
+	if stored.HolderSessionID != winner || stored.ClientInstanceID != roleClaimSecondInstance {
+		t.Fatalf("the claim is held by %q of process %q, want the winner %q of %q: the renewal wrote into the claim that landed",
+			stored.HolderSessionID, stored.ClientInstanceID, winner, roleClaimSecondInstance)
+	}
+	if stored.RenewedAt != stored.ClaimedAt {
+		t.Fatalf("the winning claim was claimed at %d and renewed at %d, want its own single stamp: the renewal moved a claim it does not hold",
+			stored.ClaimedAt, stored.RenewedAt)
+	}
+}

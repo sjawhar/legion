@@ -1871,10 +1871,18 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 }
 
 // subscribeHandler answers POST /v1/interests/subscribe. Its store work - the interest record's
-// read and write (store.Registry.UpsertWithin), the session entry's write and the unwired-repository
-// checks - runs within sendRequestBudget of the request's own context, so a bus that does not answer
-// is the bus-unavailable 503 with Retry-After: 1 inside the caller's attempt (writeStoreError); a
-// refused key is still its 413 or 400.
+// read and write (store.Registry.UpsertWithin), the session entry's write, the renewal of the
+// role claims this registration's own process holds (store.Registry.RenewRoleClaims) and the
+// unwired-repository checks - runs within sendRequestBudget of the request's own context, so a
+// bus that does not answer is the bus-unavailable 503 with Retry-After: 1 inside the caller's
+// attempt (writeStoreError); a refused key is still its 413 or 400.
+//
+// The renewal is the one thing here that cannot fail the registration. It runs last, once the
+// records this route owns are written, and whatever it could not do is logged and passed over: a
+// claim view that cannot answer yet (store.ErrRoleViewNotReady, which every listener leaves
+// behind it for a while after a restart), a bucket call that did not answer, a renewal that lost
+// its compare-and-swap. A heartbeat refused for any of those would take down the very sessions
+// whose claims it keeps alive.
 func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1964,6 +1972,24 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				// The mark tells it which of its runs restarted after this registration: those need
 				// no restart for its epoch (sessionRelays.apply).
 				d.consumers.relay.registered(body.SessionID, epochChanged, delivery.heard)
+			}
+		}
+		// The registration is this process's heartbeat, so it is where the claims it holds
+		// say they are still held: every claim naming this session and this client instance
+		// is stamped renewed, and a claim that names no process at all is adopted by the
+		// first registration of the session holding it. A registration stating no process
+		// renews nothing, since an absent instance names no process to match. The write is
+		// the registration's last, so a renewal never costs the records above it.
+		if err := d.registry.RenewRoleClaims(ctx, body.SessionID, strings.TrimSpace(body.ClientInstanceID)); err != nil {
+			switch {
+			case errors.Is(err, store.ErrRoleViewNotReady):
+				logger.Info("listener subscribe renewed no role claim: the role claim view cannot answer yet",
+					slog.String("session_id", body.SessionID),
+					slog.String("error", err.Error()))
+			default:
+				logger.Warn("listener subscribe left a role claim unrenewed",
+					slog.String("session_id", body.SessionID),
+					slog.String("error", err.Error()))
 			}
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
