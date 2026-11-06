@@ -108,6 +108,7 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.SessionStore":                        "runtime.kubernetes.session_store (the kind alone: neither the Secret key nor the instance and login behind it is emitted)",
 	"Kubernetes.Plugins":                             "runtime.kubernetes.plugins",
 	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
+	"Kubernetes.SkillsRepository":                    "runtime.kubernetes.skills_repository",
 	"Kubernetes.TestPostgres":                        "runtime.kubernetes.test_postgres",
 	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
 	"Kubernetes.IdleRelease":                         "runtime.kubernetes.idle_release",
@@ -296,7 +297,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
 	assertKeys(t, "settings.runtime.kubernetes", kubernetesKeys, []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
-		"agent_secrets", "plugins", "setup", "test_postgres", "repository_cache", "idle_release",
+		"agent_secrets", "plugins", "setup", "skills_repository", "test_postgres", "repository_cache", "idle_release",
 	})
 	assertKeys(t, "settings.runtime.kubernetes.idle_release", keysOf(t, kubernetesKeys["idle_release"]), []string{
 		"idle_minutes", "backstop_minutes",
@@ -358,6 +359,9 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := []string{"/bin/sh", "-c", "echo fixture-setup"}; !slices.Equal(settings.Runtime.Kubernetes.Setup, want) {
 		t.Errorf("runtime.kubernetes.setup = %q, want %q", settings.Runtime.Kubernetes.Setup, want)
+	}
+	if got := settings.Runtime.Kubernetes.SkillsRepository; got != "acme/agent-skills" {
+		t.Errorf("runtime.kubernetes.skills_repository = %q, want the file's acme/agent-skills", got)
 	}
 	cache := settings.Runtime.Kubernetes.RepositoryCache
 	if cache.Volume != "40Gi" || cache.RefreshMinutes != 15 || cache.RetainHours != 48 || cache.Resources.CPU != "500m" || cache.Resources.CPURequest != "500m" || cache.Resources.Memory != "1Gi" || cache.Resources.EphemeralStorage != "2Gi" {

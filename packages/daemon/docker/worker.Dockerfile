@@ -246,11 +246,12 @@ RUN jq --arg v "$PI_LEGION_VERSION" '(if $v != "" then .version = $v else . end)
     && mkdir -p /out/pi-legion \
     && tar xzf ./*.tgz -C /out/pi-legion --strip-components=1
 
-# claude-envoy ships as a build of this checkout's source rather than a pack: no workflow releases
-# it, its skills/ are relative symlinks into the repository's skills/ that its package.json `files`
-# does not list, and a Claude Code marketplace install takes the git tree itself. That tree's dist/
-# and legion/ are no input here: a pull request never commits them, and main's Rebuild Claude Envoy
-# plugin workflow commits them only after each merge, so they lag the source they were built from.
+# claude-envoy is built from this checkout's source rather than installed from npm: the image
+# runs the tree it was built from, as it does for the rest of the repository. Nothing here packs
+# it, unlike the two plugins above, so the prepack that resolves its skills/ links for a pack
+# never runs.
+# That tree's dist/ and legion/ are no input here: nothing commits them, and the release that
+# publishes the plugin builds them in its own build job.
 # `scripts/build.ts --out` writes /out/claude-envoy from the source instead: the plugin's own files
 # with its skills symlinks resolved, since the image carries no repository root for them to point
 # into, and a fresh dist/ and legion/. It refuses any Bun but the one .bun-version pins, which this

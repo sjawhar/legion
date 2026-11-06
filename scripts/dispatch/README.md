@@ -86,19 +86,22 @@ reaches both Dispatch's database and the transcript store.
 ### The run
 
 Use one window for both steps. That run chooses `TO`. Both times are UTC, in the form
-`2026-10-01T00:00:00Z`.
+`2026-10-01T00:00:00Z`. Each psql run is one read-only transaction, so a mistake cannot write, and
+`-q` keeps psql's `SET` line out of the CSV.
 
 ```bash
 FROM=2026-10-01T00:00:00Z
 TO=2026-10-27T05:00:00Z
 
 # 1. Dispatch: every person's comment in the window, one row per pair.
-PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --csv \
+psql "$DATABASE_URL" --single-transaction -q -X -v ON_ERROR_STOP=1 --csv \
+  -c 'SET TRANSACTION READ ONLY' \
   -v from="$FROM" -v to="$TO" \
   -f packages/envoy/internal/dispatch/deliveryaudit/comments.sql > comments.csv
 
 # Optional: Dispatch's whole record of one comment, once for each comment to show.
-PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --csv \
+psql "$DATABASE_URL" --single-transaction -q -X -v ON_ERROR_STOP=1 --csv \
+  -c 'SET TRANSACTION READ ONLY' \
   -v comment=03207432-749f-4211-9607-e378dc636807 \
   -f packages/envoy/internal/dispatch/deliveryaudit/trace.sql > trace-03207432.csv
 

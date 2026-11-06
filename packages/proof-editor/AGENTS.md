@@ -169,7 +169,12 @@ way it is over the copy. `tests/upstream-pin.test.ts` is the guard on the pin: i
 installed dependency and fails when a fix the pinned line carries has gone missing, or when
 `upstream/` stops being what the pinned sources emit. `tests/upstream-boundary.ts` has no
 runtime at all — `bun run typecheck` is what runs it, and it fails when a name crossing the
-boundary is `any` again.
+boundary is `any` again. `tests/going-answer-no-link.test.ts` is the ground truth for Dispatch's
+answer filter (`packages/envoy/going/filter.go`): it parses what that filter emitted for every
+probe of its own Go suite — `packages/envoy/going/testdata/filtered-answers.json`, a golden
+`packages/envoy/going/filter_golden_test.go` writes under `-update` — with the plugin list
+`src/lib-headless.ts` parses a body with, and fails on a `link`, an `image` or an `html` node,
+which no cleared answer may hold.
 
 The copied files are proof-sdk's and stay under its MIT license, as does `upstream/`, which tsc
 derives from proof-sdk's pinned sources; `LICENSE` beside this file is that license, taken from the

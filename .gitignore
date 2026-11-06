@@ -160,9 +160,11 @@ out
 .nuxt
 dist
 packages/*/dist/
-# The Claude Code plugin cache runs the plugin from main's committed bundle, which main's Rebuild
-# Claude Envoy plugin workflow writes; a pull request never commits it.
-!packages/claude-envoy/dist/
+# The Claude Envoy plugin's two generated trees. Nothing commits them: the plugin is published to
+# npm by release.yaml's claude_envoy_build, which builds them in the job and packs them with the
+# rest of the package, and `npm pack` reads package.json's "files" list rather than git, so an
+# ignored path is packed all the same.
+packages/claude-envoy/legion/
 
 # Gatsby files
 .cache/
