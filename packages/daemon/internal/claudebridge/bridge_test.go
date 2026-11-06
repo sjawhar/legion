@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // fakeClaudeEnv makes the test binary a stand-in for `claude -p` in stream-json: it records every
@@ -190,6 +191,10 @@ type rig struct {
 func newRig(t *testing.T, args ...string) *rig {
 	t.Helper()
 	dir := t.TempDir()
+	// Run opens the inbox under the process TMPDIR, so the rig places that directory itself: one
+	// with room for the inbox's socket, which TMPDIR holds unless the socket's path would not fit
+	// there, when the helper falls back to /tmp.
+	t.Setenv("TMPDIR", testtmp.Dir(t, "legion-claude-0123456789/inbox.sock"))
 	record, gate := filepath.Join(dir, "record"), filepath.Join(dir, "gate")
 	argv := append([]string{os.Args[0]}, args...)
 	env := append(os.Environ(), fakeClaudeEnv+"=1", "FAKE_CLAUDE_RECORD="+record, fakeClaudeGateEnv+"="+gate,
@@ -771,12 +776,10 @@ func TestTheBridgeEndsWithAnInboxClientConnected(t *testing.T) {
 func TestAClaudeCodeThatStopsReadingEndsTheBridge(t *testing.T) {
 	// A refusal repeats its request's id, so a long id fills the pipe within a few dozen refusals.
 	controlRequest := `{"type":"control_request","request_id":"` + strings.Repeat("r", 1000) + `","request":{"subtype":"can_use_tool"}}`
-	// The inbox's socket path must fit sun_path, so its TMPDIR is under /tmp.
-	tmp, err := os.MkdirTemp("/tmp", "legion-bridge")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
+	// The inbox is opened under the process TMPDIR, so the test places that directory: one with
+	// room for the inbox's socket, which TMPDIR holds unless the socket's path would not fit
+	// there, when the helper falls back to /tmp.
+	tmp := testtmp.Dir(t, "legion-claude-0123456789/inbox.sock")
 	t.Setenv("TMPDIR", tmp)
 	dir := t.TempDir()
 	stream := filepath.Join(dir, "stream")
