@@ -265,10 +265,12 @@ func credentialDigest(files ...string) string {
 //
 // It is no bound for a launch and the runtime rebuild does not take it for one. One Spawn or
 // Resume try may rightfully run for the whole of the runtime's LaunchBound — the Sandbox
-// runtime's is `worker_boot_timeout_seconds` several times over plus its provision bound, and a
-// projected caller can raise that timeout — so that rebuild waits the replaced runtime's own
-// bound with this as the margin beyond it (runtimeDrainBound), and only past that is the old
-// runtime ended and the call inside it left with a cancelled context.
+// runtime's is `worker_boot_timeout_seconds` several times over plus its provision bound, which
+// is settled when that runtime is built and no caller can raise under it, since that timeout is
+// class `rebuild` held by the runtime (config.Classes), so a change of it builds another runtime
+// rather than lengthening the one a launch is inside — so that rebuild waits the replaced
+// runtime's own bound with this as the margin beyond it (runtimeDrainBound), and only past that
+// is the old runtime ended and the call inside it left with a cancelled context.
 //
 // That wait is taken under the settings holder's lock, which every other settings change takes:
 // a rebuild runs either from an apply's observers (config.Live.Apply holds l.mu for the whole

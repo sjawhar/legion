@@ -17,9 +17,9 @@ import (
 
 // PhaseWork is what the one read answers: Keys is every issue that carries Legion phase work,
 // and RoleSessions is the newest title of every session the read found to be a Legion role
-// working an issue, keyed by session id. A reader that keeps the answer and must know which
-// events can move it reads RoleSessions (api/legion_phase_work.go); a reader that only places
-// an issue in a tree reads Keys alone (legion/metrics).
+// working an issue (WorkerTitle), keyed by session id. A reader that keeps the answer and must
+// know which events can move it reads RoleSessions (api/legion_phase_work.go); a reader that
+// only places an issue in a tree reads Keys alone (legion/metrics).
 type PhaseWork struct {
 	Keys         map[string]struct{}
 	RoleSessions map[string]string
@@ -30,8 +30,8 @@ type PhaseWork struct {
 // issue's key>` was written on. It is read project-wide, which is what makes the answer a fact of
 // the project rather than of a window (tree.go).
 //
-// The title rule is this package's own (RoleSessionWorks, session_title.go), and the titles are
-// resolved the one way Dispatch resolves them, each session's newest
+// The title rule is this package's own (WorkerTitle and RoleSessionWorks, session_title.go), and
+// the titles are resolved the one way Dispatch resolves them, each session's newest
 // (delivery.ResolveSessionTitles). Every reader of the fact comes through here, so a session
 // renamed after it wrote, or an event that carried no title of its own, moves the board and the
 // metrics together.
@@ -49,7 +49,7 @@ func PhaseWorkKeys(ctx context.Context, pool *store.Pool) (PhaseWork, error) {
 		return PhaseWork{}, fmt.Errorf("resolve the session titles of the Legion phase work: %w", err)
 	}
 	for _, session := range sessions {
-		if parsed, ok := ParseSessionTitle(titles[session]); ok && !parsed.Controller {
+		if _, worker := WorkerTitle(titles[session]); worker {
 			work.RoleSessions[session] = titles[session]
 		}
 	}

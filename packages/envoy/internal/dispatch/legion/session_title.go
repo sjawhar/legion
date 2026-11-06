@@ -66,12 +66,26 @@ func (t SessionTitle) Works(issue string) bool {
 	return !t.Controller && t.Issue == issue
 }
 
+// WorkerTitle is the parsed title of a session that works an issue, and whether title is one: a
+// phase worker or a root architect, never the project's controller, whose subject is a project
+// and no issue. It is the one statement of that rule, which three readers of it ask: the
+// project-wide read, which records every such session's newest title (PhaseWorkKeys); the board's
+// index of which sessions can move that read's answer (api/legion_phase_work.go's observe); and
+// the issue half below. So the index and the read can never disagree about which sessions count.
+func WorkerTitle(title string) (SessionTitle, bool) {
+	parsed, ok := ParseSessionTitle(title)
+	if !ok || parsed.Controller {
+		return SessionTitle{}, false
+	}
+	return parsed, true
+}
+
 // RoleSessionWorks is whether a session titled title is a Legion role working issue. It is the
 // title half of what makes an issue carry Legion phase work, which the project-wide read asks
 // for every (issue, session) pair it finds (PhaseWorkKeys) and the metrics' own window read asks
 // for the pairs of its scope (metrics.readRoleEvents).
 func RoleSessionWorks(title, issue string) bool {
-	parsed, ok := ParseSessionTitle(title)
+	parsed, ok := WorkerTitle(title)
 	return ok && parsed.Works(issue)
 }
 

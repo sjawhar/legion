@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"slices"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -947,5 +949,127 @@ func TestEachKindRecordsOnlyTheLaunchKeysItsOwnLaunchReads(t *testing.T) {
 	if drifted := launchSettingsDrift(launchSettingsFor(built, controllerPod{}), launchSettingsFor(shifted, controllerPod{})); len(drifted) != 1 ||
 		!strings.Contains(drifted[0], "runtime.kubernetes.resources.controller") {
 		t.Errorf("the controller pod's drift = %q, want its own reservation named", drifted)
+	}
+}
+
+// movedIssueLaunchKeys is the whole launch record as it reads after one launch key only an issue
+// pod's launch reads has moved (podkind.go's issueLaunchPaths), by path: what an operator who
+// changes that one key leaves for the next pod's template to record.
+var movedIssueLaunchKeys = map[string]func() string{
+	"runtime.kubernetes.resources.issue": movedBy(func(cfg *config.Config) {
+		cfg.Runtime.Kubernetes.Resources.Issue.CPURequest = "2"
+	}),
+	"runtime.kubernetes.skills_repository": movedSkillsRepositoryRecord,
+	"runtime.kubernetes.test_postgres": movedBy(func(cfg *config.Config) {
+		cfg.Runtime.Kubernetes.TestPostgres = false
+	}),
+	"worker_backends": movedBy(func(cfg *config.Config) {
+		cfg.WorkerBackends[claim.RoleTester] = runtime.BackendClaude
+	}),
+}
+
+// movedBy is the record of the launch fixture with move applied to it.
+func movedBy(move func(*config.Config)) func() string {
+	return func() string {
+		cfg := launchFixture()
+		move(cfg)
+		return LaunchSettings(cfg)
+	}
+}
+
+// movedSkillsRepositoryRecord moves `runtime.kubernetes.skills_repository` in the record itself
+// and not in the configuration it is read from, which is the one key of the four that cannot be
+// moved there: a ghrepo.Repository keeps its owner and name unexported, so config.Render marshals
+// every repository, the zero one included, as `{}`, and no change of that key moves what
+// LaunchSettings records. What replaces an issue pod whose skills repository moved is the pod's
+// recorded shape, which carries it as a string of its own (podShapeRecord.SkillsRepository), and
+// the controller's shape carries none (controllerPod.skillsRepository). The record is moved here
+// so the filter and the drift read are held to the same rule for this key as for the other three.
+func movedSkillsRepositoryRecord() string {
+	settings, err := launchSettingsOf(LaunchSettings(launchFixture()))
+	if err != nil {
+		panic("the launch fixture's record cannot be read: " + err.Error())
+	}
+	settings["runtime.kubernetes.skills_repository"] = ghrepo.MustParse("sjawhar/legion-skills").String()
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		panic("the moved record cannot be encoded: " + err.Error())
+	}
+	return string(encoded)
+}
+
+// A launch key only an issue pod's launch reads is drift of every issue pod and of no controller
+// pod: the skills repository, which the controller's pod clones in no init container and mounts
+// in no container (controllerPod.skillsRepository, controllerPod.initContainers); the pod's own
+// test database, which no container of the controller's serves (issuePod.mainVolumes); the issue
+// reservation, which no container of the controller's carries; and the workers' backends, which
+// name issue roles alone. Were one of them compared against the controller's record, its next
+// launch would replace a pod nothing about it had changed — the spurious round launchSettingsFor
+// exists to refuse, in the one direction its own comment did not cover.
+func TestAnIssueOnlyLaunchKeyDriftsTheIssuePodAndNotTheController(t *testing.T) {
+	built := LaunchSettings(launchFixture())
+	recorded, err := launchSettingsOf(built)
+	if err != nil {
+		t.Fatalf("the record cannot be read: %v", err)
+	}
+	for _, path := range slices.Concat(issueLaunchPaths, controllerLaunchPaths) {
+		if _, held := recorded[path]; !held {
+			t.Fatalf("%s is named as a key one kind's launch alone reads and no pod records it: the name has moved or is misspelt", path)
+		}
+	}
+	for _, path := range issueLaunchPaths {
+		move, named := movedIssueLaunchKeys[path]
+		if !named {
+			t.Fatalf("%s is a launch key an issue pod's launch alone reads and this test moves no such key", path)
+		}
+		t.Run(path, func(t *testing.T) {
+			shifted := move()
+			if shifted == built {
+				t.Fatalf("the whole record did not move with %s, so this proves nothing", path)
+			}
+			drifted := launchSettingsDrift(launchSettingsFor(built, issuePod{}), launchSettingsFor(shifted, issuePod{}))
+			if len(drifted) != 1 || !strings.Contains(drifted[0], path) {
+				t.Errorf("the issue pod's drift = %q, want the one reason naming %s", drifted, path)
+			}
+			before, after := launchSettingsFor(built, controllerPod{}), launchSettingsFor(shifted, controllerPod{})
+			if before != after {
+				t.Errorf("%s moved the controller pod's record, which no launch of its reads:\n%s\n%s", path, before, after)
+			}
+			if drifted := launchSettingsDrift(before, after); len(drifted) > 0 {
+				t.Errorf("the controller pod's drift = %q, want nothing: no launch of its reads %s", drifted, path)
+			}
+		})
+	}
+}
+
+// A launch key both kinds' launches read is drift of both pods, which is the other half of the
+// same rule: the filter takes a key from a pod's record only where that pod's own launch does not
+// read it, so a key both read reaches both, and the issue pod's round and the controller pod's
+// own next launch each carry the change. The image every container runs, the setup command that
+// wraps every role's start (launcherCommand), the issue volume's size, which sizes the issue
+// pod's own ephemeral claim and the controller Sandbox's template alike (diskSpec), and the
+// deployment instructions in every agent's system prompt are four such keys.
+func TestALaunchKeyBothKindsReadDriftsBothPods(t *testing.T) {
+	built := LaunchSettings(launchFixture())
+	for path, move := range map[string]func(*config.Config){
+		"runtime.kubernetes.image":        func(cfg *config.Config) { cfg.Runtime.Kubernetes.Image = nextImage },
+		"runtime.kubernetes.setup":        func(cfg *config.Config) { cfg.Runtime.Kubernetes.Setup = []string{"/bin/sh", "-c", "echo setup 2"} },
+		"runtime.kubernetes.issue_volume": func(cfg *config.Config) { cfg.Runtime.Kubernetes.IssueVolume = "80Gi" },
+		"instructions":                    func(cfg *config.Config) { cfg.InstructionsPath = "/etc/legion/instructions-2.md" },
+	} {
+		t.Run(path, func(t *testing.T) {
+			moved := launchFixture()
+			move(moved)
+			shifted := LaunchSettings(moved)
+			if shifted == built {
+				t.Fatalf("the whole record did not move with %s, so this proves nothing", path)
+			}
+			for _, kind := range []podKind{issuePod{}, controllerPod{}} {
+				drifted := launchSettingsDrift(launchSettingsFor(built, kind), launchSettingsFor(shifted, kind))
+				if len(drifted) != 1 || !strings.Contains(drifted[0], path) {
+					t.Errorf("the drift of %T = %q, want the one reason naming %s, which its launch reads", kind, drifted, path)
+				}
+			}
+		})
 	}
 }

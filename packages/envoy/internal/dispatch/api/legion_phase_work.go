@@ -93,14 +93,13 @@ func (w *legionPhaseWork) invalidate() {
 //
 // Anything else cannot move the read's answer: an ordinary session's event, and a Legion role's
 // event on an issue the set already holds or that its title does not name, which is every event
-// of a running phase worker after its first. The rule's title half is the one reading of a
-// title (legion.ParseSessionTitle), never a second one stated here.
+// of a running phase worker after its first. Which titles are a role's at all is the one
+// statement of that rule (legion.WorkerTitle), never a second one stated here.
 func (w *legionPhaseWork) observe(session, title, issue string) {
 	if session == "" {
 		return
 	}
-	parsed, isRole := legion.ParseSessionTitle(title)
-	isRole = isRole && !parsed.Controller
+	parsed, isRole := legion.WorkerTitle(title)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	known, wasRole := w.roleSessions[session]

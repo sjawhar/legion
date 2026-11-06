@@ -262,19 +262,17 @@ func podLaunchPath(path string) bool {
 	return !strings.HasPrefix(path, "runtime.tmux.")
 }
 
-// resourcesPrefix is where the two pod kinds' reservations are written, one key per kind
-// (podKind.resourcesPath).
-const resourcesPrefix = "runtime.kubernetes.resources."
-
 // launchSettingsFor is the record a pod of kind carries: the launch keys of the whole record
-// (LaunchSettings) less the keys another kind's launch reads and this one's does not. Today that
-// is the other kind's reservation alone (podKind.resourcesPath), which only the launch of the
-// pod it names ever reads.
+// (LaunchSettings) less the keys another kind's launch reads and this one's does not, which the
+// kind itself says, key by key (podKind.readsLaunchPath, podkind.go's issueLaunchPaths and
+// controllerLaunchPaths).
 //
 // It is why a changed `runtime.kubernetes.resources.controller` opens no update round over every
-// issue pod of the fleet: a round opens for each pod whose own launch reads the key that moved
-// and for no other (INFRA-1077's acceptance A5). A record this package cannot read is carried as
-// it is, and compares as every unreadable record does.
+// issue pod of the fleet, and why a changed `runtime.kubernetes.skills_repository`, which only an
+// issue pod's launch reads, replaces no controller pod: a round opens, and a pod no round covers
+// is replaced, for each pod whose own launch reads the key that moved and for no other
+// (INFRA-1077's acceptance A5). A record this package cannot read is carried as it is, and
+// compares as every unreadable record does.
 func launchSettingsFor(record string, kind podKind) string {
 	if record == "" {
 		return ""
@@ -284,7 +282,7 @@ func launchSettingsFor(record string, kind podKind) string {
 		return record
 	}
 	maps.DeleteFunc(settings, func(path, _ string) bool {
-		return strings.HasPrefix(path, resourcesPrefix) && path != kind.resourcesPath()
+		return !kind.readsLaunchPath(path)
 	})
 	encoded, err := json.Marshal(settings)
 	if err != nil {

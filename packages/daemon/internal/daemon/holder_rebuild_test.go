@@ -187,10 +187,10 @@ func TestARuntimeRebuildWaitsForTheCallsInsideTheRuntimeItReplaced(t *testing.T)
 // launch bound and a margin, never a fixed two minutes. One Sandbox launch try may run up to
 // LaunchBound — `worker_boot_timeout_seconds` several times over plus the provision bound
 // (runtime/sandbox's launchBound) — and that timeout defaults to 120 s and is the runtime's own
-// to rebuild, so a projected caller can raise it: a drain bounded by the two minutes the NATS
-// intake is given would stop the old runtime under a Spawn, Resume or ReplacePod that was still
-// rightfully inside it, leaving the call a cancelled context and the claim one of its launch
-// failures.
+// to rebuild, so the bound to wait is the one the replaced runtime was built with and no caller
+// can raise it under a launch: a drain bounded by the two minutes the NATS intake is given would
+// stop the old runtime under a Spawn, Resume or ReplacePod that was still rightfully inside it,
+// leaving the call a cancelled context and the claim one of its launch failures.
 func TestTheRuntimeDrainBoundIsTheReplacedRuntimesLaunchBoundAndAMargin(t *testing.T) {
 	launching := fake.NewRuntime()
 	launching.TryBound = 25 * time.Minute

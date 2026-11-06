@@ -50,3 +50,31 @@ func TestRoleSessionWorksIsTheTitleHalfOfPhaseWork(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkerTitleIsTheOneStatementOfTheWorkerRule: which titles are a Legion worker's — a phase
+// worker's or a root architect's, never the project controller's — is said once (WorkerTitle),
+// and the three readers of it ask it rather than stating it again: the project-wide read's
+// RoleSessions (PhaseWorkKeys), the board's index of the sessions that can move that answer
+// (api's legionPhaseWork.observe) and the issue half below (RoleSessionWorks).
+func TestWorkerTitleIsTheOneStatementOfTheWorkerRule(t *testing.T) {
+	for _, one := range []struct {
+		title string
+		want  SessionTitle
+		ok    bool
+	}{
+		{"Legion implementer · INFRA-1077", SessionTitle{Role: "implementer", Issue: "INFRA-1077"}, true},
+		{"Legion architect · INFRA-979", SessionTitle{Role: "architect", Issue: "INFRA-979"}, true},
+		{"Legion controller · INFRA", SessionTitle{}, false},
+		{"A person's session", SessionTitle{}, false},
+		{"", SessionTitle{}, false},
+	} {
+		got, ok := WorkerTitle(one.title)
+		if ok != one.ok || got != one.want {
+			t.Errorf("WorkerTitle(%q) = %+v, %t; want %+v, %t", one.title, got, ok, one.want, one.ok)
+		}
+		// A title WorkerTitle refuses works no issue either: the issue half asks it first.
+		if works := RoleSessionWorks(one.title, one.want.Issue); !one.ok && works {
+			t.Errorf("RoleSessionWorks(%q, %q) = true, want false: the title is no worker's", one.title, one.want.Issue)
+		}
+	}
+}
