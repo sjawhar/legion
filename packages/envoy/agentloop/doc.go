@@ -28,7 +28,9 @@
 // a run or in a decision, so the token reaches the endpoint the caller named and no other
 // server: the client's redirect check fails the call, above the transport and its retry, with
 // an error naming the redirecting status and the host the Location points at, so the run ends
-// in FaultProviderError.
+// in FaultProviderError. The Detail of that fault carries more than the host: Go's own
+// *url.Error wraps the check's error and names the Location in full, query included, as the
+// endpoint sent it. A caller that logs a Detail logs whatever the endpoint it named put there.
 //
 // # The retry
 //

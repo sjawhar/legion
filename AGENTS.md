@@ -438,7 +438,7 @@ Each item below names a task and where its code is, then notes on it.
   Its live proof is `go test -tags modellive ./agentloop/ -run TestLive`, run from `packages/envoy`, which makes a real model call and skips unless the operator names its gateway's base URL, its key file and its model (`AGENTLOOP_LIVE_*`).
   No `cmd` of the module imports it yet, so `packages/envoy/docker/Dockerfile` copies no new directory.
   The merge raises modules the listener and Dispatch compile in all the same, so those two binaries change and so do their third-party notices.
-  `packages/envoy/.changes/unreleased/pr2841-agentloop.yaml` is where each raise is named.
+  `packages/envoy/CHANGELOG.md` names each raise once the release fold has taken the entry.
 
 - Shared event contracts — `packages/contracts/`
 
