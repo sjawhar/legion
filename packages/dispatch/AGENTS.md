@@ -1988,7 +1988,7 @@ after a 4001, its second subscribe arriving within 500 ms of the close, and with
 attempt's spread after a 1012 (`RECONNECT_SPREAD_MS`, two seconds).
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/kept-file-storage.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
+`e2e/keyboard-agents-picker.e2e.ts`,
 `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`, `e2e/keyed-writes.e2e.ts`,
 `e2e/live-socket.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Every row of
 the live-socket spec runs in every project that lists
@@ -2026,12 +2026,11 @@ unloads and tells its other tabs of a sign-out in its own way, and a write has t
 every one of them. Its throttled-upload row skips outside Chromium, the one engine whose DevTools
 protocol paces a page's own upload; the in-flight upload row runs everywhere and is throttled only
 there.
-`e2e/kept-file-storage.e2e.ts` runs here and in `firefox` beneath that path: an upload the page
-keeps across a reload is resumed only where the engine gives the kept row back from IndexedDB
-(`web/src/features/writes/kept-files.ts`, which keeps the file's bytes with its name and type and
-makes the `File` again on the way out, since WebKit's IndexedDB stores no `File` at all),
-`Writes.#resume` drops a kept upload without a word where it does not, and that row's result in an
-engine says which of the two a reload showing no upload is.
+Its retried-upload row carries the kept-file question with it in every one of those engines: an
+upload the page keeps across a reload is resumed only where the engine gives the kept row back
+from IndexedDB (`web/src/features/writes/kept-files.ts`, which keeps the file's bytes with its
+name and type and makes the `File` again on the way out, since WebKit's IndexedDB stores no
+`File` at all), and `Writes.#resume` drops a kept upload without a word where it does not.
 CI installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
 
 The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for two
@@ -2055,14 +2054,14 @@ The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four row
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/kept-file-storage.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
+`e2e/keyboard-agents-picker.e2e.ts`,
 `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`, `e2e/keyed-writes.e2e.ts`,
 `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`, and
 `e2e/picture-link-click.e2e.ts`: Firefox's native editing puts text
 typed over a code block's last line before that line's newline, and deletes a paragraph's hard break
 along with the text after it, which Chromium and WebKit never do, so that spec is the one that needs
-a second engine; the two picker specs, the deep-links spec, the two keyed specs, the kept-file
-spec and the live-socket spec run for the reasons given under `webkit` above; and a click on a
+a second engine; the two picker specs, the deep-links spec, the two keyed specs
+and the live-socket spec run for the reasons given under `webkit` above; and a click on a
 link inside the editor meets
 the engine's focus rule — Firefox focuses the editing host, not the link — so the picture view's
 fallback link is clicked there too. CI installs Firefox beside Chromium for them (`bun run
