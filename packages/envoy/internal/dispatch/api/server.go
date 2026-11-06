@@ -610,6 +610,18 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		// (routeScopes).
 		panic("api.Register: the route table's scope map names a route the table does not mount: " + strings.Join(unmounted, "; "))
 	}
+	if shapeless := shapelessRoutes(routes); len(shapeless) > 0 {
+		// A row with no shape is a row the generated OpenAPI document would leave out, so the
+		// one definition of the API would stop being one; the table is refused rather than
+		// mounted (routes_shapes.go).
+		panic("api.Register: the route table holds a row with no request and response shape: " + strings.Join(shapeless, "; "))
+	}
+	if unshaped := shapedRoutesNotMounted(); len(unshaped) > 0 {
+		// A shape for a route nothing serves is a shape the document would describe and no
+		// caller could reach — a row renamed or deleted and its entry left behind — so the
+		// table is refused rather than mounted (routeShapes).
+		panic("api.Register: the route table's shape map names a route the table does not mount: " + strings.Join(unshaped, "; "))
+	}
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {

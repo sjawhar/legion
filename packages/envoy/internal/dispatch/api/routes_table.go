@@ -293,15 +293,19 @@ type routeRow struct {
 }
 
 // apiRoute is one mounted route: the table's row, the class routes() stamps onto it from
-// writeClasses and the OAuth scopes it stamps from routeScopes. Register mounts the table and
-// GET /api/v1 lists it, so the two can never disagree about what the server serves. Every
-// mutating row carries a Scope, and a GET row carries none (project_scope.go); OAuthScopes is
-// empty on every row any authenticated caller may reach; the row's own five columns are read
-// through it by promotion.
+// writeClasses, the OAuth scopes it stamps from routeScopes and the shape it stamps from
+// routeShapes. Register mounts the table and GET /api/v1 lists it, so the two can never disagree
+// about what the server serves. Every mutating row carries a Scope, and a GET row carries none
+// (project_scope.go); OAuthScopes is empty on every row any authenticated caller may reach; the
+// row's own five columns are read through it by promotion.
 type apiRoute struct {
 	routeRow
 	Scope       writeScope
 	OAuthScopes routeScopeSet
+	// Shape is what the route takes and answers, in Go types (routeShapes): the schemas an
+	// OpenAPI document is reflected out of, which the table's five columns do not carry. Every
+	// mounted row has one, shapelessRoutes refusing to mount a table that holds a row without.
+	Shape routeShape
 }
 
 // routeIndexEntry is the public shape of a route in GET /api/v1. Scopes is left out of a route
@@ -514,7 +518,7 @@ func (s *server) routes() []apiRoute {
 	routes := make([]apiRoute, len(rows))
 	for index, row := range rows {
 		name := row.Method + " " + row.Pattern
-		routes[index] = apiRoute{row, writeClasses[name], routeScopes[name]}
+		routes[index] = apiRoute{row, writeClasses[name], routeScopes[name], routeShapes[name]}
 	}
 	return routes
 }
