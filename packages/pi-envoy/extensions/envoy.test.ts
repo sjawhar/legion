@@ -71,6 +71,7 @@ import { restoreEnvironment } from "@legion/test-fixtures/environment";
 import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
+import { nkeys, connect as realConnect } from "nats";
 import { z } from "zod";
 import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
@@ -161,176 +162,167 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
-// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports, and
-// a row that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the
-// module before the mock replaces it: a static import's live bindings would read the mock.
-const { connect: realConnect, Events, nkeyAuthenticator, nkeys } = await import("nats");
-mock.module("nats", () => ({
-  Events,
-  nkeyAuthenticator,
-  nkeys,
-  connect: async (options: {
-    readonly name: string;
-    readonly servers: readonly string[];
-    readonly authenticator?: unknown;
-  }) => {
-    const { name, servers, authenticator } = options;
-    if (natsState.failConnects > 0) {
-      natsState.failConnects -= 1;
-      throw new Error("CONNECTION_REFUSED");
-    }
-    natsState.connectedNames.push(name);
-    natsState.connects.push({ servers, authenticated: authenticator !== undefined });
-    // Parked only where a test asks for it: every other connect answers at once, as before.
-    if (natsState.heldConnect !== undefined) await natsState.heldConnect;
-    if (natsState.realConnect) {
-      return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
-    }
-    let closed = false;
-    return {
-      isClosed: () => closed || natsState.connectionsClosed,
-      close: async () => {
-        closed = true;
-        natsState.closedNames.push(name);
-      },
-      drain: async () => {
-        natsState.drainStarted = true;
-        if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
-      },
-      // An async iterable of the connection's status events, which a test feeds through
-      // `pushNatsStatus`; it ends once the connection is closed.
-      status: () => {
-        const queued: { readonly type: string; readonly data: unknown }[] = [];
-        let wake: (() => void) | undefined;
-        const reader = (status: { readonly type: string; readonly data: unknown }) => {
-          queued.push(status);
-          wake?.();
-          wake = undefined;
-        };
-        natsState.statusReaders.push(reader);
-        return {
-          [Symbol.asyncIterator]: () => ({
-            next: async (): Promise<
-              IteratorResult<{ readonly type: string; readonly data: unknown }>
-            > => {
-              for (;;) {
-                if (closed) return { done: true, value: undefined };
-                const status = queued.shift();
-                if (status !== undefined) return { done: false, value: status };
-                const pending = Promise.withResolvers<void>();
-                wake = pending.resolve;
-                await pending.promise;
-              }
-            },
-          }),
-        };
-      },
-      // nats.js's round trip: the server has every SUB written before it when this resolves, and
-      // every pending one of them rejects when the connection drops. A rejection is transient
-      // unless the connection is closed with it, which is the one case the extension gives up on.
-      flush: async () => {
-        natsState.flushes.push([...natsState.subscriptions.keys()]);
-        if (natsState.heldFlush !== undefined) await natsState.heldFlush;
-        const failing = natsState.failFlushOnSubject;
-        if (failing !== undefined && natsState.controls.has(failing)) {
-          natsState.failFlushOnSubject = undefined;
-          if (natsState.failFlushClosesConnection) closed = true;
-          throw new Error(`FLUSH_FAILED ${failing}`);
-        }
-      },
-      publish: (subject: string, data?: Uint8Array) => {
-        if (natsState.failPublishes > 0) {
-          natsState.failPublishes -= 1;
-          throw new Error("PUBLISH_FAILED");
-        }
-        natsState.published.push({ subject, data });
-        natsState.onPublish?.(subject);
-      },
-      subscribe: (topic: string) => {
-        if (natsState.failSubscribes > 0) {
-          natsState.failSubscribes -= 1;
-          throw new Error("SUBSCRIBE_FAILED");
-        }
-        let active = true;
-        const queue: {
-          readonly subject: string;
-          readonly data: Uint8Array;
-          readonly reply: string;
-          readonly headers?: MessageHeaders;
-        }[] = [];
-        let wake: (() => void) | undefined;
-        let ended = false;
-        let failure: Error | undefined;
-        const notify = () => {
-          wake?.();
-          wake = undefined;
-        };
-        const controls = {
-          push: (data: string, reply = "", headers?: Readonly<Record<string, string>>) => {
-            queue.push({
-              subject: topic,
-              data: new TextEncoder().encode(data),
-              reply,
-              ...(headers === undefined
-                ? {}
-                : { headers: { get: (name: string) => headers[name] ?? "" } }),
-            });
-            notify();
+// The dial `extensions/envoy.ts` opens NATS with, handed to it below through
+// `setNatsConnectForTests`. The `nats` module itself stays as it is: a row that sets
+// `natsState.realConnect` gets nats.js's own connect from here, and every other file in this
+// `bun test` process — `card-delivery-omp.test.ts` among them — reads the real module.
+const natsStandInConnect = async (options: {
+  readonly name: string;
+  readonly servers: readonly string[];
+  readonly authenticator?: unknown;
+}) => {
+  const { name, servers, authenticator } = options;
+  if (natsState.failConnects > 0) {
+    natsState.failConnects -= 1;
+    throw new Error("CONNECTION_REFUSED");
+  }
+  natsState.connectedNames.push(name);
+  natsState.connects.push({ servers, authenticated: authenticator !== undefined });
+  // Parked only where a test asks for it: every other connect answers at once, as before.
+  if (natsState.heldConnect !== undefined) await natsState.heldConnect;
+  if (natsState.realConnect) {
+    return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
+  }
+  let closed = false;
+  return {
+    isClosed: () => closed || natsState.connectionsClosed,
+    close: async () => {
+      closed = true;
+      natsState.closedNames.push(name);
+    },
+    drain: async () => {
+      natsState.drainStarted = true;
+      if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
+    },
+    // An async iterable of the connection's status events, which a test feeds through
+    // `pushNatsStatus`; it ends once the connection is closed.
+    status: () => {
+      const queued: { readonly type: string; readonly data: unknown }[] = [];
+      let wake: (() => void) | undefined;
+      const reader = (status: { readonly type: string; readonly data: unknown }) => {
+        queued.push(status);
+        wake?.();
+        wake = undefined;
+      };
+      natsState.statusReaders.push(reader);
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: async (): Promise<
+            IteratorResult<{ readonly type: string; readonly data: unknown }>
+          > => {
+            for (;;) {
+              if (closed) return { done: true, value: undefined };
+              const status = queued.shift();
+              if (status !== undefined) return { done: false, value: status };
+              const pending = Promise.withResolvers<void>();
+              wake = pending.resolve;
+              await pending.promise;
+            }
           },
-          end: () => {
-            ended = true;
-            notify();
+        }),
+      };
+    },
+    // nats.js's round trip: the server has every SUB written before it when this resolves, and
+    // every pending one of them rejects when the connection drops. A rejection is transient
+    // unless the connection is closed with it, which is the one case the extension gives up on.
+    flush: async () => {
+      natsState.flushes.push([...natsState.subscriptions.keys()]);
+      if (natsState.heldFlush !== undefined) await natsState.heldFlush;
+      const failing = natsState.failFlushOnSubject;
+      if (failing !== undefined && natsState.controls.has(failing)) {
+        natsState.failFlushOnSubject = undefined;
+        if (natsState.failFlushClosesConnection) closed = true;
+        throw new Error(`FLUSH_FAILED ${failing}`);
+      }
+    },
+    publish: (subject: string, data?: Uint8Array) => {
+      if (natsState.failPublishes > 0) {
+        natsState.failPublishes -= 1;
+        throw new Error("PUBLISH_FAILED");
+      }
+      natsState.published.push({ subject, data });
+      natsState.onPublish?.(subject);
+    },
+    subscribe: (topic: string) => {
+      if (natsState.failSubscribes > 0) {
+        natsState.failSubscribes -= 1;
+        throw new Error("SUBSCRIBE_FAILED");
+      }
+      let active = true;
+      const queue: {
+        readonly subject: string;
+        readonly data: Uint8Array;
+        readonly reply: string;
+        readonly headers?: MessageHeaders;
+      }[] = [];
+      let wake: (() => void) | undefined;
+      let ended = false;
+      let failure: Error | undefined;
+      const notify = () => {
+        wake?.();
+        wake = undefined;
+      };
+      const controls = {
+        push: (data: string, reply = "", headers?: Readonly<Record<string, string>>) => {
+          queue.push({
+            subject: topic,
+            data: new TextEncoder().encode(data),
+            reply,
+            ...(headers === undefined
+              ? {}
+              : { headers: { get: (name: string) => headers[name] ?? "" } }),
+          });
+          notify();
+        },
+        end: () => {
+          ended = true;
+          notify();
+        },
+        fail: (error: Error) => {
+          failure = error;
+          notify();
+        },
+        active: () => active,
+      };
+      natsState.controls.set(topic, controls);
+      const controlsForTopic = natsState.controlsByTopic.get(topic);
+      if (controlsForTopic === undefined) natsState.controlsByTopic.set(topic, [controls]);
+      else controlsForTopic.push(controls);
+      const subscription: Subscription = {
+        unsubscribe: () => {
+          active = false;
+          // nats.js ends the async iterator on unsubscribe(), which is what
+          // makes a deliberate close indistinguishable from a dropped
+          // connection inside the pump. A mock that leaves the iterator
+          // parked cannot observe that, and lets resubscribe bugs ship green.
+          notify();
+        },
+        [Symbol.asyncIterator]: () => ({
+          next: async (): Promise<
+            IteratorResult<{
+              readonly subject: string;
+              readonly data: Uint8Array;
+              readonly reply: string;
+              readonly headers?: MessageHeaders;
+            }>
+          > => {
+            for (;;) {
+              if (failure) throw failure;
+              if (!active || ended) return { done: true, value: undefined };
+              const item = queue.shift();
+              if (item) return { done: false, value: item };
+              const pending = Promise.withResolvers<void>();
+              wake = pending.resolve;
+              await pending.promise;
+            }
           },
-          fail: (error: Error) => {
-            failure = error;
-            notify();
-          },
-          active: () => active,
-        };
-        natsState.controls.set(topic, controls);
-        const controlsForTopic = natsState.controlsByTopic.get(topic);
-        if (controlsForTopic === undefined) natsState.controlsByTopic.set(topic, [controls]);
-        else controlsForTopic.push(controls);
-        const subscription: Subscription = {
-          unsubscribe: () => {
-            active = false;
-            // nats.js ends the async iterator on unsubscribe(), which is what
-            // makes a deliberate close indistinguishable from a dropped
-            // connection inside the pump. A mock that leaves the iterator
-            // parked cannot observe that, and lets resubscribe bugs ship green.
-            notify();
-          },
-          [Symbol.asyncIterator]: () => ({
-            next: async (): Promise<
-              IteratorResult<{
-                readonly subject: string;
-                readonly data: Uint8Array;
-                readonly reply: string;
-                readonly headers?: MessageHeaders;
-              }>
-            > => {
-              for (;;) {
-                if (failure) throw failure;
-                if (!active || ended) return { done: true, value: undefined };
-                const item = queue.shift();
-                if (item) return { done: false, value: item };
-                const pending = Promise.withResolvers<void>();
-                wake = pending.resolve;
-                await pending.promise;
-              }
-            },
-          }),
-        };
-        natsState.subscriptions.set(topic, subscription);
-        return subscription;
-      },
-    };
-  },
-  StringCodec: () => ({
-    decode: (data: Uint8Array) => new TextDecoder().decode(data),
-    encode: (text: string) => new TextEncoder().encode(text),
-  }),
-}));
+        }),
+      };
+      natsState.subscriptions.set(topic, subscription);
+      return subscription;
+    },
+  };
+};
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async (text: string) => {
@@ -396,6 +388,16 @@ const originalConfigVariables = configVariables.map((name) => [name, process.env
 /** The envoy.json every test starts with: no Dispatch or Envoy section, and AskGate off. */
 const ASKGATE_OFF = { askgate: { enabled: false } };
 let configDirectory = "";
+
+// Hands the stand-in above to every instance of the Envoy entry this file loads: the setter keeps
+// it on `globalThis`, since each `import("./envoy.ts?<row>")` is a module of its own. The import
+// cannot be static, as the entry reads `@oh-my-pi/pi-coding-agent` and so must load below the
+// stand-ins for it; it carries a query of its own so no row's instance is this one; and it sits
+// below the `original*` captures because loading the entry sets `PATH`, `DISPATCH_HOST` and
+// `ENVOY_CONFIG_FILE` as every row's own load does, which `afterEach` puts back to what was
+// captured.
+const { setNatsConnectForTests } = await import("./envoy.ts?nats-stand-in");
+setNatsConnectForTests(natsStandInConnect);
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on

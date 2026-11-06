@@ -18,27 +18,22 @@ const registered: Record<string, unknown> = JSON.parse(
   )
 );
 
-// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports.
-const { nkeyAuthenticator, nkeys } = await import("nats");
-mock.module("nats", () => ({
-  nkeyAuthenticator,
-  nkeys,
-  connect: async () => ({
-    isClosed: () => false,
-    close: async () => undefined,
-    drain: async () => undefined,
-    flush: async () => undefined,
-    subscribe: () => ({
-      unsubscribe: () => undefined,
-      [Symbol.asyncIterator]: async function* () {
-        await new Promise<never>(() => undefined);
-      },
-    }),
+// The dial the Envoy entry opens NATS with, handed to it through `setNatsConnectForTests` once
+// that entry is loaded below. The `nats` module itself stays as it is, so
+// `@legion/envoy-client/nats-connection` resolves the NATS credential with the real nkey exports,
+// and every other file in this `bun test` process reads the real module.
+const natsStandInConnect = async () => ({
+  isClosed: () => false,
+  close: async () => undefined,
+  drain: async () => undefined,
+  flush: async () => undefined,
+  subscribe: () => ({
+    unsubscribe: () => undefined,
+    [Symbol.asyncIterator]: async function* () {
+      await new Promise<never>(() => undefined);
+    },
   }),
-  StringCodec: () => ({
-    decode: (data: Uint8Array) => new TextDecoder().decode(data),
-  }),
-}));
+});
 
 import { hostAgentRegistryMock } from "@legion/pi-shared/test/host-registry";
 
@@ -62,8 +57,13 @@ delete process.env.OMP_PROFILE;
 delete process.env.PI_CODING_AGENT_DIR;
 // Distinct mtime queries force distinct module instances, exercising the
 // cross-module role-claim bridge documented in envoy.ts. The Envoy entry is the sibling plugin's,
-// reached by path: this test is the one place the two entries meet in one process.
-const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy.ts?envoy-entry");
+// reached by path: this test is the one place the two entries meet in one process. Its NATS dial
+// is the stand-in above, handed over as soon as the entry is loaded and before any pane here
+// starts a session.
+const { default: envoyExtension, setNatsConnectForTests } = await import(
+  "../../pi-envoy/extensions/envoy.ts?envoy-entry"
+);
+setNatsConnectForTests(natsStandInConnect);
 afterAll(() => {
   for (const [key, value] of Object.entries(originalConfigEnvironment)) {
     if (value === undefined) delete process.env[key];

@@ -46,6 +46,7 @@ import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/h
 import { restoreEnvironment } from "@legion/test-fixtures/environment";
 import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { ConnectionOptions, NatsConnection } from "nats";
 import pkg from "../package.json";
 import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
 import { classifySession } from "../src/classify";
@@ -78,55 +79,51 @@ const widgetCalls: { readonly key: string; readonly lines: string[] | undefined 
 function recordWidget(key: string, lines: string[] | undefined): void {
   widgetCalls.push({ key, lines });
 }
-// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports.
-const { nkeyAuthenticator, nkeys } = await import("nats");
-mock.module("nats", () => ({
-  nkeyAuthenticator,
-  nkeys,
-  connect: async (options: { readonly name: string }) => {
-    await natsConnectGates.get(options.name)?.();
-    const endings: (() => void)[] = [];
-    const connection = {
-      name: options.name,
-      subjects: [] as string[],
-      unsubscribed: [] as string[],
-      closed: false,
-      drop: () => {
-        connection.closed = true;
-        for (const end of endings.splice(0)) end();
-      },
-    };
-    natsConnections.push(connection);
-    return {
-      close: async () => undefined,
-      drain: async () => undefined,
-      isClosed: () => connection.closed,
-      flush: async () => undefined,
-      publish: () => undefined,
-      subscribe: (subject: string) => {
-        natsSubscribeObserver?.(subject);
-        connection.subjects.push(subject);
-        const ended = Promise.withResolvers<void>();
-        endings.push(ended.resolve);
-        return {
-          unsubscribe: () => {
-            connection.unsubscribed.push(subject);
+// The dial the Envoy entry opens NATS with, handed to it through `setNatsConnectForTests` once
+// that entry is loaded below. The `nats` module itself stays as it is, so
+// `@legion/envoy-client/nats-connection` resolves the NATS credential with the real nkey exports,
+// and every other file in this `bun test` process reads the real module.
+const natsStandInConnect = async (options: ConnectionOptions = {}): Promise<NatsConnection> => {
+  const name = options.name ?? "";
+  await natsConnectGates.get(name)?.();
+  const endings: (() => void)[] = [];
+  const connection = {
+    name,
+    subjects: [] as string[],
+    unsubscribed: [] as string[],
+    closed: false,
+    drop: () => {
+      connection.closed = true;
+      for (const end of endings.splice(0)) end();
+    },
+  };
+  natsConnections.push(connection);
+  // The stand-in answers the members the entry calls, not the whole `NatsConnection`.
+  return {
+    close: async () => undefined,
+    drain: async () => undefined,
+    isClosed: () => connection.closed,
+    flush: async () => undefined,
+    publish: () => undefined,
+    subscribe: (subject: string) => {
+      natsSubscribeObserver?.(subject);
+      connection.subjects.push(subject);
+      const ended = Promise.withResolvers<void>();
+      endings.push(ended.resolve);
+      return {
+        unsubscribe: () => {
+          connection.unsubscribed.push(subject);
+        },
+        [Symbol.asyncIterator]: () => ({
+          next: async () => {
+            await ended.promise;
+            return { done: true, value: undefined };
           },
-          [Symbol.asyncIterator]: () => ({
-            next: async () => {
-              await ended.promise;
-              return { done: true, value: undefined };
-            },
-          }),
-        };
-      },
-    };
-  },
-  StringCodec: () => ({
-    decode: (data: Uint8Array) => new TextDecoder().decode(data),
-    encode: (text: string) => new TextEncoder().encode(text),
-  }),
-}));
+        }),
+      };
+    },
+  } as unknown as NatsConnection;
+};
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
@@ -181,9 +178,14 @@ process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
 delete process.env.OMP_PROFILE;
 delete process.env.PI_CODING_AGENT_DIR;
 
-// The extension modules must load after their OMP and NATS host dependencies are mocked. The
-// Envoy entry is the sibling plugin's, reached by path: these panes run both, as a Legion pane does.
-const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy");
+// The extension modules must load after their OMP host dependencies are mocked. The Envoy entry
+// is the sibling plugin's, reached by path: these panes run both, as a Legion pane does. Its NATS
+// dial is the stand-in above, handed over as soon as the entry is loaded and before any pane here
+// starts a session.
+const { default: envoyExtension, setNatsConnectForTests } = await import(
+  "../../pi-envoy/extensions/envoy"
+);
+setNatsConnectForTests(natsStandInConnect);
 const {
   default: legionExtension,
   setLegionBootstrapExitForTests,
