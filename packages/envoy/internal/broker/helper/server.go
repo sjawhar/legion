@@ -1089,7 +1089,7 @@ const (
 func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass identity) (time.Time, confirmation) {
 	var lease time.Time
 	outcome := confirmStopped
-	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, s.enrollRetryMin(), s.enrollRetryMax(), func(attempt int, err error, delay time.Duration, retrying bool) {
 		switch {
 		case errors.Is(err, errRenamed):
 			outcome = confirmMoved

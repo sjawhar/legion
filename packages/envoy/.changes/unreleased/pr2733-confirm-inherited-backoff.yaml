@@ -1,0 +1,4 @@
+kind: Fixed
+body: The helper's confirmation of an inherited enrollment retries with the enroll's own backoff,
+  as its documentation says, rather than with a fixed second that no deployment or test could
+  change.
