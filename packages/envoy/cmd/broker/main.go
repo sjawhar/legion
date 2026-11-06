@@ -19,6 +19,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -202,6 +203,10 @@ func main() {
 	// BROKER_SECRETS_KMS_KEY_ARN, or BROKER_SECRETS_KMS_KEY_NAME under gcp-secret-manager.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
+	// And, in the same breath, the airlock's test-only settings: every one of them is a local
+	// run's, so a production start that names any of them is refused here rather than running
+	// a broker that mints against a stand-in or dials an address no production proxy may.
+	fatal(refuseAirlockTestSettingsInProduction(cfg, fakeSecrets))
 	// The airlock's rules, read here beside the port-0 refusal: before the database is migrated,
 	// before the socket is bound and before anything reaches for AWS, so a pod given a file it
 	// cannot read or cannot serve refuses to start instead of running without the rules its
@@ -226,6 +231,12 @@ func main() {
 		airlockCA, err = airlockproxy.NewAuthority(cfg.AirlockCACertFile, cfg.AirlockCAKeyFile)
 		fatal(err)
 	}
+	// And the extra roots the proxy verifies a service's certificate against on its own calls
+	// upstream, which a local stack points at the certificate of its stand-in services. It is
+	// read here with the files above and refused the same way: a file that is not a
+	// certificate would leave every bound host's call failing.
+	airlockTestUpstreamRoots, err := readAirlockTestUpstreamRoots(cfg.AirlockTestUpstreamCAFile)
+	fatal(err)
 	// The proxy port's own server, built far below once the boot has bound its socket, and nil
 	// for a deployment with no airlock. It is declared here because the two reread paths below
 	// — this pod's own, and a peer's notification — are wired before it is built and have to
@@ -589,6 +600,15 @@ func main() {
 			CA:     airlockCA,
 			Idle:   time.Duration(cfg.AirlockIdleSeconds) * time.Second,
 			Log:    slog.Default(),
+			// The local stack's four settings for the proxy, every one of them refused on a
+			// production start (refuseAirlockTestSettingsInProduction): where a name is, the
+			// addresses it may dial anyway, the roots it trusts upstream, and the two
+			// negative controls.
+			Resolve:       airlockTestResolver(cfg.AirlockTestResolve),
+			UpstreamRoots: airlockTestUpstreamRoots,
+			DialAllow:     cfg.AirlockTestDialAllow,
+			KeepValues:    cfg.AirlockTestKeepValues,
+			NoKind:        cfg.AirlockTestNoKind,
 		})
 	}
 	// From here a second signal belongs to the drain below rather than to the watchdog's exit:
@@ -770,6 +790,87 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_FAKE_SECRETS_FILE is unset); only a local run may use it as dev-broker.sh's derive-from-bind convention", redact.URL(publicURL))
 }
 
+// refuseAirlockTestSettingsInProduction refuses every one of the airlock's test-only settings
+// unless BROKER_FAKE_SECRETS_FILE makes this a local run, as the port-0 refusal above does and
+// for the same reason: each of them points the broker at a stand-in, lets it dial an address no
+// production proxy may dial, or turns off a part of the airlock, so one reaching a real
+// deployment must fail loudly at boot rather than quietly serve a broker that is not the one
+// the operator configured. The refusal names the variable it found, since an operator reads
+// which of its settings it has to take out. Extracted from main so a test can drive it
+// directly instead of through fatal, which calls os.Exit.
+func refuseAirlockTestSettingsInProduction(cfg config.Config, fakeSecretsFile string) error {
+	if fakeSecretsFile != "" {
+		return nil
+	}
+	for _, setting := range []struct {
+		name string
+		set  bool
+	}{
+		{"BROKER_AIRLOCK_TEST_GITHUB_API_BASE", cfg.AirlockTestGitHubAPIBase != ""},
+		{"BROKER_AIRLOCK_TEST_GOOGLE_TOKEN_URL", cfg.AirlockTestGoogleTokenURL != ""},
+		{"BROKER_AIRLOCK_TEST_DIAL_ALLOW", len(cfg.AirlockTestDialAllow) > 0},
+		{"BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE", cfg.AirlockTestUpstreamCAFile != ""},
+		{"BROKER_AIRLOCK_TEST_RESOLVE", len(cfg.AirlockTestResolve) > 0},
+		{"BROKER_AIRLOCK_TEST_KEEP_VALUES", cfg.AirlockTestKeepValues},
+		{"BROKER_AIRLOCK_TEST_NO_KIND", cfg.AirlockTestNoKind},
+	} {
+		if setting.set {
+			return fmt.Errorf("%s is for the broker's local stack alone and is set on a production start (BROKER_FAKE_SECRETS_FILE is unset); take it out", setting.name)
+		}
+	}
+	return nil
+}
+
+// readAirlockTestUpstreamRoots is the trust store the proxy verifies a service's certificate
+// against on its own calls upstream: the host's own roots with the certificates of
+// BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE added, so a local stack's stand-in services verify while
+// every real host still verifies as it did. An empty path answers nil, which is the host's
+// roots alone. A file that cannot be read or holds no certificate refuses the boot: a run that
+// quietly trusted nothing extra would fail one call at a time instead.
+func readAirlockTestUpstreamRoots(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// os.ReadFile's own error names the path, so this adds the variable alone.
+		return nil, fmt.Errorf("BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE: the host's own roots: %w", err)
+	}
+	if !pool.AppendCertsFromPEM(data) {
+		return nil, fmt.Errorf("BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE %s: holds no PEM certificate", path)
+	}
+	return pool, nil
+}
+
+// airlockTestResolver is BROKER_AIRLOCK_TEST_RESOLVE as the proxy's Resolve: the address the
+// setting gives a host, and the ordinary lookup for every host it does not name. It answers nil
+// for a setting that names none, which leaves the proxy its own resolver.
+func airlockTestResolver(hosts map[string]netip.Addr) func(context.Context, string) ([]netip.Addr, error) {
+	if len(hosts) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if addr, named := hosts[host]; named {
+			return []netip.Addr{addr}, nil
+		}
+		if addr, err := netip.ParseAddr(host); err == nil {
+			return []netip.Addr{addr.Unmap()}, nil
+		}
+		addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		for i, addr := range addrs {
+			addrs[i] = addr.Unmap()
+		}
+		return addrs, nil
+	}
+}
+
 // readAirlockRules reads the airlock's rules file, the path BROKER_AIRLOCK_RULES_FILE names. An
 // empty path is a deployment with no airlock, and answers empty rules, whose Digest is "" for
 // every secret. Anything else refuses the boot: a path that cannot be read, a file airlock.Parse
@@ -844,9 +945,15 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
-		ServicesByAccount:    cfg.ServicesByAccount,
-		VMServicesByAccount:  cfg.VMServicesByAccount,
-		Minters:              kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
+		ServicesByAccount:   cfg.ServicesByAccount,
+		VMServicesByAccount: cfg.VMServicesByAccount,
+		// The two kinds whose minter calls an endpoint of its own carry the local stack's
+		// stand-in endpoints when it named them, and the real ones otherwise: a minter left
+		// zero mints against GitHub and Google themselves.
+		Minters: kindMinters(
+			secrets.GitHubApp{Base: cfg.AirlockTestGitHubAPIBase},
+			secrets.GoogleLogin{TokenURL: cfg.AirlockTestGoogleTokenURL},
+			secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
 		Airlock:              rules,
 		AirlockProxyURL:      cfg.AirlockProxyURL,
 		AirlockCACertificate: caCertificate,

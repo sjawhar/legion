@@ -10,15 +10,12 @@
 package airlockproxy
 
 import (
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +24,7 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 
 	"github.com/sjawhar/envoy/internal/broker/airlock"
+	"github.com/sjawhar/envoy/internal/broker/airlock/airlocktest"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -82,20 +80,21 @@ func newAWSRig(t *testing.T, session bool) *rig {
 }
 
 // verifyingStandIn makes the stand-in service verify every call it is sent with the real key and
-// answer 403 when the signature is not the real key's or a placeholder reached it.
+// answer 403 when the signature is not the real key's or a placeholder reached it. The check
+// itself is the stand-in package's, built from the Signature Version 4 specification rather
+// than from the signer the proxy signs with, and the same one the local stack's AWS stand-in
+// runs.
 func verifyingStandIn(r *rig, session bool) {
 	sessionToken := ""
 	if session {
 		sessionToken = awsRealSession
 	}
-	r.answerWith(func(w http.ResponseWriter, _ *http.Request) {
-		seen := r.requests()
-		if err := verifySigV4(seen[len(seen)-1], awsRealKeyID, awsRealSecret, sessionToken); err != nil {
-			http.Error(w, "the stand-in service refused this call: "+err.Error(), http.StatusForbidden)
-			return
-		}
-		fmt.Fprint(w, awsStandInAnswer)
-	})
+	r.answerWith(airlocktest.NewAWSStand(airlocktest.AWSOptions{
+		KeyID:        awsRealKeyID,
+		SecretKey:    awsRealSecret,
+		SessionToken: sessionToken,
+		Body:         awsStandInAnswer,
+	}).Answer)
 }
 
 // awsCall is one call a command makes: the request signed with the placeholder key pair, as the
@@ -140,90 +139,10 @@ func awsCall(t *testing.T, r *rig, client *http.Client, method, target, body, se
 	return answer, string(read)
 }
 
-// verifySigV4 is the stand-in service's own check of one call: the Signature Version 4
-// specification, carried out here rather than through an AWS library, and the refusal of any
-// placeholder anywhere in the request.
-func verifySigV4(seen seenRequest, keyID, secretKey, sessionToken string) error {
-	if dump := fmt.Sprint(seen.method, seen.path, seen.query, seen.host, seen.header, seen.body); strings.Contains(dump, requests.PlaceholderPrefix) {
-		return fmt.Errorf("this call carries a placeholder: %s", dump)
-	}
-	authorization := seen.header.Get("Authorization")
-	rest, isV4 := strings.CutPrefix(authorization, sigV4Scheme+" ")
-	if !isV4 {
-		return fmt.Errorf("the Authorization is no %s credential: %q", sigV4Scheme, authorization)
-	}
-	var credential, signedHeaders, signature string
-	for _, part := range strings.Split(rest, ",") {
-		name, value, _ := strings.Cut(strings.TrimSpace(part), "=")
-		switch name {
-		case "Credential":
-			credential = value
-		case "SignedHeaders":
-			signedHeaders = value
-		case "Signature":
-			signature = value
-		}
-	}
-	scope := strings.Split(credential, "/")
-	if len(scope) != 5 {
-		return fmt.Errorf("the Credential is no KEY/date/region/service/aws4_request scope: %q", credential)
-	}
-	if scope[0] != keyID {
-		return fmt.Errorf("the Credential names the key id %q; want the real key id %q", scope[0], keyID)
-	}
-	if got := seen.header.Get("X-Amz-Security-Token"); got != sessionToken {
-		return fmt.Errorf("X-Amz-Security-Token = %q; want %q", got, sessionToken)
-	}
-	date, region, service := scope[1], scope[2], scope[3]
-	payload := seen.header.Get("X-Amz-Content-Sha256")
-	if payload == "" {
-		sum := sha256.Sum256([]byte(seen.body))
-		payload = hex.EncodeToString(sum[:])
-	}
-	var canonicalHeaders strings.Builder
-	for _, name := range strings.Split(signedHeaders, ";") {
-		var value string
-		switch name {
-		case "host":
-			value = seen.host
-		case "content-length":
-			if value = seen.header.Get("Content-Length"); value == "" {
-				value = strconv.Itoa(len(seen.body))
-			}
-		default:
-			value = strings.Join(seen.header.Values(http.CanonicalHeaderKey(name)), ",")
-		}
-		canonicalHeaders.WriteString(name + ":" + strings.TrimSpace(value) + "\n")
-	}
-	query, err := url.ParseQuery(seen.query)
-	if err != nil {
-		return fmt.Errorf("the query %q: %w", seen.query, err)
-	}
-	for name := range query {
-		slices.Sort(query[name])
-	}
-	canonical := strings.Join([]string{
-		seen.method,
-		seen.path,
-		strings.ReplaceAll(query.Encode(), "+", "%20"),
-		canonicalHeaders.String(),
-		signedHeaders,
-		payload,
-	}, "\n")
-	sum := sha256.Sum256([]byte(canonical))
-	credentialScope := strings.Join([]string{date, region, service, "aws4_request"}, "/")
-	stringToSign := strings.Join([]string{sigV4Scheme, seen.header.Get("X-Amz-Date"), credentialScope, hex.EncodeToString(sum[:])}, "\n")
-	signing := hmacOf(hmacOf(hmacOf(hmacOf([]byte("AWS4"+secretKey), date), region), service), "aws4_request")
-	if want := hex.EncodeToString(hmacOf(signing, stringToSign)); want != signature {
-		return fmt.Errorf("the signature is %q; want %q, this call signed with the real key. canonical request:\n%s", signature, want, canonical)
-	}
-	return nil
-}
-
-func hmacOf(key []byte, data string) []byte {
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(data))
-	return mac.Sum(nil)
+// hashOf is the hex SHA-256 a client puts in X-Amz-Content-Sha256 when it hashes its own body.
+func hashOf(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
 }
 
 // TestAnAWSCallIsSignedAgainWithTheRealKey: the command signs with the key pair the airlock
@@ -279,11 +198,11 @@ func TestAnAWSCallIsSignedAgainWithTheRealKey(t *testing.T) {
 					if len(seen) != 1 {
 						t.Fatalf("the service saw %d calls; want one", len(seen))
 					}
-					if seen[0].body != c.body {
-						t.Errorf("the service saw the body %q; want %q", seen[0].body, c.body)
+					if seen[0].Body != c.body {
+						t.Errorf("the service saw the body %q; want %q", seen[0].Body, c.body)
 					}
-					if c.hashed && seen[0].header.Get("X-Amz-Content-Sha256") != "" {
-						t.Errorf("the proxy added X-Amz-Content-Sha256 %q; want the hash in the signature alone", seen[0].header.Get("X-Amz-Content-Sha256"))
+					if c.hashed && seen[0].Header.Get("X-Amz-Content-Sha256") != "" {
+						t.Errorf("the proxy added X-Amz-Content-Sha256 %q; want the hash in the signature alone", seen[0].Header.Get("X-Amz-Content-Sha256"))
 					}
 					if line := r.logs.calls(); len(line) != 1 || line[0].fields["secret"] != awsName || line[0].fields["allowed"] != true {
 						t.Errorf("the call logged %v; want one allowed line for %s", line, awsName)
@@ -292,12 +211,6 @@ func TestAnAWSCallIsSignedAgainWithTheRealKey(t *testing.T) {
 			}
 		})
 	}
-}
-
-// hashOf is the hex SHA-256 a client puts in X-Amz-Content-Sha256 when it hashes its own body.
-func hashOf(body string) string {
-	sum := sha256.Sum256([]byte(body))
-	return hex.EncodeToString(sum[:])
 }
 
 // TestAnAWSCallThatIsNotThisGrantsIsRefused: the signature the command made is the proof that

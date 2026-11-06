@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -106,6 +107,87 @@ func TestPortZeroPublicURLIsFineForALocalRun(t *testing.T) {
 func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
 	if err := refusePortZeroPublicURLInProduction("https://broker.invalid", ""); err != nil {
 		t.Fatalf("a real BROKER_PUBLIC_URL: want nil, got %v", err)
+	}
+}
+
+// airlockTestSettings is the seven settings of the airlock's local stack, each as a Config the
+// refusal below reads and as the environment a real broker is started with. One row per
+// setting: the refusal has to name whichever one it found, since an operator reads from it
+// which setting to take out.
+func airlockTestSettings() []struct {
+	name string
+	cfg  func(*config.Config)
+	env  string
+} {
+	return []struct {
+		name string
+		cfg  func(*config.Config)
+		env  string
+	}{
+		{"BROKER_AIRLOCK_TEST_GITHUB_API_BASE", func(c *config.Config) { c.AirlockTestGitHubAPIBase = "http://127.0.0.1:18080" }, "http://127.0.0.1:18080"},
+		{"BROKER_AIRLOCK_TEST_GOOGLE_TOKEN_URL", func(c *config.Config) { c.AirlockTestGoogleTokenURL = "http://127.0.0.1:18081/token" }, "http://127.0.0.1:18081/token"},
+		{"BROKER_AIRLOCK_TEST_DIAL_ALLOW", func(c *config.Config) { c.AirlockTestDialAllow = []string{"s.airlock.test:443"} }, "s.airlock.test:443"},
+		{"BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE", func(c *config.Config) { c.AirlockTestUpstreamCAFile = "/run/airlock/ca.crt" }, "/run/airlock/ca.crt"},
+		{"BROKER_AIRLOCK_TEST_RESOLVE", func(c *config.Config) {
+			c.AirlockTestResolve = map[string]netip.Addr{"s.airlock.test": netip.MustParseAddr("127.0.0.1")}
+		}, "s.airlock.test=127.0.0.1"},
+		{"BROKER_AIRLOCK_TEST_KEEP_VALUES", func(c *config.Config) { c.AirlockTestKeepValues = true }, "true"},
+		{"BROKER_AIRLOCK_TEST_NO_KIND", func(c *config.Config) { c.AirlockTestNoKind = true }, "true"},
+	}
+}
+
+// TestEachAirlockTestSettingIsRefusedInProduction: every one of the seven points the broker at
+// a stand-in, lets it dial what no production proxy may, or turns a part of the airlock off, so
+// each on its own refuses a start that is not a local run, naming itself.
+func TestEachAirlockTestSettingIsRefusedInProduction(t *testing.T) {
+	for _, setting := range airlockTestSettings() {
+		var cfg config.Config
+		setting.cfg(&cfg)
+		err := refuseAirlockTestSettingsInProduction(cfg, "")
+		if err == nil {
+			t.Errorf("%s set with no BROKER_FAKE_SECRETS_FILE: want an error, got nil", setting.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), setting.name) || !strings.Contains(err.Error(), "BROKER_FAKE_SECRETS_FILE is unset") {
+			t.Errorf("%s set: error = %q; want it to name the setting and the local-run file", setting.name, err)
+		}
+	}
+}
+
+// TestEveryAirlockTestSettingIsFineForALocalRun: all seven at once, with the fake secrets file
+// that makes a start a local run, are accepted - and a production start naming none of them is
+// accepted too, since this refusal must not stand in the way of an ordinary boot.
+func TestEveryAirlockTestSettingIsFineForALocalRun(t *testing.T) {
+	var cfg config.Config
+	for _, setting := range airlockTestSettings() {
+		setting.cfg(&cfg)
+	}
+	if err := refuseAirlockTestSettingsInProduction(cfg, "/dev/fake-secrets.json"); err != nil {
+		t.Fatalf("all seven with BROKER_FAKE_SECRETS_FILE set: want nil, got %v", err)
+	}
+	if err := refuseAirlockTestSettingsInProduction(config.Config{}, ""); err != nil {
+		t.Fatalf("a production start naming none of them: want nil, got %v", err)
+	}
+}
+
+// TestMainRefusesAnAirlockTestSettingInProduction drives the REAL compiled binary with each of
+// the seven, as the port-0 row above drives it: the helper's rows prove it is correct, and this
+// proves the broker runs it at boot, before it migrates the database or binds a socket. The
+// database it is given is unreachable, so a broker that read these settings later would fail on
+// the host instead of on the setting.
+func TestMainRefusesAnAirlockTestSettingInProduction(t *testing.T) {
+	binary := buildBroker(t)
+	for _, setting := range airlockTestSettings() {
+		t.Run(setting.name, func(t *testing.T) {
+			out := runRefusedBroker(t, binary,
+				"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+				"BROKER_PUBLIC_URL=https://secrets.internal.example",
+				setting.name+"="+setting.env,
+			)
+			if !strings.Contains(out, setting.name) || !strings.Contains(out, "local stack") {
+				t.Fatalf("broker refused, but its output does not name %s as a local-stack setting: %s", setting.name, out)
+			}
+		})
 	}
 }
 

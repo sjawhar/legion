@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 )
 
 // clusterRange is 100.64.0.0/10, the shared address space of RFC 6598. Kubernetes clusters and
@@ -34,18 +35,43 @@ func resolveHost(ctx context.Context, host string) ([]netip.Addr, error) {
 	return addrs, nil
 }
 
-// refuseLocalAddress answers why the proxy will not dial host, and nil when it may. A name that
-// resolves to several addresses is refused when ANY of them is one the proxy never dials:
-// answering the request would otherwise depend on which address the dialer happened to pick,
-// and a name under the caller's control can answer with one public address beside one private
-// one precisely to make that choice.
+// dialResolved dials addr through resolve rather than through the dialer's own lookup: the
+// address resolve answers for the host, with the port the caller asked for. It is the dial of a
+// proxy whose Options.Resolve says where a name is, and the one way a run can point a name a
+// client resolves for itself at a stand-in service of its own.
+func dialResolved(ctx context.Context, dialer *net.Dialer, resolve func(context.Context, string) ([]netip.Addr, error), network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := resolve(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("%s resolves to no address", host)
+	}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].String(), port))
+}
+
+// refuseLocalAddress answers why the proxy will not dial host at port, and nil when it may. A
+// name that resolves to several addresses is refused when ANY of them is one the proxy never
+// dials: answering the request would otherwise depend on which address the dialer happened to
+// pick, and a name under the caller's control can answer with one public address beside one
+// private one precisely to make that choice.
 //
 // The check is on the addresses the name has at this moment. A name that answers one address
 // here and another to the dial below it - DNS rebinding - is not covered by this check alone;
 // what the proxy puts into such a request is nothing, since a bound host's rules are read from
 // the name rather than from the address, and a tunnel carries only what the command already
 // held.
-func (s *Server) refuseLocalAddress(ctx context.Context, host string) error {
+//
+// An address Options.DialAllow names is dialled whatever it resolves to, which is what lets one
+// run reach a stand-in service on loopback while every other loopback address stays refused.
+func (s *Server) refuseLocalAddress(ctx context.Context, host, port string) error {
+	if slices.Contains(s.dialAllow, net.JoinHostPort(host, port)) {
+		return nil
+	}
 	addrs, err := s.resolve(ctx, host)
 	if err != nil {
 		return fmt.Errorf("cannot resolve %s: %w", host, err)

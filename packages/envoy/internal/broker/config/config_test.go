@@ -3,6 +3,7 @@ package config
 
 import (
 	"maps"
+	"net/netip"
 	"os"
 	"reflect"
 	"slices"
@@ -1729,6 +1730,77 @@ func TestLoadRefusesASignInIssuerThatIsNotHTTPS(t *testing.T) {
 		e["BROKER_SIGNIN_ISSUER"] = bad
 		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_ISSUER") || strings.Contains(err.Error(), signInSecret) {
 			t.Errorf("BROKER_SIGNIN_ISSUER = %q: err = %v, want a refusal naming it", bad, err)
+		}
+	}
+}
+
+// TestLoadReadsTheAirlocksTestOnlySettings pins each of the seven settings the broker's local
+// stack configures the airlock with: the two minter bases, the addresses the proxy may dial
+// although they are loopback, the extra upstream roots, where a name resolves to, and the two
+// negative-control switches. Each is read as it is given and is empty or off when unset. The
+// refusal of each on a production start is cmd/broker's, which has its own rows.
+func TestLoadReadsTheAirlocksTestOnlySettings(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AirlockTestGitHubAPIBase != "" || cfg.AirlockTestGoogleTokenURL != "" || cfg.AirlockTestUpstreamCAFile != "" ||
+		len(cfg.AirlockTestDialAllow) != 0 || len(cfg.AirlockTestResolve) != 0 || cfg.AirlockTestKeepValues || cfg.AirlockTestNoKind {
+		t.Fatalf("with none of them set the airlock's test settings read %+v; want every one empty or off", cfg)
+	}
+
+	e := validEnv()
+	e["BROKER_AIRLOCK_TEST_GITHUB_API_BASE"] = "http://127.0.0.1:18080"
+	e["BROKER_AIRLOCK_TEST_GOOGLE_TOKEN_URL"] = "http://127.0.0.1:18081/token"
+	e["BROKER_AIRLOCK_TEST_DIAL_ALLOW"] = "s.airlock.test:443 t.airlock.test:8443"
+	e["BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE"] = "/run/airlock/ca.crt"
+	e["BROKER_AIRLOCK_TEST_RESOLVE"] = "s.airlock.test=127.0.0.1 login.microsoftonline.com=127.0.0.2"
+	e["BROKER_AIRLOCK_TEST_KEEP_VALUES"] = "true"
+	e["BROKER_AIRLOCK_TEST_NO_KIND"] = "1"
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AirlockTestGitHubAPIBase != "http://127.0.0.1:18080" || cfg.AirlockTestGoogleTokenURL != "http://127.0.0.1:18081/token" {
+		t.Errorf("the minter bases read %q and %q; want the two the environment named", cfg.AirlockTestGitHubAPIBase, cfg.AirlockTestGoogleTokenURL)
+	}
+	if cfg.AirlockTestUpstreamCAFile != "/run/airlock/ca.crt" {
+		t.Errorf("the upstream roots file reads %q; want /run/airlock/ca.crt", cfg.AirlockTestUpstreamCAFile)
+	}
+	if !slices.Equal(cfg.AirlockTestDialAllow, []string{"s.airlock.test:443", "t.airlock.test:8443"}) {
+		t.Errorf("the dial allow list reads %v; want both addresses in the order they were given", cfg.AirlockTestDialAllow)
+	}
+	want := map[string]netip.Addr{
+		"s.airlock.test":            netip.MustParseAddr("127.0.0.1"),
+		"login.microsoftonline.com": netip.MustParseAddr("127.0.0.2"),
+	}
+	if !maps.Equal(cfg.AirlockTestResolve, want) {
+		t.Errorf("the resolve map reads %v; want %v", cfg.AirlockTestResolve, want)
+	}
+	if !cfg.AirlockTestKeepValues || !cfg.AirlockTestNoKind {
+		t.Errorf("the two switches read %v and %v; want both on", cfg.AirlockTestKeepValues, cfg.AirlockTestNoKind)
+	}
+}
+
+// TestLoadRefusesAnAirlockTestSettingItCannotActOn pins that a value the proxy could not act
+// on refuses the start naming the setting, rather than being read as none: an address with no
+// port, an entry that is no IP address, a host resolved twice, and a switch that is neither
+// true nor false.
+func TestLoadRefusesAnAirlockTestSettingItCannotActOn(t *testing.T) {
+	for _, c := range []struct{ setting, value, want string }{
+		{"BROKER_AIRLOCK_TEST_DIAL_ALLOW", "s.airlock.test", "must be <host>:<port>"},
+		{"BROKER_AIRLOCK_TEST_DIAL_ALLOW", "s.airlock.test:https", "names no port number"},
+		{"BROKER_AIRLOCK_TEST_RESOLVE", "s.airlock.test", "must be <host>=<address>"},
+		{"BROKER_AIRLOCK_TEST_RESOLVE", "s.airlock.test=localhost", "names no IP address"},
+		{"BROKER_AIRLOCK_TEST_RESOLVE", "s.airlock.test=127.0.0.1 s.airlock.test=127.0.0.2", "twice"},
+		{"BROKER_AIRLOCK_TEST_KEEP_VALUES", "yes please", "must be true or false"},
+		{"BROKER_AIRLOCK_TEST_NO_KIND", "off-ish", "must be true or false"},
+	} {
+		e := validEnv()
+		e[c.setting] = c.value
+		_, err := Load(env(e))
+		if err == nil || !strings.Contains(err.Error(), c.setting) || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s = %q: err = %v; want a refusal naming it and %q", c.setting, c.value, err, c.want)
 		}
 	}
 }

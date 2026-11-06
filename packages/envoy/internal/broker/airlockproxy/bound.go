@@ -57,10 +57,20 @@ type grantValues struct {
 // been reread since, or when a minted value is
 // within mintAgainBefore of its expiry: that one name is what the read is for, but the read is
 // of the whole grant, since AirlockValues answers a grant and not a name.
-func (g *grantValues) held(now time.Time) (map[string]requests.AirlockSecret, uint64, bool) {
+//
+// keep is Options.KeepValues: it holds the answer across both of those, the reread and the
+// margin alike, which is the negative control of the check they belong to and is refused on a
+// production start.
+func (g *grantValues) held(now time.Time, keep bool) (map[string]requests.AirlockSecret, uint64, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.values == nil || g.keptAt != g.drops {
+	if g.values == nil {
+		return nil, g.drops, false
+	}
+	if keep {
+		return g.values, g.drops, true
+	}
+	if g.keptAt != g.drops {
 		return nil, g.drops, false
 	}
 	for _, secret := range g.values {
@@ -124,7 +134,7 @@ func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]requ
 
 	held.read.Lock()
 	defer held.read.Unlock()
-	values, drops, fresh := held.held(s.now())
+	values, drops, fresh := held.held(s.now(), s.keepValues)
 	if fresh {
 		return values, nil
 	}
@@ -201,6 +211,12 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 	kind := ""
 	if entry := s.rules.Lookup(chosen.name); entry != nil {
 		kind = entry.Kind
+	}
+	if s.noKind {
+		// Options.NoKind: the entry's kind is read as none, so an azure or aws entry takes
+		// the plain header swap below. It is the negative control of the check those two
+		// kinds belong to, and is refused on a production start.
+		kind = ""
 	}
 	exchange := kind == airlockKindAzure && isTokenRequest(r)
 	if exchange {

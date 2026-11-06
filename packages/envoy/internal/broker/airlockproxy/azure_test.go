@@ -12,17 +12,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/airlock"
+	"github.com/sjawhar/envoy/internal/broker/airlock/airlocktest"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -50,63 +49,13 @@ func azureRules() airlock.Rules {
 	}}}
 }
 
-// azureStandIn is the stand-in for both parts of the bound host: Microsoft's token endpoint,
-// which answers an exchange that carries the real federated token, and the API service, which
-// records the Authorization it was given.
-type azureStandIn struct {
-	mu sync.Mutex
-	// tokens is the access token each exchange answers in turn; the last one answers every
-	// exchange after it.
-	tokens []string
-	// refuse is the status an exchange is refused with, and zero answers it.
-	refuse int
-	// forms is each form the endpoint was sent, in order.
-	forms []url.Values
-}
-
-// install makes the rig's stand-in service answer as this one.
-func (a *azureStandIn) install(r *rig) {
-	r.answerWith(func(w http.ResponseWriter, req *http.Request) {
-		if !isTokenRequest(req) {
-			fmt.Fprint(w, "the service answered")
-			return
-		}
-		seen := r.requests()
-		form, err := url.ParseQuery(seen[len(seen)-1].body)
-		if err != nil {
-			http.Error(w, "the token endpoint read no form", http.StatusBadRequest)
-			return
-		}
-		a.mu.Lock()
-		a.forms = append(a.forms, form)
-		refuse, token := a.refuse, a.tokens[min(len(a.forms), len(a.tokens))-1]
-		a.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if refuse != 0 {
-			w.WriteHeader(refuse)
-			fmt.Fprint(w, `{"error":"invalid_client","error_codes":[5002723]}`)
-			return
-		}
-		if form.Get("client_assertion") != azureRealFederated {
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"error":"invalid_client","error_description":"the assertion is not this application's"}`)
-			return
-		}
-		fmt.Fprintf(w, `{"token_type":"Bearer","expires_in":%d,"ext_expires_in":%d,"access_token":%q,"id_token":%q}`,
-			azureLifetime, azureLifetime, token, azureRealIDToken)
-	})
-}
-
-// exchanges is every form the token endpoint was sent.
-func (a *azureStandIn) exchanges() []url.Values {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return append([]url.Values(nil), a.forms...)
-}
-
 // newAzureRig is the rig with the azure-login secret as the grant's one name, and the stand-in
-// token endpoint behind the bound host.
-func newAzureRig(t *testing.T, o Options) (*rig, *azureStandIn) {
+// token endpoint behind the bound host: the stand-in package's Microsoft endpoint, which
+// answers an exchange that carries the real federated token and records each form it was sent.
+// It answers token requests alone, so the same service plays the API these rows then call with
+// the access token: that is the shape of the design, since the proxy reads one of them and
+// streams the other.
+func newAzureRig(t *testing.T, o Options) (*rig, *airlocktest.MicrosoftStand) {
 	t.Helper()
 	o.Rules = azureRules()
 	r := newRig(t, o)
@@ -122,9 +71,16 @@ func newAzureRig(t *testing.T, o Options) (*rig, *azureStandIn) {
 		azureName: {Kind: "azure-login", Slots: map[string]string{requests.SlotAzureFederated: azureRealFederated}},
 	})
 	// One token for every exchange, as a real endpoint answers one identity's calls: a row
-	// about a second token says so itself.
-	stand := &azureStandIn{tokens: []string{azureRealAccess}}
-	stand.install(r)
+	// about a second token says so itself. The endpoint takes the real federated token as its
+	// assertion and refuses any other, as Microsoft refuses an assertion that is not the
+	// application's.
+	stand := airlocktest.NewMicrosoftStand(airlocktest.MicrosoftOptions{
+		Tokens:    []string{azureRealAccess},
+		IDToken:   azureRealIDToken,
+		Assertion: azureRealFederated,
+		Lifetime:  azureLifetime * time.Second,
+	})
+	r.answerWith(stand.Answer)
 	return r, stand
 }
 
@@ -182,7 +138,7 @@ func TestAnAzureTokenRequestIsExchangedByTheBrokerAndItsTokenSwappedIn(t *testin
 	}
 	placeholder := placeholderTokenOf(t, body)
 
-	exchanges := stand.exchanges()
+	exchanges := stand.Exchanges()
 	if len(exchanges) != 1 {
 		t.Fatalf("the endpoint was sent %d exchanges; want one", len(exchanges))
 	}
@@ -204,10 +160,10 @@ func TestAnAzureTokenRequestIsExchangedByTheBrokerAndItsTokenSwappedIn(t *testin
 	if len(seen) != 2 {
 		t.Fatalf("the host saw %d calls; want the exchange and the API call", len(seen))
 	}
-	if got, want := seen[1].header.Get("Authorization"), "Bearer "+azureRealAccess; got != want {
+	if got, want := seen[1].Header.Get("Authorization"), "Bearer "+azureRealAccess; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q", got, want)
 	}
-	if later := stand.exchanges(); len(later) != 1 {
+	if later := stand.Exchanges(); len(later) != 1 {
 		t.Errorf("the endpoint was sent %d exchanges; want the one, since this pod holds the token", len(later))
 	}
 }
@@ -229,10 +185,10 @@ func TestASecondPodExchangesTheSlotForItself(t *testing.T) {
 	if len(seen) != 3 {
 		t.Fatalf("the host saw %d calls; want the first pod's exchange, the second pod's, and the API call", len(seen))
 	}
-	if got, want := seen[2].header.Get("Authorization"), "Bearer "+azureRealAccess; got != want {
+	if got, want := seen[2].Header.Get("Authorization"), "Bearer "+azureRealAccess; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q, the token the second pod exchanged for itself", got, want)
 	}
-	exchanges := stand.exchanges()
+	exchanges := stand.Exchanges()
 	if len(exchanges) != 2 {
 		t.Fatalf("the endpoint was sent %d exchanges; want one per pod", len(exchanges))
 	}
@@ -256,15 +212,15 @@ func TestASecondPodExchangesTheSlotForItself(t *testing.T) {
 func secondPod(t *testing.T, r *rig) string {
 	t.Helper()
 	second := New(Options{
-		Rules:  azureRules(),
-		Grants: r.grants,
-		CA:     r.authority,
-		Log:    slog.New(r.logs),
-		Dial:   r.dial,
-		Now:    r.proxy.now,
+		Rules:         azureRules(),
+		Grants:        r.grants,
+		CA:            r.authority,
+		Log:           slog.New(r.logs),
+		Dial:          r.dial,
+		Now:           r.proxy.now,
+		Resolve:       r.resolve,
+		UpstreamRoots: r.service.Authority().Pool(),
 	})
-	second.resolve = r.resolve
-	second.upstream.TLSClientConfig.RootCAs = r.proxy.upstream.TLSClientConfig.RootCAs
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("bind the second pod's proxy port: %v", err)
@@ -291,7 +247,7 @@ func TestATokenRequestWithoutThisGrantsPlaceholderIsRefused(t *testing.T) {
 	if answer.StatusCode != http.StatusForbidden || !strings.Contains(body, "client_assertion is not this grant's placeholder") {
 		t.Fatalf("the token request answered %d %q; want 403 naming the assertion it refused", answer.StatusCode, body)
 	}
-	if sent := stand.exchanges(); len(sent) != 0 {
+	if sent := stand.Exchanges(); len(sent) != 0 {
 		t.Fatalf("the endpoint was sent %d exchanges; want none", len(sent))
 	}
 	if mints := r.grants.accessMints(); mints != 0 {
@@ -304,7 +260,7 @@ func TestATokenRequestWithoutThisGrantsPlaceholderIsRefused(t *testing.T) {
 // the words name the exchange, so an operator reading them knows which call failed.
 func TestAnExchangeTheEndpointRefusesKeepsItsStatus(t *testing.T) {
 	r, stand := newAzureRig(t, Options{})
-	stand.refuse = http.StatusBadRequest
+	stand.Refuse(http.StatusBadRequest)
 	answer, body := tokenRequest(t, r, r.client(azureFederatedPlaceholder), azureFederatedPlaceholder)
 	if answer.StatusCode != http.StatusBadRequest {
 		t.Fatalf("the exchange answered %d %q; want the endpoint's own 400", answer.StatusCode, body)
@@ -312,7 +268,7 @@ func TestAnExchangeTheEndpointRefusesKeepsItsStatus(t *testing.T) {
 	if !strings.Contains(body, "the token endpoint refused the exchange of this grant's federated token") {
 		t.Fatalf("the exchange answered %q; want words naming the exchange", body)
 	}
-	if sent := stand.exchanges(); len(sent) != 1 {
+	if sent := stand.Exchanges(); len(sent) != 1 {
 		t.Errorf("the endpoint was sent %d exchanges; want the one it refused", len(sent))
 	}
 	if mints := r.grants.accessMints(); mints != 0 {
@@ -328,7 +284,7 @@ func TestAnAccessTokenNearItsExpiryIsExchangedAgain(t *testing.T) {
 	r, stand := newAzureRig(t, Options{Now: clock.read})
 	// A token of its own for the second exchange, so what leaves says which exchange it came
 	// from.
-	stand.tokens = []string{azureRealAccess, azureNextAccess}
+	stand.Answers(azureRealAccess, azureNextAccess)
 	_, body := tokenRequest(t, r, r.client(azureFederatedPlaceholder), azureFederatedPlaceholder)
 	placeholder := placeholderTokenOf(t, body)
 	client := r.client(azureFederatedPlaceholder)
@@ -337,10 +293,10 @@ func TestAnAccessTokenNearItsExpiryIsExchangedAgain(t *testing.T) {
 	clock.set(clock.read().Add(time.Hour - 10*time.Minute))
 	r.get(client, "https://"+boundHost+"/v1/subscriptions", "Authorization", "Bearer "+placeholder)
 	seen := r.requests()
-	if got, want := seen[len(seen)-1].header.Get("Authorization"), "Bearer "+azureRealAccess; got != want {
+	if got, want := seen[len(seen)-1].Header.Get("Authorization"), "Bearer "+azureRealAccess; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q, the token this pod holds", got, want)
 	}
-	if sent := stand.exchanges(); len(sent) != 1 {
+	if sent := stand.Exchanges(); len(sent) != 1 {
 		t.Fatalf("the endpoint was sent %d exchanges; want the one, since the token is not near its expiry", len(sent))
 	}
 
@@ -348,10 +304,10 @@ func TestAnAccessTokenNearItsExpiryIsExchangedAgain(t *testing.T) {
 	clock.set(clock.read().Add(6 * time.Minute))
 	r.get(client, "https://"+boundHost+"/v1/subscriptions", "Authorization", "Bearer "+placeholder)
 	seen = r.requests()
-	if got, want := seen[len(seen)-1].header.Get("Authorization"), "Bearer "+azureNextAccess; got != want {
+	if got, want := seen[len(seen)-1].Header.Get("Authorization"), "Bearer "+azureNextAccess; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q, the token of the second exchange", got, want)
 	}
-	if sent := stand.exchanges(); len(sent) != 2 {
+	if sent := stand.Exchanges(); len(sent) != 2 {
 		t.Fatalf("the endpoint was sent %d exchanges; want a second one for the token about to end", len(sent))
 	}
 	if mints := r.grants.accessMints(); mints != 1 {
@@ -396,7 +352,7 @@ func TestAnAccessPlaceholderTheBrokerDoesNotKnowIsRefused(t *testing.T) {
 	if answer.StatusCode != http.StatusForbidden || !strings.Contains(body, "names no exchange this broker made") {
 		t.Fatalf("the call answered %d %q; want 403 naming the slot it could not read", answer.StatusCode, body)
 	}
-	if sent := stand.exchanges(); len(sent) != 0 {
+	if sent := stand.Exchanges(); len(sent) != 0 {
 		t.Fatalf("the endpoint was sent %d exchanges; want none", len(sent))
 	}
 	if seen := r.requests(); len(seen) != 0 {

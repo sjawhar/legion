@@ -17,27 +17,19 @@ package airlockproxy
 import (
 	"bufio"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"maps"
-	"math/big"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -46,6 +38,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/airlock"
+	"github.com/sjawhar/envoy/internal/broker/airlock/airlocktest"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -199,12 +192,9 @@ func (f *fakeGrants) accessMints() int {
 	return f.accessCalls
 }
 
-// seenRequest is one request the stand-in service received, as the rows read it.
-type seenRequest struct {
-	method, path, query, host string
-	header                    http.Header
-	body                      string
-}
+// seenRequest is one request the stand-in service received, as the rows read it: the record the
+// stand-in package keeps, since the service behind the bound host is that package's.
+type seenRequest = airlocktest.Request
 
 // logLine is one line the proxy logged, as the rows read it.
 type logLine struct {
@@ -268,10 +258,7 @@ type rig struct {
 	dialTo map[string]string
 	dials  atomic.Int64
 
-	mu      sync.Mutex
-	seen    []seenRequest
-	answer  func(w http.ResponseWriter, r *http.Request)
-	service *httptest.Server
+	service *airlocktest.Service
 }
 
 // newRig builds the whole world. Everything of o the caller leaves zero is filled in.
@@ -279,27 +266,15 @@ func newRig(t *testing.T, o Options) *rig {
 	t.Helper()
 	r := &rig{t: t, grants: newFakeGrants(), logs: &logCapture{}, trust: x509.NewCertPool()}
 
-	// The stand-in service behind the bound host. httptest's own certificate names example.com,
-	// which is why that is the bound host here.
-	r.service = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		body, _ := io.ReadAll(req.Body)
-		r.mu.Lock()
-		r.seen = append(r.seen, seenRequest{
-			method: req.Method, path: req.URL.Path, query: req.URL.RawQuery, host: req.Host,
-			header: req.Header.Clone(), body: string(body),
-		})
-		answer := r.answer
-		r.mu.Unlock()
-		if answer != nil {
-			answer(w, req)
-			return
-		}
-		fmt.Fprintln(w, "the service answered")
-	}))
-	r.service.StartTLS()
+	// The stand-in service behind the bound host, with a certificate of its own naming that
+	// host and an authority of the rig's own behind it, which is the only thing the proxy
+	// trusts upstream.
+	service, err := airlocktest.NewService(airlocktest.ServiceOptions{Hosts: []string{boundHost}})
+	if err != nil {
+		t.Fatalf("the stand-in service: %v", err)
+	}
+	r.service = service
 	t.Cleanup(r.service.Close)
-	servicePool := x509.NewCertPool()
-	servicePool.AddCert(r.service.Certificate())
 
 	// The two tunnelled services: one that speaks TLS with a certificate of its own, and one
 	// plain echo the idle and drain rows run bytes through.
@@ -321,7 +296,7 @@ func newRig(t *testing.T, o Options) *rig {
 		echoHost:   {netip.MustParseAddr("93.184.216.36")},
 	}
 	r.dialTo = map[string]string{
-		net.JoinHostPort(boundHost, "443"):  r.service.Listener.Addr().String(),
+		net.JoinHostPort(boundHost, "443"):  r.service.Addr(),
 		net.JoinHostPort(tunnelHost, "443"): tunnelAddr,
 		net.JoinHostPort(echoHost, "443"):   echoAddr,
 	}
@@ -333,11 +308,11 @@ func newRig(t *testing.T, o Options) *rig {
 	o.CA = r.authority
 	o.Log = slog.New(r.logs)
 	o.Dial = r.dial
-	r.proxy = New(o)
-	r.proxy.resolve = r.resolve
-	// What the proxy trusts upstream: the stand-in service's own certificate, in place of the
+	o.Resolve = r.resolve
+	// What the proxy trusts upstream: the stand-in service's own authority, in place of the
 	// host's roots. Nothing else about the upstream side is replaced.
-	r.proxy.upstream.TLSClientConfig.RootCAs = servicePool
+	o.UpstreamRoots = r.service.Authority().Pool()
+	r.proxy = New(o)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -382,19 +357,13 @@ func (r *rig) resolve(_ context.Context, host string) ([]netip.Addr, error) {
 }
 
 // requests is what the stand-in service has been sent.
-func (r *rig) requests() []seenRequest {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]seenRequest(nil), r.seen...)
-}
+func (r *rig) requests() []seenRequest { return r.service.Requests() }
 
 // answerWith is what the stand-in service answers from here on, in place of its one line: a row
 // whose point is what the service received - the signature it verifies, the token it is given,
 // the upgrade it answers - writes that answer here.
-func (r *rig) answerWith(answer func(w http.ResponseWriter, req *http.Request)) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.answer = answer
+func (r *rig) answerWith(answer airlocktest.Answer) {
+	r.service.AnswerWith(answer)
 }
 
 // client is a command's own HTTP client, pointed at the rig's proxy with password as its proxy
@@ -511,35 +480,18 @@ func newTestAuthority(t *testing.T) *Authority {
 	return authority
 }
 
-// writeCAFiles writes one certificate authority's PEM certificate and key into a directory of
-// its own and answers the two paths.
+// writeCAFiles makes one certificate authority through the stand-in package and writes its PEM
+// certificate and key into a directory of its own, which is the pair a pod mounts.
 func writeCAFiles(t *testing.T) (certFile, keyFile string) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	authority, err := airlocktest.NewAuthority("airlock test authority")
 	if err != nil {
-		t.Fatalf("the authority's key: %v", err)
+		t.Fatalf("the authority: %v", err)
 	}
-	template := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "airlock test authority"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	certFile, keyFile, err = authority.WriteFiles(t.TempDir())
 	if err != nil {
-		t.Fatalf("the authority's certificate: %v", err)
+		t.Fatalf("write the authority's files: %v", err)
 	}
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatalf("the authority's key, encoded: %v", err)
-	}
-	dir := t.TempDir()
-	certFile, keyFile = filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key")
-	writeFile(t, certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-	writeFile(t, keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
 	return certFile, keyFile
 }
 
@@ -659,25 +611,25 @@ func TestABoundHostGetsTheValueSwappedIntoTheHeaderTheEntryNames(t *testing.T) {
 		t.Fatalf("the service saw %d requests; want exactly one", len(seen))
 	}
 	got := seen[0]
-	if want := "Bearer " + workerValue; got.header.Get("Authorization") != want {
-		t.Errorf("the service saw Authorization %q; want %q: the entry names that header, so the value goes in it", got.header.Get("Authorization"), want)
+	if want := "Bearer " + workerValue; got.Header.Get("Authorization") != want {
+		t.Errorf("the service saw Authorization %q; want %q: the entry names that header, so the value goes in it", got.Header.Get("Authorization"), want)
 	}
 	// Everything the entry does not name travels as the command wrote it, placeholder and all:
 	// the airlock swaps the headers of the entry and nothing else.
-	if want := "carried: " + workerPlaceholder; got.header.Get("X-Other") != want {
-		t.Errorf("the service saw X-Other %q; want %q: a header the entry does not name is not swapped", got.header.Get("X-Other"), want)
+	if want := "carried: " + workerPlaceholder; got.Header.Get("X-Other") != want {
+		t.Errorf("the service saw X-Other %q; want %q: a header the entry does not name is not swapped", got.Header.Get("X-Other"), want)
 	}
-	if want := "token=" + workerPlaceholder; got.query != want {
-		t.Errorf("the service saw the query %q; want %q: the airlock changes no query", got.query, want)
+	if want := "token=" + workerPlaceholder; got.Query != want {
+		t.Errorf("the service saw the query %q; want %q: the airlock changes no query", got.Query, want)
 	}
-	if want := "the body holds " + workerPlaceholder; got.body != want {
-		t.Errorf("the service saw the body %q; want %q: the airlock reads no body and changes none", got.body, want)
+	if want := "the body holds " + workerPlaceholder; got.Body != want {
+		t.Errorf("the service saw the body %q; want %q: the airlock reads no body and changes none", got.Body, want)
 	}
-	if got.host != boundHost {
-		t.Errorf("the service saw Host %q; want %q, the CONNECT target's host", got.host, boundHost)
+	if got.Host != boundHost {
+		t.Errorf("the service saw Host %q; want %q, the CONNECT target's host", got.Host, boundHost)
 	}
-	if got.method != http.MethodPost || got.path != "/v1/things" {
-		t.Errorf("the service saw %s %s; want POST /v1/things", got.method, got.path)
+	if got.Method != http.MethodPost || got.Path != "/v1/things" {
+		t.Errorf("the service saw %s %s; want POST /v1/things", got.Method, got.Path)
 	}
 }
 
@@ -821,6 +773,39 @@ func TestTheProxyRefusesTheAddressesItMustNeverDial(t *testing.T) {
 				t.Fatalf("the proxy dialled %s %d time(s); want none: the refusal comes before any dial", row.host, after-before)
 			}
 		})
+	}
+}
+
+// TestDialAllowOpensTheAddressesItNamesAndNoOthers: Options.DialAllow is how the broker's local
+// stack reaches its stand-in services on loopback while every other loopback address the pod
+// holds - the broker's own ports among them - stays refused, which one check needs both halves
+// of in one run. An entry is a host and a port, so the same host at another port is refused
+// too.
+func TestDialAllowOpensTheAddressesItNamesAndNoOthers(t *testing.T) {
+	const standIn = "stand-in.example.net"
+	allowed := net.JoinHostPort(standIn, "443")
+	r := newRig(t, Options{DialAllow: []string{allowed}})
+	r.addresses[standIn] = []netip.Addr{netip.MustParseAddr("127.0.0.1")}
+	r.dialTo[allowed] = r.dialTo[net.JoinHostPort(echoHost, "443")]
+
+	before := r.dials.Load()
+	answer, _, _ := r.connectRaw(allowed, basic(workerPlaceholder))
+	if answer.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT %s = %d %q; want 200: the list names it", allowed, answer.StatusCode, bodyOf(t, answer))
+	}
+	if after := r.dials.Load(); after != before+1 {
+		t.Fatalf("the proxy dialled %d time(s) for an allowed address; want one", after-before)
+	}
+	for _, target := range []string{net.JoinHostPort(standIn, "8443"), net.JoinHostPort("127.0.0.1", "443")} {
+		before := r.dials.Load()
+		answer, _, _ := r.connectRaw(target, basic(workerPlaceholder))
+		body := bodyOf(t, answer)
+		if answer.StatusCode != http.StatusForbidden || !strings.Contains(body, "a loopback IPv4 address") {
+			t.Errorf("CONNECT %s = %d %q; want 403 naming the loopback address, which the list does not name", target, answer.StatusCode, body)
+		}
+		if after := r.dials.Load(); after != before {
+			t.Errorf("the proxy dialled %s %d time(s); want none", target, after-before)
+		}
 	}
 }
 
@@ -1005,8 +990,8 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 	if len(seen) != 1 {
 		t.Fatalf("the service saw %d requests; want one", len(seen))
 	}
-	if want := "Token " + betaValue; seen[0].header.Get("X-Beta") != want {
-		t.Fatalf("the service saw X-Beta %q; want %q: the request carried beta's placeholder, so it is handled for beta", seen[0].header.Get("X-Beta"), want)
+	if want := "Token " + betaValue; seen[0].Header.Get("X-Beta") != want {
+		t.Fatalf("the service saw X-Beta %q; want %q: the request carried beta's placeholder, so it is handled for beta", seen[0].Header.Get("X-Beta"), want)
 	}
 	if secret := r.logs.calls()[0].fields["secret"]; secret != betaName {
 		t.Fatalf("the call logged the secret %v; want %s", secret, betaName)
@@ -1019,7 +1004,7 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 	if len(seen) != 2 {
 		t.Fatalf("the service saw %d requests; want two", len(seen))
 	}
-	if got := seen[1].header.Get("X-Plain"); got != "nothing of this grant" {
+	if got := seen[1].Header.Get("X-Plain"); got != "nothing of this grant" {
 		t.Errorf("the service saw X-Plain %q; want it unchanged", got)
 	}
 	if secret := r.logs.calls()[1].fields["secret"]; secret != alphaName {
@@ -1034,11 +1019,11 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 	if len(seen) != 3 {
 		t.Fatalf("the service saw %d requests; want three", len(seen))
 	}
-	if want := "Bearer " + alphaValue; seen[2].header.Get("Authorization") != want {
-		t.Errorf("the service saw Authorization %q; want %q", seen[2].header.Get("Authorization"), want)
+	if want := "Bearer " + alphaValue; seen[2].Header.Get("Authorization") != want {
+		t.Errorf("the service saw Authorization %q; want %q", seen[2].Header.Get("Authorization"), want)
 	}
-	if want := "Token " + betaPlaceholder; seen[2].header.Get("X-Beta") != want {
-		t.Errorf("the service saw X-Beta %q; want %q: one request is handled for one name", seen[2].header.Get("X-Beta"), want)
+	if want := "Token " + betaPlaceholder; seen[2].Header.Get("X-Beta") != want {
+		t.Errorf("the service saw X-Beta %q; want %q: one request is handled for one name", seen[2].Header.Get("X-Beta"), want)
 	}
 }
 
@@ -1138,7 +1123,7 @@ func TestAMintedValueIsMintedAgainBeforeItExpires(t *testing.T) {
 			t.Fatalf("the call to %s answered %d %q; want 200", path, answer.StatusCode, body)
 		}
 		seen := r.requests()
-		return seen[len(seen)-1].header.Get("Authorization")
+		return seen[len(seen)-1].Header.Get("Authorization")
 	}
 
 	if got, want := call("/v1/first"), "Bearer "+firstToken; got != want {
@@ -1231,7 +1216,7 @@ func TestDropNameDropsOneNameAndKeepsTheGrantsOthers(t *testing.T) {
 		t.Fatalf("AirlockValues ran %d times; want twice: the request after a drop reads the grant again", calls)
 	}
 	seen := r.requests()
-	if got, want := seen[len(seen)-1].header.Get("X-Beta"), "Token beta-v2"; got != want {
+	if got, want := seen[len(seen)-1].Header.Get("X-Beta"), "Token beta-v2"; got != want {
 		t.Fatalf("the service saw X-Beta %q; want %q, the version the reread brought", got, want)
 	}
 	// And the read that followed the drop put every name back.
@@ -1279,7 +1264,7 @@ func TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder(t *testi
 	if len(seen) != 1 {
 		t.Fatalf("the service saw %d requests; want one", len(seen))
 	}
-	if got, want := seen[0].header.Get("Authorization"), "Bearer "+zedToken; got != want {
+	if got, want := seen[0].Header.Get("Authorization"), "Bearer "+zedToken; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q: the request carried zed's placeholder", got, want)
 	}
 	line := r.logs.calls()[0]
@@ -1295,7 +1280,7 @@ func TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder(t *testi
 	// acme's placeholder on the same connection: acme's token, for the same reason.
 	r.get(client, "https://"+boundHost+"/v1/issues", "Authorization", "Bearer "+acmeHolder)
 	seen = r.requests()
-	if got, want := seen[1].header.Get("Authorization"), "Bearer "+acmeToken; got != want {
+	if got, want := seen[1].Header.Get("Authorization"), "Bearer "+acmeToken; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q: the request carried acme's placeholder", got, want)
 	}
 	if slot := r.logs.calls()[1].fields["slot"]; slot != acmeSlot {
@@ -1306,7 +1291,7 @@ func TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder(t *testi
 	// candidate pair in (name, slot) order, and forwarded with nothing swapped.
 	r.get(client, "https://"+boundHost+"/v1/plain", "X-Plain", "nothing of this grant")
 	seen = r.requests()
-	if got := seen[2].header.Get("X-Plain"); got != "nothing of this grant" {
+	if got := seen[2].Header.Get("X-Plain"); got != "nothing of this grant" {
 		t.Errorf("the service saw X-Plain %q; want it unchanged", got)
 	}
 	if slot := r.logs.calls()[2].fields["slot"]; slot != acmeSlot {

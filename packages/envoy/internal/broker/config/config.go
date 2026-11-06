@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -204,6 +205,51 @@ type Config struct {
 	// command that is gone; a short bound costs a long-polling client its connection, which it
 	// opens again.
 	AirlockIdleSeconds int
+	// BROKER_AIRLOCK_TEST_GITHUB_API_BASE: the base URL a github-app secret is minted against,
+	// in place of https://api.github.com, so a release of one mints at a stand-in GitHub
+	// (internal/broker/airlock/airlocktest, cmd/dev-airlock-stands). For the broker's local
+	// stack alone: a production start, which is one with BROKER_FAKE_SECRETS_FILE unset, is
+	// refused naming it.
+	AirlockTestGitHubAPIBase string
+	// BROKER_AIRLOCK_TEST_GOOGLE_TOKEN_URL: the token endpoint a google-login secret is
+	// refreshed at, in place of https://oauth2.googleapis.com/token, so a release of one mints
+	// at a stand-in Google. For the broker's local stack alone: a production start, which is
+	// one with BROKER_FAKE_SECRETS_FILE unset, is refused naming it.
+	AirlockTestGoogleTokenURL string
+	// BROKER_AIRLOCK_TEST_DIAL_ALLOW: whitespace-separated <host>:<port> addresses the airlock
+	// proxy may dial although the address they resolve to is one it never dials - a loopback,
+	// cluster, link-local or private address. It is a list rather than a switch for loopback
+	// because a local stack needs both at once: its stand-in services on loopback reachable,
+	// and the broker's own loopback port still refused. For the broker's local stack alone: a
+	// production start, which is one with BROKER_FAKE_SECRETS_FILE unset, is refused naming
+	// it.
+	AirlockTestDialAllow []string
+	// BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE: a PEM file of extra roots the airlock proxy
+	// verifies a service's certificate against on its own calls upstream, beside the host's
+	// own roots, so it trusts a stand-in service's certificate. Read once at start, and a file
+	// it cannot read or that holds no certificate refuses the start. For the broker's local
+	// stack alone: a production start, which is one with BROKER_FAKE_SECRETS_FILE unset, is
+	// refused naming it.
+	AirlockTestUpstreamCAFile string
+	// BROKER_AIRLOCK_TEST_RESOLVE: whitespace-separated <host>=<address> entries, each an IP
+	// address the airlock proxy reads that host as having and dials it at, in place of what
+	// the resolver answers. It is how a client that resolves a real name of its own - az, the
+	// AWS client - reaches a stand-in service through the proxy. A host named twice is
+	// refused. For the broker's local stack alone: a production start, which is one with
+	// BROKER_FAKE_SECRETS_FILE unset, is refused naming it.
+	AirlockTestResolve map[string]netip.Addr
+	// BROKER_AIRLOCK_TEST_KEEP_VALUES: with it true, the airlock proxy keeps a grant's values
+	// across the reread of one of its names and past the five-minute margin before a minted
+	// token's expiry, rather than reading and minting again. It is the negative control of the
+	// check that both halves belong to. For the broker's local stack alone: a production
+	// start, which is one with BROKER_FAKE_SECRETS_FILE unset, is refused naming it.
+	AirlockTestKeepValues bool
+	// BROKER_AIRLOCK_TEST_NO_KIND: with it true, the airlock proxy reads every rules entry as
+	// having no kind, so an azure entry's exchange and an aws entry's signing are off and each
+	// takes the plain header swap. It is the negative control of the check those two kinds
+	// belong to. For the broker's local stack alone: a production start, which is one with
+	// BROKER_FAKE_SECRETS_FILE unset, is refused naming it.
+	AirlockTestNoKind bool
 	// BROKER_AZURE_TOKEN_FILE: the path of the broker pod's projected ServiceAccount token for
 	// azure-login releases, default /var/run/secrets/azure/tokens/azure-identity-token. Read only
 	// on release, not at boot, and read anew each time so the rotated token is used. The token's
@@ -793,6 +839,69 @@ func parseVMExchangeGrants(setting, value string) ([]vmExchangeGrant, error) {
 	return grants, nil
 }
 
+// parseAirlockTestDialAllow reads BROKER_AIRLOCK_TEST_DIAL_ALLOW's whitespace-separated
+// <host>:<port> addresses, in order. It refuses, naming the entry: one that is no host and
+// port, and one whose port is not a number, since an address the proxy compares a CONNECT
+// target against has to be the exact string that target becomes.
+func parseAirlockTestDialAllow(value string) ([]string, error) {
+	const setting = "BROKER_AIRLOCK_TEST_DIAL_ALLOW"
+	var allowed []string
+	for _, text := range strings.Fields(value) {
+		host, port, err := net.SplitHostPort(text)
+		if err != nil || host == "" {
+			return nil, fmt.Errorf("%s must be <host>:<port> addresses, got %q", setting, text)
+		}
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return nil, fmt.Errorf("%s: %q names no port number", setting, text)
+		}
+		allowed = append(allowed, text)
+	}
+	return allowed, nil
+}
+
+// parseAirlockTestResolve reads BROKER_AIRLOCK_TEST_RESOLVE's whitespace-separated
+// <host>=<address> entries. It refuses, naming the entry: one not of that form, one whose
+// address is no IP address, and a host named twice, since a host has one address here and the
+// second would silently replace the first.
+func parseAirlockTestResolve(value string) (map[string]netip.Addr, error) {
+	const setting = "BROKER_AIRLOCK_TEST_RESOLVE"
+	var hosts map[string]netip.Addr
+	for _, text := range strings.Fields(value) {
+		host, address, ok := strings.Cut(text, "=")
+		if !ok || host == "" {
+			return nil, fmt.Errorf("%s must be <host>=<address> entries, got %q", setting, text)
+		}
+		addr, err := netip.ParseAddr(address)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %q names no IP address", setting, text)
+		}
+		if _, twice := hosts[host]; twice {
+			return nil, fmt.Errorf("%s names the host %s twice; a host resolves to one address here, so name it once", setting, host)
+		}
+		if hosts == nil {
+			hosts = map[string]netip.Addr{}
+		}
+		hosts[host] = addr.Unmap()
+	}
+	return hosts, nil
+}
+
+// airlockTestSwitch reads one of the airlock's two test-only switches: unset is off, and
+// anything strconv.ParseBool does not read is refused rather than taken as off, since a
+// misspelled value would otherwise turn a negative control into the ordinary run it is meant to
+// be compared against.
+func airlockTestSwitch(setting, value string) (bool, error) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return false, nil
+	}
+	on, err := strconv.ParseBool(text)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false, got %q", setting, text)
+	}
+	return on, nil
+}
+
 // parseExchangeWorkflows reads setting's whitespace-separated
 // <repository>=<workflow path>=<ref>=<project>=<person>[=<session>] entries, the identities
 // BROKER_EXCHANGE_WORKFLOWS lists, in order. It refuses, naming the entry: one not of that form or
@@ -922,25 +1031,44 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("BROKER_DATABASE_URL names the removed %s placeholder; %s", databasePasswordPlaceholder, noDatabasePassword)
 	}
 	cfg := Config{
-		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
-		DatabaseURL:        getenv("BROKER_DATABASE_URL"),
-		PublicURL:          getenv("BROKER_PUBLIC_URL"),
-		MachineLoginURL:    strings.TrimSpace(getenv("BROKER_MACHINE_LOGIN_URL")),
-		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
-		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
-		AirlockRulesFile:   orDefault(getenv("BROKER_AIRLOCK_RULES_FILE"), ""),
-		AirlockListenAddr:  orDefault(getenv("BROKER_AIRLOCK_LISTEN_ADDR"), "127.0.0.1:13381"),
-		AirlockProxyURL:    strings.TrimSpace(getenv("BROKER_AIRLOCK_PROXY_URL")),
-		AirlockCACertFile:  strings.TrimSpace(getenv("BROKER_AIRLOCK_CA_CERT_FILE")),
-		AirlockCAKeyFile:   strings.TrimSpace(getenv("BROKER_AIRLOCK_CA_KEY_FILE")),
-		AzureTokenFile:     orDefault(getenv("BROKER_AZURE_TOKEN_FILE"), secrets.DefaultAzureTokenFile),
-		AzureLoginSecret:   getenv("BROKER_AZURE_LOGIN_SECRET"),
-		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
-		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
-		GoogleOIDCIssuer:   orDefault(strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_ISSUER")), DefaultGoogleOIDCIssuer),
-		GoogleOIDCAudience: strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_AUDIENCE")),
-		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
-		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
+		ListenAddr:                orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
+		DatabaseURL:               getenv("BROKER_DATABASE_URL"),
+		PublicURL:                 getenv("BROKER_PUBLIC_URL"),
+		MachineLoginURL:           strings.TrimSpace(getenv("BROKER_MACHINE_LOGIN_URL")),
+		SecretsStore:              orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
+		SecretsPrefix:             getenv("BROKER_SECRETS_PREFIX"),
+		AirlockRulesFile:          orDefault(getenv("BROKER_AIRLOCK_RULES_FILE"), ""),
+		AirlockListenAddr:         orDefault(getenv("BROKER_AIRLOCK_LISTEN_ADDR"), "127.0.0.1:13381"),
+		AirlockProxyURL:           strings.TrimSpace(getenv("BROKER_AIRLOCK_PROXY_URL")),
+		AirlockCACertFile:         strings.TrimSpace(getenv("BROKER_AIRLOCK_CA_CERT_FILE")),
+		AirlockCAKeyFile:          strings.TrimSpace(getenv("BROKER_AIRLOCK_CA_KEY_FILE")),
+		AirlockTestGitHubAPIBase:  strings.TrimSpace(getenv("BROKER_AIRLOCK_TEST_GITHUB_API_BASE")),
+		AirlockTestGoogleTokenURL: strings.TrimSpace(getenv("BROKER_AIRLOCK_TEST_GOOGLE_TOKEN_URL")),
+		AirlockTestUpstreamCAFile: strings.TrimSpace(getenv("BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE")),
+		AzureTokenFile:            orDefault(getenv("BROKER_AZURE_TOKEN_FILE"), secrets.DefaultAzureTokenFile),
+		AzureLoginSecret:          getenv("BROKER_AZURE_LOGIN_SECRET"),
+		K8sOIDCIssuer:             getenv("BROKER_K8S_OIDC_ISSUER"),
+		K8sOIDCAudience:           getenv("BROKER_K8S_OIDC_AUDIENCE"),
+		GoogleOIDCIssuer:          orDefault(strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_ISSUER")), DefaultGoogleOIDCIssuer),
+		GoogleOIDCAudience:        strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_AUDIENCE")),
+		EnvoyURL:                  getenv("BROKER_ENVOY_URL"),
+		TrustedProxyHeader:        getenv("BROKER_TRUSTED_PROXY_HEADER"),
+	}
+	// The airlock's test-only settings, each read whatever the rules file says, since the two
+	// minter bases are read with no airlock at all. cmd/broker refuses every one of them on a
+	// production start; what is refused here is a value the broker could not act on.
+	var airlockTestErr error
+	if cfg.AirlockTestDialAllow, airlockTestErr = parseAirlockTestDialAllow(getenv("BROKER_AIRLOCK_TEST_DIAL_ALLOW")); airlockTestErr != nil {
+		return Config{}, airlockTestErr
+	}
+	if cfg.AirlockTestResolve, airlockTestErr = parseAirlockTestResolve(getenv("BROKER_AIRLOCK_TEST_RESOLVE")); airlockTestErr != nil {
+		return Config{}, airlockTestErr
+	}
+	if cfg.AirlockTestKeepValues, airlockTestErr = airlockTestSwitch("BROKER_AIRLOCK_TEST_KEEP_VALUES", getenv("BROKER_AIRLOCK_TEST_KEEP_VALUES")); airlockTestErr != nil {
+		return Config{}, airlockTestErr
+	}
+	if cfg.AirlockTestNoKind, airlockTestErr = airlockTestSwitch("BROKER_AIRLOCK_TEST_NO_KIND", getenv("BROKER_AIRLOCK_TEST_NO_KIND")); airlockTestErr != nil {
+		return Config{}, airlockTestErr
 	}
 	if cfg.AzureLoginSecret != "" {
 		if _, err := policy.NameToSlug(cfg.AzureLoginSecret); err != nil {

@@ -16,45 +16,48 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/airlock/airlocktest"
 )
 
 // upgradeStandIn makes the stand-in service answer 101 and then speak the little line protocol
 // these rows pass frames with: one line in, one line out.
 func upgradeStandIn(t *testing.T, r *rig) {
 	t.Helper()
-	r.answerWith(func(w http.ResponseWriter, req *http.Request) {
+	r.answerWith(func(w http.ResponseWriter, req *http.Request, _ airlocktest.Request) bool {
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
 			http.Error(w, "the stand-in service cannot be taken over", http.StatusInternalServerError)
-			return
+			return true
 		}
 		if req.Header.Get("Upgrade") != "websocket" {
 			http.Error(w, "the stand-in service was sent no Upgrade header", http.StatusBadRequest)
-			return
+			return true
 		}
 		conn, buffered, err := hijacker.Hijack()
 		if err != nil {
 			t.Errorf("the stand-in service could not hijack: %v", err)
-			return
+			return true
 		}
 		defer conn.Close()
 		// Past the 101 the stand-in says nothing about an error: the connection ends when the
 		// command walks away or the idle limit closes it, and each row reads the frames - or
 		// their absence - from the command's own side.
 		if _, err := buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"); err != nil {
-			return
+			return true
 		}
 		if err := buffered.Flush(); err != nil {
-			return
+			return true
 		}
 		frame, err := buffered.ReadString('\n')
 		if err != nil {
-			return
+			return true
 		}
 		if _, err := buffered.WriteString("the service read " + strings.TrimSpace(frame) + "\n"); err != nil {
-			return
+			return true
 		}
 		_ = buffered.Flush()
+		return true
 	})
 }
 
@@ -110,13 +113,13 @@ func TestAWebSocketUpgradeIsSwappedAndThenJoined(t *testing.T) {
 	if len(seen) != 1 {
 		t.Fatalf("the service saw %d requests; want the upgrade", len(seen))
 	}
-	if got, want := seen[0].header.Get("Authorization"), "Bearer "+workerValue; got != want {
+	if got, want := seen[0].Header.Get("Authorization"), "Bearer "+workerValue; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q: the swap reaches an upgrade's own headers", got, want)
 	}
-	if got := seen[0].header.Get("Upgrade"); got != "websocket" {
+	if got := seen[0].Header.Get("Upgrade"); got != "websocket" {
 		t.Errorf("the service saw Upgrade %q; want websocket: the header has to survive the rewrite", got)
 	}
-	if got := seen[0].header.Get("Connection"); !strings.Contains(strings.ToLower(got), "upgrade") {
+	if got := seen[0].Header.Get("Connection"); !strings.Contains(strings.ToLower(got), "upgrade") {
 		t.Errorf("the service saw Connection %q; want it to name Upgrade", got)
 	}
 

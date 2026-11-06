@@ -21,8 +21,10 @@ package airlockproxy
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"io"
 	"log"
@@ -94,6 +96,35 @@ type Options struct {
 	// from one that is not (mintAgainBefore); nil is time.Now. A test drives it rather than
 	// waiting out a token's life.
 	Now func() time.Time
+	// Resolve answers the addresses a host has, the ones the loopback refusal reads
+	// (refuseLocalAddress); nil is net.DefaultResolver's lookup. When it is given, the
+	// proxy's own dialer dials the address it answers rather than letting the dialer resolve
+	// the name, so a host that resolves here reaches whatever this answers for it. A test
+	// drives a public name at a stand-in service on loopback with it, and
+	// BROKER_AIRLOCK_TEST_RESOLVE is it in the broker's local stack, where a client that
+	// resolves a real name - az, the AWS client - has to reach a stand-in.
+	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
+	// UpstreamRoots are the roots the proxy verifies a service's certificate against on its
+	// own calls upstream; nil is the host's own roots, as any client uses. A test puts its
+	// stand-in service's certificate in it, and BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE is it in
+	// the broker's local stack, where the service behind a bound host is a stand-in with a
+	// certificate of the run's own.
+	UpstreamRoots *x509.CertPool
+	// DialAllow is the host:port addresses the proxy may dial although the address they
+	// resolve to is one it never dials - a loopback or private address. It is a list rather
+	// than a switch because the broker's local stack needs both halves at once: the stand-in
+	// services on loopback reachable, and the broker's own loopback port still refused.
+	// BROKER_AIRLOCK_TEST_DIAL_ALLOW is it.
+	DialAllow []string
+	// KeepValues keeps a grant's values across the reread of one of its names and past the
+	// five-minute margin of a minted token's expiry, so a run can show what the airlock does
+	// when neither happens. BROKER_AIRLOCK_TEST_KEEP_VALUES is it, the negative control of
+	// the check that both halves belong to.
+	KeepValues bool
+	// NoKind turns the azure exchange and the AWS signing off, so an entry whose kind names
+	// one of them takes the plain header swap instead. BROKER_AIRLOCK_TEST_NO_KIND is it, the
+	// negative control of the check the two kinds belong to.
+	NoKind bool
 }
 
 // Server is the broker's proxy port: one HTTP CONNECT proxy whose password is a placeholder of a
@@ -108,10 +139,14 @@ type Server struct {
 	now    func() time.Time
 
 	// resolve answers the addresses a host has, the ones refuseLocalAddress reads. It is
-	// net.DefaultResolver's lookup in production and a map in a test, which is how a test
-	// drives a public name at a stand-in service on loopback without the loopback refusal
-	// below standing in its way.
+	// Options.Resolve, and net.DefaultResolver's lookup for a proxy given none.
 	resolve func(ctx context.Context, host string) ([]netip.Addr, error)
+	// dialAllow, keepValues and noKind are the three test-only settings of Options, each
+	// refused on a production start of the broker (cmd/broker's
+	// refuseAirlockTestSettingsInProduction).
+	dialAllow  []string
+	keepValues bool
+	noKind     bool
 
 	// outer serves the bound listener: CONNECT and absolute-URL proxy requests. inner serves
 	// what the outer one decrypted, through innerLn.
@@ -119,7 +154,7 @@ type Server struct {
 	inner   *http.Server
 	innerLn *chanListener
 	// upstream carries every request to a service. Its TLSClientConfig trusts the host's roots
-	// as any client does; a test puts its stand-in service's own certificate in that pool.
+	// as any client does, or Options.UpstreamRoots when a caller named roots of its own.
 	upstream *http.Transport
 	serveOne sync.Once
 
@@ -161,25 +196,39 @@ type connKey struct{}
 // New builds the proxy. Nothing is bound and nothing is served until Serve.
 func New(o Options) *Server {
 	s := &Server{
-		rules:   o.Rules,
-		grants:  o.Grants,
-		ca:      o.CA,
-		idle:    o.Idle,
-		log:     o.Log,
-		dial:    o.Dial,
-		now:     o.Now,
-		resolve: resolveHost,
-		innerLn: newChanListener(),
-		open:    map[io.Closer]struct{}{},
-		values:  map[string]*grantValues{},
-		access:  map[accessKey]*accessHeld{},
+		rules:      o.Rules,
+		grants:     o.Grants,
+		ca:         o.CA,
+		idle:       o.Idle,
+		log:        o.Log,
+		dial:       o.Dial,
+		now:        o.Now,
+		resolve:    o.Resolve,
+		dialAllow:  o.DialAllow,
+		keepValues: o.KeepValues,
+		noKind:     o.NoKind,
+		innerLn:    newChanListener(),
+		open:       map[io.Closer]struct{}{},
+		values:     map[string]*grantValues{},
+		access:     map[accessKey]*accessHeld{},
 	}
 	if s.log == nil {
 		s.log = slog.Default()
 	}
+	if s.resolve == nil {
+		s.resolve = resolveHost
+	}
 	if s.dial == nil {
 		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 		s.dial = dialer.DialContext
+		if o.Resolve != nil {
+			// A proxy told where a name is dials there: the dialer would otherwise resolve
+			// the name itself and reach the host the name really names, which is the one
+			// thing a run pointing a real name at a stand-in is trying not to do.
+			s.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialResolved(ctx, dialer, s.resolve, network, addr)
+			}
+		}
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -188,7 +237,7 @@ func New(o Options) *Server {
 		// Through the same seam as every other dial, so one replacement in a test covers a
 		// tunnel and a bound host alike.
 		DialContext:         func(ctx context.Context, network, addr string) (net.Conn, error) { return s.dial(ctx, network, addr) },
-		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: o.UpstreamRoots},
 		ForceAttemptHTTP2:   true,
 		MaxIdleConnsPerHost: upstreamIdleConns,
 		IdleConnTimeout:     upstreamIdleTimeout,
@@ -327,7 +376,7 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request, grant requ
 	}
 	host = asciiLower(host)
 	target = net.JoinHostPort(host, port)
-	if err := s.refuseLocalAddress(r.Context(), host); err != nil {
+	if err := s.refuseLocalAddress(r.Context(), host, port); err != nil {
 		http.Error(w, "airlock: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -433,7 +482,7 @@ func (s *Server) servePlain(w http.ResponseWriter, r *http.Request, grant reques
 		http.Error(w, "airlock: refusing plain http to "+host+", a host behind the airlock: a secret of this grant may reach it only inside TLS, so ask for it over https", http.StatusForbidden)
 		return
 	}
-	if err := s.refuseLocalAddress(r.Context(), host); err != nil {
+	if err := s.refuseLocalAddress(r.Context(), host, cmp.Or(r.URL.Port(), "80")); err != nil {
 		http.Error(w, "airlock: "+err.Error(), http.StatusForbidden)
 		return
 	}
