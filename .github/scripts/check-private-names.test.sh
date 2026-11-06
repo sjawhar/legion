@@ -724,6 +724,7 @@ echo "case: a head commit naming the trailer in prose, outside its last block"
 # The shape of a real commit of this repository: a subject, a body paragraph naming the trailer in
 # backticks mid-sentence, then the session trailer as the last block. GitHub reads a trailer in
 # the last block alone, and only two empty lines below the rest, so it starts the runs for this.
+# shellcheck disable=SC2016 # the backticks are the commit message's own markdown, not a substitution
 run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
   "$(printf 'fix(ci): read the head commit the event names\n\nThe guard reads a `skip-checks: true` line of the last block only, so a\nmessage that names it in prose keeps every run it would have had.\n\nOmp-Session: 01K9ZR4T5V6W7X8Y9Z0A1B2C3D\n')"
 check "a head commit naming the trailer in prose is no workflow-skip" "$(is "$status" 0)"
