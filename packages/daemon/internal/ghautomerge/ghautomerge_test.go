@@ -58,14 +58,18 @@ type github struct {
 	mutations                      []string
 }
 
-// updatedAt is the fake pull request's default last change on GitHub.
-const updatedAt = "2026-10-16T05:00:00Z"
+// updatedAt is the fake pull request's default last change on GitHub, and absent is how the fake
+// records an input the mutation it serves does not pass.
+const (
+	updatedAt = "2026-10-16T05:00:00Z"
+	absent    = "<absent>"
+)
 
 // submitted is the enable or merge the fake records for #42 at head. Both inputs of the squash
 // commit's message are absent: the mutations pass neither, so each repository's own squash
 // settings decide the message (why is on the enable and merge mutations in ghautomerge.go).
 func submitted(verb string) string {
-	return fmt.Sprintf("%s PR_42 head SQUASH headline=%q body=%q", verb, "<absent>", "<absent>")
+	return fmt.Sprintf("%s PR_42 head SQUASH headline=%q body=%q", verb, absent, absent)
 }
 
 // operationHeader is the start of a GraphQL document's operation signature: the operation's name
@@ -157,7 +161,7 @@ func (g *github) serve(t *testing.T) string {
 			// is recorded as absent rather than as the value of the variable it never reads.
 			passed := func(field, variable string) any {
 				if !strings.Contains(request.Query, field+": $"+variable) {
-					return "<absent>"
+					return absent
 				}
 				return request.Variables[variable]
 			}
@@ -262,7 +266,7 @@ func TestTheFakeRefusesAGraphQLDocumentGitHubsValidatorWouldRefuse(t *testing.T)
 }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := &github{head: "head", mergeState: "CLEAN"}
+			g := &github{}
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
 			err := client.GraphQL(context.Background(), tc.document, map[string]any{"id": "PR_42", "headline": "a headline"}, nil)
 			var refusal *githubrest.GraphQLError

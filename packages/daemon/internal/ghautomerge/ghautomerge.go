@@ -472,10 +472,8 @@ type repository struct {
 
 // pullRequest is what Disarm and Submit read of a pull request: its node id, state, head, merge
 // state, GitHub's last change to it, whether its base requires a merge queue, and whether
-// auto-merge is enabled and it sits in a merge queue. Submit sends no commit headline and no
-// commit body, so each repository's own squash settings decide the message a merge lands with: on
-// this repository squash_merge_commit_title=PR_TITLE and squash_merge_commit_message=BLANK make
-// the subject the pull request's own title, with its number, and leave the body blank.
+// auto-merge is enabled and it sits in a merge queue. Nothing of the squash commit's message is
+// read, since Submit passes none; the enable and merge mutations above say what decides it.
 type pullRequest struct {
 	ID                  string    `json:"id"`
 	State               string    `json:"state"`
