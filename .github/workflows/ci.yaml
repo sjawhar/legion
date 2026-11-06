@@ -1341,6 +1341,7 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/*'
+              - 'packages/envoy/agentloop/**'
               - 'packages/envoy/brokerclient/**'
               - 'packages/envoy/brokertest/**'
               - 'packages/envoy/cmd/**'
@@ -3166,6 +3167,11 @@ jobs:
       - name: Unit test envoy Go package
         run: |
           go list ./... | grep -Ev '/integration|/internal/dispatch/delivery($|/)|/internal/dispatch/store($|/)|/internal/bus$|/cmd/listener$|/internal/store$|/internal/session$|/internal/kvwatch($|/)|/internal/dispatch/api$|/internal/dispatch/docs$' | xargs go test -count=1 -timeout 20m
+        working-directory: packages/envoy
+      # agentloop's live proof makes a real model call, so it sits behind a build tag and CI
+      # never runs it. Vetting it keeps it compiling as the package changes.
+      - name: Vet agentloop's live proof (no model call)
+        run: go vet -tags modellive ./agentloop/
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
