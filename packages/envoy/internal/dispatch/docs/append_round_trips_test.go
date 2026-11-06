@@ -207,8 +207,8 @@ func (r *roundTripRecorder) labelsOn(conn *pgx.Conn) []string {
 	return roundTripLabels(trips)
 }
 
-// roundTripLabels names each trip for an assertion's message: the statements one store runs are
-// few and fixed, so each has a name of its own and anything else is reported as its own SQL.
+// roundTripLabels names each trip for an assertion's message, in order (roundTripLabel): the
+// statements one store runs are few and fixed, so each has a name of its own.
 func roundTripLabels(trips []roundTrip) []string {
 	labels := make([]string, 0, len(trips))
 	for _, trip := range trips {
@@ -217,16 +217,19 @@ func roundTripLabels(trips []roundTrip) []string {
 	return labels
 }
 
+// roundTripLabel names one trip. A batch is named by what it holds, not by being a batch: the
+// append's writes are the batch of a document's store (appendWrites), and a transaction's read
+// phase sends batches of its own - the owner's lock and the read that lock guards go out as one
+// (store.LockOwnerAndRead, lockArtifactOwner) - which are no trip of an append and must not read
+// as one. Anything else is reported as its own SQL, a batch's statements joined.
 func roundTripLabel(trip roundTrip) string {
-	if trip.batch {
-		if trip.prepare {
-			return "a prepare of the append's writes (one batch)"
-		}
-		return "the append's writes (one batch)"
-	}
 	sql := oneLineSQL(trip.sql[0])
 	label := sql
 	switch {
+	case trip.batch && slices.ContainsFunc(trip.sql, isAppendInsert):
+		label = "the append's writes (one batch)"
+	case trip.batch:
+		label = oneLineSQL(strings.Join(trip.sql, "; ")) + " (one batch)"
 	case sql == oneLineSQL(appendGateStatement):
 		label = "the append gate read"
 	case strings.Contains(sql, "pg_advisory_lock(hashtext"):
@@ -242,6 +245,12 @@ func roundTripLabel(trip roundTrip) string {
 		return "a prepare of " + label
 	}
 	return label
+}
+
+// isAppendInsert reports whether sql is the statement an append writes its update row with, the
+// first of the writes it queues (appendUpdateTxClass): the batch holding it is the append's.
+func isAppendInsert(sql string) bool {
+	return strings.Contains(sql, "insert into doc_updates")
 }
 
 func oneLineSQL(sql string) string {

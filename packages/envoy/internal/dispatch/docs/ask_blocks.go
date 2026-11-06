@@ -237,9 +237,11 @@ func settlementRetraction(resolution model.AskResolution) bool {
 
 // reconcileAskBlocks makes the asks rows and the ask blocks of tree, the document settlement read,
 // agree. A new block is authored by the update that introduced it (askBlockSources.author), as the
-// room recorded it or, failing that, as the durable record does, which this reads in tx; one whose
-// update observer has not run is left for the settlement that observer arms. The durable author of
-// each block an ask row now names, and of each block tree no longer holds, is deleted in tx.
+// room recorded it or, failing that, as the durable record does, which this reads in tx with the
+// rows tx has queued itself (transactionRecordedAskAuthors): a block a stamp of this very
+// transaction renamed is found under its minted id there. One whose update observer has not run
+// is left for the settlement that observer arms. The durable author of each block an ask row now
+// names, and of each block tree no longer holds, is deleted in tx.
 // A block copied from another document's ask opens none and shows that ask's state instead
 // (copiedAskSources). A decided ask of this document that a task of an earlier release reworded
 // gets its decided wording back first (restoreDocumentDecidedWordings), so the block is written
@@ -277,7 +279,7 @@ func (s *Service) reconcileAskBlocks(
 	if err != nil {
 		return settlementReconciliation{}, err
 	}
-	credit.askSources.recorded, err = readRecordedAskAuthors(ctx, tx, artifactID)
+	credit.askSources.recorded, err = transactionRecordedAskAuthors(ctx, tx, artifactID)
 	if err != nil {
 		return settlementReconciliation{}, err
 	}

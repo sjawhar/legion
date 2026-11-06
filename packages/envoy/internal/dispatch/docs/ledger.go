@@ -144,6 +144,11 @@ type Ledger struct {
 	// has run, so the versions this transaction writes read them from here as well as from the
 	// table (transactionPendingAuthors).
 	owedAuthors map[string]map[string]model.Actor
+	// askAuthors holds, per document, the durable ask block authors this transaction has queued
+	// writes of (recordAskAuthors), by block id: doc_ask_block_authors holds none of those rows
+	// until the write phase has run, so what this transaction reads of them it reads from here
+	// as well as from the table (transactionRecordedAskAuthors).
+	askAuthors map[string]map[string]model.Actor
 }
 
 // WriteStep is one step of a transaction's write phase: it puts the statements of one write on the
@@ -397,6 +402,30 @@ func (l *Ledger) queuedAuthors(artifactID string, authors []pendingAuthor) {
 	}
 	for _, author := range authors {
 		owed[actorKey(author.actor)] = author.actor
+	}
+}
+
+// queuedAskAuthors records authors, by block id, as durable ask block authors of artifactID this
+// transaction has queued the write of (recordAskAuthors): until its write phase has run,
+// doc_ask_block_authors holds no row of theirs, and the reads this transaction makes of them take
+// them from here as well as from the table (transactionRecordedAskAuthors). The insert keeps the
+// author a row already recorded has (askAuthorsStatement), so a row the table holds wins over one
+// recorded here, and so does the first entry recorded for a block. A settlement's queued delete of
+// them (deleteSettledAskAuthors) is queued after the insert, so it takes the rows back out in the
+// write phase; nothing of this transaction reads them between the two.
+func (l *Ledger) queuedAskAuthors(artifactID string, authors map[string]model.Actor) {
+	if l.askAuthors == nil {
+		l.askAuthors = make(map[string]map[string]model.Actor, 1)
+	}
+	queued := l.askAuthors[artifactID]
+	if queued == nil {
+		queued = make(map[string]model.Actor, len(authors))
+		l.askAuthors[artifactID] = queued
+	}
+	for block, actor := range authors {
+		if _, recorded := queued[block]; !recorded {
+			queued[block] = actor
+		}
 	}
 }
 

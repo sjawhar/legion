@@ -23,7 +23,16 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if !roomLocked {
+	// A transaction that has already queued a write of this document's history holds the
+	// document's lock from that write's own read and knows the head its queue leaves
+	// (pendingRoom): the table holds none of those rows yet, so the head and the intact flag come
+	// from the queue (appendGateRead.after) and the rest of the verdict from this read, and the
+	// prune recovery is the first write's alone. Every other append takes the lock here, once:
+	// before the cursor the gate reads and before the gate's own read, and not again, since a
+	// second acquisition in the transaction that holds it grants what the transaction has and
+	// costs the round trip every other writer of the document waits out.
+	pending := pendingRoomOf(ctx, tx, room)
+	if !roomLocked && pending == nil {
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return 0, err
 		}
@@ -63,17 +72,6 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	var through int64
 	if gated != nil {
 		through = gated.heldThrough()
-	}
-	// A transaction that has already queued a write of this document's history holds the
-	// document's lock from that write's own read and knows the head its queue leaves
-	// (pendingRoom): the table holds none of those rows yet, so the head and the intact flag come
-	// from the queue (appendGateRead.after) and the rest of the verdict from this read, and the
-	// prune recovery is the first write's alone.
-	pending := pendingRoomOf(ctx, tx, room)
-	if !roomLocked && pending == nil {
-		if err := lockDocumentRoom(ctx, tx, room); err != nil {
-			return 0, err
-		}
 	}
 	read, err := readAppendGate(ctx, tx, room, through, nil)
 	if err != nil {
