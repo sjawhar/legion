@@ -1,9 +1,10 @@
 // Package fixtureenv is the environment a test's real git and jj run in. The daemon's tests run
 // inside Legion's own issue pods, whose environment names the pod's live workspace, its git
-// configuration and its GitHub credential; a test that inherited them could read or push the
-// pod's own work. Guard takes them out of a test process's own environment, so every command it
-// starts and everything it runs in-process inherits none; Isolated hands one command none of them
-// and a home of the test's.
+// configuration, its GitHub credential and the deployment's own session store; a test that
+// inherited them could read or push the pod's own work, or read and write the conversation of
+// every agent of the deployment. Guard takes them out of a test process's own environment, so
+// every command it starts and everything it runs in-process inherits none; Isolated hands one
+// command none of them and a home of the test's.
 package fixtureenv
 
 import (
@@ -62,8 +63,9 @@ var guardedKeep []string
 var unguarded []string
 
 // Guard takes every variable that reaches (LEGION_*, GIT_*, JJ_*, GH_*, GITHUB_*, SSH_AUTH_SOCK,
-// SSH_ASKPASS) out of the test process's own environment, but the test inputs and the names in
-// keep, and sets GIT_ALLOW_PROTOCOL=file. A package whose tests run git or jj — as child
+// SSH_ASKPASS) or places a session (OMP_SESSION_SQL_DSN_FILE, OMP_SESSION_STORAGE,
+// OMP_SESSION_SQL_DSN) out of the test process's own environment, but the test inputs and the
+// names in keep, and sets GIT_ALLOW_PROTOCOL=file. A package whose tests run git or jj — as child
 // processes, with no Env of their own, or in-process through the code under test — calls it in
 // TestMain before m.Run, after the branch where the test binary runs as a helper child: that child
 // keeps the variables its test hands it. Code under test that names its own transport
@@ -135,8 +137,9 @@ func RequireGuarded(t testing.TB) {
 }
 
 // Isolated is the process's environment without anything that could lead git or jj to a real
-// workspace, repository, remote or credential, and with home as the home, an empty user
-// configuration and an identity of the test's. It drops:
+// workspace, repository, remote or credential, or Oh My Pi to a real session store, and with home
+// as the home, an empty user configuration and an identity of the test's. It keeps no test input
+// either, so a fixture that needs one appends it after. It drops:
 //
 //   - LEGION_*: LEGION_WORKSPACE names the workspace a shim adopts and checks for unpushed work
 //     (shim.rescue, shim.runAdoption); a test that leaves it out to see a refusal would otherwise
@@ -145,6 +148,9 @@ func RequireGuarded(t testing.TB) {
 //     whatever directory a command runs in, a pod hands every process a GIT_CONFIG_* block of its
 //     own, and a home carries configuration and an identity.
 //   - GH_*, GITHUB_*, SSH_AUTH_SOCK, SSH_ASKPASS: a credential git could push with.
+//   - OMP_SESSION_SQL_DSN_FILE, OMP_SESSION_STORAGE, OMP_SESSION_SQL_DSN: the session store Oh My
+//     Pi places a session in, which in a Legion pod is the deployment's own, holding every agent's
+//     conversation; a fixture that carried them would have whatever it starts read and write it.
 //
 // GIT_ALLOW_PROTOCOL=file lets git use no transport but local files, whatever a repository's own
 // configuration allows (git-config(1), protocol.allow): a push or fetch that still named a network
