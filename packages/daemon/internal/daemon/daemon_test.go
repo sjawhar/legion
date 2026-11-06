@@ -1040,14 +1040,16 @@ func TestWorkflowBootWhoseEveryInstallationReadFailsAnswersItsState(t *testing.T
 	}
 	// The boot's own ERROR lines. pollClient bounds each readiness poll at a second (:275), and a
 	// poll the daemon answers more slowly than that - on a busy machine, or under the race
-	// detector - is abandoned by this test, whose cancelled request the API then logs
-	// (server.go:536). That line is the test's own doing and says nothing about the boot.
+	// detector - is abandoned by this test; the API then logs the request whose context went with
+	// it, as "api: begin state transaction failed" or "api: state source failed", both of them
+	// "context canceled". Every line the boot itself writes is the workflow's, so an api line
+	// whose error is that cancellation is the test's own doing and is left out.
 	var errorLines []string
 	for line := range strings.SplitSeq(logged.String(), "\n") {
 		if !strings.Contains(line, `"level":"ERROR"`) {
 			continue
 		}
-		if strings.Contains(line, "api: begin state transaction failed") && strings.Contains(line, "context canceled") {
+		if strings.Contains(line, `"msg":"api: `) && strings.Contains(line, "context canceled") {
 			continue
 		}
 		errorLines = append(errorLines, line)
