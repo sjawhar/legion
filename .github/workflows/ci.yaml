@@ -2537,6 +2537,34 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
+      # The key the apt archive cache below is read and written under, computed here because a
+      # step expression cannot read the runner's own environment.
+      - id: apt-debs-key
+        name: Compute the apt archive cache key
+        run: |
+          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
+          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
+          [ -n "$version" ] || {
+            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
+              "cannot name the Playwright version"
+            exit 1
+          }
+          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
+          for name in ImageOS ImageVersion; do
+            [ -n "${!name}" ] || {
+              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
+                "the image"
+              exit 1
+            }
+          done
+          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      # No restore-keys: a partial match would hand the install the .deb files of another
+      # Playwright version or another image, which apt would fetch again anyway.
+      - id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
       # This step installs the system packages itself instead of through `playwright install
       # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
       # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
@@ -2642,6 +2670,15 @@ jobs:
       # at 300 s, the fallback origin's update stopped at 90 s and a third download attempt
       # stopped at 300 s. The step fails by its own name in at most 1170 s, against the
       # 40-minute job cancel it replaces.
+      #
+      # The .deb files of that list are cached between runs. The restore step above reads them
+      # into ~/apt-archives, and the step below hands them to apt before its first call: what
+      # apt already has on disk it does not fetch. The key names the Playwright version bun.lock
+      # pins, because that version decides the list, and the runner image, because the image
+      # decides which versions apt resolves, so an image roll misses the entry rather than
+      # restoring files the new image's indexes no longer name. No pull-request or merge-queue
+      # run writes an Actions cache entry, so a branch run fetches the whole set, and every
+      # bound and budget above is that cold case either way.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
@@ -2687,6 +2724,14 @@ jobs:
               [ "$left" -gt 0 ] || return 1
             done
           }
+          # What the restore above found, handed to apt before it reads any index. apt checks
+          # each file against the index it just read, so one that no longer matches is fetched
+          # again: a stale or partial file costs a download, never a wrong install. nullglob
+          # makes an empty or absent directory an empty list instead of a failed copy.
+          shopt -s nullglob
+          seeded=("$HOME"/apt-archives/*.deb)
+          shopt -u nullglob
+          [ "${#seeded[@]}" -eq 0 ] || sudo cp "${seeded[@]}" /var/cache/apt/archives/
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
           # sudo holding it.
           attempts 2 "apt-get update" sudo timeout 90 apt-get update || {
@@ -2732,6 +2777,18 @@ jobs:
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $apt_list
+          # What apt has now, kept for the save below, whether the restore hit or missed, so a
+          # set that grew keeps its new members. apt's archive directory is root's and the cache
+          # action runs as the runner user, so the copies change hands.
+          shopt -s nullglob
+          kept=(/var/cache/apt/archives/*.deb)
+          shopt -u nullglob
+          mkdir -p "$HOME/apt-archives"
+          [ "${#kept[@]}" -eq 0 ] || {
+            sudo cp "${kept[@]}" "$HOME/apt-archives/"
+            sudo chown "$(id -u):$(id -g)" "$HOME"/apt-archives/*.deb
+          }
+          echo "apt archives: seeded ${#seeded[@]} .deb files, keeping ${#kept[@]}"
           # Is each decoder WebKit plays through in the GStreamer registry? One call per element:
           # `gst-inspect-1.0 --exists` reads one element argument and discards the rest, so a
           # single call with five names would report on the first alone. Each element is written
@@ -2773,6 +2830,12 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
+      # The .deb files the install step kept, under the same rule as the save before it.
+      - if: github.event_name == 'push' && success() && steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs.outputs.cache-primary-key }}
       - name: Wait for the S3-compatible server
         # The readiness wait of the step that started the container, after the install the
         # container came up during. An anonymous PUT makes the bucket; each lane makes its own
