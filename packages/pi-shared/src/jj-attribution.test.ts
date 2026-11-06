@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -283,14 +283,26 @@ describe("exportJjSessionAttribution", () => {
     expect(env.JJ_CONFIG).toBeUndefined();
   });
 
-  it("leaves the environment untouched for an empty session id", async () => {
+  // The id reaches both the TOML literal and the overlay's file name, so an id that is not one
+  // (`SESSION_ID`) passes nothing on: a single quote would end the literal and break every `jj`
+  // command in the pane, and a `/` would move the overlay out of the state directory.
+  it.each([
+    ["an empty session id", ""],
+    ["a session id holding a single quote", "s'1"],
+    ["a session id holding a slash", "../s-1"],
+    ["a session id holding a backslash", "s\\1"],
+    ["a session id over 128 characters", "s".repeat(129)],
+  ])("leaves the environment untouched and writes nothing for %s", async (_name, sessionId) => {
     const dir = await stateDir();
     const env: NodeJS.ProcessEnv = {};
-    expect(await exportJjSessionAttribution("", dir, { env })).toBeUndefined();
-    expect(env.JJ_CONFIG).toBeUndefined();
     expect(
-      await readFile(path.join(dir, "omp-attribution-.toml"), "utf8").catch(() => undefined)
+      await exportJjSessionAttribution(sessionId, dir, {
+        env,
+        resolveBase: async () => "/u/base.toml",
+      })
     ).toBeUndefined();
+    expect(env.JJ_CONFIG).toBeUndefined();
+    expect(await readdir(dir)).toEqual([]);
   });
 });
 

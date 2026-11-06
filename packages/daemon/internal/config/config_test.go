@@ -567,7 +567,7 @@ func TestLoadReadsProjectCommitIssueTrailerRepos(t *testing.T) {
 // names one repository the list already names: a value that is no owner and name, one repository
 // twice, a repeat differing only in case — GitHub compares a name without case — and a repeat a
 // configured repository_renames pair makes one repository, which readCommitIssueTrailerRepos
-// cannot see because a project is read before the renames settle (checkCommitTrailerRenames).
+// cannot see because a project is read before the renames settle (checkCommitIssueTrailerRenames).
 func TestLoadRefusesProjectCommitIssueTrailerRepos(t *testing.T) {
 	for _, tc := range []struct{ name, repos, renames, want string }{
 		{

@@ -437,7 +437,7 @@ func TestASpecStampsTheIssueKeyOnlyOnARepositoryTheProjectNames(t *testing.T) {
 	s := specs{
 		stateDir: t.TempDir(), project: "acme", prompts: composer, repositories: noRepositoriesView,
 		commitIssueTrailerRepos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
-		renames:                 ghrepo.MustRenames(ghrepo.MustRename("acme/widgets-legacy", "acme/widgets")),
+		same:                    newRepositories("acme", ghrepo.MustRenames(ghrepo.MustRename("acme/widgets-legacy", "acme/widgets"))).same,
 		repository: func(_ context.Context, issue string) (ghrepo.Repository, string, error) {
 			name, recorded := recorded[issue]
 			if !recorded {
@@ -508,6 +508,7 @@ func TestAClaudeLaunchCarriesTheIssueKeyItStampsUnderEachRuntime(t *testing.T) {
 					stateDir: t.TempDir(), project: "acme", prompts: composer, repositories: noRepositoriesView,
 					runtimeName:             runtimeName,
 					commitIssueTrailerRepos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+					same:                    newRepositories("acme", ghrepo.Renames{}).same,
 					backend:                 func(claim.Role) runtime.Backend { return backend },
 					repository: func(context.Context, string) (ghrepo.Repository, string, error) {
 						return ghrepo.MustParse("acme/widgets"), "main", nil

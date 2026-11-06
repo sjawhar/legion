@@ -61,6 +61,13 @@ const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
  * inside a TOML literal, so a quote, a backslash or a newline would write a template jj cannot
  * parse and break every `jj describe` in the pane. */
 const ISSUE_KEY = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
+/** The whole value of a session id, the project's own rule for one used as a single path segment
+ * (`packages/envoy-client/src/dispatch-session-directory.ts` holds the same expression for the
+ * same reason). The id reaches both a TOML literal and a file name here: a single quote would end
+ * the literal and break every `jj` command in the pane, and a `/` would move the overlay out of
+ * the state directory. Oh My Pi's id is the transcript's UUID; Claude Code's is whatever its hook
+ * input carries, which its schema caps at nothing. */
+const SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 /** The first code point a TOML basic string carries raw, and the one it cannot: every control
  * character below the space, and the DEL. */
 const FIRST_RAW_CODE = 0x20;
@@ -155,9 +162,11 @@ export async function userConfigChain(
 }
 
 /** Writes the overlay for `sessionId` under `stateDir` and returns the chain it exported into
- * `env.JJ_CONFIG`, or undefined when it exported none: an empty session id, no base chain to layer
- * over, or a failed write — which still degrades `env.JJ_CONFIG` to the base, since no overlay is
- * active. `options.issueKey` and `options.workspace` add the `Dispatch:` line, scoped to that one
+ * `env.JJ_CONFIG`, or undefined when it exported none: a session id that is not one
+ * (`SESSION_ID`: the id reaches both the TOML literal and the overlay's file name, so an id that
+ * is not one passes nothing on), no base chain to layer over, or a failed write — which still
+ * degrades `env.JJ_CONFIG` to the base, since no overlay is active. `options.issueKey` and
+ * `options.workspace` add the `Dispatch:` line, scoped to that one
  * workspace, only when the key's whole value is a key and the path is one a TOML basic string can
  * carry; `options.workspace` is the resolved path (`resolvedWorkspace`), which is what jj matches
  * a scope against. */
@@ -172,8 +181,11 @@ export async function exportJjSessionAttribution(
   } = {}
 ): Promise<string | undefined> {
   const { issueKey, workspace, env = process.env, resolveBase = userConfigChain } = options;
-  if (!sessionId) return undefined;
+  if (!SESSION_ID.test(sessionId)) return undefined;
   const overlay = path.join(stateDir, `omp-attribution-${sessionId}.toml`);
+  // Bracket access, not a dot: claude-envoy type-checks this source under
+  // noPropertyAccessFromIndexSignature, which refuses a dot on an index signature.
+  // biome-ignore-start lint/complexity/useLiteralKeys: claude-envoy's tsconfig refuses dot access
   const active = env["JJ_CONFIG"];
   // Already active — never rewrite a live layer; the caller still learns the live chain.
   if (active?.split(":").includes(overlay)) return active;
@@ -203,4 +215,31 @@ export async function exportJjSessionAttribution(
     env["JJ_CONFIG"] = base; // degrade to no trailer, never a stale one
     return undefined;
   }
+  // biome-ignore-end lint/complexity/useLiteralKeys: see above
+}
+
+/** The writer's `issueKey` and `workspace` for a Legion pane, from the pane's environment: the
+ * two rules both harnesses' callers follow, in one place.
+ *
+ * The key is `LEGION_ISSUE_TRAILER` alone, never `LEGION_ISSUE`: a pane works an issue of this
+ * deployment's own Dispatch project, and only the daemon knows whether its repository is one the
+ * deployment names, so a key reaches a commit only when the daemon put it in this variable
+ * (dispatch://INFRA-472). Absent or empty is no key, and the trailer is the session line alone.
+ *
+ * The workspace is `LEGION_WORKSPACE` resolved (`resolvedWorkspace`), since jj matches a scope
+ * against the workspace root it resolved: a caller that passed the raw variable would write a
+ * scope that silently matches nothing. Without one the trailer is the session line alone too —
+ * the issue key belongs to the pane's own repository, not to whatever else its shell commits in.
+ *
+ * Each is left out rather than passed undefined, so the result is the options object of a caller
+ * type-checked under `exactOptionalPropertyTypes` (claude-envoy's). */
+export function paneAttributionOptions(env: NodeJS.ProcessEnv): {
+  issueKey?: string;
+  workspace?: string;
+} {
+  // biome-ignore-start lint/complexity/useLiteralKeys: claude-envoy's tsconfig refuses dot access
+  const issueKey = env["LEGION_ISSUE_TRAILER"];
+  const workspace = resolvedWorkspace(env["LEGION_WORKSPACE"]);
+  // biome-ignore-end lint/complexity/useLiteralKeys: see above
+  return { ...(issueKey ? { issueKey } : {}), ...(workspace ? { workspace } : {}) };
 }

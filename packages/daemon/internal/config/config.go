@@ -993,7 +993,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if err := checkDeployRenames(&cfg); err != nil {
 		return Config{}, err
 	}
-	if err := checkCommitTrailerRenames(&cfg); err != nil {
+	if err := checkCommitIssueTrailerRenames(&cfg); err != nil {
 		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {

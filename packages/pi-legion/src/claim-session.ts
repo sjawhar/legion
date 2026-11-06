@@ -2,7 +2,7 @@ import type { LegionCapabilityReportBody } from "@legion/contracts/legion-api";
 import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
 import {
   exportJjSessionAttribution,
-  resolvedWorkspace,
+  paneAttributionOptions,
   sessionIdFromTranscript,
 } from "@legion/pi-shared/jj-attribution";
 import { bootLegionClaim } from "@legion/pi-shared/legion-claim-core";
@@ -27,18 +27,8 @@ export interface ClaimSession {
  * What this pane's jj attribution overlay is written from
  * (`exportJjSessionAttribution`, `@legion/pi-shared/jj-attribution`): the Oh My Pi session id read
  * off the transcript (undefined for a subagent's, which owns no claim), the state directory the
- * daemon names, the issue key the trailer's `Dispatch:` line carries, and the workspace that line
- * is scoped to.
- *
- * That key comes from `LEGION_ISSUE_TRAILER` alone, never from `LEGION_ISSUE`: a pane works an
- * issue of this deployment's own Dispatch project, and only the daemon knows whether its
- * repository is one the deployment names, so a key reaches a commit only when the daemon put it
- * in this variable (dispatch://INFRA-472). Absent or empty is no key, and the trailer is the
- * session line alone.
- *
- * The workspace is `LEGION_WORKSPACE` resolved (`resolvedWorkspace`), since jj matches a scope
- * against the workspace root it resolved. Without one the trailer is the session line alone too:
- * the issue key belongs to the pane's own repository, not to whatever else its shell commits in.
+ * daemon names, and the pane's own key and workspace (`paneAttributionOptions`, which holds the
+ * rule both harnesses read those two variables by).
  */
 export function attributionInputs(
   sessionFile: string,
@@ -46,14 +36,13 @@ export function attributionInputs(
 ): {
   readonly sessionId: string | undefined;
   readonly stateDir: string;
-  readonly issueKey: string | undefined;
-  readonly workspace: string | undefined;
+  readonly issueKey?: string;
+  readonly workspace?: string;
 } {
   return {
     sessionId: sessionIdFromTranscript(sessionFile),
     stateDir: requiredEnvironment(env, "LEGION_STATE_DIR"),
-    issueKey: env.LEGION_ISSUE_TRAILER || undefined,
-    workspace: resolvedWorkspace(env.LEGION_WORKSPACE),
+    ...paneAttributionOptions(env),
   };
 }
 
@@ -110,12 +99,8 @@ export function createClaimSession(deps: {
           promptAgents: claim.promptAgents,
         }),
       afterRegister: async () => {
-        const { sessionId, stateDir, issueKey, workspace } = attributionInputs(
-          sessionFile,
-          process.env
-        );
-        if (sessionId)
-          await exportJjSessionAttribution(sessionId, stateDir, { issueKey, workspace });
+        const { sessionId, stateDir, ...pane } = attributionInputs(sessionFile, process.env);
+        if (sessionId) await exportJjSessionAttribution(sessionId, stateDir, pane);
       },
       setCapability: (registered) => {
         capability = registered;

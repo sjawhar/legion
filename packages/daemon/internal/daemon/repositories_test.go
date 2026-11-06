@@ -411,7 +411,10 @@ func TestABootWhoseEveryInstallationReadFailsServesNoneAndLogsOneError(t *testin
 // commit_issue_trailer_repos only selects among the project's repositories, which are Dispatch's
 // mapping, so the boot's mapping load says once of each configured name the mapping does not hold
 // that it stamps nothing, naming the name and the project, and says nothing of a name the project
-// serves, whatever the case it is configured in. It refuses no boot and widens nothing: the served
+// serves, whatever the case it is configured in. It reads the mapping's own equivalence, the one
+// the stamping decision reads (specs.issueTrailer), so a configured name the mapping holds only
+// under the other name of a configured rename is served, stamps, and is not warned about. It
+// refuses no boot and widens nothing: the served
 // set is Dispatch's mapping either way, and `legion start --check-config` reads no Dispatch at all,
 // so the file alone cannot decide it.
 func TestTheBootWarnsOfACommitTrailerRepositoryTheProjectDoesNotServe(t *testing.T) {
@@ -419,6 +422,7 @@ func TestTheBootWarnsOfACommitTrailerRepositoryTheProjectDoesNotServe(t *testing
 	for _, tc := range []struct {
 		name     string
 		repos    []ghrepo.Repository
+		renames  ghrepo.Renames
 		warnings int
 		named    string
 	}{
@@ -426,6 +430,9 @@ func TestTheBootWarnsOfACommitTrailerRepositoryTheProjectDoesNotServe(t *testing
 			warnings: 1, named: "repository=acme/gadgets project=LEGION"},
 		{name: "a served name", repos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}},
 		{name: "a served name in another case", repos: []ghrepo.Repository{ghrepo.MustParse("Acme/Widgets")}},
+		{name: "the name a configured rename moved the served repository away from",
+			repos:   []ghrepo.Repository{ghrepo.MustParse("acme/widgets-legacy")},
+			renames: ghrepo.MustRenames(ghrepo.MustRename("acme/widgets-legacy", "acme/widgets"))},
 		{name: "one of each", repos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets"), ghrepo.MustParse("acme/gadgets")},
 			warnings: 1, named: "repository=acme/gadgets project=LEGION"},
 		{name: "none configured"},
@@ -433,8 +440,8 @@ func TestTheBootWarnsOfACommitTrailerRepositoryTheProjectDoesNotServe(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			var logged bytes.Buffer
 			w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "zeta/tools", Project: "LEGION"}}},
-				dispatchProject: "LEGION", installs: &installations{}, commitTrailerRepos: tc.repos,
-				repositories: newRepositories("LEGION", ghrepo.Renames{}), log: slog.New(slog.NewTextHandler(&logged, nil))}
+				dispatchProject: "LEGION", installs: &installations{}, commitIssueTrailerRepos: tc.repos,
+				repositories: newRepositories("LEGION", tc.renames), log: slog.New(slog.NewTextHandler(&logged, nil))}
 			if err := w.loadMapping(context.Background()); err != nil {
 				t.Fatalf("loadMapping = %v, want the boot to go on", err)
 			}

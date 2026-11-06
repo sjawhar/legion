@@ -615,7 +615,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	w.repositories.set(accepted, refused)
 	w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
 	w.logUnservedRenames(accepted)
-	w.logUnservedCommitTrailerRepos(accepted)
+	w.logUnservedCommitIssueTrailerRepos(accepted)
 	w.logRenameOwnerConflicts()
 	return nil
 }
@@ -635,21 +635,26 @@ func (w *workflowRuntime) logUnservedRenames(accepted []mappedRepository) {
 	}
 }
 
-// logUnservedCommitTrailerRepos says, once at the boot's mapping load, that
+// logUnservedCommitIssueTrailerRepos says, once at the boot's mapping load, that
 // `commit_issue_trailer_repos` names a repository the project does not serve, naming the name and
 // the project: the key only selects among the project's repositories, which are Dispatch's
-// mapping, so a name the mapping does not hold stamps nothing. It is said here, and refuses
+// mapping, so a name the mapping does not hold stamps nothing. The two names are compared by the
+// mapping's own equivalence (same: without case, and through a configured rename), the one the
+// stamping decision this warning describes reads (specs.issueTrailer), so a configured name the
+// mapping holds only under the other name of a configured pair is served, stamps, and is not
+// warned about. It is said here, and refuses
 // nothing, because the served set is Dispatch's mapping alone and `legion start --check-config`
 // reads no Dispatch at all — it runs config.LoadForValidation and daemon.CheckStart and nothing
 // else (checkStartConfig, cmd/legion/main.go) — so it can refuse only what the file alone
 // decides, and a name mapped the day after the file is written is no fault of the file.
-func (w *workflowRuntime) logUnservedCommitTrailerRepos(accepted []mappedRepository) {
-	for _, repo := range w.commitTrailerRepos {
-		if slices.ContainsFunc(accepted, func(mapped mappedRepository) bool { return strings.EqualFold(mapped.Repo.String(), repo.String()) }) {
+func (w *workflowRuntime) logUnservedCommitIssueTrailerRepos(accepted []mappedRepository) {
+	for _, repo := range w.commitIssueTrailerRepos {
+		name := repo.String()
+		if slices.ContainsFunc(accepted, func(mapped mappedRepository) bool { return w.repositories.same(mapped.Repo.String(), name) }) {
 			continue
 		}
 		w.log.Warn("workflow: commit_issue_trailer_repos names a repository this project does not serve, so no pane stamps a commit with the issue key for it",
-			"repository", repo.String(), "project", w.dispatchProject)
+			"repository", name, "project", w.dispatchProject)
 	}
 }
 

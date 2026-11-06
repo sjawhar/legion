@@ -18,9 +18,9 @@
 // 2. For a Legion pane (`LEGION_STATE_DIR` set), write the pane's jj attribution overlay under
 //    that directory and hand on the jj config chain it layers over: `export JJ_CONFIG='<chain>'`
 //    in the same file, so every jj commit a Bash command of the session makes carries an
-//    `Omp-Session: <id>` trailer, and a `Dispatch: <KEY>` line too when `LEGION_ISSUE_TRAILER`
-//    names the issue key — that line scoped to the pane's own workspace (`LEGION_WORKSPACE`
-//    resolved), so a commit made in any other jj repository carries the session line alone
+//    `Omp-Session: <id>` trailer, and a `Dispatch: <KEY>` line too for a pane whose environment
+//    names an issue key, scoped to that pane's own workspace — which of the pane's variables say
+//    so, and how, is `paneAttributionOptions`
 //    (`exportJjSessionAttribution`, `@legion/pi-shared/jj-attribution`). The
 //    hook writes it, not the claim boot: that boot is the MCP server Claude Code spawns as a
 //    child, and a child cannot change its parent's environment. A `/clear` gives the session a
@@ -102,7 +102,7 @@ import {
 } from "@legion/envoy-client/session-settings"
 import {
   exportJjSessionAttribution,
-  resolvedWorkspace,
+  paneAttributionOptions,
   userConfigChain,
 } from "@legion/pi-shared/jj-attribution"
 import { z } from "zod"
@@ -177,17 +177,29 @@ const JJ_CONFIG_EXPORT = "export JJ_CONFIG="
  *  costs the session the export and nothing else. */
 const JJ_BASE_CHAIN_TIMEOUT_MS = 3_000
 
-/** Appends `line` to the env file, once: every SessionStart of the session runs this. */
-function appendOnce(envFile: string, line: string): void {
-  let written = ""
+/** What the env file holds, and "" when it does not exist yet: Claude Code names the file before
+ *  any hook has written it. */
+function envFileText(envFile: string): string {
   try {
-    written = readFileSync(envFile, "utf8")
+    return readFileSync(envFile, "utf8")
   } catch (error) {
     if (!hasErrnoCode(error, "ENOENT")) throw error
+    return ""
   }
-  if (written.split("\n").includes(line)) return
+}
+
+/** Appends `line` to the env file as a line of its own, `written` being what `envFileText` read:
+ *  a file not ending in a newline gets one first, so the line never joins the last one. */
+function appendLine(envFile: string, written: string, line: string): void {
   const separator = written === "" || written.endsWith("\n") ? "" : "\n"
   appendFileSync(envFile, `${separator}${line}\n`)
+}
+
+/** Appends `line` to the env file, once: every SessionStart of the session runs this. */
+function appendOnce(envFile: string, line: string): void {
+  const written = envFileText(envFile)
+  if (written.split("\n").includes(line)) return
+  appendLine(envFile, written, line)
 }
 
 /** Writes `line` to the env file as the only line starting with `prefix`, replacing an earlier
@@ -196,19 +208,14 @@ function appendOnce(envFile: string, line: string): void {
  *  overlay wins to the order they were written in. Every other line keeps its text and its place.
  *  A replacement is written through a temporary file and a rename, so a process that dies
  *  mid-write leaves the shell the whole old file, never a truncated one; with no earlier line it
- *  appends, as `appendOnce` does, rather than rewriting what another hook may be appending to. */
+ *  appends, as `appendOnce` does (`appendLine`), rather than rewriting what another hook may be
+ *  appending to. */
 function replaceOnce(envFile: string, prefix: string, line: string): void {
-  let written = ""
-  try {
-    written = readFileSync(envFile, "utf8")
-  } catch (error) {
-    if (!hasErrnoCode(error, "ENOENT")) throw error
-  }
+  const written = envFileText(envFile)
   const lines = written.split("\n")
   const at = lines.findIndex((existing) => existing.startsWith(prefix))
   if (at === -1) {
-    const separator = written === "" || written.endsWith("\n") ? "" : "\n"
-    appendFileSync(envFile, `${separator}${line}\n`)
+    appendLine(envFile, written, line)
     return
   }
   if (lines[at] === line) return
@@ -230,13 +237,10 @@ async function openAsks(raw: unknown): Promise<void> {
     const stateDir = process.env["LEGION_STATE_DIR"]
     if (stateDir) {
       try {
-        // Absent or empty is no key, and the trailer is the session line alone; the same for a
-        // workspace that does not resolve, which the `Dispatch:` line is scoped to.
-        const issueKey = process.env["LEGION_ISSUE_TRAILER"]
-        const workspace = resolvedWorkspace(process.env["LEGION_WORKSPACE"])
+        // The pane's own key and workspace, by the rule both harnesses read those two variables
+        // by (`paneAttributionOptions`).
         const chain = await exportJjSessionAttribution(input.session_id, stateDir, {
-          ...(issueKey ? { issueKey } : {}),
-          ...(workspace ? { workspace } : {}),
+          ...paneAttributionOptions(process.env),
           resolveBase: () => userConfigChain(JJ_BASE_CHAIN_TIMEOUT_MS),
         })
         if (chain !== undefined) {
