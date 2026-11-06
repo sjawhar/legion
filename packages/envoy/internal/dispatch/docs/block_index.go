@@ -481,12 +481,15 @@ var wholeTextOwners = func() []wholeTextOwner {
 // on both sides, so neither embeddings_window_owner, keyed on (kind, split_part(id, '#', 1)),
 // nor embeddings_pkey could drive the join, and the planner read every whole-text row of the
 // kind and filtered it against the windows: one pass took 25 minutes against the 482,073
-// comments still unwindowed (INFRA-988). The kinds are written as literals, not parameters, so
-// the planner can prove embeddings_window_owner's partial predicate and read the owner's
-// windows - the inner side alone - through that index. The owner key is stripped outside the
-// distinct rather than inside it, so the distinct is over split_part(w.id, '#', 1) itself, the
-// index's own key: the owners can be read off embeddings_window_owner in that order and the
-// statement stop at $1 of them.
+// comments still unwindowed (INFRA-988). The owner side does not stop at $1 of the owners: it
+// reads and sorts every current window of the kind, and the limit takes the first $1 rows the
+// distinct emits off that sort. On a database seeded at the load test's shape the planner read
+// those windows as a bitmap scan of embeddings_pkey under the window kind, not through
+// embeddings_window_owner; both indexes lead on the kind, which is why the kinds are written
+// as literals rather than parameters. That side is still the cheap one: the windows of a kind
+// are the owners already indexed, where the whole-text rows are the backlog being drained. A
+// batch of 500 took 26.9 ms over 480,000 whole-text comment rows against 18,000 current
+// windows (INFRA-1504).
 func (owner wholeTextOwner) retire() string {
 	return fmt.Sprintf(`
 		with picked as (
