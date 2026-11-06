@@ -147,6 +147,113 @@ func requireKeysChecked(t *testing.T, client *Client, kv KeyValue, letter string
 	}
 }
 
+// A caller that holds a key from a scan of the bucket rather than from a read of it asks
+// RefusesRead whether this build can read the key at all, so it must answer exactly the refusal a
+// real Get answers before sending: it refuses the same keys, with the same ErrRefused classes and
+// the same text, and answers nil wherever the get reaches the bucket, whether that get finds the
+// key or not. nats.go's key alphabet is copied into this package (natsKeyValid) because keyValid
+// is unexported there, and this case is what pins the copy: a nats.go bump that changed the
+// alphabet must fail this build rather than silently reclassify stored keys.
+//
+// Pinning it takes a row per character of that alphabet, in both directions. A key is decided by
+// kv.check first wherever its subject would be too long or would hold an empty token or
+// whitespace, and natsKeyValid is reached only by the keys check passes, so a table of ordinary
+// `a-z` keys and one colon would leave a bump free to drop `-`, `/`, `_`, `=` or `.`, or to add a
+// character, with every row still green while RefusesRead and a real Get disagreed about stored
+// keys. Each character nats.go accepts beyond letters and digits therefore has a key of its own
+// here, stored in the bucket so the get it is compared against reaches it and answers its value,
+// and the characters it rejects have several, each still reaching natsKeyValid rather than
+// stopping at check.
+func TestRefusesReadAnswersTheSameRefusalAGetOfTheKeyAnswers(t *testing.T) {
+	client, err := Connect([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	js, err := client.Conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	const bucket = "kv_refuses_read"
+	raw, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket, Storage: nats.MemoryStorage})
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	t.Cleanup(func() { _ = js.DeleteKeyValue(bucket) })
+	// The keys an earlier listener stored, which no KeyValue can write: one a direct get still
+	// reads, and one past a direct get's bound but inside a delete's.
+	readable, unreadable := testnats.LegacyKeys(bucket, "r")
+	for _, key := range []string{readable, unreadable} {
+		if _, err := raw.Put(key, []byte("legacy")); err != nil {
+			t.Fatalf("store the %d-byte key as an earlier listener did: %v", len(key), err)
+		}
+	}
+	kv, err := OpenKeyValue(client.Conn, js, bucket)
+	if err != nil {
+		t.Fatalf("open bucket: %v", err)
+	}
+	// The keys whose character the alphabet accepts are stored, so the get each row compares
+	// RefusesRead against reaches the bucket and answers a value rather than ErrKeyNotFound.
+	for _, key := range []string{"fits-r", "ses/sub", "ses_sub", "ses=sub", "ses.sub", "0123456789"} {
+		if _, err := kv.Put(key, []byte("v")); err != nil {
+			t.Fatalf("put the %q key, which nats.go's alphabet accepts: %v", key, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"a key past the server's protocol line", strings.Repeat("k", 5000)},
+		{"a key holding an empty token", "sess..x"},
+		{"a key outside nats.go's key alphabet", "ses:bad"},
+		{"an ordinary key", "fits-r"},
+		{"a stored key a direct get still reads", readable},
+		{"a stored key past a direct get's bound", unreadable},
+		// One row per character nats.go accepts beyond a letter or a digit, so a bump that
+		// dropped one of them fails here rather than reclassifying the keys holding it.
+		{"a key holding a hyphen", "fits-r"},
+		{"a key holding a slash", "ses/sub"},
+		{"a key holding an underscore", "ses_sub"},
+		{"a key holding an equals sign", "ses=sub"},
+		{"a key holding a dot", "ses.sub"},
+		{"a key of digits", "0123456789"},
+		// And the other direction, keys check passes and the alphabet refuses, so a bump that
+		// widened it fails here too.
+		{"a key holding a plus", "ses+bad"},
+		{"a key holding a wildcard", "ses*bad"},
+		{"a key holding a token wildcard", "ses>bad"},
+		{"a key holding a percent sign", "ses%bad"},
+		{"a key holding a letter outside ASCII", "sés"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answered := kv.RefusesRead(tc.key)
+			_, err := kv.Get(tc.key)
+			refused := errors.Is(err, ErrRefused)
+			if err != nil && !refused && !errors.Is(err, nats.ErrKeyNotFound) {
+				t.Fatalf("get of the %d-byte key = %v; want its value, a refusal or ErrKeyNotFound", len(tc.key), err)
+			}
+			if refused != (answered != nil) {
+				t.Fatalf("RefusesRead = %v, get = %v; want RefusesRead to refuse exactly when the get does", answered, err)
+			}
+			if !refused {
+				return
+			}
+			for _, class := range []error{ErrRefused, ErrTooLarge, ErrInvalidSubject, ErrInvalidKey, nats.ErrInvalidKey} {
+				if errors.Is(answered, class) != errors.Is(err, class) {
+					t.Fatalf("RefusesRead = %v and get = %v disagree on %v", answered, err, class)
+				}
+			}
+			if answered.Error() != err.Error() {
+				t.Fatalf("RefusesRead says %q, the get says %q; want the same refusal", answered, err)
+			}
+		})
+	}
+	if !client.Conn.IsConnected() {
+		t.Fatalf("the refusals left the connection %v, want it connected", client.Conn.Status())
+	}
+}
+
 // A key already in a bucket stays usable whatever this build would now refuse to write: a listener
 // built before the key check stored keys up to the length its own direct get could read. A write
 // of such a key is refused, since a key written now must stay readable and watchable; a read is
