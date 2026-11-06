@@ -41,24 +41,44 @@ func headerIdentity(database *store.Store) identity.HeaderIdentity {
 	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)}
 }
 
-func newTestService(t *testing.T) (*Service, string) {
-	t.Helper()
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, "# First")
-	service := New(Deps{
+// testServiceDeps are the dependencies every document service of this package's tests is built
+// with, on database. A caller that builds a service with them owns its shutdown:
+// newTestServiceOn registers one, and a caller that shuts its service down by hand (a seeding
+// service a test ends before it swaps the manifest, newAdmissionServer) builds New with these
+// directly.
+func testServiceDeps(database *store.Store) Deps {
+	return Deps{
 		Store:     database,
 		Events:    events.NewBroker(),
 		Identity:  headerIdentity(database),
 		ServerURL: "https://dispatch.example",
 		Settle:    20 * time.Millisecond,
-	})
+	}
+}
+
+// newTestServiceOn builds a document service on database and shuts it down when the test ends.
+// Where that shutdown runs among the test's other cleanups matters to a test that swaps the
+// schema manifest: pmdoc's readers do not lock it, so the swap's restore must run after this
+// shutdown has stopped the service's room, settlement and flush goroutines, which read it.
+// Cleanups run last in first out, so such a test registers its restore before it calls this.
+func newTestServiceOn(t *testing.T, database *store.Store) *Service {
+	t.Helper()
+	service := New(testServiceDeps(database))
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	return service, artifactID
+	return service
 }
+
+func newTestService(t *testing.T) (*Service, string) {
+	t.Helper()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	return newTestServiceOn(t, database), artifactID
+}
+
 func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour

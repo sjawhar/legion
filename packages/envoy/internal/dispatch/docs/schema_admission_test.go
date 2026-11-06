@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // fleetProcess writes the server_processes row of another server process straight into the
@@ -184,6 +185,16 @@ func admission(t *testing.T, serverURL, artifactID string, query url.Values, tok
 // the shipped version and creates up to R, the shipped version: the cases below need a process
 // that creates less than it reads. With future, the document holds a "future" block too, so the
 // highest since it holds is that V.
+//
+// The order the two manifests are staged in is what keeps those swaps off a running service.
+// pmdoc's readers do not lock the manifest (pmdoc.UseManifestForTest), so none may be installed
+// while a service's room, settlement or flush goroutines read it: each is a data race, and one of
+// them took the race lane red (a settlement's renderTreeWithOffsets against a restore's install).
+// So the document is seeded by a service of its own, under the creatable manifest, and that
+// service is shut down - its settlement and flush goroutines with it - before the uncreatable
+// manifest is staged; the serving service is built after that staging, and its shutdown is
+// registered after both restores. Cleanups run last in first out, so they run the server's close,
+// that shutdown, then the two restores, each with no service left to read the manifest.
 func newAdmissionServer(t *testing.T, future bool) (*Service, string, *httptest.Server) {
 	t.Helper()
 	restoreCreatable, err := pmdoc.UseStagedBlockForTest("future", true)
@@ -195,13 +206,19 @@ func newAdmissionServer(t *testing.T, future bool) (*Service, string, *httptest.
 	if future {
 		markdown += "\n:::future{#future-1}\nBody.\n:::\n"
 	}
-	service, artifactID := newTestService(t)
-	seedServiceText(t, service, artifactID, markdown)
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	seeding := New(testServiceDeps(database))
+	seedServiceText(t, seeding, artifactID, markdown)
+	if err := seeding.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown the seeding document service: %v", err)
+	}
 	restoreUncreatable, err := pmdoc.UseStagedBlockForTest("future", false)
 	if err != nil {
 		t.Fatalf("stage the future block as not creatable: %v", err)
 	}
 	t.Cleanup(restoreUncreatable)
+	service := newTestServiceOn(t, database)
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
 	return service, artifactID, server
