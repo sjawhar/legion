@@ -517,9 +517,11 @@ func decodeAskPart(encoded []byte, into any) (bool, error) {
 }
 
 // storeTexts reads the display tree of each of texts and stores it, fillWorkers readings at a
-// time, in chunks of fillChunk. The reading is pmdoc.DisplayTreeToStore, which neither reads this
-// process's cache of display trees nor fills it: the cache holds the trees readers were served,
-// and a pass that put its own 140,000 readings through it would evict every one of them.
+// time, in chunks of fillChunk. The reading is pmdoc.DisplayTreeToStore, which fills no cache of
+// this process's: the display cache holds the trees readers were served, and a pass that put its
+// own 140,000 readings through it would evict every one of them. What that reading does take
+// from the cache is a tree the cache already holds, which costs a reader nothing and saves this
+// pass the parse of a text a reader of this process has been shown.
 func storeTexts(ctx context.Context, table texttrees.Table, texts []string) error {
 	if len(texts) == 0 {
 		return nil

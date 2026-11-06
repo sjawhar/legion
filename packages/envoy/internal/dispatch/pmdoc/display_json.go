@@ -42,15 +42,27 @@ func DisplayJSON(markdown string, mode DisplayMode) json.RawMessage {
 	return tree
 }
 
-// DisplayTreeToStore is the tree DisplayJSON answers, read and encoded without the cache:
-// neither read from it nor put into it. It is what a write stores (texttrees), and a write is no
-// reader - the cache holds the trees readers were served, and filling it with the tree of every
-// text written would make one writer's long document the eviction of the bodies a hundred
-// readers are re-reading, which is also what TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound
-// measures. It counts no build either (DisplayTreeBuilds), since no response was read to make it.
+// DisplayTreeToStore is the tree DisplayJSON answers, for a caller that is storing it rather
+// than serving it (texttrees). It answers the cache's bytes where the cache holds that reading
+// already, and reads the markdown where it does not; it never puts what it read into the cache.
+//
+// Reading the cache and filling it are not the same thing. A write is no reader - the cache
+// holds the trees readers were served, and filling it with the tree of every text written would
+// make one writer's long document the eviction of the bodies a hundred readers are re-reading,
+// which is what TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound measures - but taking a
+// tree the cache already holds evicts nothing and holds nothing new. It is also where the trees
+// the same request just read are: a read that found no stored tree shapes its answer through
+// DisplayJSON and then stores what it shaped, and without this that second step would read every
+// one of those texts a second time.
+//
+// It counts no build either (DisplayTreeBuilds), on a hit or on a miss, since no response was
+// read to make it.
 func DisplayTreeToStore(markdown string, mode DisplayMode) json.RawMessage {
 	if markdown == "" {
 		return nil
+	}
+	if tree, held := displayCache.Get(displayCacheKey{sum: sha256.Sum256([]byte(markdown)), mode: mode}); held {
+		return tree
 	}
 	tree, err := json.Marshal(ReadForDisplay(markdown, mode).toDisplayJSON())
 	if err != nil {
@@ -58,6 +70,19 @@ func DisplayTreeToStore(markdown string, mode DisplayMode) json.RawMessage {
 		return nil
 	}
 	return tree
+}
+
+// HoldsDisplayTree reports whether the display cache already holds the tree of the text whose
+// SHA-256 is sum, read in mode. It is the key DisplayJSON looks that reading up under
+// (displayCacheKey), which is the key the stored trees are keyed by too (texttrees.Sum), so a
+// caller holding the sum can ask without the text and without hashing it again.
+//
+// A caller asks this to leave a text out of a read it would otherwise make - the priming query
+// of the stored trees (api's primeDisplayTrees) - so the answer is about this process alone and
+// says nothing about the table. It marks the entry used, as the shaping that follows it would.
+func HoldsDisplayTree(sum [32]byte, mode DisplayMode) bool {
+	_, held := displayCache.Get(displayCacheKey{sum: sum, mode: mode})
+	return held
 }
 
 // PutStoredDisplayTree puts a tree this process did not read - the text_trees row of markdown in

@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+  A read that carries display trees asks `text_trees` only for the texts this process does not hold a tree for already, and a text it does hold is left out of that statement and out of the store that follows it: the read after a write, which moves both lists' validators and leaves every body of the page where it was, asks for the one text that is new instead of for the whole page again.
+  Measured over the activity feed of an issue with 200 comments, with the answer's bytes invalidated and the trees still held, that read falls from 14.4 ms to 11.9 ms and from 7,363 allocations to 5,969 (medians of five runs of 40 reads each, on a two-core machine running other work).
+  The one thing it costs is that a tree this process built itself, whose store then failed, is not asked for again until the fill pass stores it or the process restarts; no answer differs either way, since the reader is served the tree this process holds.
+  A write encodes through `pmdoc.DisplayTreeToStore`, which now answers a tree the display cache already holds rather than reading the markdown a second time, while still putting nothing into that cache: a read that finds no stored tree shapes its answer and then stores what it shaped, and those two steps parsed every text twice.
+  Measured on the same feed with `text_trees` empty - a deployment between the migration and the end of the fill pass - the read falls from 73.8 ms to 47.4 ms and from 119,815 allocations to 64,013.
+time: 2026-11-06T05:00:00.000000000Z
+custom:
+    Issue: pr2712

@@ -61,6 +61,18 @@ func (s *server) displayTreePool() *store.Pool {
 // hundred bodies after a restart is one round trip, not one per body and not two hundred
 // markdown parses. A text repeated among them - the same body quoted twice - is asked for once.
 //
+// A text whose tree this process already holds is not asked for at all: the cache is keyed by
+// exactly what the table is keyed by (pmdoc.HoldsDisplayTree), and what the shaping is about to
+// be answered from is the cache either way. One new comment moves both lists' validators, so the
+// read after a write is this case and not the restart: 199 of the 200 bodies of a feed are where
+// the comment list left them, and the query that is left asks for the one that is new.
+//
+// What a held text costs is that this read no longer learns whether the table holds its row. A
+// text this process read for itself - one whose tree the shaping built because no row answered
+// for it, and whose store then failed - is not asked for again until this process restarts; the
+// fill pass (texttreefill) stores it meanwhile, and no answer is different either way, since a
+// reader is served the tree this process holds.
+//
 // It stores nothing. A text answered as missing is read for display by the shaping exactly as it
 // was before there was a table, and the request stores it afterwards (storeDisplayTrees), on a
 // connection of its own and outside any transaction of its caller's.
@@ -97,6 +109,9 @@ func (s *server) primeDisplayTreesIn(ctx context.Context, mode pmdoc.DisplayMode
 			continue
 		}
 		seen[sum] = struct{}{}
+		if pmdoc.HoldsDisplayTree(sum, mode) {
+			continue
+		}
 		distinct = append(distinct, text)
 		sums = append(sums, sum)
 	}
