@@ -153,8 +153,12 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 // room looked up again once that Apply returned can have been evicted in between. The wait ends
 // with one last read rather than on the subscription alone, so a mark written into a room
 // instance that replaced the subscribed one - which another process's eviction can leave behind -
-// is still found. A comment mark read under WithCommentMarks is read on a closed issue's
-// document too.
+// is still found. Each look reads docTree, which is never older than the stored head: a mark a
+// browser on another process placed and that process stored is found at once, from the store
+// while this room's catch-up has not applied it. One stored after a look wakes the next look
+// through the room's update, a catch-up batch (roomCatchUps) when another process stored it, or a
+// browser's update on this process. A comment mark read under WithCommentMarks is read on a
+// closed issue's document too.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
 	if kind == MarkComment {
 		ctx = commentMarkOperation(ctx)
