@@ -14,15 +14,20 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/store"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
 
 // goldenPath is the cross-language pin: Go writes the wire shape, and
-// `packages/contracts/src/legion-api.test.ts` parses it through the strict zod schema the
-// plugin reads with. Go is the source of truth; the fixture is how the schema is held to it.
+// `packages/contracts/src/legion-api.test.ts` parses it through the zod schema the plugin reads
+// with and holds the parse equal to the file, so a Go field with no zod line is named there. Go
+// is the source of truth; the fixture is how the schema is held to it.
 func goldenPath(name string) string {
 	return filepath.Join("..", "..", "..", "contracts", "fixtures", "daemon-api", name)
 }
@@ -95,17 +100,21 @@ github_apps:
     installations: {sjawhar: "2003"}
 linger_hours: 1.5
 production_check_hours: 240
+pod_update_max_open_rounds: 6
+pod_update_rounds_per_minute: 2
 review_round_cap: 4
 max_fix_attempts: 5
 controller: daemon
 worker_backends: {tester: omp}
+repository_renames:
+  - {from: acme/widgets-legacy, to: acme/widgets}
 capabilities:
   decided:
     pool-capacity: "the pool is sized by hand for the admission cap"
 runtime:
   kubernetes:
     namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    image: ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp3
     issue_volume: 30Gi
     kubeconfig: /etc/legion/kubeconfig
@@ -119,7 +128,7 @@ runtime:
         - {key: spot, operator: Exists, effect: NoExecute}
       priority_class: legion-workers
     resources:
-      implementer: {cpu: 1500m, memory: 8Gi}
+      issue: {cpu: 4, memory: 24Gi}
       controller: {cpu: 2, cpu_request: 1, memory: 6Gi, memory_request: 4Gi}
     pod:
       env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, OPERATOR_FIXTURE_FLAG: operator-fixture-value}
@@ -138,6 +147,7 @@ runtime:
       pi_legion: 10.4.0
       pi_envoy: https://legion:fixture-plugin-password@plugins.internal.example/pi-envoy-10.4.0.tgz?token=fixture-plugin-token
     setup: [/bin/sh, -c, 'echo fixture-setup']
+    skills_repository: acme/agent-skills
     repository_cache:
       volume: 40Gi
       refresh_minutes: 15
@@ -184,7 +194,9 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 func populatedState(t *testing.T) State {
 	t.Helper()
 	approvedVersion := 6
-	return State{
+	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
+	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
+	state := State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
 			SchemaVersion: 1,
@@ -196,6 +208,17 @@ func populatedState(t *testing.T) State {
 			Cap:     2,
 			Active:  []string{"LEGION-208", "LEGION-210"},
 			Waiting: []string{"LEGION-211"},
+			// The roots of the live trees, which the slots no longer name: LEGION-207 closed, and
+			// each of the other three roots a tree of its own.
+			Trees: []string{"LEGION-208", "LEGION-210", "LEGION-212"},
+			// LEGION-211 is the waiting root admission skips, so it is in `waiting` too;
+			// LEGION-209 is a child of LEGION-208's tree the workflow holds at `admitted`, which
+			// no waiting line carries. Both are listed, by issue key, with what each waits on —
+			// LEGION-213 among them a key the daemon has no record of, which counts as unfinished.
+			Blocked: []BlockedIssue{
+				{Issue: "LEGION-209", BlockedBy: []string{"LEGION-210", "LEGION-213"}},
+				{Issue: "LEGION-211", BlockedBy: []string{"LEGION-210"}},
+			},
 		},
 		Issues: map[string]Issue{
 			"LEGION-208": {
@@ -203,6 +226,7 @@ func populatedState(t *testing.T) State {
 				Generation:    3,
 				Phase:         phase.Implementing,
 				Status:        "in_progress",
+				Tree:          "LEGION-208",
 				Repo:          "acme/widgets",
 				DefaultBranch: "main",
 				Architect: &ClaimView{
@@ -226,11 +250,16 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
 								Sandbox: &runtime.SandboxLocator{
 									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-									Container: "planner", Generation: 2,
+									Container: "roles", Generation: 2,
 								},
 							},
+							// The pod's update round, which every claim of that pod shares: the daemon
+							// replaces the pod only once each has answered. This one has, and reported
+							// the head it pushed.
+							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+							UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
 						},
-						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+						HandoffRecord: &HandoffRecordView{ID: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", Version: 1},
 						Rounds:        0,
 					},
 					claim.RoleImplementer: {
@@ -243,7 +272,7 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
 								Sandbox: &runtime.SandboxLocator{
 									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-									Container: "implementer", Generation: 5,
+									Container: "roles", Generation: 5,
 								},
 							},
 							// The session's capability report (LEGION-663), from the process the locator
@@ -254,6 +283,9 @@ func populatedState(t *testing.T) State {
 								OK:          []string{"subagents", "dispatch-envoy-tools"},
 								Open:        []CapabilityGap{{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"}},
 							},
+							// The same round, on the worker that has not answered it yet: no head is
+							// reported until a worker answers.
+							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
 						},
 						HandoffCommit: "",
 						Rounds:        2,
@@ -283,11 +315,31 @@ func populatedState(t *testing.T) State {
 				Generation:    1,
 				Phase:         phase.Held,
 				Status:        "in_progress",
+				Tree:          "LEGION-210",
 				Repo:          "zeta/tools",
 				DefaultBranch: "release/v7.1",
 				HoldReason:    "escalated",
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+				},
+			},
+			// LEGION-212's architect asked a person a question and handed the turn back, which gave
+			// its slot up; the person has answered the question.
+			"LEGION-212": {
+				Key:           "LEGION-212",
+				Generation:    1,
+				Phase:         phase.AwaitingPerson,
+				Status:        "in_progress",
+				Tree:          "LEGION-212",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
+				WaitingOn: &WaitingOnView{
+					Kind:       "ask",
+					Ask:        "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+					Since:      &waitedSince,
+					AnsweredAt: &answeredAt,
+					AnsweredBy: record.AnsweredByAsk,
 				},
 			},
 			// LEGION-207 merged and closed; its production check is open at its second look, woken by
@@ -297,6 +349,7 @@ func populatedState(t *testing.T) State {
 				Generation:    2,
 				Phase:         phase.Done,
 				Status:        "done",
+				Tree:          "LEGION-207",
 				Repo:          "acme/widgets",
 				DefaultBranch: "main",
 				Workers: map[claim.Role]PhaseView{
@@ -325,8 +378,15 @@ func populatedState(t *testing.T) State {
 		// two and a half minutes ago and waits behind it (record.Store.HeldRows).
 		HeldOutboxRows: []HeldOutboxRow{{ID: 802, Kind: "supervise", Issue: "LEGION-208", WaitedSeconds: 150, WaitsOn: 801}},
 		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
-		// and nothing retries the claim until its architect retries the phase.
-		StrandedClaims: []StrandedClaim{{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"}},
+		// and nothing retries the claim until its architect retries the phase. LEGION-211's
+		// implementer is the other kind, a released pod whose wake never brought it back: who
+		// suspended it is read on the operator claim routes, and the entry here carries the same
+		// three keys as every other, which is what a session on the contract before this one
+		// parses.
+		StrandedClaims: []StrandedClaim{
+			{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"},
+			{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended"},
+		},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",
 			External:     true,
@@ -341,8 +401,8 @@ func populatedState(t *testing.T) State {
 		// stale.
 		Capabilities: CapabilityStatesOf(capabilities.Deployment{
 			Runtime: "kubernetes", Probed: true, ModelFallback: "on",
-			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
-			RolesWithoutResources: []claim.Role{claim.RoleTester},
+			Decided:        map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
+			UnreservedPods: []capabilities.Pod{capabilities.PodIssue},
 		}.Report()),
 		// The project maps three repositories of two owners; the review App is not installed on one,
 		// which the daemon leaves out. acme/widgets' cache is Ready and its last health read
@@ -361,6 +421,8 @@ func populatedState(t *testing.T) State {
 				}},
 			},
 			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			// Dispatch's GitHub App is not installed on zeta/tools, which is served all the same.
+			WithoutWebhookApp: []WebhookAppGapView{{Repo: "zeta/tools", Reason: "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"}},
 			Caches: []CacheView{{
 				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
 			}},
@@ -374,11 +436,71 @@ func populatedState(t *testing.T) State {
 			Asker: "user:octocat", Ref: "dispatch://LEGION-207/message/m-4411", Reason: "not_answered",
 			PassedAt: time.Date(2026, 9, 22, 9, 14, 3, 0, time.UTC),
 		}},
+		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
+		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
+		// minute.
+		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
+			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
+			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+			{
+				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
+				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
+			},
+		}),
 	}
+	// LEGION-208's tree was drawn into the memory group, so its root and LEGION-209, a child of
+	// that tree, both show the draw as internal/projection fills them, while every other issue of
+	// the fixture belongs to a tree no draw has reached.
+	root := state.Issues["LEGION-208"]
+	root.MemoryGroup = string(memorygroup.GroupMemory)
+	root.MemoryDrawMode = string(config.MemoryRandom)
+	root.MemoryDrawnAt = &memoryDrawnAt
+	state.Issues["LEGION-208"] = root
+	state.Issues["LEGION-209"] = Issue{
+		Key:            "LEGION-209",
+		Generation:     1,
+		Phase:          phase.Admitted,
+		Status:         "in_progress",
+		Repo:           "acme/widgets",
+		DefaultBranch:  "main",
+		Workers:        map[claim.Role]PhaseView{},
+		MemoryGroup:    string(memorygroup.GroupMemory),
+		MemoryDrawMode: string(config.MemoryRandom),
+		MemoryDrawnAt:  &memoryDrawnAt,
+	}
+	return state
 }
 
 func TestStateGolden(t *testing.T) {
 	golden(t, "state.json", populatedState(t))
+}
+
+// Every plugin parses the state with the schema of the contract it was built at, and a
+// Kubernetes deployment relaunches no stale session (INFRA-945 spec R10), so a session on the
+// contract before this one reads this daemon's state for as long as its pod lives: a key added
+// to a session-facing body refuses the whole of it at every plugin whose answer side predates
+// INFRA-1048, and is dropped at every plugin after it, which loses the field rather than the
+// state. `suspendedBy` is the key this change was tempted to add, and it belongs to the
+// operator claim routes alone; the guard beside `legion-api.test.ts`'s schema tests holds the
+// same property on the schema side.
+func TestNoSessionFacingBodyCarriesSuspendedBy(t *testing.T) {
+	// The body where the key does live, so a guard over nothing cannot pass for a clean one.
+	operator, err := json.Marshal(OperatorClaims{Claims: []OperatorClaim{
+		{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended", SuspendedBy: "released"},
+	}})
+	if err != nil {
+		t.Fatalf("marshal the operator claim list: %v", err)
+	}
+	if !bytes.Contains(operator, []byte("suspendedBy")) {
+		t.Fatalf("the operator claim list does not carry suspendedBy either: %s", operator)
+	}
+	encoded, err := json.Marshal(populatedState(t))
+	if err != nil {
+		t.Fatalf("marshal the state: %v", err)
+	}
+	if bytes.Contains(encoded, []byte("suspendedBy")) {
+		t.Fatalf("the state body carries suspendedBy: %s", encoded)
+	}
 }
 
 func TestStateStage3Golden(t *testing.T) {
@@ -390,13 +512,17 @@ func TestStateStage3Golden(t *testing.T) {
 			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
 			StartedAt:     time.Date(2026, 9, 22, 17, 30, 0, 0, time.UTC),
 		},
-		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
+		Admission: Admission{
+			Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"},
+			Trees: []string{"LEGION-208"},
+		},
 		Issues: map[string]Issue{
 			"LEGION-208": {
 				Key:           "LEGION-208",
 				Generation:    4,
 				Phase:         phase.Reviewing,
 				Status:        "needs_review",
+				Tree:          "LEGION-208",
 				Repo:          "sjawhar/legion-smoke",
 				DefaultBranch: "main",
 				Workers:       map[claim.Role]PhaseView{},
@@ -414,9 +540,9 @@ func TestStateStage3Golden(t *testing.T) {
 }
 
 // An operator's claim on an issue the workflow does not record is listed for the claim's sake,
-// and says so rather than leaving its phase and status empty: an empty phase refused the whole
-// document at every strict client, over a row that is a legitimate state. internal/projection's
-// own test holds the producer to these values.
+// and says so rather than leaving its phase and status empty: an empty phase is no value of the
+// phase enum, so it refuses the whole document, over a row that is a legitimate state.
+// internal/projection's own test holds the producer to these values.
 func TestStateOperatorClaimGolden(t *testing.T) {
 	golden(t, "state-operator-claim.json", State{
 		Daemon: DaemonInfo{
@@ -451,8 +577,8 @@ func TestStateOperatorClaimGolden(t *testing.T) {
 }
 
 // golden pins one response's wire shape: Go writes it (`-update`), and
-// `packages/contracts/src/legion-api.test.ts` parses it through the strict schema of the
-// response it is. A fixture that differs from what Go now writes is stale.
+// `packages/contracts/src/legion-api.test.ts` parses it through the schema of the response it is
+// and holds the parse equal to the file. A fixture that differs from what Go now writes is stale.
 func golden(t *testing.T, name string, value any) {
 	t.Helper()
 	encoded, err := json.MarshalIndent(value, "", "  ")
@@ -516,9 +642,66 @@ func TestReadyRequestGolden(t *testing.T) {
 	})
 }
 
+// The ready-for-update request is the worker's answer to its pod's update task: the claim it
+// holds, the generation it answers for, the round the task it read named — the one round the
+// answer counts for — and the head of `legion/<issue>@origin` it reports, which the daemon
+// records and verifies nothing of.
+func TestReadyForUpdateRequestGolden(t *testing.T) {
+	golden(t, "ready-for-update.json", claim.ReadyForUpdateRequest{
+		ClaimToken: "legion-legion-legion-208-implementer",
+		SessionID:  "ses_implementer_208",
+		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		Generation: 5,
+		Round:      "pod:9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22",
+		Head:       "9f1c0a7d4b2e6f8a3c5d1e7b9a0f2c4d6e8b1a35",
+	})
+}
+
+// The release records a pod reads of its deployment's idle release, built through
+// releaseRecordsBody from the store's own rows, so the fixture is what the route writes rather
+// than a literal. The store's `Project` is no field of the wire — the route answers one
+// project's records — so the rows carry only what is served.
+//
+// Two rows of each list, because one row of each pins less than the shape:
+//   - the releases are a release that suspended two roles and saved a bundle, and one whose
+//     stops suspended no claim and whose workspace held nothing unpushed (recordPodRelease
+//     counts only the claims this release's own stops suspended, and the store reads an empty
+//     `roles` column back as none): `roles` is `[]` and never `null`, and `bundleBytes` is 0
+//     rather than absent;
+//   - the resumes are a wake whose pod was Ready and whose role took its first turn, which is
+//     the row that fills both optional stamps, and a wake of a pod with no release row recorded
+//     for it (`release` is 0) that went ten minutes with no turn, so it is `stuck` and its
+//     `firstTurnAt` is left out until something observes it;
+//   - the holds are a background-work streak over eleven passes with the kinds its session
+//     reported in `detail`, and a teardown's overtaken hold, which reads a hold and not the view
+//     behind it and so carries no detail at all (outbox.recordPodHold).
+func TestReleaseRecordsResponseGolden(t *testing.T) {
+	released := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	golden(t, "release-records.json", releaseRecordsBody(store.PodReleaseRecords{
+		Releases: []store.PodRelease{
+			{ID: 101, Issue: "LEGION-208", Generation: 3, Roles: []string{"implementer", "tester"},
+				At: released, BundleBytes: 4096},
+			{ID: 102, Issue: "LEGION-209", Generation: 1, At: released.Add(15 * time.Minute)},
+		},
+		Resumes: []store.PodResume{
+			{ID: 201, Release: 101, Issue: "LEGION-208", Role: "implementer", Kind: "delivery",
+				At: released.Add(30 * time.Minute), PodReadyAt: released.Add(31 * time.Minute),
+				FirstTurnAt: released.Add(32 * time.Minute)},
+			{ID: 202, Issue: "LEGION-207", Role: "architect", Kind: "backstop",
+				At: released.Add(45 * time.Minute), PodReadyAt: released.Add(46 * time.Minute), Stuck: true},
+		},
+		Holds: []store.PodHold{
+			{ID: 301, Issue: "LEGION-210", Reason: "background_work", Detail: "subagent,async-job",
+				FirstAt: released.Add(time.Hour), At: released.Add(70 * time.Minute), Passes: 11},
+			{ID: 302, Issue: "LEGION-211", Reason: "overtaken",
+				FirstAt: released.Add(65 * time.Minute), At: released.Add(65 * time.Minute), Passes: 1},
+		},
+	}))
+}
+
 // A session's report shows on its claim as the names it proved and the gaps it did not, each side
 // in the report's order, and both sides are arrays on the wire even when empty: a session that
-// proved every row has `"open": []`, not `null`, under the plugin's strict reader.
+// proved every row has `"open": []`, not `null`, under the plugin's reader.
 func TestCapabilityReportViewPartitionsTheRowsAndNeverMarshalsNull(t *testing.T) {
 	measured := time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC)
 	report := capabilities.Report{
@@ -628,6 +811,10 @@ func operatorClaim() OperatorClaim {
 			Interrupted: true,
 		},
 		SuspensionHeld: true,
+		// The claim's own plugin round: its process speaks a plugin contract this daemon does not,
+		// and it is replaced only once its worker has pushed its work and answered, which it has.
+		UpdateRound: "plugin:43",
+		UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
 	}
 }
 
@@ -636,7 +823,26 @@ func TestOperatorClaimGolden(t *testing.T) {
 	golden(t, "operator-claim.json", operatorClaim())
 }
 
-// What the list route answers: a queued claim carries no locator and no delivery yet.
+func TestForgetSessionOperatorClaimGolden(t *testing.T) {
+	golden(t, "operator-forget-session.json", OperatorClaim{
+		Token:                "legion-legion-legion-208-architect",
+		Tree:                 "LEGION-208",
+		Issue:                "LEGION-208",
+		Role:                 claim.RoleArchitect,
+		Generation:           4,
+		State:                "failed",
+		ForgottenSession:     "ses_architect",
+		ForgottenSessionFile: "/sessions/ses_architect.jsonl",
+		Budgets:              BudgetsView{LaunchFailures: 3},
+		UncertainStreak:      0,
+		PluginContract:       38,
+	})
+}
+
+// What the list route answers: a queued claim carries no locator and no delivery yet. The
+// pod-update record is left out of the value this marshals, so the fixture is also the proof
+// that OperatorClaims.MarshalJSON writes the zero record for a nil field and the wire carries
+// the object either way.
 func TestOperatorClaimsGolden(t *testing.T) {
 	golden(t, "operator-claims.json", OperatorClaims{Claims: []OperatorClaim{
 		{
@@ -652,7 +858,7 @@ func TestOperatorClaimsGolden(t *testing.T) {
 }
 
 // An issue the daemon has admitted but not yet given a worker still has to answer the plugin's
-// strict reader: `workers` is an object, never `null`.
+// reader: `workers` is an object, never `null`.
 func TestIssueWithoutWorkersMarshalsAnEmptyObject(t *testing.T) {
 	encoded, err := json.Marshal(Issue{Key: "LEGION-209", Phase: phase.Held})
 	if err != nil {

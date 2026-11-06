@@ -50,7 +50,7 @@ func (w *workflowRuntime) attachAnswers(cfg config.Config, p plan, s *supervisio
 	}
 	host := ghtool.Host{
 		GH: p.answers.gh, Git: p.tools["git"], Legion: legion, StateDir: cfg.StateDir,
-		Credential: appauth.GitHubCredential(w.tokens, p.repositories.Owners), Calls: st, Log: w.log, Now: time.Now,
+		Credential: appauth.GitHubCredential(w.tokens, p.repositories.Owners, cfg.RepositoryRenames), Calls: st, Log: w.log, Now: time.Now,
 	}
 	w.answers.loop = answerloop.New(answerloop.Config{
 		Project: p.project, Answers: *cfg.Answers, Store: st, Dispatch: client,

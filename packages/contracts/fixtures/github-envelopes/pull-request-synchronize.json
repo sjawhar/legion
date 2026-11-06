@@ -5,6 +5,7 @@
     "action": "synchronize",
     "author": "octocat",
     "base_ref": "main",
+    "before": "1111111111111111111111111111111111111111",
     "body": "Exercise the listener with a new head.",
     "head_ref": "acceptance-driver",
     "head_sha": "2222222222222222222222222222222222222222",
@@ -12,6 +13,7 @@
     "merged": "false",
     "number": "42",
     "repo": "example-org/example-repo",
+    "sender": "octocat",
     "title": "Add local acceptance driver",
     "updated_at": "2026-09-07T03:05:00Z",
     "url": "https://example.invalid/example-org/example-repo/pull/42"

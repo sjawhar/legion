@@ -122,9 +122,23 @@ func (f *fakeDialer) failWith(err error) {
 // build is the Config.NewDialer a test passes: the proxy gets this very fake.
 func (f *fakeDialer) build(context.Context) (Dialer, error) { return f, nil }
 
+// socketPath is a socket path under a short directory of its own (docs/testing.md): a path under
+// t.TempDir() passes the 107-byte unix socket bound once TMPDIR is long.
 func socketPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "session.sock")
+	return filepath.Join(shortTempDir(t), "session.sock")
+}
+
+// shortTempDir is a fresh directory directly under the system's temporary directory, removed
+// when the test ends.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "sp")
+	if err != nil {
+		t.Fatalf("make a short temporary directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 // startProxy starts a proxy and takes the connection Start's proof dial made, so that the next
@@ -767,4 +781,52 @@ func TestStartRefusesWhenItsContextHasEnded(t *testing.T) {
 		t.Fatalf("the socket path is still held after a refused Start: %v", err)
 	}
 	_ = listener.Close()
+}
+
+// A started proxy's Close unlinks nothing by the socket's path: a generation's agent can replace
+// its own g<n> directory with a link to a sibling's, and an unlink by path would then remove the
+// sibling's socket. The proxy's socket is left for its owner's removal of the directory, which
+// follows no link.
+func TestCloseUnlinksNoSocketThroughALinkedDirectory(t *testing.T) {
+	base := shortTempDir(t)
+	own, sibling := filepath.Join(base, "g1"), filepath.Join(base, "g2")
+	for _, dir := range []string{own, sibling} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("make %s: %v", dir, err)
+		}
+	}
+	const name = ".s.PGSQL.5432"
+	siblingListener, err := net.Listen("unix", filepath.Join(sibling, name))
+	if err != nil {
+		t.Fatalf("listen as the sibling: %v", err)
+	}
+	siblingListener.(*net.UnixListener).SetUnlinkOnClose(false)
+	defer siblingListener.Close()
+
+	up := newUpstream(t)
+	proxy := startProxy(context.Background(), t, up, &fakeDialer{addr: up.listener.Addr().String()}, filepath.Join(own, name))
+	// The agent's swap: its own directory moved aside, a link to the sibling's in its place.
+	moved := filepath.Join(base, "g1.moved")
+	if err := os.Rename(own, moved); err != nil {
+		t.Fatalf("move %s aside: %v", own, err)
+	}
+	if err := os.Symlink(sibling, own); err != nil {
+		t.Fatalf("link %s to %s: %v", own, sibling, err)
+	}
+	if err := proxy.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(sibling, name)); err != nil {
+		t.Fatalf("the sibling's socket is gone after the proxy's Close: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(moved, name)); err != nil {
+		t.Fatalf("the proxy's own socket is gone after Close, which should have left it to its owner: %v", err)
+	}
+	// The owner's removal of the generation's path takes the link, never what it points at.
+	if err := os.RemoveAll(own); err != nil {
+		t.Fatalf("remove %s: %v", own, err)
+	}
+	if _, err := os.Lstat(filepath.Join(sibling, name)); err != nil {
+		t.Fatalf("the sibling's socket is gone after the generation's directory was removed: %v", err)
+	}
 }

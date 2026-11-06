@@ -1,49 +1,110 @@
-import { claimHolds } from "@legion/contracts";
+import {
+  type ClaimHolderLiveness,
+  type ClaimHolding,
+  claimHolds,
+  claimTakeableAt,
+  claimTakeableNow,
+} from "@legion/contracts";
 import type { ReactNode } from "react";
 
+import { AGENT_LIST_REFILLING } from "../../api/client";
 import type { IssueClaim } from "../../api/types";
 import { pillClassName } from "../../components/Pill";
-import { useAgents } from "../conversation/useAgents";
-import { actorLabel } from "../refs/actor";
+import { AgentName, useAgentText } from "../refs/AgentName";
+import { type AgentRegistry, useAgentRegistry } from "../refs/agent-registry";
 import { Timestamp } from "../refs/Timestamp";
 
-/** What a claim is judged against: the live agent registry as `useAgents` returns it. */
-export interface AgentRegistry {
-  readonly isError: boolean;
-  readonly isPending: boolean;
-  readonly titles: ReadonlyMap<string, string>;
+/**
+ * What the registry says about a claim's holder, as `claimHolds` judges it. The registry lists
+ * the unresponsive sessions beside the live ones and marks each row's state, so membership is
+ * no longer the whole answer: a holder that has missed its heartbeats without ending still
+ * holds the issue (`unresponsive`), and only a session the latest successful read does not list
+ * at all has lapsed, which is exactly when the server lets any agent take the issue. A human's
+ * claim never lapses - there is no session to end, and only a human releases or forces it.
+ *
+ * The current test is the whole point. A chip paints the stamped title before the registry
+ * answers, so "the registry has not arrived" and "the holder is gone" look identical to a bare
+ * lookup; the registry's `unknown` state (no successful read yet, or the latest read failed) is
+ * never lapsed, or every claim on the page would read free for a moment, and free for good
+ * whenever the listener is unreachable or refilling. So `claimHolds` gets the registry's titles
+ * only once a read has landed and the latest one succeeded.
+ */
+export function claimHolding(
+  claim: IssueClaim,
+  registry: Pick<AgentRegistry, "state" | "titles">
+): ClaimHolding {
+  const state = registry.state(claim.actor.id);
+  return claimHolds(claim, state === "unknown" ? undefined : registry.titles, {
+    holder_state:
+      state === "unresponsive" ? "unresponsive" : state === "not-running" ? "gone" : null,
+  });
 }
 
 /**
- * Whether a claim's session has lapsed: the registry has loaded and does not list it, which is
- * exactly when the server lets any agent take the issue. A human's claim never lapses - there
- * is no session to end, and only a human releases or forces it. The judgement is `claimHolds`
- * from `@legion/contracts`, the one the agent tools print as "not running" too.
- *
- * The loaded test is the whole point. A chip paints the stamped title before the registry
- * answers, so "the registry has not arrived" and "the holder is gone" look identical to a bare
- * `titles.has(id)`; treating the first as lapsed would mark every claim on the page free for a
- * moment, and mark them all free for good whenever the listener is unreachable.
+ * The heartbeat an unresponsive holder was last seen at, as an RFC3339 stamp, or null when
+ * nothing dates it: the issue read's own `last_seen` where it gave one, else the registry row's,
+ * the order `claimTakeableAt` resolves the moment the claim comes free in.
  */
-export function claimHasLapsed(claim: IssueClaim, registry: AgentRegistry): boolean {
-  const loaded = registry.isPending || registry.isError ? undefined : registry.titles;
-  return claimHolds(claim, loaded) === "lapsed";
+function holderLastSeen(
+  liveness: ClaimHolderLiveness,
+  lastSeen: number | undefined
+): string | null {
+  if (liveness.last_seen != null) {
+    return liveness.last_seen;
+  }
+  return lastSeen === undefined ? null : new Date(lastSeen).toISOString();
+}
+
+/**
+ * Whether another agent may take this claim now, the question the Unclaimed filter asks and the
+ * chip's tone answers. It is the server's own rule (`claimBlockedBy` in
+ * `internal/dispatch/api/issue_claim.go`): a holder the latest successful read does not list has
+ * gone, so the claim is free; one that has only missed its heartbeats keeps the issue until
+ * `claimTakeableAt` - its last registration plus the shared grace - which the server refuses a
+ * take until, and grants one after, the strict comparison `claimTakeableNow` makes for both
+ * callers of this rule. An unresponsive holder whose last registration nothing dates keeps the
+ * claim, because the server refuses that take too.
+ *
+ * Takeable is not gone. Such a holder still reads "unresponsive" on the chip, still holds its
+ * roles, and is still delivered to; this says only that a second agent asking for the issue now
+ * would be given it, so the filter that lists pickable work must list it.
+ */
+export function claimIsTakeable(
+  claim: IssueClaim,
+  registry: Pick<AgentRegistry, "lastSeen" | "state" | "titles">,
+  now: number = Date.now()
+): boolean {
+  const holding = claimHolding(claim, registry);
+  if (holding !== "unresponsive") {
+    return holding === "lapsed";
+  }
+  return claimTakeableNow({ holder_state: "unresponsive" }, registry.lastSeen(claim.actor.id), now);
 }
 
 /**
  * "Claimed by <holder> · <age>" wherever an issue is shown: the issue header's state row, a
- * List row, a Board card. The holder is named by `actorLabel` from `@legion/contracts` — the
- * agent registry's live title, else the title stamped on the claim, else `session:<8>…` — and
- * the agent tools call that same function over the same registry, so a session running
- * `dispatch read` and a human reading this page see one name for one holder. The registry is
- * read here rather than passed in, so no surface can forget to pass it. The age keeps itself current through the shared `Timestamp` tick, and the
- * whole label with the absolute time is in the `title`, which also says what a claim is: the
- * chip sits among status, priority and assignee, and nothing else on the page defines it. An
- * unclaimed issue renders nothing at all, so a board of unclaimed work stays quiet.
+ * List row, a Board card. The holder is drawn by `AgentName`, as every agent is: its current
+ * registry title, else the title stamped on the claim, else `session:<8>…`, with its running
+ * state and a link to its live conversation. The age keeps itself current through the shared
+ * `Timestamp` tick, and the whole label with the absolute time is in the `title`, which also
+ * says what a claim is: the chip sits among status, priority and assignee, and nothing else on
+ * the page defines it. An unclaimed issue renders nothing at all, so a board of unclaimed work
+ * stays quiet.
  *
- * A holder the registry no longer lists reads "· not running" in the muted tone, because that
- * claim is free for the taking and a chip that looked held would hide pickable work — the same
- * judgement the Unclaimed filter makes through `claimHasLapsed`.
+ * A holder the registry no longer lists reads "· not running" in the muted tone, beside its
+ * name's own not-running mark, because that claim is free for the taking and a chip that looked
+ * held would hide pickable work — the same judgement the Unclaimed filter makes through
+ * `claimIsTakeable`. A holder that has only missed its heartbeats reads "· unresponsive since
+ * <heartbeat>", the state and the moment R5 asks the chip for, and keeps the held tone while
+ * the server would still refuse a take: the chip also names the moment the issue comes free
+ * (`liveness`, the issue read's own `takeable_at`), so a reader waiting on it knows how long.
+ * Past that moment the chip reads "· takeable now" and wears the free tone, because the server
+ * now grants that take and a held-looking chip would hide the issue again — the holder is still
+ * drawn as unresponsive, since it has not ended and may yet come back. Without a `liveness` - a
+ * List row, a Board card, whose rows carry no such read - the state and the heartbeat are the
+ * registry's and the takeable moment is that heartbeat plus the shared grace, the same sum the
+ * server uses. The judgement is remade on each render, so it follows the registry poll and the
+ * issue read rather than a timer of the chip's own.
  *
  * A session title can be any length, and no name may widen the page (the rule
  * `IssueHeader.tsx` cites for the metadata rail). `pillClassName` sets `shrink-0`, and no class
@@ -52,29 +113,66 @@ export function claimHasLapsed(claim: IssueClaim, registry: AgentRegistry): bool
  * cannot lose whatever the stylesheet order. The chip also caps itself at the row's width.
  * Only the holder's name ellipsizes:
  * "Claimed by", the age and "not running" stay whole, because a chip reading "Claimed…" would
- * say nothing.
+ * say nothing. The name is an inline link, so it keeps the chip's line box at a phone width.
  */
-export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
-  const holdsSession = claim?.actor.kind === "session";
-  const registry = useAgents(holdsSession);
+export function ClaimChip({
+  claim,
+  liveness,
+}: {
+  claim: IssueClaim | null;
+  liveness?: ClaimHolderLiveness;
+}): ReactNode {
+  const registry = useAgentRegistry(claim?.actor.kind === "session");
+  const text = useAgentText();
   if (claim === null) {
     return null;
   }
-  const holder = actorLabel(claim.actor, registry.titles);
-  const lapsed = claimHasLapsed(claim, registry);
-  const since = `Claimed by ${holder} · since ${new Date(claim.at).toLocaleString()}.`;
+  // The issue read judged the holder against its own record; a row without one is judged by the
+  // registry, which lists every session the listener still holds, live or unresponsive, and
+  // whose heartbeat then dates the wait.
+  const read: ClaimHolderLiveness = liveness?.holder_state == null ? {} : liveness;
+  const judged = read.holder_state == null;
+  const holding = judged ? claimHolding(claim, registry) : claimHolds(claim, registry.titles, read);
+  const lapsed = holding === "lapsed";
+  const unresponsive = holding === "unresponsive";
+  const lastSeen = registry.lastSeen(claim.actor.id);
+  const heard: ClaimHolderLiveness = judged ? { holder_state: "unresponsive" } : read;
+  const heardAt = !unresponsive ? null : holderLastSeen(heard, lastSeen);
+  const takeableAt = !unresponsive ? null : claimTakeableAt(heard, lastSeen);
+  // One moment decides the tone and the wording, and it is the server's: at it the take is still
+  // refused, after it granted, which is why `claimTakeableNow` compares strictly.
+  const takeable = lapsed || (unresponsive && claimTakeableNow(heard, lastSeen));
+  const since = `Claimed by ${text.label(claim.actor)} · since ${new Date(claim.at).toLocaleString()}.`;
   const explains =
     "A claim marks who is implementing this issue, so two agents never take the same work.";
   const lapsedNote = lapsed ? " That session is no longer running, so anyone may claim it." : "";
+  const unresponsiveNote = !unresponsive
+    ? ""
+    : ` That session has missed its heartbeats without ending${
+        heardAt === null ? "" : `, last seen ${new Date(heardAt).toLocaleString()}`
+      }. ${
+        takeableAt === null
+          ? "It keeps this issue; another agent may take it once the listener gives it up."
+          : takeable
+            ? `It kept this issue until ${new Date(takeableAt).toLocaleString()}, so another agent may take it now. It has not ended, and may yet answer.`
+            : `It keeps this issue until ${new Date(takeableAt).toLocaleString()}, when another agent may take it.`
+      }`;
+  // A session claim the registry could not judge says so, rather than pass for a held one.
+  const uncheckedNote =
+    claim.actor.kind === "session" && registry.isError
+      ? ` Couldn't check whether that session is still running: ${
+          registry.refilling ? AGENT_LIST_REFILLING : "Envoy listener unreachable."
+        }`
+      : "";
   return (
     <span
-      className={`${pillClassName(lapsed ? "label" : "selected-label")} min-w-0 max-w-full gap-1`}
+      className={`${pillClassName(takeable ? "label" : "selected-label")} min-w-0 max-w-full gap-1`}
       data-testid="issue-claim"
       style={{ flexShrink: 1 }}
-      title={`${since} ${explains}${lapsedNote}`}
+      title={`${since} ${explains}${lapsedNote}${unresponsiveNote}${uncheckedNote}`}
     >
       <span className="shrink-0">Claimed by</span>
-      <span className="min-w-0 truncate">{holder}</span>
+      <AgentName actor={claim.actor} className="min-w-0 truncate" inline />
       <span aria-hidden="true" className="shrink-0">
         ·
       </span>
@@ -86,6 +184,33 @@ export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
           </span>
           <span className="shrink-0" data-testid="issue-claim-lapsed">
             not running
+          </span>
+        </>
+      ) : null}
+      {unresponsive ? (
+        <>
+          <span aria-hidden="true" className="shrink-0">
+            ·
+          </span>
+          <span className="shrink-0" data-testid="issue-claim-unresponsive">
+            unresponsive
+            {heardAt === null ? null : (
+              <span data-testid="issue-claim-unresponsive-since">
+                {" since "}
+                <Timestamp at={heardAt} />
+              </span>
+            )}
+            {takeableAt === null ? null : (
+              <span data-testid="issue-claim-takeable">
+                {takeable ? (
+                  ", takeable now"
+                ) : (
+                  <>
+                    , takeable <Timestamp at={takeableAt} />
+                  </>
+                )}
+              </span>
+            )}
           </span>
         </>
       ) : null}

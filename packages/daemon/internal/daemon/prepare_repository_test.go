@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -23,9 +24,9 @@ func TestARecordedIssuesEventIsPreparedFromItsRecord(t *testing.T) {
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-301", Tree: "LEGION-301", Project: "LEGION", Title: "existing", Phase: phase.Done,
 		Generation: 1, Status: "done", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"})
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main"})
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets")}, {Repo: ghrepo.MustParse("zeta/tools")}}, nil)
-	branches := newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
+	branches := newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)
 	// zeta/tools was read once, long enough ago that preparing an issue on it reads it again, and
 	// GitHub now answers 404 for it.
 	branches.read["zeta/tools"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("zeta/tools"), DefaultBranch: "main"},
@@ -35,12 +36,12 @@ func TestARecordedIssuesEventIsPreparedFromItsRecord(t *testing.T) {
 
 	reopen := intake.DispatchIssue{Key: "LEGION-301", Seq: 2, Status: "todo", HandedOver: true, ResolvedRepo: "zeta/tools"}
 	got, err := w.prepareRepository(ctx, reopen)
-	if err != nil || got != reopen {
+	if err != nil || !reflect.DeepEqual(got, reopen) {
 		t.Fatalf("prepareRepository of a reopen resolving elsewhere = %#v, %v; want the event as it is, applied", got, err)
 	}
 	retained := intake.DispatchIssue{Key: "LEGION-301", Seq: 3, Status: "todo", HandedOver: true, ResolvedRepoMissing: true}
 	got, err = w.prepareRepository(ctx, retained)
-	if want := (intake.DispatchIssue{Key: "LEGION-301", Seq: 3, Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets"}); err != nil || got != want {
+	if want := (intake.DispatchIssue{Key: "LEGION-301", Seq: 3, Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets"}); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("prepareRepository of a retained event = %#v, %v; want %#v", got, err, want)
 	}
 	if reads := client.readCount(); reads != 0 {

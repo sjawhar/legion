@@ -11,7 +11,29 @@
     "active": [
       "LEGION-208"
     ],
-    "waiting": []
+    "waiting": [
+      "LEGION-210",
+      "LEGION-211"
+    ],
+    "trees": [
+      "LEGION-208",
+      "LEGION-210",
+      "LEGION-211"
+    ],
+    "blocked": [
+      {
+        "issue": "LEGION-209",
+        "blockedBy": [
+          "LEGION-300"
+        ]
+      },
+      {
+        "issue": "LEGION-210",
+        "blockedBy": [
+          "LEGION-301"
+        ]
+      }
+    ]
   },
   "issues": {
     "LEGION-208": {
@@ -19,6 +41,7 @@
       "generation": 1,
       "phase": "admitted",
       "status": "in_progress",
+      "tree": "LEGION-208",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "architect": {
@@ -32,7 +55,7 @@
             "namespace": "legion",
             "name": "legion-legion-legion-208",
             "podUid": "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04",
-            "container": "architect",
+            "container": "roles",
             "generation": 1
           }
         },
@@ -60,6 +83,36 @@
         "index": 0,
         "admittedAt": "2026-10-06T18:02:11Z"
       }
+    },
+    "LEGION-209": {
+      "key": "LEGION-209",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "todo",
+      "tree": "LEGION-208",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
+    },
+    "LEGION-210": {
+      "key": "LEGION-210",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "todo",
+      "tree": "LEGION-210",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
+    },
+    "LEGION-211": {
+      "key": "LEGION-211",
+      "generation": 2,
+      "phase": "implementing",
+      "status": "todo",
+      "tree": "LEGION-211",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
     }
   },
   "pendingStatusWrites": [],
@@ -77,6 +130,7 @@
     "owners": [],
     "mapped": [],
     "refused": [],
+    "withoutWebhookApp": [],
     "caches": []
   },
   "settings": {
@@ -111,13 +165,20 @@
     },
     "linger_hours": 72,
     "production_check_hours": 336,
+    "pod_update_retask_hours": 1,
+    "pod_update_notice_hours": 4,
+    "pod_update_max_open_rounds": null,
+    "pod_update_rounds_per_minute": null,
     "review_round_cap": 3,
     "max_fix_attempts": 3,
     "controller": "operator",
     "capabilities": {
       "decided": {}
     },
-    "worker_backends": {}
+    "worker_backends": {},
+    "role_config_files": {},
+    "repository_renames": []
   },
+  "consumers": [],
   "questionsForController": []
 }

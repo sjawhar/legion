@@ -1,21 +1,121 @@
 # Getting the tool your work needs
 
-Part of `skill://legion-worker`. Read it the moment your phase needs a tool the worker image may
-not carry — a database client, a linter, a one-off CLI — before you install, download, or vendor
-anything. Every path it cites is in sjawhar/legion.
+Part of `skill://legion-worker`. Read it before you read a shared database, a session store or
+another role's transcript among them; before you run a build or a test suite in your pod; the
+moment your phase needs a tool the worker image may not carry — a database client, a linter, a
+one-off CLI — before you install, download, or vendor anything; before you measure Oh My Pi's
+binary; and when a test fails in your pod. Every path it cites is in cybermonklabs/legion.
+
+## What runs in your pod, and what runs on the pull request
+
+An issue pod runs no heavy build and no whole test suite. The pod's six roles share one memory
+limit, and one command that fills it ends every role's turn, not only yours.
+
+In the pod you compile and test the packages your change touches, build the program a check of
+your issue drives (`go build ./cmd/legion`), vet the module you changed (`go vet -tags e2e ./...`,
+which compiles and runs no test), and, in a package whose tests need Postgres, run only the tests
+your change touches by name (`go test -run`).
+
+A whole module's or whole package's test run goes to CI on the pull request, where a job of that
+pull request runs it: `go test ./...`, a whole Postgres-backed package such as
+`packages/envoy/internal/dispatch/docs` or `packages/envoy/internal/dispatch/api`, a browser suite
+run whole, and `make -j` or `lake build` in a repository your deployment sends you to. Every other
+heavy run goes where your deployment's instructions say.
+
+## The database your tests use
+
+- Never give a test, a migration or anything that creates or drops a database the URL in the
+  file `OMP_SESSION_SQL_DSN_FILE`: that is the live sessions database every pod shares, and it
+  holds every role's transcript.
+- Give every Postgres variable a test reads `$LEGION_TEST_PG_DSN`, your pod's own server:
+  `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Each makes
+  and drops a database of its own per test, so your pod's roles can share the server.
+- Anything that migrates into the database its DSN names, rather than making one per test, needs
+  a database of your own, because a sibling role writing the same one collides with you: the
+  Dispatch browser suite's `DATABASE_URL`, which resets what it is given, and the stage scripts'
+  `LEGION_E2E_PG_DSN`, which a daemon's `postgres_dsn` becomes and migrates Legion's schema into.
+  Make one and point the variable at it:
+  `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`.
+- The server is empty in every new pod and dies with it. Every database made from `template1`
+  has pgvector.
+- `LEGION_TEST_PG_DSN` set and the connection refused: that is not yours to repair. Starting the
+  server is the roles container's launcher's job — it runs `legion-testpg ensure` before any role
+  starts and again every 15 seconds — so wait about that interval and try again. Never start a
+  server of your own beside it, and never reach for another DSN. Still refused after that wait:
+  report it, with the error you got and the port you used, as a fault of the pod rather than of
+  your change.
+- `LEGION_TEST_PG_DSN` unset: your deployment has not turned the pod's server on, so no launcher
+  is starting one and nothing will appear while you wait. With `legion-testpg` on `PATH`, start
+  one yourself on the issue's volume: the directory it defaults to is a 1 MiB filesystem your
+  role's own mounts cover, so `export LEGION_TESTPG_DIR=$XDG_DATA_HOME/testpg` first, then
+  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`
+  and `legion-testpg ensure`, which makes the cluster, the role and `vector` in `template1`. That
+  server lives in your generation: it dies when your generation ends, which takes a sibling
+  role's connections and databases with it mid-test, and the next `ensure` of either role finds
+  the same cluster on disk and serves it again. With no
+  `legion-testpg` either, stand up one with the harness below (**The worked case**) and set the DSN.
+
+## Reading a shared database
+
+A shared database is one outside your pod: the deployment's sessions database, another team's
+database, any server whose other clients your role cannot stop. Your pod's own test server
+(`$LEGION_TEST_PG_DSN`, above) is not one of them, because it dies with your pod.
+
+- Read it through the deployment's read-only login. Where the deployment gives one, its URL is in
+  the file `SESSION_READER_DSN_FILE` names.
+- Never read it through the session URL the file `OMP_SESSION_SQL_DSN_FILE` names. That URL is the
+  one the role's own agent writes its transcript with, so a read through it puts a write-capable
+  connection on a shared server for a read.
+- Keep the read-only setting inside one transaction, never on the connection for its whole life. A
+  read-only setting made for the whole session stays on the backend after the connection goes back
+  to the pool. The next client of that pool gets it, and that client's writes fail. On 2026-11-05
+  one such read left the setting on a pooled backend, and 1,432 session writes failed over 16
+  minutes.
+
+These three forms do it. Each one holds the transaction read-only, so a write inside it is
+refused, and each one drops that state when the transaction ends.
+
+```sql
+BEGIN READ ONLY;
+SELECT path FROM omp_session_files ORDER BY path LIMIT 1;
+COMMIT;
+```
+
+```sql
+BEGIN;
+SET LOCAL transaction_read_only = on;
+SELECT path FROM omp_session_files ORDER BY path LIMIT 1;
+COMMIT;
+```
+
+```sh
+psql "$URL" --single-transaction -q -X -v ON_ERROR_STOP=1 -c 'SET TRANSACTION READ ONLY' -f <file>
+```
+
+`-q` keeps psql's `SET` status line off stdout. Without it psql prints that line, and it becomes
+the first line of a file you redirect the output into. `-X` keeps your `~/.psqlrc` out of the
+run, and `ON_ERROR_STOP` ends the run at the first error. The file holds no `COMMIT` or
+`ROLLBACK` of its own: one would end the read-only transaction early, and every statement after
+it would run outside it.
+
+Your deployment may give no `SESSION_READER_DSN_FILE`. Then read nothing of a shared database
+through the session URL. Read your deployment's instructions for the route they give, and when
+they name none, report it as a fault of the deployment rather than reaching for the writer URL.
 
 ## The five clients the image already carries
 
 Check this list first: the worker image carries these five from the change that added them onward,
 and they are on a role's `PATH` once its deployment pins a digest at or after that change — a role
 still on an older digest finds none of them. Run `command -v psql redis-cli sqlite3 nc dig` to see
-which you have; those need no runner.
+which you have; those need no runner. `command -v legion-testpg` says whether your digest also
+carries the pod's own PostgreSQL server (the section above).
 
 - `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
   `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
   dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`,
-  `psql`, `flock` and `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is
-  given. The image carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`,
+  `psql`, `flock`, `openssl` and `python3` on `PATH`, and without `docker` too unless a
+  `DATABASE_URL` is given. The image carries `go`, `flock`, `openssl` and `python3`, a
+  `DATABASE_URL` stands in for `docker`,
   and `psql` was the one a role had no way to supply — so a role whose change owes that suite can
   run it.
 - `redis-cli` — no repository of the project speaks Redis today; it is carried anyway, at about a
@@ -29,9 +129,24 @@ which you have; those need no runner.
 - `dig` — how a role whose connection to a service name fails tells "the name does not resolve"
   from "the packets are dropped".
 
-## Why a sixth is an image change, not an install
+## Two more the image carries: `unzip` and `yq`
 
-Your container is an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
+Two programs beside those five ride in the image for a role's own work, and neither is a client of
+a service. Like the five, they are on a role's `PATH` only once its deployment pins a digest at or
+after the change that added them; `command -v unzip yq` says whether yours has them.
+
+- `unzip` — Debian trixie's, at `/usr/bin/unzip`: a script calls the `unzip` command by name, and
+  no package runner in the image provides that program.
+- `yq` — mikefarah's `yq` 4, at `/usr/local/bin/yq`, a pinned release the build fetches and checks
+  against a pinned SHA-256: a role's work that reads or rewrites YAML. Debian's `yq` is a different
+  program — kislyuk's Python wrapper over `jq`, 3.4.3 in trixie — so an expression written for one
+  does not run on the other, and a recipe you found may be written for the other one.
+
+`model-gateway/apply_test.sh` of theorem-labs/agent-infra calls both.
+
+## Why a tool the image lacks is an image change, not an install
+
+Your role runs as an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
 are read-only, `/home` is read-only too, and `apt-get` cannot take dpkg's lock even to download.
 `$HOME` — `/home/legion`, the one writable directory under that read-only `/home` — is yours to
 write.
@@ -48,12 +163,12 @@ extraction prefix under `$HOME` with `LD_LIBRARY_PATH` set, and `psql` did not �
 extraction prefix is on. What rules such an attempt out is not the unpacking: it is the next
 section's test ("The test: where it lands, and what it leaves resolving"), and an extraction under
 `$HOME` fails that test's first condition whatever you scope it to, because `/home/legion` is the
-container's own filesystem rather than the issue's volume — the placement `roleEnvironment`
+pod's disk rather than the issue's volume — the placement `roleEnvironment`
 (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes off. The sanctioned
 extraction is the harness's: onto the issue's volume, and exported around its own commands and no
-further (the Dispatch e2e stack, below, is the worked case). For everything the five do not cover,
-the one documented step is a pinned run through one of the three package runners the image already
-carries — plus `uv run --with` when what you need is a library rather than a command — and a tool
+further (the Dispatch e2e stack, below, is the worked case). For everything the image does not
+carry, the one documented step is a pinned run through one of the three package runners it does
+— plus `uv run --with` when what you need is a library rather than a command — and a tool
 no runner reaches is an image change ("When no runner reaches it", below).
 
 ## What the withheld capability is, and what it is not
@@ -68,7 +183,7 @@ three artefacts in this repository are what draw the line — not a claim about 
   `uv` and `uvx`, `bun` with its `bunx` link, and the Go toolchain, and the `toolchain` capability
   row (`packages/daemon/internal/capabilities/capabilities.go`) grants them by name. A runner put
   in the image deliberately and granted by a capability row is not a route around a withheld one.
-- **What the pod configures for those runners to write.** A role container's environment relocates
+- **What the pod configures for those runners to write.** A role's environment relocates
   `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` (`podkind.go`) and `BUN_INSTALL_CACHE_DIR`, `GOCACHE`
   and `GOMODCACHE` (`roleEnvironment`, `packages/daemon/internal/runtime/sandbox/manifest.go`)
   onto the issue's volume, shared by the issue's roles. Legion provisions the caches a pinned run
@@ -91,8 +206,8 @@ whether through a variable the runtime sets for you there or under a path on tha
 harness names itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under
 `/legion/workspaces`) and the runtime's own directories (`/legion/repos`, `/legion/feed`); and
 after the command exits nothing else resolves differently. The workspace is excluded because its jj
-working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB in a role
-container), so a root written there is added to the change every role shares, and a larger new
+working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB for a role), so
+a root written there is added to the change every role shares, and a larger new
 file is left untracked, every jj command in the workspace then warning `Refused to snapshot some
 files`. The one write into it that is sanctioned is a repository's own dependency install into
 its ignored directories, below. The variables the runtime sets on the volume, where a tool's own
@@ -100,8 +215,9 @@ cache already goes, are
 `XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
 `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
 `UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`). (`XDG_CONFIG_HOME` is set too and is not
-one of them: it is the pod's shared in-memory volume.) `$HOME` and `/tmp` are not on the volume:
-both are the container's own filesystem.
+one of them: it is your role's own config home, a copy of the pod's made for your role on the
+pod's disk, which no other role reads.) `$HOME` and `/tmp` are not on the volume:
+both are your role's own, on the pod's disk.
 
 It is the withheld capability when either condition fails — anything that writes into a
 system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
@@ -158,22 +274,25 @@ home — worth reading before an install, for the two things that follow from sh
 `PLAYWRIGHT_BROWSERS_PATH` elsewhere is what costs you: that shared registry, and the lock that
 makes a second role installing at the same time wait rather than race. The condition is for a tool
 whose cache the runtime does not already place — Puppeteer is one, resolving its browser cache to
-`join(homedir(), '.cache', 'puppeteer')` and so to the container's own filesystem whatever
+`join(homedir(), '.cache', 'puppeteer')` and so to your role's own home on the pod's disk whatever
 `XDG_CACHE_HOME` says. For that one, point the tool's own cache variable (`PUPPETEER_CACHE_DIR`
 here) at a directory under one of the paths above yourself, since an unset one leaves the download
 wherever the tool defaults, which is nowhere this runtime chose.
 
 Where it lands is what you pay. Under one of those variables it is on the issue's volume: it
-outlives a role's relaunch in its pod, and every role of the issue shares it — under every one of
-those variables but `XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, "the one directory
-of the issue's scratch that is the role's own rather than the issue's" (`roleEnvironment`),
-because Oh My Pi names its browser broker's lock from the state root and an abstract socket name
-is one name across every container of the pod — though not the pod itself: the issue's disk is
-the pod's own and is deleted with it, so a later pod of the issue starts without it. Under
-`$HOME` —
-`/home/legion`, which no volume is mounted on — it is the container's own filesystem: one copy per
-role, per pod, gone when the role relaunches, and charged to the container's ephemeral-storage
-limit, which is per role and smaller than the volume. Moving exactly these writes off that
+outlives a role's relaunch in its pod, and every role of the issue is told the same path — under
+every one of those variables but
+`XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, a directory named for your role
+(`roleEnvironment`) because Oh My Pi names its browser broker's lock from the state root and an
+abstract socket name is one name across every role of the pod, which share its network. It is not
+private: every role of the issue can write it, as it can every path above — though it does not
+outlive the pod: the issue's disk is the pod's own and is deleted with it, so a later pod of the
+issue starts without it. Under
+`$HOME` — `/home/legion`, which no volume is mounted on — it is your role's own home, an overlay
+over the image's whose writes land on the pod's disk (an `emptyDir` every role's home and `/tmp`
+share): one copy per role, per pod, kept across the role's relaunches in that pod and gone when
+the pod is replaced, and charged to the pod's ephemeral-storage limit, which every role of the pod
+shares and which is smaller than the volume. Moving exactly these writes off that
 filesystem is what `roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`)
 exists for, after GKE Autopilot evicted issue pods that charged their caches to it — so an install
 under `$HOME` fails the first condition and is outside the sanctioned form, however little else it
@@ -183,8 +302,11 @@ tools a role's own work needs", carries the figure), and a sanctioned install is
 issue pod, on the issue's own disk, by the issue's roles together.
 
 **The worked case, and the one a role actually meets: the Dispatch e2e stack.** A change to
-`packages/dispatch` is proved by driving its browser suite, which needs a Postgres with pgvector;
-the image carries a `psql` and no server and no pgvector, and no runner reaches either. The way
+`packages/dispatch` is proved in the pod by driving the specs it touches, one spec a command
+(`bun run e2e -- e2e/<one spec file>`); the whole browser suite runs in CI's `dispatch` job on the
+pull request. One spec needs the same stack as all of them: a Postgres with pgvector. On a digest
+carrying `legion-testpg`, use the pod's own server ("The database your tests use", above) and
+unpack nothing. On a digest without it, the way
 that stack is stood up here is Debian packages unpacked with `dpkg-deb -x` into one root on the
 issue's volume — the five packages and the start sequence are in
 `docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md`,
@@ -364,7 +486,7 @@ halves are yours to type.
 ## When no runner reaches it
 
 A tool that is neither in the image nor reachable through one of the three runners is an image
-change: a pull request against sjawhar/legion that carries the same name through every site that
+change: a pull request against cybermonklabs/legion that carries the same name through every site that
 spells it out, and those sites are not all held by a test.
 
 Do not work from a list of those sites. This page has carried one twice and it was wrong both
@@ -391,6 +513,10 @@ holding the summary to the list; the stub binaries in
 `packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go` have to include it, or
 the capability and `probe-image` tests fail on an image that does not carry it; and
 `packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
+Those four are for a tool every deployment's image must carry: the `toolchain` row is the floor the
+probe holds every image to, not an inventory of this one, so a program this image carries need not
+be named there — `aws` is in the image and not in that row — and a name added to the row makes the
+probe refuse every other deployment's image that lacks it. `unzip` and `yq` are in none of the four.
 
 Miss one of those four and the suite is red, which is what makes them easy to find. Nothing holds
 a Dockerfile comment or the smoke step to anything, so a change that stops at the gated sites opens
@@ -408,3 +534,194 @@ on "The test: where it lands, and what it leaves resolving", which the convenien
 The operator's side of this — why the image carries those five clients rather than anything else,
 the five priced options with their measurements, and what the clients cost the image — is in
 `docs/kubernetes.md`, the subsection "The tools a role's own work needs".
+
+## Before you measure Oh My Pi's binary
+
+Read Oh My Pi's source first, from the fork (`sjawhar/oh-my-pi`) at the tag `.omp-pin` names, not
+from upstream's version tag: the fork's release carries code upstream's does not. `.omp-pin` reads
+`github:sjawhar/oh-my-pi@<version>`, and the git tag adds a `v` in front of that text, so find it
+rather than type it:
+
+```text
+$ git ls-remote --tags https://github.com/sjawhar/oh-my-pi.git 'v<version>'
+```
+
+Search that source by the name of a construct or a setting, never by its value: one value is
+spelled in many places, and the code that sets it may spell it in none. If the module the binary
+names is absent at that tag, the binary is the ground truth: measure it, and say the source did not
+carry it. In a pod the binary (`$LEGION_OMP_PATH`) is the build the worker image was made from,
+and your workspace's `.omp-pin` can name another, so the tag you read may not be the build you
+measure: compare `"$LEGION_OMP_PATH" --version` with the pin first, and say which build each
+figure came from
+(`docs/solutions/testing/a-worker-pods-oh-my-pi-is-the-fleets-pin-not-the-branchs-fetch-the-branchs-build-and-say-which-pin-each-figure-came-from-LEGION-247.md`).
+
+## The tests your pod cannot run
+
+Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
+A tmux pane runs on its host, and none of this holds there. Their evidence is CI's run at the head:
+cite that run, and name in your handoff each package the pod could not run. The cases below are
+the known ones, not every one: a failure they do not name is yours to explain. Several of them
+reach any work a pod runs, a test or a tool of your own, not a test suite alone. One habit holds
+them together: check the result, never the request. A call's exit code, a reported limit and a
+job's phase each answer a different question than the one you asked, so where you set something,
+read it back and refuse on a mismatch, and where you read something, confirm the tool ran. An
+empty result is evidence only then: a missing binary, a refused permission, or a truncated
+search gives you silence that reads as a clean answer, so check that the thing you counted had
+something to count.
+
+- **Read the summary your work wrote, never the Job's phase.** A Kubernetes Job that reports
+  `Succeeded` says its container exited 0, and nothing more: read the artefact your work was to
+  produce, or the log line that proves it ran, before you believe any result. A lane measured
+  this on 2026-11-01: two pods running a native toolchain died with `Error: Stack overflow.` after 23
+  seconds, and their Job still reported `Succeeded`, because the process they ran (`rocq repl`)
+  exits 0 when a command inside it fails. The toolchain is incidental; any interpreter, driver or
+  wrapper that swallows an inner failure gives the same clean phase over a silent no-result, and
+  a lane that trusts the phase records it as a run that worked.
+
+  Two habits make that phase true. Detect the failure in the text your tool prints and exit
+  non-zero yourself, rather than passing the wrapper's exit code on. And write a verdict that
+  matters to durable storage as it is produced, not at the end: a node can vanish within a minute
+  of a pod ending, so an unpersisted log is gone even when nothing killed anything, and a
+  terminating pod's grace period can be as short as 25 seconds, which is no time to flush.
+
+  **The phase lies in the other direction too, and that one is worse.** A lane measured a Job
+  reporting `Running` for 23 minutes while its pod count was **zero**: the quota was full, every
+  pod create was refused (`exceeded quota … requested: requests.cpu=16, used: 198, limited:
+  200`), and the controller kept retrying. A watcher reading the phase would have called that
+  build running all night. **The phase is a request; the pod list is the result.** If you watch
+  a Job, watch `kubectl get pods -l batch.kubernetes.io/job-name=<job>`, or watch the marker
+  your own work writes — never the phase alone.
+- **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
+  kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
+  and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
+  gVisor answers `protocol not available` (`PEER_UNIDENTIFIED` in the test output). The
+  terminal-prompt tests of `cmd/agent-secrets` also need terminal job-control ioctls
+  (`inappropriate ioctl for device`), and the `SigCgt` line of `/proc/<pid>/status`, which the
+  pods' gVisor lacked on 2026-10-28; upstream gVisor added that line on 2026-09-24, so a node on a
+  later release may have it. A timing test can fail too: `internal/dispatch/pmdoc`'s linearity
+  tests time a call by the process's CPU time, which gVisor counts in 10 ms ticks, so a call under
+  10 ms can measure 0 s and the test reports `+Inf times`.
+- **`O_NOFOLLOW` guards a leaf and not a component under gVisor.** A lane measured this on
+  2026-11-01, in a pod under gVisor (`uname` 4.19.0-gvisor) against the same probe on an ordinary
+  kernel, on two filesystems. Almost everything matches: `O_RDONLY|O_NOFOLLOW` on a symlink to a
+  file refuses `ELOOP`, `O_CREAT|O_EXCL|O_NOFOLLOW` on one refuses `EEXIST`, `O_PATH|O_NOFOLLOW`
+  opens the link itself, and the controls (a regular file, a real directory, a free name) succeed
+  on both. One call differs: `openat(dirfd, <a link to a directory>,
+  O_DIRECTORY|O_NOFOLLOW|O_RDONLY|O_CLOEXEC)`, which the ordinary kernel refuses `ENOTDIR` and
+  gVisor follows with no error. So code that walks a path one component at a time and opens each
+  with `O_NOFOLLOW` is defeated there while every leaf check still passes, and its tests stay
+  green on a developer's kernel. A whole block of such tests failing in a pod is that one
+  property of the environment, not one defect per test. The fix shape holds on both kernels: the
+  walk cannot trust the flag, so `lstat` the component, `fstat` the descriptor it opened, compare
+  `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`.
+  `openat2` is not the alternative there: a lane measured it returning `ENOSYS` under gVisor for
+  every flag combination it tried, so the `lstat` and `fstat` comparison above is the portable
+  check rather than a fallback. The question is not which tool to use but whether anything you
+  run calls `openat2`, which you can read off the binary (two builds of one tool reporting an
+  identical `--version` differed here, and only the package version and the checksum told them
+  apart):
+
+  ```sh
+  b=$(readlink -f "$(command -v <tool>)")
+  n=$(nm -D --undefined-only "$b" | wc -l)
+  bad=$(nm -D --undefined-only "$b" | grep -c openat2 || true)   # grep -c exits 1 on no match
+  [ "$n" -gt 0 ] || { echo "no dynamic symbols: static binary or nm failed, use a tracer"; exit 2; }
+  [ "$bad" -eq 0 ] || { echo "this binary calls openat2 and fails under gVisor"; exit 2; }
+  ```
+
+  The total count is the control: a total of zero is a static binary or a failed `nm`, not a
+  clean result. **An undefined `openat2` symbol proves the binary calls it. Its absence proves
+  nothing**, so the check is a positive test only: a caller can reach the syscall through
+  `syscall(SYS_openat2, …)`, which leaves `syscall` in the table and never `openat2`, and a libc
+  that exports no `openat2` wrapper produces the symbol for no binary at all — measured on a
+  glibc 2.39 host, where no binary in `/usr/bin` carries it and `tar` shows 227 undefined
+  symbols, `openat2` zero and `syscall` one. To establish that a binary is safe rather than
+  suspect, trace it.
+- **Set the stack with `ulimit -s`, then read both limits back.** The check, not the number,
+  is the durable part. 131072 is the number for an ordinary job; name a larger one when a tool
+  you run polices its own limit and demands it:
+
+  ```sh
+  want=131072   # a tool with its own stack guard may demand more; use its minimum
+  ulimit -S -s "$want" 2>/dev/null || { ulimit -H -s "$want" 2>/dev/null || true; ulimit -S -s "$want"; }
+  { [ "$(ulimit -Hs)" = unlimited ] && ulimit -H -s "$want" 2>/dev/null; } || true
+  soft=$(ulimit -Ss); hard=$(ulimit -Hs)
+  [ "$soft" = "$want" ] || { echo "stack soft is $soft, want $want; refusing"; exit 2; }
+  [ "$hard" != unlimited ] && [ "$hard" -ge "$want" ] || { echo "stack hard is $hard; refusing"; exit 2; }
+  ```
+
+  The soft limit must equal what you asked for, and the hard limit must be finite and no lower.
+  `unlimited` is refused by name, because it reports `unlimited` and gives 8 MiB.
+  Three things in that setter each answer a measured failure, and a simpler form breaks one of
+  them. **The soft limit is set first**, because lowering the hard limit below a soft
+  `unlimited` is `EINVAL` — `ulimit -H -s 131072` from that state fails with `cannot modify
+  limit: Invalid argument`, and chained with `&&` the soft set never runs, so the process keeps
+  `unlimited` and gets 8 MiB, the failure the rule exists to stop. **The hard limit is set only
+  when it reads `unlimited`**, because setting it unconditionally lowers a higher finite hard
+  limit the pod gave you, which is the headroom a tool with its own guard may need. The
+  **`|| true` around it** is not decoration: on the ordinary path, where the hard limit is
+  already finite, that test is false, and a bare `&&` list whose test fails is a non-zero exit
+  status. `set -e` does not abort there, so the script runs to the end and does all of its work
+  — and if that line is the last one in the file, the script exits 1 with everything correct.
+  Measured: as a last line, `exit=1`; with `|| true`, `exit=0`; and with any command after it,
+  `exit=0` either way, which is why it is easy to test and find nothing. And the
+  **fallback** covers a want above the current hard limit, where the soft set fails first.
+  Measured from three starting states: `unlimited/unlimited` and `8192/unlimited` both end at
+  `131072/131072`, and `131072/1048576` ends at `131072/1048576` with the higher hard limit
+  kept. Do not reduce it to a single `ulimit -s <n>`: that set both limits in a fresh shell
+  here and left the hard limit `unlimited` in a long-lived one, same binary and same starting
+  pair, cause unknown — which is why the read-back is the rule and the setter is not.
+  The ceiling is 128 MiB whichever finite value you choose —
+  gVisor maps the whole stack at exec and caps it at `maxStackSize = 128 << 20` in `MapStack`
+  (`pkg/sentry/mm/syscalls.go`), with `RLIM_INFINITY` falling back to the 8 MiB default — and a
+  larger soft limit costs rather than buys, since glibc sizes a default thread stack from it and
+  a tool that creates a thread pool can fail to allocate one. A lane measured both on 2026-11-01
+  in pods under gVisor (4.19.0-gvisor), with a C probe and a second probe in another language:
+  under `unlimited` the fault came at 7 MiB and 524,150 frames; at 131072 (KiB) both probes
+  faulted at 127 MiB and 8,388,470 frames. The same probes on an ordinary kernel track the
+  setting as expected, so this is the sandbox and not the probes.
+- **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
+  work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
+  the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
+  moments. Three parts, all measured: within one pod, comparable — run both arms there, as two
+  containers on one node started together, and a difference between them is a difference between
+  the arms; across pods, not comparable; across platforms, not until something measures the gap.
+  Label every figure taken there a gVisor figure. That factor is the cost of syscalls and no
+  budget for a whole job: a lane measured two real builds of the same work faster in a pod than
+  on a virtual machine (1,014 s against 1,546 s, and 620 s against 1,117 s), with system time
+  roughly doubled and user time lower, so compute-bound work can run as fast or faster there.
+- **No Docker.** The image carries no container runtime, so a test that starts one through
+  testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
+  `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
+  `internal/testpg` (unless `DISPATCH_TEST_DATABASE_URL` names a Postgres).
+
+  The daemon's NATS-backed tests have a way round it: `packages/daemon/internal/testnats` serves
+  the server `LEGION_TEST_NATS_URL` and `LEGION_TEST_NATS_MONITOR_URL` name, and starts no
+  container when both are set, so run one yourself and point them at it:
+
+  ```sh
+  go run github.com/nats-io/nats-server/v2@v2.15.1 -js -p 14222 -m 18222 -sd "$TMPDIR/nats" &
+  export LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:18222
+  ```
+
+  Both or neither: one set without the other fails the test rather than falling back. The
+  monitor port is read, not decoration — the per-test reset waits there for every client
+  connection to end. One server serves one test binary at a time, so name one package a
+  command (or pass `-p 1`): two packages' binaries on one server delete each other's streams.
+  Pick ports no sibling role holds, and keep the store directory off your home. In your own
+  work, run the NATS-backed tests your change touches by name (`go test -run`), as the first
+  section says. Measured here, as proof of the route and not as a run to repeat:
+  `go run …@v2.15.1 --version` prints `nats-server: v2.15.1`, and with the two variables set
+  `go test -count=1 -timeout 40m ./internal/workflow/` runs whole in the pod, with no docker
+  panic.
+- **The rest, by package**, for a named run the pod does make. A Postgres unpacked from Debian
+  packages (the harness under **The worked case**) has only the `C`, `C.utf8` and `POSIX`
+  locales, so its default collation is byte order, and `internal/dispatch/api`'s
+  `TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves` refuses such a database
+  by its own message. The pod's own `legion-testpg` server is made with ICU `en-US`, so that
+  test runs there, as it does in CI's `envoy-go` job, whose Postgres has `en_US.utf8`.
+  `internal/dispatch/pmdoc`'s browser-parity tests need `bun install` to have run for
+  `@legion/proof-editor`. In the daemon's module, never export `GOWORK=off` inside
+  `$LEGION_WORKSPACE`: `packages/daemon/go.mod` replaces `github.com/sjawhar/envoy => ../envoy`,
+  and the go.sum entries its packages need live in `packages/envoy/go.sum`, which only the
+  `go.work` workspace mode consults.

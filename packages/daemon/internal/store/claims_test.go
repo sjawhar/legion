@@ -40,11 +40,13 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 		BootTokenHash:   supervise.HashBootToken("boot-" + string(token)),
 		CapabilityHash:  []byte{0xca, 0xfe, 0x01},
 		UncertainStreak: 3,
-		// The two columns a restart reads to fence a stop and to attribute a completion: a daemon
-		// that rebuilt this claim without them would suspend a run that had already replaced the
-		// one its stop names, and refuse the completion of the worker it is waiting on.
+		// The columns a restart reads to fence a stop, to attribute a completion and to refuse a
+		// retried start's task: a daemon that rebuilt this claim without them would suspend a run
+		// that had already replaced the one its stop names, refuse the completion of the worker it
+		// is waiting on, and queue a task the claim was already given.
 		LastStartRow:      7,
 		ServingGeneration: 4,
+		DeliveredRows:     []int64{5, 6},
 	}
 }
 
@@ -125,9 +127,11 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 	sameClaim(t, onlyClaim(t, store), want)
 }
 
-// A task is queued uninterrupted, and a death marks it interrupted by writing the same delivery
-// again: the mark only ever reaches the store through the upsert's update. It has to survive that
-// write, or a restart re-sends the task without the sentence saying its turn was interrupted.
+// A task is queued uninterrupted, and a death marks it interrupted — and, when its pod ran out of
+// memory, marks that too — by writing the same delivery again: both marks only ever reach the
+// store through the upsert's update. They have to survive that write, or a restart re-sends the
+// task without the sentence saying its turn was interrupted and without the note saying the pod
+// ran out of memory.
 func TestARePutDeliveryCarriesItsInterruption(t *testing.T) {
 	ctx := context.Background()
 	store := migratedStore(t)
@@ -140,13 +144,13 @@ func TestARePutDeliveryCarriesItsInterruption(t *testing.T) {
 		t.Fatalf("queue the delivery: %v", err)
 	}
 	interrupted := queued
-	interrupted.ID, interrupted.Interrupted = "delivery-2", true
+	interrupted.ID, interrupted.Interrupted, interrupted.OutOfMemory = "delivery-2", true, true
 	if err := store.PutDelivery(ctx, c.Token, interrupted); err != nil {
 		t.Fatalf("mark it interrupted: %v", err)
 	}
 
-	if got := onlyClaim(t, store).Pending; got == nil || got.ID != "delivery-2" || !got.Interrupted {
-		t.Fatalf("delivery read back = %+v, want the re-put delivery, interrupted", got)
+	if got := onlyClaim(t, store).Pending; got == nil || got.ID != "delivery-2" || !got.Interrupted || !got.OutOfMemory {
+		t.Fatalf("delivery read back = %+v, want the re-put delivery, interrupted and out of memory", got)
 	}
 }
 
@@ -239,6 +243,30 @@ func TestAClaimsPluginContractRoundTrips(t *testing.T) {
 
 	want.PluginContract = 24
 	want.PluginRelaunchFor = 0
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim again: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+}
+
+// The round a claim left is a column of its own, and it is read back exactly as it was written:
+// the daemon decides from it what the pod of a round took with it when it went, and a restart
+// has nothing else to read that from (INFRA-484). It round-trips independently of the round the
+// claim records, which a claim that leaves keeps.
+func TestTheRoundAClaimLeftRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := tmuxClaim("legion-LEGION-209-leftaround")
+	want.UpdateRound = supervise.PodRound("9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22")
+	want.UpdateLeftRound = want.UpdateRound
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+
+	// The round ends, which is the one thing that clears it.
+	want.UpdateRound = ""
+	want.UpdateLeftRound = ""
 	if err := store.PutClaim(ctx, want); err != nil {
 		t.Fatalf("put claim again: %v", err)
 	}
@@ -404,7 +432,7 @@ func TestAClaimsEnrollmentRoundTrips(t *testing.T) {
 		Token: "legion-LEGION-209-implementer", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
 		Role: claim.RoleImplementer, Generation: 3, State: supervise.StateRegistered,
 		Locator: &runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-LEGION-209-implementer", Incarnation: "pod-uid-3/3",
-			Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209", PodUID: "pod-uid-3", Container: "implementer", Generation: 3}},
+			Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209", PodUID: "pod-uid-3", Container: "roles", Generation: 3}},
 		Enrollment: &supervise.Enrollment{ID: "enr-1", Incarnation: "pod-uid-3/3"},
 	}
 	if err := s.PutClaim(ctx, c); err != nil {
@@ -442,7 +470,8 @@ func TestAnEnrollmentWithoutAnIncarnationIsRefusedByTheSchema(t *testing.T) {
 func TestASuspendedClaimsSourceRoundTripsAndTheSchemaRefusesAnUnknownOne(t *testing.T) {
 	s := migratedStore(t)
 	ctx := context.Background()
-	for _, by := range []supervise.SuspendSource{supervise.SuspendedByOperator, supervise.SuspendedByDaemon, supervise.SuspendedByExit, ""} {
+	for _, by := range []supervise.SuspendSource{supervise.SuspendedByOperator, supervise.SuspendedByDaemon, supervise.SuspendedByExit,
+		supervise.SuspendedByReleased, ""} {
 		c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
 			Role: claim.RoleTester, Generation: 2, State: supervise.StateSuspended, Session: "ses_tester", SuspendedBy: by}
 		if err := s.PutClaim(ctx, c); err != nil {
@@ -597,5 +626,130 @@ func TestClaimUnretiredIsEveryStoredStateButRetired(t *testing.T) {
 		if got, want := unretired(), state != supervise.StateRetired; got != want {
 			t.Errorf("ClaimUnretired of a %s claim = %t, want %t", state, got, want)
 		}
+	}
+}
+
+// storedActivity is the four activity columns of token's claim row, which no claim read carries:
+// the report lives on the row alone, and only the idle view reads it back.
+func storedActivity(t *testing.T, store *Store, token claim.Token) (at time.Time, background bool, kinds string, reminder time.Time) {
+	t.Helper()
+	var read, due *time.Time
+	if err := store.Pool().QueryRow(context.Background(),
+		`select activity_at, activity_background, activity_kinds, activity_next_reminder_at from claims where token = $1`,
+		string(token)).Scan(&read, &background, &kinds, &due); err != nil {
+		t.Fatalf("read the activity of %s: %v", token, err)
+	}
+	return orZero(read), background, kinds, orZero(due)
+}
+
+// A session fires its reports without an in-flight guard — pi-legion's five-second timer and its
+// session_stop report race — so an earlier reading can reach the daemon after a later one. The
+// earlier one must not win: a reading taken mid-turn before a background job started would then
+// stand as the newest, and the idle rule would release a pod whose job is still running.
+func TestAnActivityReportNeverOverwritesANewerOne(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	// The end-of-turn report: a background job of the session's own is running.
+	due := at(20)
+	newest := claim.SessionActivity{
+		At:             at(10),
+		BackgroundWork: claim.BackgroundWork{Running: true, Kinds: []string{"async-job"}},
+		Phase:          claim.PhaseActivity{NextReminderAt: &due},
+	}
+	if known, err := store.PutClaimActivity(ctx, c.Token, newest); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the newest report = %t, %v", known, err)
+	}
+
+	// The reading taken before the job started, which the five-second timer sent first and which
+	// arrives second.
+	stale := claim.SessionActivity{At: at(9)}
+	if known, err := store.PutClaimActivity(ctx, c.Token, stale); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the stale report = %t, %v", known, err)
+	}
+	gotAt, background, kinds, reminder := storedActivity(t, store, c.Token)
+	if !gotAt.Equal(newest.At) || !background || kinds != "async-job" || !reminder.Equal(due) {
+		t.Fatalf("after the stale report the row reads %s, background %t, kinds %q, reminder %s; want the newest report kept",
+			gotAt, background, kinds, reminder)
+	}
+
+	// A report of the same instant is the same reading sent twice, and is written: a retry must
+	// not be refused.
+	same := claim.SessionActivity{At: at(10)}
+	if known, err := store.PutClaimActivity(ctx, c.Token, same); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the repeated report = %t, %v", known, err)
+	}
+	if _, background, kinds, reminder = storedActivity(t, store, c.Token); background || kinds != "" || !reminder.IsZero() {
+		t.Fatalf("the repeated report left background %t, kinds %q, reminder %s; want the quiet reading written",
+			background, kinds, reminder)
+	}
+
+	// A newer one is written whole, the armed reminder cleared with the rest.
+	newer := claim.SessionActivity{At: at(11)}
+	if known, err := store.PutClaimActivity(ctx, c.Token, newer); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the newer report = %t, %v", known, err)
+	}
+	if gotAt, _, _, _ = storedActivity(t, store, c.Token); !gotAt.Equal(newer.At) {
+		t.Fatalf("activity_at = %s after the newer report, want %s", gotAt, newer.At)
+	}
+}
+
+// A session chooses the time it reports. One dated ahead of the daemon's clock — a host whose
+// clock stepped forward and was corrected back afterwards — would, under the ordering guard
+// above, drop every honest report after it while the reading it left stood as current,
+// background work and all. It is bounded to the daemon's receipt time, as the listener's report
+// is (intake.decodeListenerWake).
+func TestAnActivityReportDatedAheadOfTheDaemonIsBoundedToItsReceipt(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-210-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	before := time.Now().UTC()
+	ahead := claim.SessionActivity{At: before.Add(2 * time.Hour),
+		BackgroundWork: claim.BackgroundWork{Running: true, Kinds: []string{"async-job"}}}
+	if known, err := store.PutClaimActivity(ctx, c.Token, ahead); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the report dated ahead = %t, %v", known, err)
+	}
+	after := time.Now().UTC()
+	stored, _, _, _ := storedActivity(t, store, c.Token)
+	// The receipt the row kept is a timestamptz, which holds microseconds, so the stored
+	// instant is the Go instant of the receipt with its nanoseconds dropped: it can sit up to
+	// a microsecond below the window's own lower bound, which is what the window is truncated
+	// for. The report's time, two hours ahead, is outside the window either way, so this still
+	// fails on a report that was stored unbounded.
+	if stored.Before(before.Truncate(time.Microsecond)) || stored.After(after) {
+		t.Fatalf("a report dated %s was stored as %s, want the daemon's receipt time between %s and %s",
+			ahead.At, stored, before, after)
+	}
+
+	// The session's next honest report is written, which is what the unbounded time cost.
+	honest := claim.SessionActivity{At: time.Now().UTC()}
+	if known, err := store.PutClaimActivity(ctx, c.Token, honest); err != nil || !known {
+		t.Fatalf("PutClaimActivity of the honest report = %t, %v", known, err)
+	}
+	if _, background, kinds, _ := storedActivity(t, store, c.Token); background || kinds != "" {
+		t.Fatalf("after the honest report the row reads background %t, kinds %q; want the quiet reading written",
+			background, kinds)
+	}
+}
+
+// A report for a claim the daemon has forgotten is nothing to record, and says so: the route
+// answers it as it answers a wrong secret. A report the ordering guard drops is not that.
+func TestAnActivityReportOfAnUnknownClaimIsNotRecorded(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	known, err := store.PutClaimActivity(ctx, "legion-LEGION-999-implementer", claim.SessionActivity{At: at(1)})
+	if err != nil {
+		t.Fatalf("PutClaimActivity: %v", err)
+	}
+	if known {
+		t.Fatal("a report for a claim the store does not hold was recorded")
 	}
 }

@@ -3,8 +3,6 @@ package identity
 import (
 	"context"
 	"errors"
-	"regexp"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -27,10 +25,6 @@ var (
 	// this one recorded its subject, so the cookie this sign-in would issue must not be given out.
 	ErrSignInSuperseded = errors.New("another account signed in to this address meanwhile")
 )
-
-// emailShape is an address with one @ and a dotted domain, the shape the deployment repository's
-// identity_email accepts from a federated username.
-var emailShape = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
 // SignInRule is who may sign in to Dispatch and how Dispatch treats their sign-in: GroupRule for
 // the members of a Cognito sign-in pool's group, or DomainRule for the people of a Google
@@ -59,12 +53,13 @@ type SignInRule interface {
 	// End ends email's sign-in under this rule, returning ErrNoIdentity once it no longer stands.
 	End(ctx context.Context, people auth.PeopleStore, sessions auth.SessionStore, email, subject, reason string) error
 	// WriteSignIn records a sign-in under this rule (auth.PeopleStore.SignIn or .SignInSubject),
-	// given the subject this rule's own Subject method already resolved.
-	WriteSignIn(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string, confirmedAt time.Time) error
+	// given the subject this rule's own Subject method already resolved; the store dates it by
+	// the database's clock.
+	WriteSignIn(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string) error
 	// WriteConfirm records a refresh that confirmed email's membership under this rule
 	// (auth.PeopleStore.Confirm or .ConfirmSubject), given the subject this rule's own
-	// ConfirmSubject method already resolved.
-	WriteConfirm(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string, confirmedAt time.Time) error
+	// ConfirmSubject method already resolved; the store dates it by the database's clock.
+	WriteConfirm(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string) error
 	// ConfirmCookie confirms, after a sign-in has read the session generation it will put in a
 	// cookie, that email's row still names subject as the account that just signed in
 	// (auth.PeopleStore.Membership): a sign-in by another account that committed since has

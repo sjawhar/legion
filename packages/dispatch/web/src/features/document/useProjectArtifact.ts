@@ -5,9 +5,9 @@ import type { Artifact } from "../../api/types";
 import type { ProjectDocumentRoute } from "../refs/routes";
 
 /**
- * The project document a route names, by `project/slug`. Disabled without a document route; the
- * `["artifact-ref", …]` key is the one the event stream invalidates when a document changes, so
- * every caller shares one cache entry.
+ * The project document a route names, by `project/slug`. The `["artifact-ref", …]` key is the
+ * one the live socket's event feed invalidates when a document changes, so every caller shares
+ * one cache entry.
  */
 export function useProjectArtifact(
   route: ProjectDocumentRoute | undefined

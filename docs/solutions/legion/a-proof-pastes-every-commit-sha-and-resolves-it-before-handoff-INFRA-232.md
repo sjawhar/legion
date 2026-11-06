@@ -24,9 +24,12 @@ easier to get wrong, because a correct short prefix makes a wrong full SHA look 
 - **Never type a full SHA.** Put it in a shell variable from `jj log -r <rev> --no-graph -T
   commit_id`, or paste it from `gh` output, and write the text from that variable. This covers
   `headSha`, the PR body's `E2E` and `Threads` lines, a blob link, and a review-thread reply.
-- **Before each handoff push and each body edit, resolve every full SHA you wrote.** Extract them
+- **Before each handoff and each body edit, resolve every full SHA you wrote.** Extract them
   with `grep -oE '[0-9a-f]{40}'` and run `gh api repos/<owner>/<repo>/commits/<sha>` for each.
-  Any 422 is a defect to fix before you push. Also fetch each blob link and look for HTTP 200.
+  Any 422 is a defect to fix before you push or write the record. Also fetch each blob link and
+  look for HTTP 200. Before sjawhar/legion#2354 the checkpoint was the handoff push. A handoff is
+  a record on the Dispatch issue now, written with `dispatch handoff-write`, so the checkpoint is
+  that write.
 - **A short SHA in prose is safe only when you copied it.** Do not lengthen a 12-character
   prefix from memory.
 

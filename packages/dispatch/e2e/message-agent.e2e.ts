@@ -108,7 +108,16 @@ test("an offline selected mention is posted and exposes its failed delivery", as
     const payload = await postPayload(page);
     expect(payload.mentions).toEqual([{ target: "session:B" }]);
     await expect(page.getByRole("list", { name: "Mention deliveries" })).toContainText("failed");
-    expect((await getSentMessages()).length).toBe(1);
+    // The sender retries a "no live session" answer under the one attempt and its key for the
+    // listener take-over window - half a second under the harness's
+    // DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW (e2e/run-server.sh), of the twelve
+    // listenerTakeoverWindow gives a deployment (packages/envoy/internal/dispatch/api/
+    // envoy_resolve.go) - so the listener records more than one send, all of one attempt: every
+    // one to B under the same idempotency key.
+    const sends = await getSentMessages();
+    expect(sends.length).toBeGreaterThan(0);
+    expect(sends.every((send) => send.target_session === "B")).toBe(true);
+    expect(new Set(sends.map((send) => send.idempotency_key)).size).toBe(1);
   } finally {
     await alice.close();
   }

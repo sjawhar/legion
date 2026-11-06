@@ -8,7 +8,7 @@ tags:
   - merge-gate
   - diagnosis
 date: 2026-10-24
-status: active
+status: superseded by sjawhar/legion#2354 — a phase's handoff is a record on its Dispatch issue, and no phase commits or pushes one; see docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md
 module: legion-worker
 related_issues:
   - "INFRA-149"
@@ -24,11 +24,11 @@ you may conclude from the head afterwards.
 
 - **`skip-checks: true` suppresses the runs a push starts, and nothing else.** A workflow that
   triggers on something other than the push still runs and still attaches its check run to that
-  head. In this repository `.github/workflows/pr-title.yaml` triggers on `issue_comment`,
-  `pull_request_review` and `pull_request_review_comment` as well as on `pull_request`, so any
-  review traffic puts a required check on a head no push ever built.
+  head. In this repository `.github/workflows/pr-title.yaml` triggers on `pull_request_review` as
+  well as on `pull_request`, so any review (an inline comment posted alone included) puts a
+  required check on a head no push ever built.
 - **So "the head has no check runs" is the wrong diagnostic.** It is wrong in exactly the case you
-  will meet — a blocked pull request someone has commented on — and a reader who finds runs there
+  will meet — a blocked pull request someone has reviewed — and a reader who finds runs there
   concludes CI is merely slow and waits.
 - **Ask instead whether the checks the base requires *from a push* are present.** Read the base's
   required set live (`gh api repos/<o>/<r>/rules/branches/<base>`, plus
@@ -47,9 +47,9 @@ docs/solutions/legion/a-base-with-no-required-check-makes-the-ci-verdict-a-hand-
 ## Evidence
 
 sjawhar/legion#2121 sat `MERGEABLE`/`BLOCKED` at head `917c49e9`. Read on 2026-10-24:
-`gh api repos/sjawhar/legion/commits/917c49e9 --jq '[.files[].filename]'` returns exactly
+`gh api repos/cybermonklabs/legion/commits/917c49e9 --jq '[.files[].filename]'` returns exactly
 `[".legion/INFRA-83/review.json"]`, its commit message ends with `skip-checks: true`, and
-`gh api repos/sjawhar/legion/commits/917c49e9/check-runs` returns two completed, successful
+`gh api repos/cybermonklabs/legion/commits/917c49e9/check-runs` returns two completed, successful
 `pr-title` runs and nothing else. `lint`, `typecheck` and `test` — the other three main requires —
 are absent. Counting runs says "two checks, both green"; counting the required set says "three of
 four never ran", which is the fact.

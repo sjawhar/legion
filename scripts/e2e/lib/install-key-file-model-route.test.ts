@@ -218,4 +218,12 @@ describe("the key-file model route installer", () => {
     );
     expect(modelsYml).toContain(join(keyDir, "anthropic-key"));
   });
+
+  test("config.yml raises Oh My Pi's tool_call handler limit to 120 s, so AskGate's review fits inside it", () => {
+    const { home } = install();
+    const config = Bun.YAML.parse(
+      readFileSync(join(home, ".omp/profiles/legion-e2e-test/agent/config.yml"), "utf8")
+    ) as { extensionHandlers?: { toolCallTimeoutMs?: unknown } };
+    expect(config.extensionHandlers?.toolCallTimeoutMs).toBe(120_000);
+  });
 });

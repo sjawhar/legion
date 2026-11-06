@@ -14,7 +14,9 @@ var transcriptTypes = map[string]bool{"user": true, "assistant": true, "attachme
 
 // metadataTypes are the other line types the pinned Claude Code writes (its transcript writer's
 // routing table, every entry of it but the transcript types): titles, tags, the leaf checkpoint,
-// file history, cost and request records. None is part of the conversation the model sees.
+// file history, cost, request and tools-used records. None is part of the conversation the model
+// sees: tools-used is the session's own record of the tools a turn had, which the harness rebuilds
+// from its own configuration rather than from the transcript.
 // last-prompt says which leaf a resume continues and custom-title is the session's title; a
 // content-replacement of the main session's tool results refuses the transcript, since Claude
 // Code sends the replacement in place of the result only while a setting it does not record is
@@ -28,7 +30,7 @@ var metadataTypes = map[string]bool{
 	"permission-mode": true, "isolation-latch": true, "dev-mods": true, "memory-mode": true, "atis-latch": true,
 	"worktree-state": true, "cost-state": true, "queue-operation": true, "content-replacement": true,
 	"api-request-shape": true, "api-request-blob": true, "api-request": true, "fork-context-ref": true,
-	"observer-ref": true,
+	"observer-ref": true, "tools-used": true,
 }
 
 // System line subtypes. A local command's output is sent to the model as a user turn and a

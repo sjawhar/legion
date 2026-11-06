@@ -23,9 +23,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/stream"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// The Burstable roles live proof (scripts/e2e/burstable-kind.sh, whose driver is
+// The Burstable issue pod live proof (scripts/e2e/burstable-kind.sh, whose driver is
 // burstable_live_test.go, built with -tags e2e) writes its legion.yaml files and builds its Sandbox
 // runtime with the functions here. They are untagged so `go test` holds them to the loader's and
 // the runtime's current contracts on every run: a change that refuses the proof's files or its
@@ -41,27 +42,27 @@ var burstableLiveRepository = ghrepo.MustParse("octocat/Hello-World")
 // kubectl to read and nothing dials a model, Dispatch or NATS.
 var burstableLiveStub = []string{"/bin/sh", "-c", "exec sleep infinity", "burstable-stub"}
 
-// burstableLiveCases are the two deployments the proof launches: the implementer requesting 8Gi
-// of memory under a 32Gi limit, whose issue pod must be Burstable, and a file with no `resources`
-// block, whose issue pod must stay Guaranteed at the daemon's defaults.
+// burstableLiveCases are the two deployments the proof launches: the issue pod requesting 8Gi of
+// memory under a 32Gi limit, which must be Burstable, and a file with no `resources` block, whose
+// issue pod must stay Guaranteed at the daemon's defaults.
 var burstableLiveCases = []struct {
 	name, project, resources string
 	qos                      corev1.PodQOSClass
-	implementer              corev1.ResourceRequirements
+	issue                    corev1.ResourceRequirements
 }{
 	{
 		name: "burstable", project: "BURST", qos: corev1.PodQOSBurstable,
-		resources: "    resources:\n      implementer: {memory: 32Gi, memory_request: 8Gi}\n",
-		implementer: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
-			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("32Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("20Gi")},
+		resources: "    resources:\n      issue: {memory: 32Gi, memory_request: 8Gi}\n",
+		issue: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("6Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("32Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("80Gi")},
 		},
 	},
 	{
 		name: "guaranteed", project: "GUARD", qos: corev1.PodQOSGuaranteed,
-		implementer: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("6Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
-			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("6Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("20Gi")},
+		issue: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("19Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("6Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("19Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("80Gi")},
 		},
 	},
 }
@@ -122,7 +123,7 @@ runtime:
 // first launch, the provisioning token is one a public repository never needs, every role's gh
 // files hold a placeholder token, the agent is a sleep stub, and the mapping names
 // burstableLiveRepository alone, so the repository cache an issue pod's launch makes is that
-// repository's. It returns the implementer's reservation as sandboxOptions translated it.
+// repository's. It returns the issue pod's reservation as sandboxOptions translated it.
 func burstableLiveRuntime(ctx context.Context, cfg config.Config, rc *rest.Config, listener *stream.Listener, log *slog.Logger) (*sandbox.Runtime, corev1.ResourceRequirements, error) {
 	k := *cfg.Runtime.Kubernetes
 	project, err := claim.ProjectToken(cfg.Project)
@@ -139,6 +140,10 @@ func burstableLiveRuntime(ctx context.Context, cfg config.Config, rc *rest.Confi
 		rendered := ghconfig.Render("ghs_placeholder", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
 		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
+	// The stand-in bundle holds the launch's own owner and no other, so the proof's project
+	// serves none of its own: every pod it makes projects what it was launched with, and no pod
+	// has drifted from an owner the daemon serves (sandbox's movedGhOwners).
+	opts.GitHubOwners = func() []string { return nil }
 	opts.Mapped = func() []ghrepo.Repository { return []ghrepo.Repository{burstableLiveRepository} }
 	opts.Agent = burstableLiveStub
 	rt, err := sandbox.New(ctx, rc, opts)
@@ -146,7 +151,7 @@ func burstableLiveRuntime(ctx context.Context, cfg config.Config, rc *rest.Confi
 		return nil, corev1.ResourceRequirements{}, fmt.Errorf("sandbox.New: %w", err)
 	}
 	listener.SetLauncherResolver(rt.LauncherResolver())
-	return rt, opts.Resources[claim.RoleImplementer], nil
+	return rt, opts.Resources.Issue, nil
 }
 
 // burstableLiveSpec is the root architect's launch of issue as the proof makes it, on
@@ -175,6 +180,7 @@ func (firstLaunchStore) IssueSandboxHome(_ context.Context, _, issue string) (st
 }
 
 func (firstLaunchStore) ClaimUnretired(context.Context, claim.Token) (bool, error) { return false, nil }
+func (firstLaunchStore) Claims(context.Context) ([]supervise.Claim, error)         { return nil, nil }
 
 // publicCloneTokens is the provisioning token for a public repository, which GitHub never asks
 // git for.
@@ -185,7 +191,7 @@ func (publicCloneTokens) Token(context.Context, string) (string, error) {
 }
 
 // Each of the live proof's legion.yaml files passes the daemon's loader, holds the reservation the
-// proof expects of the implementer, and builds its runtime through sandboxOptions and sandbox.New
+// proof expects of the issue pod, and builds its runtime through sandboxOptions and sandbox.New
 // against an API server standing in for the kind cluster; each case's root launch passes the
 // spawn-spec checks. Every step is the one the driver takes before it reaches the cluster.
 func TestTheBurstableKindProofBuildsItsRuntimesFromItsConfigurations(t *testing.T) {
@@ -197,7 +203,7 @@ func TestTheBurstableKindProofBuildsItsRuntimesFromItsConfigurations(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := writeBurstableLiveConfig(t, filepath.Join(dir, tc.name), tc.project, "192.0.2.10",
-				"ghcr.io/sjawhar/legion-worker@sha256:"+strings.Repeat("a", 64), kubeconfig, "test", tc.resources)
+				"ghcr.io/cybermonklabs/legion-worker@sha256:"+strings.Repeat("a", 64), kubeconfig, "test", tc.resources)
 			cfg, err := config.LoadForValidation(path, nil)
 			if err != nil {
 				t.Fatalf("load %s: %v", path, err)
@@ -216,11 +222,11 @@ func TestTheBurstableKindProofBuildsItsRuntimesFromItsConfigurations(t *testing.
 				t.Fatalf("the proof's runtime: %v", err)
 			}
 			for _, kind := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
-				if got, want := reservation.Requests[kind], tc.implementer.Requests[kind]; got.Cmp(want) != 0 {
-					t.Errorf("the file's implementer requests %s %s, want %s", kind, got.String(), want.String())
+				if got, want := reservation.Requests[kind], tc.issue.Requests[kind]; got.Cmp(want) != 0 {
+					t.Errorf("the file's issue pod requests %s %s, want %s", kind, got.String(), want.String())
 				}
-				if got, want := reservation.Limits[kind], tc.implementer.Limits[kind]; got.Cmp(want) != 0 {
-					t.Errorf("the file's implementer is limited to %s %s, want %s", kind, got.String(), want.String())
+				if got, want := reservation.Limits[kind], tc.issue.Limits[kind]; got.Cmp(want) != 0 {
+					t.Errorf("the file's issue pod is limited to %s %s, want %s", kind, got.String(), want.String())
 				}
 			}
 			project, err := claim.ProjectToken(cfg.Project)

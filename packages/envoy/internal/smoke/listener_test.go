@@ -20,12 +20,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// capped limits a smoke container to cpus CPUs and mib MiB, as every container the repository's
+// tests start is capped on a shared host. NATS holds the smoke's few messages; the listener serves
+// one client.
+func capped(cpus, mib int64) testcontainers.CustomizeRequestOption {
+	return testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+		hostConfig.NanoCPUs = cpus * 1_000_000_000
+		hostConfig.Memory = mib << 20
+	})
+}
 
 func TestSmoke(t *testing.T) {
 	image := os.Getenv("ENVOY_SMOKE_IMAGE")
@@ -38,8 +49,8 @@ func TestSmoke(t *testing.T) {
 			"  ENVOY_SMOKE_IMAGE=$img go test -tags smoke -v ./internal/smoke/\n" +
 			"`-q` prints the image id, and go's test cache keys on the value of this variable, " +
 			"so rebuilding re-runs the test. A fixed tag would replay a cached PASS against an " +
-			"image that had since changed. In CI the build is a step of its own; see " +
-			".github/workflows/envoy-and-contracts.yaml.")
+			"image that had since changed. In CI the build is a step of its own; see the " +
+			"envoy-smoke job of .github/workflows/ci.yaml.")
 	}
 
 	ctx := context.Background()
@@ -54,6 +65,7 @@ func TestSmoke(t *testing.T) {
 	// Start NATS using the same module the rest of the project uses.
 	natsC, err := tcnats.Run(ctx, testnats.Image,
 		network.WithNetwork([]string{"nats"}, net),
+		capped(1, 512),
 	)
 	testcontainers.CleanupContainer(t, natsC)
 	if err != nil {
@@ -62,6 +74,7 @@ func TestSmoke(t *testing.T) {
 
 	listenerC, err := testcontainers.Run(ctx, image,
 		network.WithNetwork([]string{"listener"}, net),
+		capped(1, 512),
 		testcontainers.WithEnv(map[string]string{
 			"NATS_URLS": "nats://nats:4222",
 			// The listener owns ENVOY_NOTIFICATIONS on a NATS that is not its own container, as
@@ -189,7 +202,10 @@ func TestSmoke(t *testing.T) {
 	})
 
 	t.Run("subscribe_and_verify", func(t *testing.T) {
-		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.test.smoke"],"port":8080}`
+		// No port: this listener delivers nothing to a session's port and refuses a registration
+		// that names one (subscribeHandler). self_subscribed is what writes the session entry,
+		// so the session is in GET /v1/sessions below.
+		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.test.smoke"],"port":0,"self_subscribed":true}`
 		resp, err := apiRequest(http.MethodPost, baseURL+"/v1/interests/subscribe", subBody)
 		if err != nil {
 			t.Fatalf("POST /v1/interests/subscribe: %v", err)

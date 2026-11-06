@@ -12,7 +12,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
-	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // A broken role sequence drops the shared core, uses a root prompt for a child, or makes the Go
@@ -38,19 +37,26 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		goParts  []string
 		contains []string
 	}{
-		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, []string{"architect-root.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate`", "end the tree with `close_root`", "Every notice about an issue you own arrives on your own role topic", "to merge a pull request that deletes it"}, architectOperations...)},
-		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, []string{"architect.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate` refuses a child issue", "Every notice about an issue you own arrives on your own role topic", "to merge a pull request that deletes it"}, architectOperations...)},
-		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/<issue>", "ends its head's commit message with `skip-checks: true` as the last line, preceded by two empty lines", "$'\\n\\n\\nskip-checks: true'", "finds, with your pane's jj, the newest commit on the issue branch carrying `.legion/<issue>/<phase>.json`", "The daemon reads no handoff file and no branch head", "A refusal records nothing"}},
+		// Every architect is told what a pull-request-missing notice asks of it, whatever its tree.
+		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, []string{"architect-root.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate`", "end the tree with `close_root`", "Every notice about an issue you own arrives on your own role topic", "The merge carries no handoff onto the pull request's base", "A `pull-request-missing` notice"}, architectOperations...)},
+		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, []string{"architect.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate` refuses a child issue", "Every notice about an issue you own arrives on your own role topic", "The merge carries no handoff onto the pull request's base", "A `pull-request-missing` notice"}, architectOperations...)},
+		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/<issue>", "dispatch handoff-write --issue <issue> --phase <word> --body-file", "dispatch handoff-read --issue <issue> --phase <word> --version <n>", "A handoff is never committed or pushed", "`HANDOFF_SESSION_MISMATCH`", "A refusal records nothing"}},
+		// A root with no code of its own pushes one empty commit to open its pull request, and a push
+		// the handoff import's commit refused is merged forward, never rewritten. The implementer is
+		// also told the completion of implementing the handoff route refuses with no open pull
+		// request, and what to do about it.
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, []string{"implementer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"refuses READY while the head still carries it"}},
+			"Retro removes nothing", "the root of its children; no code of its own", "chore(legion): <issue>'s handoffs are on its Dispatch issue now",
+			"(`HANDOFF_NO_PULL_REQUEST`), recording nothing: open the pull request and complete again at the same commit"}},
 		// The tester runs the application, not CI again (dispatch://LEGION-631).
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
-			"read CI for everything static", "try to break it"}},
+			"read CI for everything static", "try to break it", "dispatch handoff-write --issue <issue> --phase test"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"Retro's last commit removes that directory above your approved head", "`pullRequest.head` is the commit you pushed"}},
-		// The packet limit the merger is told is the one the handoff route enforces.
+			"Retro commits nothing, so nothing of retro's sits above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
+		// The merger is told how its over-long packet is refused, at the call that carries it.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
-			"`READY_HEAD_CARRIES_HANDOFFS`", "`READY_DISARM_PENDING`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
+			"that GitHub's compare lists as removed", "`READY_DISARM_PENDING`",
+			"refused at `handoff_complete` with `READY_PACKET_TOO_LONG`, which names the bound and how far over the packet is",
 			"`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
 			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
 	} {
@@ -101,6 +107,10 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			for _, requirement := range append([]string{
 				"This Go daemon advances phases",
 				"re-read your issue record with the `legion` tool's `read_record`",
+				// Every role is told not to retry a `legion` call its plugin refused because the
+				// daemon answered a shape it does not read (INFRA-1048): the phrase pinned is the
+				// plugin's own refusal text, which survives a rewording of the clauses around it.
+				"the daemon API contract does not describe",
 			}, tc.contains...) {
 				if !strings.Contains(text.String(), requirement) {
 					t.Errorf("the composed %s prompt omits %q", tc.name, requirement)
@@ -179,13 +189,15 @@ func composedText(t *testing.T, composer *Composer, role claim.Role, isRoot bool
 	return text.String()
 }
 
-// No role's handoffs reach the default branch: retro's last commit removes the issue's own
-// .legion/<issue>/ from the head that merges (dispatch://LEGION-605). No phase worker's composed
-// prompt still carries the rule this replaced: that the approved and the merged head keep .legion/,
-// and that the daemon strips the leftovers from the next issue's branch. READY, not the merger,
-// holds the commits above the approved head to retro's removal and its docs/solutions/ ones, so no
-// prompt carries the merger's own fileset check any more, and the merger's names READY's refusals.
-func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
+// No role's handoff is a commit: each is a record on the Dispatch issue, so no phase worker's
+// composed prompt still teaches the committed handoff file, its commit and push, the trailer that
+// kept a handoff-only push from starting CI, or retro's removal of the handoffs from the head that
+// merges. Nor does any carry the rules that removal replaced: that the approved and the merged
+// head keep .legion/, and that the daemon strips the leftovers from the next issue's branch.
+// READY, not the merger, holds the commits above the approved head to retro's docs/solutions/
+// ones, so no prompt carries the merger's own fileset check any more, and the merger's names
+// READY's refusals.
+func TestNoComposedPromptCommitsAHandoff(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)
 	if err != nil {
@@ -193,7 +205,8 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 	}
 	retired := []string{"No role pushes a `.legion/` deletion", "No role removes `.legion/`", "nobody removes it before the merge", "strips whatever `.legion/`", "still carries `.legion/`",
 		"Retro then commits only `docs/solutions/`", "no file changes above the approved head", "the same sha when retro added nothing", "Retro's `docs/solutions/` commit is never",
-		"'~(docs/solutions | .legion/<issue>)'"}
+		"'~(docs/solutions | .legion/<issue>)'", ".legion/<issue>/<phase>.json", "record handoff", "handoff-only", "Retro's last commit removes",
+		"committed handoff"}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
 		text := composedText(t, composer, role, false)
 		for _, phrase := range retired {
@@ -221,6 +234,112 @@ func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	retired := []string{"READY_CHECKS_NOT_GREEN", "no check is required on", "refused at READY"}
+	for _, tc := range []struct {
+		role   claim.Role
+		isRoot bool
+	}{
+		{claim.RolePlanner, false}, {claim.RoleImplementer, false}, {claim.RoleTester, false},
+		{claim.RoleReviewer, false}, {claim.RoleMerger, false},
+		{claim.RoleArchitect, true}, {claim.RoleArchitect, false},
+	} {
+		text := composedText(t, composer, tc.role, tc.isRoot)
+		for _, phrase := range retired {
+			if strings.Contains(text, phrase) {
+				t.Errorf("the composed %s prompt (root %t) still says %q", tc.role, tc.isRoot, phrase)
+			}
+		}
+	}
+}
+
+// An issue with no Verification document, or with one holding no `before_merge` check, is a
+// coverage gap every role names and none refuses (dispatch://INFRA-174, R1 and R2): every gate
+// counts the `check` blocks that exist, and a rule that made the empty case a failure would stop
+// every issue in flight on the day these prompts deploy. So the tester records the gap in its
+// handoff without failing the phase for it, the reviewer names it in its review without asking
+// for changes over it, and the architect's acceptance comment names it and decides, which is the
+// only gate on an issue that has no `before_merge` check. Each composed prompt that carries the
+// rule says the empty case and its role's answer to it, and no paragraph of that rule calls the
+// case a failure or a request for changes. Each is also told what a child proves: a child's own
+// check whose `serves` names the root's requirement, never a result against the root's own check.
+func TestTheComposedPromptsNameAnIssueWithNoBeforeMergeCheckAsAGap(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const empty = "no Verification document, or with one that holds no `before_merge` check"
+	// A rule paragraph that says any of these has made the gap a refusal again. They are matched
+	// against the lower-cased paragraph, so a sentence that opens with one is caught too.
+	refusals := []string{"a failure", "a test failure", "fail the phase", "fails the phase",
+		"request_changes", "request changes", "requests changes", "`rejected`",
+		"is proved by nothing", "has no evidence at all", "accepted by nobody"}
+	for _, tc := range []struct {
+		role    claim.Role
+		isRoot  bool
+		answers []string
+	}{
+		{claim.RoleTester, false, []string{"is a gap you name, never a reason of its own to send the issue back"}},
+		{claim.RoleReviewer, false, []string{"is a gap you name in your review, never a review that asks for changes"}},
+		{claim.RoleArchitect, false, []string{"your acceptance is the only gate on it", "name that gap in your acceptance comment and decide there"}},
+		{claim.RoleArchitect, true, []string{"your acceptance is the only gate on it", "name that gap in your acceptance comment and decide there"}},
+	} {
+		text := composedText(t, composer, tc.role, tc.isRoot)
+		paragraphs := ruleParagraphs(text, empty)
+		if len(paragraphs) == 0 {
+			t.Errorf("the composed %s prompt (root %t) omits %q", tc.role, tc.isRoot, empty)
+		}
+		for _, paragraph := range paragraphs {
+			for _, refusal := range refusals {
+				if strings.Contains(strings.ToLower(paragraph), refusal) {
+					t.Errorf("the composed %s prompt (root %t) still calls the gap %q: %s",
+						tc.role, tc.isRoot, refusal, paragraph)
+				}
+			}
+		}
+		for _, want := range append(tc.answers, "`serves` names") {
+			if !strings.Contains(foldWhitespace(text), want) {
+				t.Errorf("the composed %s prompt (root %t) omits %q", tc.role, tc.isRoot, want)
+			}
+		}
+	}
+}
+
+// foldWhitespace is one line of text, so a phrase a hard-wrapped prompt breaks over two lines is
+// still one phrase to match.
+func foldWhitespace(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+// ruleParagraphs are the blank-line-separated paragraphs of a composed prompt that hold marker,
+// each folded to one line: a paragraph is the span a reader takes the rule and its framing from,
+// so it is the span a test asks what the rule calls its case. A composed prompt holds one per
+// part that carries the rule (the role's own part and the core its phase shares).
+func ruleParagraphs(text, marker string) []string {
+	var found []string
+	for _, paragraph := range strings.Split(text, "\n\n") {
+		if folded := foldWhitespace(paragraph); strings.Contains(folded, marker) {
+			found = append(found, folded)
+		}
+	}
+	return found
+}
+
+// What a phase proved is a result recorded against a `check` block of the issue's Verification
+// document (`dispatch result`), and the pull request body carries one line per check. No composed
+// prompt — any phase worker's, and the architect's in both its shapes — still teaches the two
+// lines the body carried before, the six-field `proof` array a handoff carried, or the
+// `Production:` line the production check wrote, which is now an `after_merge` result a closed
+// issue takes. The two line names are built from their role rather than written out, so a search
+// of the repository for either finds the texts that teach it and not this test.
+func TestNoComposedPromptTeachesAnE2ELineOrAProofArray(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	retired := []string{"`proof` array", "`Production:` line",
+		"pending deploy of", "the production-like proof", "the implementer's proof"}
+	for _, role := range []string{"implementer", "tester"} {
+		retired = append(retired, fmt.Sprintf("E2E (%s)", role))
+	}
 	for _, tc := range []struct {
 		role   claim.Role
 		isRoot bool
@@ -292,6 +411,50 @@ func TestNewRewritesAPartTheRunningDaemonDidNotWrite(t *testing.T) {
 	for _, name := range current {
 		if info, err := os.Stat(snapshot(name)); err != nil || !info.ModTime().Equal(written) {
 			t.Errorf("%s, already holding the running daemon's content, was written again: %v", name, err)
+		}
+	}
+}
+
+// A push moves the branch, but the pull request can keep naming the old commit, so the new
+// commit gets no checks and nothing reports it (dispatch://INFRA-1318). Every pushing role's
+// composed prompt therefore carries the read of the pull request's own head after its own push,
+// escalation sentence included, and neither architect shape does: a later edit that moves the
+// step into a part both shapes compose fails here rather than telling an architect to push. The
+// implementer's part carries the carve-out that names the step's spaced reads as the one sleep
+// its "never sleep in a loop for anything" rule allows. This shows the text is loaded, never
+// that a role follows it.
+func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const headRead = "gh pr view <n> --repo <the issue's repository> --json headRefOid --jq .headRefOid"
+	step := []string{
+		headRead,
+		"about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with a read that gives the pushed commit ending the step there and only the last read deciding a mismatch",
+		"once the branch has an open pull request",
+		"an empty one when your work is complete",
+		"tell your architect the commit you pushed, the head each read gave and the time of each, and end the turn with a WAITING line naming that answer rather than completing: a phase completed here hands the next role a commit the pull request does not name.",
+		"The merger pushes nothing, so this step never falls to it; it reports a mismatch it sees to the architect.",
+	}
+	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester,
+		claim.RoleReviewer, claim.RoleMerger} {
+		text := foldWhitespace(composedText(t, composer, role, false))
+		for _, phrase := range step {
+			if !strings.Contains(text, phrase) {
+				t.Errorf("the composed %s prompt omits %q", role, phrase)
+			}
+		}
+	}
+	const carveOut = "the step's spaced reads of the pull request's head after a push are the one sleep this rule allows, and they read no check"
+	if !strings.Contains(foldWhitespace(composedText(t, composer, claim.RoleImplementer, false)), carveOut) {
+		t.Errorf("the composed %s prompt omits %q, so it holds \"never sleep in a loop for anything\" beside a step whose reads are spaced by sleeps, with nothing saying that rule allows them",
+			claim.RoleImplementer, carveOut)
+	}
+	for _, isRoot := range []bool{true, false} {
+		text := foldWhitespace(composedText(t, composer, claim.RoleArchitect, isRoot))
+		if strings.Contains(text, headRead) {
+			t.Errorf("the composed %s prompt (root %t) says %q", claim.RoleArchitect, isRoot, headRead)
 		}
 	}
 }

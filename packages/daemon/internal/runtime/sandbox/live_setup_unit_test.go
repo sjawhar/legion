@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -521,7 +522,7 @@ func TestLiveSetupNeverRecordsAHelperValue(t *testing.T) {
 	}
 }
 
-// Every role container sets XDG_CONFIG_HOME, and git reads $XDG_CONFIG_HOME/git/config as its
+// Every role is told XDG_CONFIG_HOME, and git reads $XDG_CONFIG_HOME/git/config as its
 // global scope when GIT_CONFIG_GLOBAL is unset, so a helper written there must not count.
 func TestLiveSetupIgnoresTheXDGGlobalConfig(t *testing.T) {
 	r := newSetupRig(t, private)
@@ -567,9 +568,10 @@ func TestLiveSetupClassifiesEffectiveRepositoryHelpers(t *testing.T) {
 	extra := func(key, value string) func(t *testing.T, r *setupRig, clone string) {
 		return func(t *testing.T, r *setupRig, _ string) {
 			r.roleEnv()
-			t.Setenv("GIT_CONFIG_COUNT", "4")
-			t.Setenv("GIT_CONFIG_KEY_3", key)
-			t.Setenv("GIT_CONFIG_VALUE_3", value)
+			index := strconv.Itoa(len(gitConfigPairs))
+			t.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(len(gitConfigPairs)+1))
+			t.Setenv("GIT_CONFIG_KEY_"+index, key)
+			t.Setenv("GIT_CONFIG_VALUE_"+index, value)
 		}
 	}
 	for name, tc := range map[string]struct {
@@ -690,9 +692,9 @@ func TestGitCredentialHelperURLForms(t *testing.T) {
 // does not resolve, or on a GitHub 5xx. Each fake call records its environment, its HOME's
 // emptiness and its directory under the rig's audit directory.
 type setupRig struct {
-	t                                    *testing.T
-	root, start, bin, audit, owners, tmp string
-	marker, realGit                      string
+	t                                          *testing.T
+	root, start, bin, audit, owners, tmp, home string
+	marker, realGit                            string
 }
 
 // setupNetwork is how the rig's fake ls-remote ends when nothing authenticates it. The three
@@ -797,9 +799,9 @@ func newSetupRig(t *testing.T, network setupNetwork) *setupRig {
 	r := &setupRig{
 		t: t, root: root, start: filepath.Join(root, "start"), bin: filepath.Join(root, "bin"),
 		audit: filepath.Join(root, "audit"), owners: filepath.Join(root, "owners"), tmp: filepath.Join(root, "tmp"),
-		marker: filepath.Join(root, "marker"), realGit: realGit,
+		marker: filepath.Join(root, "marker"), realGit: realGit, home: filepath.Join(root, "home"),
 	}
-	for _, dir := range []string{r.start, r.bin, r.owners, r.tmp} {
+	for _, dir := range []string{r.start, r.bin, r.owners, r.tmp, r.home} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -823,9 +825,9 @@ func newSetupRig(t *testing.T, network setupNetwork) *setupRig {
 	return r
 }
 
-// roleEnv sets the role's command-scope git entries, gitCredentialEnv's as the runtime sets them.
+// roleEnv sets the role's command-scope git entries, gitConfigEnv's as the runtime sets them.
 func (r *setupRig) roleEnv() {
-	for _, variable := range gitCredentialEnv() {
+	for _, variable := range gitConfigEnv() {
 		r.t.Setenv(variable.Name, variable.Value)
 	}
 }
@@ -885,7 +887,20 @@ func (r *setupRig) plainClone() string {
 
 func (r *setupRig) git(args ...string) {
 	r.t.Helper()
-	if output, err := exec.Command(r.realGit, args...).CombinedOutput(); err != nil {
+	command := exec.Command(r.realGit, args...)
+	// Every repository the rig makes or configures lies under its root, which the commands that
+	// create one need as their parent, so the helper runs there rather than in the directory the
+	// test process happens to have.
+	command.Dir = r.root
+	// The command carries an environment of its own because a test may plant a git variable with
+	// t.Setenv long after this package's TestMain guard has run:
+	// TestLiveSetupIgnoresTheRoleEnvironmentGitVariables plants the maps setupRig.poisons returns,
+	// GIT_DIR and GIT_COMMON_DIR naming the repository the rig forges among them. GIT_DIR outranks
+	// the directory a command runs in, so a command with no Env of its own would write into that
+	// repository rather than into the rig's own (TestFixtureCommandsIgnoreAPlantedRepository). The
+	// home is the rig's, so every fixture of one rig reads one git and jj configuration.
+	command.Env = fixtureenv.Isolated(r.home)
+	if output, err := command.CombinedOutput(); err != nil {
 		r.t.Fatalf("git %q: %v: %s", args, err, output)
 	}
 }
@@ -947,7 +962,7 @@ func (r *setupRig) audited(name string) []string {
 }
 
 // wantEnvironment is the whole environment, HOME aside, that liveSetupScript's allowlist gives
-// every git under roleEnv: gitCredentialPairs as command-scope entries, with each helper key's
+// every git under roleEnv: gitConfigPairs as command-scope entries, with each helper key's
 // value emptied for the negative control, the role's PATH (runStart's) and owners directory, the
 // four fixed variables, and, for an ls-remote call, GIT_CEILING_DIRECTORIES at ceiling.
 func (r *setupRig) wantEnvironment(withoutHelper bool, ceiling string) []string {
@@ -955,12 +970,12 @@ func (r *setupRig) wantEnvironment(withoutHelper bool, ceiling string) []string 
 		"PATH=" + r.bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"LEGION_GH_OWNERS_DIR=" + r.owners,
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C",
-		"GIT_CONFIG_COUNT=" + strconv.Itoa(len(gitCredentialPairs)),
+		"GIT_CONFIG_COUNT=" + strconv.Itoa(len(gitConfigPairs)),
 	}
 	if ceiling != "" {
 		env = append(env, "GIT_CEILING_DIRECTORIES="+ceiling)
 	}
-	for i, pair := range gitCredentialPairs {
+	for i, pair := range gitConfigPairs {
 		value := pair[1]
 		if withoutHelper && strings.HasSuffix(strings.ToLower(pair[0]), "helper") {
 			value = ""
@@ -1024,11 +1039,22 @@ func (h *helperLog) helper(name string) string {
 func (h *helperLog) repo(name string, keys ...[2]string) string {
 	h.t.Helper()
 	path := filepath.Join(h.dir, name)
-	if output, err := exec.Command(h.realGit, "init", "--quiet", path).CombinedOutput(); err != nil {
+	// Every command here runs under the log's own home, so none of them reads a repository,
+	// configuration or credential of the process that runs the tests.
+	env := fixtureenv.Isolated(h.dir)
+	initialise := exec.Command(h.realGit, "init", "--quiet", path)
+	// The init creates path, so it runs in the log's own directory, which holds it; the configure
+	// below runs in the repository it names with -C, which the init has made by then.
+	initialise.Dir = h.dir
+	initialise.Env = env
+	if output, err := initialise.CombinedOutput(); err != nil {
 		h.t.Fatalf("init %s: %v: %s", name, err, output)
 	}
 	for _, kv := range keys {
-		if output, err := exec.Command(h.realGit, "-C", path, "config", "--add", kv[0], kv[1]).CombinedOutput(); err != nil {
+		configure := exec.Command(h.realGit, "-C", path, "config", "--add", kv[0], kv[1])
+		configure.Dir = path
+		configure.Env = env
+		if output, err := configure.CombinedOutput(); err != nil {
 			h.t.Fatalf("config %s: %v: %s", kv[0], err, output)
 		}
 	}

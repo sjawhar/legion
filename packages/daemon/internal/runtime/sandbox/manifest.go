@@ -16,7 +16,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -24,16 +27,22 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// The pod's init containers: workspace-fetch, the one that holds the provisioning token and
-// mounts nothing an agent of the issue can write; and workspace-init, which works on the issue's
-// volume without it. Each of the six role containers is named for its role.
+// The pod's init containers: workspace-fetch, one of the two that hold the provisioning token and
+// mount nothing an agent of the issue can write; skills-fetch, the other such container, which a
+// deployment naming runtime.kubernetes.skills_repository adds and which clones the skills
+// marketplace into the pod's skills volume; and workspace-init, which works on the issue's volume
+// without the token. The pod's one container is its kind's (podKind.container).
 const (
-	fetchContainer = "workspace-fetch"
-	initContainer  = "workspace-init"
+	fetchContainer  = "workspace-fetch"
+	skillsContainer = "skills-fetch"
+	initContainer   = "workspace-init"
 )
 
-// The pod's volumes. ghVolume is the prefix of each issue-pod role's gh volume (roleVolume), the
-// projection of its role Secret's two gh files its container alone mounts at GHConfigDir.
+// The pod's volumes. ghVolume is the prefix of each launcher role's gh volume (roleVolume), the
+// projection of its role Secret's gh files, which only that role's namespace sees at GHConfigDir.
+// roleHomesVolume is an issue pod's disk emptyDir of every role's home overlay, temporary
+// directories and own config home (issuePod.mainVolumes), and roleProbeVolume the image probe's
+// disk emptyDir its role-namespace check runs a role generation over (probeManifest).
 const (
 	provisionVolume = "provision"
 	stateVolume     = "state"
@@ -41,6 +50,19 @@ const (
 	configVolume    = "config"
 	providersVolume = "providers"
 	ghVolume        = "gh"
+	roleHomesVolume = "role-homes"
+	roleProbeVolume = "role-probe"
+	// testPGVolume is the disk emptyDir an issue pod keeps its own test PostgreSQL's cluster on
+	// (TestPGDir), when the deployment sets runtime.kubernetes.test_postgres.
+	testPGVolume = "testpg"
+	// skillsVolume is the disk emptyDir skills-fetch clones the deployment's skills marketplace
+	// into (SkillsDir), read-write there and read-only in the pod's launcher container, so a role
+	// installs from a directory no role wrote; skillsTempVolume is that container's own in-memory
+	// TMPDIR, where its one-shot credential goes, off every volume another container mounts, as
+	// workspace-fetch's tempVolume is. Neither exists when the deployment names no skills
+	// repository.
+	skillsVolume     = "skills"
+	skillsTempVolume = "skills-tmp"
 )
 
 // The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
@@ -77,26 +99,41 @@ const (
 const podUser = 1000
 
 // runtimeOwned are the main container's variables the runtime sets itself: exactly the names
-// mainEnvironment sets for a tree agent or the controller
+// mainEnvironment sets for a tree agent, a Claude Code one or the controller
 // (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the shared validator refuses
 // in a spec's Env and as a secret's pointer, and CheckPod in the operator's pod. The image probe's
-// container sets none of its own.
-var runtimeOwned = map[string]bool{
-	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
-	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
-	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
-	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
-	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
-	"GIT_CONFIG_COUNT": true, "GIT_CONFIG_KEY_0": true, "GIT_CONFIG_VALUE_0": true,
-	"GIT_CONFIG_KEY_1": true, "GIT_CONFIG_VALUE_1": true, "GIT_CONFIG_KEY_2": true, "GIT_CONFIG_VALUE_2": true,
-	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
-	"TMPDIR": true, "GOCACHE": true, "GOMODCACHE": true, "BUN_INSTALL_CACHE_DIR": true,
-	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
-	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
-	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
-	ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
-}
+// container sets none of its own. The two CLAUDE_* names and claudelaunch.SessionVariable are told
+// a Claude role alone, as the controller's Slack channels are the controller's, and owned in every
+// pod: an operator that could place a Claude Code worker's configuration directory, let the clock
+// prompt it or name another session for its launcher to keep would be undoing the launch
+// (claudelaunch.Environment). CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, CLAUDE_CODE_USE_FOUNDRY and
+// the rest of Claude Code's own variables are not here, and stay the operator's to set.
+var runtimeOwned = func() map[string]bool {
+	owned := map[string]bool{
+		"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
+		"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
+		"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
+		"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
+		"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
+		"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
+		"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
+		"TMPDIR": true, "GOCACHE": true, "GOMODCACHE": true, "BUN_INSTALL_CACHE_DIR": true,
+		"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
+		"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
+		"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
+		"CLAUDE_CONFIG_DIR": true, "CLAUDE_CODE_DISABLE_CRON": true,
+		claudelaunch.SessionVariable: true, ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
+		// The pod's own test database, which an issue pod's roles are told where the deployment
+		// serves one (runtime.kubernetes.test_postgres): owned in every pod, since a spec or an
+		// operator's pod env naming another server would point every test of the pod at it.
+		launcher.TestPGVariable: true,
+	}
+	// GIT_CONFIG_COUNT and each GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> gitConfigEnv sets.
+	for _, entry := range gitConfigEnv() {
+		owned[entry.Name] = true
+	}
+	return owned
+}()
 
 // slackChannelsVariable is the project's slack_channels as the runtime tells the controller it
 // launches (Options.ControllerSlackChannels): comma-joined, set even when empty, so no other value
@@ -115,19 +152,23 @@ var sessionStoreVariables = []string{ompsessions.StorageVariable, ompsessions.DS
 // whatever the Secret's key is called.
 const providersDSNFile = ProvidersDir + "/" + ompsessions.DSNFileName
 
-// sessionProxyFlagNames are the flags a role container's `legion launcher` is told the Cloud SQL
+// sessionProxyFlagNames are the flags a pod's `legion launcher` is told the Cloud SQL
 // session database by, in the order sessionProxyFlags writes them: the instance's connection name,
 // the database in it, and the IAM login the pod signs in as.
 var sessionProxyFlagNames = [3]string{"--session-instance", "--session-database", "--session-user"}
 
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
-// probe's, whose names the operator's volumes may not take: the shared ones and each launcher
-// role's private ones. The agent-secrets volumes are reserved whether or not this deployment
-// enrolls: an operator's pod may never claim them. Every launcher role, the controller's included,
-// has a key volume when the pod enrolls and a gh volume always.
+// probe's, whose names the operator's volumes may not take: the shared ones, the role homes, the
+// test database's, the skills clone's and its fetch's TMPDIR, and each launcher role's private
+// ones. The agent-secrets volumes are reserved
+// whether or not this deployment enrolls, the test database's whether or not it sets
+// `runtime.kubernetes.test_postgres`, and the skills volumes whether or not it names a
+// `runtime.kubernetes.skills_repository`: an operator's pod may never claim them. Every launcher
+// role, the controller's included, has a key volume when the pod enrolls and a gh volume always.
 func legionVolumeNames() []string {
 	names := []string{
-		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
+		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume, roleProbeVolume, testPGVolume,
+		skillsVolume, skillsTempVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
@@ -138,18 +179,46 @@ func legionVolumeNames() []string {
 }
 
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
-// each role container and the image probe's: an operator's mount may be neither at, under, nor
-// above one. AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this
-// deployment enrolls, GHConfigDir whether or not the pod is an issue's, and FeedDir, which TreeRoot
-// already covers, is named for the read-only mount every issue pod's role container carries there.
+// the launcher container of either pod and the image probe's, or where a role's namespace binds
+// one: an operator's mount may be neither at, under, nor above one. AgentSecretsKeyDir and
+// AgentSecretsTokenDir are reserved whether or not this deployment enrolls, GHConfigDir whether or
+// not the pod is an issue's, SkillsDir whether or not the deployment names a skills repository —
+// an operator's mount there would overlay the read-only clone a role installs from with storage
+// the operator writes — FeedDir, which TreeRoot already covers, is named for the read-only
+// mount every issue pod's container carries there, RolesDir is where an issue pod mounts every
+// role's own volumes, which each role's namespace covers whole, HomeMountsDir is where an issue
+// pod's roles container mounts what belongs under the home (homeMountsView), which each role's
+// namespace covers too once it has bound each back, and RoleProbeDir is the image probe's volume
+// for its role-namespace check.
 func legionMountPaths() []string {
 	paths := []string{
 		TreeRoot, FeedDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
-		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir,
+		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir, HomeMountsDir, RoleProbeDir, SkillsDir,
 	}
 	slices.Sort(paths)
 	return paths
 }
+
+// roleNamespacePaths are the directories each role's namespace puts filesystems of its own at
+// (`legion launcher role-init`): its temporary directories, binds of its directories under
+// RoleHomesDir, and small private memory filesystems. role-init carries back a mount it finds under
+// one of them, so an operator's mount may be under one, but one at or above one would be covered in
+// every role's namespace. role-init resolves each before it covers it, so a mount spelled through
+// one of the worker image's links to them (imageLinks: /var/lock and /var/run/lock to /run/lock,
+// /run/shm and /var/run/shm to /dev/shm) lands on what it covers, which CheckPod compares through
+// those links.
+var roleNamespacePaths = []string{"/dev/shm", "/run/lock", "/tmp", "/var/tmp"}
+
+// roleReplacedPaths are the paths each role's namespace replaces with a filesystem of its own and
+// carries no mount back onto: role-init's privateDevices mounts a new devpts instance at /dev/pts,
+// binds that instance's ptmx over /dev/ptmx, and mounts its own IPC namespace's mqueue at
+// /dev/mqueue, and prepareRoleNamespace mounts the role's own /proc last of all. An operator's
+// mount at, under or above one would vanish from every role, so CheckPod refuses every one, where
+// it refuses only a mount at or above a roleNamespacePaths entry, whose mounts role-init carries
+// back. role-init's other mounts are guarded elsewhere: its binds under launcher.FixedRoot and its
+// covers of RolesDir and HomeMountsDir are legionMountPaths, and its home overlay carries every
+// operator mount under the home back (homeMountsView), xdgStateHome refusing one at or above it.
+var roleReplacedPaths = []string{"/dev/mqueue", "/dev/ptmx", "/dev/pts", "/proc"}
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {
@@ -158,8 +227,8 @@ type launch struct {
 	// kind is the pod's kind, decided once from the claim (prepare): every facet of the pod that an
 	// issue pod and the project controller's build differently is the kind's.
 	kind podKind
-	// roles are the pod's launcher roles, one container each: the roles of the kind its labels name
-	// (podKindOf).
+	// roles are the pod's launcher roles, all of them served by the pod's one container: the roles
+	// of the kind its labels name (podKindOf).
 	roles []claim.Role
 	// workspace is the launchers' working directory (podKind.prepare): an issue pod's workspace,
 	// which workspace-init provisions on the issue's volume (workspace.Location under TreeRoot), or
@@ -183,19 +252,170 @@ type launch struct {
 	gitHubDefault string
 	// gh is the image's real gh (Tools.GH), every agent's LEGION_GH_PATH.
 	gh string
+	// claude is what a Claude Code launch needs beyond an Oh My Pi one, resolved once in prepare
+	// and zero for every other backend (claudeInputs).
+	claude claudeInputs
+	// kept is what the live pod this launch keeps rather than replaces already carries for its
+	// role, read from that pod's stored template (relaunch's keptBy). Nil is a launch that builds
+	// the pod itself — every replacing launch, and every caller that only builds a manifest — whose
+	// pod carries the configuration as it now reads.
+	kept *keptPod
 }
 
-// configName is the runtime as `legion.yaml` names it (`runtime: kubernetes`), the name a backend's
-// entry lists when this runtime launches it (runtime.Backends).
-const configName = "kubernetes"
+// keptPod is what a live pod a launch keeps was built with, for the one role that launch starts in
+// it: the facets of the pod the role's own start command names, which a pod cannot be changed to
+// carry (INFRA-484). A pod that has drifted from the configuration is replaced by an update round,
+// which first tasks every worker in it to push its work and answer, and not by the launch that
+// finds it; so the launch starts its role as that pod was built, and the role runs degraded —
+// without the secrets broker, without an overlay added since — until the round replaces the pod.
+// It can still push its work and answer the round, which a process that refused to start could
+// not.
+type keptPod struct {
+	// enrolled is the enrollment decision (Runtime.enrollsIn) read of this pod when the launch
+	// began: the runtime enrols its pods and the pod carries that enrollment for the role, both
+	// the projected token volume and the role's own key volume, the two the shim's agent-secrets
+	// flags name and stat (carriesEnrollment, launcherCommand).
+	enrolled bool
+	// overlays are the role's own overlay files (Options.RoleConfigFiles) the pod's container
+	// actually holds, in configuration order: the only ones its generation's PI_CONFIG_FILES may
+	// name (heldRoleOverlays, roleOperatorEnv).
+	overlays []string
+	// memory are the project's memory overlay files (Options.MemoryConfigFiles) the pod's
+	// container actually holds, in configuration order: what the pod holds for every role, as
+	// overlays is (heldRoleOverlays). Which launch is told them is a launch's own question, and
+	// launch.overlays asks it once — only a launch whose tree is in the memory group
+	// (runtime.SpawnSpec.Memory) names them in its generation's PI_CONFIG_FILES, after the role's
+	// own (roleOperatorEnv).
+	memory []string
+	// store is the session store this pod was built under (heldSessionStore), the kind alone: it
+	// is all a start command names, since the URL itself is in the file the pod projects or its
+	// own launcher writes (sessionDSNFile). A pod created before the store was configured carries
+	// none, and its role is told neither of Oh My Pi's two session variables rather than a URL
+	// file it cannot read.
+	store ompsessions.StoreKind
+	// skills is the skills marketplace this pod was built with, read from its stored shape
+	// (podShapeRecord.SkillsRepository): the repository whose clone its skills volume holds, and
+	// so the one a role started in it may install from. It is the zero repository for a pod built
+	// before the deployment named one, or built with none, whose volume holds no clone at all —
+	// such a role starts without its skills until an ordinary update round replaces the pod, as a
+	// role of a pod built before an overlay was added runs without that overlay. A launch that
+	// builds the pod itself carries no keptPod and uses the configuration as it now reads
+	// (podKind.skillsRepository).
+	skills ghrepo.Repository
+}
+
+// enrollsIn is the one decision whether a generation of role started now in a pod holds the
+// secrets broker: the runtime enrols its pods at all (runtime.kubernetes.agent_secrets), and the
+// pod that generation runs in carries that enrollment — the broker's projected token volume and
+// the role's own key volume (carriesEnrollment). A nil pod is a launch that builds the pod
+// itself, which carries the configuration as it now reads.
+//
+// Everything a generation's broker reaches reads this one answer, so its argv and its environment
+// can never disagree again (INFRA-484): the shim's three agent-secrets flags (launcherCommand)
+// and the AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR an agent reads to decide it holds a broker
+// at all (mainEnvironment), both through launch.enrolls; the record of what the generation was
+// handed (handedAddresses, recordFor, from the launch's own answer); and the comparison an
+// observation makes against that record (movedEnvironment, from the live pod the generation runs
+// in). A role in a kept pod that carries no enrollment is told of none, so it reports a resource
+// it cannot reach rather than a secrets grant it never had, and its generation is recorded as
+// carrying no broker URL, so moving the broker's URL never reads as StaleAddress and never
+// repoints that role mid-turn: the update round replaces its pod once every worker has answered.
+//
+// The launch reads the pod from the Sandbox's stored template, the pod's own build (keptBy), and
+// an observation from the live pod; neither a kubelet nor an admission webhook takes a volume off
+// a pod, so the two read the same enrollment.
+func (r *Runtime) enrollsIn(pod *corev1.PodSpec, role claim.Role) bool {
+	return r.agentSecrets != nil && (pod == nil || carriesEnrollment(*pod, role))
+}
+
+// enrolls is this launch's reading of that one decision: of the live pod it keeps, as the launch
+// read that pod's stored template when it began (keptPod.enrolled), or of the pod it builds
+// itself.
+func (l launch) enrolls(r *Runtime) bool {
+	if l.kept != nil {
+		return l.kept.enrolled
+	}
+	return r.enrollsIn(nil, l.spec.Role)
+}
+
+// overlays are this launch's settings overlays, which its generation is told in PI_CONFIG_FILES
+// after the operator's own (roleOperatorEnv): the role's own overlays, then, for a launch whose
+// tree is in the memory group (runtime.SpawnSpec.Memory), the project's memory overlays, which
+// outrank them. They are the ones a kept pod holds, which may be fewer than role_config_files and
+// memory.config_files now name, and all of the configuration's for a launch that builds the pod.
+// This is the one place a launch's memory group decides what it is told, for a kept pod as for a
+// fresh one: the pod holds the memory overlays for every role of it (keptPod.memory).
+func (l launch) overlays(r *Runtime) []string {
+	own, memory := r.roleConfigFiles[l.spec.Role], r.memoryConfigFiles
+	if l.kept != nil {
+		own, memory = l.kept.overlays, l.kept.memory
+	}
+	if !l.spec.Memory {
+		return own
+	}
+	return withMemoryOverlays(own, memory)
+}
+
+// withMemoryOverlays is one PI_CONFIG_FILES list: a role's own overlays and then the project's
+// memory overlays, which outrank them, and own itself where there is no memory overlay to add, so
+// a deployment whose project names no memory overlay hands every caller the list it handed before
+// the block existed (launch.overlays, probeManifest).
+func withMemoryOverlays(own, memory []string) []string {
+	if len(memory) == 0 {
+		return own
+	}
+	return slices.Concat(own, memory)
+}
+
+// sessionStore is the kind of store this launch's generation keeps its session in: the one the
+// kept pod was built under, which is the only one its role can reach (keptPod.store), and the
+// configuration's for a launch that builds the pod itself. The kind is all of a store a start
+// command names, since the URL itself is in the file the pod projects or its own launcher writes
+// (sessionDSNFile). Oh My Pi refuses to start on a URL file it cannot read, so a role of a kept
+// pod told the configuration's store — a key the pod's providers volume does not project, a
+// proxy its launcher does not serve — would never register and never answer the round that is to
+// replace that pod (INFRA-484). What it costs is that such a role writes its session into the
+// store its pod has until the round replaces the pod, which a role that never started could not
+// do at all.
+func (l launch) sessionStore(r *Runtime) ompsessions.StoreKind {
+	if l.kept != nil {
+		return l.kept.store
+	}
+	return r.sessionStore.Kind
+}
+
+// claudeInputs are the parts of a Claude Code launch that are decided before the pod is touched:
+// the `legion` the pod runs claude-bridge from, the session this generation starts, and the MCP
+// document its launcher writes. Each is resolved in prepare rather than where it is used, so one
+// generation's agent command and its launcher file name the same session and the same document
+// however often either is rebuilt.
+type claudeInputs struct {
+	// legion is the image's `legion` (Tools.Legion), whose claude-bridge runs the worker's turns.
+	legion string
+	// session is the uuid the agent command names: the one the recorded transcript continues when
+	// the launch resumes (prepare read it from spec.ResumeSessionFile with
+	// claudelaunch.ResumeSession), and a fresh one otherwise.
+	session string
+	// resume is whether session is a recorded transcript's rather than a fresh uuid, which is the
+	// difference between the agent command's `--resume` and its `--session-id` (claudelaunch.Argv).
+	resume bool
+	// mcp is the `--mcp-config` document (claudelaunch.MCPConfig), which the launcher writes into
+	// the generation's private directory as claudeMCPFile.
+	mcp string
+}
+
+// runsClaude is whether the launch's role runs Claude Code rather than the image's Oh My Pi: its
+// agent command, its launcher file and three of its variables are the Claude lane's.
+func (l launch) runsClaude() bool { return runtime.Of(l.spec.Backend) == runtime.BackendClaude }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
 // the daemon's disk, so a launch that cannot be honoured is refused before any API call: the
 // shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A secret named for the
 // provisioning token is refused, the one key the runtime writes whose pointer the worker container
 // is never told (the boot token's and the Dispatch bearer's pointers are runtime-owned, so the
-// shared refusal already covers them). prepare decides the pod's kind here, and only here: the
-// project controller's claim (`controller: daemon`) runs the controller's pod, every workflow claim
+// shared refusal already covers them). prepare decides the pod's kind from the claim's role
+// (podKindFor, which an update round reads a recorded process's kind by too): the project
+// controller's claim (`controller: daemon`) runs the controller's pod, every workflow claim
 // its issue's pod, which refuses a spec with no repository (issuePod.prepare). The labels the kind
 // gives the pod must name that kind back (podKindOf), so a launch and the Sandbox it leaves cannot
 // disagree on the pod's roles.
@@ -209,16 +429,27 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
-	// A pod's agent is the worker image's Oh My Pi (agentArgv): a backend whose entry does not name
-	// this runtime is refused.
-	if backend := runtime.Of(spec.Backend); !runtime.Backends[backend].LaunchedBy(configName) {
-		return launch{}, refuse("its role runs on %s, which the worker image does not carry: a pod runs Oh My Pi alone", backend)
-	}
-	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, gh: r.tools.GH}
-	if spec.Role == claim.RoleController {
-		l.kind = controllerPod{}
-	} else {
+	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: podKindFor(spec.Role), gh: r.tools.GH}
+	if spec.Role != claim.RoleController {
 		l.cacheURL = r.cacheURL(CacheSandboxName(r.project, spec.Repository))
+	}
+	if l.runsClaude() {
+		mcp, err := claudelaunch.MCPConfig(claudeBun, claudePluginDir, claudeConfigDir(spec.Role))
+		if err != nil {
+			return launch{}, refuse("its Claude Code MCP configuration: %v", err)
+		}
+		l.claude = claudeInputs{legion: r.tools.Legion, session: claudelaunch.NewSessionID(), mcp: string(mcp)}
+		// A launch that resumes continues the recorded transcript, by the id read from its path,
+		// which is the rule a Claude claim's recorded session is held to and the tmux lane's too
+		// (claudeResumeSession, runtime/tmux/claude.go): a transcript of this pod's own Claude
+		// Code directory and nothing else. One that starts a session names a fresh uuid.
+		if spec.ResumeSessionFile != "" {
+			session, err := claudelaunch.ResumeSession(claudeConfigDir(spec.Role), spec.ResumeSessionFile)
+			if err != nil {
+				return launch{}, refuse("%v", err)
+			}
+			l.claude.session, l.claude.resume = session, true
+		}
 	}
 	if err := l.kind.prepare(&l); err != nil {
 		return launch{}, refuse("%v", err)
@@ -261,9 +492,11 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 }
 
 // systemPrompt is the one --append-system-prompt value, the same text tmux's pane shell builds
-// (runtime/tmux/prompt.go): the role prompt files concatenated, then the addressing sentence, then
-// the deployment instructions, separated by a blank line, each file's trailing newlines dropped as
-// `$(cat …)` drops them. A pod cannot read the daemon's files, so the text is inlined here.
+// (runtime/tmux/prompt.go): the role prompt files concatenated, then the addressing sentence,
+// then the deployment instructions, then the project's memory instructions, which only a launch
+// whose tree is in the memory group is given (PromptParts.MemoryInstructionsPath), separated by a
+// blank line, each file's trailing newlines dropped as `$(cat …)` drops them. A pod cannot read
+// the daemon's files, so the text is inlined here.
 func systemPrompt(parts runtime.PromptParts) (string, error) {
 	var role strings.Builder
 	for _, path := range parts.RolePromptPaths {
@@ -277,8 +510,11 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 	if parts.Addressing != "" {
 		fragments = append(fragments, parts.Addressing)
 	}
-	if parts.DeploymentInstructionsPath != "" {
-		text, err := os.ReadFile(parts.DeploymentInstructionsPath)
+	for _, path := range []string{parts.DeploymentInstructionsPath, parts.MemoryInstructionsPath} {
+		if path == "" {
+			continue
+		}
+		text, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("prompt file: %w", err)
 		}
@@ -302,9 +538,22 @@ func SessionOnVolume(file, root string) (string, error) {
 	return filepath.Join(root, SessionsSubPath, rest), nil
 }
 
-// agentArgv is the command the shim runs: the agent with its two explicit extensions, the Envoy
-// plugin first, `--resume` on the recorded session when resuming, then RPC mode and the system
-// prompt. For a plain launch the two roots are the image's own (envoyPlugin, legionPlugin); for
+// SessionFromVolume is the recorded session path a file on a tree or controller
+// volume had under the pod's sessions directory. It is SessionOnVolume's
+// inverse and refuses a file outside the volume's sessions subdirectory.
+func SessionFromVolume(file, root string) (string, error) {
+	sessions := filepath.Join(root, SessionsSubPath)
+	relative, err := filepath.Rel(sessions, filepath.Clean(file))
+	if err != nil || relative == "." || !filepath.IsLocal(relative) {
+		return "", fmt.Errorf("session file %s is not under %s", file, sessions)
+	}
+	return filepath.Join(ompSessionsDir, relative), nil
+}
+
+// agentArgv is the command the shim runs, the launch's own harness: the Claude Code command for a
+// Claude role (claudeArgv), and otherwise the image's Oh My Pi with its two explicit extensions,
+// the Envoy plugin first, `--resume` on the recorded session when resuming, then RPC mode and the
+// system prompt. For a plain launch the two roots are the image's own (envoyPlugin, legionPlugin); for
 // an installing launch (l.spec.Plugins set, LEGION-164) they are the pair launcherCommand's
 // install wrapper lands under this generation's own directory (pluginRoots), installed before Oh
 // My Pi starts rather than the image's. Extension discovery stays on either way: a pod runs the
@@ -317,6 +566,9 @@ func SessionOnVolume(file, root string) (string, error) {
 // image leaves unlinked from its profile: Oh My Pi loads a plugin that is both installed and named
 // by --extension twice, which the boot gate's pod lane refuses an image for.
 func (l launch) agentArgv(agent []string) []string {
+	if l.runsClaude() {
+		return l.claudeArgv()
+	}
 	envoy, legion := envoyPlugin, legionPlugin
 	if l.spec.Plugins != nil {
 		envoy, legion = pluginRoots(pluginGenDir(roleStateHome(l.spec.Role), l.spec.Generation))
@@ -326,6 +578,25 @@ func (l launch) agentArgv(agent []string) []string {
 		argv = append(argv, "--resume="+l.spec.ResumeSessionFile)
 	}
 	return append(argv, "--mode", "rpc", "--append-system-prompt", l.prompt)
+}
+
+// claudeArgv is the command the shim runs for a Claude Code role: the agent command
+// claudelaunch.Argv builds around the `legion claude-bridge` the pod runs it under, naming the
+// Claude Code this generation's start script installed (claudeCodeBinary, under the role's state
+// home: the image carries none) and the image's claude-envoy root (claudePluginDir), reading the
+// MCP document its launcher writes into this generation's private directory (claudeMCPFile), and
+// then the one system prompt word, which is the same inlined text the Oh My Pi branch carries
+// (l.prompt): a pod cannot read the daemon's prompt files, so neither harness reads them there.
+// The session is the launch's own (claudeInputs): `--resume <uuid>` of the transcript a replaced
+// pod left, by the id prepare read from the recorded path, and `--session-id <fresh uuid>` when
+// the launch starts a session. Claude Code resumes by id and never by path, so the recorded file
+// name itself is never passed. Options.Agent, the operator's Oh My Pi override, does not reach
+// here: the Claude command is the runtime's, as the tmux lane's is the host's boot-resolved one.
+func (l launch) claudeArgv() []string {
+	claude := claudeCodeBinary(roleStateHome(l.spec.Role), l.spec.Generation)
+	paths := claudelaunch.Paths{Legion: l.claude.legion, Claude: claude, PluginDir: claudePluginDir}
+	argv := claudelaunch.Argv(paths, generationDir(l.spec.Generation)+"/"+claudeMCPFile, l.claude.session, l.claude.resume)
+	return append(argv, "--append-system-prompt", l.prompt)
 }
 
 // labels are the pod's resource labels, as its kind gives them (podKind.labels).
@@ -379,7 +650,10 @@ func (r *Runtime) sandboxManifest(l launch) sandbox {
 // (podKind). Beyond the Legion pool's selector and tolerations it asks nothing of its placement:
 // every pod owns a disk of its own and shares nothing with another pod, so the scheduler puts it
 // wherever the pool has room. The controller applies a template only to the next pod it creates,
-// so the template is rebuilt for every relaunch.
+// so the template is rebuilt for every relaunch. Its metadata carries, beside the two
+// stop-eviction annotations, the configuration the pod is built from (podShapeAnnotation,
+// podShape): the one write of it, so that a later sweep can read what a pod was built from
+// without rebuilding the launch that built it (drift.go).
 func (r *Runtime) podTemplate(l launch) podTemplate {
 	_, providersMounts := r.providers()
 	spec := corev1.PodSpec{
@@ -388,8 +662,11 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 		AutomountServiceAccountToken:  new(false),
 		ServiceAccountName:            r.pod.ServiceAccount,
 		EnableServiceLinks:            new(false),
+		// OnRootMismatch: every file on the pod's disk is already the pod user's, so the kubelet skips
+		// re-owning the whole volume at each mount; on a full volume that walk took about 35 s.
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsNonRoot: new(true), RunAsUser: new(int64(podUser)), RunAsGroup: new(int64(podUser)), FSGroup: new(int64(podUser)),
+			FSGroupChangePolicy: new(corev1.FSGroupChangeOnRootMismatch),
 		},
 		RuntimeClassName:  new(gvisor),
 		NodeSelector:      r.nodeSelector(),
@@ -397,7 +674,7 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 		PriorityClassName: r.scheduling.PriorityClass,
 		Volumes:           r.volumes(l),
 		InitContainers:    l.kind.initContainers(r, l),
-		Containers:        r.launcherContainers(l, providersMounts),
+		Containers:        []corev1.Container{r.launcherContainer(l, providersMounts)},
 	}
 	for i := range spec.InitContainers {
 		kubeletLiteral(&spec.InitContainers[i])
@@ -407,51 +684,25 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 	}
 	return podTemplate{
 		Metadata: podMetadata{
-			Labels:      r.labels(l),
-			Annotations: map[string]string{doNotDisruptAnnotation: "true", safeToEvictAnnotation: "false"},
+			Labels: r.labels(l),
+			Annotations: map[string]string{
+				doNotDisruptAnnotation: "true", safeToEvictAnnotation: "false",
+				podShapeAnnotation: r.podShapes[l.kind],
+			},
 		},
 		Spec: spec,
 	}
 }
 
-// launcherContainers are the pod's launcher containers, one per role of l.roles: an issue pod's
-// six, the controller's one. Each runs only `legion launcher`, told the Cloud SQL session database
-// its own proxy serves this pod's generations when the deployment keeps sessions there
-// (sessionProxyFlags); the per-generation worker-shim argv and plain environment arrive in the
-// launcher's start command, while values the kubelet must resolve (the downward API, the
-// operator's secret refs) are set on every container. An issue pod's role container also mounts
-// its own gh volume, read-only, at GHConfigDir: the role's GitHub credential, which no other
-// role's container can read.
-func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMount) []corev1.Container {
+// launcherContainer is the pod's one container, its kind's (podKind.launcherContainer): an issue
+// pod's `roles`, whose launcher runs every workflow role, or the controller's `controller`. It runs
+// only `legion launcher`, told the Cloud SQL session database its proxies serve this pod's
+// generations when the deployment keeps sessions there (sessionProxyFlags); the per-generation
+// worker-shim argv and plain environment arrive in the launcher's start command, while values the
+// kubelet must resolve (the downward API, the operator's secret refs) are set on the container.
+func (r *Runtime) launcherContainer(l launch, providersMounts []corev1.VolumeMount) corev1.Container {
 	resolved, _ := r.launchEnvironment(l)
-	sessionProxy := r.sessionProxyFlags()
-	containers := make([]corev1.Container, 0, len(l.roles))
-	for _, role := range l.roles {
-		mounts := []corev1.VolumeMount{
-			{Name: issueVolume, MountPath: TreeRoot},
-			{Name: roleVolume("launcher", role), MountPath: LauncherDir, ReadOnly: true},
-			{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
-			{Name: roleVolume(stateVolume, role), MountPath: StateDir},
-			{Name: configVolume, MountPath: xdgConfigHome},
-			{Name: roleVolume(ghVolume, role), MountPath: GHConfigDir, ReadOnly: true},
-		}
-		mounts = append(mounts, l.kind.agentMounts()...)
-		containers = append(containers, corev1.Container{
-			Name:  string(role),
-			Image: r.image,
-			Command: slices.Concat([]string{
-				r.tools.Legion, "launcher", connectFlag, r.streamURL, "--token-file", LauncherDir + "/" + LauncherTokenFile,
-				"--sandbox", l.name, "--role", string(role), "--private-dir", LauncherPrivateDir,
-				"--stop-grace", r.terminationGrace.String(),
-			}, sessionProxy),
-			Env:             slices.Clone(resolved),
-			WorkingDir:      l.workspace,
-			VolumeMounts:    slices.Concat(mounts, providersMounts, agentSecretsMounts(r.agentSecrets, role), r.pod.VolumeMounts),
-			Resources:       r.resources[role],
-			SecurityContext: restrictedContainer(),
-		})
-	}
-	return containers
+	return l.kind.launcherContainer(r, l, resolved, providersMounts)
 }
 
 // kubeletLiteral escapes a container's command and env values against the kubelet's expansion,
@@ -479,11 +730,13 @@ func kubeletEscape(text string) string {
 // credential directory, state and gh volume: each owner's two gh files of its role Secret
 // (GitHubHostsKey(owner) as <owner>/hosts.yml, GitHubConfigKey(owner) as <owner>/config.yml) for
 // the launch's owners (gitHubOwners), read-only to the pod's user, from the same Secret as the
-// launcher token, so the refresher's one Update reaches the container's GHConfigDir. A projection's
+// launcher token, so the refresher's one Update reaches the role's gh directory. A projection's
 // items are fixed for the pod's life, so a pod holds the owners of its creation. A launch with no
 // owners — a controller whose project has no GitHub owner to mint for, and the Sandbox's first
 // template (sandboxManifest), which never runs — gets an empty directory instead: a Secret
 // projection with no items would project every key of the Secret, the launcher token among them.
+// Then the volumes its kind's one container alone mounts (podKind.mainVolumes), the agent-secrets
+// volumes, the providers and the operator's.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	providers, _ := r.providers()
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
@@ -517,8 +770,8 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 	_, disk := l.kind.disk(r, l)
 	volume := corev1.Volume{Name: issueVolume, VolumeSource: disk}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
-	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
-		r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
+	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(r, l), []corev1.Volume{config}, roleVolumes,
+		l.kind.mainVolumes(r), r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
 }
 
 // agentSecretsVolumes are, for a pod the runtime enrolls with the secrets broker
@@ -526,8 +779,9 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 // admission policy permits one volume per audience) and one private memory key directory per role
 // of roles, the controller's included; none when the runtime enrolls no pod. Every role of every pod
 // enrolls, so the broker can grant a pod of the Legion daemon's service the secrets that service
-// owns, such as the controller's Slack bot token; the mounts (agentSecretsMounts), the shim's flags
-// (launcherCommand), mainEnvironment and handedAddresses read the same r.agentSecrets.
+// owns, such as the controller's Slack bot token. This builds the pod, so it reads r.agentSecrets
+// whole, as its mounts do (agentSecretsMounts); what a generation is handed reads the enrollment
+// decision instead (enrollsIn), since the pod a launch keeps is never rebuilt.
 func (r *Runtime) agentSecretsVolumes(roles []claim.Role) []corev1.Volume {
 	broker := r.agentSecrets
 	if broker == nil {
@@ -552,10 +806,10 @@ func brokerTokenProjection(broker *AgentSecrets) *corev1.ServiceAccountTokenProj
 	return &corev1.ServiceAccountTokenProjection{Audience: broker.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile}
 }
 
-// agentSecretsMounts are role's launcher container's mounts of the agent-secrets volumes when it
-// enrolls with broker, none when broker is nil: the one configured audience projection, shared,
-// and the role's own key directory, which keeps its generated private key and enrollment id out of
-// the other launcher containers.
+// agentSecretsMounts are the controller's container's mounts of the agent-secrets volumes when it
+// enrolls with broker, none when broker is nil: the one configured audience projection and the
+// role's own key directory. An issue pod's container mounts each role's key directory under the
+// role's directory of RolesDir instead (issuePod.launcherContainer).
 func agentSecretsMounts(broker *AgentSecrets, role claim.Role) []corev1.VolumeMount {
 	if broker == nil {
 		return nil
@@ -622,20 +876,23 @@ func (r *Runtime) sessionDSNPointer() []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: ompsessions.DSNFileVariable, Value: providersDSNFile}}
 }
 
-// sessionDSNFile is the file a generation's Oh My Pi reads its session database's URL from: the
+// sessionDSNFile is the file a generation of l reads its session database's URL from: the
 // providers mount's projection of the Secret key under postgres, and, under cloudsql-iam, the file
-// the generation's own launcher writes in its private directory beside the socket it proxies.
-func (r *Runtime) sessionDSNFile(generation uint64) string {
-	if r.sessionStore.Kind == ompsessions.StoreCloudSQLIAM {
-		return generationDir(generation) + "/" + ompsessions.DSNFileName
+// the generation's own launcher writes in its private directory beside the socket it proxies. The
+// store is the one the pod that generation runs in was built under, which is the configuration's
+// for a launch that builds the pod and the kept pod's own otherwise (launch.sessionStore).
+func (r *Runtime) sessionDSNFile(l launch) string {
+	if l.sessionStore(r) == ompsessions.StoreCloudSQLIAM {
+		return generationDir(l.spec.Generation) + "/" + ompsessions.DSNFileName
 	}
 	return providersDSNFile
 }
 
-// sessionProxyFlags are what each role container's `legion launcher` is told of the Cloud SQL
-// session database it proxies its generations' sessions to, none under any other store. There is
-// no address among them: the launcher binds the socket in the generation's own private directory,
-// which it already knows from --private-dir.
+// sessionProxyFlags are what a pod's `legion launcher` is told of the Cloud SQL session database
+// it proxies its generations' sessions to, none under any other store. There is no address among
+// them: the launcher binds the socket in the generation's own private directory, which it knows
+// from --roles-dir and the role in an issue pod's one container, and from --private-dir in the
+// controller's.
 func (r *Runtime) sessionProxyFlags() []string {
 	if r.sessionStore.Kind != ompsessions.StoreCloudSQLIAM {
 		return nil
@@ -669,17 +926,56 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 	return env
 }
 
+// settingsOverlays is Oh My Pi's list of settings overlays, which the operator's pod env may set
+// and a role's own overlays extend (roleOperatorEnv).
+const settingsOverlays = "PI_CONFIG_FILES"
+
+// roleOperatorEnv is operatorEnv as the launch's role is told it: with the launch's own overlays
+// (launch.overlays, the role's from Options.RoleConfigFiles and then a memory-group launch's from
+// Options.MemoryConfigFiles) after the operator's in PI_CONFIG_FILES, so each of them outranks the
+// operator's, or as PI_CONFIG_FILES in name order when the operator's pod env names none. A role
+// with none is told operatorEnv unchanged.
+//
+// The overlays are the launch's, not the configuration's, so a role started in a live pod the
+// launch keeps is told only the files that pod holds (keptPod): Oh My Pi refuses to start on an
+// entry that is not there, and a role of a drifted pod that never starts never answers the update
+// round that is to replace that pod (INFRA-484). A role whose kept pod holds none of its overlays
+// is told operatorEnv unchanged, exactly as a role with none configured is, and runs without them
+// until the round replaces its pod.
+func (r *Runtime) roleOperatorEnv(l launch) []corev1.EnvVar {
+	env := r.operatorEnv()
+	own := strings.Join(l.overlays(r), ":")
+	if own == "" {
+		return env
+	}
+	at, found := slices.BinarySearchFunc(env, settingsOverlays, func(v corev1.EnvVar, name string) int { return strings.Compare(v.Name, name) })
+	switch {
+	case !found:
+		return slices.Insert(env, at, corev1.EnvVar{Name: settingsOverlays, Value: own})
+	case env[at].Value == "":
+		env[at].Value = own
+	default:
+		env[at].Value += ":" + own
+	}
+	return env
+}
+
 // The XDG base directories, at the standard offsets from the image's HOME: what the issue pod's
-// workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role
-// container is told none of the three home-directory ones: its cache and data homes are the
-// issue's scratch's, shared with every other role of the pod, its state home its own directory
-// under that scratch (roleEnvironment), and the config home alone is shared with workspace-init.
-// The config home is the pod's shared in-memory volume: jj keeps a repository's `--repo`
-// configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init sets there
-// (git.abandon-unreachable-commits false, no repository identity) is what the agent's jj reads.
-// It starts empty in every pod, so nothing an agent wrote reaches workspace-init's jj.
+// workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role is
+// told none of the three home-directory ones: its cache and data homes are the issue's
+// scratch's, shared with every other role of the pod, and its state home a directory per role under
+// that scratch (roleEnvironment). The config home is the one path a role is told the same as
+// workspace-init. There it is the pod's shared in-memory volume: jj keeps a repository's `--repo`
+// configuration under $XDG_CONFIG_HOME/jj/repos/, so workspace-init writes Legion's settings of the
+// issue's clone there (git.abandon-unreachable-commits false, no repository identity). In an issue
+// pod's roles container that volume is under launcher.HomeMountsDir, which no role sees, and each
+// role's role-init binds the role's own config home at the path instead, a copy of the shared one
+// made once per pod (launcher.ConfigHomeDir): the role's jj reads Legion's settings, and what a
+// role writes there — a git `core.fsmonitor`, a jj alias — never runs in another role's git or
+// jj. The shared volume starts empty in every pod, and no role writes it, so nothing an agent wrote
+// reaches workspace-init's jj.
 const (
-	xdgConfigHome = podHome + "/.config"
+	xdgConfigHome = podHome + "/" + launcher.ConfigHomeDir
 	xdgCacheHome  = podHome + "/.cache"
 	xdgDataHome   = podHome + "/.local/share"
 	xdgStateHome  = podHome + "/.local/state"
@@ -687,9 +983,9 @@ const (
 
 // xdgEnvironment is the four XDG base directories on the image's HOME: what the issue pod's
 // workspace-init is told (initEnvironment), the one container of a pod told any of them besides
-// the role containers — workspace-fetch is told none (fetchEnvironment). A role container is
-// told none of them but the config home; its cache and data homes are the issue's scratch's and
-// its state home its own directory there (roleEnvironment).
+// what each role is told — workspace-fetch is told none (fetchEnvironment). A role is told none of
+// them but the config home, at whose path it sees its own; its cache and data homes are the issue's
+// scratch's and its state home a directory per role there (roleEnvironment).
 func xdgEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
@@ -699,18 +995,18 @@ func xdgEnvironment() []corev1.EnvVar {
 	}
 }
 
-// scratchRoot is the issue's scratch, on the issue's volume, which every role launcher mounts
-// whole at TreeRoot: the four directories every role container of the pod is told the same one of
+// scratchRoot is the issue's scratch, on the issue's volume, which every launcher container
+// mounts whole at TreeRoot: the four directories every role of the pod is told the same one of
 // (roleEnvironment) and `state`, which holds one state home per role (roleStateHome).
 const scratchRoot = TreeRoot + "/scratch"
 
-// roleEnvironment is where a role container's agent puts what it writes without being told where:
+// roleEnvironment is where a role's agent puts what it writes without being told where:
 // its temporary directory, the three XDG homes a tool caches under, and the three tool caches that
 // resolve to a path of their own (Go's build and module caches, bun's install cache). Every one of
-// them is on the issue's volume, where neither the gigabyte of ephemeral storage the container is
-// admitted with nor the pod's memory bounds it: a bun install cache alone is 1.4 GB for this
-// repository, and charging it to the container's filesystem is what GKE Autopilot evicted issue
-// pods for. All but the state home are the issue's, one directory every role of it is told the
+// them is on the issue's volume, where neither the pod's ephemeral storage nor the pod's memory
+// bounds it: a bun install cache alone is 1.4 GB for this repository, and charging it to the
+// container's filesystem is what GKE Autopilot evicted issue pods for. All but the state home are
+// the issue's, one directory every role of it is told the
 // same: the temporary directory, the cache and data homes and bun's install cache directly under
 // scratchRoot, and the two Go caches (goBuildCache, goModCache), as uv's cache already was
 // (uvCacheDir). A directory per role is what this replaces, by the human's decision of
@@ -725,11 +1021,11 @@ const scratchRoot = TreeRoot + "/scratch"
 // rather than caution: Oh My Pi names its browser broker's lock from the state root, the name is
 // an abstract unix socket, and an abstract socket name is one name across every container of the
 // pod, so one state home would block every role's broker but the first. Only the config home is
-// neither the issue's scratch nor the role's: it stays the pod's shared in-memory volume
-// (xdgConfigHome), where workspace-init writes the jj configuration the agents' jj reads. None of
-// these directories outlives the pod: the issue's disk is the pod's own generic ephemeral volume,
-// so a later pod of the issue downloads and builds again, and the sharing here is between the
-// roles of one pod, not between pods.
+// neither the issue's scratch nor a directory of it: each role sees its own at xdgConfigHome,
+// which role-init seeds from the pod's shared in-memory volume, where workspace-init writes the jj
+// configuration the agents' jj reads. None of these directories outlives the pod: the issue's disk
+// is the pod's own generic ephemeral volume, so a later pod of the issue downloads and builds
+// again, and the sharing here is between the roles of one pod, not between pods.
 func roleEnvironment(role claim.Role) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
@@ -744,23 +1040,35 @@ func roleEnvironment(role claim.Role) []corev1.EnvVar {
 }
 
 // roleStateHome is the XDG_STATE_HOME a role's agent is told, `/legion/scratch/state/<role>`: the
-// one directory of the issue's scratch that is the role's own rather than the issue's, in a pod
-// whose role containers share the network namespace, the workspace path and the rest of that
+// one directory of the issue's scratch that is one per role rather than one for the issue, in a pod
+// whose roles share the network namespace, the workspace path and the rest of that
 // scratch. Oh My Pi keeps its browser broker's lock under its state root (`run/daemons/<hash of
 // the workspace's real path>/broker.pid`), taken as an abstract unix socket named from the lock
-// path, and an abstract socket name is one name across every container of the pod; with one state
-// root the first role's lock would block every other role's broker, and their `browser.open` would
-// fail while `broker.sock` sits on the first container's own filesystem. The per-role homes hang
+// path, and an abstract socket name is one name across every role of the pod, whose namespaces
+// share the pod's network namespace; with one state root the first role's lock would block every
+// other role's broker, and their `browser.open` would fail while `broker.sock` sits in the first
+// role's own view of the filesystem. The per-role homes hang
 // under one `state` directory so that the shared and the per-role halves of the scratch stay
 // visibly apart and no role's name can collide with a shared directory's. The shim makes Oh My
 // Pi's profile directory under it before Oh My Pi starts (podsafety.EnsureStateHome), since Oh My
 // Pi reads the variable only where that directory exists. It is on the issue's volume, which is
-// neither the pod's memory nor the gigabyte of ephemeral storage the container is admitted with,
-// so Oh My Pi's logs, Chromium's `browser-profiles` and the plugin generation an installing launch
-// puts there (plugins.go) are charged to neither — and, unlike both, the state home outlives a
-// role container's restart, though not the pod, whose own ephemeral volume the issue's disk is.
+// neither the pod's memory nor the pod's ephemeral storage, so Oh My Pi's logs, Chromium's
+// `browser-profiles` and the plugin generation an installing launch puts there (plugins.go) are
+// charged to neither — and, unlike the container's own filesystem, the state home outlives a
+// restart of the `roles` container, though not the pod, whose own ephemeral volume the issue's
+// disk is.
 func roleStateHome(role claim.Role) string {
 	return scratchRoot + "/state/" + string(role)
+}
+
+// claudeConfigDir is a Claude Code role's CLAUDE_CONFIG_DIR, `<role state home>/claude`: its
+// transcripts, its plugin data and the rest of Claude Code's own state. It is the role's own
+// directory of the issue's scratch (roleStateHome), so it is writable by the pod's uid and gid
+// 1000 and is no other role's; like the rest of the pod's disk it lives and dies with the pod
+// (INFRA-80). Nothing in the image makes it: the generation's start script does, before the agent
+// execs (startScript).
+func claudeConfigDir(role claim.Role) string {
+	return roleStateHome(role) + "/claude"
 }
 
 // uv's settings in the worker container, which the pod's environment hands the image's uv.
@@ -768,7 +1076,7 @@ const (
 	// uvPythonRoot holds the Pythons uv installs, one directory per issue (uvPythonDir), and
 	// uvCacheDir its cache, both on the issue's volume beside the workspaces. A project's .venv, in
 	// an issue's workspace on that volume, links to an interpreter in that issue's directory, so
-	// every role container of the issue's pod finds the interpreter and the environment works there
+	// every role of the issue's pod finds the interpreter and the environment works there
 	// as it is; the cache lets every role of the pod reuse what another downloaded. Neither outlives
 	// the pod (roleEnvironment).
 	uvPythonRoot = TreeRoot + "/uv/python"
@@ -789,10 +1097,10 @@ func uvPythonDir(issue string) string {
 	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
 }
 
-// The go command's two caches in the role containers, which roleEnvironment hands every role of
-// the issue the same pair of.
+// The go command's two caches, which roleEnvironment hands every role of the issue the same pair
+// of.
 const (
-	// goBuildCache is the GOCACHE every role container of an issue is told and goModCache its
+	// goBuildCache is the GOCACHE every role of an issue is told and goModCache its
 	// GOMODCACHE, both on the issue's volume beside the workspaces and uv's cache, and both shared
 	// by the issue's roles rather than split per role. Each holds content addressed by its hash,
 	// and the roles of one issue may fill them at once: of the build cache `go help cache` says
@@ -816,8 +1124,13 @@ const (
 // fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, the mounted
 // provisioning token, and, for an issue pod, its repository's cache — its address, which resolves
 // only while the cache is Ready, so the fetch waits for it, and its bearer token's file, from the
-// same Secret — which `fetch` streams a fresh feed from alone before it asks GitHub for the delta.
-// Its git reads no configuration but its own, so it is told no config home.
+// same Secret — which `fetch` streams a fresh feed from alone before it asks GitHub for the delta,
+// and the default branch the daemon recorded for the issue (LEGION_DEFAULT_BRANCH), which the
+// delta brings current beside the one GitHub names now, since `workspace-init provision` starts an
+// issue with no branch there. It is a variable and not a flag so that an image from before it
+// ignores it rather than refusing the command, and a daemon from before it leaves it unset, which
+// the fetch reads as no recorded default. Its git reads no configuration but its own, so it is
+// told no config home.
 func fetchEnvironment(l launch) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
@@ -825,6 +1138,7 @@ func fetchEnvironment(l launch) []corev1.EnvVar {
 		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
 		{Name: "LEGION_REPOSITORY_CACHE_URL", Value: l.cacheURL},
 		{Name: repocache.CacheTokenFileEnv, Value: ProvisionDir + "/" + cacheTokenKey},
+		{Name: "LEGION_DEFAULT_BRANCH", Value: l.spec.DefaultBranch},
 	}
 }
 
@@ -841,10 +1155,23 @@ func (r *Runtime) initEnvironment(launch) []corev1.EnvVar {
 	return append([]corev1.EnvVar{{Name: "PATH", Value: imagePath}}, xdgEnvironment()...)
 }
 
+// skillsEnvironment is `workspace-init skills`'s: the image's PATH alone, its own TMPDIR, where
+// the one-shot credential goes, and the mounted provisioning token. It names no repository cache
+// — a skills marketplace has none, and the clone is one shallow transfer — and no config home: its
+// git reads no configuration but its own.
+func skillsEnvironment() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "PATH", Value: imagePath},
+		{Name: "TMPDIR", Value: initTempDir},
+		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
+	}
+}
+
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the
 // real bounds of the pod's two provisioning phases, one after the other: workspace-fetch's whole
-// budget (its wait for the repository cache, then the stream, verification and delta that share
-// one FetchTimeout) and workspace-init's shared clone of the feed, whose size-following steps
+// budget (its wait for the repository cache, then one FetchTimeout for the cache's stream and its
+// verification, then one of its own for the delta from GitHub) and workspace-init's shared clone
+// of the feed, whose size-following steps
 // share one CloneTimeout. It is how much longer than the boot timeout a launch may wait for
 // its pod's launcher, counted from when it first sees one of the pod's init containers running
 // (awaitRoleLauncher). The fetch started no later than that and the shared clone after the fetch
@@ -876,22 +1203,30 @@ func (r *Runtime) LaunchBound() time.Duration {
 // its agents (podKind.agentEnv: a tree agent its tree, issue, workspace and the gh files its
 // credential is read from, the controller LEGION_CONTROLLER=1), then the rest of the variables
 // every tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's
-// (runtime.kubernetes.pod), then the spec's own, then one `<NAME>_FILE` pointer per secret into
+// (runtime.kubernetes.pod, with the role's own overlays after the operator's in PI_CONFIG_FILES,
+// roleOperatorEnv), then the spec's own, then one `<NAME>_FILE` pointer per secret into
 // the generation's private launcher directory, then one per providers secret into the providers
 // mount, then OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the URL file of the
-// session database every session is a row in (Options.SessionStore, sessionDSNFile), which a pod
-// created before the store was configured does not carry: Oh My Pi refuses to start on an
-// unreadable URL file, so such a generation fails rather than writing a session onto a disk that
-// dies with its pod (the relaunch replaces that pod first, movedSessionStore). None of them repeats
-// another: the runtime refuses a spec naming one of its own (runtimeOwned), and the daemon an
-// operator's variable naming one of the runtime's or a spec's. The temporary directory, XDG homes
-// and tool caches are the issue pod's disk's (roleEnvironment) — the issue's scratch and its Go
-// caches, which every role of it is told the same of, but the state home, which is the role's own
-// — carried to the role's shim by the start command (launcherCommand's Env). POD_UID is the pod's
-// own incarnation, from the downward API. The secrets broker is told when the runtime enrolls
-// pods. PI_SHELL_PREFIX puts the `legion` directory first on PATH alone: a pod's gh is the
+// session database every session is a row in (Options.SessionStore, sessionDSNFile) — of the pod
+// the generation runs in, which is the configuration's store for a launch that builds the pod and
+// the kept pod's own otherwise (launch.sessionStore). Oh My Pi refuses to start on an unreadable
+// URL file, so a generation told a file its pod does not carry never starts, never registers and
+// never answers the round that is to replace that pod (INFRA-484); a pod created before the store
+// was configured carries no URL file at all, and its generation is told neither variable rather
+// than one it cannot read, until the round replaces the pod (movedSessionStore, keptPod.store).
+// None of them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned),
+// and the daemon an operator's variable naming one of the runtime's or a spec's. The temporary
+// directory, XDG homes and tool caches are the issue pod's disk's (roleEnvironment) — the issue's
+// scratch and its Go caches, which every role of it is told the same of, but the state home, one
+// per role — carried to the role's shim by the start command (launcherCommand's Env). POD_UID is
+// the pod's own incarnation, from the downward API. The secrets broker is told when the runtime
+// enrolls pods. PI_SHELL_PREFIX puts the `legion` directory first on PATH alone: a pod's gh is the
 // image's, so no directory of the issue's disk leads PATH. The GIT_CONFIG pairs are the GitHub
-// credential of every git the role runs, in the issue's clone or outside it (gitCredentialEnv).
+// credential of every git the role runs, in the issue's clone or outside it, and two settings that
+// would run a program another role planted in the clone, the fsmonitor and the hooks, turned off
+// (gitConfigEnv); other settings of the shared clone can still run one. A Claude Code role, and no
+// other, is also told Claude Code's own three (claudelaunch.Environment, runsClaude) and the
+// session its launcher keeps (claudelaunch.SessionVariable).
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -916,19 +1251,52 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	add("PATH", podPath(legionDir))
 	add("PI_SHELL_PREFIX", shellprefix.For(legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
-	env = append(env, gitCredentialEnv()...)
-	if broker := r.agentSecrets; broker != nil {
-		add("AGENT_SECRETS_URL", broker.URL)
+	env = append(env, gitConfigEnv()...)
+	// The two variables an agent reads to decide it holds a broker at all, gated on the same one
+	// decision as the shim's agent-secrets flags (enrollsIn, launcherCommand): a generation in a
+	// kept pod that carries no enrollment is started with neither the flags nor these, so its
+	// role reports a resource it cannot reach rather than a secrets grant it never had.
+	if l.enrolls(r) {
+		add("AGENT_SECRETS_URL", r.agentSecrets.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
+	}
+	// The pod's own test database, when the deployment serves one (runtime.kubernetes.test_postgres):
+	// an issue pod's roles alone, whose launcher serves it before it accepts a role start
+	// (launcher's testpg.go). The controller's pod runs no tests and serves none. The name is the
+	// runtime's (podVariables), so no operator's pod env can point it elsewhere.
+	if _, issue := l.kind.(issuePod); issue && r.testPostgres {
+		add(launcher.TestPGVariable, launcher.TestPGDSN)
 	}
 	if spec.Role == claim.RoleController {
 		add(slackChannelsVariable, r.slackChannelsValue())
+	}
+	if l.runsClaude() {
+		// Claude Code's own two (claudelaunch.Environment): where its state lives, and its
+		// scheduled prompts off, since a prompt of the clock's is a turn no task of the daemon's
+		// asked for. Its background tasks stay on: a task that finishes wakes Claude Code into a
+		// turn of its own, which the bridge reports to the daemon as a turn (internal/claudebridge),
+		// so the result is read in a turn the daemon sees rather than after one it thinks has
+		// ended. Both names are the runtime's (runtimeOwned), so neither a spec nor an operator's
+		// pod.env may place them.
+		for _, pair := range claudelaunch.Environment(claudeConfigDir(spec.Role)) {
+			name, value, _ := strings.Cut(pair, "=")
+			add(name, value)
+		}
+		// The session this generation's agent command starts or resumes, which tells the role's
+		// launcher to keep its transcript and phase-reminder record in the session table
+		// (claudelaunch.SessionVariable): the pod's disk dies with the pod, so those files would
+		// otherwise die with it and the next pod's `--resume` would find nothing. It is a variable of
+		// the start command, never a field of shimwire.LauncherStart, and the image's launcher reads
+		// it: the contract number (api.DaemonAPIVersion) and the image probe hold the image to this
+		// daemon, so no launcher that predates it runs this launch. It is plain, so it travels in the
+		// start command alone (launchEnvironment) and changes nothing of the pod.
+		add(claudelaunch.SessionVariable, l.claude.session)
 	}
 	env = append(env, roleEnvironment(spec.Role)...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})
-	env = append(env, r.operatorEnv()...)
+	env = append(env, r.roleOperatorEnv(l)...)
 	for _, name := range sortedKeys(spec.Env) {
 		add(name, spec.Env[name])
 	}
@@ -940,37 +1308,57 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	}
 	env = append(env, r.providersPointers()...)
 	// Oh My Pi's own two variables, which place the session in the database the generation's URL
-	// file names (sessionDSNFile): every pod gets them, since the store must keep sessions in a
-	// database and nothing in a pod may keep a session as a file (internal/podsafety's baseline
-	// covers only a container the runtime tells neither, the image probe's).
-	add(ompsessions.StorageVariable, ompsessions.SQLStorage)
-	add(ompsessions.DSNFileVariable, r.sessionDSNFile(spec.Generation))
+	// file names (sessionDSNFile): every pod this runtime builds gets them, since the store must
+	// keep sessions in a database and nothing in a pod may keep a session as a file
+	// (internal/podsafety's baseline covers only a container the runtime tells neither, the image
+	// probe's). A Claude role is told them too: Claude Code ignores them, and its launcher reaches
+	// the table through them to keep the Claude session's files (claudelaunch.SessionVariable).
+	//
+	// They are gated on the store of the pod the generation runs in, as the broker's two are on
+	// that pod's enrollment (launch.sessionStore, l.enrolls): a kept pod created before any store
+	// was configured projects no URL file, and a role told one it cannot read would refuse to
+	// start, never register and never answer the round that is to replace that pod — so it is told
+	// neither and keeps its session as a file on the pod's disk until the round replaces the pod
+	// (INFRA-484, keptPod.store).
+	if store := l.sessionStore(r); store.InDatabase() {
+		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
+		add(ompsessions.DSNFileVariable, r.sessionDSNFile(l))
+	}
 	return env
 }
 
-// gitCredentialPairs are the git configuration entries gitCredentialEnv sets: the helper for
+// gitConfigPairs are the git configuration entries gitConfigEnv sets: the helper for
 // https://github.com reset, then set to `legion git-credential` (workspace.GitHubCredentialHelper),
 // and credential.useHttpPath on for github.com, so git hands the helper the path whose owner picks
-// the token.
-var gitCredentialPairs = [][2]string{
+// the token; then core.fsmonitor off and core.hooksPath at /dev/null, so no git a role runs starts
+// the fsmonitor program or a hook any configuration file names. The issue's roles share the
+// clone, and each can write its `.git/config` and hooks, so without these a `git status` or `git
+// commit` of one role would run a program another planted, with the first role's credentials.
+// These are two of the settings that can do so, not all: a diff driver, a filter driver or a
+// signing program a role plants in the shared clone still runs in a sibling's git, and the roles
+// are no boundary against each other's code (docs/kubernetes.md).
+var gitConfigPairs = [][2]string{
 	{"credential.https://github.com.helper", ""},
 	{"credential.https://github.com.helper", workspace.GitHubCredentialHelper},
 	{"credential.https://github.com.useHttpPath", "true"},
+	{"core.fsmonitor", ""},
+	{"core.hooksPath", "/dev/null"},
 }
 
-// gitCredentialEnv is gitCredentialPairs as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_<n> and
-// GIT_CONFIG_VALUE_<n>, which git reads after every configuration file, as it reads `-c`. Every git
-// a role process runs then answers https://github.com from the role's gh files, in the issue's
-// clone or outside it: a clone the setup command makes (runtime.kubernetes.setup: Oh My Pi's
-// marketplace clone among them), or a repository an agent clones for itself. The reset drops every
-// helper a configuration file names for github.com, the image's or a repository's, and the helper
-// it sets is the one the issue's clone already names, so git in the clone asks what it asked
-// before. Any other host is left to the configuration files. `legion git-credential` answers only
-// an owner of the project, from that owner's directory of LEGION_GH_OWNERS_DIR (ghAgentEnv), and
-// `legion gh` adds its own entry after these (withGitHubUseHTTPPath, cmd/legion/gh.go).
-func gitCredentialEnv() []corev1.EnvVar {
-	env := []corev1.EnvVar{{Name: "GIT_CONFIG_COUNT", Value: strconv.Itoa(len(gitCredentialPairs))}}
-	for i, pair := range gitCredentialPairs {
+// gitConfigEnv is gitConfigPairs as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_<n> and GIT_CONFIG_VALUE_<n>,
+// which git reads after every configuration file, the repository's own `.git/config` among them,
+// as it reads `-c`. Every git a role process runs then answers https://github.com from the role's
+// gh files, in the issue's clone or outside it: a clone the setup command makes
+// (runtime.kubernetes.setup: Oh My Pi's marketplace clone among them), or a repository an agent
+// clones for itself. The reset drops every helper a configuration file names for github.com, the
+// image's or a repository's, and the helper it sets is the one the issue's clone already names, so
+// git in the clone asks what it asked before. Any other host is left to the configuration files.
+// `legion git-credential` answers only an owner of the project, from that owner's directory of
+// LEGION_GH_OWNERS_DIR (ghAgentEnv), and `legion gh` adds its own entry after these
+// (withGitHubUseHTTPPath, cmd/legion/gh.go).
+func gitConfigEnv() []corev1.EnvVar {
+	env := []corev1.EnvVar{{Name: "GIT_CONFIG_COUNT", Value: strconv.Itoa(len(gitConfigPairs))}}
+	for i, pair := range gitConfigPairs {
 		env = append(env,
 			corev1.EnvVar{Name: "GIT_CONFIG_KEY_" + strconv.Itoa(i), Value: pair[0]},
 			corev1.EnvVar{Name: "GIT_CONFIG_VALUE_" + strconv.Itoa(i), Value: pair[1]})
@@ -979,8 +1367,9 @@ func gitCredentialEnv() []corev1.EnvVar {
 }
 
 // launchEnvironment is mainEnvironment split into its two carriers: the variables the kubelet
-// resolves (the downward API, the operator's Secret references), set on every role container, and
-// the plain NAME=value pairs the launcher's start command carries to each generation's child.
+// resolves (the downward API, the operator's Secret references), set once on the launcher's
+// container, and the plain NAME=value pairs the launcher's start command carries to each
+// generation's child.
 func (r *Runtime) launchEnvironment(l launch) ([]corev1.EnvVar, []string) {
 	var resolved []corev1.EnvVar
 	var plain []string
@@ -1005,18 +1394,20 @@ const connectFlag = "--connect"
 type handedAddress struct{ name, value string }
 
 // handedAddresses are every address a role process launched now carries, whatever its role: the
-// worker stream listener its launcher dials (launcherContainers, fixed when the pod is created),
+// worker stream listener its launcher dials (podKind.launcherContainer, fixed when the pod is created),
 // then the daemon's API, NATS, Envoy, Dispatch and the secrets broker as the agent's environment
 // names them (mainEnvironment, carried by each generation's start command, launcherCommand), the
-// broker only when the runtime enrolls pods. The stream is fixed for the pod's life, so a pod a
-// daemon created under another stream dials it until the pod is replaced; the other five are fixed
-// for the generation's life, and the Sandbox records them per role (recordAddresses) so a daemon
-// restarted under other addresses can tell (evaluate).
+// broker only where enrolled, the one enrollment decision that generation's environment and argv
+// are built from (enrollsIn), and unset otherwise — so the record of a generation in a pod that
+// carries no enrollment says what it was handed, which is no broker at all. The stream is fixed
+// for the pod's life, so a pod a daemon created under another stream dials it until the pod is
+// replaced; the other five are fixed for the generation's life, and the Sandbox records them per
+// role (recordAddresses) so a daemon restarted under other addresses can tell (evaluate).
 // TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
-func (r *Runtime) handedAddresses() []handedAddress {
+func (r *Runtime) handedAddresses(enrolled bool) []handedAddress {
 	brokerURL := ""
-	if broker := r.agentSecrets; broker != nil {
-		brokerURL = broker.URL
+	if enrolled {
+		brokerURL = r.agentSecrets.URL
 	}
 	return []handedAddress{
 		{connectFlag, r.streamURL},

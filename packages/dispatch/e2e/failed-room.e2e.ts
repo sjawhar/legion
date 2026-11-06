@@ -7,8 +7,8 @@
 // It is opt-in, because it takes about 40 s of real time (a trigger holds a durable append for
 // 20 s) and it cancels a Postgres backend, so it is not part of the suite CI runs:
 //
-//   DISPATCH_FAILED_ROOM_PROBE=1 bunx playwright test --config e2e/playwright.config.ts \
-//     --project=chromium e2e/failed-room.e2e.ts
+//   DISPATCH_FAILED_ROOM_PROBE=1 bun e2e/run.ts -- bunx playwright test \
+//     --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts
 //
 // Comparing a tree against another is what it is for: run it on this head and on the base, and
 // read the two lines it prints for the queued writer.
@@ -107,12 +107,11 @@ async function anchoredComment(issueKey: string, body: string, quote: string): P
 
 test("a writer inside the docs layer when its room fails is told, and the room recovers", async ({
   browser,
-}, testInfo) => {
+}) => {
   test.skip(
     process.env.DISPATCH_FAILED_ROOM_PROBE !== "1",
     "the failed-room probe is opt-in: it holds a durable append for 20 s and cancels a backend"
   );
-  test.skip(testInfo.project.name === "iphone", "one browser is enough for a server behaviour");
   test.setTimeout(240_000);
   await resetDatabase();
   await createProject({ key: "CORE", name: "Core" });

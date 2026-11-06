@@ -40,7 +40,7 @@ func TestAppendWritesOhMyPisPartAndRefusesASessionThatMoved(t *testing.T) {
 
 	err := Append(ctx, conn, sessionPath, int64(len(session)), line, at)
 	var moved *MovedError
-	if !errors.Is(err, conversation.ErrMoved) || !errors.As(err, &moved) || moved.Now != byteLen {
+	if !errors.Is(err, conversation.ErrMoved) || !errors.As(err, &moved) || moved.Held != byteLen {
 		t.Errorf("an append on the old length = %v, want ErrMoved naming byte_len %d", err, byteLen)
 	}
 	if err := Append(ctx, conn, "/no/such/session.jsonl", 0, line, at); !errors.Is(err, conversation.ErrMoved) {

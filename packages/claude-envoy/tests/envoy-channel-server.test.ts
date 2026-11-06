@@ -33,6 +33,9 @@ import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
 
+/** The plugin's entries in the repository's marketplace, which the two cases below read. */
+const marketplaceEntries = marketplace.plugins.filter((entry) => entry.name === plugin.name)
+
 /**
  * A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for,
  * under the key the listener minted for the publish behind the arbiter's forward mark.
@@ -74,6 +77,37 @@ test("emits each Envoy envelope as the exact Claude channel notification", async
       },
     },
   ])
+})
+
+test("presents an ad-hoc topic's forward on the agent subject with the topic it was published to", async () => {
+  const notifier = new FakeNotifier()
+  const delivery = createChannelDelivery({
+    identity: new SessionIdentity("ses_claude", "/tmp"),
+    notifier,
+    configFile: sessionConfigFile("claude", process.env),
+  })
+  // The publish route forwards an ad-hoc topic's envelope, unchanged, to each self-subscribed
+  // session's agent subject, and that copy can arrive before the one on the topic itself.
+  const adHocForward = JSON.stringify({
+    event_id: "evt-team-3",
+    dedupe_key: "publish.0123456789abcdef0123456789abcdef",
+    source: "agent",
+    source_session: "ses_sender",
+    topic: "notifications.team.deploy-squad",
+    issued_at: 1_760_000_000_000,
+    payload_summary: "Deploy done",
+  })
+
+  await delivery.enqueue({ subject: directSubject, raw: adHocForward })
+
+  expect(notifier.notifications).toHaveLength(1)
+  expect(notifier.notifications[0]?.params.meta).toEqual({
+    producer: "agent",
+    topic: "notifications.team.deploy-squad",
+    event_id: "evt-team-3",
+    dedupe_key: "publish.0123456789abcdef0123456789abcdef",
+    from_session: "ses_sender",
+  })
 })
 
 test("strips unsafe channel meta keys before notifying Claude Code", () => {
@@ -344,7 +378,10 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
   })
 
   const session = await startChannelSession(
-    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, { client }),
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      client,
+      pluginVersion: "afe10b2f3e1b",
+    }),
   )
 
   try {
@@ -354,6 +391,7 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
         topics: [directSubject],
         capabilities: ["aside"],
         selfSubscribed: true,
+        plugin: { name: "@sjawhar/claude-envoy", version: "afe10b2f3e1b" },
       }),
     ])
     expect(setRoles).toEqual([
@@ -369,17 +407,43 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
   }
 })
 
-test("Claude Code versions the plugin by its commit; omp and the MCP server report package.json's", () => {
-  // Claude Code updates an installed plugin only when its computed version changes. With no
-  // version in plugin.json or the marketplace entry it takes the version of a relative-path plugin
-  // from the marketplace commit it installs from, so every merge to main reaches an update; a
-  // declared version nothing bumps holds every install at the tree it was first installed from.
+test("the committed manifests declare no version the release would have to bump; omp and the MCP server report package.json's", () => {
+  // Claude Code names an installed plugin by the `version` of its .claude-plugin/plugin.json,
+  // never by the version the registry served: with none it calls the install `unknown`, caches
+  // it under that name and sees no later release as an update (measured on 2.1.311). So
+  // release.yaml's claude_envoy_build writes the release's version into the manifest it packs,
+  // and the committed one declares none — a string committed here would hold every install at it
+  // until someone changed it, and the release writes it anyway. The entry in the marketplace
+  // declares no `version` of its own either, which is what leaves the packed manifest to name
+  // an install; the range on the entry's npm source is a field of its own, below.
   expect(plugin).not.toHaveProperty("version")
-  const entries = marketplace.plugins.filter((entry) => entry.name === plugin.name)
-  expect(entries).toHaveLength(1)
-  expect(entries[0]).not.toHaveProperty("version")
+  expect(marketplaceEntries).toHaveLength(1)
+  expect(marketplaceEntries[0]).not.toHaveProperty("version")
   expect(ompPlugin.version).toBe(pkg.version)
   expect(MCP_SERVER_INFO).toEqual({ name: "envoy", version: pkg.version })
+})
+
+test("the marketplace entry installs the plugin from npm, by name, above the placeholder", () => {
+  // release.yaml's claude_envoy_build packs this package and its publish job uploads that tarball
+  // to npm, so the registry name is package.json's own, read here rather than written twice. The
+  // source's `version` is a range, not the version of an install: it leaves out 0.0.0, the
+  // placeholder a person published so that trusted publishing could attach to the package at all,
+  // and takes `latest`, which the resolver prefers while it satisfies the range. npm's `latest`
+  // is that placeholder until the first release, and it holds no plugin, so an install before
+  // then must fail by name rather than install nothing. 1.0.0 is what the version step computes
+  // for the first release (release-bump.sh over CLAUDE_ENVOY_VERSION_ARGS from the placeholder's
+  // 0.0.0). 99.0.0 is every release after it: a range that pinned the major, `^1.0.0` or `1.x`,
+  // would take the placeholder out and the first release in just as well, and then hold every
+  // install at the last 1.x while the releases carried on. Those three are what the range is
+  // for, so they are what is asserted, rather than the string that happens to hold them.
+  expect(marketplaceEntries).toHaveLength(1)
+  const source = marketplaceEntries[0]?.source
+  expect(source?.source).toBe("npm")
+  expect(source?.package).toBe(pkg.name)
+  const range = source?.version ?? ""
+  expect(Bun.semver.satisfies("0.0.0", range)).toBe(false)
+  expect(Bun.semver.satisfies("1.0.0", range)).toBe(true)
+  expect(Bun.semver.satisfies("99.0.0", range)).toBe(true)
 })
 
 test("the Oh My Pi manifest declares no MCP server", () => {
@@ -452,7 +516,6 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
       return Response.json({})
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "reply-token"
   const notifier = new FakeNotifier()
@@ -481,7 +544,6 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
     ])
   } finally {
     server.stop(true)
-    process.env = previous
   }
 })
 
@@ -506,7 +568,6 @@ test("a Dispatch frame the channel answered with an error is answered again when
       return Response.json({})
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "reply-token"
   const nats = new FakeNats()
@@ -539,7 +600,6 @@ test("a Dispatch frame the channel answered with an error is answered again when
   } finally {
     await session.shutdown()
     server.stop(true)
-    process.env = previous
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
@@ -561,7 +621,6 @@ test("answers a malformed targeted comment through its supplied comment reply ad
       return Response.json({})
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "reply-token"
   const notifier = new FakeNotifier()
@@ -589,7 +648,6 @@ test("answers a malformed targeted comment through its supplied comment reply ad
     ])
   } finally {
     server.stop(true)
-    process.env = previous
   }
 })
 
@@ -790,13 +848,20 @@ test("the server calls the listener with the file's envoy.token and signs in to 
   const user = nkeys.createUser()
   const auth: Array<string | null> = []
   const registered = Promise.withResolvers<void>()
+  const plugins: unknown[] = []
   const listener = Bun.serve({
     port: 0,
     fetch: async (request) => {
       auth.push(request.headers.get("Authorization"))
       const url = new URL(request.url)
       if (request.method === "POST" && url.pathname === "/v1/interests/subscribe") {
-        const body = (await request.json()) as { session_id: string; topics: string[] }
+        const body = (await request.json()) as {
+          session_id: string
+          topics: string[]
+          plugin: string
+          plugin_version: string
+        }
+        plugins.push({ plugin: body.plugin, plugin_version: body.plugin_version })
         registered.resolve()
         return Response.json({
           session_id: body.session_id,
@@ -838,6 +903,8 @@ test("the server calls the listener with the file's envoy.token and signs in to 
     await Promise.all([registered.promise, broker.until(() => broker.connects.length > 0)])
     expect(broker.connects[0]).toMatchObject({ nkey: user.getPublicKey() })
     expect(new Set(auth)).toEqual(new Set(["Bearer file-token"]))
+    // The bundle runs from this checkout, outside Claude Code's plugin cache.
+    expect(plugins[0]).toEqual({ plugin: "@sjawhar/claude-envoy", plugin_version: "source" })
     server.kill("SIGTERM")
     expect(await server.exited).toBe(0)
   } finally {

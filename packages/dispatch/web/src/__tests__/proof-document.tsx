@@ -76,16 +76,22 @@ export function renderProofDocument({
   fake = fakeDocumentRuntime({ text: "The live document" }),
   highlightTerm,
   isClosed = false,
+  onAskAnswered,
+  onUnavailable,
   queryClient = createQueryClient(),
   showDiff = false,
+  surface,
   version,
 }: {
   document?: Artifact;
   fake?: FakeDocumentRuntime;
   highlightTerm?: string;
   isClosed?: boolean;
+  onAskAnswered?(askId: string): void;
+  onUnavailable?(reason: string): void;
   queryClient?: QueryClient;
   showDiff?: boolean;
+  surface?: "page" | "pane";
   version?: number;
 } = {}) {
   const margin = {
@@ -94,7 +100,11 @@ export function renderProofDocument({
           blockFilterId: string | undefined;
           focusBlock(blockId: string): void;
           documentBridge:
-            | { focusMark(markId: string): void; setActiveMarks(markIds: string[]): void }
+            | {
+                focusMark(markId: string): void;
+                setActiveMarks(markIds: string[]): void;
+                whenSent(timeoutMs: number): Promise<void>;
+              }
             | undefined;
           focusRequest: { markId: string; seq: number } | undefined;
           hoveredMarkId: string | undefined;
@@ -112,7 +122,10 @@ export function renderProofDocument({
   };
   queryClient.setQueryData(["block-schema"], blockSchema);
   const toolbar: { current: DocumentToolbar | undefined } = { current: undefined };
-  const onToolbarChange = (next: DocumentToolbar) => {
+  /** Every value the document reported upward, so a suite can assert it reported none at all. */
+  const toolbarChanges: (DocumentToolbar | undefined)[] = [];
+  const onToolbarChange = (next: DocumentToolbar | undefined) => {
+    toolbarChanges.push(next);
     toolbar.current = next;
   };
   const onVersionChange = (_version: number | null) => {};
@@ -134,11 +147,14 @@ export function renderProofDocument({
               highlight={undefined}
               highlightTerm={next.highlightTerm ?? highlightTerm}
               isClosed={next.isClosed ?? isClosed}
+              onAskAnswered={onAskAnswered}
               onToolbarChange={onToolbarChange}
+              onUnavailable={onUnavailable}
               owner={{ key: "CORE-1", kind: "issue" }}
               onVersionChange={onVersionChange}
               showDiff={next.showDiff ?? showDiff}
-              user={{ kind: "user", login: "alice" }}
+              surface={surface}
+              user={{ event_head: "0", kind: "user", login: "alice" }}
               version={next.version ?? version}
             />
             <RefPreviewHost />
@@ -172,6 +188,7 @@ export function renderProofDocument({
       fake.sync();
     },
     toolbar,
+    toolbarChanges,
     view,
   };
 }

@@ -39,9 +39,8 @@ func construct(t *testing.T, inputs map[string]property.Value, dryRun bool) (*pu
 // plainInputs are exampleArgs' plain fields, as a consumer sends them.
 func plainInputs() map[string]property.Value {
 	return map[string]property.Value{
-		"machineId":  property.New("example-host-a"),
-		"image":      property.New(exampleImage),
-		"hostBridge": property.New("127.0.0.1"),
+		"machineId": property.New("example-host-a"),
+		"image":     property.New(exampleImage),
 	}
 }
 
@@ -74,21 +73,6 @@ func TestConstructTakesUnknownNatsUrlsAndSeedUnderPreview(t *testing.T) {
 	require.Equal(t, exampleContainer, withoutEnvs(container))
 	envs, _ := pulumitest.Plain(container.Inputs["envs"])
 	require.True(t, envs.IsComputed(), "envs from unknown inputs are unknown, not %s", envs.TypeString())
-}
-
-// subscribeAllTopics, sent as a consumer's program sends it through the plugin's schema, reaches
-// the container's environment as its last variable.
-func TestConstructTakesSubscribeAllTopics(t *testing.T) {
-	inputs := plainInputs()
-	inputs["natsUrls"] = property.New(property.NewArray([]property.Value{
-		property.New("nats://hub.internal.example:4222"),
-	}))
-	inputs["subscribeAllTopics"] = property.New(true)
-	m, err := construct(t, inputs, false)
-	require.NoError(t, err)
-
-	envs, _ := envsOf(t, m.One(t, containerType))
-	require.Equal(t, append(slices.Clone(exampleEnvs), "ENVOY_SUBSCRIBE_ALL_TOPICS=1"), envs)
 }
 
 // A plain field is for a literal: Construct refuses one whose input carries a dependency, before
@@ -160,7 +144,7 @@ func carriedText(inputs resource.PropertyMap) string {
 
 // A listener refuses an nkey seed in each of its inputs but seed, through the plugin's
 // Construct as a consumer's program reaches it, naming the input and never quoting the seed, and
-// no resource it registers carries the seed in its inputs or aliases. machineId, hostBridge and
+// no resource it registers carries the seed in its inputs or aliases. machineId and
 // natsUrls are refused by core, the rest by the listener. Each row's clean value, in the same
 // place, constructs the listener. seed is the one input that is a seed, and is accepted.
 func TestConstructRefusesASeedInEveryInputButSeed(t *testing.T) {
@@ -209,14 +193,6 @@ func TestConstructRefusesASeedInEveryInputButSeed(t *testing.T) {
 			in["containerName"] = property.New("envoy-" + v)
 			return "example-host-a"
 		}, "containerName holds an nkey seed (not echoed)", "example"},
-		{"hostBridge", func(in map[string]property.Value, v string) string {
-			in["hostBridge"] = property.New("bridge-" + v + ".example")
-			return "example-host-a"
-		}, "hostBridge holds an nkey seed (not echoed)", "example"},
-		{"hostBridge, split across DNS labels", func(in map[string]property.Value, v string) string {
-			in["hostBridge"] = property.New(split(v) + ".example")
-			return "example-host-a"
-		}, "hostBridge holds an nkey seed (not echoed)", "cleanlabels"},
 		{"watchdog.host", func(in map[string]property.Value, v string) string {
 			in["watchdog"] = object(map[string]string{"host": "host-" + v + ".example"})
 			return "example-host-a"

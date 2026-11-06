@@ -18,7 +18,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
-import { shortSessionId } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import {
   buildIssuePath,
@@ -30,7 +30,12 @@ import {
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { artifactVersionUrl, formatArtifactBytes, versionsNewestFirst } from "./ArtifactHeader";
-import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
+import {
+  ArtifactDropZone,
+  ArtifactUploadRow,
+  CLOSED_ISSUE_UPLOAD_REFUSAL,
+  useArtifactUpload,
+} from "./ArtifactUpload";
 
 function kindIcon(kind: Artifact["kind"]): ReactNode {
   const common = {
@@ -95,12 +100,16 @@ function artifactPath(artifact: Artifact): string {
       });
 }
 
-/** Who owns an artifact, as a References row names it. */
-function artifactOwnerLabel(artifact: Artifact): string {
+/** Who owns an artifact, as a References row names it: its issue, its project, or the agent
+ *  whose conversation holds it. */
+function ArtifactOwner({ artifact }: { artifact: Artifact }): ReactNode {
   if (artifact.issue_key !== null) return artifact.issue_key;
-  return isAgentArtifact(artifact)
-    ? `agent ${shortSessionId(artifact.session_id)}`
-    : artifact.project;
+  if (!isAgentArtifact(artifact)) return artifact.project;
+  return (
+    <>
+      agent <AgentName inline sessionId={artifact.session_id} storedTitle={undefined} />
+    </>
+  );
 }
 
 // The issue's reference closure (every artifact reachable by following references, up to 8
@@ -130,7 +139,7 @@ function References({ references }: { references: IssueReferences }): ReactNode 
                 {artifact.name}
               </Link>
               <p className={textMutedOnSurface}>
-                {artifactOwnerLabel(artifact)} · via {via.kind} · depth {depth}
+                <ArtifactOwner artifact={artifact} /> · via {via.kind} · depth {depth}
               </p>
             </li>
           ))}
@@ -215,13 +224,17 @@ function ArtifactRow({
   );
 }
 
-export function ArtifactsTab(): ReactNode {
+/** The issue's artifacts, with an upload that a closed issue refuses before a file is picked. */
+export function ArtifactsTab({ isClosed }: { readonly isClosed: boolean }): ReactNode {
   const { pathname } = useLocation();
   const route = parseIssuePath(pathname);
   const issueKey = route?.key;
   const highlightedSlug = route?.kind === "artifact" ? route.slug : undefined;
   const [filter, setFilter] = useState("");
-  const upload = useArtifactUpload({ issue: issueKey ?? "" });
+  const upload = useArtifactUpload(
+    { issue: issueKey ?? "" },
+    { refusal: isClosed ? CLOSED_ISSUE_UPLOAD_REFUSAL : null }
+  );
   const artifacts = useQuery({
     enabled: issueKey !== undefined,
     queryKey: ["artifacts", issueKey],

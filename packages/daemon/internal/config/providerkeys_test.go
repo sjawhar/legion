@@ -239,3 +239,92 @@ func TestProviderKeysMayNotNameAGhVariableEveryPaneSets(t *testing.T) {
 		t.Fatalf("ProviderKeys = %+v, want %+v", cfg.ProviderKeys, want)
 	}
 }
+
+// Under tmux a provider key may name a file (`file:/abs/path`) in place of a secretsd key, for a
+// host with no secretsd: the loader keeps the file's cleaned path beside a secretsd entry, in file
+// order, and the variable names stay refused as for any other entry.
+func TestAProviderKeyMayNameAFileUnderTmux(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, minimalFile+"provider_keys:\n  ANTHROPIC_API_KEY: file:/etc/legion/providers//ANTHROPIC_API_KEY\n  GEMINI_API_KEY: GEMINI_API_KEY_TESTS\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation with a file provider key: %v", err)
+	}
+	want := []ProviderKey{{Env: "ANTHROPIC_API_KEY", File: "/etc/legion/providers/ANTHROPIC_API_KEY"}, {Env: "GEMINI_API_KEY", Secret: "GEMINI_API_KEY_TESTS"}}
+	if !reflect.DeepEqual(cfg.ProviderKeys, want) {
+		t.Fatalf("ProviderKeys = %+v, want %+v", cfg.ProviderKeys, want)
+	}
+	_, err = LoadForValidation(writeConfigFile(t, minimalFile+"provider_keys:\n  GH_TOKEN: file:/etc/legion/providers/GH_TOKEN\n"), noEnv)
+	if err == nil || !strings.HasPrefix(err.Error(), "provider_keys names GH_TOKEN, which the daemon sets on every pane and pod") {
+		t.Fatalf("LoadForValidation of a file provider key named GH_TOKEN = %v, want the gh variable refused", err)
+	}
+}
+
+// A file provider key is read at boot as the daemon, with no `secrets` run: its contents, trimmed,
+// land in the variable's 0600 file beside the secretsd keys' values.
+func TestMaterializeProviderKeysReadsAFileKey(t *testing.T) {
+	environ, stubDir := secretsStub(t)
+	keyFile := filepath.Join(t.TempDir(), "anthropic")
+	if err := os.WriteFile(keyFile, []byte("  file-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(t.TempDir(), "state")
+	log := slog.New(slog.NewTextHandler(&strings.Builder{}, nil))
+	dir, err := MaterializeProviderKeys([]ProviderKey{{Env: "ANTHROPIC_API_KEY", File: keyFile}, {Env: "AGENT_ENV", Secret: "AGENT_KEY"}}, stateDir, environ, log)
+	if err != nil {
+		t.Fatalf("MaterializeProviderKeys: %v", err)
+	}
+	for name, want := range map[string]string{"ANTHROPIC_API_KEY": "file-value", "AGENT_ENV": "agent-value"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("%s: %v", path, err)
+			continue
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s: mode %v, want 0600", path, info.Mode().Perm())
+		}
+		if got, _ := os.ReadFile(path); string(got) != want {
+			t.Errorf("%s holds the wrong bytes", name)
+		}
+	}
+	if calls := readStub(t, stubDir, "calls"); calls != "get AGENT_KEY --no-request\nget AGENT_KEY --value" {
+		t.Errorf("secrets was run as:\n%s\nwant only the secretsd key's two reads", calls)
+	}
+}
+
+// A file provider key is read by ReadPrivateSecretPointer's rules: a file that cannot be read, holds
+// nothing, is not a regular file, or that its group or others can read is a refusal naming the
+// variable and the file, never its contents, and the boot writes no key at all.
+func TestMaterializeProviderKeysRefusesAFileKeyItCannotUse(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(dir, "shared")
+	if err := os.WriteFile(shared, []byte("file-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing")
+	for _, tc := range []struct{ name, file, want string }{
+		{"a missing file", missing, "provider_keys.ANTHROPIC_API_KEY names " + missing + ", which could not be read: open " + missing + ": no such file or directory"},
+		{"an empty file", empty, "provider_keys.ANTHROPIC_API_KEY names " + empty + ", which is empty"},
+		{"a file others can read", shared, "provider_keys.ANTHROPIC_API_KEY " + shared + " is readable by its group or others (mode 0644); chmod 0600 it"},
+		{"a directory", dir, "provider_keys.ANTHROPIC_API_KEY names " + dir + ", which is not a regular file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			environ, _ := secretsStub(t)
+			stateDir := filepath.Join(t.TempDir(), "state")
+			log := slog.New(slog.NewTextHandler(&strings.Builder{}, nil))
+			_, err := MaterializeProviderKeys([]ProviderKey{{Env: "AGENT_ENV", Secret: "AGENT_KEY"}, {Env: "ANTHROPIC_API_KEY", File: tc.file}}, stateDir, environ, log)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if _, statErr := os.Stat(filepath.Join(stateDir, "secrets", "provider-env", "AGENT_ENV")); !os.IsNotExist(statErr) {
+				t.Errorf("a refused boot still wrote AGENT_ENV (stat: %v)", statErr)
+			}
+		})
+	}
+}

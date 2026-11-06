@@ -132,7 +132,7 @@ func TestRenewSendsThePodsCurrentToken(t *testing.T) {
 	var stderr bytes.Buffer
 	result := make(chan int, 1)
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, &stderr, after)
+		result <- renewLoop(ctx, client, signer, enrollmentID, tokenFile, &stderr, after)
 	}()
 	receive(t, first, "first renewal")
 	receive(t, waits, "wait for the next renewal") <- time.Now()
@@ -180,7 +180,7 @@ func TestRenewWithoutAPodTokenFileSendsNoBody(t *testing.T) {
 	defer cancel()
 	result := make(chan int, 1)
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return "", nil }, io.Discard, after)
+		result <- renewLoop(ctx, client, signer, enrollmentID, "", io.Discard, after)
 	}()
 	awaitRetry(t, waits, result, "an iat-skewed PROOF_INVALID")
 	mu.Lock()
@@ -224,7 +224,7 @@ func TestRenewStopsOnlyForTerminalBrokerCodes(t *testing.T) {
 				cancel()
 				return make(chan time.Time)
 			}
-			if got := renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return "", nil }, io.Discard, after); got != exitRenewRefused {
+			if got := renewLoop(ctx, client, signer, enrollmentID, "", io.Discard, after); got != exitRenewRefused {
 				t.Fatalf("renew loop exit = %d, want %d", got, exitRenewRefused)
 			}
 		})
@@ -248,6 +248,10 @@ func TestRenewRetriesEveryOtherRefusal(t *testing.T) {
 		{"PROOF_INVALID", "proof invalid: htm/htu do not match the request", http.StatusUnauthorized},
 	} {
 		t.Run(tc.code+" "+tc.message, func(t *testing.T) {
+			tokenFile := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(tokenFile, []byte("a-pod-token\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			var mu sync.Mutex
 			requests := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -265,7 +269,7 @@ func TestRenewRetriesEveryOtherRefusal(t *testing.T) {
 			defer cancel()
 			result := make(chan int, 1)
 			go func() {
-				result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return "a-pod-token", nil }, io.Discard, after)
+				result <- renewLoop(ctx, client, signer, enrollmentID, tokenFile, io.Discard, after)
 			}()
 			awaitRetry(t, waits, result, tc.code) <- time.Now()
 			awaitRetry(t, waits, result, tc.code+" again")
@@ -362,7 +366,7 @@ func TestRenewNeverSendsABlankLaterToken(t *testing.T) {
 	result := make(chan int, 1)
 	var stderr syncWriter
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, &stderr, after)
+		result <- renewLoop(ctx, client, signer, enrollmentID, tokenFile, &stderr, after)
 	}()
 	receive(t, first, "first renewal")
 	awaitRetry(t, waits, result, "the wait after the first renewal") <- time.Now()

@@ -783,10 +783,13 @@ func TestSummaryTickUsesLatestCheckRunIDAfterStateExpiration(t *testing.T) {
 	}
 }
 
+// Two replicas, each with its own store on the same bucket, attempt one due record at once: the
+// second finds the first's durable claim and finishes without reaching publish.
 func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	store := openStore(t, conn)
+	replicaA := openStore(t, conn)
+	replicaB := openStore(t, conn)
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	pub := &recPub{
@@ -802,16 +805,17 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 
-	if err := recordCheck(store, owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+	if err := recordCheck(replicaA, owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
-	waitCacheChecks(t, store, owner, repo, number, sha, 1)
-	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	waitCacheChecks(t, replicaA, owner, repo, number, sha, 1)
+	setLastEventAt(t, replicaA, owner, repo, number, sha, 0)
+	waitCached(t, replicaB, Key(owner, repo, number, sha), func(st State) bool { return st.LastEventAt == 0 })
 
 	firstDone := make(chan struct{})
 	go func() {
 		defer close(firstDone)
-		runSummaryTick(store, pub, time.Second, logging.New("test"))
+		runSummaryTick(replicaA, pub, time.Second, logging.New("replica-a"))
 	}()
 	select {
 	case <-entered:
@@ -822,7 +826,7 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
-		runSummaryTick(store, pub, time.Second, logging.New("test"))
+		runSummaryTick(replicaB, pub, time.Second, logging.New("replica-b"))
 	}()
 	select {
 	case <-secondDone:
@@ -867,7 +871,7 @@ func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) 
 	originalKV := replicaA.watcher.KV()
 	var keyGets int
 	useKV(t, replicaA, &interleavingKV{
-		KeyValue: originalKV,
+		KeyValue: originalKV.Legacy(),
 		beforeGet: func(got string) {
 			if got != key {
 				return
@@ -879,7 +883,7 @@ func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) 
 			}
 		},
 	})
-	t.Cleanup(func() { useKV(t, replicaA, originalKV) })
+	t.Cleanup(func() { useKV(t, replicaA, originalKV.Legacy()) })
 
 	bPublished := make(chan struct{})
 	pub := &recPub{onPublish: func(contracts.Envelope) {
@@ -1005,7 +1009,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 		blocked bool
 	}
 	useKV(t, store, &interleavingKV{
-		KeyValue: originalKV,
+		KeyValue: originalKV.Legacy(),
 		afterUpdate: func(updatedKey string, _ []byte, _ uint64) {
 			claimGate.Lock()
 			if updatedKey != key || claimGate.blocked {
@@ -1038,7 +1042,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("summary tick did not resume")
 	}
-	useKV(t, store, originalKV)
+	useKV(t, store, originalKV.Legacy())
 
 	if got := pub.count(); got != 0 {
 		t.Fatalf("rearmed claim published %d stale envelopes, want 0", got)

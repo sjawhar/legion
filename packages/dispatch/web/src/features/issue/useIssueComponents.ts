@@ -1,6 +1,6 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 
-import { api } from "../../api/client";
+import { issuePatchRequest } from "../../api/client";
 import type {
   ArchitectureTree,
   ArchitectureTreeIssueRef,
@@ -9,6 +9,7 @@ import type {
   IssueDetails,
 } from "../../api/types";
 import { predictTree } from "../architecture/architecture-model";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 export interface IssueComponentsWrite {
   /** The failed save's message, until the next attempt starts. */
@@ -55,8 +56,13 @@ export function useIssueComponents(
   const queryClient = useQueryClient();
   const detailKey = ["issue", issue.key] as const;
   const treeKey = ["architecture", issue.project] as const;
-  const mutation = useMutation({
-    mutationFn: (input: IssueComponentsInput) => api.patchIssue(issue.key, { components: input }),
+  const mutation = useKeyedWrite({
+    // The components line says why a save was refused, beside the picker it came from.
+    inline: true,
+    label: () => `Components of ${issue.key}`,
+    // One write to the issue, in press order with every other (`issue:<KEY>`).
+    target: () => `issue:${issue.key}`,
+    request: (input: IssueComponentsInput) => issuePatchRequest(issue.key, { components: input }),
     onMutate: async (input): Promise<Snapshot> => {
       await Promise.all([
         queryClient.cancelQueries({ queryKey: detailKey }),

@@ -29,7 +29,6 @@ type ListenerConfig struct {
 	MachineID   string // ENVOY_MACHINE_ID
 	Port        int    // PORT, 1-65535: a component resolves its default, DefaultListenerPort
 	ListenHost  string // "" leaves ENVOY_LISTEN_HOST unset, so the listener binds 127.0.0.1
-	HostBridge  string // "" leaves ENVOY_HOST_BRIDGE unset
 	SOCKS5Proxy string // "" leaves ENVOY_NATS_SOCKS5_PROXY unset
 	// AllowedHosts are the names a client may reach the listener's /v1 interface by,
 	// ENVOY_ALLOWED_HOSTS. An empty list leaves the variable unset, and a listener that requires
@@ -37,13 +36,30 @@ type ListenerConfig struct {
 	// (cmd/listener/apiauth.go, servesHost); an entry is rendered as written, since the listener
 	// normalizes what it reads.
 	AllowedHosts []string
-	// SubscribeAllTopics renders ENVOY_SUBSCRIBE_ALL_TOPICS=1, which has the listener also hold a
-	// core subscription on every notification topic, so a session served on its machine receives a
-	// topic the stream does not store. Only a NATS user whose grant allows `notifications.>`
-	// (HostPermissions) may set it: the listener's start ends when NATS refuses that subscription,
-	// as it does for ListenerPermissions and DispatchPermissions. The component cannot read the
-	// user's grant, so the operator who knows it opts in; false renders nothing.
-	SubscribeAllTopics bool
+	// NATSReplicas is the copies JetStream keeps of every stream and bucket the listener creates,
+	// ENVOY_NATS_REPLICAS, at most bus.MaxReplicas. 0 leaves the variable unset, and the listener
+	// then keeps one copy (internal/config/config.go).
+	NATSReplicas int
+	// StreamMaxBytes is the byte limit of the notification stream the listener owns
+	// (bus.ConnectOwningStream), ENVOY_STREAM_MAX_BYTES. 0 leaves the variable unset, and the
+	// listener keeps its own default.
+	StreamMaxBytes int
+	// AgentSecretsURL, AgentSecretsAudience and PublicURL are the listener's broker check,
+	// which the listener reads as one all-or-nothing set (cmd/listener/brokerauth.go,
+	// resolveListenerBrokerConfig): the secrets broker a caller's broker access token is
+	// introspected at, ENVOY_AGENT_SECRETS_URL; the audience this listener's own Google
+	// identity token is minted for, ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE, which is the
+	// identity each introspection presents; and this listener's own origin,
+	// ENVOY_PUBLIC_URL, which a DPoP proof's target URI is checked against. Set all three or
+	// none: CheckBroker holds that rule. All three empty leaves every variable unset, and the
+	// listener then takes no broker token at all.
+	//
+	// The audience is a VM's identity. A listener in a pod presents a projected
+	// ServiceAccount token instead, through a variable of its own, and the listener refuses
+	// that file beside the audience, so a component renders one identity and never both.
+	AgentSecretsURL      string
+	AgentSecretsAudience string
+	PublicURL            string
 }
 
 // TailnetHostName is the address a client reaches the listener of the tailnet machine hostname by,
@@ -115,17 +131,76 @@ func CheckAllowedHosts(input string, hosts []string) error {
 	return nil
 }
 
+// brokerVars are the three variables of the listener's broker check, in the order Env renders
+// them, each with the schema input a refusal names it by. The names are copied from
+// packages/envoy/cmd/listener/brokerauth.go by hand, as the allowed-host rule above copies its
+// own: core may not import that package, since it is a main package and since a non-test import
+// would put it in `go list -deps ./cmd/...`, the path list a plugin release is cut from
+// (packages/envoy/infra/AGENTS.md, "Release contract").
+var brokerVars = [3]struct{ input, variable string }{
+	{"agentSecretsUrl", "ENVOY_AGENT_SECRETS_URL"},
+	{"agentSecretsAudience", "ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE"},
+	{"publicUrl", "ENVOY_PUBLIC_URL"},
+}
+
+// CheckBroker refuses a broker check the listener would refuse at boot. prefix is the caller's
+// own path for the three inputs — "" for a listener's config, and a component's spelling, such
+// as "listener.", where it carries them under one input — so each refusal names the input as the
+// operator wrote it, as CheckAllowedHosts names the list.
+//
+// The listener reads the three as one all-or-nothing set (cmd/listener/brokerauth.go,
+// resolveListenerBrokerConfig), so a partial set is refused here, naming the missing input and
+// the one that asks for it, rather than deploying a listener that refuses its own environment at
+// boot. A value holding an nkey seed is refused first, naming the input and never the value, for
+// Check's reason; and one holding whitespace or a control character is refused because a
+// component renders each as one KEY=value argument of the unit's docker run command, where a
+// space splits the argument and a line break ends the heredoc a watchdog writes it into, and
+// because the listener trims what it reads, so a blank value is no value there at all.
+func CheckBroker(prefix, brokerURL, audience, origin string) error {
+	values := [3]string{brokerURL, audience, origin}
+	for i, v := range brokerVars {
+		input := prefix + v.input
+		if bus.HoldsSeed(values[i]) {
+			return InputErrorf(input, "%w", SeedRefusal(input))
+		}
+		if strings.ContainsFunc(values[i], unicode.IsSpace) || strings.ContainsFunc(values[i], unicode.IsControl) {
+			return InputErrorf(input, "%s holds whitespace or a control character, which %s cannot carry (not echoed)", input, v.variable)
+		}
+	}
+	set := -1
+	for i, value := range values {
+		if value != "" {
+			set = i
+			break
+		}
+	}
+	if set < 0 {
+		return nil
+	}
+	for i, value := range values {
+		if value == "" {
+			return InputErrorf(prefix+brokerVars[i].input,
+				"%s is required when %s is set: the listener takes a broker access token only with %s, %s and %s together, and refuses a partial set when it boots",
+				prefix+brokerVars[i].input, prefix+brokerVars[set].input,
+				brokerVars[0].variable, brokerVars[1].variable, brokerVars[2].variable)
+		}
+	}
+	return nil
+}
+
 // Check refuses a config the listener cannot run on. Each refusal is an InputError.
 //
 // CheckMachineID owns the machine-id rule and CheckAllowedHosts the allowed-host rule.
-// ENVOY_HOST_BRIDGE is read untrimmed into every local
-// delivery's URL (internal/session/session.go), so a host bridge with surrounding whitespace is
-// refused. Port is always given, since a health check calls it. No value may hold a control
+// Port is always given, since a health check calls it. No value may hold a control
 // character: a watchdog writes the environment, one variable per line, into a heredoc of a script
 // that runs as root on the host, where a line break would end the heredoc and run what follows it.
 // Nor may one hold an nkey seed (bus.HoldsSeed), which the environment would carry, in the
 // container's inputs and the watchdog's env file; that refusal names the field and never quotes
-// the value, and comes before any other refusal of that field.
+// the value, and comes before any other refusal of that field. NATSReplicas and StreamMaxBytes
+// are refused below 0, which is no count, and NATSReplicas above bus.MaxReplicas, which NATS
+// refuses when the listener creates its stream. CheckBroker owns the broker check's rule, under
+// core's own input names, so a component that renders those three under an input of its own
+// calls it with its own prefix first.
 func (c ListenerConfig) Check() error {
 	if bus.HoldsSeed(c.MachineID) {
 		return InputErrorf("machineId", "%w", SeedRefusal("machineId"))
@@ -135,15 +210,6 @@ func (c ListenerConfig) Check() error {
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return InputErrorf("port", "port %d is outside 1-65535", c.Port)
-	}
-	if bus.HoldsSeed(c.HostBridge) {
-		return InputErrorf("hostBridge", "%w", SeedRefusal("hostBridge"))
-	}
-	if strings.TrimSpace(c.HostBridge) != c.HostBridge {
-		return InputErrorf("hostBridge", "hostBridge has leading or trailing whitespace: %q", c.HostBridge)
-	}
-	if strings.ContainsFunc(c.HostBridge, unicode.IsControl) {
-		return InputErrorf("hostBridge", "hostBridge contains a control character: %q", c.HostBridge)
 	}
 	if bus.HoldsSeed(c.ListenHost) {
 		return InputErrorf("listenHost", "%w", SeedRefusal("listenHost"))
@@ -158,6 +224,15 @@ func (c ListenerConfig) Check() error {
 		if err := bus.CheckSOCKS5Proxy(c.SOCKS5Proxy); err != nil {
 			return InputErrorf("socks5Proxy", "%s %w", bus.SOCKS5ProxyEnvVar, err)
 		}
+	}
+	if c.NATSReplicas < 0 || c.NATSReplicas > bus.MaxReplicas {
+		return InputErrorf("natsReplicas", "natsReplicas %d is outside 0-%d", c.NATSReplicas, bus.MaxReplicas)
+	}
+	if c.StreamMaxBytes < 0 {
+		return InputErrorf("streamMaxBytes", "streamMaxBytes %d is below 0", c.StreamMaxBytes)
+	}
+	if err := CheckBroker("", c.AgentSecretsURL, c.AgentSecretsAudience, c.PublicURL); err != nil {
+		return err
 	}
 	return nil
 }
@@ -174,9 +249,12 @@ func (c ListenerConfig) Check() error {
 // the URL. ENVOY_ALLOW_REMOTE_NATS=1 is set exactly when a URL names a server bus.LocalNATSURL
 // does not vouch for, since the listener refuses such a server without it. ENVOY_ALLOWED_HOSTS
 // follows the ENVOY_LISTEN_HOST block, and only when the config lists a host, so a listener
-// without one renders what it always rendered. ENVOY_SUBSCRIBE_ALL_TOPICS=1 comes last, and only
-// when SubscribeAllTopics is set, for the same reason: every rendering made before the opt-in
-// existed, the hub's cloud-config and Dispatch's container among them, stays byte for byte.
+// without one renders what it always rendered. ENVOY_NATS_REPLICAS then ENVOY_STREAM_MAX_BYTES
+// follow, each only when its field is above 0, for that reason too; ENVOY_NATS_REPLICAS there
+// is where aws/rendering's ListenerEnv writes its own, after Env's variables. The broker check
+// comes last, in brokerVars's order — ENVOY_AGENT_SECRETS_URL,
+// ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE, ENVOY_PUBLIC_URL — and only on a config that sets it, so
+// a listener without one renders what it always rendered, byte for byte.
 func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	if err := c.Check(); err != nil {
 		return nil, err
@@ -222,11 +300,16 @@ func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	if c.SOCKS5Proxy != "" {
 		env = append(env, bus.SOCKS5ProxyEnvVar+"="+c.SOCKS5Proxy)
 	}
-	if c.HostBridge != "" {
-		env = append(env, "ENVOY_HOST_BRIDGE="+c.HostBridge)
+	if c.NATSReplicas > 0 {
+		env = append(env, "ENVOY_NATS_REPLICAS="+strconv.Itoa(c.NATSReplicas))
 	}
-	if c.SubscribeAllTopics {
-		env = append(env, "ENVOY_SUBSCRIBE_ALL_TOPICS=1")
+	if c.StreamMaxBytes > 0 {
+		env = append(env, "ENVOY_STREAM_MAX_BYTES="+strconv.Itoa(c.StreamMaxBytes))
+	}
+	for i, value := range [3]string{c.AgentSecretsURL, c.AgentSecretsAudience, c.PublicURL} {
+		if value != "" {
+			env = append(env, brokerVars[i].variable+"="+value)
+		}
 	}
 	return env, nil
 }

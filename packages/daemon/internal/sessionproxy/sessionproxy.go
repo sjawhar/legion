@@ -157,6 +157,13 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 		return nil, fmt.Errorf("sessionproxy: dial %s: %w", cfg.Instance, err)
 	}
 	_ = proof.Close()
+	// Once the start has succeeded, closing the listener never unlinks the socket. Go's unlink goes
+	// by the socket's full path, and once the generation's agent runs it can replace a directory on
+	// that path, its own g<n> among them, with a link to a sibling's, which would make the unlink
+	// remove the sibling's socket. The socket's owner removes it with the directory instead
+	// (os.RemoveAll follows no link). A refused start above still unlinks: nothing of the
+	// generation runs yet, and the address must be free for the generation's next start.
+	listener.(*net.UnixListener).SetUnlinkOnClose(false)
 
 	p := &Proxy{
 		instance: cfg.Instance,
@@ -179,7 +186,8 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 // longer than Drain so long as each dial honours that cancellation, as the Cloud SQL connector's
 // does: a holder that never hangs up, inside the generation or outside it, cannot keep it from
 // returning; a dial that ignored its cancelled context would hold Close until it returned. A second
-// call is a no-op that returns nil.
+// call is a no-op that returns nil. Close leaves the socket's file where it was, for its owner to
+// remove with the directory that holds it (Start says why).
 func (p *Proxy) Close() error {
 	first := false
 	p.closeOnce.Do(func() {

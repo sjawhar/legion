@@ -2,7 +2,6 @@ package contracts
 
 import (
 	"encoding/json"
-	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -1023,6 +1022,96 @@ func TestGithubCIObservations(t *testing.T) {
 		}
 	})
 
+	// GitHub leaves a check suite's pull_requests list empty whenever it cannot resolve the pull
+	// request itself; the suite's head branch still carries the ref the pull request's head is
+	// fetched by, and attributes the observation.
+	suiteBody := func(suite map[string]any) map[string]any {
+		body := checkRunBody([]any{})
+		if suite != nil {
+			body["check_run"].(map[string]any)["check_suite"] = suite
+		}
+		return body
+	}
+
+	t.Run("check_run with no PR on a pull head ref is attributed by it", func(t *testing.T) {
+		obs := GithubCIObservations("check_run", suiteBody(map[string]any{
+			"id":          float64(900),
+			"head_branch": "refs/pull/42/head",
+		}))
+		if len(obs) != 1 {
+			t.Fatalf("expected 1 observation, got %d", len(obs))
+		}
+		if o := obs[0]; o.Number != "42" || o.CheckName != "unit-tests" || o.SHA != "deadbeef" ||
+			o.CheckRunID != 987654321 || o.Conclusion != "failure" {
+			t.Fatalf("unexpected observation: %+v", o)
+		}
+	})
+
+	for _, head := range []struct {
+		name   string
+		branch string
+	}{
+		{name: "a zero number", branch: "refs/pull/0/head"},
+		{name: "a leading zero", branch: "refs/pull/007/head"},
+		{name: "a number that is not one", branch: "refs/pull/x/head"},
+		{name: "the merge ref", branch: "refs/pull/42/merge"},
+		{name: "the default branch", branch: "main"},
+		{name: "a topic branch", branch: "feature/x"},
+		{name: "a merge queue branch", branch: "gh-readonly-queue/main/pr-1-deadbeef"},
+		{name: "an empty head branch", branch: ""},
+	} {
+		t.Run("check_run with no PR on "+head.name+" yields nothing", func(t *testing.T) {
+			body := suiteBody(map[string]any{"id": float64(900), "head_branch": head.branch})
+			if obs := GithubCIObservations("check_run", body); len(obs) != 0 {
+				t.Fatalf("head branch %q yielded %+v", head.branch, obs)
+			}
+		})
+	}
+
+	t.Run("check_run with no PR and no check_suite yields nothing", func(t *testing.T) {
+		if obs := GithubCIObservations("check_run", suiteBody(nil)); len(obs) != 0 {
+			t.Fatalf("a run carrying no check suite yielded %+v", obs)
+		}
+	})
+
+	t.Run("check_suite with no PR on a pull head ref is attributed by it", func(t *testing.T) {
+		body := map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"check_suite": map[string]any{
+				"id":            float64(900),
+				"status":        "completed",
+				"conclusion":    "success",
+				"head_sha":      "deadbeef",
+				"head_branch":   "refs/pull/42/head",
+				"updated_at":    "2026-09-07T03:01:00Z",
+				"app":           map[string]any{"id": float64(12345)},
+				"pull_requests": []any{},
+			},
+		}
+		obs := GithubCIObservations("check_suite", body)
+		if len(obs) != 1 {
+			t.Fatalf("expected 1 observation, got %d", len(obs))
+		}
+		if want := (CIObservation{
+			Owner:      "sjawhar",
+			Repo:       "legion",
+			Number:     "42",
+			SHA:        "deadbeef",
+			AppID:      "12345",
+			SuiteID:    "900",
+			Status:     "completed",
+			Conclusion: "success",
+			ObservedAt: "2026-09-07T03:01:00Z",
+		}); obs[0] != want {
+			t.Fatalf("suite observation = %+v, want %+v", obs[0], want)
+		}
+	})
+
 	t.Run("check_run missing head_sha yields nothing", func(t *testing.T) {
 		body := checkRunBody([]any{map[string]any{"number": 42}})
 		delete(body["check_run"].(map[string]any), "head_sha")
@@ -1068,6 +1157,102 @@ func TestGithubCIObservationsSkipMalformedCheckRunIDs(t *testing.T) {
 		}
 		if observations := GithubCIObservations("check_run", body); len(observations) != 0 {
 			t.Fatalf("check run ID %v yielded observations: %+v", checkRunID, observations)
+		}
+	}
+}
+
+// GitHub's REST listing GET /repos/{owner}/{repo}/commits/{sha}/check-runs returns each check run
+// outside any webhook body, with a short check_suite that carries no head_branch, so a caller
+// reading it names the pull request number itself and the mapper attributes nothing.
+func TestGithubCIObservationMapsARestListedCheckRun(t *testing.T) {
+	object := map[string]any{
+		"id":           float64(126934155799),
+		"name":         "ci-ok",
+		"status":       "completed",
+		"conclusion":   "failure",
+		"head_sha":     "deadbeef",
+		"html_url":     "https://example-host/checks/126934155799",
+		"started_at":   "2026-09-07T02:59:00Z",
+		"completed_at": "2026-09-07T03:00:00Z",
+		"app":          map[string]any{"id": float64(12345)},
+		"check_suite":  map[string]any{"id": float64(900)},
+	}
+	obs, ok := GithubCIObservation("check_run", object, "sjawhar", "legion", "42")
+	if !ok {
+		t.Fatalf("a listed check run mapped to nothing")
+	}
+	if want := (CIObservation{
+		Owner:      "sjawhar",
+		Repo:       "legion",
+		Number:     "42",
+		SHA:        "deadbeef",
+		AppID:      "12345",
+		CheckName:  "ci-ok",
+		CheckRunID: 126934155799,
+		URL:        "https://example-host/checks/126934155799",
+		Status:     "completed",
+		Conclusion: "failure",
+		ObservedAt: "2026-09-07T03:00:00Z",
+	}); obs != want {
+		t.Fatalf("observation = %+v, want %+v", obs, want)
+	}
+}
+
+// The mapper is the one rule behind every observation: the webhook's fan-out and a caller that
+// names the number itself record the same bytes for the same GitHub object.
+func TestGithubCIObservationAgreesWithTheWebhooksFanOut(t *testing.T) {
+	run := map[string]any{
+		"id":            float64(987654321),
+		"name":          "unit-tests",
+		"status":        "completed",
+		"conclusion":    "failure",
+		"head_sha":      "deadbeef",
+		"html_url":      "https://example-host/checks/987654321",
+		"completed_at":  "2026-09-07T03:00:00Z",
+		"app":           map[string]any{"id": float64(12345)},
+		"check_suite":   map[string]any{"id": float64(900), "head_branch": "refs/pull/42/head"},
+		"pull_requests": []any{map[string]any{"number": 42}},
+	}
+	body := map[string]any{
+		"action": "completed",
+		"repository": map[string]any{
+			"full_name": "sjawhar/legion",
+			"name":      "legion",
+			"owner":     map[string]any{"login": "sjawhar"},
+		},
+		"check_run": run,
+	}
+	fanned := GithubCIObservations("check_run", body)
+	if len(fanned) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(fanned))
+	}
+	mapped, ok := GithubCIObservation("check_run", run, "sjawhar", "legion", "42")
+	if !ok || mapped != fanned[0] {
+		t.Fatalf("mapped = %+v (ok=%v), webhook fan-out = %+v", mapped, ok, fanned[0])
+	}
+}
+
+// The reviewer rule decides one check run by its name and the App that created it; the handler
+// that drops a verdict logs what it dropped.
+func TestReviewerVerdictDecision(t *testing.T) {
+	for _, c := range []struct {
+		checkName     string
+		appID         string
+		reviewerAppID string
+		want          ReviewerVerdict
+	}{
+		{checkName: "unit-tests", appID: "98765", reviewerAppID: "12345", want: VerdictNotAVerdict},
+		{checkName: "unit-tests", appID: "98765", reviewerAppID: "", want: VerdictNotAVerdict},
+		{checkName: "tester", appID: "12345", reviewerAppID: "", want: VerdictNoReviewerApp},
+		{checkName: "architect", appID: "12345", reviewerAppID: "", want: VerdictNoReviewerApp},
+		{checkName: "tester", appID: "98765", reviewerAppID: "12345", want: VerdictUntrusted},
+		{checkName: "architect", appID: "", reviewerAppID: "12345", want: VerdictUntrusted},
+		{checkName: "tester", appID: "12345", reviewerAppID: "12345", want: VerdictTrusted},
+		{checkName: "architect", appID: "12345", reviewerAppID: "12345", want: VerdictTrusted},
+	} {
+		if got := ReviewerVerdictDecision(c.checkName, c.appID, c.reviewerAppID); got != c.want {
+			t.Errorf("ReviewerVerdictDecision(%q, %q, %q) = %d, want %d",
+				c.checkName, c.appID, c.reviewerAppID, got, c.want)
 		}
 	}
 }
@@ -1988,144 +2173,18 @@ func TestGithubPayloadFields(t *testing.T) {
 			want: map[string]string{"head_subject": realLongSubject},
 		},
 		{
-			name:  "push lists unique changed paths across commits in first-seen order",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{"id": "1", "added": []any{"a.ts"}, "removed": []any{}, "modified": []any{"b.ts"}},
-					map[string]any{"id": "2", "added": []any{}, "removed": []any{"c.ts"}, "modified": []any{"a.ts"}},
-				},
-			},
-			want: map[string]string{"changed_paths": "a.ts\nb.ts\nc.ts", "changed_paths_truncated": "false"},
-		},
-		{
-			name:  "push caps changed paths at 100 and flags truncation",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{"id": "1", "added": numberedPaths(0, 60), "removed": []any{}, "modified": []any{}},
-					map[string]any{"id": "2", "added": []any{}, "removed": []any{}, "modified": numberedPaths(60, 101)},
-				},
-			},
-			want: map[string]string{
-				"changed_paths":           strings.Join(numberedPathStrings(0, 100), "\n"),
-				"changed_paths_truncated": "true",
-			},
-		},
-		{
-			name:  "push with exactly 100 unique paths and a repeat does not flag truncation",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{"id": "1", "added": numberedPaths(0, 100), "removed": []any{}, "modified": []any{}},
-					map[string]any{"id": "2", "added": []any{}, "removed": []any{}, "modified": numberedPaths(0, 1)},
-				},
-			},
-			want: map[string]string{
-				"changed_paths":           strings.Join(numberedPathStrings(0, 100), "\n"),
-				"changed_paths_truncated": "false",
-			},
-		},
-		{
-			// A hundred paths are not bounded by their count alone: git bounds no path's length, and
-			// the envelope carries the list whole. The list stops at a path that would take it past
-			// its text budget, keeps every path it lists whole, and says it stopped.
-			name:  "push stops listing changed paths at their text budget and flags truncation",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{"id": "1", "added": longPaths(0, 100), "removed": []any{}, "modified": []any{}},
-				},
-			},
-			want: map[string]string{
-				"changed_paths":           strings.Join(pathsWithinBudget(longPathStrings(0, 100)), "\n"),
-				"changed_paths_truncated": "true",
-			},
-		},
-		{
-			name:  "push with no commits omits changed_paths",
-			event: "push",
-			body: map[string]any{
-				"repository":  map[string]any{"full_name": "example-org/example-repo"},
-				"ref":         "refs/heads/legion/X",
-				"commits":     []any{},
-				"head_commit": nil,
-			},
-			want:    map[string]string{"changed_paths_truncated": "false", "commit_count": "0"},
-			omitted: []string{"changed_paths"},
-		},
-		{
-			name:  "a forced push says so",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"forced":     true,
-				"commits": []any{
-					map[string]any{"id": "1", "added": []any{}, "removed": []any{}, "modified": []any{".legion/review.json"}},
-				},
-			},
-			want: map[string]string{"forced": "true", "changed_paths": ".legion/review.json"},
-		},
-		{
-			name:  "a push GitHub says was not forced says so",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"forced":     false,
-				"commits":    []any{},
-			},
-			want: map[string]string{"forced": "false"},
-		},
-		{
-			name:  "a push whose body leaves forced out says it was not forced",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits":    []any{},
-			},
-			want: map[string]string{"forced": "false"},
-		},
-		{
-			name:  "push removing the .legion handoffs lists the removed paths",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{
-						"id":       "9b6fe2c5154f",
-						"added":    []any{},
-						"removed":  []any{".legion/implement.json", ".legion/plan.json", ".legion/review.json", ".legion/test.json"},
-						"modified": []any{},
-					},
-				},
-			},
-			want: map[string]string{
-				"changed_paths":           ".legion/implement.json\n.legion/plan.json\n.legion/review.json\n.legion/test.json",
-				"changed_paths_truncated": "false",
-			},
-		},
-		{
 			name:  "merged pull request carries merge and ref facts",
 			event: "pull_request",
 			body: map[string]any{
 				"action":     "closed",
 				"repository": map[string]any{"full_name": "example-org/example-repo"},
 				"pull_request": map[string]any{
-					"number":           24,
-					"merged":           true,
-					"head":             map[string]any{"sha": "head-sha", "ref": "feature/payloads"},
+					"number": 24,
+					"merged": true,
+					"head": map[string]any{
+						"sha": "head-sha", "ref": "feature/payloads",
+						"repo": map[string]any{"full_name": "example-org/example-repo"},
+					},
 					"base":             map[string]any{"ref": "main"},
 					"merge_commit_sha": "merge-sha",
 					"merged_by":        map[string]any{"login": "merger"},
@@ -2134,8 +2193,28 @@ func TestGithubPayloadFields(t *testing.T) {
 			},
 			want: map[string]string{
 				"head_sha": "head-sha", "head_ref": "feature/payloads", "base_ref": "main", "merged": "true",
+				"head_repo":        "example-org/example-repo",
 				"merge_commit_sha": "merge-sha", "merged_by": "merger", "updated_at": "2026-09-07T10:01:00Z",
 			},
+		},
+		{
+			// A fork's pull request names its own repository as the head's; Dispatch attributes
+			// no result's currency to one (delivery's headAttribution).
+			name:  "a fork's pull request names the fork as its head repository",
+			event: "pull_request",
+			body: map[string]any{
+				"action":     "opened",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{
+					"number": 25,
+					"head": map[string]any{
+						"sha": "fork-sha", "ref": "patch-1",
+						"repo": map[string]any{"full_name": "stranger/example-repo"},
+					},
+					"base": map[string]any{"ref": "main"},
+				},
+			},
+			want: map[string]string{"head_repo": "stranger/example-repo", "head_sha": "fork-sha"},
 		},
 		{
 			name:  "workflow run carries branch and pull request facts",
@@ -2491,60 +2570,12 @@ func TestAWorkflowFileNameIsOneValidSubjectSegment(t *testing.T) {
 	}
 }
 
-// numberedPathStrings returns src/f<from>.ts .. src/f<to-1>.ts.
-func numberedPathStrings(from, to int) []string {
-	paths := make([]string, 0, to-from)
-	for n := from; n < to; n++ {
-		paths = append(paths, fmt.Sprintf("src/f%d.ts", n))
-	}
-	return paths
-}
-
-// longPathStrings returns paths of 400 runes each, numbered from..to-1.
-func longPathStrings(from, to int) []string {
-	paths := make([]string, 0, to-from)
-	for n := from; n < to; n++ {
-		paths = append(paths, fmt.Sprintf("src/%s/f%03d.ts", strings.Repeat("d", 388), n))
-	}
-	return paths
-}
-
-func longPaths(from, to int) []any {
-	paths := make([]any, 0, to-from)
-	for _, path := range longPathStrings(from, to) {
-		paths = append(paths, path)
-	}
-	return paths
-}
-
-// pathsWithinBudget returns the longest prefix of paths whose newline-joined list fits the push
-// payload's changed-paths budget.
-func pathsWithinBudget(paths []string) []string {
-	runes := 0
-	for i, path := range paths {
-		if i > 0 {
-			runes++
-		}
-		runes += len([]rune(path))
-		if runes > maxPushChangedPathRunes {
-			return paths[:i]
-		}
-	}
-	return paths
-}
-
-func numberedPaths(from, to int) []any {
-	paths := make([]any, 0, to-from)
-	for _, path := range numberedPathStrings(from, to) {
-		paths = append(paths, path)
-	}
-	return paths
-}
-
-// TestGithubPayloadPushChangedPathsFixture normalizes a captured-shape GitHub push body carrying
-// the real LEGION-23 handoff push (PR #966, commit 538bbf1a: `.legion/implement.json` added,
-// nothing else) and asserts the daemon sees exactly that one path, unflagged.
-func TestGithubPayloadPushChangedPathsFixture(t *testing.T) {
+// TestGithubPayloadPushCarriesExactlyTheKeysTheListenerPublishes normalizes a captured real GitHub
+// push body (sjawhar/legion PR #966, commit 538bbf1a) and asserts the push payload's exact key set:
+// the ten fields the listener publishes, and none of changed_paths, changed_paths_truncated or
+// forced, which no daemon reads since sjawhar/legion#2354 moved Legion's handoffs onto their
+// Dispatch issues.
+func TestGithubPayloadPushCarriesExactlyTheKeysTheListenerPublishes(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "push_handoff_only.json"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -2561,18 +2592,19 @@ func TestGithubPayloadPushChangedPathsFixture(t *testing.T) {
 	}
 	payload := decodePayload(t, envelope.Payload)
 	want := map[string]string{
-		"changed_paths":           ".legion/implement.json",
-		"changed_paths_truncated": "false",
-		"commit_count":            "1",
-		"after":                   "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
-		"ref":                     "refs/heads/legion/LEGION-23",
-		// GitHub's own push carries "forced": false.
-		"forced": "false",
+		"kind":         "push",
+		"repo":         "sjawhar/legion",
+		"ref":          "refs/heads/legion/LEGION-23",
+		"after":        "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
+		"before":       "da6d40f735b36fdda8f6980cd7550b872d5ceeba",
+		"pusher":       "legion-implementer[bot]",
+		"sender":       "legion-implementer[bot]",
+		"head_subject": "implement: record handoff",
+		"commit_count": "1",
+		"compare_url":  "https://github.com/sjawhar/legion/compare/da6d40f735b3...538bbf1ab6b9",
 	}
-	for key, value := range want {
-		if got := payload[key]; got != value {
-			t.Fatalf("payload[%q] = %q, want %q", key, got, value)
-		}
+	if !maps.Equal(want, payload) {
+		t.Fatalf("push payload keys = %v, want %v; payload = %v", slices.Sorted(maps.Keys(payload)), slices.Sorted(maps.Keys(want)), payload)
 	}
 }
 

@@ -1,0 +1,8 @@
+{
+  "name": "legion-worker-codegraph",
+  "private": true,
+  "description": "The CodeGraph CLI the worker image puts on its PATH, installed from this directory's bun.lock with `bun install --frozen-lockfile --ignore-scripts` (worker.Dockerfile's plugin stage). @colbymchenry/codegraph is pinned to the version the devbox runs (`codegraph --version`), and this is the one place that names it: the plugin stage copies the per-platform bundle out of the install, and the notices stage reads the pin from this file for the LICENSE of that release. Everything Bun installs beside it, the per-platform bundle included, is pinned by the lockfile alone.",
+  "dependencies": {
+    "@colbymchenry/codegraph": "1.5.0"
+  }
+}

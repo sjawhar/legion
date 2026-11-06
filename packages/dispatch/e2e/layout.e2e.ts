@@ -11,10 +11,6 @@ test.beforeEach(async () => {
 test("tablet keeps the Conversation readable and exposes the review sheet", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the tablet viewport uses the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -69,11 +65,7 @@ test("tablet keeps the Conversation readable and exposes the review sheet", asyn
 // on that route.
 test("a comment deep link keeps the compact review-panel toggle hit-testable", async ({
   browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the tablet viewport uses the desktop browser project"
-  );
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",

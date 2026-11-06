@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,19 +21,38 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // --- Unit Tests (no NATS needed — test Match() against pre-populated cache) ---
 
+// holding is a registry with no watcher whose cache holds interests, each delivered as a read
+// delivers it (interestCache.Apply).
+func holding(t *testing.T, interests map[string]Interest) *Registry {
+	t.Helper()
+	r := &Registry{index: newSubjectIndex()}
+	r.cache = newInterestCopy(r)
+	for sessionID, item := range interests {
+		value, err := json.Marshal(item)
+		if err != nil {
+			t.Fatalf("encode %s: %v", sessionID, err)
+		}
+		interestCache{r}.Apply(kvwatch.Entry{Key: sessionID, Value: value, Revision: 1}, kvwatch.Read{})
+	}
+	return r
+}
+
 func TestMatch_FiltersByMachineID(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_a": {SessionID: "ses_a", MachineID: "machine-A", Topics: []string{"notifications.>"}},
 		"ses_b": {SessionID: "ses_b", MachineID: "machine-B", Topics: []string{"notifications.>"}},
 		"ses_c": {SessionID: "ses_c", MachineID: "machine-A", Topics: []string{"notifications.>"}},
-	}}
+	})
 
 	got := r.Match("machine-A", "notifications.test")
 	if len(got) != 2 {
@@ -55,13 +75,40 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 	}
 }
 
+// MatchAll is Match without the machine filter: a sender confirming delivery to every subscribed
+// session must find the ones registered through another machine's listener, by an exact topic or
+// a wildcard alike, and none whose patterns miss the topic.
+func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
+	r := holding(t, map[string]Interest{
+		"ses_b_exact": {SessionID: "ses_b_exact", MachineID: "machine-B", Topics: []string{"notifications.team.deploy"}},
+		"ses_a_star":  {SessionID: "ses_a_star", MachineID: "machine-A", Topics: []string{"notifications.team.*"}},
+		"ses_a_other": {SessionID: "ses_a_other", MachineID: "machine-A", Topics: []string{"notifications.team.review"}},
+		"ses_b_chev":  {SessionID: "ses_b_chev", MachineID: "machine-B", Topics: []string{"notifications.slack.>", "notifications.>"}},
+		"ses_b_slack": {SessionID: "ses_b_slack", MachineID: "machine-B", Topics: []string{"notifications.slack.>"}},
+	})
+
+	got := r.MatchAll("notifications.team.deploy")
+	ids := make([]string, len(got))
+	for i, item := range got {
+		ids[i] = item.SessionID
+	}
+	want := []string{"ses_a_star", "ses_b_chev", "ses_b_exact"}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("MatchAll(notifications.team.deploy) = %v, want %v in SessionID order", ids, want)
+	}
+
+	if got := r.MatchAll("notifications.agent.ses_x.extra.tokens"); len(got) != 1 || got[0].SessionID != "ses_b_chev" {
+		t.Fatalf("MatchAll of a topic only notifications.> matches = %v, want [ses_b_chev]", got)
+	}
+}
+
 func TestMatch_WildcardPatterns(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_exact":   {SessionID: "ses_exact", MachineID: "m1", Topics: []string{"notifications.github.sjawhar.legion.pr"}},
 		"ses_star":    {SessionID: "ses_star", MachineID: "m1", Topics: []string{"notifications.github.*.*.pr"}},
 		"ses_chevron": {SessionID: "ses_chevron", MachineID: "m1", Topics: []string{"notifications.github.>"}},
 		"ses_slack":   {SessionID: "ses_slack", MachineID: "m1", Topics: []string{"notifications.slack.>"}},
-	}}
+	})
 
 	got := r.Match("m1", "notifications.github.sjawhar.legion.pr")
 	ids := make([]string, len(got))
@@ -90,7 +137,7 @@ func TestMatch_WildcardPatterns(t *testing.T) {
 }
 
 func TestMatch_SlackThreadIsolation(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_thread_a": {SessionID: "ses_thread_a", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.thread.1111111111_111111.>",
 		}},
@@ -100,7 +147,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 		"ses_channel": {SessionID: "ses_channel", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.>",
 		}},
-	}}
+	})
 
 	// Thread A message: only ses_thread_a and ses_channel
 	gotA := r.Match("m1", "notifications.slack.T123.C456.thread.1111111111_111111.message")
@@ -136,7 +183,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 }
 
 func TestMatch_EmptyCache(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{}}
+	r := holding(t, map[string]Interest{})
 	got := r.Match("m1", "notifications.test")
 	if len(got) != 0 {
 		t.Fatalf("expected 0 results from empty cache, got %d", len(got))
@@ -144,13 +191,13 @@ func TestMatch_EmptyCache(t *testing.T) {
 }
 
 func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_multi": {
 			SessionID: "ses_multi",
 			MachineID: "m1",
 			Topics:    []string{"notifications.github.>", "notifications.slack.>"},
 		},
-	}}
+	})
 
 	// Matches first topic
 	got := r.Match("m1", "notifications.github.sjawhar.legion.pr")
@@ -281,6 +328,103 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	}
 }
 
+// A row stored before the listener refused topics reaching a private stream subject keeps them
+// until the session's next registration, which drops them: another session's agent subject, a
+// failed-delivery lane wildcard, a Legion controller lane and notifications.> go, while the
+// session's own agent subject, the issue topic it followed and the topic it registers now stay.
+func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_x",
+		MachineID: "m1",
+		Topics: []string{
+			"notifications.agent.ses_other",
+			"notifications.agent.ses_x",
+			"notifications.dispatch.issue.KEY-1.>",
+			"notifications.envoy.exceptions.>",
+			"notifications.legion.ACME.controller",
+			"notifications.>",
+		},
+	}
+	item := Interest{SessionID: "ses_x", MachineID: "m1"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x", "notifications.github.acme.widgets.pr.7.>"}, 7)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	want := []string{"notifications.agent.ses_x", "notifications.dispatch.issue.KEY-1.>", "notifications.github.acme.widgets.pr.7.>"}
+	if !slices.Equal(result.Topics, want) {
+		t.Fatalf("merged topics = %v, want %v", result.Topics, want)
+	}
+}
+
+// A session that registers again through another listener moves its row: the machine id and the
+// directory the second registration carries are the ones the row keeps, so every reader of the row
+// - the fan-out index, the durable path's ownership and the sender stamp of a message the session
+// sends (cmd/listener/api.go's senderStamp) - names the listener the session is registered through
+// now, not the one it registered through first.
+func TestMergeForUpsertMovesTheRowToTheMachineAndDirectoryOfASecondRegistration(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_moved",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_moved"},
+	}
+	// The listener's subscribe handler's call shape: its own machine id and the body's directory.
+	item := Interest{SessionID: "ses_moved", MachineID: "machine-second", Dir: "/work/second"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_moved"}, 300)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.MachineID != "machine-second" {
+		t.Errorf("MachineID = %q, want the second registration's machine-second", result.MachineID)
+	}
+	if result.Dir != "/work/second" {
+		t.Errorf("Dir = %q, want the second registration's /work/second", result.Dir)
+	}
+}
+
+// A role claim carries the claiming listener's machine id and no directory (SetRoleWithPrevious),
+// so the row keeps the directory the session's registration stored: claiming a role never clears
+// the Cwd of the sender stamp.
+func TestMergeForUpsertKeepsTheStoredDirectoryForARoleClaimThatCarriesNone(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_claimant",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_claimant"},
+	}
+	item := Interest{SessionID: "ses_claimant", MachineID: "machine-first"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.role.reviewer"}, 301)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.Dir != "/work/first" {
+		t.Errorf("Dir = %q, want the stored /work/first: the claim carries no directory", result.Dir)
+	}
+}
+
+// A request that carries no machine id keeps the stored one: a caller that names no machine says
+// nothing about where the session runs, so the row is left naming the listener it has.
+func TestMergeForUpsertKeepsTheStoredMachineIDForARequestThatCarriesNone(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_machineless",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_machineless"},
+	}
+	item := Interest{SessionID: "ses_machineless", Dir: "/work/first"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_machineless"}, 302)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.MachineID != "machine-first" {
+		t.Errorf("MachineID = %q, want the stored machine-first", result.MachineID)
+	}
+}
+
 // --- Integration Tests (a real NATS server) ---
 
 // connectNATS connects to the package's shared NATS server, in the JetStream account
@@ -371,12 +515,12 @@ func TestWatch_PropagatesUpsert(t *testing.T) {
 	}
 
 	// Upsert writes to KV — the watcher should propagate to cache
-	if _, err := reg.Upsert(Interest{SessionID: "ses_new", MachineID: "m1"}, []string{"notifications.>"}); err != nil {
+	if _, err := reg.Upsert(Interest{SessionID: "ses_new", MachineID: "m1"}, []string{"notifications.test.>"}); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
 	// Poll with bounded timeout
-	got = pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
+	got = pollMatch(t, reg, "m1", "notifications.test.x", 1, 5*time.Second)
 	if got[0].SessionID != "ses_new" {
 		t.Fatalf("expected ses_new, got %s", got[0].SessionID)
 	}
@@ -406,7 +550,7 @@ func TestWatch_PropagatesDelete(t *testing.T) {
 	pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
 
 	// Delete via KV Delete operation (empty topics = delete all)
-	if err := reg.Remove("ses_del", nil); err != nil {
+	if err := reg.Remove(context.Background(), "ses_del", nil); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -521,8 +665,17 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
-	r := &Registry{roleKV: bus.KeyValue{KeyValue: roleKV}, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
-	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
+	roles, err := bus.WrapKeyValue(conn, roleKV)
+	if err != nil {
+		t.Fatalf("wrap the role KV bucket: %v", err)
+	}
+	r := &Registry{roleKV: roles, now: time.Now, index: newSubjectIndex()}
+	r.cache = newInterestCopy(r)
+	handle, err := bus.WrapKeyValue(conn, kv)
+	if err != nil {
+		t.Fatalf("wrap the KV bucket: %v", err)
+	}
+	r.watcher = kvwatch.New("interest registry", handle, interestCache{r})
 	return r, kv
 }
 
@@ -533,7 +686,7 @@ func TestGet_ColdCacheFallsBackToKV(t *testing.T) {
 	reg, kv := coldRegistry(t, conn)
 	putInterest(t, kv, Interest{SessionID: "ses_cold", MachineID: "m1", Topics: []string{"topic.a", "topic.b"}})
 
-	item, err := reg.Get("ses_cold")
+	item, err := reg.Get(context.Background(), "ses_cold")
 	if err != nil {
 		t.Fatalf("Get failed on cold cache: %v", err)
 	}
@@ -554,7 +707,7 @@ func TestGet_ColdCachePopulatesCacheOnHit(t *testing.T) {
 	putInterest(t, kv, Interest{SessionID: "ses_pop", MachineID: "m1", Topics: []string{"topic.x"}})
 
 	// First Get falls back to KV and caches the result
-	if _, err := reg.Get("ses_pop"); err != nil {
+	if _, err := reg.Get(context.Background(), "ses_pop"); err != nil {
 		t.Fatalf("first Get failed: %v", err)
 	}
 
@@ -571,12 +724,249 @@ func TestGet_ColdCacheMissReturnsError(t *testing.T) {
 
 	reg, _ := coldRegistry(t, conn)
 
-	_, err := reg.Get("nonexistent")
+	_, err := reg.Get(context.Background(), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent session, got nil")
 	}
 	if err != natsgo.ErrKeyNotFound {
 		t.Fatalf("expected ErrKeyNotFound, got %v", err)
+	}
+}
+
+// A read whose context has already ended still answers from the cache: Get's cache hit never
+// consults ctx. Every read that would go to the bucket - a Get that misses, a claim read, and a
+// release's read - instead returns ctx's end, naming the call, and a release left that way deletes
+// nothing.
+func TestReadsWhoseContextHasEndedAnswerOnlyFromTheCache(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_cached", MachineID: "m1", Topics: []string{"topic.a"}})
+	if _, err := reg.Get(context.Background(), "ses_cached"); err != nil {
+		t.Fatalf("warm the cache: %v", err)
+	}
+	const role = "reviewer"
+	if _, err := reg.SetRole("ses_lapsed", "m1", role, false); err != nil {
+		t.Fatalf("seed the role claim: %v", err)
+	}
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if item, err := reg.Get(ended, "ses_cached"); err != nil || item.SessionID != "ses_cached" {
+		t.Fatalf("cached Get under an ended context = %+v, %v; want the cached interest", item, err)
+	}
+	if _, err := reg.Get(ended, "ses_uncached"); !errors.Is(err, context.Canceled) || err.Error() != "read ses_uncached's interest record: context canceled" {
+		t.Fatalf("uncached Get under an ended context = %v, want it to name the read and wrap context.Canceled", err)
+	}
+	if _, err := reg.RoleClaim(ended, role); !errors.Is(err, context.Canceled) || err.Error() != "read role reviewer's claim: context canceled" {
+		t.Fatalf("RoleClaim under an ended context = %v, want it to name the read and wrap context.Canceled", err)
+	}
+	release, err := reg.ReleaseExpiredRoleClaim(ended, role, "ses_lapsed", 0)
+	if release != ExpiredRoleClaimRetained || !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "release role reviewer's expired claim held by ses_lapsed: ") {
+		t.Fatalf("release under an ended context = %v, %v; want retained, naming the release and wrapping context.Canceled", release, err)
+	}
+	assertRoleHolder(t, reg, role, "ses_lapsed")
+}
+
+// A claim record the bucket holds and no read can decode is ErrMalformedRoleClaim, so a caller can
+// tell it from a read that did not answer, with the detail of what is wrong kept in the message.
+func TestRoleClaimReadsAnUndecodableRecordAsErrMalformedRoleClaim(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	for record, detail := range map[string]string{
+		`{"holder_session_id":""}`: "malformed role claim: it names no holder",
+		`{"holder_session_id":7}`:  "malformed role claim: json: ",
+		"  ":                       "malformed role claim: a legacy record with an empty holder",
+	} {
+		if _, err := reg.roleKV.Put("reviewer", []byte(record)); err != nil {
+			t.Fatalf("store the claim record %q: %v", record, err)
+		}
+		_, err := reg.RoleClaim(context.Background(), "reviewer")
+		if !errors.Is(err, ErrMalformedRoleClaim) || !strings.HasPrefix(err.Error(), detail) {
+			t.Fatalf("RoleClaim of %q = %v, want ErrMalformedRoleClaim naming %q", record, err, detail)
+		}
+	}
+}
+
+// An interest record the bucket holds and this build cannot decode is ErrMalformedInterest, so a
+// caller can tell it from a read that did not answer, with the decode failure kept in the message,
+// and the registry logs it at WARN naming the session. Nothing is cached from it.
+func TestGetReadsAnUndecodableInterestRecordAsErrMalformedInterest(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const sessionID = "ses_unreadable_interest"
+	if _, err := kv.Put(sessionID, []byte("not a json interest record")); err != nil {
+		t.Fatalf("store the interest record: %v", err)
+	}
+	item, err := reg.Get(context.Background(), sessionID)
+	if !errors.Is(err, ErrMalformedInterest) || !strings.HasPrefix(err.Error(), "malformed interest record: invalid character ") {
+		t.Fatalf("Get of an undecodable record = %+v, %v; want ErrMalformedInterest naming the decode failure", item, err)
+	}
+	if item.SessionID != "" || item.Topics != nil {
+		t.Fatalf("Get of an undecodable record returned %+v, want the zero Interest", item)
+	}
+	if cached, ok := reg.Cached(sessionID); ok {
+		t.Fatalf("the cache holds %+v after an undecodable read", cached)
+	}
+	for _, want := range []string{"level=WARN", `msg="registry read an interest record it cannot decode"`, "session_id=" + sessionID, "invalid character"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("registry logs %q, want them to contain %q", logs.String(), want)
+		}
+	}
+}
+
+const undecodableInterestRecord = "not a json interest record"
+
+// storeUndecodableInterest writes a record no build can decode as sessionID's interest record, and
+// a claim on role naming sessionID as its holder.
+func storeUndecodableInterest(t *testing.T, reg *Registry, kv natsgo.KeyValue, sessionID, role string) {
+	t.Helper()
+	if _, err := kv.Put(sessionID, []byte(undecodableInterestRecord)); err != nil {
+		t.Fatalf("store %s's interest record: %v", sessionID, err)
+	}
+	claim, err := json.Marshal(RoleClaim{HolderSessionID: sessionID, ClaimedAt: 1})
+	if err != nil {
+		t.Fatalf("encode the claim on %s: %v", role, err)
+	}
+	if _, err := reg.roleKV.Put(role, claim); err != nil {
+		t.Fatalf("store the claim on %s: %v", role, err)
+	}
+}
+
+// Removing every topic of a session whose interest record this build cannot decode deletes the
+// record and releases the session's role claims, as it does for a record that decodes: failing on
+// the read would leave nothing that can clear the record.
+func TestRemoveAllDeletesAnUndecodableInterestRecordAndReleasesItsRoles(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const sessionID = "ses_undecodable_remove_all"
+	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
+	if err := reg.Remove(context.Background(), sessionID, nil); err != nil {
+		t.Fatalf("Remove(%s, nil) over an undecodable record: %v", sessionID, err)
+	}
+	if entry, err := kv.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("the bucket's %s key after Remove = %v, %v; want ErrKeyNotFound", sessionID, entry, err)
+	}
+	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != "" {
+		t.Fatalf("reviewer's holder after Remove = %q, %v; want the claim released", holder, err)
+	}
+}
+
+// Removing some topics of a session whose interest record this build cannot decode releases the
+// role claims those topics name and leaves the record as it is, logged at WARN naming the session:
+// the record routes none of its topics here, so there is nothing to take out of it.
+func TestRemoveTopicsLeavesAnUndecodableInterestRecordAndReleasesTheirRoles(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const sessionID = "ses_undecodable_remove_topics"
+	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
+	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.role.reviewer"}); err != nil {
+		t.Fatalf("Remove(%s, its role topic) over an undecodable record: %v", sessionID, err)
+	}
+	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != "" {
+		t.Fatalf("reviewer's holder after Remove = %q, %v; want the claim released", holder, err)
+	}
+	entry, err := kv.Get(sessionID)
+	if err != nil || string(entry.Value()) != undecodableInterestRecord {
+		t.Fatalf("the bucket's %s record after Remove = %v, %v; want it unchanged", sessionID, entry, err)
+	}
+	for _, want := range []string{"level=WARN", `msg="registry left an interest record it cannot decode unchanged"`, "session_id=" + sessionID} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("registry logs %q, want them to contain %q", logs.String(), want)
+		}
+	}
+}
+
+// A subscribe over an interest record this build cannot decode writes the record it asks for,
+// without the undecodable record's topics, and logs the replacement at WARN naming the session: the
+// session's own subscribe is the authority on its record. The session's role claims live in the
+// role bucket, so they are kept.
+func TestUpsertReplacesAnUndecodableInterestRecord(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const sessionID = "ses_undecodable_upsert"
+	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
+	item, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: "m1", Dir: "/workspace"},
+		[]string{"topic.fresh", "notifications.agent." + sessionID})
+	if err != nil {
+		t.Fatalf("Upsert over an undecodable record: %v", err)
+	}
+	entry, err := kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read %s's record after Upsert: %v", sessionID, err)
+	}
+	var stored Interest
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+		t.Fatalf("the record Upsert wrote does not decode: %q: %v", entry.Value(), err)
+	}
+	want := "notifications.agent." + sessionID + " topic.fresh"
+	if got := strings.Join(stored.Topics, " "); got != want || stored.MachineID != "m1" || stored.Dir != "/workspace" {
+		t.Fatalf("the record Upsert wrote = %+v, want topics %q on m1 in /workspace", stored, want)
+	}
+	if got := strings.Join(item.Topics, " "); got != want {
+		t.Fatalf("Upsert returned topics %q, want %q", got, want)
+	}
+	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != sessionID {
+		t.Fatalf("reviewer's holder after Upsert = %q, %v; want the claim kept for %s", holder, err, sessionID)
+	}
+	for _, want := range []string{"level=WARN", `msg="registry replaced an interest record it cannot decode"`, "session_id=" + sessionID} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("registry logs %q, want them to contain %q", logs.String(), want)
+		}
+	}
+}
+
+// A role claim goes through over an interest record this build cannot decode, the claimant's or
+// the role's previous holder's: the claimant's record is replaced by one naming the role, and the
+// previous holder's is left as it is.
+func TestSetRoleClaimsOverUndecodableInterestRecords(t *testing.T) {
+	captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const (
+		claimant = "ses_undecodable_claimant"
+		previous = "ses_undecodable_previous"
+	)
+	if _, err := kv.Put(claimant, []byte(undecodableInterestRecord)); err != nil {
+		t.Fatalf("store %s's interest record: %v", claimant, err)
+	}
+	storeUndecodableInterest(t, reg, kv, previous, "reviewer")
+	item, err := reg.SetRole(claimant, "m1", "reviewer", false)
+	if err != nil {
+		t.Fatalf("SetRole over undecodable records: %v", err)
+	}
+	if got := strings.Join(item.Topics, " "); got != "notifications.role.reviewer" {
+		t.Fatalf("SetRole returned topics %q, want the role topic", got)
+	}
+	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != claimant {
+		t.Fatalf("reviewer's holder after SetRole = %q, %v; want %s", holder, err, claimant)
+	}
+	entry, err := kv.Get(claimant)
+	if err != nil {
+		t.Fatalf("read %s's record after SetRole: %v", claimant, err)
+	}
+	var stored Interest
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil || strings.Join(stored.Topics, " ") != "notifications.role.reviewer" {
+		t.Fatalf("%s's record after SetRole = %q, %v; want it to decode with the role topic", claimant, entry.Value(), err)
+	}
+	if entry, err := kv.Get(previous); err != nil || string(entry.Value()) != undecodableInterestRecord {
+		t.Fatalf("%s's record after SetRole = %v, %v; want it unchanged", previous, entry, err)
 	}
 }
 
@@ -693,6 +1083,183 @@ func TestUpsert_ColdCacheDuplicateTopicDeduped(t *testing.T) {
 	}
 }
 
+// manualClock is a registry clock (WithClock) the test moves by hand.
+type manualClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+// Set moves the clock to at.
+func (c *manualClock) Set(at time.Time) {
+	c.mu.Lock()
+	c.at = at
+	c.mu.Unlock()
+}
+
+// clockedRegistry opens a registry on the clock, over an interest bucket no earlier test wrote,
+// waits for its cache, and returns it with that bucket.
+func clockedRegistry(t *testing.T, clock *manualClock) (*Registry, natsgo.KeyValue) {
+	t.Helper()
+	conn, cleanup := connectNATS(t)
+	t.Cleanup(cleanup)
+	reg, err := Open(conn, WithReplicas(1), WithClock(clock.Now))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("interest cache not ready: %v", err)
+	}
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	kv, err := js.KeyValue(bus.InterestBucket)
+	if err != nil {
+		t.Fatalf("interest bucket: %v", err)
+	}
+	return reg, kv
+}
+
+// interestRevision is the bucket's revision of the session's interest row.
+func interestRevision(t *testing.T, kv natsgo.KeyValue, sessionID string) uint64 {
+	t.Helper()
+	entry, err := kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("get interest %s: %v", sessionID, err)
+	}
+	return entry.Revision()
+}
+
+// upsertOrFail upserts the heartbeat-shaped item and topics and returns what Upsert returned.
+func upsertOrFail(t *testing.T, reg *Registry, sessionID string, topics ...string) Interest {
+	t.Helper()
+	item, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: "m1", Dir: "/work/" + sessionID}, topics)
+	if err != nil {
+		t.Fatalf("Upsert %s: %v", sessionID, err)
+	}
+	return item
+}
+
+// A heartbeat that changes nothing writes the interest row only once the row is
+// InterestRefreshAge old: before that Upsert returns the stored row, UpdatedAt and all, and the
+// bucket gains no revision; at that age, and past it, the row is written and restamped.
+func TestUpsertWritesAnUnchangedRowOnlyOnceItIsInterestRefreshAgeOld(t *testing.T) {
+	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	clock := &manualClock{at: start}
+	reg, kv := clockedRegistry(t, clock)
+	topics := []string{"notifications.agent.ses_hb", "notifications.team.heartbeat"}
+
+	upsertOrFail(t, reg, "ses_hb", topics...)
+	created := interestRevision(t, kv, "ses_hb")
+	for _, after := range []time.Duration{90 * time.Second, 180 * time.Second, 270 * time.Second, InterestRefreshAge - time.Millisecond} {
+		clock.Set(start.Add(after))
+		got := upsertOrFail(t, reg, "ses_hb", topics...)
+		if revision := interestRevision(t, kv, "ses_hb"); revision != created {
+			t.Fatalf("unchanged heartbeat %v after the write moved the row from revision %d to %d", after, created, revision)
+		}
+		if got.UpdatedAt != start.UnixMilli() {
+			t.Fatalf("unchanged heartbeat %v after the write returned updated_at %d, want the stored row's %d", after, got.UpdatedAt, start.UnixMilli())
+		}
+	}
+
+	refreshed := start.Add(InterestRefreshAge)
+	clock.Set(refreshed)
+	if got := upsertOrFail(t, reg, "ses_hb", topics...); got.UpdatedAt != refreshed.UnixMilli() {
+		t.Fatalf("heartbeat at InterestRefreshAge returned updated_at %d, want %d", got.UpdatedAt, refreshed.UnixMilli())
+	}
+	if revision := interestRevision(t, kv, "ses_hb"); revision != created+1 {
+		t.Fatalf("heartbeat at InterestRefreshAge left revision %d, want one write (%d)", revision, created+1)
+	}
+
+	clock.Set(refreshed.Add(90 * time.Second))
+	upsertOrFail(t, reg, "ses_hb", topics...)
+	if revision := interestRevision(t, kv, "ses_hb"); revision != created+1 {
+		t.Fatalf("heartbeat 90s after the refresh moved the row to revision %d, want %d", revision, created+1)
+	}
+
+	clock.Set(refreshed.Add(InterestRefreshAge + time.Minute))
+	upsertOrFail(t, reg, "ses_hb", topics...)
+	if revision := interestRevision(t, kv, "ses_hb"); revision != created+2 {
+		t.Fatalf("heartbeat past InterestRefreshAge left revision %d, want one more write (%d)", revision, created+2)
+	}
+	entry, err := kv.Get("ses_hb")
+	if err != nil {
+		t.Fatalf("get ses_hb: %v", err)
+	}
+	var stored Interest
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+		t.Fatalf("decode ses_hb: %v", err)
+	}
+	if want := refreshed.Add(InterestRefreshAge + time.Minute).UnixMilli(); stored.UpdatedAt != want {
+		t.Fatalf("stored updated_at = %d, want the last write's %d", stored.UpdatedAt, want)
+	}
+}
+
+// A heartbeat that adds a topic is written at once, however young the row; one that re-sends the
+// stored topics in another order changes nothing, since the merge sorts them.
+func TestUpsertWritesAChangedTopicSetAtOnce(t *testing.T) {
+	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	clock := &manualClock{at: start}
+	reg, kv := clockedRegistry(t, clock)
+
+	upsertOrFail(t, reg, "ses_topics", "notifications.agent.ses_topics")
+	created := interestRevision(t, kv, "ses_topics")
+
+	clock.Set(start.Add(time.Second))
+	got := upsertOrFail(t, reg, "ses_topics", "notifications.team.new", "notifications.agent.ses_topics")
+	if revision := interestRevision(t, kv, "ses_topics"); revision != created+1 {
+		t.Fatalf("a new topic left revision %d, want one write (%d)", revision, created+1)
+	}
+	if want := []string{"notifications.agent.ses_topics", "notifications.team.new"}; !slices.Equal(got.Topics, want) || got.UpdatedAt != start.Add(time.Second).UnixMilli() {
+		t.Fatalf("Upsert with a new topic returned %+v, want topics %v stamped now", got, want)
+	}
+
+	clock.Set(start.Add(2 * time.Second))
+	upsertOrFail(t, reg, "ses_topics", "notifications.team.new", "notifications.agent.ses_topics")
+	upsertOrFail(t, reg, "ses_topics", "notifications.agent.ses_topics", "notifications.team.new")
+	if revision := interestRevision(t, kv, "ses_topics"); revision != created+1 {
+		t.Fatalf("re-sending the stored topics moved the row to revision %d, want %d", revision, created+1)
+	}
+}
+
+// A row stored with a null topic list is not the [] a write would store, so the first heartbeat
+// over it writes it once, however young it is, and the next one finds it unchanged.
+func TestUpsertWritesARowStoredWithNullTopicsOnce(t *testing.T) {
+	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	clock := &manualClock{at: start}
+	reg, kv := clockedRegistry(t, clock)
+	putInterest(t, kv, Interest{SessionID: "ses_null", MachineID: "m1", Dir: "/work/ses_null", UpdatedAt: start.UnixMilli()})
+	stored := interestRevision(t, kv, "ses_null")
+
+	clock.Set(start.Add(time.Second))
+	upsertOrFail(t, reg, "ses_null")
+	if revision := interestRevision(t, kv, "ses_null"); revision != stored+1 {
+		t.Fatalf("Upsert over a null topic list left revision %d, want one write (%d)", revision, stored+1)
+	}
+	entry, err := kv.Get("ses_null")
+	if err != nil {
+		t.Fatalf("get ses_null: %v", err)
+	}
+	if !bytes.Contains(entry.Value(), []byte(`"topics":[]`)) {
+		t.Fatalf("stored row = %s, want an empty topic list", entry.Value())
+	}
+
+	clock.Set(start.Add(2 * time.Second))
+	upsertOrFail(t, reg, "ses_null")
+	if revision := interestRevision(t, kv, "ses_null"); revision != stored+1 {
+		t.Fatalf("Upsert over the rewritten row moved it to revision %d, want %d", revision, stored+1)
+	}
+}
+
 func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -701,7 +1268,7 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	putInterest(t, kv, Interest{SessionID: "ses_rm", MachineID: "m1", Topics: []string{"topic.a", "topic.b", "topic.c"}})
 
 	// Remove topic B — cache is cold, must read from KV
-	if err := reg.Remove("ses_rm", []string{"topic.b"}); err != nil {
+	if err := reg.Remove(context.Background(), "ses_rm", []string{"topic.b"}); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -716,6 +1283,66 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	}
 	if len(item.Topics) != 2 || item.Topics[0] != "topic.a" || item.Topics[1] != "topic.c" {
 		t.Fatalf("expected [topic.a topic.c], got %v", item.Topics)
+	}
+}
+
+// An unsubscribe and a role claim rewrite the session's row too, and neither keeps a topic the row
+// stored before the listener refused topics reaching a private stream subject: another session's
+// agent subject and a failed-delivery lane are dropped, so Match stops fanning that lane out to the
+// session, while its own agent subject and the issue topic it follows stay.
+func TestRemoveAndSetRole_DropStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
+	const lane = "notifications.envoy.exceptions.notifications.agent.ses_other"
+	stale := []string{
+		"notifications.agent.ses_other",
+		"notifications.agent.ses_stale",
+		"notifications.dispatch.issue.KEY-1.>",
+		"notifications.envoy.exceptions.>",
+		"topic.gone",
+	}
+	for name, write := range map[string]func(*Registry) ([]string, error){
+		"unsubscribe": func(reg *Registry) ([]string, error) {
+			return []string{"notifications.agent.ses_stale", "notifications.dispatch.issue.KEY-1.>"},
+				reg.Remove(context.Background(), "ses_stale", []string{"topic.gone"})
+		},
+		"role set": func(reg *Registry) ([]string, error) {
+			_, err := reg.SetRole("ses_stale", "m1", "reviewer", false)
+			return []string{"notifications.agent.ses_stale", "notifications.dispatch.issue.KEY-1.>", "notifications.role.reviewer", "topic.gone"}, err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, cleanup := connectNATS(t)
+			defer cleanup()
+			reg, kv := coldRegistry(t, conn)
+			putInterest(t, kv, Interest{SessionID: "ses_stale", MachineID: "m1", Topics: stale})
+			// Get caches the stored row, so Match fans the lane out to the session before the write.
+			if _, err := reg.Get(context.Background(), "ses_stale"); err != nil {
+				t.Fatalf("read the seeded row: %v", err)
+			}
+			if matched := reg.Match("m1", lane); len(matched) != 1 {
+				t.Fatalf("Match(%s) before the write = %v, want the seeded session", lane, matched)
+			}
+
+			want, err := write(reg)
+			if err != nil {
+				t.Fatalf("write the row: %v", err)
+			}
+
+			entry, err := kv.Get("ses_stale")
+			if err != nil {
+				t.Fatalf("read the stored row: %v", err)
+			}
+			var item Interest
+			if err := json.Unmarshal(entry.Value(), &item); err != nil {
+				t.Fatalf("decode the stored row: %v", err)
+			}
+			got := slices.Sorted(slices.Values(item.Topics))
+			if !slices.Equal(got, want) {
+				t.Fatalf("stored topics = %v, want %v", got, want)
+			}
+			if matched := reg.Match("m1", lane); len(matched) != 0 {
+				t.Fatalf("Match(%s) = %v, want no session", lane, matched)
+			}
+		})
 	}
 }
 
@@ -752,7 +1379,7 @@ func TestSetRole_ClaimNewRole(t *testing.T) {
 		t.Fatalf("role holder = %q, want ses_role_a", claim.HolderSessionID)
 	}
 
-	persisted, err := reg.Get("ses_role_a")
+	persisted, err := reg.Get(context.Background(), "ses_role_a")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
@@ -865,7 +1492,7 @@ func TestSetRole_Idempotent(t *testing.T) {
 		t.Fatalf("expected single role topic, got %v", got.Topics)
 	}
 
-	persisted, err := reg.Get("ses_same")
+	persisted, err := reg.Get(context.Background(), "ses_same")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
@@ -885,7 +1512,7 @@ func TestRemove_ReleasesRoleClaimAfterSameSessionReplacement(t *testing.T) {
 	if _, err := reg.SetRole("ses_role", "m1", "legion-reviewer", false); err != nil {
 		t.Fatalf("SetRole reviewer: %v", err)
 	}
-	if err := reg.Remove("ses_role", []string{"notifications.role.legion-controller"}); err != nil {
+	if err := reg.Remove(context.Background(), "ses_role", []string{"notifications.role.legion-controller"}); err != nil {
 		t.Fatalf("Remove controller role: %v", err)
 	}
 
@@ -932,16 +1559,17 @@ func TestInterestReaper(t *testing.T) {
 	putInterest(t, kv, Interest{SessionID: "ses_dead", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: now - 600_000})
 
 	// Warm cache via Get (coldRegistry has no watch())
-	if _, err := reg.Get("ses_alive"); err != nil {
+	if _, err := reg.Get(context.Background(), "ses_alive"); err != nil {
 		t.Fatalf("Get ses_alive failed: %v", err)
 	}
-	if _, err := reg.Get("ses_dead"); err != nil {
+	if _, err := reg.Get(context.Background(), "ses_dead"); err != nil {
 		t.Fatalf("Get ses_dead failed: %v", err)
 	}
 
-	// Reap with 0 grace window — all dead sessions should be reaped
-	count, err := reg.Reap(func(sessionID string) bool {
-		return sessionID == "ses_alive"
+	// Reap with 0 grace window: a dead session's row older than InterestRefreshAge (this
+	// one is 10 minutes old) is reaped, and the live session's row is kept.
+	count, err := reg.Reap(func(sessionID string) (bool, error) {
+		return sessionID == "ses_alive", nil
 	}, 0)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
@@ -972,11 +1600,11 @@ func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	if _, err := reg.SetRole(sessionID, "example-host", role, false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
-	stale, err := reg.Get(sessionID)
+	stale, err := reg.Get(context.Background(), sessionID)
 	if err != nil {
 		t.Fatalf("Get role interest: %v", err)
 	}
-	stale.UpdatedAt = time.Now().Add(-time.Minute).UnixMilli()
+	stale.UpdatedAt = time.Now().Add(-(InterestRefreshAge + time.Minute)).UnixMilli()
 	raw, err := json.Marshal(stale)
 	if err != nil {
 		t.Fatalf("marshal stale interest: %v", err)
@@ -989,11 +1617,9 @@ func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("make interest stale: %v", err)
 	}
-	reg.mu.Lock()
-	reg.cacheInterestLocked(sessionID, stale, revision)
-	reg.mu.Unlock()
+	interestCache{reg}.Apply(kvwatch.Entry{Key: sessionID, Value: raw, Revision: revision}, kvwatch.Read{})
 
-	count, err := reg.Reap(func(string) bool { return false }, 0)
+	count, err := reg.Reap(func(string) (bool, error) { return false, nil }, 0)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
@@ -1034,8 +1660,8 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *tes
 		t.Fatalf("seed lapsed role claim: %v", err)
 	}
 	roleKV := registry.roleKV
-	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
-		KeyValue: roleKV,
+	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
+		KeyValue: roleKV.Legacy(),
 		beforeFirstDelete: func() {
 			entry, err := roleKV.Get(role)
 			if err != nil {
@@ -1053,9 +1679,9 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *tes
 			}
 		},
 		err: natsgo.ErrKeyExists,
-	}}
+	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 
-	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
+	release, err := registry.ReleaseExpiredRoleClaim(context.Background(), role, "ses_lapsed", 0)
 	if err != nil {
 		t.Fatalf("release lapsed role claim: %v", err)
 	}
@@ -1075,8 +1701,8 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *te
 		t.Fatalf("seed lapsed role claim: %v", err)
 	}
 	roleKV := registry.roleKV
-	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
-		KeyValue: roleKV,
+	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
+		KeyValue: roleKV.Legacy(),
 		beforeFirstDelete: func() {
 			entry, err := roleKV.Get(role)
 			if err != nil {
@@ -1087,9 +1713,9 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *te
 			}
 		},
 		err: natsgo.ErrKeyNotFound,
-	}}
+	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 
-	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
+	release, err := registry.ReleaseExpiredRoleClaim(context.Background(), role, "ses_lapsed", 0)
 	if err != nil {
 		t.Fatalf("release lapsed role claim: %v", err)
 	}
@@ -1110,13 +1736,13 @@ func TestReleaseExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
 	}
 	releaseErr := errors.New("injected conditional delete failure")
 	roleKV := registry.roleKV
-	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
-		KeyValue:          roleKV,
+	registry.roleKV = bus.NewKeyValue(&racingDeleteKeyValue{
+		KeyValue:          roleKV.Legacy(),
 		beforeFirstDelete: func() {},
 		err:               releaseErr,
-	}}
+	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 
-	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
+	release, err := registry.ReleaseExpiredRoleClaim(context.Background(), role, "ses_lapsed", 0)
 	if !errors.Is(err, releaseErr) {
 		t.Fatalf("release error = %v, want %v", err, releaseErr)
 	}
@@ -1131,29 +1757,276 @@ func TestReaperGraceWindow(t *testing.T) {
 	defer cleanup()
 
 	reg, kv := coldRegistry(t, conn)
+	fixed := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	reg.now = func() time.Time { return fixed }
 
-	// Create interest updated 2 min ago — session is dead but within 10 min grace window
-	now := time.Now().UnixMilli()
-	putInterest(t, kv, Interest{SessionID: "ses_recent", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: now - 120_000})
-
-	// Warm cache
-	if _, err := reg.Get("ses_recent"); err != nil {
-		t.Fatalf("Get ses_recent failed: %v", err)
+	// Dead sessions whose rows were last written 14, exactly 15, and 16 minutes ago: the
+	// listener's grace (InterestReapGrace) plus InterestRefreshAge is 15 minutes, and only a
+	// row strictly older than that is reaped.
+	rows := map[string]time.Duration{
+		"ses_14m": 14 * time.Minute,
+		"ses_15m": 15 * time.Minute,
+		"ses_16m": 16 * time.Minute,
+	}
+	for sid, age := range rows {
+		putInterest(t, kv, Interest{SessionID: sid, MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: fixed.Add(-age).UnixMilli()})
+		// Warm cache
+		if _, err := reg.Get(context.Background(), sid); err != nil {
+			t.Fatalf("Get %s failed: %v", sid, err)
+		}
 	}
 
-	// Reap with 10 min grace window — ses_recent updated only 2 min ago, should survive
-	count, err := reg.Reap(func(string) bool { return false }, 10*time.Minute)
+	count, err := reg.Reap(func(string) (bool, error) { return false, nil }, InterestReapGrace)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 reaped (only the 16-minute row), got %d", count)
+	}
+
+	for _, sid := range []string{"ses_14m", "ses_15m"} {
+		if _, err := kv.Get(sid); err != nil {
+			t.Fatalf("%s should still exist within grace window plus refresh age: %v", sid, err)
+		}
+	}
+	if _, err := kv.Get("ses_16m"); err != natsgo.ErrKeyNotFound {
+		t.Fatalf("ses_16m should be deleted, got err: %v", err)
+	}
+}
+
+// A session that heartbeats every 90 seconds and then pauses keeps its interest row as it did when
+// every heartbeat wrote the row: the unchanged row is not rewritten for up to InterestRefreshAge,
+// so its UpdatedAt lags the last heartbeat, but the listener's reaper (InterestReapGrace, plus
+// InterestRefreshAge in Reap) deletes nothing within InterestReapGrace of that heartbeat, long
+// after the session row's 5-minute TTL has made the session dead. A session back under the same
+// id at 6 or at 9 minutes finds its row and topics.
+func TestAPausedSessionKeepsItsInterestThroughTheReapGrace(t *testing.T) {
+	const sessionTTL = 5 * time.Minute // the session bucket's MaxAge, the liveness clock
+	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	clock := &manualClock{at: start}
+	reg, kv := clockedRegistry(t, clock)
+	const github = "notifications.github.acme.widgets.pr.>"
+	ids := []string{"ses_back6", "ses_back9", "ses_gone"}
+	lastHeartbeat := map[string]time.Time{}
+	heartbeat := func(sessionID string, topics ...string) Interest {
+		t.Helper()
+		lastHeartbeat[sessionID] = clock.Now()
+		return upsertOrFail(t, reg, sessionID, topics...)
+	}
+	isAlive := func(sessionID string) (bool, error) {
+		return clock.Now().Sub(lastHeartbeat[sessionID]) < sessionTTL, nil
+	}
+	reapNothing := func(when string) {
+		t.Helper()
+		count, err := reg.Reap(isAlive, InterestReapGrace)
+		if err != nil {
+			t.Fatalf("%s: Reap: %v", when, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s: Reap deleted %d interests, want none", when, count)
+		}
+		if _, err := kv.Get("ses_gone"); err != nil {
+			t.Fatalf("%s: ses_gone's interest row is gone: %v", when, err)
+		}
+	}
+
+	revisions := map[string]uint64{}
+	for _, id := range ids {
+		heartbeat(id, "notifications.agent."+id, github)
+		revisions[id] = interestRevision(t, kv, id)
+	}
+	for beat := 1; beat <= 3; beat++ {
+		clock.Set(start.Add(time.Duration(beat) * 90 * time.Second))
+		for _, id := range ids {
+			heartbeat(id, "notifications.agent."+id, github)
+			if revision := interestRevision(t, kv, id); revision != revisions[id] {
+				t.Fatalf("heartbeat %d moved %s's unchanged row from revision %d to %d", beat, id, revisions[id], revision)
+			}
+		}
+		reapNothing(fmt.Sprintf("heartbeat %d", beat))
+	}
+	last := clock.Now()
+
+	for _, after := range []time.Duration{90 * time.Second, sessionTTL, 6 * time.Minute, 9 * time.Minute, InterestReapGrace - time.Millisecond, InterestReapGrace} {
+		clock.Set(last.Add(after))
+		if alive, _ := isAlive("ses_gone"); after >= sessionTTL && alive {
+			t.Fatalf("ses_gone is alive %v after its last heartbeat, past the session TTL", after)
+		}
+		reapNothing(fmt.Sprintf("%v after the last heartbeat", after))
+		var back string
+		switch after {
+		case 6 * time.Minute:
+			back = "ses_back6"
+		case 9 * time.Minute:
+			back = "ses_back9"
+		default:
+			continue
+		}
+		if alive, _ := isAlive(back); alive {
+			t.Fatalf("%s is alive %v after its last heartbeat, past the session TTL", back, after)
+		}
+		got := heartbeat(back, "notifications.agent."+back)
+		if want := []string{"notifications.agent." + back, github}; !slices.Equal(got.Topics, want) {
+			t.Fatalf("%s back %v after its last heartbeat has topics %v, want %v", back, after, got.Topics, want)
+		}
+	}
+
+	// The reaper does take the row that never came back, once it is InterestReapGrace plus
+	// InterestRefreshAge past its last write.
+	clock.Set(start.Add(InterestReapGrace + InterestRefreshAge + time.Millisecond))
+	count, err := reg.Reap(isAlive, InterestReapGrace)
+	if err != nil {
+		t.Fatalf("final Reap: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("final Reap deleted %d interests, want ses_gone's alone", count)
+	}
+	if _, err := kv.Get("ses_gone"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("ses_gone should be reaped, got %v", err)
+	}
+}
+
+// upsertWithin upserts item on another goroutine and reports whether it finished within five
+// seconds, failing the test when it did not or when it failed. A reaper pass calls it from isAlive,
+// so a pass that held the interest lock there would make it time out rather than deadlock.
+func upsertWithin(t *testing.T, reg *Registry, item Interest, topics []string) bool {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := reg.Upsert(item, topics)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Upsert(%s) during the reaper pass: %v", item.SessionID, err)
+			return false
+		}
+		return true
+	case <-time.After(5 * time.Second):
+		t.Errorf("Upsert(%s) did not finish while Reap was calling isAlive: the pass holds the interest lock", item.SessionID)
+		return false
+	}
+}
+
+func TestReapCallsIsAliveWithoutHoldingTheInterestLock(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_dead", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get(context.Background(), "ses_dead"); err != nil {
+		t.Fatalf("Get ses_dead failed: %v", err)
+	}
+
+	upserted := false
+	count, err := reg.Reap(func(sessionID string) (bool, error) {
+		if sessionID == "ses_dead" {
+			upserted = upsertWithin(t, reg, Interest{SessionID: "ses_other", MachineID: "m1"}, []string{"notifications.agent.ses_other"})
+		}
+		return false, nil
+	}, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if !upserted {
+		t.Fatal("isAlive never upserted ses_other")
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 reaped, got %d", count)
+	}
+	if _, err := kv.Get("ses_dead"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("ses_dead should be deleted, got err: %v", err)
+	}
+	if _, err := kv.Get("ses_other"); err != nil {
+		t.Fatalf("ses_other, upserted during the pass, should exist: %v", err)
+	}
+}
+
+func TestReapKeepsAnInterestReupsertedDuringThePass(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_back", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get(context.Background(), "ses_back"); err != nil {
+		t.Fatalf("Get ses_back failed: %v", err)
+	}
+
+	// The session heartbeats again while the pass is deciding it is dead.
+	count, err := reg.Reap(func(sessionID string) (bool, error) {
+		if sessionID == "ses_back" {
+			upsertWithin(t, reg, Interest{SessionID: "ses_back", MachineID: "m1"}, []string{"notifications.agent.ses_back"})
+		}
+		return false, nil
+	}, 0)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
 	}
 	if count != 0 {
-		t.Fatalf("expected 0 reaped (within grace window), got %d", count)
+		t.Fatalf("expected 0 reaped, got %d", count)
 	}
+	if _, err := kv.Get("ses_back"); err != nil {
+		t.Fatalf("ses_back, re-upserted during the pass, should exist: %v", err)
+	}
+	if _, err := reg.Get(context.Background(), "ses_back"); err != nil {
+		t.Fatalf("ses_back should stay cached: %v", err)
+	}
+}
 
-	// ses_recent should still exist in KV
-	if _, err := kv.Get("ses_recent"); err != nil {
-		t.Fatalf("ses_recent should still exist within grace window: %v", err)
+func TestReapKeepsAnInterestWrittenAfterItsRecheck(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_raced", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get(context.Background(), "ses_raced"); err != nil {
+		t.Fatalf("Get ses_raced failed: %v", err)
 	}
+	// Another listener's write lands after the pass re-checked the candidate and before its delete
+	// reaches the bucket.
+	fresh := Interest{SessionID: "ses_raced", MachineID: "m2", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().UnixMilli()}
+	current := reg.watcher.KV()
+	reg.watcher = kvwatch.New("interest registry", bus.NewKeyValue(&putBeforeDeleteKeyValue{
+		KeyValue:     kv,
+		beforeDelete: func() { putInterest(t, kv, fresh) },
+	}, current.WatchHandle(), current.Streams()), interestCache{reg})
+
+	count, err := reg.Reap(func(string) (bool, error) { return false, nil }, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 reaped, got %d", count)
+	}
+	entry, err := kv.Get("ses_raced")
+	if err != nil {
+		t.Fatalf("ses_raced, written before the delete landed, should exist: %v", err)
+	}
+	var got Interest
+	if err := json.Unmarshal(entry.Value(), &got); err != nil {
+		t.Fatalf("decode ses_raced: %v", err)
+	}
+	if got.MachineID != "m2" {
+		t.Fatalf("ses_raced = %+v, want the write that landed during the pass", got)
+	}
+}
+
+// putBeforeDeleteKeyValue runs beforeDelete before its first Delete reaches the bucket, and then
+// sends that Delete as it was asked to.
+type putBeforeDeleteKeyValue struct {
+	natsgo.KeyValue
+
+	deletes      int
+	beforeDelete func()
+}
+
+func (kv *putBeforeDeleteKeyValue) Delete(key string, opts ...natsgo.DeleteOpt) error {
+	kv.deletes++
+	if kv.deletes == 1 {
+		kv.beforeDelete()
+	}
+	return kv.KeyValue.Delete(key, opts...)
 }
 
 func TestPing_HealthyConnReturnsNil(t *testing.T) {
@@ -1268,7 +2141,7 @@ func TestRemoveWritesThroughCache(t *testing.T) {
 	); err != nil {
 		t.Fatalf("subscribe failed: %v", err)
 	}
-	if err := reg.Remove(sessionID, []string{"notifications.b"}); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.b"}); err != nil {
 		t.Fatalf("unsubscribe failed: %v", err)
 	}
 	if _, err := reg.Upsert(
@@ -1278,7 +2151,7 @@ func TestRemoveWritesThroughCache(t *testing.T) {
 		t.Fatalf("heartbeat re-registration failed: %v", err)
 	}
 
-	item, err := reg.Get(sessionID)
+	item, err := reg.Get(context.Background(), sessionID)
 	if err != nil {
 		t.Fatalf("Get after unsubscribe and heartbeat: %v", err)
 	}
@@ -1300,11 +2173,11 @@ func TestRemoveAllClearsCache(t *testing.T) {
 	); err != nil {
 		t.Fatalf("subscribe failed: %v", err)
 	}
-	if err := reg.Remove(sessionID, nil); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("unsubscribe all failed: %v", err)
 	}
 
-	if _, err := reg.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+	if _, err := reg.Get(context.Background(), sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get after unsubscribe all error = %v, want ErrKeyNotFound", err)
 	}
 	if got := reg.Match("example-host", "notifications.a"); len(got) != 0 {
@@ -1323,7 +2196,7 @@ func TestRemoveAllReleasesRoleClaims(t *testing.T) {
 	if _, err := reg.SetRole(sessionID, "example-host", role, false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
-	if err := reg.Remove(sessionID, nil); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("Remove all: %v", err)
 	}
 	assertRoleHolder(t, reg, role, "")
@@ -1343,7 +2216,7 @@ func TestRemoveAllReleasesRoleClaimMissingFromInterest(t *testing.T) {
 	if _, err := reg.roleKV.Put(role, []byte(sessionID)); err != nil {
 		t.Fatalf("seed orphaned role claim: %v", err)
 	}
-	if err := reg.Remove(sessionID, nil); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("Remove all: %v", err)
 	}
 	assertRoleHolder(t, reg, role, "")
@@ -1383,6 +2256,9 @@ func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
 	assertInterestMissing(t, reg, newSession)
 }
 
+// A hard claim's role write is unconditional (store.Registry.SetRoleWithPrevious), so a genuine
+// failure of it is still a failure: the claim is refused, the old holder keeps the role, and the
+// claimant's role topic is rolled back.
 func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1403,11 +2279,11 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 		t.Fatalf("seed role claim: %v", err)
 	}
 
-	reg.roleKV = bus.KeyValue{KeyValue: &failingKeyValue{
-		KeyValue:     reg.roleKV,
-		failUpdateAt: 1,
-		err:          errors.New("injected role update failure"),
-	}}
+	reg.roleKV = bus.NewKeyValue(&failingKeyValue{
+		KeyValue:  reg.roleKV.Legacy(),
+		failPutAt: 1,
+		err:       errors.New("injected role write failure"),
+	}, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed role update")
 	}
@@ -1417,6 +2293,8 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 	assertInterestMissing(t, reg, newSession)
 }
 
+// A soft claim of an unheld role creates its claim conditionally, so a genuine failure of that
+// create is still a failure: nothing holds the role and the claimant's role topic is rolled back.
 func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1426,12 +2304,12 @@ func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 		sessionID = "ses_new"
 		role      = "legion-controller"
 	)
-	reg.roleKV = bus.KeyValue{KeyValue: &failingKeyValue{
-		KeyValue:     reg.roleKV,
+	reg.roleKV = bus.NewKeyValue(&failingKeyValue{
+		KeyValue:     reg.roleKV.Legacy(),
 		failCreateAt: 1,
 		err:          errors.New("injected role create failure"),
-	}}
-	if _, err := reg.SetRole(sessionID, "example-host", role, false); err == nil {
+	}, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
+	if _, err := reg.SetRole(sessionID, "example-host", role, true); err == nil {
 		t.Fatal("SetRole must return the failed role create")
 	}
 
@@ -1439,7 +2317,10 @@ func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 	assertInterestMissing(t, reg, sessionID)
 }
 
-func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
+// A claim that landed is the success: the old holder's role topic a failed cleanup leaves gives it
+// no role, since the claim alone says who holds one, so the failure is logged at WARN and not
+// returned.
+func TestSetRoleSucceedsWhenOldHolderCleanupFails(t *testing.T) {
 	logs := captureRegistryLogs(t)
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1465,8 +2346,8 @@ func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
 		failPutAt: 2,
 		err:       errors.New("injected old-holder cleanup failure"),
 	})
-	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
-		t.Fatal("SetRole must return the failed old-holder cleanup")
+	if _, err := reg.SetRole(newSession, "example-host", role, false); err != nil {
+		t.Fatalf("SetRole returned %v after its claim landed, want success", err)
 	}
 
 	assertRoleHolder(t, reg, role, newSession)
@@ -1510,7 +2391,7 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 		t.Fatalf("put malformed value: %v", err)
 	}
 	pollMatch(t, reg, machineID, topic, 0, 5*time.Second)
-	if _, err := reg.Get(sessionID); err == nil {
+	if _, err := reg.Get(context.Background(), sessionID); err == nil {
 		t.Fatal("Get must not return a route after its watched value is malformed")
 	}
 
@@ -1526,16 +2407,18 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 	t.Logf("interest watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
 }
 
-// useKV rebuilds the registry's watcher over kv, a wrapper of its interest bucket handle, so the
-// registry writes interests through kv from here on. The replaced watcher is stopped first.
+// useKV rebuilds the registry's watcher over kv, a wrapper of its interest bucket handle that
+// watches through the handle's own jetstream one, so the registry writes interests through kv from
+// here on. The replaced watcher is stopped first.
 func useKV(t *testing.T, r *Registry, kv natsgo.KeyValue) {
 	t.Helper()
+	base := r.watcher.KV()
 	r.watcher.Stop()
-	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("interest registry", bus.NewKeyValue(kv, base.WatchHandle(), base.Streams()), interestCache{r})
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := r.WaitForCacheReady(ctx); err != nil {
+	if err := r.watcher.WaitReady(ctx); err != nil {
 		t.Fatalf("wait for the rebuilt watcher: %v", err)
 	}
 }
@@ -1589,7 +2472,7 @@ func assertRoleHolder(t *testing.T, reg *Registry, role, want string) {
 
 func assertInterestTopicsForSession(t *testing.T, reg *Registry, sessionID string, want ...string) {
 	t.Helper()
-	item, err := reg.Get(sessionID)
+	item, err := reg.Get(context.Background(), sessionID)
 	if err != nil {
 		t.Fatalf("Get(%q): %v", sessionID, err)
 	}
@@ -1614,7 +2497,7 @@ func assertInterestTopics(t *testing.T, item Interest, want ...string) {
 
 func assertInterestMissing(t *testing.T, reg *Registry, sessionID string) {
 	t.Helper()
-	if _, err := reg.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+	if _, err := reg.Get(context.Background(), sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(%q) error = %v, want ErrKeyNotFound", sessionID, err)
 	}
 }
@@ -1622,9 +2505,7 @@ func assertInterestMissing(t *testing.T, reg *Registry, sessionID string) {
 func captureRegistryLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	var logs lockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 	return &logs
 }
 
@@ -1645,7 +2526,10 @@ func (b *lockedBuffer) String() string {
 	return b.buffer.String()
 }
 
-func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
+// A soft claim's create is conditional, and the claim that beat it to the key was this session's
+// own concurrent claim: the role is held by the session that asked for it, so the call is the
+// success it would have been had it won, not *ErrRoleHeld against itself and not a failure.
+func TestSetRoleSoftTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1655,15 +2539,15 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 		role      = "legion-controller"
 		roleTopic = "notifications.role.legion-controller"
 	)
-	racingKV := &racingCreateKeyValue{KeyValue: reg.roleKV}
-	reg.roleKV = bus.KeyValue{KeyValue: racingKV}
+	racingKV := &racingCreateKeyValue{KeyValue: reg.roleKV.Legacy()}
+	reg.roleKV = bus.NewKeyValue(racingKV, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
 	var concurrent Interest
 	var concurrentErr error
 	racingKV.beforeFirstCreate = func() {
-		concurrent, concurrentErr = reg.SetRole(sessionID, "example-host", role, false)
+		concurrent, concurrentErr = reg.SetRole(sessionID, "example-host", role, true)
 	}
-	first, firstErr := reg.SetRole(sessionID, "example-host", role, false)
+	first, firstErr := reg.SetRole(sessionID, "example-host", role, true)
 
 	if concurrentErr != nil {
 		t.Fatalf("concurrent SetRole: %v", concurrentErr)
@@ -1675,6 +2559,59 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 	assertInterestTopics(t, first, roleTopic)
 	assertRoleHolder(t, reg, role, sessionID)
 	assertInterestTopicsForSession(t, reg, sessionID, roleTopic)
+}
+
+// Every honest hard claim of one role lands, however many of them are made at once. A hard claim
+// is last-claim-wins and has no refusal in its contract, so no claimant may be answered a failure
+// because another's claim landed first: the conditional write this once made answered all but one
+// of a burst with JetStream's wrong last sequence (nats.ErrKeyExists), which POST /v1/roles/set
+// wrote as a 500. The role ends held by one of the claimants, and that holder's interest row names
+// the role topic: no cleanup takes the topic from the session that ended up holding the role.
+func TestSetRoleConcurrentHardClaimsOfOneRoleAllLand(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		role       = "legion-controller"
+		roleTopic  = "notifications.role.legion-controller"
+		claimants  = 24
+		idTemplate = "ses_claimant_%02d"
+	)
+	errs := make([]error, claimants)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range claimants {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, errs[i] = reg.SetRole(fmt.Sprintf(idTemplate, i), "example-host", role, false)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("%s: concurrent hard claim of %s returned %v, want the claim it is promised", fmt.Sprintf(idTemplate, i), role, err)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	holder, err := reg.RoleHolder(role)
+	if err != nil {
+		t.Fatalf("read the role's holder after %d concurrent claims: %v", claimants, err)
+	}
+	claimed := false
+	for i := range claimants {
+		claimed = claimed || holder == fmt.Sprintf(idTemplate, i)
+	}
+	if !claimed {
+		t.Fatalf("after %d concurrent claims the role is held by %q, want one of the claimants", claimants, holder)
+	}
+	assertInterestTopicsForSession(t, reg, holder, roleTopic)
 }
 
 func TestSetRoleSoft_TakesUnheldAndOwnAndSupersedableRoles(t *testing.T) {
@@ -1724,7 +2661,7 @@ func TestSetRoleSoft_RefusesLiveHolderAndLeavesClaimUntouched(t *testing.T) {
 	}
 	assertRoleHolder(t, reg, role, "ses_live")
 	// The refused claimant gained no role topic: nothing was written for it.
-	if _, err := reg.Get("ses_stale_transcript"); err == nil {
+	if _, err := reg.Get(context.Background(), "ses_stale_transcript"); err == nil {
 		t.Fatal("refused soft claim left an interest row behind")
 	}
 
@@ -1736,7 +2673,7 @@ func TestSetRoleSoft_RefusesLiveHolderAndLeavesClaimUntouched(t *testing.T) {
 }
 
 func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
-	// Interleaving: role at A. B claims — its role-row CAS succeeds (row -> B)
+	// Interleaving: role at A. B claims — its role-row write lands (row -> B)
 	// — and before B's cleanup of A runs, A re-claims (row -> A). B's cleanup
 	// must not delete A's fresh claim. The previous implementation released
 	// through the role row whenever its holder equalled the old session, which
@@ -1750,10 +2687,10 @@ func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
 		t.Fatalf("seed A: %v", err)
 	}
 
-	// B's role-row Update is the CAS write; fire A's re-claim right after it
-	// succeeds and before B proceeds to old-holder cleanup.
-	racing := &afterUpdateKeyValue{KeyValue: reg.roleKV}
-	reg.roleKV = bus.KeyValue{KeyValue: racing}
+	// B's role-row write is what makes B the holder; fire A's re-claim right
+	// after it lands and before B proceeds to old-holder cleanup.
+	racing := &afterRoleWriteKeyValue{KeyValue: reg.roleKV.Legacy()}
+	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 	racing.after = func() {
 		racing.after = nil
 		if _, err := reg.SetRole("ses_a", "m1", role, false); err != nil {
@@ -1768,13 +2705,23 @@ func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
 	assertRoleHolder(t, reg, role, "ses_a")
 }
 
-type afterUpdateKeyValue struct {
+// afterRoleWriteKeyValue runs after, once, when a claim write lands: a hard claim's unconditional
+// Put, or a soft claim's conditional Update.
+type afterRoleWriteKeyValue struct {
 	natsgo.KeyValue
 
 	after func()
 }
 
-func (kv *afterUpdateKeyValue) Update(key string, value []byte, last uint64) (uint64, error) {
+func (kv *afterRoleWriteKeyValue) Put(key string, value []byte) (uint64, error) {
+	revision, err := kv.KeyValue.Put(key, value)
+	if err == nil && kv.after != nil {
+		kv.after()
+	}
+	return revision, err
+}
+
+func (kv *afterRoleWriteKeyValue) Update(key string, value []byte, last uint64) (uint64, error) {
 	revision, err := kv.KeyValue.Update(key, value, last)
 	if err == nil && kv.after != nil {
 		kv.after()
@@ -1810,9 +2757,9 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 
 	interestKV := reg.watcher.KV()
 	useKV(t, reg, &interleavingPutKeyValue{
-		KeyValue: interestKV,
+		KeyValue: interestKV.Legacy(),
 		afterFirstPut: func() {
-			putInterest(t, interestKV, Interest{
+			putInterest(t, interestKV.Legacy(), Interest{
 				SessionID: sessionID,
 				MachineID: machineID,
 				Topics:    []string{"notifications.remote"},
@@ -1820,11 +2767,11 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 			pollMatch(t, reg, machineID, "notifications.remote", 1, 5*time.Second)
 		},
 	})
-	if err := reg.Remove(sessionID, []string{"notifications.b"}); err != nil {
+	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.b"}); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 
-	item, err := reg.Get(sessionID)
+	item, err := reg.Get(context.Background(), sessionID)
 	if err != nil {
 		t.Fatalf("Get after interleaving: %v", err)
 	}
@@ -1896,8 +2843,7 @@ func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
 		machineID = "example-host"
 		topic     = "notifications.delete"
 	)
-	item, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{topic})
-	if err != nil {
+	if _, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{topic}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	entry, err := kv.Get(sessionID)
@@ -1909,20 +2855,18 @@ func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
 		KeyValue: kv,
 		err:      errors.New("injected history failure"),
 	})
-	if err := reg.removeInterestTopics(sessionID, nil); err != nil {
+	if err := reg.removeInterestTopics(context.Background(), sessionID, nil); err != nil {
 		t.Fatalf("remove all: %v", err)
 	}
 
 	// This is the same cache mutation performed by a WatchAll update that was
 	// queued before the delete marker. Its older revision must stay rejected.
-	reg.mu.Lock()
-	reg.cacheInterestLocked(sessionID, item, entry.Revision())
-	reg.mu.Unlock()
+	interestCache{reg}.Apply(kvwatch.LegacyEntry(entry), kvwatch.Read{})
 
 	if got := reg.Match(machineID, topic); len(got) != 0 {
 		t.Fatalf("stale watcher update restored deleted route: %v", got)
 	}
-	if _, err := reg.Get(sessionID); err == nil {
+	if _, err := reg.Get(context.Background(), sessionID); err == nil {
 		t.Fatal("Get returned a session restored by a stale watcher update")
 	}
 }
@@ -1960,7 +2904,7 @@ func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
 	if _, err := reg.SetRole("ses_clock", "m1", "clock-role", false); err != nil {
 		t.Fatalf("set role: %v", err)
 	}
-	claim, err := reg.RoleClaim("clock-role")
+	claim, err := reg.RoleClaim(context.Background(), "clock-role")
 	if err != nil {
 		t.Fatalf("role claim: %v", err)
 	}
@@ -1969,23 +2913,17 @@ func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
 	}
 }
 
-// A rebuild onto an interest bucket that was deleted and created again refills the cache from the
-// new bucket. The recreated stream numbers its revisions from 1, so a cache still fenced by the
-// old bucket's revisions would keep an old value for every key the new bucket has not yet written
-// past, and a key the new bucket does not hold at all.
+// A rebuild onto an interest bucket that was deleted and created again reads the new bucket while
+// the cache keeps every interest it had: the new bucket's values replace the old ones as they are
+// delivered, and an interest the new bucket does not hold stays until the read completes, and is
+// then swept. The recreated stream numbers its revisions from 1, so a cache still fenced by the old
+// bucket's revisions would keep an old value for every key the new bucket has not yet written past.
 func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	reg, err := Open(conn, WithReplicas(1))
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	t.Cleanup(reg.StopWatch)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := reg.WaitForCacheReady(ctx); err != nil {
-		t.Fatalf("WaitForCacheReady: %v", err)
-	}
+	reg, held, _ := rebuiltRegistry(t, conn)
+	reg.watcher.Start()
+	waitFor(t, 5*time.Second, reg.watcher.Following)
 	for i := range 20 {
 		if _, err := reg.Upsert(Interest{SessionID: "ses_a", MachineID: "m1"}, []string{fmt.Sprintf("notifications.old.%d", i)}); err != nil {
 			t.Fatalf("upsert ses_a: %v", err)
@@ -2011,13 +2949,31 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	putInterest(t, recreated, Interest{SessionID: "ses_a", MachineID: "m1", Topics: []string{"notifications.new"}})
 	putInterest(t, recreated, Interest{SessionID: "ses_b", MachineID: "m1", Topics: []string{"notifications.b"}})
+	var swept []string
+	completion := held.holdCompletion(t, func() { swept = cachedIDs(reg) })
 	if err := reg.Rewatch(conn); err != nil {
 		t.Fatalf("Rewatch: %v", err)
 	}
+	waitClosed(t, completion.reached, "the new bucket's read to deliver every record")
+	if got := reg.Match("m1", "notifications.ghost"); len(got) != 1 {
+		t.Fatalf("during the read the cache dropped ses_ghost before the read completed: %v", got)
+	}
+	if got := reg.Match("m1", "notifications.new"); len(got) != 1 {
+		t.Fatalf("during the read ses_a = %v, want the new bucket's value as delivered", got)
+	}
+	if got := reg.Match("m1", "notifications.old.0"); len(got) != 0 {
+		t.Fatalf("during the read the old bucket's ses_a is still matched: %v", got)
+	}
+	if got := reg.Match("m1", "notifications.b"); len(got) != 1 {
+		t.Fatalf("during the read ses_b = %v, want it as delivered", got)
+	}
 
-	waitFor(t, 5*time.Second, func() bool {
-		return len(reg.Match("m1", "notifications.new")) == 1 && len(reg.Match("m1", "notifications.b")) == 1
-	})
+	completion.open()
+	waitClosed(t, completion.done, "the read's sweep")
+	if want := []string{"ses_a", "ses_b"}; !slices.Equal(swept, want) {
+		t.Fatalf("cached right after the sweep = %v, want the new bucket's %v", swept, want)
+	}
+	waitFor(t, 5*time.Second, reg.watcher.Following)
 	if got := reg.Match("m1", "notifications.ghost"); len(got) != 0 {
 		t.Fatalf("the cache kept a session the recreated bucket does not hold: %v", got)
 	}
@@ -2041,6 +2997,8 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	if err := js.DeleteKeyValue(bus.RoleClaimBucket); err != nil {
 		t.Fatalf("delete the role bucket: %v", err)
 	}
+	roles, roleWatch := reg.roles(), reg.roleWatcher.KV()
+	roleWatcher := reg.roleWatcher
 	second, closeSecond := connectNATS(t)
 	if err := reg.Rewatch(second); err == nil {
 		t.Fatal("Rewatch onto a connection without the role bucket succeeded")
@@ -2049,8 +3007,63 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	if _, err := reg.Upsert(Interest{SessionID: "ses_still_first", MachineID: "m1"}, []string{"notifications.agent.x"}); err != nil {
 		t.Fatalf("Upsert after the failed Rewatch: %v; the interest handle moved to the closed connection", err)
 	}
-	if err := reg.WatchErr(); err != nil {
-		t.Fatalf("WatchErr after the failed Rewatch: %v; the interest watcher moved to the closed connection", err)
+	// WatchErr was the interest watcher's error alone when this test was written. It now joins the
+	// role claim watcher's, which ends on its own here because the test deleted its bucket, so the
+	// interest watcher's is read directly, and the role side is held to moving nothing too.
+	if err := reg.watcher.Err(); err != nil {
+		t.Fatalf("the interest watcher's error after the failed Rewatch: %v; it moved to the closed connection", err)
+	}
+	if reg.roles() != roles || reg.roleWatcher.KV() != roleWatch {
+		t.Fatal("a Rewatch that could not open the role bucket moved a role bucket handle")
+	}
+	if reg.roleWatcher != roleWatcher {
+		t.Fatal("a Rewatch that could not open the role bucket replaced the role claim watcher")
+	}
+}
+
+// A Rewatch whose interest watcher cannot move moves nothing either: the role handle and the role
+// claim watcher stay on the connection they were on, so the registry does not read and write the
+// two buckets through different connections, and the role claim view still answers there.
+func TestARewatchWhoseInterestWatcherCannotMoveMovesNothing(t *testing.T) {
+	first, closeFirst := connectNATS(t)
+	defer closeFirst()
+	reg, err := Open(first, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	if _, err := reg.SetRole("ses_role_holder", "m1", "reviewer", false); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		roles, err := reg.RolesHeldBy("ses_role_holder")
+		return err == nil && slices.Equal(roles, []string{"reviewer"})
+	})
+	js, err := first.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
+		t.Fatalf("delete the interest bucket: %v", err)
+	}
+	roles, roleWatch := reg.roles(), reg.roleWatcher.KV()
+	roleWatcher := reg.roleWatcher
+	second, closeSecond := connectNATS(t)
+	if err := reg.Rewatch(second); err == nil {
+		t.Fatal("Rewatch onto a connection without the interest bucket succeeded")
+	}
+	closeSecond()
+	if reg.roles() != roles || reg.roleWatcher.KV() != roleWatch {
+		t.Fatal("a Rewatch whose interest watcher could not move moved a role bucket handle")
+	}
+	if reg.roleWatcher != roleWatcher {
+		t.Fatal("a Rewatch whose interest watcher could not move replaced the role claim watcher")
+	}
+	if got, err := reg.RolesHeldBy("ses_role_holder"); err != nil || !slices.Equal(got, []string{"reviewer"}) {
+		t.Fatalf("after the failed Rewatch RolesHeldBy = %v, %v; want [reviewer] from the view on the first connection", got, err)
+	}
+	if _, err := reg.RoleClaim(context.Background(), "reviewer"); err != nil {
+		t.Fatalf("a role claim read after the failed Rewatch: %v; the role handle moved to the closed connection", err)
 	}
 }
 
@@ -2123,11 +3136,81 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 	}
 	// What the snapshot is for, through the caller that reads it: an absent holder keeps its claim
 	// for one session TTL after the restart, and a key the bucket no longer holds has none to keep.
-	if release, err := registry.ReleaseExpiredRoleClaim("role-000", "ses_000", time.Minute); err != nil || release != ExpiredRoleClaimRetained {
+	if release, err := registry.ReleaseExpiredRoleClaim(context.Background(), "role-000", "ses_000", time.Minute); err != nil || release != ExpiredRoleClaimRetained {
 		t.Fatalf("restored claim within its grace = %v, %v; want it retained", release, err)
 	}
-	if release, err := registry.ReleaseExpiredRoleClaim(deleted, fmt.Sprintf("ses_%03d", claims), time.Minute); err != nil || release != ExpiredRoleClaimMissing {
+	if release, err := registry.ReleaseExpiredRoleClaim(context.Background(), deleted, fmt.Sprintf("ses_%03d", claims), time.Minute); err != nil || release != ExpiredRoleClaimMissing {
 		t.Fatalf("deleted claim = %v, %v; want it missing", release, err)
+	}
+}
+
+// A claim another listener's registry writes reaches this registry's CachedRoleHolder through the
+// role watcher, and so do its release and its replacement, and the cache answers with no read of the
+// bucket, so the role lane resolves a holder without a round trip per message.
+func TestCachedRoleHolderFollowsAnotherRegistrysClaimsWithoutReadingTheBucket(t *testing.T) {
+	uri := testnats.URL(t)
+	reader, writer := testnats.Connect(t, uri), testnats.Connect(t, uri)
+	defer reader.Close()
+	defer writer.Close()
+	readerRegistry, err := Open(reader, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the reading registry: %v", err)
+	}
+	t.Cleanup(readerRegistry.StopWatch)
+	writerRegistry, err := Open(writer, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the writing registry: %v", err)
+	}
+	t.Cleanup(writerRegistry.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := readerRegistry.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("warm the reading registry: %v", err)
+	}
+	gets, err := reader.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", bus.RoleClaimBucket))
+	if err != nil {
+		t.Fatalf("watch direct gets: %v", err)
+	}
+	defer func() { _ = gets.Unsubscribe() }()
+	legacyGets, err := reader.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", bus.RoleClaimBucket))
+	if err != nil {
+		t.Fatalf("watch stream message gets: %v", err)
+	}
+	defer func() { _ = legacyGets.Unsubscribe() }()
+	reads := func() int {
+		t.Helper()
+		if err := reader.Flush(); err != nil {
+			t.Fatalf("flush the reader: %v", err)
+		}
+		return pending(t, gets) + pending(t, legacyGets)
+	}
+	requireHolder := func(role, want string) {
+		t.Helper()
+		waitFor(t, 5*time.Second, func() bool { return holderOf(readerRegistry, role) == want })
+		before := reads()
+		holder, err := readerRegistry.CachedRoleHolder(role)
+		if err != nil || holder != want {
+			t.Fatalf("CachedRoleHolder(%s) = %q, %v; want %q", role, holder, err, want)
+		}
+		if after := reads(); after != before {
+			t.Fatalf("CachedRoleHolder(%s) read the bucket %d times, want none", role, after-before)
+		}
+	}
+
+	if _, err := writerRegistry.SetRole("ses_first", "m1", "reviewer", false); err != nil {
+		t.Fatalf("claim the role: %v", err)
+	}
+	requireHolder("reviewer", "ses_first")
+	if _, err := writerRegistry.SetRole("ses_second", "m1", "reviewer", false); err != nil {
+		t.Fatalf("take the role over: %v", err)
+	}
+	requireHolder("reviewer", "ses_second")
+	if err := writerRegistry.Remove(context.Background(), "ses_second", []string{contracts.RoleTopicPrefix + "reviewer"}); err != nil {
+		t.Fatalf("release the role: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return holderOf(readerRegistry, "reviewer") == "" })
+	if holder, err := readerRegistry.CachedRoleHolder("reviewer"); err != nil || holder != "" {
+		t.Fatalf("CachedRoleHolder after the release = %q, %v; want no holder", holder, err)
 	}
 }
 
@@ -2200,60 +3283,58 @@ func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
 	}
 }
 
-// earlyEndKV hands out a watcher over the real bucket that ends its scan early, the two ways
-// nats.go ends one early (nats.go v1.50.0 kv.go). With no fault it closes the updates channel
-// after `after` entries and never sends the nil marker, which is what a subscription that ends
-// mid-scan looks like (:1170). With one it sends the marker after `after` entries and puts the
-// fault on Error() first, which is what the idle timer does when no entry arrives within the
-// JetStream MaxWait (:1145-1156).
+// earlyEndKV hands out a watcher over the real bucket whose scan ends early, the two ways a scan of
+// the jetstream watcher can. With ended set, its subscription ends after `after` entries, before
+// the nil marker, and nats.go closes its updates (a closed connection, an ordered consumer it could
+// not recreate). Without, the scan delivers `after` entries and then nothing more, a stalled scan
+// only the scan's own idle bound ends.
 type earlyEndKV struct {
-	natsgo.KeyValue
+	jetstream.KeyValue
 
 	after int
-	fault error
+	ended bool
 }
 
-func (k earlyEndKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	watcher, err := k.KeyValue.Watch(keys, opts...)
+func (k earlyEndKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	watcher, err := k.KeyValue.Watch(ctx, keys, opts...)
 	if err != nil {
 		return nil, err
 	}
-	ended := &earlyEndWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry), faults: make(chan error, 1)}
+	updates := make(chan jetstream.KeyValueEntry)
 	go func() {
-		defer close(ended.updates)
-		for delivered := 0; delivered < k.after; delivered++ {
-			entry, ok := <-watcher.Updates()
-			if !ok || entry == nil {
+		defer close(updates)
+		forwarded := 0
+		for entry := range watcher.Updates() {
+			if forwarded < k.after {
+				forwarded++
+				updates <- entry
+				continue
+			}
+			if k.ended {
+				_ = watcher.Stop()
+				for range watcher.Updates() {
+				}
 				return
 			}
-			ended.updates <- entry
-		}
-		if k.fault != nil {
-			ended.faults <- k.fault
-			ended.updates <- nil
 		}
 	}()
-	return ended, nil
+	return &earlyEndWatcher{KeyWatcher: watcher, updates: updates}, nil
 }
 
 type earlyEndWatcher struct {
-	natsgo.KeyWatcher
+	jetstream.KeyWatcher
 
-	updates chan natsgo.KeyValueEntry
-	faults  chan error
+	updates chan jetstream.KeyValueEntry
 }
 
-func (w *earlyEndWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
-
-func (w *earlyEndWatcher) Error() <-chan error { return w.faults }
+func (w *earlyEndWatcher) Updates() <-chan jetstream.KeyValueEntry { return w.updates }
 
 // A revision snapshot that ends before the bucket's keys are all delivered is not a snapshot: the
 // claims it missed are still in the bucket, and each one is a restored holder that would lose the
-// grace a restart owes it and be released a session TTL early. nats.go ends a scan early two ways
-// and they look different to the caller - a closed updates channel, and its own idle timeout,
-// which arrives as the same nil marker a complete scan ends with. Neither may return what the scan
-// managed to read; Open returns the error unchanged, failing the start as a failed read did when
-// this was one Get per key.
+// grace a restart owes it and be released a session TTL early. A scan ends early two ways and they
+// look different to the caller - a closed updates channel, and a scan that stops delivering, which
+// the scan's own idle bound ends. Neither may return what the scan managed to read; Open returns
+// the error unchanged, failing the start as a failed read did when this was one Get per key.
 func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -2268,18 +3349,24 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 	for i := range 4 {
 		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%d", i), fmt.Sprintf("ses_%d", i))
 	}
+	roles, err := bus.WrapKeyValue(conn, rawRoles)
+	if err != nil {
+		t.Fatalf("wrap the role bucket: %v", err)
+	}
+	const idle = 200 * time.Millisecond
 
 	for _, ending := range []struct {
 		name  string
-		fault error
+		ended bool
 		want  string
+		fault error
 	}{
-		{name: "the subscription ends mid-scan", want: "ended after 1 entries"},
-		{name: "the idle timer gives up mid-scan", fault: natsgo.ErrKeyWatcherTimeout, want: "stopped after 1 entries"},
+		{name: "the subscription ends mid-scan", ended: true, want: "ended after 1 entries"},
+		{name: "the scan stalls past its idle bound", want: "delivered nothing for 200ms after 1 entries", fault: kvwatch.ErrScanTimedOut},
 	} {
 		t.Run(ending.name, func(t *testing.T) {
-			handle := bus.KeyValue{KeyValue: earlyEndKV{KeyValue: rawRoles, after: 1, fault: ending.fault}}
-			revisions, err := roleRevisions(handle, slog.Default())
+			handle := bus.NewKeyValue(rawRoles, earlyEndKV{KeyValue: roles.WatchHandle(), after: 1, ended: ending.ended}, roles.Streams())
+			revisions, err := roleRevisions(handle, idle, slog.Default())
 			if err == nil {
 				t.Fatalf("a scan that ended after 1 of 4 claims returned %d revisions and no error", len(revisions))
 			}
@@ -2400,9 +3487,9 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 
 // The listener's own failure, through real nats.go: a link that goes quiet partway through the
 // revision scan and then comes back must fail Open, not open the registry on the claims that
-// happened to arrive. nats.go's idle timer reports the quiet as ErrKeyWatcherTimeout on Error()
-// and then sends the same nil entry a finished scan sends, so a reader that takes the nil for a
-// finished scan restores a snapshot missing most of the bucket, and every claim it misses is a
+// happened to arrive. The scan's idle timer (kvwatch.ScanExistingKeys) ends a quiet scan as
+// ErrScanTimedOut, where a reader that took whatever had arrived for a finished scan would restore
+// a snapshot missing most of the bucket, and every claim it misses is a
 // restored holder released a session TTL early. Which error Open reports depends on how it reads
 // the bucket; that it reports one is the contract. The deterministic halves of both endings,
 // including that the timeout is carried, are in

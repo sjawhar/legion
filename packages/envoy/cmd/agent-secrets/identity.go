@@ -25,10 +25,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 const (
@@ -36,6 +36,11 @@ const (
 	// writes, and the enrollment id enroll (or the pod's launcher) writes beside it.
 	keyFile        = "key.pem"
 	enrollmentFile = "enrollment"
+	// machineSessionMarker says this key dir's key and enrollment are a session this command
+	// registered for a machine that proves an identity of its own, which is what makes the
+	// enrollment one this command may register again when the broker says it is not live. A
+	// launcher's key dir holds no such file: its enrollment is the launcher's to make again.
+	machineSessionMarker = "machine-session"
 	// pendingMarker is the file a box's launcher keeps in the key dir while it sets the box up.
 	pendingMarker = "enrollment.pending"
 	// pendingMarkerLife bounds how long a client trusts a marker, by its mtime. It covers the
@@ -55,6 +60,10 @@ const (
 	// the proof matches no broker route and is worthless if it ever leaked; identity discards it
 	// unread.
 	identityProbeURL = "agent-secrets:identity"
+	// brokerURLVar is the one variable every form takes the broker's address from. A refusal
+	// that could not reach the broker names it, so a session that inherited a stale address
+	// reads a stale address rather than a broker that is down.
+	brokerURLVar = "AGENT_SECRETS_URL"
 )
 
 // keyDir is AGENT_SECRETS_KEY_DIR, else the default $XDG_RUNTIME_DIR/agent-secrets — the
@@ -66,6 +75,14 @@ func keyDir() string {
 	return filepath.Dir(helper.DefaultSocket(os.Getenv))
 }
 
+// brokerBaseURL is the broker's address as brokerURLVar gives it, without the slashes it ends in
+// (brokerclient.WithoutTrailingSlashes, the rule both halves of this client read an address by),
+// and empty when the variable is unset or holds nothing but slashes: the one place every form
+// reads it.
+func brokerBaseURL() string {
+	return brokerclient.WithoutTrailingSlashes(os.Getenv(brokerURLVar))
+}
+
 // helperSocket is AGENT_SECRETS_HELPER_SOCK, else the helper's default socket; named reports
 // which, since a default counts only when the socket is there.
 func helperSocket() (sock string, named bool) {
@@ -75,11 +92,14 @@ func helperSocket() (sock string, named bool) {
 	return helper.DefaultSocket(os.Getenv), false
 }
 
-// approveURL is AGENT_SECRETS_APPROVE_URL, Dispatch's origin, without a trailing slash: the base
-// of the pages `machine login` and a pending exec form name for a person to decide on. Empty
-// when unset.
+// approveURL is AGENT_SECRETS_APPROVE_URL, Dispatch's origin, without the slashes it ends in (the
+// same brokerclient.WithoutTrailingSlashes every other address here is read by): the base of the
+// machine-login page (/credentials/machine) where `machine login` sends a person to type its code
+// (machine.go). That page is the only thing this setting names: a pending secret request names
+// the page on the secrets broker its own answer carries as approve_url, and reads nothing from
+// here. Empty when unset.
 func approveURL() string {
-	return strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/")
+	return brokerclient.WithoutTrailingSlashes(os.Getenv("AGENT_SECRETS_APPROVE_URL"))
 }
 
 // requestSessionID answers the session id every request and exec form sends with its request

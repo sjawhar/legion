@@ -39,6 +39,15 @@ test("a personal agent token attributes its ask, remains private, and is revoked
     expect(token).toMatch(/^dsp_[A-Za-z0-9_-]{43}$/);
     const tokenPrefix = `dsp_${token.slice(4, 12)}…`;
 
+    // The card tells the reader which directory a session reads its envoy.json from. Asserted
+    // whole, so a variable the client no longer reads cannot be listed here unnoticed.
+    await expect(alicePage.getByRole("status").getByText(/^If the file exists/)).toHaveText(
+      "If the file exists, replace its dispatch section with this one and keep the rest. " +
+        "A session under a named omp profile, or with CLAUDE_CONFIG_DIR set, reads the " +
+        "envoy.json in that directory instead; any other session reads the file " +
+        "ENVOY_CONFIG_FILE names when it is set."
+    );
+
     const created = await createAskWithToken(issue.key, token);
     expect(created.status).toBe(201);
 

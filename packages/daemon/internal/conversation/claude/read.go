@@ -30,9 +30,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/conversation"
 )
 
-// PinnedVersion is the Claude Code release the reader and appender follow, the one the Tests
-// workflow installs for the real-binary tests (.github/actions/install-claude-code).
-const PinnedVersion = "2.1.310"
+// PinnedVersion is the Claude Code release the reader and appender follow, the one
+// `.claude-code-pin` names and the CI job installs for the real-binary tests
+// (.github/actions/install-claude-code). pin_test.go holds it to that file, the repository's one
+// copy of the pin.
+const PinnedVersion = "2.1.311"
 
 // anthropicMessages is the provider API every Claude Code turn runs on.
 const anthropicMessages = "anthropic-messages"

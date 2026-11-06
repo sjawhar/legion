@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -144,8 +145,13 @@ func (r refusingRecorder) refuse(kind string) error {
 	return nil
 }
 
-func (r refusingRecorder) Record(contracts.CIObservation) error      { return r.refuse("check") }
-func (r refusingRecorder) RecordSuite(contracts.CIObservation) error { return r.refuse("suite") }
+func (r refusingRecorder) Record(context.Context, contracts.CIObservation) error {
+	return r.refuse("check")
+}
+
+func (r refusingRecorder) RecordSuite(context.Context, contracts.CIObservation) error {
+	return r.refuse("suite")
+}
 
 func postGitHub(t *testing.T, handler http.Handler, event, delivery, body string) {
 	t.Helper()
@@ -302,11 +308,11 @@ type failAfter struct {
 	published int
 }
 
-func (p *failAfter) Publish(item contracts.Envelope) error {
+func (p *failAfter) PublishWithin(ctx context.Context, item contracts.Envelope) error {
 	if p.published >= p.after {
 		return fmt.Errorf("publish refused after %d envelopes", p.after)
 	}
-	if err := p.inner.Publish(item); err != nil {
+	if err := p.inner.PublishWithin(ctx, item); err != nil {
 		return err
 	}
 	p.published++

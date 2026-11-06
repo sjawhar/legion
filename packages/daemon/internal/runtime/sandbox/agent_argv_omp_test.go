@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
 
@@ -47,7 +48,10 @@ func TestTheAgentArgvImportsTheRepositorysExtensionsHooksAndCommands(t *testing.
 		}
 	}
 	testbin.OMPHome(t, omp, home)
-	if out, err := exec.Command("git", "init", "--quiet", repo).CombinedOutput(); err != nil {
+	initialise := exec.Command("git", "init", "--quiet", repo)
+	initialise.Dir = repo
+	initialise.Env = fixtureenv.Isolated(home)
+	if out, err := initialise.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 	// A profile whose one model is an operator's provider that nothing listens on: RPC mode starts

@@ -1,5 +1,6 @@
 import {
   ArtifactCreatedEventPayloadSchema as ArtifactCreatedPayloadSchema,
+  ArtifactHumanEditedEventPayloadSchema as ArtifactHumanEditedPayloadSchema,
   ArtifactVersionEventPayloadSchema as ArtifactVersionPayloadSchema,
   AskEditedEventPayloadSchema as AskEditedPayloadSchema,
   AskFollowerEventPayloadSchema as AskFollowerPayloadSchema,
@@ -29,8 +30,11 @@ import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine } from "./dispatch-command";
+import type { ActiveDispatchConfig } from "./dispatch-config";
+import { DispatchClient } from "./dispatch-http";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 import { pictureAddresses } from "./dispatch-pictures";
+import { humanEditDiffBlock, humanEditHead } from "./human-edit";
 
 const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -56,6 +60,9 @@ const InboundEnvelopeSchema = z
     dedupe_key: z.string().optional(),
     issued_at: z.number().int().optional(),
     expires_at: z.number().int().optional(),
+    // Set only on a copy the listener forwards from a role's kept lane: the message waited for
+    // this session to claim the role, so the card says when it was kept.
+    kept_at: z.number().int().optional(),
     payload_summary: z.string().optional(),
     payload: z.string().optional(),
     sender: InboundSenderSchema.optional(),
@@ -92,6 +99,10 @@ export type DispatchDelivery = {
   readonly replyFields: Readonly<Record<string, string>>;
   readonly issueKey: string | null;
   readonly body: string;
+  /** `body` is the first part of the item's body and not all of it, as the event payload's
+   *  `body_truncated` says (`CarriedBodyPayload` in `@legion/contracts`). A reader that needs
+   *  the rest reads the item itself through `DispatchClient`. */
+  readonly bodyTruncated?: boolean;
   /** The broadcast a message frame says its message is one recipient's copy of, when it names
    *  one. The frame is untrusted: this can only rule a user turn out, never in. */
   readonly broadcastId?: string;
@@ -105,30 +116,23 @@ function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): 
 /**
  * Answers a targeted Dispatch delivery on the sender's behalf: the reply body when the
  * host delivered it, or the error when it could not (so the sender sees the attempt fail
- * instead of waiting on a reply that never comes). A plain fetch with no deadline of its own.
+ * instead of waiting on a reply that never comes). A write through `DispatchClient`, so it
+ * carries a key of its own, is asked again under it while Dispatch gives no definitive answer,
+ * and throws Dispatch's refusal as a `DispatchServiceError`.
  */
 export async function postDeliveryReply(
-  config: { readonly url: string; readonly token: string },
+  config: Pick<ActiveDispatchConfig, "url" | "credential">,
   sessionId: string,
   delivery: DispatchDelivery,
   result: { readonly body?: string; readonly error?: string }
 ): Promise<void> {
-  const response = await fetch(
-    `${config.url}${dispatchReplyPath(delivery.resource, delivery.id)}`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        actor: { kind: "session", id: sessionId },
-        attempt: delivery.attempt,
-        ...delivery.replyFields,
-        ...result,
-      }),
-    }
-  );
-  if (!response.ok) {
-    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
-  }
+  const client = new DispatchClient(config.url, config.credential);
+  await client.deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result,
+  });
 }
 
 /**
@@ -157,6 +161,74 @@ export function expectsLaneReceipt<
   );
 }
 
+/** A message a subscription yielded, and when it arrived. */
+export interface Arrival<Message> {
+  readonly message: Message;
+  /** When the subscription yielded it (`now`), however long the messages before it took. */
+  readonly receivedAt: number;
+}
+
+/**
+ * Reads `subscription` as its messages arrive and yields them in arrival order, each stamped with
+ * when it arrived. nats.js pushes a message into a subscription's iterator as it arrives, and this
+ * always waits on that iterator, so the stamp is the arrival time whatever the caller is doing
+ * with the messages before it (a Dispatch accept, pictures, a side turn): a message waits here
+ * until the caller asks for the next one. Once the subscription ends or throws, every message
+ * already read is still yielded, in order, and only then does the caller's next read end or throw
+ * that error, as nats.js's own iterator yields the messages it took before it stops. A caller that
+ * stops reading early returns the subscription's iterator, which stops the subscription once the
+ * iterator's pending read settles (nats.js takes a return only after the read in flight).
+ */
+export async function* readArrivals<Message>(
+  subscription: AsyncIterable<Message>,
+  now: () => number = Date.now
+): AsyncGenerator<Arrival<Message>, void, undefined> {
+  const source = subscription[Symbol.asyncIterator]();
+  const arrived: Arrival<Message>[] = [];
+  let stopped: { readonly error?: unknown; readonly failed: boolean } | undefined;
+  let left = false;
+  let wake: (() => void) | undefined;
+  const signal = () => {
+    wake?.();
+    wake = undefined;
+  };
+  void (async () => {
+    try {
+      for (;;) {
+        const read = await source.next();
+        if (read.done === true || left) break;
+        arrived.push({ message: read.value, receivedAt: now() });
+        signal();
+      }
+      stopped = { failed: false };
+    } catch (error) {
+      stopped = { error, failed: true };
+    }
+    signal();
+  })();
+  try {
+    for (;;) {
+      const next = arrived.shift();
+      if (next !== undefined) {
+        yield next;
+        continue;
+      }
+      if (stopped?.failed === true) throw stopped.error;
+      if (stopped !== undefined) return;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      wake = resolve;
+      await promise;
+    }
+  } finally {
+    if (stopped === undefined) {
+      left = true;
+      // The subscription's own end, or the reader's error, says how it stopped; a rejected return
+      // adds nothing a caller that left could act on.
+      void Promise.resolve(source.return?.()).catch(() => undefined);
+    }
+  }
+}
+
 /**
  * The part of an inbound frame a host recognises a repeat by: its `dedupe_key`, which a re-send
  * shares with the frame that came first, and its `event_id`, which only copies of one publish
@@ -172,9 +244,15 @@ export const DedupeIdentitySchema = z.object({
 
 export type DedupeIdentity = z.infer<typeof DedupeIdentitySchema>;
 
-/** What one claim recorded. `release` undoes exactly that, and only once. */
+/**
+ * What one claim recorded. `release` undoes exactly that, and only once. `settle` says the host is
+ * done with the frame without undoing the record: it was handed over, or the host chose not to
+ * show it. Until one of the two, the frame is pending (`DeliveryDedupe.pending`), and a replay
+ * sweep leaves the stream's copy for later rather than show it beside the live one.
+ */
 export interface DeliveryClaim {
   release(): void;
+  settle(): void;
 }
 
 /**
@@ -187,7 +265,9 @@ export interface DeliveryClaim {
  * already a repeat. It releases the claim when its agent was not handed the frame after all: the
  * hand-off threw, or the host answered the frame with an error instead (a BTW whose side turn
  * failed, a frame it could not read). Dispatch records that attempt failed, and a same-mode
- * re-send of it must then reach the agent.
+ * re-send of it must then reach the agent. Otherwise it settles the claim once it is done with the
+ * frame, shown or not: a claim left open reads as `pending` forever, and a replay sweep then never
+ * moves its stream cursor past that frame.
  */
 export interface DeliveryDedupe {
   /**
@@ -196,6 +276,13 @@ export interface DeliveryDedupe {
    * claimed already), otherwise the claim, whose `release` undoes what this call recorded.
    */
   claim(frame: DedupeIdentity | undefined): DeliveryClaim | undefined;
+  /**
+   * Whether a claim of the frame is still being delivered: neither settled nor released. A claim
+   * of its event id, or of a key that names its event, is that frame's claim, by the same identity
+   * rule `claim` drops a repeat by. A settled claim says nothing of whether the frame was shown: a
+   * host that shows it records that in the replay ledger, which a replay sweep reads first.
+   */
+  pending(frame: DedupeIdentity): boolean;
 }
 
 /**
@@ -235,10 +322,13 @@ const DELIVERY_EVENT_ID_LIMIT = 10_000;
 export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedupe {
   // Insertion order is claim order, so the keys past the window, and the oldest key the limit
   // evicts, are always at the front. A key maps to when it was claimed, an event id to the number
-  // of the claim that recorded it, so a release removes neither once another claim took it.
+  // of the claim that recorded it, so a release removes neither once another claim took it. The
+  // pending maps hold only the claims neither settled nor released yet, each by its number.
   const keys = new Map<string, number>();
   let events = new Map<string, number>();
   let olderEvents = new Map<string, number>();
+  const pendingKeys = new Map<string, number>();
+  const pendingEvents = new Map<string, number>();
   let claims = 0;
   return {
     claim(frame) {
@@ -272,10 +362,22 @@ export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedu
           events = new Map();
         }
         events.set(eventId, claim);
+        pendingEvents.set(eventId, claim);
       }
+      if (named) pendingKeys.set(key, claim);
+      let open = true;
+      const close = () => {
+        if (!open) return;
+        open = false;
+        if (eventId !== undefined && pendingEvents.get(eventId) === claim) {
+          pendingEvents.delete(eventId);
+        }
+        if (named && pendingKeys.get(key) === claim) pendingKeys.delete(key);
+      };
       let released = false;
       return {
         release() {
+          close();
           if (released) return;
           released = true;
           if (named && keys.get(key) === at) keys.delete(key);
@@ -283,7 +385,16 @@ export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedu
           if (events.get(eventId) === claim) events.delete(eventId);
           if (olderEvents.get(eventId) === claim) olderEvents.delete(eventId);
         },
+        settle: close,
       };
+    },
+    pending(frame) {
+      const eventId = frame.event_id;
+      const key = frame.dedupe_key;
+      return (
+        (eventId !== undefined && pendingEvents.has(eventId)) ||
+        (key !== undefined && dedupeKeyNamesItsEvent(frame) && pendingKeys.has(key))
+      );
     },
   };
 }
@@ -360,6 +471,10 @@ export type RenderInboundResult = {
   /** The Dispatch addresses of the pictures the delivered message, comment, ask question, answer
    *  or resolution reason embeds, in writing order; absent when it embeds none. */
   readonly pictures?: readonly string[];
+  /** The comment or message whose body this event carried only in part, or not at all: the item
+   *  a host reads whole (`wholeCarriedBody`) before it renders the frame again with that body.
+   *  Absent when the event carried the body whole, and from a render given that body. */
+  readonly cutItem?: CarriedItem;
 };
 
 /** The pictures the text a Dispatch event brings embeds: a message's or comment's body, an opened
@@ -394,6 +509,87 @@ function eventPictures(event: DispatchEvent): string[] {
   return typeof text === "string" ? pictureAddresses(text) : [];
 }
 
+/** The comment or message a Dispatch event names, as the item whose whole body a reader can go
+ *  and read. */
+export interface CarriedItem {
+  readonly resource: "comment" | "message";
+  readonly id: string;
+  readonly issueKey: string | null;
+}
+
+/** The item a `comment.*`, `suggestion.*` or `message.*` event names; undefined for every other
+ *  event, and for one whose payload names no id. */
+export function carriedItem(
+  event: Pick<DispatchEvent, "type" | "issue_key"> & { readonly payload: unknown }
+): CarriedItem | undefined {
+  const resource =
+    event.type.startsWith("comment.") || event.type.startsWith("suggestion.")
+      ? ("comment" as const)
+      : event.type.startsWith("message.")
+        ? ("message" as const)
+        : undefined;
+  if (resource === undefined || !isObject(event.payload)) return undefined;
+  const id = event.payload["id"];
+  if (typeof id !== "string" || id === "") return undefined;
+  return { resource, id, issueKey: event.issue_key };
+}
+
+/** Whether an event payload says the body on it is not the item's body whole: the first part of
+ *  it (`CarriedBodyPayload.body_truncated` in `@legion/contracts`), or none of it, because the
+ *  bus refused the event and the outbox published a stand-in with its long fields dropped
+ *  (`payload_omitted`). Either way the item itself answers the rest. */
+export function bodyWasCut(payload: unknown): boolean {
+  return (
+    isObject(payload) && (payload["body_truncated"] === true || payload["payload_omitted"] === true)
+  );
+}
+
+/** The Dispatch route that answers the whole item an event names. */
+function wholeItemRoute(item: CarriedItem): string {
+  return `GET /api/v1/${item.resource === "comment" ? "comments" : "messages"}/${item.id}`;
+}
+
+/** The note a reader is given when an event carries less than the item's body - its first part,
+ *  or nothing of it - naming the route that answers the item whole. Undefined when the event
+ *  carries the body whole. */
+function carriedBodyNote(event: DispatchEvent): string | undefined {
+  if (!bodyWasCut(event.payload)) return undefined;
+  const what =
+    isObject(event.payload) && event.payload["payload_omitted"] === true
+      ? "this event carries no body: it was too large for the bus"
+      : "the body is its first part only";
+  const item = carriedItem(event);
+  return item === undefined ? what : `${what}; read it whole with ${wholeItemRoute(item)}`;
+}
+
+/** The whole body of a comment or message, read from the server. Undefined when the read fails
+ *  or its answer does not hold the item, so the caller keeps the part its event carried: a body
+ *  the server will not answer is still better read in part than not at all. A direct message,
+ *  which belongs to no issue, is read through the session it was delivered to. */
+export async function wholeCarriedBody(
+  client: DispatchClient,
+  item: CarriedItem,
+  session?: string
+): Promise<string | undefined> {
+  try {
+    if (item.resource === "comment") {
+      const read = await client.getComment(item.id);
+      return [read.comment, ...read.replies].find((comment) => comment.id === item.id)?.body;
+    }
+    const read =
+      item.issueKey === null
+        ? session === undefined
+          ? undefined
+          : await client.getMessageThread(item.id, session)
+        : await client.getMessage(item.issueKey, item.id);
+    return read === undefined
+      ? undefined
+      : [read.message, ...read.replies].find((message) => message.id === item.id)?.body;
+  } catch {
+    return undefined;
+  }
+}
+
 export function senderLabel(envelope: DeliveryEnvelope): string {
   const sender = envelope.source_session ?? envelope.source ?? "unknown";
   return envelope.sender?.title === undefined ? sender : `${sender} (${envelope.sender.title})`;
@@ -423,6 +619,7 @@ export function replyWith(envelope: DeliveryEnvelope): ReplyHint | undefined {
 // ask.opened/anchor_refreshed/handed_back/answered/resolved the Ask, ask.edited the edited Ask plus
 // its prior fields and editor, message.created the Message, comment.*/suggestion.* the Comment plus
 // artifact_name, artifact.created {artifact}, artifact.version {artifact_id, name, version, diff?},
+// artifact.human_edited {artifact_id, name, from_version, to_version, editors, diff, diff_truncated},
 // and child.status {child_key, from, to}.
 // Bus frames are untrusted, so each schema below declares exactly the fields
 // this renderer surfaces and a frame that disagrees renders without them.
@@ -436,6 +633,7 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "issue.closed": IssuePayloadSchema,
   "artifact.created": ArtifactCreatedPayloadSchema,
   "artifact.version": ArtifactVersionPayloadSchema,
+  "artifact.human_edited": ArtifactHumanEditedPayloadSchema,
   "ask.opened": AskPayloadSchema,
   "ask.anchor_refreshed": AskPayloadSchema,
   "ask.edited": AskEditedPayloadSchema,
@@ -536,6 +734,13 @@ function dispatchCompact(
   event: DispatchEvent,
   comment: CommentPayload | undefined
 ): CompactDispatch | undefined {
+  if (event.type === "artifact.human_edited") {
+    // A person's edit names its document, versions and editors in the card; its diff follows the
+    // card as a fenced block (humanEditDiffBlock), where a reader sees it as the diff it is.
+    const edit = ArtifactHumanEditedPayloadSchema.safeParse(event.payload);
+    if (!edit.success) return undefined;
+    return { askId: undefined, record: { edit: humanEditHead(edit.data) } };
+  }
   if (event.type === "comment.created") {
     if (comment?.ask_id === undefined || comment.ask_id === null) return undefined;
     const question = dispatchAskQuestion(comment);
@@ -675,7 +880,12 @@ function dispatchReplyRef(
 // kept (`raw`) so no data is dropped and nothing renders as a hand-built text
 // template.
 type DispatchFrame =
-  | { readonly event: DispatchEvent; readonly notify: unknown; readonly delivery: unknown }
+  | {
+      readonly event: DispatchEvent;
+      readonly notify: unknown;
+      readonly quiet: unknown;
+      readonly delivery: unknown;
+    }
   | {
       readonly raw: unknown;
       readonly rejectedDelivery?: DispatchDelivery;
@@ -686,7 +896,19 @@ function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null;
 }
 
-function parseDispatchFrame(rawPayload: string): DispatchFrame {
+/** `event` with the whole body of the item it carried only the first part of, or none of: the
+ *  body the server answered, and neither flag that said the body on the event was not the
+ *  item's own (`bodyWasCut`). The event is left as it arrived when the caller read no body. */
+function withWholeBody(event: DispatchEvent, body: string | undefined): DispatchEvent {
+  if (body === undefined || !isObject(event.payload) || !bodyWasCut(event.payload)) return event;
+  const { body_truncated: _cut, payload_omitted: _omitted, ...carried } = event.payload;
+  return { ...event, payload: { ...carried, body } };
+}
+
+/** The frame one Dispatch envelope's payload carries. `wholeBody` is the body of the item the
+ *  event named as cut, read from the server since (`renderInbound`'s `cutItem`); the event then
+ *  reads as though it had carried that body whole. */
+function parseDispatchFrame(rawPayload: string, wholeBody?: string): DispatchFrame {
   let value: unknown;
   try {
     value = JSON.parse(rawPayload);
@@ -698,10 +920,15 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
   if (isObject(value) && "delivery" in value) {
     const targeted = DispatchTargetedFrameSchema.safeParse(value);
     if (targeted.success) {
-      const wireFrame = value as { readonly event: DispatchEvent & { readonly notify?: unknown } };
+      // `notify` and `quiet` are fields of the event the frame wraps, which is where the
+      // outbox marshals them, and the schema drops both as unknown keys.
+      const wireFrame = value as {
+        readonly event: DispatchEvent & { readonly notify?: unknown; readonly quiet?: unknown };
+      };
       return {
-        event: targeted.data.event,
+        event: withWholeBody(targeted.data.event, wholeBody),
         notify: wireFrame.event.notify,
+        quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery,
       };
     }
@@ -731,10 +958,14 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
 
   const parsed = DispatchEventSchema.safeParse(value);
   if (!parsed.success) return { raw: value };
-  const wireEvent = value as DispatchEvent & { readonly notify?: unknown };
+  const wireEvent = value as DispatchEvent & {
+    readonly notify?: unknown;
+    readonly quiet?: unknown;
+  };
   return {
-    event: parsed.data,
+    event: withWholeBody(parsed.data, wholeBody),
     notify: wireEvent.notify,
+    quiet: wireEvent.quiet,
     delivery: undefined,
   };
 }
@@ -744,10 +975,16 @@ export function inboundTimestamp(milliseconds: number | undefined): string {
   return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString().replace(".000Z", "Z");
 }
 
+/** One inbound envelope's JSON as a card for the agent, with what the host does with it. A body
+ *  is bounded block by block, so one event can carry its first part alone, or none of it, and
+ *  the result names that item as `cutItem`: a host that reads it whole
+ *  (`wholeCarriedBody`) renders again with the body in `wholeBody`, and the card then holds the
+ *  body the comment or message route answers rather than one that stops mid-thought. */
 export function renderInbound(
   raw: string,
   sessionID: string,
-  subject?: string
+  subject?: string,
+  wholeBody?: string
 ): RenderInboundResult {
   let value: unknown;
   try {
@@ -787,19 +1024,38 @@ export function renderInbound(
   let rejectedDelivery: DispatchDelivery | undefined;
   let malformedDelivery = false;
   let pictures: string[] = [];
+  // The note a cut body earns on the rendered record (carriedBodyNote), and the item whose
+  // whole body the host can read in its place; both undefined when the event carried the body
+  // whole, and after a render that was given that body (wholeBody).
+  let bodyNote: string | undefined;
+  let cutItem: CarriedItem | undefined;
   let inReplyTo = envelope.in_reply_to;
   // On an ask event the payload is the ask itself, whose author is another follower's
   // session when this session merely replied; naming it is not a spoof to flag.
   let askAuthor: string | undefined;
+  // Text that follows the card's TOON block: a person's edit's diff as a fenced `diff` block.
+  let trailer = "";
   const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
   if (envelope.source === "dispatch") {
     const topic = subject ?? envelope.topic;
     if (envelope.payload === undefined) {
       dispatchIssue = "payload";
     } else {
-      const frame = parseDispatchFrame(envelope.payload);
+      const frame = parseDispatchFrame(envelope.payload, wholeBody);
       if ("event" in frame) {
-        if (frame.notify === false && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
+        // An owner topic carries every event of its issue, document or project, so a frame
+        // carrying nothing to read is dropped here rather than shown or recorded. Dispatch
+        // states that as `quiet` (`events.Quiet`): a delivery receipt, an anchor refresh,
+        // settings or per-viewer bookkeeping, a targeted message its session already had, an ask
+        // edit that only moved a version, or a version nobody named. `notify` is a different
+        // question — whether to wake the issue's route and claimant — and it is false for every
+        // event an agent wrote, so skipping on it dropped exactly the activity a session that
+        // subscribed to `notifications.dispatch.issue.<KEY>.>` asked for
+        // (skills/dispatch/SKILL.md). A frame with no `quiet` was published by a Dispatch from
+        // before this field and is judged by the old rule: the stream still holds 72 hours of
+        // them, and a replay must not start showing their receipts and autosaves.
+        const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
+        if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
           return { skip: true, content: "", envelope };
         }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
@@ -874,6 +1130,7 @@ export function renderInbound(
               replyFields: {},
               issueKey: frame.event.issue_key,
               body: message.data.body,
+              ...(message.data.body_truncated === true ? { bodyTruncated: true } : {}),
               ...(typeof message.data.broadcast_id === "string"
                 ? { broadcastId: message.data.broadcast_id }
                 : {}),
@@ -902,6 +1159,7 @@ export function renderInbound(
               replyFields: { target: requested.data.target },
               issueKey: frame.event.issue_key,
               body: comment.data.body,
+              ...(comment.data.body_truncated === true ? { bodyTruncated: true } : {}),
             };
           }
         }
@@ -925,7 +1183,13 @@ export function renderInbound(
           ...(compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }),
         };
         dispatchActor = frame.event.actor;
+        bodyNote = carriedBodyNote(frame.event);
+        if (bodyWasCut(frame.event.payload)) cutItem = carriedItem(frame.event);
         pictures = eventPictures(frame.event);
+        if (frame.event.type === "artifact.human_edited") {
+          const edit = ArtifactHumanEditedPayloadSchema.safeParse(frame.event.payload);
+          if (edit.success) trailer = humanEditDiffBlock(edit.data.diff, edit.data.diff_truncated);
+        }
       } else {
         dispatchEvent = frame.raw;
         rejectedDelivery = frame.rejectedDelivery;
@@ -995,6 +1259,9 @@ export function renderInbound(
     from: senderLabel(envelope),
     at: inboundTimestamp(envelope.issued_at),
     id: envelope.event_id ?? "unknown",
+    // The listener could not deliver this message when it was sent, so it kept it until this
+    // session claimed the role. The time it was kept says how long it waited.
+    ...(envelope.kept_at === undefined ? {} : { kept_at: inboundTimestamp(envelope.kept_at) }),
     ...(envelope.expires_at === undefined ? {} : { by: inboundTimestamp(envelope.expires_at) }),
     ...(envelope.urgency === undefined ? {} : { urgency: envelope.urgency }),
     ...(envelope.expects_reply === undefined ? {} : { expects_reply: envelope.expects_reply }),
@@ -1015,6 +1282,7 @@ export function renderInbound(
           ...(summaryIsHead ? {} : { summary: payloadSummary }),
           ...(message === undefined ? {} : { message }),
         }),
+    ...(bodyNote === undefined ? {} : { body_note: bodyNote }),
     ...(foreignSession === undefined
       ? {}
       : {
@@ -1025,12 +1293,14 @@ export function renderInbound(
 
   return {
     skip: false,
-    content: encode({ envoy: rendered }),
+    content:
+      trailer === "" ? encode({ envoy: rendered }) : `${encode({ envoy: rendered })}\n\n${trailer}`,
     envelope,
     ...(dispatchActor === undefined ? {} : { dispatchActor }),
     ...(delivery === undefined ? {} : { delivery }),
     ...(rejectedDelivery === undefined ? {} : { rejectedDelivery }),
     ...(malformedDelivery ? { malformedDelivery: true as const } : {}),
     ...(pictures.length === 0 ? {} : { pictures }),
+    ...(cutItem === undefined ? {} : { cutItem }),
   };
 }

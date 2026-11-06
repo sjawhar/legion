@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -34,6 +36,9 @@ import (
 // and the session finds that file through the variable with "_FILE" appended, as every pane finds
 // a secret file.
 const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
+
+// stdinIsTerminal says whether this process's stdin is a terminal; a test replaces it.
+var stdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
 // controllerCommands is `legion controller`'s subcommands, the one list of them `legion controller
 // --help` names.
@@ -67,9 +72,14 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // controllerStart is `legion controller start`, the operator's side of the controller under
 // `controller: operator`, where the daemon launches none. In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
-// refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
-// file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, an
-// instructions file that is missing or blank, and an Oh My Pi invocation that does not resolve;
+// refuse an operator token file others can read, then a stdin that is no terminal (stdinIsTerminal:
+// given a positional word there, Oh My Pi runs headless print mode, which would run the start
+// command after the mint revoked the running controller), a blank or unreadable Envoy token file,
+// a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, a configured
+// `dispatch_url` whose file names neither of the two Dispatch credentials, a secrets broker that
+// refuses this machine's identity under `dispatch_token_broker` (controllerDispatchBroker) and a
+// blank or unreadable Dispatch token file under `dispatch_token_file`, an instructions file that
+// is missing or blank, and an Oh My Pi invocation that does not resolve;
 // then probe that Oh My Pi as the controller will run it — the launch prefix, the invocation, the
 // controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
@@ -90,9 +100,10 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // `<state_dir>/github-credential.log` rather than this process's streams, and stopping when Oh My
 // Pi exits or the daemon says the capability is no longer current
 // (controllerCredentialSuperseded); then run Oh My Pi interactive — the launch prefix and the
-// resolved invocation with one joined `--append-system-prompt`, no `--resume`, no `--mode rpc`,
-// and daemon.ControllerStartMessage as LEGION_CONTROLLER_START_MESSAGE in its environment for the
-// extension to send as the first turn — in the foreground with the same environment, and answer
+// resolved invocation with one joined `--append-system-prompt` and the one positional word
+// daemon.ControllerStartCommand, no `--resume`, no `--mode rpc`, and daemon.ControllerStartMessage
+// as LEGION_CONTROLLER_START_MESSAGE in its environment for that pi-legion command to send as the
+// first turn — in the foreground with the same environment, and answer
 // its exit code. A refusal before the secret is written removes the directories made for the
 // probe, so the state directory is as it was.
 func controllerStart(ctx context.Context, configPath, daemonURL string, stderr io.Writer) (int, error) {
@@ -111,6 +122,13 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
+	// Before every other check, but after the operator token file's own, which a script with no
+	// terminal relies on reaching: with a positional word and a stdin that is no terminal, Oh My Pi
+	// runs print mode, headless, and would run the start command only after the mint had revoked the
+	// running controller.
+	if !stdinIsTerminal() {
+		return 0, errors.New("stdin is not a terminal: Oh My Pi would run headless print mode, running the controller start command after the daemon's mint had revoked the running controller; run `legion controller start` at a terminal")
+	}
 	// Every check this machine can make on its own comes before the fetch, and none of them writes
 	// under the state directory but the probe's own directory, removed again on a refusal: the
 	// daemon mints a fresh capability on every request and revokes the incumbent controller's, so
@@ -125,10 +143,25 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	if cfg.DispatchTokenFile != "" {
+	// Exactly one credential writes the configured Dispatch, and the file says which: the bearer
+	// `dispatch_token_file` points at, read here as every other pointer is, or this machine's own
+	// identity (`dispatch_token_broker`), traded at the secrets broker once here to prove the
+	// controller can hold a credential at all (controllerDispatchBroker). The loader takes a
+	// `dispatch_url` with neither, since it reads no environment and the broker route is proved
+	// only by trading; naming neither here is a controller that could write nothing, so the start
+	// refuses it by name.
+	switch {
+	case cfg.DispatchURL == "":
+	case cfg.DispatchTokenBroker:
+		if err := controllerDispatchBroker(ctx, stderr); err != nil {
+			return 0, err
+		}
+	case cfg.DispatchTokenFile != "":
 		if _, err := config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile); err != nil {
 			return 0, err
 		}
+	default:
+		return 0, errors.New("dispatch_url is configured with no Dispatch credential: set dispatch_token_file to the bearer's file, or dispatch_token_broker: true where this machine proves an identity of its own and the controller's session trades it at the secrets broker")
 	}
 	if cfg.InstructionsPath != "" {
 		if _, err := config.ReadDeploymentInstructions(cfg.InstructionsPath); err != nil {
@@ -160,8 +193,17 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// token, which a start from inside a Legion pane inherits, is dropped too: the plugin takes a
 	// controller carrying one for a controller the daemon launched (`controller: daemon`). So are
 	// the Slack channels the daemon tells its own controller (LEGION_SLACK_CHANNELS): only that
-	// controller can reply in Slack, and an inherited list is no project's word for this one. The
-	// one difference between the probed and the launched environment is GH_CONFIG_DIR, which names
+	// controller can reply in Slack, and an inherited list is no project's word for this one. A
+	// machine that holds its Dispatch credential at the broker drops the operator's own Dispatch
+	// bearer and pointer as well: either would be presented in place of the traded token as a
+	// bearer Dispatch refuses (controllerDispatchBroker). The drop is not the whole of it — the
+	// operator's HOME is the controller's, and the envoy.json there holds that person's
+	// `dispatch.token`, which no delete here reaches — so the controller's set carries
+	// DISPATCH_TOKEN_BROKER, the session's word that its Dispatch credential is this machine's
+	// own identity and nothing else, under which the client reads no bearer from any source and
+	// turns Dispatch off saying so when it can trade none (dispatch-config.ts, dispatchTarget).
+	// The one difference between the probed and the launched
+	// environment is GH_CONFIG_DIR, which names
 	// the default owner's directory only once the credential fetch after the mint has named that
 	// owner.
 	env := processEnvironment()
@@ -170,6 +212,10 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	delete(env, "LEGION_BOOT_TOKEN")
 	delete(env, "LEGION_BOOT_TOKEN_FILE")
 	delete(env, "LEGION_SLACK_CHANNELS")
+	if cfg.DispatchTokenBroker {
+		delete(env, "DISPATCH_TOKEN")
+		delete(env, "DISPATCH_TOKEN_FILE")
+	}
 	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token), gh) {
 		env[pair[0]] = pair[1]
 	}
@@ -232,17 +278,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// The daemon's design gate policy, then the project's whole repository list (fetched and
 	// validated above, before the capability mint), is the controller's addressing, the line its
 	// take comment reads before it promises anyone a design approval (skill://legion-controller).
-	// The start message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) rather
-	// than a CLI word: the pi-legion extension sends it as the session's first turn once its claim
-	// succeeds, before it opens the live wake subscription, so a started or restarted controller
-	// runs its start procedure at once and deterministically, never racing a wake for the one
-	// first-turn slot.
+	// The start message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) and the
+	// command line ends with the word daemon.ControllerStartCommand, whose doc says why.
 	addressing := daemon.DesignGateFragment(designGate) + " " + daemon.RepositoriesSentence(repositories)
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,
 		Addressing:                 addressing,
 		DeploymentInstructionsPath: instructionsFile,
-	})
+	}) + " " + shellprefix.Word(daemon.ControllerStartCommand)
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
 	// Interactive and in the foreground: the operator's terminal is Oh My Pi's. The child is not
 	// bound to ctx — a Ctrl-C reaches Oh My Pi through the terminal's process group and is its to
@@ -270,15 +313,24 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // environment: the controller marker and role, the daemon, project and state directory, the Envoy,
 // GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
 // directory's legion launcher and gh wrapper first in the agent's bash tool as on every pane, and
-// LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
-// once its claim succeeds (daemon.ControllerStartMessage). LEGION_GH_OWNERS_DIR names
+// LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension's daemon.ControllerStartCommand,
+// the word on Oh My Pi's command line, sends as the session's first turn
+// (daemon.ControllerStartMessage). LEGION_GH_OWNERS_DIR names
 // `<state_dir>/gh`, the gh bundle controllerStartGitHubCredential writes and keeps fresh, and
 // LEGION_GH_PATH gh, the real gh the wrapper runs; GH_CONFIG_DIR names the bundle's root here, an
 // empty directory when the daemon has no GitHub App, and controllerStart points it at the default
 // owner's directory once the fetch names one; GH_TOKEN, GITHUB_TOKEN and GH_HOST are blanked so gh
 // and git read the bundle's hosts.yml rather than an inherited pointer of the operator's own.
-// Secrets travel as `<NAME>_FILE` pointers only. Later pairs replace any inherited value of the
-// same name.
+// Secrets travel as `<NAME>_FILE` pointers only, and under `dispatch_token_broker` — this machine
+// holding its Dispatch credential at the secrets broker (controllerDispatchBroker) — DISPATCH_URL
+// travels with DISPATCH_TOKEN_BROKER=1 and no bearer beside it at all: the client trades for a
+// DPoP-bound token of its own, and that variable is what keeps it on that route. Without it the
+// client takes the broker route only where no bearer resolves, and the operator's own envoy.json,
+// which the controller reads because it keeps the operator's HOME, names a `dispatch.token` that
+// resolves first — the controller would write Dispatch as the operator, which is the whole of
+// what this setting exists to stop. Set, no bearer of any source is read, and a machine that can
+// trade nothing turns Dispatch off saying so rather than falling back to a person's token. Later
+// pairs replace any inherited value of the same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh string) [][2]string {
 	bin := workerbin.LauncherDir(stateDir)
 	env := [][2]string{
@@ -302,7 +354,12 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh
 		{"LEGION_CONTROLLER_START_MESSAGE", daemon.ControllerStartMessage},
 	}
 	if cfg.DispatchURL != "" {
-		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})
+		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL})
+		if cfg.DispatchTokenBroker {
+			env = append(env, [2]string{"DISPATCH_TOKEN_BROKER", "1"})
+		} else {
+			env = append(env, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})
+		}
 	}
 	env = append(env, [2]string{controllerSecretVariable + "_FILE", secretFile})
 	if cfg.EnvoyTokenFile != "" {

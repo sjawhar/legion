@@ -1,7 +1,9 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
+import { api } from "../../api/client";
 import type { Event } from "../../api/types";
 import { PinnedTab } from "./PinnedTab";
 
@@ -98,5 +100,51 @@ test("a pinned lifecycle event remains removable", async () => {
     expect(removed).toEqual([2]);
   } finally {
     view.unmount();
+  }
+});
+
+// A pinned card's byline names its writer through `AgentName`: an agent's name links to its
+// live conversation, on a pinned conversation and on a pinned event alike.
+test("a pinned card's agent byline links to its live conversation", () => {
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const agent = {
+    id: "session-one",
+    kind: "session" as const,
+    origin: { session_title: "Implementer" },
+  };
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <PinnedTab
+          conversations={[
+            {
+              at: "2026-09-10T00:00:00Z",
+              author: agent,
+              body: "Pinned question",
+              id: "ask:ask-1",
+              kind: "ask",
+            },
+          ]}
+          events={[{ ...messageEvent, actor: agent }]}
+          onUnpin={() => {}}
+          onUnpinConversation={() => {}}
+          pinnedIds={["ask:ask-1", "1"]}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const names = screen.getAllByRole("link", { name: "Implementer" });
+    expect(names.map((name) => name.getAttribute("href"))).toEqual([
+      "/agents/session-one/live",
+      "/agents/session-one/live",
+    ]);
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
   }
 });

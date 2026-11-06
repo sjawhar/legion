@@ -3,13 +3,11 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"unicode/utf16"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
-	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -73,7 +71,8 @@ func (e *Engine) mergeFailed(ctx context.Context, tx pgx.Tx, fact intake.MergeFa
 // head it does not name, and nothing withdraws a READY the issue never reached awaiting_merge to
 // hold. The route held the commit to GitHub's head, and passes the record as it read it, head and
 // clock (intake.HandoffComplete.RecordedHead, RecordedHeadAt), and GitHub's clock in its read
-// (HeadAt): the record follows GitHub only by webhook, so one still exactly that snapshot is
+// (HeadAt): the record follows GitHub only by webhook and the daemon's two-minute read of each pull
+// request (daemon's followHead), so one still exactly that snapshot is
 // lagging, not moved, one at the commit has caught up, and one with a clock still before GitHub's
 // read applied only pushes that read had passed, so it is behind, not moved (a push between the
 // snapshot's head and the commit, its webhook applied while the route checked READY). Any other
@@ -106,7 +105,8 @@ func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record
 		return intake.Result{}, nil
 	}
 	if pr.HeadSHA != fact.Commit {
-		*pr = classify.AdvancePullRequestHead(*pr, fact.Commit)
+		*pr = classify.AdvancePullRequestHead(*pr, classify.Arrival{}, fact.Commit)
+		e.stampRun(pr)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.HeadAt)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
@@ -127,26 +127,15 @@ func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issu
 	return e.tellReadyAudience(ctx, tx, issue, withdrawal(issue.Key, pr.Number, reason))
 }
 
-// withdrawal is the READY's withdrawal for issue's pull request number, for reason, within the one
-// Dispatch message the outbox can post (record.MessagePostLimit, in UTF-16 units as Dispatch counts
-// them): a reason that would carry it past that, a merge group's many failing runs say, is cut, and
-// the withdrawal says so. The implementer's task and the architect's checks-red carry it whole.
+// withdrawal is the READY's withdrawal for issue's pull request number, for reason. It is one
+// paragraph, so Dispatch measures it as one block: a long reason — a merge group's many failing
+// runs, say — is posted whole while that paragraph stays under Dispatch's block bound
+// (dispatchbody.BlockUnits), and nothing here cuts it to fit. A reason past the bound is refused on
+// the post, Dispatch refusing every attempt at it alike, and the outbox finishes that row and
+// tells the issue's architect Dispatch's own answer (the daemon package's messagePostRefused).
+// The implementer's task and the architect's checks-red carry the reason whole either way.
 func withdrawal(issue string, number int, reason string) string {
-	text := func(reason string) string {
-		return fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue, number, reason)
-	}
-	body := text(reason)
-	if dispatch.MessageBodyLength(body) <= record.MessagePostLimit {
-		return body
-	}
-	const cut = " … (cut to fit one Dispatch message; the implementer's task and the architect's checks-red carry it whole)"
-	over := dispatch.MessageBodyLength(text(reason+cut)) - record.MessagePostLimit
-	runes := []rune(reason)
-	for over > 0 && len(runes) > 0 {
-		over -= utf16.RuneLen(runes[len(runes)-1])
-		runes = runes[:len(runes)-1]
-	}
-	return text(string(runes) + cut)
+	return fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue, number, reason)
 }
 
 // headMoved answers a move of pr's head: a push, or a reopen (reopened), which can carry a head
@@ -212,19 +201,16 @@ func (e *Engine) voidMovedHeldReady(ctx context.Context, tx pgx.Tx, issue record
 // close in the record has ended, and one still waiting absorbs the new one, since the outbox holds
 // one ready_merge row per issue and head.
 //
-// A push to a pull request GitHub has already merged takes neither move. A merged root stands in
-// awaiting_merge for as long as the rest of its tree runs (closeMerged), so a push can land there
-// for days after the merge, and there is nothing left to merge or to re-implement: no READY is
-// withdrawn and the issue stays where it is. The neighbouring doors are already shut this way —
-// a red withdraws a READY only on an open pull request (classify.RedWithdrawsReady), as does a
+// A merged root stands in awaiting_merge for as long as the rest of its tree runs (closeMerged),
+// and there is nothing left to merge or to re-implement, so no head move reaches here for a merged
+// pull request: GitHub synchronizes and reopens only a pull request it has not merged, so a
+// synchronize or a reopen observed after the merge is older than it and returns early
+// (pullRequestSynchronized, pullRequestOpened). The neighbouring doors are shut the same way — a
+// red withdraws a READY only on an open pull request (classify.RedWithdrawsReady), as does a
 // conflict (classify.ConflictWithdrawsReady), a merge queue's failed merge returns early unless
-// the pull request is open (mergeFailed), a reopen of a merged one returns early
-// (pullRequestOpened), and the row that submits READY's merge ends itself once the record shows
-// the merge (queueReadyMerge).
+// the pull request is open (mergeFailed), and the row that submits READY's merge ends itself once
+// the record shows the merge (queueReadyMerge).
 func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reopened bool) error {
-	if pr.State == record.PullRequestMerged {
-		return nil
-	}
 	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 	if err != nil {
 		return err

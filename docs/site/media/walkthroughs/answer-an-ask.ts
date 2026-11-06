@@ -3,6 +3,7 @@
 // at the cue it names, once that moment is on screen.
 import type { Page } from "@playwright/test";
 
+import { sessionIds } from "../../../../packages/dispatch/e2e/session-ids";
 import { type DispatchWorkspace, dispatchApi, expect, seedDispatchWorkspace } from "../harness";
 import { highlight, linger, pointTo, ring, scrollBy, type Walkthrough } from "../recording";
 
@@ -38,7 +39,7 @@ async function seed(): Promise<Seeded> {
   const workspace = await seedDispatchWorkspace();
   const api = await dispatchApi();
   const planner = {
-    actor: { id: "planner-session", kind: "session", origin: { session_title: "Planner" } },
+    actor: { id: sessionIds.planner, kind: "session", origin: { session_title: "Planner" } },
     as: "agent",
   } as const;
   const issue = await api.createIssue({ project: "CORE", spec: SPEC, title: ISSUE_TITLE });
@@ -59,7 +60,7 @@ async function seed(): Promise<Seeded> {
       .toBe(count + 1);
   }
   const asks = (await api.getIssue(issue.key)).open_asks;
-  if (asks.some((ask) => ask.author.kind !== "session" || ask.author.id !== "planner-session")) {
+  if (asks.some((ask) => ask.author.kind !== "session" || ask.author.id !== sessionIds.planner)) {
     throw new Error(`answer-an-ask: the decisions are not the Planner's: ${JSON.stringify(asks)}`);
   }
   return { ...workspace, webhooks: issue.key };

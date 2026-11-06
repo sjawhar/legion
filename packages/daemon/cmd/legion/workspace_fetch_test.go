@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -51,11 +52,15 @@ if [ "$1 $2 $3 $4" = "clone --bare --quiet https://github.com/acme/widgets" ]; t
 fi
 if [ "$2 $3 $4 $5" = "fetch --prune --quiet https://github.com/acme/widgets" ]; then
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
-	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$1" fetch --prune --quiet "$WINIT_REMOTE" "$6"
+	first="$1"
+	shift 5
+	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$first" fetch --prune --quiet "$WINIT_REMOTE" "$@"
 fi
 if [ "$2 $3 $4 $5" = "ls-remote --symref https://github.com/acme/widgets HEAD" ]; then
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
-	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$1" ls-remote --symref "$WINIT_REMOTE" HEAD
+	first="$1"
+	shift 5
+	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$first" ls-remote --symref "$WINIT_REMOTE" HEAD "$@"
 fi
 exec "$WINIT_REAL_GIT" "$@"
 `
@@ -469,13 +474,19 @@ func objectBytes(t *testing.T, gitDir string) int64 {
 // advanceRemote puts one more commit on the volume's remote's main and returns its id.
 func (v *issueVolume) advanceRemote(t *testing.T) string {
 	t.Helper()
-	work := filepath.Join(t.TempDir(), "work")
+	scratch := t.TempDir()
+	work := filepath.Join(scratch, "work")
 	for _, argv := range [][]string{
 		{"clone", "--quiet", v.env["WINIT_REMOTE"], work},
 		{"-C", work, "-c", "user.name=Legion test", "-c", "user.email=legion-test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "advanced"},
 		{"-C", work, "push", "--quiet", "origin", "HEAD:main"},
 	} {
-		if output, err := exec.Command(v.env["WINIT_REAL_GIT"], argv...).CombinedOutput(); err != nil {
+		command := exec.Command(v.env["WINIT_REAL_GIT"], argv...)
+		// The clone creates work, so every command in the run names its parent as the directory
+		// it runs in rather than inheriting the test process's.
+		command.Dir = scratch
+		command.Env = fixtureenv.Isolated(t.TempDir())
+		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
 		}
 	}
@@ -488,8 +499,14 @@ func (v *issueVolume) advanceRemote(t *testing.T) string {
 // is.
 func (v *issueVolume) cacheTarServer(t *testing.T) (string, int) {
 	t.Helper()
-	cache := filepath.Join(t.TempDir(), "widgets.git")
-	if output, err := exec.Command(v.env["WINIT_REAL_GIT"], "clone", "--bare", "--quiet", "--no-local", v.env["WINIT_REMOTE"], cache).CombinedOutput(); err != nil {
+	scratch := t.TempDir()
+	cache := filepath.Join(scratch, "widgets.git")
+	clone := exec.Command(v.env["WINIT_REAL_GIT"], "clone", "--bare", "--quiet", "--no-local", v.env["WINIT_REMOTE"], cache)
+	// The clone creates the cache, so it runs in the scratch directory holding it rather than in
+	// the directory the test process happens to have.
+	clone.Dir = scratch
+	clone.Env = fixtureenv.Isolated(t.TempDir())
+	if output, err := clone.CombinedOutput(); err != nil {
 		t.Fatalf("clone the cache: %v\n%s", err, output)
 	}
 	var stream bytes.Buffer
@@ -593,8 +610,9 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 	if main := v.git(t, "--git-dir="+feed, "rev-parse", "refs/heads/main"); main != head {
 		t.Fatalf("the feed's main is %s, want the remote's %s", main, head)
 	}
-	if credential := logLines(t, v.credentialLog); len(credential) != 2 || !strings.HasSuffix(credential[0], " ghs_test") || !strings.HasSuffix(credential[1], " ghs_test") {
-		t.Fatalf("GitHub was reached with %q, want the delta's fetch and its read of GitHub's HEAD, each with the provisioning token", credential)
+	credential := logLines(t, v.credentialLog)
+	if len(credential) != 3 || !strings.HasSuffix(credential[0], " ghs_test") || !strings.HasSuffix(credential[1], " ghs_test") || !strings.HasSuffix(credential[2], " ghs_test") {
+		t.Fatalf("GitHub was reached with %q, want the read of GitHub's HEAD that plans the delta, the delta's fetch and the read that follows HEAD, each with the provisioning token", credential)
 	}
 	holdsNoToken(t, v.feed, "after fetch")
 

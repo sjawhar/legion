@@ -10,6 +10,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 // createRequestBody is POST /v1/requests's exact shape: a signed
@@ -41,18 +42,23 @@ type createRequestResponse struct {
 	GrantID *string `json:"grant_id"`
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
-	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
-	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. While
-	// it is pending it waits in that person's Dispatch Inbox, or in everyone's for "anyone". Null
-	// when the policy decided it at once, so no record names one.
+	// Who decides it, as its record names them: a person's login (their lowercase email), or
+	// "anyone" for a shared secret, which anyone signed in to the broker's approval page may
+	// decide. While it is pending it is listed in that person's Dispatch Inbox, or in everyone's
+	// for "anyone", linking approve_url. Null when the policy decided it at once, so no record
+	// names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts, as the signed request asked; null when it asked for no
-	// lifetime, and the grant lasts until the session ends. A reused or coalesced request answers
+	// How many seconds its grant lasts, as the signed request asked; or, when it asked for none, 12
+	// hours; null when every name is tagged default-grant=session and the grant lasts until the
+	// session ends. A reused or coalesced request answers
 	// its own, which equals the one asked for. A client that asked for a lifetime and reads null,
 	// or no such field from a broker before it, was not given that lifetime.
 	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// True when the request joined an identical one this session already had pending.
 	Coalesced bool `json:"coalesced,omitempty"`
+	// While it is pending, its record's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>,
+	// where a person signed in to the broker decides it; absent when the policy decided it at once.
+	ApproveURL string `json:"approve_url,omitempty"`
 }
 
 // createRequest requests secrets for the proof-verified caller, never for an enrollment named in
@@ -103,6 +109,7 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		Approver:        req.Approver,
 		LifetimeSeconds: req.LifetimeSeconds,
 		Coalesced:       req.Coalesced,
+		ApproveURL:      s.pendingApproveURL(req.State, req.RecordID),
 	})
 }
 
@@ -125,20 +132,52 @@ type requestStatusResponse struct {
 	GrantID *string `json:"grant_id"`
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
-	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
-	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. The
-	// record fixes it when the request is made, so a later change to the secret's owner does not
-	// move it, and it stays once the request is decided. Null when the policy decided it at once,
-	// so no record names one.
+	// Who decides it, as its record names them: a person's login (their lowercase email), or
+	// "anyone" for a shared secret, which anyone signed in to the broker's approval page may
+	// decide. The record fixes it when the request is made, so a later change to the secret's
+	// owner does not move it, and it stays once the request is decided. Null when the policy
+	// decided it at once, so no record names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts, as the signed request asked; null for a grant that lasts
-	// until the session ends.
+	// How many seconds its grant lasts: as the signed request asked, else 12 hours; null for a
+	// grant that lasts until the session ends (every name tagged default-grant=session).
 	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`
 	// Who decided it and when; null while pending, when the policy decided it at once, and when it
 	// expired.
 	Decision *requestDecision `json:"decision"`
+	// While it is pending, its record's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>,
+	// where a person signed in to the broker decides it; absent once it is no longer pending, and
+	// when the policy decided it at once.
+	ApproveURL string `json:"approve_url,omitempty"`
+}
+
+// grantValuesBody is POST /v1/grants/{id}/values's optional body: no body at all, or one with no
+// github_app, releases every value as the grant holds it.
+type grantValuesBody struct {
+	// Optional: narrows the token of every github-app secret the grant holds to one account's
+	// installation and, within it, to named repositories, to read access, or to both. A grant
+	// that holds no github-app secret refuses it (NARROWING_NOT_APPLICABLE), and one whose
+	// github-app secret does not list the account refuses it (NARROWING_OWNER_NOT_LISTED). It
+	// narrows this release alone: the grant's next release without it is owner-wide.
+	GitHubApp *githubNarrowing `json:"github_app"`
+}
+
+// githubNarrowing is one release's narrowing of its GitHub App tokens: as the request names it,
+// and as the answer names what the broker applied.
+type githubNarrowing struct {
+	// The one GitHub account whose installation the token is minted for: a login the secret's
+	// github-owners lists, compared without regard to case. The answer names it lowercased.
+	Owner string `json:"owner"`
+	// Optional: names of the account's repositories, without the account, at least one and at most
+	// 100: the token reaches those repositories alone, but keeps every permission the App holds, its
+	// organization permissions among them, unless read_only is set too. The answer names them
+	// sorted, each once.
+	Repositories []string `json:"repositories,omitempty"`
+	// Optional: true limits the token to contents: read, metadata: read, pull_requests: read and
+	// actions: read, less the Actions grant the installation does not hold. A machine that must
+	// only read needs it, with or without repositories.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // grantValuesResponse is POST /v1/grants/{id}/values's answer.
@@ -148,6 +187,10 @@ type grantValuesResponse struct {
 	ExpiresAt *time.Time `json:"expires_at"`
 	// Each granted name's value, read fresh from the secret store.
 	Values map[string]string `json:"values"`
+	// The narrowing this release applied to its GitHub App tokens, absent when it applied none. A
+	// client that asked for one and finds none here is answered by a broker from before
+	// narrowing, which released the owner-wide tokens.
+	GitHubApp *githubNarrowing `json:"github_app,omitempty"`
 }
 
 func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
@@ -175,7 +218,10 @@ func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentI
 		writeInternal(w, "read request", err)
 		return
 	}
-	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, LifetimeSeconds: req.LifetimeSeconds, DecidedAt: req.DecidedAt}
+	resp := requestStatusResponse{
+		State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, LifetimeSeconds: req.LifetimeSeconds,
+		DecidedAt: req.DecidedAt, ApproveURL: s.pendingApproveURL(req.State, req.RecordID),
+	}
 	if req.DecidedBy != nil && req.DecidedAt != nil {
 		resp.Decision = &requestDecision{By: *req.DecidedBy, At: *req.DecidedAt}
 	}
@@ -210,7 +256,22 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if !ok {
 		return
 	}
-	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID)
+	var body grantValuesBody
+	if r.ContentLength != 0 && !readJSON(w, r, &body, "INVALID_NARROWING") {
+		return
+	}
+	var narrowing *secrets.GitHubNarrowing
+	var applied *githubNarrowing
+	if body.GitHubApp != nil {
+		n, refusal := policy.ParseGitHubNarrowing(body.GitHubApp.Owner, body.GitHubApp.Repositories, body.GitHubApp.ReadOnly)
+		if refusal != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_NARROWING", "github_app."+refusal.Field+" "+refusal.Reason)
+			return
+		}
+		narrowing = &n
+		applied = &githubNarrowing{Owner: n.Owner, Repositories: n.Repositories, ReadOnly: n.ReadOnly}
+	}
+	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID, narrowing)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
@@ -224,9 +285,24 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	case errors.Is(err, requests.ErrSecretNotInStore):
 		writeError(w, http.StatusNotFound, "SECRET_NOT_IN_STORE", err.Error())
 		return
+	case errors.Is(err, requests.ErrNarrowingNotApplicable):
+		writeError(w, http.StatusBadRequest, "NARROWING_NOT_APPLICABLE", err.Error())
+		return
+	case errors.Is(err, requests.ErrNarrowingOwnerNotListed):
+		// The narrowing names an account a github-app secret of the grant does not list; no minter
+		// ran and GitHub was not asked. The caller's input, so a 4xx and never MINT_FAILED.
+		writeError(w, http.StatusForbidden, "NARROWING_OWNER_NOT_LISTED", err.Error())
+		return
+	case errors.Is(err, secrets.ErrMintNarrowingRefused):
+		// GitHub refused the narrowed token (a repository the installation does not reach, or a
+		// permission the App does not hold); its message names the narrowing's likely mistake. The
+		// caller's input, so a 4xx and never MINT_FAILED.
+		writeError(w, http.StatusUnprocessableEntity, "NARROWING_REFUSED", err.Error())
+		return
 	case errors.Is(err, requests.ErrMintFailed):
-		// The kind's upstream (GitHub or Google) refused or failed the mint; its message says why,
-		// such as a Google login that needs a new sign-in, and never holds the stored value.
+		// The kind's upstream (GitHub or Google) refused or failed a mint the narrowing, if any, is
+		// not at fault: an App with no installation, a Google login that needs a new sign-in, an
+		// upstream that could not be asked. Its message says why and never holds the stored value.
 		writeError(w, http.StatusBadGateway, "MINT_FAILED", err.Error())
 		return
 	case err != nil:
@@ -236,7 +312,7 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if values == nil {
 		values = map[string]string{}
 	}
-	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values})
+	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values, GitHubApp: applied})
 }
 
 // revokeGrant ends a grant for the session that holds it — session proof only, per the shared

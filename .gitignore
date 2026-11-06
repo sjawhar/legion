@@ -135,6 +135,8 @@ web_modules/
 
 # Output of 'npm pack'
 *.tgz
+# The nats chart gcp:ClusteredNatsHub's live test renders, vendored at the version the component pins.
+!packages/envoy/infra/gcp/testdata/nats-2.15.1.tgz
 
 # Yarn Integrity file
 .yarn-integrity
@@ -158,8 +160,11 @@ out
 .nuxt
 dist
 packages/*/dist/
-# The Claude Code plugin cache runs the plugin from its committed bundle.
-!packages/claude-envoy/dist/
+# The Claude Envoy plugin's two generated trees. Nothing commits them: the plugin is published to
+# npm by release.yaml's claude_envoy_build, which builds them in the job and packs them with the
+# rest of the package, and `npm pack` reads package.json's "files" list rather than git, so an
+# ignored path is packed all the same.
+packages/claude-envoy/legion/
 
 # Gatsby files
 .cache/
@@ -260,8 +265,6 @@ $RECYCLE.BIN/
 
 .sisyphus/*
 !.sisyphus/rules/
-# .legion/ handoff data must be committed — do not ignore the directory
-# (see implement.md step 6 note)
 
 # Playwright MCP transient snapshots
 .playwright-mcp/
@@ -269,6 +272,8 @@ $RECYCLE.BIN/
 # Playwright output (packages/dispatch e2e)
 packages/dispatch/e2e/test-results/
 packages/dispatch/e2e/playwright-report/
+# The second dashboard build two-process browser runs serve (`bun run e2e:multiprocess`)
+packages/dispatch/web/dist-b/
 
 .superpowers/sdd/
 
@@ -289,3 +294,6 @@ docs/site/media/.work/
 # Base-revision plugin copy written by packages/pi-envoy/scripts/smoke-registration-stall.sh;
 # a killed run skips the trap that removes it.
 packages/pi-envoy/extensions/.smoke-base-*.ts
+
+# Python bytecode (scripts/e2e/lib/as-role.py and any other script run or imported locally).
+__pycache__/

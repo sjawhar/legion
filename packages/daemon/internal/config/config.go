@@ -35,17 +35,18 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
-// Runtime is the `runtime` block: its name, under kubernetes the settled `runtime.kubernetes`
-// block (nil under tmux), and under tmux the settled `runtime.tmux` block (the zero value under
-// kubernetes, and under the scalar `runtime: tmux`).
+// Runtime is the `runtime` block: its name, under kubernetes the settled `runtime.kubernetes` block
+// (nil under tmux), and under tmux the settled `runtime.tmux` block when the file names one (nil
+// otherwise).
 type Runtime struct {
 	Name       string
 	Kubernetes *Kubernetes
-	Tmux       Tmux
+	Tmux       *Tmux
 }
 
 // ControllerLaunch is who launches the project's controller (`controller`).
@@ -55,9 +56,10 @@ const (
 	// ControllerLaunchOperator is the default: the operator runs `legion controller start` on a
 	// machine of theirs, and the daemon launches no controller.
 	ControllerLaunchOperator ControllerLaunch = "operator"
-	// ControllerLaunchDaemon is the daemon launching the controller itself, as an Agent Sandbox pod
-	// it supervises like a root architect, minting its credential at every launch; the operator's
-	// controller secret route then refuses, since one controller per project runs.
+	// ControllerLaunchDaemon is the daemon launching the controller itself — an Agent Sandbox pod
+	// under kubernetes, a pane of its own window under tmux — and supervising it like a root
+	// architect, minting its credential at every launch; the operator's controller secret route then
+	// refuses, since one controller per project runs.
 	ControllerLaunchDaemon ControllerLaunch = "daemon"
 )
 
@@ -92,10 +94,11 @@ type Config struct {
 	// neither its config nor sops's age identity (ProviderKeys is how a provider key reaches OMP).
 	OmpLaunchPrefix []string
 	// ProviderKeys are the provider credentials every pane's or pod's OMP receives in its
-	// environment, in file order: the variable OMP reads, and the key that holds it. Under tmux the
-	// key is a secretsd key, which boot resolves once, as the daemon (MaterializeProviderKeys), into
-	// a daemon-held 0600 file, so a pane never holds the secret store itself; under kubernetes it is
-	// a key of the providers Secret, which every pod mounts as the file the shim exports.
+	// environment, in file order: the variable OMP reads, and where its value is held. Under tmux the
+	// source is a secretsd key, or a file (`file:/abs/path`), which boot reads once, as the daemon
+	// (MaterializeProviderKeys), into a daemon-held 0600 file, so a pane never holds the secret store
+	// itself; under kubernetes it is a key of the providers Secret, which every pod mounts as the
+	// file the shim exports.
 	ProviderKeys []ProviderKey
 	// InstructionsPath is the operator's deployment instructions, "" when none; boot copies it to
 	// `<state_dir>/deployment-instructions.md` (MaterializeDeploymentInstructions).
@@ -152,14 +155,32 @@ type Config struct {
 	// ProductionCheckBound is how long a closed issue's production check waits for its deploy
 	// after the close before its last look (`production_check_hours`, 14 days by default).
 	ProductionCheckBound time.Duration
-	ReviewRoundCap       int
-	MaxFixAttempts       int
+	// PodUpdateRetask is how long an open update round waits after it sent a worker the task
+	// before it asks that worker again (`pod_update_retask_hours`, an hour by default), and
+	// PodUpdateNotice how long after the round opened the controller is told the round is stalled
+	// (`pod_update_notice_hours`, four hours by default). Both are decimal numbers of hours, as
+	// `production_check_hours` is, so a live proof and the production check can drive each bound
+	// inside one run rather than wait out a day of real time.
+	PodUpdateRetask time.Duration
+	PodUpdateNotice time.Duration
+	// PodUpdateMaxOpenRounds is how many issues may hold an open pod-update round at once
+	// (`pod_update_max_open_rounds`), and PodUpdateRoundsPerMinute how many rounds one sweep may
+	// open in a minute (`pod_update_rounds_per_minute`). Both are pointers because a file that
+	// leaves the key out asks for no limit at all, which no number says: there is no default to
+	// fall back on, and nil is how a sweep reads "open as many as the fleet needs".
+	PodUpdateMaxOpenRounds   *int
+	PodUpdateRoundsPerMinute *int
+	ReviewRoundCap           int
+	MaxFixAttempts           int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
-	// admission's rule (admit.Admission.wakeController and its callers).
+	// admission's rule (admit.Admission.wakeController and its callers). The same tick runs the
+	// workflow's status repair (workflow.Engine.correctStatuses), so this period is also how long
+	// an issue's Dispatch status can stand wrong before the daemon puts it back: an operator who
+	// raises it to quiet the controller slows that repair by as much.
 	ControllerWakeInterval time.Duration
 	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
-	// the file says the daemon does, which only `runtime: kubernetes` with Dispatch allows.
+	// the file says the daemon does.
 	ControllerLaunch ControllerLaunch
 	// Capabilities is the `capabilities` block; the zero value with none.
 	Capabilities Capabilities
@@ -170,6 +191,16 @@ type Config struct {
 	// that is not running, from its own conversation. Nil when the file sets none, and the daemon
 	// then answers nothing, as before the block existed.
 	Answers *Answers
+	// RoleConfigFiles is `role_config_files`: the Oh My Pi settings overlays one role names in its
+	// PI_CONFIG_FILES and no other role does, by role, each after the overlays every role names
+	// (runtime.tmux.pi_config_files, or runtime.kubernetes.pod.env's PI_CONFIG_FILES); a role it
+	// leaves out names those alone. Nil while the file names none.
+	RoleConfigFiles map[claim.Role][]string
+	// RepositoryRenames is `repository_renames`: the repository pairs this deployment treats as
+	// one repository wherever a name is compared, because a repository moved while Legion's
+	// records keep the name each was written under. The zero value, which answers as
+	// strings.EqualFold does, while the file configures none.
+	RepositoryRenames ghrepo.Renames
 }
 
 const (
@@ -221,7 +252,7 @@ var countKeys = []struct {
 // would.
 var tossedKeys = map[string]string{
 	"worker_cap":                 "the running-worker cap no longer exists (LEGION-208 Requirement 8)",
-	"worker_idle_retire_seconds": `a worker stays live from its role's first assignment until its issue closes, and nothing retires it after an idle window (LEGION-462)`,
+	"worker_idle_retire_seconds": `an idle window retires no worker: it releases the worker's issue pod, and the key for it is runtime.kubernetes.idle_release (idle_minutes, backstop_minutes), which suspends every claim of the released pod with the source released and brings them back on the next wake (INFRA-945)`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
 }
@@ -253,7 +284,7 @@ type fileConfig struct {
 	StateDir          *string
 	AdmissionCap      *int
 	Kubernetes        *Kubernetes
-	Tmux              Tmux
+	Tmux              *Tmux
 	DaemonURL         *string
 	OmpInvocation     *string
 	OmpLaunchPrefix   []string
@@ -274,14 +305,23 @@ type fileConfig struct {
 	GitHubApps             *GitHubApps
 	Linger                 *time.Duration
 	ProductionCheckBound   *time.Duration
-	ReviewRoundCap         *int
-	MaxFixAttempts         *int
-	Controller             *string
-	Capabilities           *Capabilities
-	Durations              map[string]int
-	Counts                 map[string]int
-	WorkerBackends         map[claim.Role]runtime.Backend
-	Answers                *answersFile
+	PodUpdateRetask        *time.Duration
+	PodUpdateNotice        *time.Duration
+	// PodUpdateMaxOpenRounds is `pod_update_max_open_rounds` and PodUpdateRoundsPerMinute
+	// `pod_update_rounds_per_minute`; each stays nil when the file leaves its key out, which is
+	// how resolve tells an absent key from a number and leaves Config's own pointer nil.
+	PodUpdateMaxOpenRounds   *int
+	PodUpdateRoundsPerMinute *int
+	ReviewRoundCap           *int
+	MaxFixAttempts           *int
+	Controller               *string
+	Capabilities             *Capabilities
+	Durations                map[string]int
+	Counts                   map[string]int
+	WorkerBackends           map[claim.Role]runtime.Backend
+	Answers                  *answersFile
+	RoleConfigFiles          map[claim.Role][]string
+	RepositoryRenames        []ghrepo.Rename
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -407,6 +447,16 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Linger, err = readHours(value, key)
 		case "production_check_hours":
 			file.ProductionCheckBound, err = readHours(value, key)
+		case "pod_update_retask_hours":
+			file.PodUpdateRetask, err = readHours(value, key)
+		case "pod_update_notice_hours":
+			file.PodUpdateNotice, err = readHours(value, key)
+		// Both round caps are read here rather than through countKeys, which carries a default
+		// for every key it holds and so could never report that the operator named neither.
+		case "pod_update_max_open_rounds":
+			file.PodUpdateMaxOpenRounds, err = readPositiveInteger(value, key, 0)
+		case "pod_update_rounds_per_minute":
+			file.PodUpdateRoundsPerMinute, err = readPositiveInteger(value, key, 0)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
@@ -419,6 +469,10 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.WorkerBackends, err = readWorkerBackends(value, key)
 		case "answers":
 			file.Answers, err = readAnswers(value, key)
+		case "role_config_files":
+			file.RoleConfigFiles, err = readRoleConfigFiles(value, key)
+		case repositoryRenamesKey:
+			file.RepositoryRenames, err = readRepositoryRenames(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -484,39 +538,36 @@ func classify(key string) error {
 	return fmt.Errorf("unknown key %s", key)
 }
 
-// readRuntime reads `runtime`: the `tmux` scalar (the default session store), a one-key
-// `{tmux: {...}}` mapping, whose block it reads, or the shipped one-key `{kubernetes: {...}}`
-// mapping, whose block it reads. A bare `kubernetes` scalar is refused: it carries no block, and
-// the block is the only source of what a pod needs.
-func readRuntime(value *yaml.Node) (*Kubernetes, Tmux, error) {
+// readRuntime reads `runtime`: the `tmux` scalar (no block), or a one-key mapping, `{kubernetes:
+// {...}}` or `{tmux: {...}}`, whose block it reads. A bare `kubernetes` scalar is refused: it
+// carries no block, and the block is the only source of what a pod needs.
+func readRuntime(value *yaml.Node) (*Kubernetes, *Tmux, error) {
 	if value.Tag == "!!null" {
-		return nil, Tmux{}, nil
+		return nil, nil, nil
 	}
 	if value.Kind == yaml.ScalarNode {
 		switch value.Value {
 		case "tmux":
-			return nil, Tmux{}, nil
+			return nil, nil, nil
 		case "kubernetes":
-			return nil, Tmux{}, errors.New("runtime.kubernetes is required when runtime is kubernetes")
+			return nil, nil, errors.New("runtime.kubernetes is required when runtime is kubernetes")
 		}
-		return nil, Tmux{}, errors.New("runtime must be 'tmux' or 'kubernetes'")
+		return nil, nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
 	}
+	shape := errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes or tmux")
 	if value.Kind != yaml.MappingNode || len(value.Content) != 2 {
-		return nil, Tmux{}, errors.New(runtimeShapes)
+		return nil, nil, shape
 	}
 	switch value.Content[0].Value {
-	case "tmux":
-		tmux, err := readTmux(value.Content[1])
-		return nil, tmux, err
 	case "kubernetes":
 		k, err := readKubernetes(value.Content[1])
-		return k, Tmux{}, err
+		return k, nil, err
+	case "tmux":
+		t, err := readTmux(value.Content[1])
+		return nil, t, err
 	}
-	return nil, Tmux{}, errors.New(runtimeShapes)
+	return nil, nil, shape
 }
-
-// runtimeShapes is readRuntime's refusal of a `runtime` of no shape it reads.
-const runtimeShapes = "runtime accepts tmux, kubernetes, or a mapping with the single key tmux or kubernetes"
 
 // readString reads a string key; nil for an unset one (absent from its mapping, or null).
 func readString(value *yaml.Node, key string) (*string, error) {
@@ -689,16 +740,22 @@ var envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 const envNameRule = "must be an environment variable name (letters, digits, and underscores, not starting with a digit)"
 
 // ProviderKey is one `provider_keys` entry: Env, the variable Oh My Pi reads (GEMINI_API_KEY), and
-// Secret, the key that holds its value in this deployment (GEMINI_API_KEY_TESTS) — a secretsd key
-// under tmux, a key of the providers Secret under kubernetes — named apart because a deployment
-// names its secrets per environment while the provider's variable is fixed.
+// where its value is held in this deployment, named apart because a deployment names its secrets per
+// environment while the provider's variable is fixed. Secret is the key that holds it
+// (GEMINI_API_KEY_TESTS) — a secretsd key under tmux, a key of the providers Secret under
+// kubernetes — or File, set instead when the entry's value is `file:/abs/path`: the file the daemon
+// reads the value from at boot, under tmux alone. Exactly one of the two is set.
 type ProviderKey struct {
 	Env    string
 	Secret string
+	File   string
 }
 
+// providerKeyFilePrefix marks a `provider_keys` value that names a file rather than a key.
+const providerKeyFilePrefix = "file:"
+
 // providerKeysShape is the refusal for anything but the mapping.
-const providerKeysShape = "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}"
+const providerKeysShape = "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key, or file:/abs/path under runtime tmux; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}"
 
 // paneGitHubEnv are the gh variables the daemon sets on every pane and pod (tmux's panePairs, the
 // sandbox runtime's ghAgentEnv): LEGION_GH_OWNERS_DIR, the role's gh bundle (one directory of gh
@@ -713,8 +770,10 @@ const providerKeysShape = "provider_keys must be a mapping of the variable OMP r
 var paneGitHubEnv = []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH"}
 
 // readProviderKeys is `provider_keys`: a mapping of the variable OMP reads to the key that holds
-// it, both sides environment variable names, in file order. A variable named twice is refused
-// rather than one entry silently winning, as is one the daemon sets on every pane itself.
+// it, both sides environment variable names, or to `file:` and the absolute path of the file that
+// holds it, in file order. A variable named twice is refused rather than one entry silently
+// winning, as is one the daemon sets on every pane itself. Which runtime reads a file is resolve's
+// to check (checkProviderKeyFiles).
 func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
@@ -744,8 +803,15 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 		if secretNode.Kind != yaml.ScalarNode || secretNode.Decode(&secret) != nil {
 			return nil, fmt.Errorf("%s value for %s (the key that holds it) must be a string", key, env)
 		}
+		if path, isFile := strings.CutPrefix(secret, providerKeyFilePrefix); isFile {
+			if !filepath.IsAbs(path) {
+				return nil, fmt.Errorf("%s value %q for %s names a file by a path that is not absolute; write %s/abs/path", key, secret, env, providerKeyFilePrefix)
+			}
+			keys = append(keys, ProviderKey{Env: env, File: filepath.Clean(path)})
+			continue
+		}
 		if !envVarName.MatchString(secret) {
-			return nil, fmt.Errorf("%s value %q for %s (the key that holds it) %s", key, secret, env, envNameRule)
+			return nil, fmt.Errorf("%s value %q for %s (the key that holds it) %s, or %s and an absolute path", key, secret, env, envNameRule, providerKeyFilePrefix)
 		}
 		keys = append(keys, ProviderKey{Env: env, Secret: secret})
 	}
@@ -763,11 +829,13 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 	return &read, nil
 }
 
-// readHours is a key in hours (`linger_hours`, `production_check_hours`): a positive number of
-// hours, a decimal among them (0.3 is 18 minutes), bounded as the shipped key is, by the timer
-// bound in whole hours (config.ts MAX_TIMER_HOURS). A value too small to be a nanosecond is
-// refused, never read as zero: the engine arms the deadline it is given, so a zero would close a
-// finished tree at once and take its workspace with it, or bound a check before its first look.
+// readHours is a key in hours (`linger_hours`, `production_check_hours`,
+// `pod_update_retask_hours`, `pod_update_notice_hours`): a positive number of hours, a decimal
+// among them (0.3 is 18 minutes), bounded as the shipped key is, by the timer bound in whole
+// hours (config.ts MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read
+// as zero: the engine arms the deadline it is given, so a zero would close a finished tree at
+// once and take its workspace with it, bound a check before its first look, or ask an update
+// round's worker again at every tick.
 func readHours(value *yaml.Node, key string) (*time.Duration, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
@@ -862,6 +930,8 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		Gates:                Gates{Design: DesignGateRootIssues},
 		Linger:               72 * time.Hour,
 		ProductionCheckBound: 336 * time.Hour,
+		PodUpdateRetask:      time.Hour,
+		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
 		MaxFixAttempts:       3,
 	}
@@ -908,8 +978,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 			return Config{}, err
 		}
 	}
-	if file.Tmux.InDatabase() {
-		cfg.Runtime.Tmux = Tmux{SessionDSNFile: underConfig(file.Tmux.SessionDSNFile, configDir)}
+	cfg.Runtime.Tmux = resolveTmux(file.Tmux, configDir)
+	if err := checkProviderKeyFiles(file); err != nil {
+		return Config{}, err
 	}
 
 	switch {
@@ -942,7 +1013,17 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		cfg.Capabilities = *file.Capabilities
 	}
 	cfg.WorkerBackends = file.WorkerBackends
-	if err := checkWorkerBackends(cfg); err != nil {
+	cfg.RoleConfigFiles = file.RoleConfigFiles
+	if err := checkRoleConfigFiles(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkMemory(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkRepositoryRenames(file, &cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkDeployRenames(&cfg); err != nil {
 		return Config{}, err
 	}
 	if err := resolveAnswers(file, configDir, &cfg); err != nil {
@@ -968,8 +1049,10 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 }
 
 // resolveControllerLaunch settles `controller`: the operator's launch unless the file names the
-// daemon's, which needs a cluster to run the pod in (and kubernetes already requires Dispatch).
-// runtime.kubernetes.resources.controller sizes that pod, so the operator's launch refuses it
+// daemon's — an Agent Sandbox pod of its own under kubernetes (which already requires Dispatch), a
+// pane in a window of its own under tmux, where the controller's Dispatch is dispatch_url, so the
+// daemon's launch needs it. runtime.kubernetes.resources.controller sizes that pod, so the
+// operator's launch refuses the key wherever the file names it, an entry setting no field included,
 // rather than read a key that sizes nothing. The file's own block is read: the settled one holds
 // the controller's default reservation whether or not the file named it.
 func resolveControllerLaunch(file fileConfig, cfg *Config) error {
@@ -978,17 +1061,30 @@ func resolveControllerLaunch(file fileConfig, cfg *Config) error {
 		switch launch := ControllerLaunch(*file.Controller); launch {
 		case ControllerLaunchOperator:
 		case ControllerLaunchDaemon:
-			if cfg.Runtime.Name != "kubernetes" {
-				return fmt.Errorf("controller: daemon needs runtime: kubernetes, where the daemon launches the controller as an Agent Sandbox pod; under %s the operator runs legion controller start", cfg.Runtime.Name)
+			if cfg.DispatchURL == "" {
+				return errors.New("controller: daemon needs dispatch_url: the controller the daemon launches works the project's Dispatch issues")
 			}
 			cfg.ControllerLaunch = launch
 		default:
 			return fmt.Errorf("controller must be 'operator' or 'daemon' (got %q)", *file.Controller)
 		}
 	}
-	if k := file.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon {
-		if _, sized := k.Resources[claim.RoleController]; sized {
-			return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
+	if k := file.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon && k.controllerNamed {
+		return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
+	}
+	return nil
+}
+
+// checkProviderKeyFiles refuses a `provider_keys` entry naming a file (`file:/abs/path`) under
+// runtime kubernetes: there a provider key is a key of the providers Secret, which every pod mounts,
+// and a file on the daemon's own disk reaches no pod.
+func checkProviderKeyFiles(file fileConfig) error {
+	if file.Kubernetes == nil {
+		return nil
+	}
+	for _, key := range file.ProviderKeys {
+		if key.File != "" {
+			return fmt.Errorf("provider_keys.%s names the file %s, which only runtime tmux reads: under runtime kubernetes a provider key is a key of the providers Secret", key.Env, key.File)
 		}
 	}
 	return nil

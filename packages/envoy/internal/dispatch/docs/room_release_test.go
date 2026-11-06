@@ -130,7 +130,7 @@ func TestClosingAnIssueReleasesItsUnsettledDocuments(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close the documents' issue: %v", err)
 	}
-	service.SetIssueClosed(ctx, "DOC-1", true)
+	service.issueOpenChanged(ctx, "DOC-1")
 	waitFor(t, 30*time.Second, "the closed issue's rooms to close", func() bool {
 		return len(service.srv.Rooms()) == 0
 	})
@@ -200,7 +200,7 @@ func newRoomReleaseService(t *testing.T) (*Service, *store.Store) {
 	service := New(Deps{
 		Store:     database,
 		Events:    events.NewBroker(),
-		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)},
+		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)},
 		ServerURL: "https://dispatch.example",
 		Settle:    20 * time.Millisecond,
 	})

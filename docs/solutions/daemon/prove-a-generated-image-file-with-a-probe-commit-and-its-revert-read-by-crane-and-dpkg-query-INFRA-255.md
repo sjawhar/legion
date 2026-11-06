@@ -23,11 +23,13 @@ Extends docs/solutions/daemon/a-dockerfile-self-checks-red-control-is-a-pushed-c
 That note makes a red control a pushed commit. The delta is for a positive control on a generated
 artifact ("adding X to an input puts X in the output") and for reading the result without docker:
 
-- **Push the probe and its `jj revert` back to back, with the pull request open.** The probe adds
-  one input (a package on the apt line) and nothing else; `jj revert -r <probe> --insert-after
-  <probe>` undoes it in a new commit, never a rewrite of the pushed one. `jj diff --from <feature>
-  --to <revert>` must print nothing, so the revert head is the content that merges. Each head gets
-  its own `sha-<12 hex>` image.
+- **Push the probe, then push its `jj revert` once the probe's image is built, with the pull request
+  open and not a draft.** The probe adds one input (a package on the apt line) and nothing else;
+  `jj revert -r <probe> --insert-after <probe>` undoes it in a new commit, never a rewrite of the
+  pushed one. `jj diff --from <feature> --to <revert>` must print nothing, so the revert head is the
+  content that merges. Each head gets its own `sha-<12 hex>` image only when its build completes
+  before the next push; otherwise re-run that head's run after the newest head's run has completed
+  (the last item below). A draft's head builds no image until the pull request is marked ready.
 - **Compare the two images with `LC_ALL=C comm -3`.** Two cold builds can pull different Debian
   archive states; `comm -3` shows drift as extra lines instead of hiding it in a pass. Expect only
   the probed name.
@@ -43,9 +45,21 @@ artifact ("adding X to an input puts X in the output") and for reading the resul
   event keys `check_runs` by check name, and the `Docs` and `Worker Image` workflows both name their
   job `build`: a settlement's passed `build` can be the docs build, with the image's job not yet
   started. Read the image run itself (`gh run list --workflow worker-image.yaml --commit <sha>`).
-- **A job in `queued` has left the concurrency wait; one in `pending` has not.** Under
-  `worker-image.yaml`'s per-PR group with `cancel-in-progress: false`, push again only once the
-  waiting run's job reads `queued` or `in_progress`; a push while it reads `pending` cancels it.
+  Since 2026-10-27 (INFRA-520, the CI router) the docs job is `docs` in ci.yaml, and the image
+  job's check on a pull request is `worker-image / build`, a job of ci.yaml's run that calls
+  `worker-image.yaml`: read that check at the head (`gh pr checks <n>`), since `gh run list
+  --workflow worker-image.yaml` lists only dispatched runs.
+- **Push the next commit only after the image run you need has completed.** Since 2026-10-27
+  (INFRA-520 and dispatch://INFRA-600) `worker-image.yaml`'s per-PR group has `cancel-in-progress`
+  on `pull_request`, and ci.yaml's own group, which holds the call, cancels an older head's run
+  too. A new head's run cancels the older head's build whether its job reads `pending`, `queued` or
+  `in_progress`. A revert pushed early leaves the probe with no image to read. A later push (a
+  simplify commit, say) made while the revert's run is not finished leaves the revert with none.
+  Re-running a cancelled older head's run enters the group again and cancels the newest head's
+  build, so re-run it only after the newest head's image run has completed. (Before that date the
+  group had `cancel-in-progress: false`: a job in `queued` had left the concurrency wait and
+  survived the next push, and only a job still `pending` was cancelled. The evidence below is from
+  then.)
 
 ## Evidence
 
@@ -57,4 +71,5 @@ only `tree`; all three named 312 = installed 312. The negative control, the rele
 `legion-worker:14.6.0`, named 0 against 312 installed. The settlement for 8f7d8bd at 00:25:19
 reported `build` passed from `Docs` run 40248164555; the image's `build` job started at 00:25:24.
 The simplify push (4d6d8cb3) went out while the revert's image job read `queued`; that run
-completed and the new one waited behind it.
+completed and the new one waited behind it. Since 2026-10-27 the same push cancels the revert's
+run.

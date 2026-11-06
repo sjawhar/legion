@@ -12,7 +12,7 @@
 # is this script's own stdout — the CI log; the last case runs the guard over that captured log.
 #
 # Run from anywhere: .github/scripts/check-private-names.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -23,11 +23,12 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # Every case's stdout below (echoed "case:" lines and `check`'s PASS/FAIL lines) is this script's
-# own output — the Tests job's log — so it is also teed to self_log and, as the last case, scanned
-# with the guard itself: a future case that prints an assembled form turns red here, in the suite,
-# before it ever reaches a real job log. `exec 3>&1 4>&2` keeps the real terminal fds reachable so
-# the redirection can be undone before reading the file: a process substitution's write end must
-# close (and its process be waited on) before its output is guaranteed to be flushed to disk.
+# own output — the log of ci.yaml's test job — so it is also teed to self_log and, as the last
+# case, scanned with the guard itself: a future case that prints an assembled form turns red
+# here, in the suite, before it ever reaches a real job log. `exec 3>&1 4>&2` keeps the real
+# terminal fds reachable so the redirection can be undone before reading the file: a process
+# substitution's write end must close (and its process be waited on) before its output is
+# guaranteed to be flushed to disk.
 self_log="$work/suite-output.log"
 exec 3>&1 4>&2
 exec > >(tee "$self_log") 2>&1
@@ -340,24 +341,139 @@ run_check "$root" dist
 check "exits 2" "$(is "$status" 2)"
 check "names it" "$(contains "$out" 'dist does not exist')"
 
+echo "case: a relative path from a subdirectory is read from that subdirectory"
+root=$(fixture relative-subdir)
+mkdir -p "$root/work"
+printf 'line one\n%s\n' "$key-7" > "$root/work/body.md"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh body.md 2>&1)
+status=$?
+set -e
+check "fails" "$(is "$status" 1)"
+check "names the file and line" "$(contains "$out" '^::error file=work/body.md,line=2::work/body.md:2: names the private deployment repository')"
+
+echo "case: a missing relative path from a subdirectory is still refused"
+root=$(fixture relative-missing)
+mkdir -p "$root/work"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh body.md 2>&1)
+status=$?
+set -e
+check "exits 2" "$(is "$status" 2)"
+check "names it" "$(contains "$out" 'work/body.md does not exist')"
+
+echo "case: a relative path from a subdirectory of a checkout reached through a symlink"
+root=$(fixture relative-symlinked)
+mkdir -p "$root/work"
+printf 'line one\n%s\n' "$key-7" > "$root/work/body.md"
+ln -s "$root" "$work/relative-symlinked-link"
+set +e
+out=$(cd "$work/relative-symlinked-link/work" && ../.github/scripts/check-private-names.sh body.md 2>&1)
+status=$?
+set -e
+check "fails" "$(is "$status" 1)"
+check "names the file by its repository path" "$(contains "$out" '^::error file=work/body.md,line=2::work/body.md:2: names the private deployment repository')"
+
+echo "case: a symlink before a '..' is followed as the kernel follows it"
+root=$(fixture relative-symlink-dotdot)
+mkdir -p "$root/work" "$root/elsewhere/deep"
+ln -s ../elsewhere/deep "$root/work/link"
+printf 'line one\n%s\n' "$key-7" > "$root/elsewhere/body.md"
+printf 'Nothing private here.\n' > "$root/work/body.md"
+run_check "$root" work/link/../body.md
+check "from the root, fails" "$(is "$status" 1)"
+check "from the root, names the file the link leads to" "$(contains "$out" '^::error file=work/link/\.\./body\.md,line=2::')"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh link/../body.md 2>&1)
+status=$?
+set -e
+check "from the subdirectory, fails" "$(is "$status" 1)"
+check "from the subdirectory, names the file the link leads to" "$(contains "$out" '^::error file=work/link/\.\./body\.md,line=2::')"
+
+echo "case: a relative name starting with '-' is read as a path"
+root=$(fixture relative-dash)
+mkdir -p "$root/work"
+printf 'line one\n%s\n' "$key-7" > "$root/-dash.md"
+printf 'line one\n%s\n' "$key-7" > "$root/work/-dash.md"
+run_check "$root" -dash.md
+check "from the root, fails" "$(is "$status" 1)"
+check "from the root, names the file" "$(contains "$out" '^::error file=\./-dash\.md,line=2::')"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh -dash.md 2>&1)
+status=$?
+set -e
+check "from the subdirectory, fails" "$(is "$status" 1)"
+check "from the subdirectory, names the file" "$(contains "$out" '^::error file=work/-dash\.md,line=2::')"
+
+echo "case: an empty argument from a subdirectory is refused"
+root=$(fixture relative-empty)
+mkdir -p "$root/work"
+set +e
+out=$(cd "$root/work" && ../.github/scripts/check-private-names.sh '' 2>&1)
+status=$?
+set -e
+check "exits 2" "$(is "$status" 2)"
+check "names it" "$(contains "$out" '^check-private-names:  does not exist')"
+
+echo "case: a relative path from a directory outside the repository is read from that directory"
+root=$(fixture relative-outside)
+outside="$work/relative-outside-caller"
+mkdir -p "$outside"
+printf 'line one\n%s\n' "$key-7" > "$outside/body.md"
+set +e
+out=$(cd "$outside" && "$root/.github/scripts/check-private-names.sh" body.md 2>&1)
+status=$?
+set -e
+check "fails" "$(is "$status" 1)"
+check "names the file by its absolute path" "$(contains "$out" '^::error file=/.*/relative-outside-caller/body\.md,line=2::')"
+
+echo "case: an exported CDPATH does not move the repository root"
+root=$(fixture relative-cdpath)
+set +e
+out=$(cd "$root" && CDPATH=. .github/scripts/check-private-names.sh docs/notes.md 2>&1)
+status=$?
+set -e
+check "exits 0" "$(is "$status" 0)"
+check "scans the file" "$(contains "$out" '(1 files under docs/notes\.md)')"
+
+echo "case: a relative path from a directory whose name ends in a newline"
+root=$(fixture relative-newline)
+newline_dir="$root/work"$'\n'
+mkdir -p "$newline_dir"
+printf 'line one\n%s\n' "$key-7" > "$newline_dir/body.md"
+set +e
+out=$(cd "$newline_dir" && ../.github/scripts/check-private-names.sh body.md 2>&1)
+status=$?
+set -e
+check "fails" "$(is "$status" 1)"
+check "names the file's line" "$(contains "$out" '/body\.md:2: names the private deployment repository')"
+
+echo "case: a repository whose directory name ends in a newline"
+root=$(fixture relative-newline-root$'\n'; printf x)
+root=${root%$'\n'x}
+run_check "$root" docs/notes.md
+check "exits 0" "$(is "$status" 0)"
+check "scans the file" "$(contains "$out" '(1 files under docs/notes\.md)')"
+
 # write_pr_text <title> <body> <commit message> [branch] [author email] [committer email]: writes
-# the fixture check-pr-text.sh reads as CI runs it. A pull_request event payload carries the title,
-# body, branch name and the head the run checks (its base and head sha, and its one commit); a
-# stand-in `gh` answers the compare route for exactly that base...head with that commit (message,
-# author and committer) in the route's own JSON shape, so the real `.commits[] | .commit.message, …`
+# the fixture check-pr-text.sh reads as CI runs it. A pull_request event payload carries the head
+# the run checks (its base and head sha, and its one commit); the stand-in `gh` answers the pull
+# request route with the title, body and branch name the pull request has now (`$work/pull`, the
+# event's own unless a case rewrites it); and it answers the compare route for exactly that
+# base...head with that commit (message, author and committer) in the route's own JSON shape, so
+# the real `.commits[] | .commit.message, …`
 # filter that feeds the required check runs for real, rather than a filter the stub fakes. It
 # matches that URL whole and refuses a call without --paginate, so losing either paging token
 # fails every case below instead of passing on a list GitHub cut short at 250 commits. It answers
 # the pull request's three comment routes (issue comments, reviews and review comments), which
 # report no total, one page of 100 at a time: page N of each is `$work/<route>.N` (`comments`,
 # `reviews` or `review-comments`), and a page no case wrote is an empty list, as GitHub answers past
-# the last. It answers the pulls route with the pull request the payload carries (`$work/pull`),
-# which an issue_comment payload names only by number. The stub also answers the pull request's
-# own commits route, which reads whatever head the pull request has by then: the same commit, until
-# the mid-run-push case appends a later one that names a private thing. A case rewrites
-# `$work/compare` (one JSON object per page, as `gh api --paginate` prints them), `$work/pr-commits`
-# or a comment route's pages, then calls run_pr_text, which runs the script and sets `out` and
-# `status`; the stub logs each call it answers to `$work/calls`.
+# the last. The stub also answers the pull request's own commits route, which reads whatever head
+# the pull request has by then: the same commit, until the mid-run-push case appends a later one
+# that names a private thing. A case rewrites `$work/compare` (one JSON object per page, as
+# `gh api --paginate` prints them), `$work/pr-commits` or a comment route's pages, then calls
+# run_pr_text, which runs the script and sets `out` and `status`; the stub logs each call it
+# answers to `$work/calls`.
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
@@ -434,22 +550,11 @@ by() {
     "$4" > "$4.next"
   mv "$4.next" "$4"
 }
-# as_event <name>: rewrites the fixture's pull_request payload as that event's. A
-# pull_request_review or pull_request_review_comment payload carries the pull request whole beside
-# the review or comment; an issue_comment payload names it only as an issue (its number, title and
-# a pull_request link), so the script reads the rest from the pulls route.
-as_event() {
-  case $1 in
-    pull_request_review)
-      jq '. + {action: "submitted", review: {id: 201, body: "Approved."}}' "$work/event.json" ;;
-    pull_request_review_comment)
-      jq '. + {action: "created", comment: {id: 301, body: "A nit."}}' "$work/event.json" ;;
-    issue_comment)
-      jq '{action: "created", comment: {id: 101, body: "Looks good."},
-           issue: {number: .pull_request.number, title: .pull_request.title,
-                   pull_request: {url: "https://api.github.com/repos/example/repo/pulls/7"}}}' \
-        "$work/event.json" ;;
-  esac > "$work/event.next"
+# as_review_event: rewrites the fixture's pull_request payload as a pull_request_review one,
+# which carries the pull request whole beside the review.
+as_review_event() {
+  jq '. + {action: "submitted", review: {id: 201, body: "Approved."}}' "$work/event.json" \
+    > "$work/event.next"
   mv "$work/event.next" "$work/event.json"
 }
 
@@ -462,6 +567,28 @@ run_pr_text "fix(dispatch): keep the inbox order ($key-7)" "Refs LEGION-7" "fix:
 check "a title naming a deployment issue key fails" "$(is "$status" 1)"
 check "names the title" "$(contains "$out" 'title:1: names the private deployment repository')"
 check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
+
+run_pr_text "Keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+check "a title that is no conventional commit subject fails" "$(is "$status" 1)"
+check "says the title must be one" \
+  "$(contains "$out" '^::error::PR title must be a conventional commit subject (type(scope): summary)')"
+check "does not print the title" "$(is "$(contains "$out" 'Keep the inbox order')" false)"
+
+run_pr_text "feat!: keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+check "a breaking change with no scope passes" "$(is "$status" 0)"
+
+echo "case: an edit after the event: the pull request's title and body as they are now are checked"
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq --arg key "$key" '.title = "fix(dispatch): keep the inbox order (\($key)-7)"' "$work/pull" > "$work/pull.next"
+mv "$work/pull.next" "$work/pull"
+run_pr_text
+check "a title edited to name a deployment issue key fails although the event's was clean" "$(is "$status" 1)"
+check "names the title" "$(contains "$out" 'title:1: names the private deployment repository')"
+write_pr_text "Keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq '.title = "fix(dispatch): keep the inbox order"' "$work/pull" > "$work/pull.next"
+mv "$work/pull.next" "$work/pull"
+run_pr_text
+check "a title edited to a conventional one passes although the event's was not" "$(is "$status" 0)"
 
 run_pr_text "fix(dispatch): keep the inbox order" "$(printf 'Line one.\nAs %s Labs found.\n' "$company_proper")" "fix: keep the order"
 check "a body naming the company fails" "$(is "$status" 1)"
@@ -631,42 +758,21 @@ run_pr_text
 check "an item whose id is not a whole number fails" "$(is "$status" 1)"
 check "names the cause" "$(contains "$out" 'whose id is not a whole number')"
 
-echo "case: the events pr-title.yaml runs on for a comment or review"
+echo "case: the review event pr-title.yaml runs on"
 clean_pr
-as_event pull_request_review
+as_review_event
 items 202 "Blocking: see $key-7." > "$work/reviews.1"
 run_pr_text
 check "a pull_request_review payload is checked like a pull_request one" "$(is "$status" 1)"
 check "names the review" "$(contains "$out" 'review:202:1: names the private deployment repository')"
-check "reads the pull request from the payload" "$(is "$(contains "$(< "$work/calls")" '^api repos/example/repo/pulls/7$')" false)"
-
-clean_pr
-as_event pull_request_review_comment
-run_pr_text
-check "a clean pull_request_review_comment payload passes" "$(is "$status" 0)"
-
-clean_pr
-as_event issue_comment
-items 101 "Looks good." > "$work/comments.1"
-run_pr_text
-check "a clean issue_comment payload passes" "$(is "$status" 0)"
-check "reads the pull request from the pulls route" "$(contains "$(< "$work/calls")" '^api repos/example/repo/pulls/7$')"
-check "and its commits between that pull request's base and head" \
-  "$(contains "$(< "$work/calls")" '^api repos/example/repo/compare/base-sha...event-head-sha?per_page=100 --paginate$')"
-
-jq '.title = "fix(dispatch): keep the order (" + $key + "-7)"' --arg key "$key" "$work/pull" > "$work/pull.next"
-mv "$work/pull.next" "$work/pull"
-run_pr_text
-check "an issue_comment run still checks the title the pulls route answers" "$(is "$status" 1)"
-check "names the title" "$(contains "$out" 'title:1: names the private deployment repository')"
 
 clean_pr
 jq '{action: "created", comment: {id: 101, body: "fine"}, issue: {number: 7, title: "a plain issue"}}' \
   "$work/event.json" > "$work/event.next"
 mv "$work/event.next" "$work/event.json"
 run_pr_text
-check "an issue_comment on an issue that is no pull request is refused" "$(is "$status" 1)"
-check "names the cause" "$(contains "$out" 'names no pull request')"
+check "a payload with no pull_request is refused" "$(is "$status" 1)"
+check "names the cause" "$(contains "$out" 'carries no pull request')"
 
 echo "case: only the comments of an App installed here or of the repository's own people count"
 # On a public repository anyone signed in can comment or review, and every run reports the required
@@ -716,7 +822,7 @@ for author in "dev-app[bot] Bot CONTRIBUTOR" "new-app[bot] Bot NONE" "owner User
 done
 
 clean_pr
-as_event issue_comment
+as_review_event
 items 405 "As $company_proper Labs found." 406 "All clear now." > "$work/comments.1"
 by drive-by User NONE "$work/comments.1" 1
 run_pr_text

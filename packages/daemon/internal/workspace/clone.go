@@ -149,23 +149,44 @@ func (dir feedSource) open(repository ghrepo.Repository, bookmark, defaultBranch
 	return feedRemote(feed, repository, bookmark, defaultBranch), nil
 }
 
-// FromGitHub is GitHub itself, reached with the one-shot credential holding token, created under
-// credentialDir and removed again: the tmux runtime, which names its state directory.
-func FromGitHub(token, credentialDir string) Source {
+// FromGitHub is GitHub itself, reached with the one-shot credential holding the token that token
+// answers, created under credentialDir and removed again: the tmux runtime, which names its state
+// directory. token is asked when the provision opens the source, under the shared clone's store
+// lock (Request.StoreLock), never before: a provision may wait on that lock behind a repository's
+// whole queue of provisions, and a token minted before the wait could expire in it. Its fetch
+// brings only the repository's default branch and the issue's own branch, by their exact names:
+// it runs under the store lock, and every branch of a busy repository would hold every other
+// issue's provision behind it. A pane's own `jj git fetch` brings the rest when it needs them.
+func FromGitHub(token func() (string, error), credentialDir string) Source {
 	return gitHubSource{token: token, credentialDir: credentialDir}
 }
 
-type gitHubSource struct{ token, credentialDir string }
+type gitHubSource struct {
+	token         func() (string, error)
+	credentialDir string
+}
 
 func (s gitHubSource) check(ghrepo.Repository) error {
 	if s.credentialDir == "" {
 		return errors.New("workspace credential directory is required")
 	}
+	if s.token == nil {
+		return errors.New("workspace provisioning token is required")
+	}
 	return nil
 }
 
-func (s gitHubSource) open(ghrepo.Repository, string, string) (remote, error) {
-	return newProvisioningCredential(s.credentialDir, s.token)
+func (s gitHubSource) open(_ ghrepo.Repository, bookmark, defaultBranch string) (remote, error) {
+	token, err := s.token()
+	if err != nil {
+		return remote{}, err
+	}
+	r, err := newProvisioningCredential(s.credentialDir, token)
+	if err != nil {
+		return remote{}, err
+	}
+	r.branches = []string{defaultBranch, bookmark}
+	return r, nil
 }
 
 // FeedRepository is where Fetch clones repository under a feed directory, and where a feed
@@ -184,12 +205,17 @@ func FeedRepository(feed string, repository ghrepo.Repository) (string, error) {
 
 // FeedEntry is whether name — a path inside a bare repository, slash-separated and relative to it,
 // a directory when dir is set — is one of the refs and packs the repository cache streams and a
-// feed takes from it: HEAD, packed-refs, what lies under refs/, and objects/pack/pack-<id>.pack.
-// Never a loose object, nor a pack's index, reverse index or bitmap, a multi-pack index or a
-// commit-graph, which the feed builds itself from the packs it verifies (unpackCache); never the
-// repository's own configuration, hooks, info or description, which a feed makes for itself, nor
-// objects/info/alternates or http-alternates, which would point the feed at objects elsewhere; and
-// never a file or directory git is still writing (tmp_*, incoming-*, *.lock).
+// feed takes from it: HEAD, packed-refs, what lies under refs/, and each pack of objects/pack/,
+// both its pack-<id>.pack and the pack-<id>.idx git reads it through. The index comes with the
+// pack because building it again costs every issue pod minutes of CPU on a large repository
+// (`git index-pack` inflates and hashes every object); the feed holds both to the checksums git
+// wrote into them and takes the index's names on the cache's word, which verifyCache states
+// exactly. Never a loose object, a
+// pack's reverse index or bitmap, a multi-pack index or a commit-graph, which git builds for
+// itself; never the repository's own configuration, hooks, info or description, which a feed makes
+// for itself, nor objects/info/alternates or http-alternates, which would point the feed at
+// objects elsewhere; and never a file or directory git is still writing (tmp_*, incoming-*,
+// *.lock).
 func FeedEntry(name string, dir bool) bool {
 	base := path.Base(name)
 	if strings.HasPrefix(base, "tmp_") || strings.HasPrefix(base, "incoming-") || strings.HasSuffix(base, ".lock") {
@@ -206,8 +232,9 @@ func FeedEntry(name string, dir bool) bool {
 	return false
 }
 
-// packFile is the name git gives a pack: its SHA-1 or SHA-256 id.
-var packFile = regexp.MustCompile(`^pack-([0-9a-f]{40}|[0-9a-f]{64})\.pack$`)
+// packFile is the name git gives a pack and the index it reads it through: the pack's SHA-1 or
+// SHA-256 id.
+var packFile = regexp.MustCompile(`^pack-([0-9a-f]{40}|[0-9a-f]{64})\.(pack|idx)$`)
 
 // GitHubURL is the repository's GitHub remote: the URL the shared clone is cloned from and Fetch
 // clones into the feed, and so the URL feedRemote rewrites to the feed.
@@ -235,11 +262,11 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch str
 }
 
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
-// contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
-// clone. From GitHub the clone is `jj git clone`; from a pod's feed (source.feed) it is a local git
-// clone followed by Jujutsu's import of every commit. The size-following steps share one
-// CloneTimeout, counted on clock from the first's start, each given what remains of it
-// (cloneSteps), not the runner's slow-command budget.
+// contains .jj, record what it holds (RecordHeld), then rename it into place. A killed clone can
+// therefore never appear to be a final clone. From GitHub the clone is `jj git clone`; from a pod's
+// feed (source.feed) it is a local git clone followed by Jujutsu's import of every commit. The
+// size-following steps share one CloneTimeout, counted on clock from the first's start, each given
+// what remains of it (cloneSteps), not the runner's slow-command budget.
 func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, remote, defaultBranch string, source remote) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
@@ -266,7 +293,10 @@ func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, rem
 		_ = os.RemoveAll(temporary)
 	}()
 
-	steps := cloneSteps{clock: clock, deadline: clock.Now().Add(CloneTimeout)}
+	// Every step runs in the clone's parent, the directory os.MkdirAll made above: it is there
+	// before the first step starts, and it outlives them all, where temporary is filled by the
+	// steps themselves and then renamed or removed.
+	steps := cloneSteps{clock: clock, deadline: clock.Now().Add(CloneTimeout), dir: filepath.Dir(cloneDir)}
 	if source.feed != "" {
 		if err := feedClone(ctx, run, steps, temporary, remote, defaultBranch, source); err != nil {
 			return err
@@ -280,6 +310,11 @@ func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, rem
 	}
 	if !complete {
 		return fmt.Errorf("incomplete Jujutsu clone at %s: missing .jj", temporary)
+	}
+	// Before the rename, so a clone in place always carries its record of what it held when it was
+	// made, and a clone with none is one an earlier release made.
+	if err := RecordHeld(ctx, run, temporary); err != nil {
+		return err
 	}
 	if err := os.Rename(temporary, cloneDir); err != nil {
 		if cloneCollision(err) {
@@ -306,13 +341,15 @@ func feedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, rem
 		return err
 	}
 	gitDir := filepath.Join(temporary, ".git")
-	if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + gitDir, "remote", "set-url", "origin", remote}, nil, ""); err != nil {
+	// The clone above made temporary, so this git and the rev-parse below run in the repository
+	// their --git-dir names.
+	if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + gitDir, "remote", "set-url", "origin", remote}, nil, temporary); err != nil {
 		return err
 	}
 	if err := steps.run(ctx, run, []string{"jj", "git", "init", "--colocate", temporary}, nil); err != nil {
 		return err
 	}
-	present, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + defaultBranch}, nil, "")
+	present, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + defaultBranch}, nil, temporary)
 	if err != nil {
 		return fmt.Errorf("run git rev-parse refs/remotes/origin/%s: %w", defaultBranch, err)
 	}
@@ -324,10 +361,14 @@ func feedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, rem
 }
 
 // cloneSteps is the one CloneTimeout the shared clone's size-following steps share, ending at
-// deadline by clock: ProvisionBound budgets one CloneTimeout for workspace-init's clone.
+// deadline by clock: ProvisionBound budgets one CloneTimeout for workspace-init's clone. Each
+// step runs in dir, the directory the shared clone is made beside: a jj that opens no workspace
+// (`jj git clone`, `jj git init --colocate`) would otherwise search upwards from whatever
+// directory the daemon or a test happens to run in and write the repository it finds there.
 type cloneSteps struct {
 	clock    Clock
 	deadline time.Time
+	dir      string
 }
 
 // run runs one size-following step of the shared clone's clone under what remains of the shared
@@ -338,7 +379,7 @@ func (s cloneSteps) run(ctx context.Context, run Runner, argv, env []string) err
 	if left <= 0 {
 		return fmt.Errorf("the shared clone's %s bound ran out before %s", CloneTimeout, strings.Join(argv, " "))
 	}
-	result, err := runCommandTimeout(ctx, run, argv, env, "", left)
+	result, err := runCommandTimeout(ctx, run, argv, env, s.dir, left)
 	_, err = checkedResult(argv, result, err)
 	return err
 }

@@ -19,12 +19,13 @@ related_issues:
 
 Extends docs/solutions/testing/a-checkpoint-compares-live-state-to-a-comparand-read-at-the-assertion-and-waits-only-for-what-the-current-producer-can-deliver-LEGION-578.md.
 
-- The daemon's outbox runs an issue's rows on two lanes side by side (`record/outbox.go`,
+- The daemon's outbox runs an issue's rows on three lanes side by side (`record/outbox.go`,
   `laneKinds`). The lifecycle lane runs `supervise`, `issue_suspend`, `linger_close`,
   `workspace_remove`, `gate_seed`, `issue_branch`, `auto_merge_disable`, `ready_merge` and the
   `check_*` rows. The board lane
   runs `dispatch_status`, `dispatch_message`, `notice`, `controller_notice` and
-  `merge_queue_publish`.
+  `merge_queue_publish`. The role-message lane runs `phase_ended`, the one message the daemon
+  addresses to a role of the issue that is not its architect (INFRA-338).
 - Read every board-lane effect (a Dispatch status write, a message, a notice) through its own
   `testwait.Eventually`, even after waiting for a lifecycle effect of the same fact (a suspension,
   or the projected phase). The waits before it say nothing about the board lane.

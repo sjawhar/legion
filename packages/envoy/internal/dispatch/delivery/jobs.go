@@ -3,7 +3,6 @@ package delivery
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -24,15 +23,19 @@ import (
 // from the event, once per burst: a run's events within jobQuiet of each other are one read, and a
 // burst never waits longer than jobMaxWait. A run it does not track costs no GitHub call.
 //
-// It has a durable consumer of its own rather than a kind in Intake's route: Intake handles one
-// message at a time with its GitHub calls inline (intakeMaxAckPending), and a deploy run's thirty
+// It has a durable consumer of its own rather than a kind in Intake's route: Intake handles at most
+// intakeMaxAckPending messages at once with their GitHub calls inline, and a deploy run's thirty
 // jobs finishing together would queue every merge behind them. Intake's own durable filters every
-// GitHub subject, so it is handed job messages too, and its route acks them with no call.
+// GitHub subject, so it is handed job messages too, and acks them by their subject with no decode
+// (intakeKey).
 type JobIntake struct {
 	nats   *bus.Client
 	pool   *store.Pool
 	github *githubapp.Client
 	clock  jobClock
+	// settings is the delivery settings a job event is checked against, shared with the intake
+	// (StartIntakes): a message reads them from memory, not from delivery_settings.
+	settings *SettingsCache
 	// leases is the pool bind takes this durable's consumer lease on (consumerLease), so that one
 	// process at a time reconciles this durable's configuration (bindDurableConsumer). It is the
 	// delivery intake's lease pool, but not its lease: a lease name per durable, so that a
@@ -80,7 +83,7 @@ const (
 	// jobAckWait only bounds a message the handler never reached: every message is acked on
 	// receipt, before its checks.
 	jobAckWait = 30 * time.Second
-	// jobCheckTimeout bounds one message's two indexed reads (the settings and RunTracked).
+	// jobCheckTimeout bounds one message's indexed read (RunTracked).
 	jobCheckTimeout = 10 * time.Second
 )
 
@@ -101,10 +104,10 @@ func (realJobClock) Now() time.Time { return time.Now() }
 func (realJobClock) At(at time.Time, f func()) jobTimer { return time.AfterFunc(time.Until(at), f) }
 
 // newJobIntake builds a JobIntake on natsClient, a connected client StartIntakes opens for it alone,
-// scheduling its reads by clock.
-func newJobIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, github *githubapp.Client, clock jobClock) *JobIntake {
+// scheduling its reads by clock and checking each job event against settings.
+func newJobIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, github *githubapp.Client, clock jobClock, settings *SettingsCache) *JobIntake {
 	return &JobIntake{
-		nats: natsClient, pool: pool, github: github, clock: clock, leases: leases,
+		nats: natsClient, pool: pool, github: github, clock: clock, settings: settings, leases: leases,
 		throttle: &bindThrottle{},
 		ctx:      context.Background(), pending: map[runKey]*pendingRun{},
 		reads: make(chan struct{}, reconcilePartialConcurrency),
@@ -114,15 +117,18 @@ func newJobIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, 
 // Run binds the durable job consumer and handles job events until ctx is cancelled. An attempt
 // that binds nothing -- a failure, or the durable being another process's (bindStandby) -- is
 // made again every durableBindInterval, for the life of the process: a standby that outlives its
-// holder takes the durable over seconds later.
+// holder takes the durable over seconds later. A bind under way as ctx ends ends by the stop
+// deadline armed then (stopContext, bindDurableConsumer), as the delivery intake's does.
 func (j *JobIntake) Run(ctx context.Context) {
 	j.ctx = ctx
 	defer j.stopPending()
+	stopping, release := stopContext(ctx)
+	defer release()
 	var sub *natsgo.Subscription
 	binds := time.NewTicker(durableBindInterval)
 	defer binds.Stop()
 	for sub == nil {
-		bound, outcome := j.bind(ctx)
+		bound, outcome := j.bind(ctx, stopping)
 		if outcome == bindBound {
 			sub = bound
 			break
@@ -153,9 +159,13 @@ func jobConsumerConfig() natsgo.ConsumerConfig {
 }
 
 // bind creates (on first run) or resumes the durable and subscribes to it, throttling its own
-// reconciliation and standby line on this intake's own bindThrottle.
-func (j *JobIntake) bind(ctx context.Context) (*natsgo.Subscription, bindOutcome) {
-	return bindDurableConsumer(ctx, j.nats, j.leases, j.throttle, jobConsumerConfig(), j.deliver)
+// reconciliation and standby line on this intake's own bindThrottle. stopping is Run's stop
+// deadline (bindDurableConsumer).
+func (j *JobIntake) bind(ctx, stopping context.Context) (*natsgo.Subscription, bindOutcome) {
+	wanted := jobConsumerConfig()
+	return bindDurableConsumer(ctx, stopping, j.nats, j.leases, j.throttle, wanted, func() (*natsgo.Subscription, error) {
+		return subscribeDurable(j.nats, wanted, "", j.deliver)
+	})
 }
 
 // deliver acks a job message on receipt, then hands its payload to receive. Acking first is safe:
@@ -176,7 +186,8 @@ func (j *JobIntake) deliver(msg *natsgo.Msg) {
 }
 
 // receive schedules a read of the run a job event names, when it is a run of the deploy repository
-// Dispatch already tracks; any other event costs at most these two indexed reads.
+// Dispatch already tracks: the repository is checked against the cached settings, and any other
+// event costs at most one indexed read (RunTracked).
 func (j *JobIntake) receive(ctx context.Context, payload string) {
 	var job struct {
 		Kind  string `json:"kind"`
@@ -186,14 +197,8 @@ func (j *JobIntake) receive(ctx context.Context, payload string) {
 	if err := json.Unmarshal([]byte(payload), &job); err != nil || job.Kind != "job" {
 		return
 	}
-	settings, err := GetSettings(ctx, j.pool)
-	if err != nil {
-		if !errors.Is(err, ErrNoSettings) {
-			slog.Error("dispatch delivery: read settings for a job event", "error", err)
-		}
-		return
-	}
-	if job.Repo != settings.DeployRepo {
+	settings := j.settings.Load()
+	if settings == nil || job.Repo != settings.DeployRepo {
 		return
 	}
 	runID, err := strconv.ParseInt(job.RunID, 10, 64)

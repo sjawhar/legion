@@ -14,7 +14,7 @@
 # octal 8 and come back as `1.9.0`, lower than the version it bumps.
 #
 # Run from anywhere: .github/scripts/release-bump.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 # Hermetic: the developer's global/system git config (commit.gpgsign, core.hooksPath) must not
 # reach the fixture repository.

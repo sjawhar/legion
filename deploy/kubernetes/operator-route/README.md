@@ -30,6 +30,8 @@ override — is unchanged from `pod.yml`.
 - **The audience its model endpoint accepts on the pod's projected ServiceAccount token**, which the
   operator puts in place of `pod.yml`'s `${MODEL_TOKEN_AUDIENCE}` placeholder when copying `pod.yml`
   into `legion.yaml`, so the repository holds no audience either.
+- **The ServiceAccount the pods run as**, which the operator puts in place of `pod.yml`'s
+  `${POD_SERVICE_ACCOUNT}` placeholder in the same copy, so the repository holds no account either.
 
 Every mount in `pod.yml` is read-only: `read_only` defaults to true, and none of them sets it false.
 A mount added later goes beside these paths, never beneath one: the container runtime must create
@@ -49,10 +51,11 @@ deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>
 
 `--context` is required, and the output names the cluster it wrote to. `apply.sh` refuses a
 `models.yml` still holding the placeholder. Then put `pod.yml` under `runtime.kubernetes.pod` in
-the deployment's `legion.yaml`, with the gateway's audience in place of `${MODEL_TOKEN_AUDIENCE}`,
-and run `legion start --config <file> --check-config`, which applies the daemon's own collision
-checks and refuses a token audience still holding the placeholder. Every deployment whose pods
-mount `legion-operator-route` in that namespace reads the same copy.
+the deployment's `legion.yaml`, with the gateway's audience in place of `${MODEL_TOKEN_AUDIENCE}`
+and the ServiceAccount the pods run as in place of `${POD_SERVICE_ACCOUNT}`, and run
+`legion start --config <file> --check-config`, which applies the daemon's own collision checks and
+refuses a token audience or a ServiceAccount still holding its placeholder. Every deployment whose
+pods mount `legion-operator-route` in that namespace reads the same copy.
 
 ## Changing a role's model
 
@@ -109,8 +112,8 @@ Every value is the operator's, passed as flags in their own `models.yml`:
 
 The service-account token is the projected token `pod.yml` already mounts at
 `/var/run/operator/token`, with the operator's dedicated sign-in audience in place of
-`${MODEL_TOKEN_AUDIENCE}`; `legion start --check-config` refuses that placeholder unfilled. Set
-`X-Api-Key` to the same command.
+`${MODEL_TOKEN_AUDIENCE}`; `legion start --check-config` refuses that placeholder unfilled, and the
+pods' `${POD_SERVICE_ACCOUNT}` the same way. Set `X-Api-Key` to the same command.
 
 ## How the pieces compose
 

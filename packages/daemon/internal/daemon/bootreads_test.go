@@ -142,7 +142,7 @@ func TestATmuxSessionDatabaseIsTheAnswerLoopsConversationStore(t *testing.T) {
 	lookup := environLookup([]string{"PATH=" + onPath})
 	file := dsnFileOf(t, conversationsDSN+"\n")
 	cfg := testConfig(t)
-	cfg.Runtime.Tmux = config.Tmux{SessionDSNFile: file}
+	cfg.Runtime.Tmux = &config.Tmux{SessionDSNFile: file}
 
 	reads, err := readBoot(cfg, lookup, os.Getenv, false, quietLogger())
 	if err != nil {
@@ -177,7 +177,7 @@ func TestBootRefusesATmuxSessionDSNFileWithNoURL(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig(t)
-			cfg.Runtime.Tmux = config.Tmux{SessionDSNFile: tc.file}
+			cfg.Runtime.Tmux = &config.Tmux{SessionDSNFile: tc.file}
 			_, err := readBoot(cfg, lookup, os.Getenv, false, quietLogger())
 			if err == nil || !strings.HasPrefix(err.Error(), tc.want) || strings.Contains(err.Error(), "fixture-keyword-password") {
 				t.Fatalf("readBoot = %v, want a refusal starting %q that carries nothing the file holds", err, tc.want)

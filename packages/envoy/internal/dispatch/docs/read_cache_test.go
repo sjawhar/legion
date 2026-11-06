@@ -129,30 +129,44 @@ func TestAStampChangesWhenAPruneAndAnAppendRepeatAVersionNumber(t *testing.T) {
 	}
 }
 
-// Compaction folds the log into the head's row, which it rewrites: the stamp moves while the
-// version and the document stay as they were.
+// Compaction folds the rows at or below its fold point into that row, which it rewrites: when every
+// row is old the fold point is the head row, and the stamp moves while the version and the document
+// stay as they were; when the head row is young the fold point is below it, and the stamp stays.
 func TestACompactionChangesTheStampAndKeepsTheDocument(t *testing.T) {
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
-	artifactID := createDocument(t, database, "one")
-	writer := newProofHistory(t, 101)
-	appendUpdates(t, versioned, artifactID, writer.write("one\n"), writer.write("two\n\nmore\n"), writer.write("three\n"))
-	before := readStamp(t, versioned, artifactID)
-	loaded := loadDocument(t, versioned, artifactID)
-	want, wantMarkdown := rawReading(t, loaded.Doc), docMarkdown(loaded.Doc)
-	if loaded.Stamp != before || wantMarkdown != "three\n" {
-		t.Fatalf("load before compaction = %q under %+v, want three under %+v", wantMarkdown, loaded.Stamp, before)
-	}
-	if deleted, err := versioned.Compact(context.Background(), artifactID, compactKeep); err != nil || deleted != 2 {
-		t.Fatalf("compact: deleted %d (%v), want 2", deleted, err)
-	}
-	after := readStamp(t, versioned, artifactID)
-	if after.Version != before.Version || after.Row == before.Row {
-		t.Fatalf("stamp after compaction = %+v, want version %d under another row than %q", after, before.Version, before.Row)
-	}
-	compacted := loadDocument(t, versioned, artifactID)
-	if got := rawReading(t, compacted.Doc); got != want || docMarkdown(compacted.Doc) != wantMarkdown || compacted.Stamp != after {
-		t.Fatalf("load after compaction = %s under %+v, want %s under %+v", got, compacted.Stamp, want, after)
+	for _, test := range []struct {
+		name      string
+		agedUpTo  int64
+		deleted   int
+		stampMove bool
+	}{
+		{name: "every row old", agedUpTo: 3, deleted: 2, stampMove: true},
+		{name: "a young head row", agedUpTo: 2, deleted: 1, stampMove: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifactID := createDocument(t, database, "one")
+			writer := newProofHistory(t, 101)
+			appendUpdates(t, versioned, artifactID, writer.write("one\n"), writer.write("two\n\nmore\n"), writer.write("three\n"))
+			before := readStamp(t, versioned, artifactID)
+			loaded := loadDocument(t, versioned, artifactID)
+			want, wantMarkdown := rawReading(t, loaded.Doc), docMarkdown(loaded.Doc)
+			if loaded.Stamp != before || wantMarkdown != "three\n" {
+				t.Fatalf("load before compaction = %q under %+v, want three under %+v", wantMarkdown, loaded.Stamp, before)
+			}
+			ageUpdatesThrough(t, database, artifactID, test.agedUpTo, time.Hour)
+			if result := compactUnderTail(t, versioned, artifactID); result.outcome != compactCompacted || result.deleted != test.deleted {
+				t.Fatalf("compact = %+v, want %d rows deleted", result, test.deleted)
+			}
+			after := readStamp(t, versioned, artifactID)
+			if after.Version != before.Version || (after.Row != before.Row) != test.stampMove {
+				t.Fatalf("stamp after compaction = %+v from %+v, want version %d and the row moved: %v", after, before, before.Version, test.stampMove)
+			}
+			compacted := loadDocument(t, versioned, artifactID)
+			if got := rawReading(t, compacted.Doc); got != want || docMarkdown(compacted.Doc) != wantMarkdown || compacted.Stamp != after {
+				t.Fatalf("load after compaction = %s under %+v, want %s under %+v", got, compacted.Stamp, want, after)
+			}
+		})
 	}
 }
 

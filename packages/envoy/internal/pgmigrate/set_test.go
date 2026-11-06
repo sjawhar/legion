@@ -2,6 +2,7 @@ package pgmigrate
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"reflect"
 	"strings"
@@ -28,6 +29,29 @@ func TestLoadReturnsForwardMigrationsInVersionOrder(t *testing.T) {
 		{Version: 2, Name: "0002_second.up.sql", SQL: "select 2"},
 		{Version: 9, Name: "9_ninth.up.sql", SQL: "select 9"},
 		{Version: 10, Name: "0010_tenth.up.sql", SQL: "select 10"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Load = %+v, want %+v", got, want)
+	}
+}
+
+// A version past int4 is no longer refused: a migration added since the sets stopped being
+// numbered is named for the UTC moment it was created, 14 digits, which the runners' bigint
+// version column holds and which sorts after every number.
+func TestLoadAcceptsAVersionPastTheIntegerColumn(t *testing.T) {
+	set := fstest.MapFS{
+		"migrations/0140_last_numbered.up.sql":     file("select 140"),
+		"migrations/20261030120000_stamped.up.sql": file("select 1030"),
+		"migrations/2147483648_big.up.sql":         file("select 2147483648"),
+	}
+	got, err := Load(set, "migrations")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []Migration{
+		{Version: 140, Name: "0140_last_numbered.up.sql", SQL: "select 140"},
+		{Version: 2147483648, Name: "2147483648_big.up.sql", SQL: "select 2147483648"},
+		{Version: 20261030120000, Name: "20261030120000_stamped.up.sql", SQL: "select 1030"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load = %+v, want %+v", got, want)
@@ -107,12 +131,14 @@ func TestLoadRefusesASetARunnerWouldApplyOtherThanAsWritten(t *testing.T) {
 		{
 			name: "version zero",
 			set:  fstest.MapFS{"migrations/0000_zero.up.sql": file("select 0")},
-			want: []string{"migration 0000_zero.up.sql: version 0000 is not a number from 1 to 2147483647"},
+			want: []string{"migration 0000_zero.up.sql: version 0000 is not a number from 1 that the runners' bigint version column holds"},
 		},
 		{
-			name: "a version past the integer column",
-			set:  fstest.MapFS{"migrations/2147483648_big.up.sql": file("select 1")},
-			want: []string{"migration 2147483648_big.up.sql: version 2147483648 is not a number from 1 to 2147483647"},
+			// A timestamp is 14 digits; 20 digits is past every version column there is, and
+			// past the number Go reads the digits into.
+			name: "a version past the bigint column",
+			set:  fstest.MapFS{"migrations/99999999999999999999_huge.up.sql": file("select 1")},
+			want: []string{"migration 99999999999999999999_huge.up.sql: version 99999999999999999999 is not a number from 1 that the runners' bigint version column holds"},
 		},
 		{
 			name: "a forward migration missing .up",
@@ -171,6 +197,81 @@ func TestLoadRefusesASetARunnerWouldApplyOtherThanAsWritten(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("Load error = %q, want it to contain %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+// A collision must not send a numbered set to a timestamp its guard refuses. A recorded closing
+// file still requires timestamps before the first timestamp exists, even when that file collides.
+func TestLoadCollisionRemedyMatchesTheSet(t *testing.T) {
+	cutover := fstest.MapFS{}
+	for version := 1; version < 161; version++ {
+		cutover[fmt.Sprintf("migrations/%04d_numbered.up.sql", version)] = file("select 1")
+	}
+	cutover["migrations/0161_delivery_run_warnings.up.sql"] = file("select 1")
+	cutover["migrations/0161_z_collision.up.sql"] = file("select 2")
+	for _, tc := range []struct {
+		name string
+		set  fstest.MapFS
+		want string
+	}{
+		{
+			name: "broker numbered throughout",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":   file("select 1"),
+				"migrations/0001_first.down.sql": file("select -1"),
+				"migrations/0002_a.up.sql":       file("select 2"),
+				"migrations/0002_b.up.sql":       file("select 2"),
+				"migrations/0003_later.up.sql":   file("select 3"),
+			},
+			want: "the next number in this set, starting at 4, so the versions stay numbered 1 to N with no gap (pgmigratetest.CheckNumberedOneToN)",
+		},
+		{
+			name: "Dispatch numbers then timestamps",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":                 file("select 1"),
+				"migrations/0161_delivery_run_warnings.up.sql": file("select 161"),
+				"migrations/20261104120000_a.up.sql":           file("select 2"),
+				"migrations/20261104120000_b.up.sql":           file("select 2"),
+			},
+			want: "the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+		{
+			name: "Dispatch closing file collides before its first timestamp",
+			set:  cutover,
+			want: "the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+		{
+			name: "timestamp set without a recorded closing file",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":       file("select 1"),
+				"migrations/20261104120000_a.up.sql": file("select 2"),
+				"migrations/20261104120000_b.up.sql": file("select 2"),
+			},
+			want: "the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+		{
+			name: "a gap leaves the naming rule uncertain",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql": file("select 1"),
+				"migrations/0003_a.up.sql":     file("select 3"),
+				"migrations/0003_b.up.sql":     file("select 3"),
+			},
+			want: "a version under this set's naming guard: pgmigratetest.CheckNumberedOneToN requires the next free number on main, keeping 1 to N with no gap; migrationid.Check requires the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Load(tc.set, "migrations")
+			if err == nil {
+				t.Fatalf("Load accepted the collision and returned %+v", got)
+			}
+			if got != nil {
+				t.Errorf("Load refused the set but returned %+v; want no migration", got)
+			}
+			_, remedy, found := strings.Cut(err.Error(), "and give each of the rest ")
+			if !found || remedy != tc.want {
+				t.Errorf("Load error = %q, want the remedy %q", err, tc.want)
 			}
 		})
 	}
@@ -312,6 +413,15 @@ func TestLoadRefusesACensusWithNoMigrationOneThatIsNotASelectAndOneThatCallsAFor
 			},
 			want: "census 0001_first.census.sql: a census may not call pg_sleep",
 		},
+		// Postgres 18 reads a vertical tab before the newline as the same whitespace, so the
+		// literal continues across it just as across a space.
+		"a call after an E literal continued across a vertical tab": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte("select count(*) from (select E'a'\v\n'\\'' as a, pg_sleep(1) as nap, '' as c) t")},
+			},
+			want: "census 0001_first.census.sql: a census may not call pg_sleep",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			migrations, err := Load(tc.set, "migrations")
@@ -337,6 +447,18 @@ func TestLoadAcceptsACensusWhoseCommentOrStringLiteralNamesAForbiddenFunction(t 
 			"/* nor pg_terminate_backend /* nested: pg_advisory_lock */ still a comment: U&'x' */\n" +
 			"select count(*) from a where note in ('pg_sleep', 'it''s pg_cancel_backend', E'U&\\'pg_sleep\\'',\n" +
 			"  $$pg_advisory_lock(1)$$, $q$query_to_xml('select 1')$q$, N'pg_sleep', 'a'\n  'continued pg_sleep')")},
+	}
+	if _, err := Load(set, "migrations"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+// Postgres 18 reads a vertical tab as space, so a census whose words vertical tabs separate, one
+// leading the file included, is one select.
+func TestLoadReadsAVerticalTabInACensusAsSpace(t *testing.T) {
+	set := fstest.MapFS{
+		"migrations/0001_first.up.sql":     {Data: []byte("create table a (id integer)")},
+		"migrations/0001_first.census.sql": {Data: []byte("\vselect\vcount(*)\vfrom\va\v")},
 	}
 	if _, err := Load(set, "migrations"); err != nil {
 		t.Fatalf("Load: %v", err)

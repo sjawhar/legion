@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,8 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // registerEnv names the helper socket a child of this test binary registers with as a session
@@ -76,14 +79,35 @@ func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Socket != "/run/user/7/agent-secrets/helper.sock" || cfg.StatePath != "/run/user/7/agent-secrets/sessions.json" ||
+	// The records hold a named session's signing key and must outlive a reboot, so they sit
+	// beside the machine login, never in the runtime directory the socket is in: that is tmpfs
+	// (dispatch://INFRA-1167). LegacyStatePath is where a helper upgraded in place finds them.
+	if cfg.Socket != "/run/user/7/agent-secrets/helper.sock" || cfg.StatePath != "/home/u/.config/agent-secrets/sessions.json" ||
+		cfg.LegacyStatePath != "/run/user/7/agent-secrets/sessions.json" ||
 		cfg.OperatorFile != "/home/u/.config/agent-secrets/operator" || cfg.MachineFile != "/home/u/.config/agent-secrets/machine.json" {
 		t.Fatalf("defaults: %+v", cfg)
 	}
-	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/tmp/x/h.sock", "AGENT_SECRETS_MACHINE_FILE": "/tmp/x/m.json"}))
-	if cfg.StatePath != "/tmp/x/sessions.json" {
-		t.Fatalf("state sits beside the socket: %q", cfg.StatePath)
+	// A helper installed with a socket of its own (install writes AGENT_SECRETS_HELPER_SOCK
+	// into its unit) migrates the records beside THAT socket, which is where its own previous
+	// release left them; reading the default socket here would migrate nothing on upgrade. Its
+	// records still go to durable storage, since its machine login is the default one.
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "XDG_RUNTIME_DIR": "/run/user/7", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/run/user/7/mine/h.sock"}))
+	if cfg.StatePath != "/home/u/.config/agent-secrets/sessions.json" || cfg.LegacyStatePath != "/run/user/7/mine/sessions.json" {
+		t.Fatalf("a helper on a socket of its own must migrate its own old records and keep them durable: %+v", cfg)
 	}
+	// A second helper — a dev stack, a test rig — names a machine login of its own, which no
+	// other helper may hold at the same time (claimMachineFile), and its records follow it. So
+	// it never writes the records of the helper installed under this HOME, which now hold that
+	// helper's named sessions' signing keys and are what its next Recover reads.
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/tmp/x/h.sock", "AGENT_SECRETS_MACHINE_FILE": "/tmp/box-two/m.json"}))
+	if cfg.StatePath != "/tmp/box-two/sessions.json" || cfg.LegacyStatePath != "/tmp/x/sessions.json" {
+		t.Fatalf("a helper with a machine login of its own must keep records of its own: %+v", cfg)
+	}
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_STATE_FILE": "/tmp/x/sessions.json"}))
+	if cfg.StatePath != "/tmp/x/sessions.json" || cfg.LegacyStatePath != "" {
+		t.Fatalf("AGENT_SECRETS_STATE_FILE names the records and migrates nothing into them: %+v", cfg)
+	}
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_MACHINE_FILE": "/tmp/x/m.json"}))
 	if cfg.MachineFile != "/tmp/x/m.json" {
 		t.Fatalf("AGENT_SECRETS_MACHINE_FILE must name the machine file: %q", cfg.MachineFile)
 	}
@@ -287,6 +311,119 @@ func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 	}
 }
 
+// TestServeLogsTheBrokerWithoutACredential: a user name and password AGENT_SECRETS_URL carries
+// never reach the helper's journal; its listening line names the broker with both masked.
+func TestServeLogsTheBrokerWithoutACredential(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent-secrets-helper")
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	dir := shortTempDir(t)
+	stderr, err := os.Create(filepath.Join(dir, "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	logged := func() string {
+		b, err := os.ReadFile(stderr.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	host := strings.TrimPrefix(fakeBroker(t).URL, "http://")
+	cmd := exec.Command(binary, "serve")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir,
+		"AGENT_SECRETS_URL=http://tokuser9f3:hunter2pw@" + host,
+		"AGENT_SECRETS_HELPER_SOCK=" + filepath.Join(dir, "run", "helper.sock")}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	defer func() { _ = cmd.Process.Kill(); <-exited }()
+	want := `level=INFO msg="agent-secrets-helper listening"`
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(logged(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no listening line within 10 s; stderr:\n%s", logged())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := logged(); !strings.Contains(got, `broker="`+redact.NotPrinted+`"`) ||
+		strings.Contains(got, "tokuser9f3") || strings.Contains(got, "hunter2pw") {
+		t.Fatalf("stderr:\n%s\nwant the broker named as %q, with no user name or password", got, redact.NotPrinted)
+	}
+}
+
+// TestALoginTheBrokerNeverAnswersNamesNoCredential: a machine login against a broker that never
+// answers fails with an error `agent-secrets machine login` prints. For an AGENT_SECRETS_URL
+// redact.URL will not print, it names the URL as redact.NotPrinted and the failure's class
+// alone; for a clean one, it reads as net/http wrote it.
+func TestALoginTheBrokerNeverAnswersNamesNoCredential(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent-secrets-helper")
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	for _, row := range []struct{ base, want string }{
+		{"http://127.0.0.1:1", `"http://127.0.0.1:1/v1/oauth/device_authorization": dial tcp 127.0.0.1:1: connect: connection refused`},
+		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", `"` + redact.NotPrinted + `": connection refused`},
+		{"http://127.0.0.1:1/?token=qtok77", `"` + redact.NotPrinted + `": connection refused`},
+		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", `"` + redact.NotPrinted + `": not a valid URL`},
+	} {
+		t.Run(row.base, func(t *testing.T) {
+			dir := shortTempDir(t)
+			operator := filepath.Join(dir, "operator")
+			if err := os.WriteFile(operator, []byte("alice@example.com\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			logged, err := os.Create(filepath.Join(dir, "stderr"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer logged.Close()
+			sock := filepath.Join(dir, "run", "helper.sock")
+			cmd := exec.Command(binary, "serve")
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "AGENT_SECRETS_URL=" + row.base,
+				"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_OPERATOR_FILE=" + operator}
+			cmd.Stderr = logged
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			exited := make(chan error, 1)
+			go func() { exited <- cmd.Wait() }()
+			defer func() { _ = cmd.Process.Kill(); <-exited }()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if resp, err := helper.Call(sock, helper.Request{Op: "sessions"}, time.Second); err == nil && resp.OK {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the helper never answered on its socket")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			resp, err := helper.Call(sock, helper.Request{Op: "login"}, 5*time.Second)
+			if err != nil || resp.OK {
+				t.Fatalf("login against a broker that never answers: %+v %v; want a refusal", resp, err)
+			}
+			if !strings.Contains(resp.Error, row.want) {
+				t.Fatalf("login error %q; want it to name %s", resp.Error, row.want)
+			}
+			journal, err := os.ReadFile(logged.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77", "%zz"} {
+				if strings.Contains(resp.Error, secret) || strings.Contains(string(journal), secret) {
+					t.Fatalf("login error %q or the helper's log %q names %q", resp.Error, journal, secret)
+				}
+			}
+		})
+	}
+}
+
 // TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket: serve never takes over a socket another
 // helper answers on (the error names it, and the socket still answers), and removes one nothing
 // answers on, as a helper that died leaves.
@@ -404,5 +541,91 @@ func TestASecondServeOnTheSameMachineFileNeverSpendsItsRefreshToken(t *testing.T
 	}
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("the second serve made %d broker calls; want none", n)
+	}
+}
+
+// identityHelperConfig is the configuration of a machine that proves a Kubernetes identity of
+// its own, with a HOME of its own so the key it keeps is this test's.
+func identityHelperConfig(t *testing.T, home string) config {
+	t.Helper()
+	tokenFile := filepath.Join(t.TempDir(), "projected-token")
+	if err := os.WriteFile(tokenFile, []byte("projected.service.account.token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(env(map[string]string{
+		"HOME": home, "XDG_RUNTIME_DIR": t.TempDir(),
+		"AGENT_SECRETS_URL":                "https://secrets.internal.example",
+		"AGENT_SECRETS_MACHINE_IDENTITY":   "kubernetes",
+		"AGENT_SECRETS_MACHINE_TOKEN_FILE": tokenFile,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// TestAnIdentityHelperKeepsItsKeyAcrossARestart: the broker names a machine's one launcher
+// credential by the thumbprint of the key the trade's proof presented
+// (exchange.MachineSubject), so a helper that made a new key at every start would ask for a new
+// subject at every restart and leave behind the credential its sessions are enrolled under:
+// those sessions could not revoke their old enrollments under the new credential, and a box
+// enrolled through `enroll-session-key` would be refused ENROLLMENT_NOT_LIVE once the old
+// credential lapsed, with nothing to enrol it again. So the key is kept, 0600 beside the
+// machine login, and a restart trades the same subject.
+func TestAnIdentityHelperKeepsItsKeyAcrossARestart(t *testing.T) {
+	home := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := identityHelperConfig(t, home)
+	want := filepath.Join(home, ".config", "agent-secrets", "identity-key.pem")
+	if cfg.IdentityKeyFile != want {
+		t.Fatalf("identity key file %q, want %q", cfg.IdentityKeyFile, want)
+	}
+
+	first, err := identityClient(cfg, log)
+	if err != nil || first == nil {
+		t.Fatalf("the first helper's token client: %+v %v", first, err)
+	}
+	info, err := os.Stat(cfg.IdentityKeyFile)
+	if err != nil {
+		t.Fatalf("the key the first helper kept: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("identity key mode %04o; want 600, since whoever holds this key holds this machine's credential", mode)
+	}
+
+	// The restart: a second process, with nothing of the first's memory, reading the same HOME.
+	second, err := identityClient(identityHelperConfig(t, home), log)
+	if err != nil || second == nil {
+		t.Fatalf("the restarted helper's token client: %+v %v", second, err)
+	}
+	before, err := proof.Thumbprint(&first.Key().PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := proof.Thumbprint(&second.Key().PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("the restarted helper trades with the key %s, the first with %s; one machine holds one key, and the subject carries its thumbprint", after, before)
+	}
+}
+
+// TestAnIdentityHelperRefusesAKeyOthersCanRead: the key this machine's launcher credential is
+// bound to is the whole of its authority over its sessions, so a file others may read stops the
+// start naming the file and the fix, as the machine login's own file does.
+func TestAnIdentityHelperRefusesAKeyOthersCanRead(t *testing.T) {
+	home := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := identityHelperConfig(t, home)
+	if _, err := identityClient(cfg, log); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.IdentityKeyFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := identityClient(cfg, log)
+	if err == nil || !strings.Contains(err.Error(), cfg.IdentityKeyFile) || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("a world-readable identity key: %v; want a refusal naming %s and the fix", err, cfg.IdentityKeyFile)
 	}
 }

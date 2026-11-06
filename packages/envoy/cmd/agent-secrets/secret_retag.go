@@ -32,8 +32,9 @@ var errTagsChanged = errors.New("another write changed the secret after this ret
 // put back to the tags the retag read, which the broker must be asked to reread.
 var errTagsRestored = errors.New("the tags are restored to what this retag read; run the retag again once the other writer is done")
 
-// cmdSecretRetag changes a secret's owner, tier, kind, GitHub owners or max grant, in one cloud
-// write. A retag that names none (--kind none, --github-owners none, --max-grant none) removes
+// cmdSecretRetag changes a secret's owner, tier, kind, GitHub owners, max grant or default grant, in one
+// cloud write. A retag that names none (--kind none, --github-owners none, --max-grant none,
+// --default-grant none) removes
 // those tags and does nothing else; --kind none also removes the rollback guard written with the
 // kind. Any other retag sets tags. A retag that does both is refused before anything is read or
 // written: AWS removes tags only with UntagResource, so it would be two calls, and a refused second
@@ -59,15 +60,16 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	flags, profile := secretFlags(form, stderr)
 	newOwner := flags.String("owner", "", "the new owner: me (your email, from your AWS or Google sign-in) or shared")
 	newTier := flags.String("tier", "", "the new tier: agent or human")
-	newKind := flags.String("kind", "", "github-app, google-login or none")
+	newKind := flags.String("kind", "", strings.Join(policy.Kinds, ", ")+" or none")
 	newGitHubOwners := flags.String("github-owners", "", `the GitHub accounts a github-app secret mints for, separated by spaces ("<login> <login>"), or none`)
 	newMaxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows, or none")
+	newDefaultGrant := flags.String("default-grant", "", "session (no --ttl lasts until the session ends) or none (12 hours)")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	name, slug, err := secretName(positional)
-	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newGitHubOwners == "" && *newMaxGrant == "" {
-		err = usageErr{errors.New("--owner, --tier, --kind, --github-owners, --max-grant or a combination is required")}
+	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newGitHubOwners == "" && *newMaxGrant == "" && *newDefaultGrant == "" {
+		err = usageErr{errors.New("--owner, --tier, --kind, --github-owners, --max-grant, --default-grant or a combination is required")}
 	}
 	if err == nil {
 		err = checkOwnerTier(*newOwner, *newTier)
@@ -81,6 +83,9 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		err = checkMaxGrant(*newMaxGrant, true)
 	}
+	if err == nil {
+		err = checkDefaultGrant(*newDefaultGrant, true)
+	}
 	var remove []string
 	if *newKind == tagNone {
 		// The rollback guard goes with the kind: a stored secret is safe on every broker.
@@ -92,7 +97,10 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if *newMaxGrant == tagNone {
 		remove = append(remove, policy.TagMaxGrant)
 	}
-	set := optionalTags(*newKind, *newGitHubOwners, *newMaxGrant)
+	if *newDefaultGrant == tagNone {
+		remove = append(remove, policy.TagDefaultGrant)
+	}
+	set := optionalTags(*newKind, *newGitHubOwners, *newMaxGrant, *newDefaultGrant)
 	if err == nil && len(remove) > 0 && (*newOwner != "" || *newTier != "" || len(set) > 0) {
 		err = usageErr{errors.New("none removes a tag in a retag of its own: run the removal and the other changes as two retags")}
 	}
@@ -106,7 +114,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	defer s.Close()
 	held, err := s.backend.currentTags(s.ctx, slug)
 	if err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
 	// after is the secret's tags once this retag lands: the tags held, less those it removes, with
 	// those it sets.
@@ -120,7 +128,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	maps.Copy(after, set)
 	if *newOwner != "" {
 		if after[policy.TagOwner], err = ownerTag(*newOwner, email); err != nil {
-			return secretFail(stderr, form, err)
+			return secretFailIn(stderr, form, s, err)
 		}
 	}
 	if *newTier != "" {
@@ -128,24 +136,24 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	}
 	named := *newGitHubOwners != "" && *newGitHubOwners != tagNone
 	if err := checkGitHubOwnersFor(after[policy.TagKind], after[policy.TagGitHubOwners], named); err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
 	if len(remove) > 0 {
 		if err := s.backend.removeTags(s.ctx, slug, held, remove); err != nil {
-			fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
+			fmt.Fprintf(stderr, "agent-secrets %s: %v; looked in %s\n", form, err, s.storeName())
 			rereadIfRestored(s, stdout, stderr, form, name, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(remove, ", "))
+		fmt.Fprintf(stdout, "retagged %s in %s (removed %s)\n", name, s.storeName(), strings.Join(remove, ", "))
 		return rereadRetag(s, stdout, stderr, form, name, after[policy.TagKind])
 	}
 	owner, tier := after[policy.TagOwner], after[policy.TagTier]
 	if owner == "" || tier == "" {
-		return secretFail(stderr, form, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
+		return secretFailIn(stderr, form, s, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
 	}
 	set[policy.TagOwner], set[policy.TagTier] = owner, tier
 	if err := s.backend.setTags(s.ctx, slug, held, set); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
+		fmt.Fprintf(stderr, "agent-secrets %s: %v; looked in %s\n", form, err, s.storeName())
 		// AWS: IAM conditioned on the request tags leaves a shared secret's owner and tier to
 		// administrators specifically. GCP has no per-secret condition on secretmanager.secrets.update,
 		// so a deployment instead grants that permission at all only to administrators for the
@@ -156,7 +164,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		rereadIfRestored(s, stdout, stderr, form, name, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, owner, tier)
+	fmt.Fprintf(stdout, "retagged %s in %s (owner=%s, tier=%s)\n", name, s.storeName(), owner, tier)
 	return rereadRetag(s, stdout, stderr, form, name, after[policy.TagKind])
 }
 
@@ -181,7 +189,7 @@ func rereadRetag(s *secretSession, stdout, stderr io.Writer, form, name, kind st
 		return 1
 	}
 	if r.Kind != kind {
-		fmt.Fprintf(stderr, "agent-secrets %s: the retag stands, but the broker serves %s as %s, not %s: it still sees the old tags. Run this retag again to ask it to reread them, and store no value in %s until a retag exits 0\n", form, name, kindName(r.Kind), kindName(kind), name)
+		fmt.Fprintf(stderr, "agent-secrets %s: the retag in %s stands, but %s serves %s as %s, not %s: it still sees the old tags. Run this retag again to ask it to reread them, and store no value in %s until a retag exits 0\n", form, s.storeName(), s.src.brokerAt(), name, kindName(r.Kind), kindName(kind), name)
 		return 1
 	}
 	return 0

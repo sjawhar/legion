@@ -74,22 +74,37 @@ test("an architecture import names the repository it came from; a retained event
       payload: { branch: "main", commit, components: 3, repo: "acme/infra" },
       type: "architecture.synced",
     })
-  ).toBe("synced the architecture model from acme/infra at 3be61df5be90");
+  ).toEqual(["synced the architecture model from acme/infra at 3be61df5be90"]);
   expect(
     activityDescription({
       ...projectEvent,
       payload: { branch: "main", error, repo: "acme/infra" },
       type: "architecture.sync_failed",
     })
-  ).toBe("failed to sync the architecture model from acme/infra: duplicate component id api");
+  ).toEqual(["failed to sync the architecture model from acme/infra: duplicate component id api"]);
   expect(
     activityDescription({
       ...projectEvent,
       payload: { commit, components: 3 },
       type: "architecture.synced",
     })
-  ).toBe("synced the architecture model at 3be61df5be90");
+  ).toEqual(["synced the architecture model at 3be61df5be90"]);
   expect(
     activityDescription({ ...projectEvent, payload: { error }, type: "architecture.sync_failed" })
-  ).toBe("failed to sync the architecture model: duplicate component id api");
+  ).toEqual(["failed to sync the architecture model: duplicate component id api"]);
+});
+
+test("a recorded handoff names its phase and version", () => {
+  expect(
+    activityDescription({
+      actor: { id: "session-1", kind: "session" },
+      created_at: "2026-10-26T00:00:00Z",
+      id: 2,
+      issue_key: "CORE-1",
+      notify: true,
+      payload: { handoff_id: "handoff-1", phase: "implement", version: 2 },
+      seq: 2,
+      type: "handoff.recorded",
+    })
+  ).toEqual(["recorded the implement handoff, version 2"]);
 });

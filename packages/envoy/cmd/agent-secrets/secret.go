@@ -31,6 +31,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/brokerclient"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 type secretForm struct {
@@ -45,14 +47,14 @@ func init() {
 	// Register after variable initialization: the handlers use commands for help.
 	secretForms = []secretForm{
 		{command{"secret list", "agent-secrets secret list [--json] [--profile P]",
-			"List every agent secret under your own cloud sign-in: its owner, tier, kind, max grant,\nwhether it has a value, and deletion details."}, cmdSecretList},
+			"List every agent secret under your own cloud sign-in: its owner, tier, kind, max grant,\nwhether it has a value, and deletion details. Name the store the rows are in."}, cmdSecretList},
 		{command{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
-			"Print an agent secret's owner, tier, kind, max grant, dates and versions. Never print its\nvalue."}, cmdSecretShow},
-		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--kind github-app|google-login|none] [--github-owners LOGINS] [--max-grant DURATION] [--profile P]",
+			"Print an agent secret's store, owner, tier, kind, max grant, dates and versions. Never\nprint its value."}, cmdSecretShow},
+		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--kind " + strings.Join(policy.Kinds, "|") + "|none] [--github-owners LOGINS] [--max-grant DURATION] [--default-grant session] [--profile P]",
 			"Create an agent secret under your own cloud sign-in. Then ask the broker to serve it. Read\nits value from standard input, or type it at a prompt with echo off."}, cmdSecretCreate},
 		{command{"secret set", "agent-secrets secret set NAME [--profile P]",
 			"Set a new agent-secret value under your own cloud sign-in. Then ask the broker to serve it.\nRead the value from standard input, or type it at a prompt with echo off."}, cmdSecretSet},
-		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--kind github-app|google-login|none] [--github-owners LOGINS|none] [--max-grant DURATION|none] [--profile P]",
+		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--kind " + strings.Join(policy.Kinds, "|") + "|none] [--github-owners LOGINS|none] [--max-grant DURATION|none] [--default-grant session|none] [--profile P]",
 			"Change an agent secret's owner, tier, kind, GitHub owners or max grant under your own cloud\nsign-in. Then ask the broker to reread it. none removes a kind, GitHub owners or max grant, in a\nretag of its own. An administrator changes a shared secret's owner and tier."}, cmdSecretRetag},
 		{command{"secret delete", "agent-secrets secret delete NAME [--profile P]",
 			"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own cloud\nsign-in, then ask the broker to stop serving it at once."}, cmdSecretDelete},
@@ -119,7 +121,7 @@ func cmdSecret(args []string, stdout, stderr io.Writer) int {
 // trust the broker's settings to steer a write, so a plain-http broker a network attacker can answer
 // is refused before the first call; an unparseable URL is left to the client, which names it.
 func requireSecretBrokerURL(raw string) error {
-	base := strings.TrimSuffix(raw, "/")
+	base := brokerclient.WithoutTrailingSlashes(raw)
 	if base == "" {
 		return nil
 	}
@@ -130,7 +132,7 @@ func requireSecretBrokerURL(raw string) error {
 	if u.Scheme == "https" || (u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
 		return nil
 	}
-	return usageErr{fmt.Errorf("AGENT_SECRETS_URL %q must be https, or http only when the broker's host is loopback (127.0.0.1, [::1] or localhost): the secret forms trust the broker's settings, so a plain-http broker on the network is refused", base)}
+	return usageErr{fmt.Errorf("AGENT_SECRETS_URL %q must be https, or http only when the broker's host is loopback (127.0.0.1, [::1] or localhost): the secret forms trust the broker's settings, so a plain-http broker on the network is refused", redact.URL(base))}
 }
 
 // isLoopbackHost reports whether host is "localhost" (any case) or a loopback IP literal
@@ -158,7 +160,7 @@ func secretFail(stderr io.Writer, form string, err error) int {
 }
 
 // secretFlagValues are the secret forms' flags that take a value.
-var secretFlagValues = map[string]bool{"owner": true, "tier": true, "kind": true, "github-owners": true, "max-grant": true, "profile": true}
+var secretFlagValues = map[string]bool{"owner": true, "tier": true, "kind": true, "github-owners": true, "max-grant": true, "default-grant": true, "profile": true}
 
 // secretFlags is form's flag set with --profile, which every secret form takes but only the AWS
 // backend uses (GCP uses your Google sign-in instead, gcpBackend; a non-empty --profile there is a
@@ -416,23 +418,38 @@ type secretBackend interface {
 }
 
 // secretSession is one secret form's connection: the broker and the backend (requireAccount,
-// requireWriteSignIn) opened for it.
+// requireWriteSignIn) opened for it, and src, the store those reads and writes go to, which
+// every answer and every refusal of the form names (source.go).
 type secretSession struct {
 	ctx     context.Context
 	broker  *client
 	backend secretBackend
+	src     source
 }
 
 // Close releases the session's backend connection.
 func (s *secretSession) Close() error { return s.backend.close() }
 
+// storeName is the store this session reads and writes, for a line that names where an answer
+// came from: the secret forms call the store directly under the person's own cloud sign-in, so
+// the store, not the broker, is the source of what they print.
+func (s *secretSession) storeName() string { return s.src.storeName() }
+
+// secretFailIn is secretFail for a failure met once the session is open: it names the store the
+// form looked in, so no refusal of this CLI's reads as another secrets CLI's answer about the
+// name. It is a function rather than a method on secretSession because broker-refgen reads every
+// exit code this package returns, and it follows a plain call, never a method's.
+func secretFailIn(stderr io.Writer, form string, s *secretSession, err error) int {
+	return secretFail(stderr, form, fmt.Errorf("%w; looked in %s", err, s.storeName()))
+}
+
 // openSession reads the broker's settings from AGENT_SECRETS_URL and opens the backend its
 // `store` field names (openSecretBackend). It checks nothing about the sign-in: connectReader
 // and connectWriter do.
 func openSession(ctx context.Context, profile string) (*secretSession, error) {
-	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
+	base := brokerBaseURL()
 	if base == "" {
-		return nil, usageErr{errors.New("AGENT_SECRETS_URL is required")}
+		return nil, usageErr{fmt.Errorf("%s is required: it names the secrets broker whose store these forms read and write", brokerURLVar)}
 	}
 	if err := requireSecretBrokerURL(base); err != nil {
 		return nil, err
@@ -440,13 +457,13 @@ func openSession(ctx context.Context, profile string) (*secretSession, error) {
 	broker := newClient(base)
 	settings, err := broker.Settings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read the broker's settings: %w", err)
+		return nil, fmt.Errorf("read the settings of %s: %w", brokerSource(base), err)
 	}
 	backend, err := openSecretBackend(ctx, profile, settings)
 	if err != nil {
 		return nil, err
 	}
-	return &secretSession{ctx: ctx, broker: broker, backend: backend}, nil
+	return &secretSession{ctx: ctx, broker: broker, backend: backend, src: brokerSource(base).withSettings(settings)}, nil
 }
 
 // openSecretBackend builds the backend settings.Store names: AWS Secrets Manager, pinned to the
@@ -537,25 +554,25 @@ func rereadAfter(s *secretSession, stdout, stderr io.Writer, form, name string, 
 func reread(s *secretSession, stdout, stderr io.Writer, form, name string, wantServed bool, restorable *time.Time) (Reread, bool) {
 	r, err := s.broker.RereadSecret(s.ctx, name)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets %s: the write to the secret store stands, but the broker could not be asked to reread %s, so it serves the change only from its next reload: %v\n", form, name, err)
+		fmt.Fprintf(stderr, "agent-secrets %s: the write to %s stands, but %s could not be asked to reread %s, so it serves the change only from its next reload: %v\n", form, s.storeName(), s.src.brokerAt(), name, err)
 		return r, false
 	}
 	switch {
 	case r.Served && r.Kind != "":
-		fmt.Fprintf(stdout, "broker: serving %s (kind %s)\n", name, r.Kind)
+		fmt.Fprintf(stdout, "broker: serving %s from %s (kind %s)\n", name, s.storeName(), r.Kind)
 	case r.Served:
-		fmt.Fprintf(stdout, "broker: serving %s\n", name)
+		fmt.Fprintf(stdout, "broker: serving %s from %s\n", name, s.storeName())
 	case !wantServed && r.Reason == policy.ReasonAbsent:
-		fmt.Fprintf(stdout, "broker: %s is deleted (restorable until %s)\n", name, formatTime(restorable))
+		fmt.Fprintf(stdout, "broker: %s is deleted in %s (restorable until %s)\n", name, s.storeName(), formatTime(restorable))
 	default:
-		fmt.Fprintf(stdout, "broker: refusing %s (reason=%s)\n", name, r.Reason)
+		fmt.Fprintf(stdout, "broker: refusing %s from %s (reason=%s)\n", name, s.storeName(), r.Reason)
 	}
 	switch {
 	case wantServed && !r.Served:
-		fmt.Fprintf(stderr, "agent-secrets %s: the broker refuses %s after the write (reason=%s)\n", form, name, r.Reason)
+		fmt.Fprintf(stderr, "agent-secrets %s: %s refuses %s after the write to %s (reason=%s)\n", form, s.src.brokerAt(), name, s.storeName(), r.Reason)
 		return r, false
 	case !wantServed && r.Served:
-		fmt.Fprintf(stderr, "agent-secrets %s: the broker still serves %s after its delete\n", form, name)
+		fmt.Fprintf(stderr, "agent-secrets %s: %s still serves %s after its delete in %s\n", form, s.src.brokerAt(), name, s.storeName())
 		return r, false
 	}
 	return r, true
@@ -565,6 +582,10 @@ func reread(s *secretSession, stdout, stderr io.Writer, form, name string, wantS
 type secretView struct {
 	// Name is the NAME a session asks for it as (or its name in the secret store, when it maps to none).
 	Name string `json:"name"`
+	// Store is the secret store this row was read from, as the broker's settings describe it
+	// (source.storeName): a machine can hold another secrets CLI answering the same names from
+	// another store, and a reader of these rows must never take one for the other.
+	Store string `json:"store"`
 	// SecretName is its whole name in the secret store.
 	SecretName string `json:"secret_name"`
 	Owner      string `json:"owner"`
@@ -573,6 +594,7 @@ type secretView struct {
 	// GitHubOwners is a github-app secret's github-owners tag, the accounts the broker mints for.
 	GitHubOwners string `json:"github_owners"`
 	MaxGrant     string `json:"max_grant"`
+	DefaultGrant string `json:"default_grant"`
 	// HasValue is whether it holds a current, servable version (AWS: a version carries AWSCURRENT;
 	// GCP: versions/latest is ENABLED), so the broker can release a value.
 	HasValue bool `json:"has_value"`
@@ -594,7 +616,7 @@ type secretView struct {
 // withTags is v with the fields a secret's tags (AWS tags, or Secret Manager annotations) give.
 func (v secretView) withTags(tags map[string]string) secretView {
 	v.Owner, v.Tier = tags[policy.TagOwner], tags[policy.TagTier]
-	v.Kind, v.GitHubOwners, v.MaxGrant = tags[policy.TagKind], tags[policy.TagGitHubOwners], tags[policy.TagMaxGrant]
+	v.Kind, v.GitHubOwners, v.MaxGrant, v.DefaultGrant = tags[policy.TagKind], tags[policy.TagGitHubOwners], tags[policy.TagMaxGrant], tags[policy.TagDefaultGrant]
 	return v
 }
 
@@ -627,33 +649,39 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 	defer s.Close()
 	views, err := s.backend.list(s.ctx)
 	if err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
 	// sort.Slice's less answers a bool: an int-returning comparator would be read by broker-refgen
 	// as an exit code, which every int-returning function in this package is.
 	sort.Slice(views, func(i, j int) bool { return views[i].Name < views[j].Name })
+	for i := range views {
+		views[i].Store = s.storeName()
+	}
 	if *asJSON {
 		if err := writeIndentedJSON(stdout, views); err != nil {
-			return secretFail(stderr, form, err)
+			return secretFailIn(stderr, form, s, err)
 		}
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tOWNER\tTIER\tKIND\tMAX_GRANT\tVALUE\tDELETED\tEARLIEST_PURGE")
+	fmt.Fprintln(tw, "NAME\tOWNER\tTIER\tKIND\tMAX_GRANT\tDEFAULT_GRANT\tVALUE\tDELETED\tEARLIEST_PURGE")
 	for _, v := range views {
 		value := "no"
 		if v.HasValue {
 			value = "yes"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", v.Name, orDash(v.Owner), orDash(v.Tier), orDash(v.Kind), orDash(v.MaxGrant), value, formatTime(v.Deleted), formatTime(v.EarliestPurge))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", v.Name, orDash(v.Owner), orDash(v.Tier), orDash(v.Kind), orDash(v.MaxGrant), orDash(v.DefaultGrant), value, formatTime(v.Deleted), formatTime(v.EarliestPurge))
 	}
 	if err := tw.Flush(); err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
-	// The legend goes to stderr, so the table on stdout stays one row per secret for a script. It
-	// names Secrets Manager's own recovery window, so it is printed only for a row that has one
-	// (EarliestPurge, AWS-only: GCP's expire_time is the exact purge moment, with no separate
-	// recovery window to explain).
+	// The source line and the legend go to stderr, so the table on stdout stays one row per
+	// secret for a script. The source names the one store every row was read from, since a
+	// machine can hold another secrets CLI listing other secrets under the same names.
+	fmt.Fprintf(stderr, "Every row is a secret in %s.\n", s.storeName())
+	// The legend names Secrets Manager's own recovery window, so it is printed only for a row
+	// that has one (EarliestPurge, AWS-only: GCP's expire_time is the exact purge moment, with
+	// no separate recovery window to explain).
 	if slices.ContainsFunc(views, func(v secretView) bool { return v.EarliestPurge != nil }) {
 		fmt.Fprintf(stderr, "EARLIEST_PURGE is the deletion plus Secrets Manager's %d-day minimum recovery window: restore works at least until then; the window the delete chose may be longer.\n", minRecoveryWindowDays)
 	}
@@ -683,17 +711,18 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 	defer s.Close()
 	view, err := s.backend.show(s.ctx, slug)
 	if err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
+	view.Store = s.storeName()
 
 	if *asJSON {
 		if err := writeIndentedJSON(stdout, view); err != nil {
-			return secretFail(stderr, form, err)
+			return secretFailIn(stderr, form, s, err)
 		}
 		return 0
 	}
-	fmt.Fprintf(stdout, "name: %s\nsecret_name: %s\nowner: %s\ntier: %s\nkind: %s\ngithub_owners: %s\nmax_grant: %s\ncreated: %s\nlast_changed: %s\n",
-		view.Name, view.SecretName, orDash(view.Owner), orDash(view.Tier), orDash(view.Kind), orDash(view.GitHubOwners), orDash(view.MaxGrant), formatTime(view.Created), formatTime(view.LastChanged))
+	fmt.Fprintf(stdout, "name: %s\nstore: %s\nsecret_name: %s\nowner: %s\ntier: %s\nkind: %s\ngithub_owners: %s\nmax_grant: %s\ndefault_grant: %s\ncreated: %s\nlast_changed: %s\n",
+		view.Name, view.Store, view.SecretName, orDash(view.Owner), orDash(view.Tier), orDash(view.Kind), orDash(view.GitHubOwners), orDash(view.MaxGrant), orDash(view.DefaultGrant), formatTime(view.Created), formatTime(view.LastChanged))
 	switch {
 	case view.EarliestPurge != nil:
 		fmt.Fprintf(stdout, "deleted: %s\nearliest_purge: %s (the deletion plus Secrets Manager's %d-day minimum recovery window: restorable at least until then; the window the delete chose may be longer)\n",
@@ -725,9 +754,10 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	flags, profile := secretFlags(form, stderr)
 	owner := flags.String("owner", "", "me (your email, from your AWS or Google sign-in) or shared")
 	tier := flags.String("tier", "", "agent (its owner's agents use it without asking) or human (a person approves each use)")
-	kind := flags.String("kind", "", "github-app, google-login or none (the default)")
+	kind := flags.String("kind", "", strings.Join(policy.Kinds, ", ")+" or none (the default)")
 	githubOwners := flags.String("github-owners", "", `the GitHub accounts a github-app secret mints for, separated by spaces ("<login> <login>")`)
 	maxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows")
+	defaultGrant := flags.String("default-grant", "", "session: a request with no --ttl lasts until its session ends, not 12 hours")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -750,6 +780,9 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		err = checkMaxGrant(*maxGrant, false)
 	}
+	if err == nil {
+		err = checkDefaultGrant(*defaultGrant, false)
+	}
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -760,9 +793,9 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	defer s.Close()
 	ownerValue, err := ownerTag(*owner, email)
 	if err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
-	tags := optionalTags(*kind, *githubOwners, *maxGrant)
+	tags := optionalTags(*kind, *githubOwners, *maxGrant, *defaultGrant)
 	command := []string{"secret", "create", name, "--owner", *owner, "--tier", *tier}
 	if *kind != "" {
 		command = append(command, "--kind", *kind)
@@ -773,15 +806,18 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if *maxGrant != "" {
 		command = append(command, "--max-grant", *maxGrant)
 	}
+	if *defaultGrant != "" {
+		command = append(command, "--default-grant", *defaultGrant)
+	}
 	value, err := readSecretValue(name, pipeCommand(s.backend.signInPrefix(), *profile, command...), stderr)
 	if err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
 	tags[policy.TagOwner], tags[policy.TagTier] = ownerValue, *tier
 	if err := s.backend.create(s.ctx, slug, tags, value); err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
-	fmt.Fprintf(stdout, "created %s (owner=%s, tier=%s)\n", name, ownerValue, *tier)
+	fmt.Fprintf(stdout, "created %s in %s (owner=%s, tier=%s)\n", name, s.storeName(), ownerValue, *tier)
 	return rereadAfter(s, stdout, stderr, form, name, true, nil)
 }
 
@@ -807,12 +843,12 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 	defer s.Close()
 	value, err := readSecretValue(name, pipeCommand(s.backend.signInPrefix(), *profile, "secret", "set", name), stderr)
 	if err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
 	if err := s.backend.set(s.ctx, slug, value); err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
-	fmt.Fprintf(stdout, "set a new value of %s\n", name)
+	fmt.Fprintf(stdout, "set a new value of %s in %s\n", name, s.storeName())
 	return rereadAfter(s, stdout, stderr, form, name, true, nil)
 }
 
@@ -841,9 +877,9 @@ func cmdSecretDelete(args []string, stdout, stderr io.Writer) int {
 	defer s.Close()
 	deletion, err := s.backend.delete(s.ctx, slug)
 	if err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
-	fmt.Fprintf(stdout, "deleted %s\n", name)
+	fmt.Fprintf(stdout, "deleted %s in %s\n", name, s.storeName())
 	return rereadAfter(s, stdout, stderr, form, name, false, deletion)
 }
 
@@ -864,8 +900,8 @@ func cmdSecretRestore(args []string, stdout, stderr io.Writer) int {
 	}
 	defer s.Close()
 	if err := s.backend.restore(s.ctx, slug); err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
-	fmt.Fprintf(stdout, "restored %s\n", name)
+	fmt.Fprintf(stdout, "restored %s in %s\n", name, s.storeName())
 	return rereadAfter(s, stdout, stderr, form, name, true, nil)
 }

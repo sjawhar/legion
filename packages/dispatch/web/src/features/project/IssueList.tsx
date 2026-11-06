@@ -52,6 +52,7 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
         <Link
           className={`col-span-2 row-start-1 min-w-0 text-sm sm:col-span-1 ${linkText} ${linkHoverText}`}
+          data-issue-link
           to={buildIssuePath({ key: issue.key, kind: "issue" })}
           {...referenceTriggerProps({ key: issue.key, kind: "issue" })}
         >
@@ -124,7 +125,10 @@ export function IssueList({ project }: { project: string }): ReactNode {
   // and are no step.
   const rows = () => [...document.querySelectorAll<HTMLElement>(ROW_SELECTOR)];
   const focusedRow = () => closestMatching(document.activeElement, ROW_SELECTOR);
-  const openFocusedRow = () => focusedRow()?.querySelector("a")?.click();
+  // The title link, by its mark: the row holds other links (a claim's agent, the parent), and
+  // `o`/`Enter` must open the issue whichever comes first.
+  const openFocusedRow = () =>
+    focusedRow()?.querySelector<HTMLElement>("[data-issue-link]")?.click();
   useKeymap("project", [
     // Movement: a palette row that moves the cursor helps nobody.
     {

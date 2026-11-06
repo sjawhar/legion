@@ -9,27 +9,31 @@ import {
   readdirSync,
   readFileSync,
   readSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { askgateState, recordNamesStore, sweepStores } from "./askgate-marker";
 import { adviceMemory } from "./dispatch-execute";
+import { keyedLayerMemory, rememberKeyedLayer } from "./dispatch-http";
 import { shownPictures } from "./dispatch-picture-tools";
 import type { PictureType, ToolImage } from "./dispatch-pictures";
+import { writeAtomically } from "./dispatch-session-directory";
 import { hasErrnoCode, messageFor } from "./errors";
 
 /**
- * The `dispatch` CLI's state, one directory per host session under
- * `<root>/sessions/<session id>`: what a long-lived host kept in memory across calls (the triage
- * lines and pictures already shown, the asks whose follow notice was printed) in `state.json`, a
- * ledger of every call's result in `results.jsonl`, and the pictures and long results the CLI
- * wrote for the agent to open. The state names issue keys and picture addresses, so every file
- * is the owner's alone.
+ * The `dispatch` CLI's state, one directory per host session under `<root>/sessions/<session id>`
+ * (`dispatch-session-directory.ts` names it): what a long-lived host kept in memory across calls
+ * (the triage lines and pictures already shown, the asks whose follow notice was printed, which
+ * Dispatch lately showed it runs the keyed layer) in `state.json`, a ledger of every call's result
+ * in `results.jsonl`, and the pictures and long results the CLI wrote for the agent to open. The
+ * state names issue keys and picture addresses, so every file is the owner's alone.
  *
- * Two calls racing in one session can lose a memory entry; that costs one repeated line.
+ * Two calls racing in one session can lose a memory entry; that costs one repeated line, or one
+ * `/healthz` read before a failed write is asked again. They can also bring back a keyed-layer
+ * sighting the other call set aside on an answer its layer did not judge; that sighting still
+ * ends `KEYED_LAYER_MEMORY_MS` after the answer that showed it.
  */
 
 export interface ResultEntry {
@@ -37,15 +41,29 @@ export interface ResultEntry {
   readonly tool: string;
   readonly details?: unknown;
   readonly error?: string;
+  /**
+   * A gated write AskGate's record required a marker for, and which carried none or one whose
+   * file or arguments differ: refused in `block` mode (`error` holds the refusal); in `warn` mode a
+   * line of its own, with neither `details` nor `error`, written before the write is sent, and the
+   * result's own line after it. pi-envoy turns each into an `advisor-gate` entry, so the report
+   * counts it. `asksCarried` is how many asks for a person the write's own text carries, which
+   * pi-envoy records on Dispatch; the line carries that count and never the ask text.
+   */
+  readonly askgate?: {
+    readonly mode: "warn" | "block";
+    readonly why: string;
+    readonly asksCarried?: number;
+  };
 }
 
 interface SessionMemory {
   readonly advice: readonly string[];
   readonly pictures: readonly string[];
   readonly follows: readonly string[];
+  /** `keyedLayerMemory()`: each Dispatch origin with when a call last saw its keyed layer. */
+  readonly keyedLayer: Readonly<Record<string, string>>;
 }
 
-const SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 const PRIVATE_DIR = 0o700;
 const PRIVATE_FILE = 0o600;
 const IDLE_SESSION_MS = 14 * 86_400_000;
@@ -58,30 +76,6 @@ const PICTURE_EXTENSIONS: Record<PictureType, string> = {
   "image/gif": "gif",
   "image/webp": "webp",
 };
-
-/** `DISPATCH_STATE_DIR`, else `<XDG_STATE_HOME or ~/.local/state>/dispatch`. Empty counts as unset. */
-export function sessionStateRoot(env: Readonly<Record<string, string | undefined>>): string {
-  // Bracket access, not a dot: claude-envoy type-checks this source under
-  // noPropertyAccessFromIndexSignature, which refuses a dot on an index signature.
-  // biome-ignore-start lint/complexity/useLiteralKeys: claude-envoy's tsconfig refuses dot access
-  const stateDir = env["DISPATCH_STATE_DIR"];
-  if (stateDir) return stateDir;
-  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
-  // biome-ignore-end lint/complexity/useLiteralKeys: see above
-}
-
-/** `<root>/sessions/<id>`; an id that is not one plain path segment is refused. */
-export function sessionDirectory(
-  env: Readonly<Record<string, string | undefined>>,
-  sessionId: string
-): string {
-  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
-    throw new Error(
-      `dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`
-    );
-  }
-  return join(sessionStateRoot(env), "sessions", sessionId);
-}
 
 function ensureDirectory(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
@@ -97,13 +91,6 @@ function readIfPresent(path: string): string | undefined {
   }
 }
 
-/** Writes `text` to `path` through a temporary file and `rename`, so a reader sees all or none. */
-function writeAtomically(path: string, text: string): void {
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, text, { mode: PRIVATE_FILE });
-  renameSync(temporary, path);
-}
-
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
@@ -111,9 +98,10 @@ function stringList(value: unknown): string[] {
 }
 
 /**
- * Reads `state.json`, seeds the advice and picture memories the library consults, and returns the
- * asks this session already printed a follow notice for. A missing file is an empty memory; one
- * that is not JSON throws, naming it.
+ * Reads `state.json`, seeds the advice, picture and keyed-layer memories the library consults, and
+ * returns the asks this session already printed a follow notice for. A missing file is an empty
+ * memory; one that is not JSON throws, naming it. A keyed-layer entry that is stale or not a
+ * sighting is passed over (`rememberKeyedLayer`).
  */
 export function loadSessionMemory(dir: string, sessionId: string): Set<string> {
   const path = join(dir, "state.json");
@@ -131,10 +119,11 @@ export function loadSessionMemory(dir: string, sessionId: string): Set<string> {
   for (const key of stringList(state.advice)) advice.add(key);
   const pictures = shownPictures(sessionId);
   for (const address of stringList(state.pictures)) pictures.add(address);
+  rememberKeyedLayer(state.keyedLayer);
   return new Set(stringList(state.follows));
 }
 
-/** Writes the advice and picture memories and `follows` back to `state.json`. */
+/** Writes the advice, picture and keyed-layer memories and `follows` back to `state.json`. */
 export function saveSessionMemory(dir: string, sessionId: string, follows: Set<string>): void {
   ensureDirectory(dir);
   writeMemory(dir, sessionId, follows);
@@ -145,6 +134,7 @@ function writeMemory(dir: string, sessionId: string, follows: Set<string>): void
     advice: [...adviceMemory()],
     pictures: [...shownPictures(sessionId)],
     follows: [...follows],
+    keyedLayer: keyedLayerMemory(),
   };
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}\n`);
 }
@@ -279,7 +269,11 @@ export function readSessionTitle(dir: string): string | undefined {
 
 /**
  * Removes the session directories nobody touched for 14 days, at most once a day: the root's
- * `.pruned` stamp records the last pass.
+ * `.pruned` stamp records the last pass. A directory whose AskGate record a live process keeps
+ * (`askgateState`), whose record cannot be read, or whose record names a marker store that is
+ * still there (`recordNamesStore`: its owner may be a process of another pid namespace that this
+ * one cannot look up) stays: removing it would let that session's writes post with no marker. The
+ * same pass removes the AskGate marker stores of processes that are gone (`sweepStores`).
  */
 export function pruneSessions(root: string, now: number): void {
   const stamp = join(root, PRUNED_STAMP);
@@ -299,7 +293,8 @@ export function pruneSessions(root: string, now: number): void {
     if (!entry.isDirectory()) continue;
     const dir = join(sessions, entry.name);
     try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
+      const idle = now - statSync(dir).mtimeMs > IDLE_SESSION_MS;
+      if (idle && askgateState(dir, now).kind === "off" && !recordNamesStore(dir)) {
         rmSync(dir, { recursive: true, force: true });
       }
     } catch (error) {
@@ -307,6 +302,7 @@ export function pruneSessions(root: string, now: number): void {
       if (!hasErrnoCode(error, "ENOENT")) throw error;
     }
   }
+  sweepStores(root, now);
   ensureDirectory(root);
   writeFileSync(stamp, "", { mode: PRIVATE_FILE });
 }

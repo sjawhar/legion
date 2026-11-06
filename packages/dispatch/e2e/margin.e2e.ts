@@ -1,5 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import {
   acceptSuggestion,
   createAsk,
@@ -29,6 +29,7 @@ import {
 } from "./editor";
 import { commentWithBody } from "./margin-helpers";
 import { resetDatabase, setCommentAuthorService } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -48,7 +49,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the selection bar comments, suggests, and asks on marks that both users see", async ({
+// SLOW(>=2s): two browser contexts, three document loads and three composer round trips.
+test("the selection bar comments, suggests, and asks on marks that both users see @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -109,9 +111,10 @@ test("the selection bar comments, suggests, and asks on marks that both users se
       expectMark(alicePage, comment.anchor.mark_id, "brown"),
       expectMark(bobPage, comment.anchor.mark_id, "brown"),
     ]);
+    // A surface change, as a link does it: a cold load would prove nothing this row is about.
     await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/conversation`),
-      bobPage.goto(`/issues/${issue.key}/conversation`),
+      navigateInApp(alicePage, `/issues/${issue.key}/conversation`),
+      navigateInApp(bobPage, `/issues/${issue.key}/conversation`),
     ]);
     await Promise.all([
       expect(alicePage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText("brown"),
@@ -122,8 +125,10 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     // The comment quotes the spec, so its deep link opens the spec with the thread beside it.
     await alicePage.goto(`/issues/${issue.key}/comments/${comment.id}`);
     await expect(alicePage).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
+    // A load, not an in-app step: closing the thread the deep link opened beside the document is
+    // what leaves one composer on the page for the bar action below.
     await alicePage.goto(`/issues/${issue.key}/spec`);
-    await bobPage.goto(`/issues/${issue.key}/spec`);
+    await navigateInApp(bobPage, `/issues/${issue.key}/spec`);
     await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
 
     await setSheet(alicePage, testInfo.project.name, false);
@@ -174,8 +179,7 @@ test("the selection bar comments, suggests, and asks on marks that both users se
 // On a phone the sheet opens for it, which `phone.e2e.ts` checks.
 test("a bar Comment focuses its composer from the margin's rail and from its Pinned tab", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec: initialMarkdown, title: "Focus" });
   const alice = await asUser(browser, "alice");
@@ -255,7 +259,7 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
   }
 });
 
-test("highlights follow edits in the other browser and preserve their anchor state", async ({
+test("highlights follow edits in the other browser and preserve their anchor state @phone", async ({
   browser,
 }) => {
   await createProject({ key: "FOLLOW", name: "Following highlights" });
@@ -321,7 +325,7 @@ test("highlights follow edits in the other browser and preserve their anchor sta
         )
       )
       .toMatchObject({ anchor: { orphaned: true, version: 1 } });
-    await bobPage.goto(`/issues/${issue.key}/conversation`);
+    await navigateInApp(bobPage, `/issues/${issue.key}/conversation`);
     const orphanedTurn = bobPage.locator(`li[data-turn="comment:${fox.id}"]`);
     await orphanedTurn.getByRole("button", { name: "Expand thread" }).click();
     const threadDialog = bobPage.getByRole("dialog", { name: "Thread" });
@@ -336,7 +340,8 @@ test("highlights follow edits in the other browser and preserve their anchor sta
   }
 });
 
-test("accepting a suggestion changes the text in both browsers and names a version; rejecting leaves the text", async ({
+// SLOW(>=2s): two browser contexts, two suggestion sends and the accept and reject round trips.
+test("accepting a suggestion changes the text in both browsers and names a version; rejecting leaves the text @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SUG", name: "Suggestions" });
@@ -371,7 +376,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       throw new Error("The accepted suggestion has no anchor.");
     }
 
-    await alicePage.goto(`/issues/${issue.key}/conversation`);
+    await navigateInApp(alicePage, `/issues/${issue.key}/conversation`);
     await alicePage
       .locator(`[data-turn="comment:${accepted.id}"]`)
       .getByTestId(`margin-comment-${accepted.id}`)
@@ -394,7 +399,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
         .getByTestId(`margin-comment-${accepted.id}`)
         .getByRole("button", { name: "Reopen" })
     ).toHaveCount(0);
-    await alicePage.goto(`/issues/${issue.key}/spec`);
+    await navigateInApp(alicePage, `/issues/${issue.key}/spec`);
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox"),
       expect(bobEditor).toContainText("The quick red fox"),
@@ -430,6 +435,8 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       throw new Error("The rejected suggestion was not created with an anchor.");
     }
 
+    // A load, not an in-app step: the accept above left the Conversation filtered to Closed, and
+    // the suggestion rejected below is an open thread.
     await alicePage.goto(`/issues/${issue.key}/conversation`);
     const rejectButton = alicePage
       .locator(`[data-turn="comment:${rejected.id}"]`)
@@ -444,7 +451,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       rejectButton.click(),
     ]);
     expect(response.ok()).toBe(true);
-    await alicePage.goto(`/issues/${issue.key}/spec`);
+    await navigateInApp(alicePage, `/issues/${issue.key}/spec`);
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox"),
       expect(bobEditor).toContainText("The quick red fox"),
@@ -464,6 +471,9 @@ test("accepting a suggestion changes the text in both browsers and names a versi
   }
 });
 
+// SLOW(>=2s): both viewers are the claim, so the row pays two browser contexts and a Conversation
+// load in each - made together - and each page then draws the seeded anchored comment in its
+// conversation and in its margin before a second comment, made with both pages open, reaches them.
 test("anchored and unanchored comments reach Conversation for both viewers", async ({
   browser,
 }) => {
@@ -520,7 +530,7 @@ test("anchored and unanchored comments reach Conversation for both viewers", asy
   }
 });
 
-test("a document mark opens its thread in the margin and stays on the document", async ({
+test("a document mark opens its thread in the margin and stays on the document @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "FOCUS", name: "Focus marks" });
@@ -582,7 +592,7 @@ test("a document mark opens its thread in the margin and stays on the document",
   }
 });
 
-test("a Conversation reply to an agent's anchored comment carries no anchor and stays in one thread", async ({
+test("a Conversation reply to an agent's anchored comment carries no anchor and stays in one thread @phone", async ({
   browser,
 }) => {
   await createProject({ key: "REPLY", name: "Anchored replies" });
@@ -677,7 +687,9 @@ test("margin ask composer sends option choices that the inbox records as a selec
         },
       });
 
-    await page.goto("/");
+    // The Inbox as the reader reaches it, by the navigation rather than a reload: this row is
+    // about the answer it records, not about loading it cold.
+    await navigateInApp(page, "/");
     const inboxCard = page.getByTestId(`ask-${askId}`);
     await inboxCard.getByRole("checkbox", { name: "Ship" }).check();
     await inboxCard.getByRole("button", { name: "Answer" }).click();
@@ -691,7 +703,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
   }
 });
 
-test("a viewer who opens the issue after an anchored ask is answered sees it in the margin", async ({
+test("a viewer who opens the issue after an anchored ask is answered sees it in the margin @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SEES", name: "Sees answered asks" });
@@ -751,7 +763,7 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
   }
 });
 
-test("long option labels and descriptions wrap inside the margin ask card", async ({
+test("long option labels and descriptions wrap inside the margin ask card @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -840,7 +852,7 @@ test("long option labels and descriptions wrap inside the margin ask card", asyn
   }
 });
 
-test("a comment a verified service token wrote names its service account in the margin", async ({
+test("a comment a verified service token wrote names its service account in the margin @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SVC", name: "Service" });
@@ -897,6 +909,8 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
   try {
     const page = await bob.newPage();
     const transport = await documentTransport(page);
+    // The reconnect draw the sever below arms is spent on the page's clock, not in real time.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/spec`);
     const connected = connectedDot(page);
     await expect(connected).toHaveText("connected");
@@ -911,6 +925,10 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
       .toBe("The quick red fox\n");
 
     await transport.release();
+    // The provider waits a draw from [0, RECONNECT_SPREAD_MS) set at the previous open
+    // (`web/src/features/doc/connection.ts`) before it dials again; the close that armed it is
+    // already observed above, so one jump spends it.
+    await page.clock.fastForward(RECONNECT_SPREAD_MS);
     await expect(connected).toHaveText("connected");
     await expect(documentEditor(page)).toHaveText("The quick red fox");
   } finally {

@@ -78,10 +78,141 @@ test("sends Envoy messages through the shared transport", async () => {
     message: "ready",
   })
   expect(result).toEqual({
-    message: "sent evt-sent to ses_receiver",
+    message: "sent evt-sent to ses_receiver (live)",
     event_id: "evt-sent",
     recipient: "ses_receiver",
+    recipient_state: "live",
     confirmed: true,
+  })
+})
+
+// The list is what the model reads before it decides a peer is dead: a session past its live
+// window is still running, so it must be asked for and must arrive with the state and the
+// heartbeat that say so (dispatch://INFRA-392).
+test("lists the unresponsive sessions too, each with its state and last_seen", async () => {
+  let requested = ""
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (request) => {
+      requested = String(request)
+      return Response.json([
+        {
+          session_id: "ses_stalled",
+          machine_id: "host-a",
+          dir: "/work",
+          port: 0,
+          title: "Reviewer",
+          topics: [],
+          self_subscribed: true,
+          last_seen: 1_700_000_000_000,
+          state: "unresponsive",
+        },
+      ])
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const result = await executeEnvoyTool(runtime, "envoy_sessions", {})
+
+  expect(requested).toBe("http://envoy.test/v1/sessions?include=unresponsive")
+  expect(result).toEqual([
+    expect.objectContaining({
+      session_id: "ses_stalled",
+      state: "unresponsive",
+      last_seen: 1_700_000_000_000,
+    }),
+  ])
+})
+
+test("renders a kept role publish as a success that says no session holds the role yet", async () => {
+  // Nobody holds the role, so the listener kept the message and answered 202 (INFRA-839). The
+  // tool says so in the same words the Oh My Pi plugin uses, and names no holder: the holder a
+  // resolution read never received the message.
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (_request, init) => {
+      const body = JSON.parse(String(init?.body)) as { readonly topic: string }
+      return new Response(
+        JSON.stringify({
+          event_id: "evt-kept",
+          source: "agent",
+          source_event_id: "agent.ses_claude.evt-kept",
+          source_session: "ses_claude",
+          topic: body.topic,
+          dedupe_key: "agent.legion-architect.evt-kept",
+          issued_at: 1,
+          payload_summary: "the worker is stalled",
+          trace_id: "trace-kept",
+          kept: true,
+          kept_reason: "unclaimed",
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } },
+      )
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const result = (await executeEnvoyTool(runtime, "envoy_publish", {
+    topic: "notifications.role.legion-architect",
+    message: "the worker is stalled",
+  })) as { readonly message: string; readonly kept: boolean; readonly kept_reason: string }
+
+  expect(result.message).toBe(
+    "published evt-kept. Envoy kept it for the role: no session holds it yet, and the message waits for the session that claims it next.",
+  )
+  expect(result.kept).toBe(true)
+  expect(result.kept_reason).toBe("unclaimed")
+})
+
+test("a send that is not confirmed names its key, and a resend under that key sends it again", async () => {
+  const keys: string[] = []
+  let answer: "time out" | "repeat" = "time out"
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (_request, init) => {
+      keys.push((JSON.parse(String(init?.body)) as { idempotency_key: string }).idempotency_key)
+      if (answer === "time out") throw new DOMException("The operation timed out.", "TimeoutError")
+      return Response.json({
+        event_id: "evt-resent",
+        source: "agent",
+        source_event_id: "agent.ses_claude.evt-resent",
+        source_session: "ses_claude",
+        topic: "notifications.agent.ses_receiver",
+        dedupe_key: `agent.ses_receiver.${keys[0]}`,
+        issued_at: 1,
+        payload_summary: "ready",
+        trace_id: "trace-resent",
+        recipient: "ses_receiver",
+        duplicate: true,
+      })
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const failed = await executeEnvoyTool(runtime, "envoy_send", {
+    session_id: "ses_receiver",
+    message: "ready",
+  }).then(
+    () => undefined,
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  )
+  const key = keys[0] as string
+  expect(failed).toContain("The send to ses_receiver is not confirmed delivered")
+  expect(failed).toContain(
+    `Sending it again with idempotency_key ${key} within 72 hours is the safe resend`,
+  )
+
+  answer = "repeat"
+  const resent = await executeEnvoyTool(runtime, "envoy_send", {
+    session_id: "ses_receiver",
+    message: "ready",
+    idempotency_key: key,
+  })
+
+  expect(keys).toEqual([key, key, key])
+  expect(resent).toMatchObject({
+    message:
+      "sent to ses_receiver once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy",
   })
 })
 
@@ -158,7 +289,6 @@ test("a dispatch_* call is an unknown tool even with Dispatch configured, and re
       return Response.json({ error: "unexpected" }, { status: 500 })
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
   const runtime: ChannelToolRuntime = {
@@ -174,7 +304,6 @@ test("a dispatch_* call is an unknown tool even with Dispatch configured, and re
     expect(requests).toEqual([])
   } finally {
     server.stop(true)
-    process.env = previous
   }
 })
 
@@ -212,4 +341,43 @@ test("envoy_list reports the union of live NATS subscriptions and registry inter
       { topic: "notifications.dispatch.issue.DSP-3.>", source: "live" },
     ],
   })
+})
+
+test("envoy_sessions filters by the machine a session runs on and by the listener it registered through", async () => {
+  const sessions = [
+    {
+      session_id: "ses_on_hub",
+      machine_id: "envoy-hub",
+      host: "gke-node-7",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    },
+    {
+      session_id: "ses_on_devbox",
+      machine_id: "devbox",
+      host: "devbox",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    },
+  ]
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async () => Response.json(sessions),
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+  const listed = async (machine: string) =>
+    (
+      (await executeEnvoyTool(runtime, "envoy_sessions", { machine })) as { session_id: string }[]
+    ).map((session) => session.session_id)
+
+  expect(await listed("envoy-hub")).toEqual(["ses_on_hub"])
+  expect(await listed("gke-node-7")).toEqual(["ses_on_hub"])
+  expect(await listed("devbox")).toEqual(["ses_on_devbox"])
+  expect(await listed("other")).toEqual([])
 })

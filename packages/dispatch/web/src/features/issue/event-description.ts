@@ -1,8 +1,15 @@
 import type { Event } from "../../api/types";
 import { capabilityLabel } from "../conversation/delivery";
-import { actorLabel, describeAskResolution } from "../refs/actor";
+import { type AgentPart, askResolutionParts } from "../refs/AgentName";
 
-export function eventDescription(event: Event): string {
+/** An event's line in the Pinned tab, as `AgentPart`s: an agent it names keeps its identity
+ *  until `EventBody` draws it through `AgentName`. */
+export function eventDescription(event: Event): AgentPart[] {
+  const description = describe(event);
+  return typeof description === "string" ? [description] : description;
+}
+
+function describe(event: Event): string | AgentPart[] {
   switch (event.type) {
     case "project.created":
       return `Project created: ${event.payload.name}`;
@@ -34,8 +41,10 @@ export function eventDescription(event: Event): string {
       return "Agent conversation state updated";
     case "user_thread_state.updated":
       return "Thread read";
+    case "decision.kept":
+      return "Kept a decision";
     case "ask.resolved":
-      return describeAskResolution(event.payload.resolution);
+      return askResolutionParts(event.payload.resolution);
     case "ask.answered":
       return event.payload.previous_answer === undefined
         ? `Ask answered: ${event.payload.question}`
@@ -88,11 +97,13 @@ export function eventDescription(event: Event): string {
     case "issue.claimed":
       return event.payload.previous_claim === undefined
         ? "Issue claimed"
-        : `Claim taken from ${actorLabel(event.payload.previous_claim.actor)}`;
+        : ["Claim taken from ", { actor: event.payload.previous_claim.actor }];
     case "issue.released":
       return event.payload.reason === "closed" ? "Claim released on close" : "Claim released";
     case "issue.deployed":
       return `Deployed by run ${event.payload.run_id}`;
+    case "handoff.recorded":
+      return `Recorded the ${event.payload.phase} handoff, version ${event.payload.version}`;
     case "artifact.created":
       return `Added ${event.payload.artifact.name}`;
     case "artifact.approved":
@@ -101,6 +112,8 @@ export function eventDescription(event: Event): string {
       return `Changes requested on v${event.payload.version}`;
     case "artifact.version":
       return `Saved ${event.payload.name} v${event.payload.version.number}`;
+    case "artifact.human_edited":
+      return `Edited ${event.payload.name} v${event.payload.from_version} to v${event.payload.to_version}`;
     case "suggestion.accepted":
       return "Suggestion accepted";
     case "suggestion.rejected":
@@ -112,17 +125,25 @@ export function eventDescription(event: Event): string {
     case "child.removed":
       return `Removed child ${event.payload.child_key}`;
     case "subscription.remove_requested":
-      return `Unsubscribe requested for ${event.payload.session_id}`;
+      return [
+        "Unsubscribe requested for ",
+        { sessionId: event.payload.session_id, storedTitle: undefined },
+      ];
     case "subscription.removed":
-      return `Unsubscribed ${event.payload.session_id}`;
+      return ["Unsubscribed ", { sessionId: event.payload.session_id, storedTitle: undefined }];
     case "ask.follower_added":
-      return `${event.payload.session_id} follows an ask`;
+      return [{ sessionId: event.payload.session_id, storedTitle: undefined }, " follows an ask"];
     case "ask.follower_removed":
-      return `${event.payload.session_id} unfollowed an ask`;
+      return [
+        { sessionId: event.payload.session_id, storedTitle: undefined },
+        " unfollowed an ask",
+      ];
     case "block.repaired":
       return `Repaired block ${event.payload.block_id}`;
     case "block.invalid":
       return `marked decision ${event.payload.block_id} malformed: ${event.payload.reason}`;
+    case "result.recorded":
+      return `Check ${event.payload.check_block_id} ${event.payload.verdict === "pass" ? "passed" : "failed"} at ${event.payload.commit_sha.slice(0, 12)}, recorded by ${event.payload.role}${event.payload.issue === event.payload.check_issue ? "" : ` on ${event.payload.issue}`}`;
   }
   return event satisfies never;
 }

@@ -257,33 +257,28 @@ func TestAMergeTheQueueFailedSendsTheAwaitedREADYBackToImplementing(t *testing.T
 	}
 }
 
-// A merge group with many failing runs makes a long reason, and Dispatch refuses a message over its
-// cap on every attempt (LEGION-800 review). The READY's withdrawal posted on the issue is cut to fit
-// one message, saying so, while the implementer's task, which no cap bounds, carries every run.
-func TestAWithdrawalOfAMergeTheQueueFailedFitsOneDispatchMessage(t *testing.T) {
+// A merge group with many failing runs makes a long reason. Dispatch bounds a message block by
+// block, and the withdrawal is one paragraph of its own, so the READY's withdrawal posted on the
+// issue carries every failing run whole, as the implementer's task does.
+func TestAWithdrawalOfAMergeTheQueueFailedCarriesEveryFailingRun(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket})
-	// Failing runs until the reason alone is a tenth past record.MessagePostLimit, so the
-	// withdrawal is still cut whatever that constant is: a fixed count stops overrunning the cap
-	// the next time it moves, as the 40 runs written against 1,956 did when INFRA-45 took Dispatch's
-	// body cap to 32,000 and the limit derived from it to 31,956.
 	const failed = "the merge queue took pull request #42 out at READY's head head at 2026-10-16T05:10:00Z (failed_checks): its merge_group run on group-sha, the commit the queue built for it, failed: "
 	var runs []string
-	reason := failed
-	for dispatch.MessageBodyLength(reason) <= record.MessagePostLimit+record.MessagePostLimit/10 {
-		runs = append(runs, fmt.Sprintf("integration-shard-%03d (failure, https://github.com/sjawhar/legion/actions/runs/700000%03d)", len(runs), len(runs)))
-		reason = failed + strings.Join(runs, "; ")
+	for i := range 400 {
+		runs = append(runs, fmt.Sprintf("integration-shard-%03d (failure, https://github.com/sjawhar/legion/actions/runs/700000%03d)", i, i))
 	}
+	reason := failed + strings.Join(runs, "; ")
 	applyRefusingNothing(t, pool, readyEngine(""), intake.MergeFailed{Issue: "LEGION-208", Number: 42, Head: "head", Reason: reason})
 	var body string
 	if err := pool.QueryRow(context.Background(), "select payload->>'body' from outbox where kind = 'dispatch_message'").Scan(&body); err != nil {
 		t.Fatalf("read the withdrawal: %v", err)
 	}
-	if length := dispatch.MessageBodyLength(body); length > record.MessagePostLimit || !strings.HasPrefix(body, "READY withdrawn for LEGION-208") || !strings.Contains(body, "cut to fit") {
-		t.Fatalf("withdrawal of %d characters (limit %d) %q, want it within one message, saying it was cut", length, record.MessagePostLimit, body)
+	if !strings.HasPrefix(body, "READY withdrawn for LEGION-208") || !strings.Contains(body, runs[len(runs)-1]) || strings.Contains(body, "cut to fit") {
+		t.Fatalf("withdrawal of %d characters %q, want it whole with every failing run", len(body), body)
 	}
 	if task := startTask(t, pool, claim.RoleImplementer); !strings.Contains(task, runs[len(runs)-1]) {
 		t.Fatalf("the implementer's task %q, want every failing run in it", task)
@@ -677,7 +672,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			var got phase.Phase
 			var starts, rounds, told int
 			if err := pool.QueryRow(t.Context(), `select phase,
-				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start'),
+				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''),
 				(select rounds from phases where issue = 'LEGION-209' and role = 'implementer'),
 				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice', 'controller_notice'))
 				from issues where key = 'LEGION-209'`).Scan(&got, &starts, &rounds, &told); err != nil || got != tc.at || starts != 0 || rounds != 2 || told != 0 {
@@ -710,7 +705,8 @@ func TestAnApprovalOfTheOldRootsDocumentReleasesACarriedChildsREADY(t *testing.T
 	if err != nil || refusalCode(result) != "DESIGN_GATE_CLOSED" {
 		t.Fatalf("carried READY = %#v, %v; want the closed copy's refusal", result, err)
 	}
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2}, engine, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2,
+		Actor: dispatch.Actor{Kind: "user", ID: "alice"}}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact approval: %v", err)
 	}
 	var got string
@@ -727,7 +723,7 @@ func TestAnApprovalOfTheOldRootsDocumentReleasesACarriedChildsREADY(t *testing.T
 		}
 	}
 	var notices []string
-	rows, err := pool.Query(ctx, `select issue || ' ' || (payload->>'kind') from outbox where kind = 'notice'
+	rows, err := pool.Query(ctx, `select issue || ' ' || (payload->>'kind') || ' ' || (payload->>'actor') || ' ' || (payload->>'ref') from outbox where kind = 'notice'
 		and payload->>'kind' in ('design-approved', 'carried-gate-opened') order by id`)
 	if err != nil {
 		t.Fatalf("read notices: %v", err)
@@ -740,7 +736,7 @@ func TestAnApprovalOfTheOldRootsDocumentReleasesACarriedChildsREADY(t *testing.T
 		}
 		notices = append(notices, notice)
 	}
-	if want := []string{"LEGION-208 design-approved", "LEGION-209 carried-gate-opened"}; !slices.Equal(notices, want) {
+	if want := []string{"LEGION-208 design-approved user:alice dispatch://LEGION-208/spec", "LEGION-209 carried-gate-opened user:alice dispatch://LEGION-208/spec"}; !slices.Equal(notices, want) {
 		t.Fatalf("notices = %v, want %v", notices, want)
 	}
 }
@@ -749,7 +745,8 @@ func TestAnApprovalOfTheOldRootsDocumentReleasesACarriedChildsREADY(t *testing.T
 // design it carries, and the old document belongs to another tree now. After the carry, a new
 // version of the old document, a changes request on it, or an approval of an older version leaves
 // an open copy open, tells the carried architect nothing, and its merger's READY goes through, while
-// the old root's own gate takes every event as before.
+// the old root's own gate takes the version and the changes request as before, and, like every
+// gate, no review of a version below its latest (applyArtifact).
 func TestTheOldRootsDocumentChangingAfterTheCarryLeavesAnOpenCopyOpen(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -771,8 +768,8 @@ func TestTheOldRootsDocumentChangingAfterTheCarryLeavesAnOpenCopyOpen(t *testing
 		}
 	}
 	var latest, approved int
-	if err := pool.QueryRow(ctx, "select latest_version, coalesce(approved_version, 0) from design_gates where issue = 'LEGION-208'").Scan(&latest, &approved); err != nil || latest != 3 || approved != 1 {
-		t.Fatalf("old root's gate = latest %d, approved %d, %v; want every event applied (latest 3, approved 1)", latest, approved, err)
+	if err := pool.QueryRow(ctx, "select latest_version, coalesce(approved_version, 0) from design_gates where issue = 'LEGION-208'").Scan(&latest, &approved); err != nil || latest != 3 || approved != 0 {
+		t.Fatalf("old root's gate = latest %d, approved %d, %v; want version 3 closed by its changes request and the older approval ignored", latest, approved, err)
 	}
 	var notices int
 	if err := pool.QueryRow(ctx, "select count(*) from outbox where kind = 'notice' and issue = 'LEGION-209'").Scan(&notices); err != nil || notices != 0 {
@@ -798,11 +795,19 @@ func refusalCode(result intake.Result) string {
 }
 
 func readyEngine(mergeQueue string) *Engine {
+	return readyEngineAt(mergeQueue, time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC))
+}
+
+// readyEngineAt is readyEngine with its clock at now.
+func readyEngineAt(mergeQueue string, now time.Time) *Engine {
 	return New(record.NewStore(), Config{
 		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
-		Clock: func() time.Time { return time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC) },
+		Clock: func() time.Time { return now },
 	}, nil)
 }
+
+// heldRedLapses is readyEngine's clock once a red it held while a head waited has lapsed (redHold).
+var heldRedLapses = time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC).Add(redHold + time.Second)
 
 // applyFacts applies each fact to pool through engine, failing the test on an error, and returns
 // the fact's result.

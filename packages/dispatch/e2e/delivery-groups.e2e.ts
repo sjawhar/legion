@@ -39,11 +39,19 @@ test("grouping two sessions makes them one Parent agent", async ({ browser }) =>
   await page.getByRole("button", { name: "Edit groups" }).click();
   const editor = page.getByRole("dialog", { name: "Session groups" });
 
-  await editor.getByRole("checkbox", { name: "Planner, first run (e2e-planner-1)" }).check();
-  await editor.getByRole("checkbox", { name: "Planner, second run (e2e-planner-2)" }).check();
+  // Each session is an agent: its checkbox's label keeps the name, its live link sits beside it.
+  await editor.getByRole("checkbox", { name: "Planner, first run", exact: true }).check();
+  await editor.getByRole("checkbox", { name: "Planner, second run", exact: true }).check();
+  await expect(
+    editor.getByRole("link", { name: "Open live conversation with Planner, first run" })
+  ).toHaveAttribute("href", "/agents/e2e-planner-1/live");
   await editor.getByLabel("New group name").fill("Release crew");
   await editor.getByRole("button", { name: "Create group" }).click();
-  await expect(editor.getByRole("group", { name: "Release crew" })).toBeVisible();
+  const group = editor.getByRole("group", { name: "Release crew" });
+  await expect(group).toBeVisible();
+  await expect(
+    group.getByRole("link", { name: "Planner, second run", exact: true })
+  ).toHaveAttribute("href", "/agents/e2e-planner-2/live");
   await editor.getByRole("button", { name: "Close session groups" }).click();
 
   await expect

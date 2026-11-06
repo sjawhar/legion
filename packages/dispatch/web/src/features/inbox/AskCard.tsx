@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 
-import { type ArtifactOwner, api } from "../../api/client";
+import { type ArtifactOwner, api, type WriteBounds } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
@@ -39,7 +39,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
-import { actorLabel } from "../refs/actor";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
@@ -59,16 +59,20 @@ import { AskChoiceRow } from "./AskOptionRow";
 import { AskRecipients } from "./AskRecipients";
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
-import { askTurnLabel } from "./ask-turn";
+import { askTurnHolder } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
 import { EarlierApproval } from "./EarlierApproval";
 import { clearReplyDraft } from "./reply-drafts";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
-const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
+const answerAsk = (id: string, input: AnswerAskInput, bounds: WriteBounds): Promise<Ask> =>
+  api.answerAsk(id, input, bounds);
 const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
-const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
-  api.createComment(issueKey, input);
+const createReply = (
+  issueKey: string,
+  input: CreateCommentInput,
+  bounds: WriteBounds
+): Promise<Comment> => api.createComment(issueKey, input, bounds);
 
 export interface AskCardProps {
   artifactSlug?: string;
@@ -90,14 +94,18 @@ export interface AskCardProps {
    *  editor shows the question, and the block is the link's target, so the card renders only
    *  what the block lacks — who asked and when, the exchange, and the composer or the record. */
   frame?: AskFrame;
-  answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
+  answerAsk?: (id: string, input: AnswerAskInput, bounds: WriteBounds) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
   getAskThread?: (id: string) => Promise<AskRead>;
   /** Data the Inbox response already hydrated for the first card render. */
   initialThread?: AskRead;
   /** Timestamp of the Inbox snapshot that supplied initialThread. */
   initialThreadUpdatedAt?: number;
-  createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  createReply?: (
+    issueKey: string,
+    input: CreateCommentInput,
+    bounds: WriteBounds
+  ) => Promise<Comment>;
   /** Whether an approval ask's label also links its document and version. Default `true`: the
    *  Inbox, the drawer and the Conversation name it. The margin passes `false` — the reader is
    *  already on that document, so the link would point at the page under it. */
@@ -208,6 +216,7 @@ export function AskCard({
     submitGuard,
     threadQuery,
     trimmedAnswer,
+    unsentAnswer,
   } = useAskAnswerForm({
     answer,
     ask,
@@ -259,6 +268,21 @@ export function AskCard({
       answerFieldRef.current?.focus();
     }
   }, [reasonFieldShown]);
+  // Opening the disclosure is a move into the field it reveals, whoever opened it: the reader's
+  // own click, and the Inbox's Enter, which presses this same control (`Inbox.tsx`). The field
+  // is drawn by the render the press schedules, so the focus can only be this effect's - the
+  // opener runs before React has committed the box and would focus nothing. Only an open by the
+  // disclosure itself focuses, which is why the intent is recorded as the control is pressed: an
+  // option that opens the disclosure for its own words, and a change that seeds the note, leave
+  // the reader where they are.
+  const focusNoteOnOpen = useRef(false);
+  useEffect(() => {
+    if (!focusNoteOnOpen.current) return;
+    focusNoteOnOpen.current = false;
+    if (ownWordsOpen) {
+      answerFieldRef.current?.focus();
+    }
+  }, [ownWordsOpen]);
   // A control that disables itself under the reader's focus - Ask back while sending and once
   // its text is sent - would have the browser drop focus to the document body (in the Inbox, out
   // of the row, which then lets the row go) with nothing the card could act on afterwards; the
@@ -272,14 +296,21 @@ export function AskCard({
     }
   });
   const submitHintId = `${answerFieldId}-hint`;
-  const authorLabel = actorLabel(displayedAsk.author);
+  const agentText = useAgentText();
+  // The asker as its button's tooltip: a block ask the server indexed with no pending author
+  // has an empty label and reads as "asked". A session's tooltip also carries its full id, since
+  // the innermost title is the one a browser shows, and an untitled session's name is the short
+  // form `session:<8>…` that sessions started in the same minute share.
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
+  const askerTitle =
+    displayedAsk.author.id === ""
+      ? "asked"
+      : sessionAuthor === undefined
+        ? agentText.label(displayedAsk.author)
+        : `${agentText.label(sessionAuthor)} · ${sessionAuthor.id}`;
+  // The copy handles' values: the title the session stamped, as the clipboard has always had it.
   const sessionTitle = sessionAuthor?.origin?.session_title?.trim();
   const tmuxTarget = sessionAuthor?.origin?.tmux;
-  const handleCount =
-    (sessionAuthor === undefined ? 0 : 1) +
-    (sessionTitle === undefined || sessionTitle === "" ? 0 : 1) +
-    (tmuxTarget === undefined ? 0 : 1);
   const hasUrgencyNotch =
     !inBlock && (displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high");
   // The thread's own "still open?" wording must track the post-answer ask, not the possibly
@@ -294,7 +325,7 @@ export function AskCard({
   // The count comes from `displayedAsk`, never from `completed`: answering an ask does not move
   // a backlink count, and the answer response is the one ask shape that carries no count.
   const referencedByCount = displayedAsk.referenced_by_count ?? 0;
-  const turnLabel = askTurnLabel(currentAsk, threadQuery.data?.replies.at(-1));
+  const turnHolder = askTurnHolder(currentAsk, threadQuery.data?.replies.at(-1));
   // The thread's newest write the card shows, which the Replies mark watches and reads through:
   // the newest reply, unless the record's answer came after it (an answer is a write like a reply).
   const newestReply = threadQuery.data?.replies.at(-1);
@@ -468,6 +499,20 @@ export function AskCard({
           markRef={answerIsNewest ? markNewest : undefined}
           onChangeAnswer={canChangeAnswer ? startChanging : undefined}
         />
+        {unsentAnswer === "" ? null : (
+          <div
+            className={`mt-3 rounded-xl border p-3 ${borderDefault}`}
+            data-testid="ask-unsent-answer"
+          >
+            <p className={`text-xs ${textMutedOnSurface}`}>
+              This question closed before you sent your answer, so it was not sent. Your text is
+              here to copy.
+            </p>
+            <p className={`mt-1 text-sm whitespace-pre-wrap ${textPrimaryOnSurface}`}>
+              {unsentAnswer}
+            </p>
+          </div>
+        )}
         {answerFailure === null ? null : <QueryError message={answerFailure.message} />}
         {referencedByNode}
         {threadNode}
@@ -483,10 +528,12 @@ export function AskCard({
           ? "relative mt-3"
           : `relative rounded-xl border-l-4 shadow-sm ${isCompact ? "px-3 pt-4 pb-3" : "px-4 pt-5 pb-4"} ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${askUrgencyAccent[displayedAsk.urgency]}`
       }
-      // The one handle on a card as a whole: a page-level key that must not fire while the reader
-      // is answering an ask (the issue page's priority digits, beside this card's own options)
-      // asks for it by name rather than matching a test id.
-      data-ask-card=""
+      // The one handle on a card as a whole, carrying the question the card draws: a page-level
+      // key that must not fire while the reader is answering an ask (the issue page's priority
+      // digits, beside this card's own options) matches the bare attribute, and the Inbox's
+      // answer keys find the selected question's own card by its value (`answerHand` in
+      // `Inbox.tsx`). Neither asks for a test id.
+      data-ask-card={displayedAsk.id}
       data-testid={`ask-${displayedAsk.id}`}
     >
       {hasUrgencyNotch ? (
@@ -537,50 +584,66 @@ export function AskCard({
             280 px margin, where a single row could not hold five copy controls without pushing
             the reference out of reach. */}
         <div
-          className={`mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
+          className={`@container mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
         >
-          {/* Turn, author and time are one unwrapped group whose author truncates: a separator
-              that wrapped left a line opening - or ending - on a bare "·", and the author is the
-              only part of the three that can give up width. A block ask the server indexed with
-              no pending author has an empty label and still says when it was asked. */}
-          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap">
-            {turnLabel === null ? null : (
+          {/* Turn, author and time are one group whose names truncate: a separator that wrapped
+              left a line opening - or ending - on a bare "·", and the agents are the only parts
+              that can give up width ("Waiting on you" never does). Below 24rem of line (a phone,
+              a margin) the turn takes a line of its own with no separator after it, and the
+              asker and time share the next: beside the turn and the live link's 44 px touch box
+              the asker's name kept only two letters. A block ask the server indexed with no
+              pending author has an empty label and still says when it was asked. */}
+          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap @max-sm:flex-wrap">
+            {turnHolder === null ? null : (
               <span
-                className={`shrink-0 font-semibold ${textSecondaryOnSurface}`}
+                className={`${turnHolder === "you" ? "shrink-0" : "min-w-0 truncate"} font-semibold @max-sm:basis-full ${textSecondaryOnSurface}`}
                 data-testid={`turn-${displayedAsk.id}`}
               >
-                {turnLabel}
+                Waiting on {turnHolder === "you" ? "you" : <AgentName actor={turnHolder} inline />}
               </span>
             )}
-            {turnLabel === null ? null : (
-              <span className="shrink-0" aria-hidden="true">
+            {turnHolder === null ? null : (
+              <span className="shrink-0 @max-sm:hidden" aria-hidden="true">
                 ·
               </span>
             )}
-            {handleCount === 0 ? (
-              <TruncatedText className="min-w-0" title={authorLabel === "" ? "asked" : authorLabel}>
-                {authorLabel === "" ? "asked" : authorLabel}
-              </TruncatedText>
-            ) : (
-              <button
-                aria-expanded={handlesOpen}
-                className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
-                onClick={() => setHandlesOpen((open) => !open)}
-                type="button"
-              >
-                <TruncatedText
-                  className="min-w-0"
-                  title={authorLabel === "" ? "asked" : authorLabel}
-                >
-                  {authorLabel === "" ? "asked" : authorLabel}
+            <span className="flex min-w-0 items-center gap-x-1.5">
+              {sessionAuthor === undefined ? (
+                <TruncatedText className="min-w-0" title={askerTitle}>
+                  {displayedAsk.author.id === "" ? (
+                    "asked"
+                  ) : (
+                    <AgentName actor={displayedAsk.author} />
+                  )}
                 </TruncatedText>
-                <ChevronIcon expanded={handlesOpen} />
-              </button>
-            )}
-            <span className="shrink-0" aria-hidden="true">
-              ·
+              ) : (
+                // The asker's button keeps its name and opens the session's copy handles; the
+                // component's live link sits beside it, outside the button. `whitespace-pre`
+                // keeps the space before an attribution suffix, which a flex item would drop.
+                <AgentName
+                  actor={sessionAuthor}
+                  className="flex min-w-0 items-center whitespace-pre"
+                  control={(name) => (
+                    <button
+                      aria-expanded={handlesOpen}
+                      className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
+                      onClick={() => setHandlesOpen((open) => !open)}
+                      type="button"
+                    >
+                      <TruncatedText className="min-w-0" title={askerTitle}>
+                        {name}
+                      </TruncatedText>
+                      <ChevronIcon expanded={handlesOpen} />
+                    </button>
+                  )}
+                  kind="control"
+                />
+              )}
+              <span className="shrink-0" aria-hidden="true">
+                ·
+              </span>
+              <Timestamp at={displayedAsk.created_at} />
             </span>
-            <Timestamp at={displayedAsk.created_at} />
           </span>
           {reference === undefined ? null : <CopyRefButton route={reference} />}
           {!handlesOpen ? null : (
@@ -661,7 +724,15 @@ export function AskCard({
                 aria-controls={`${answerFieldId}-disclosure`}
                 aria-expanded={ownWordsOpen}
                 className={`min-h-11 text-sm font-medium ${textSecondaryOnSurface}`}
-                onClick={() => setOwnWordsOpen((open) => !open)}
+                // The Inbox's Enter opens this disclosure to reach the answer box behind it,
+                // and finds the control by this handle, as it finds the box by
+                // `data-ask-answer` and an option by `data-ask-option` (`Inbox.tsx`).
+                data-ask-note-disclosure=""
+                onClick={() => {
+                  // Opening it is a move into the field behind it; closing it moves nowhere.
+                  focusNoteOnOpen.current = !ownWordsOpen;
+                  setOwnWordsOpen(!ownWordsOpen);
+                }}
                 type="button"
               >
                 Add a note or answer in your own words
@@ -697,8 +768,12 @@ export function AskCard({
       </form>
       <AskRecipients
         askId={displayedAsk.id}
+        claimant={threadQuery.data?.claimant ?? null}
         followers={threadQuery.data?.followers ?? []}
         owner={displayedAsk}
+        route={threadQuery.data?.route ?? null}
+        routeHolder={threadQuery.data?.route_holder ?? null}
+        routeStatus={threadQuery.data?.route_status ?? null}
       />
     </article>
   );

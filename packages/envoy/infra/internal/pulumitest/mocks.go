@@ -17,11 +17,13 @@ import (
 	"github.com/sjawhar/envoy/infra/provider"
 )
 
-// Registration is one resource the mock engine was asked to register.
+// Registration is one resource the mock engine was asked to register or read. A registration has
+// RPC; a read has ReadRPC instead, and ID, the id it asked for.
 type Registration struct {
-	Type, Name string
-	Inputs     resource.PropertyMap
-	RPC        *pulumirpc.RegisterResourceRequest
+	Type, Name, ID string
+	Inputs         resource.PropertyMap
+	RPC            *pulumirpc.RegisterResourceRequest
+	ReadRPC        *pulumirpc.ReadResourceRequest
 }
 
 // Mocks is a mock engine, for pulumi.WithMocks and integration.WithMocks, that records every
@@ -34,6 +36,10 @@ type Mocks struct {
 	Computed func(args pulumi.MockResourceArgs) (id string, outputs resource.PropertyMap)
 	// CallResult, when not nil, answers an invoke as the resource provider would.
 	CallResult func(args pulumi.MockCallArgs) (resource.PropertyMap, error)
+	// Preview, when set, makes Run a preview (DryRun) and answers every registration as a preview
+	// of a create does: with no ID, so a resource's ID, and every output built on it, is unknown.
+	// A read keeps its ID, since what it reads exists.
+	Preview bool
 
 	mu         sync.Mutex
 	registered []Registration
@@ -43,7 +49,7 @@ func (m *Mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Prop
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registered = append(m.registered, Registration{
-		Type: args.TypeToken, Name: args.Name, Inputs: args.Inputs, RPC: args.RegisterRPC,
+		Type: args.TypeToken, Name: args.Name, ID: args.ID, Inputs: args.Inputs, RPC: args.RegisterRPC, ReadRPC: args.ReadRPC,
 	})
 	state := resource.PropertyMap{}
 	for k, v := range args.Inputs {
@@ -60,6 +66,9 @@ func (m *Mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Prop
 		for k, v := range outputs {
 			state[k] = v
 		}
+	}
+	if m.Preview && args.ReadRPC == nil {
+		id = ""
 	}
 	return id, state, nil
 }
@@ -121,16 +130,26 @@ func (m *Mocks) Types() []string {
 	return types
 }
 
-// Run runs program on m, as project "p" and stack "s", and returns its error.
+// Run runs program on m, as project "p" and stack "s", and returns its error. With Preview set it
+// runs the program as a preview.
 func (m *Mocks) Run(program pulumi.RunFunc) error {
-	return pulumi.RunErr(program, pulumi.WithMocks("p", "s", m))
+	opts := []pulumi.RunOption{pulumi.WithMocks("p", "s", m)}
+	if m.Preview {
+		opts = append(opts, func(info *pulumi.RunInfo) { info.DryRun = true })
+	}
+	return pulumi.RunErr(program, opts...)
 }
 
 // Construct serves the envoy-infra plugin in process with m behind it and constructs the
 // component of type typ named name, in project "p" and stack "s", from inputs with providers, as
 // a consumer's program does. It returns Construct's response and error.
+//
+// dependsOn is the ConstructRequest's Dependencies, the resources a consumer's pulumi.DependsOn
+// on the component itself names. It is variadic and last so that every caller that sends none
+// stays as it was written: an extra required parameter would touch each of them to say "nothing"
+// twice over, and a second function beside this one would duplicate the whole body for one field.
 func Construct(t testing.TB, m *Mocks, typ, name string, inputs map[string]property.Value, dryRun bool,
-	providers map[tokens.Package]p.ProviderReference,
+	providers map[tokens.Package]p.ProviderReference, dependsOn ...resource.URN,
 ) (p.ConstructResponse, error) {
 	t.Helper()
 	prov, err := provider.New()
@@ -143,10 +162,11 @@ func Construct(t testing.TB, m *Mocks, typ, name string, inputs map[string]prope
 		t.Fatalf("serve the plugin: %v", err)
 	}
 	return server.Construct(p.ConstructRequest{
-		Urn:       resource.NewURN("s", "p", "", tokens.Type(typ), name),
-		DryRun:    dryRun,
-		Inputs:    property.NewMap(inputs),
-		Providers: providers,
+		Urn:          resource.NewURN("s", "p", "", tokens.Type(typ), name),
+		DryRun:       dryRun,
+		Inputs:       property.NewMap(inputs),
+		Providers:    providers,
+		Dependencies: dependsOn,
 	})
 }
 

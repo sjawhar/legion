@@ -1,6 +1,7 @@
 import type { LegionRole } from "@legion/contracts"
 import type { LegionPhase } from "@legion/contracts/legion-api"
 import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client"
+import type { HandoffReport } from "@legion/pi-shared/handoff-record"
 import {
   type ClaimCapability,
   executePhaseOp,
@@ -21,7 +22,7 @@ export function legionToolDefinition() {
     name: LEGION_TOOL_NAME,
     description: legionToolDescription({
       envoyPublish: "mcp__legion__envoy_publish",
-      before: PHASE_OP_SENTENCES.readRecord,
+      before: PHASE_OP_SENTENCES.readRecord + PHASE_OP_SENTENCES.readReleaseRecords,
       after: PHASE_OP_SENTENCES.requestBackwardMove,
     }),
     inputSchema: z.toJSONSchema(z.object({ op: z.enum(PHASE_OPS), ...phaseOpParameters(z) })),
@@ -32,15 +33,22 @@ export interface LegionToolRuntime {
   readonly daemon: LegionDaemonClient
   /** The pane's registered claim, or undefined while its boot is still registering. */
   readonly claim: () => ClaimCapability | undefined
-  /** The commit a completion of `phase` by `role` reports (`findHandoffCommit` with the pane's
-   * environment): throws naming the remedy when the handoff is not committed and pushed. */
-  readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>
+  /** What a completion of `phase` by `role` reports beside its summary (`findHandoffReport` with
+   * the pane's environment and Dispatch): throws naming the remedy when the phase has no handoff
+   * record, Dispatch does not answer, or the implementer's work is not pushed. */
+  readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>
+  /** The head of `legion/<issue>@origin` a `ready_for_update` signal reports
+   * (`findPushedBranchHead` with the pane's environment): `""` when the branch is not there. */
+  readonly branchHead: () => Promise<string>
 }
 
-/** Runs one call of the `legion` tool and answers its JSON result; a refusal throws its reason. */
+/** Runs one call of the `legion` tool and answers its JSON result; a refusal throws its reason.
+ * `signal`, the MCP request's cancellation, ends a `handoff_complete` waiting out a daemon
+ * restart. */
 export async function executeLegionTool(
   runtime: LegionToolRuntime,
   input: unknown,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const claim = runtime.claim()
   if (claim === undefined) {
@@ -49,7 +57,13 @@ export async function executeLegionTool(
     )
   }
   return executePhaseOp(
-    { daemon: runtime.daemon, claim, handoffCommit: runtime.handoffCommit },
+    {
+      daemon: runtime.daemon,
+      claim,
+      handoffReport: runtime.handoffReport,
+      branchHead: runtime.branchHead,
+      ...(signal === undefined ? {} : { restart: { signal } }),
+    },
     input,
   )
 }

@@ -36,7 +36,7 @@ related_issues:
   pull request's `synchronize` in either order, so a code head's settlement comes to stand for the
   handoff head above it either when the push is classified after the head arrived
   (`classify.SettlementFor` through the push handler) or when the head arrives over a push already
-  known (`classify.AdvancePullRequestHead`, `keptPushes` through `pullRequestSynchronized`). Any
+  known (`classify.AdvancePullRequestHead`, `unspentPushes` through `pullRequestSynchronized`). Any
   rule over the carried state needs both handlers, and a phase gate on one of them (the push
   handler's `issue.Phase != phase.Reviewing`, which also gated the round's re-ask) hides the gap in
   the phase the acceptance test happens to exercise.

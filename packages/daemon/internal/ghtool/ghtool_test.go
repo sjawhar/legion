@@ -164,7 +164,7 @@ func newFixture(t *testing.T, agent Agent, b behaviour) *fixture {
 	f.host = Host{
 		GH: filepath.Join(f.stand, "gh"), Git: filepath.Join(root, "gitbin", "git"), Legion: filepath.Join(root, "legion"),
 		StateDir: filepath.Join(root, "state"), Calls: f.calls, Log: slog.New(slog.NewJSONHandler(f.logs, nil)), Now: time.Now,
-		Credential: appauth.GitHubCredential(f.tokens, func() []string { return []string{"acme", "Sjawhar"} }),
+		Credential: appauth.GitHubCredential(f.tokens, func() []string { return []string{"acme", "Sjawhar"} }, ghrepo.Renames{}),
 	}
 	answer, err := Open(context.Background(), f.host, agent, question)
 	if err != nil {
@@ -262,7 +262,7 @@ func TestOpenWritesTheAgentsBundleAsAPanesAndCloseRemovesIt(t *testing.T) {
 		tokens := &fakeTokens{}
 		host := Host{
 			GH: "/opt/gh/gh", Legion: "/opt/legion/legion", StateDir: stale, Calls: newFakeRecorder(), Log: slog.New(slog.DiscardHandler), Now: time.Now,
-			Credential: appauth.GitHubCredential(tokens, func() []string { return []string{"acme", "Sjawhar"} }),
+			Credential: appauth.GitHubCredential(tokens, func() []string { return []string{"acme", "Sjawhar"} }, ghrepo.Renames{}),
 		}
 		answer, err := Open(context.Background(), host, tc.agent, question)
 		if err != nil {

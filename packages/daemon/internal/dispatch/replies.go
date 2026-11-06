@@ -11,13 +11,6 @@ import (
 // delivery went to (packages/envoy/internal/dispatch/api message_delivery.go replyMessage,
 // comment_delivery.go replyComment), and an answer reads as the agent's.
 
-// Actor is a Dispatch writer as a read names it: a person ("user", their login) or an agent
-// ("session", its session id).
-type Actor struct {
-	Kind string `json:"kind"`
-	ID   string `json:"id"`
-}
-
 // Comment is a comment as an ask read lists it: its id, its author and its body.
 type Comment struct {
 	ID     string `json:"id"`

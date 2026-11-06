@@ -1,12 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api } from "../../api/client";
+import { threadReadRequest } from "../../api/client";
 import { myRepliesKey, myRepliesOwnerQuery } from "../../api/queries";
 import type { Ask } from "../../api/types";
 import { useIsHuman } from "../../hooks/useIsHuman";
-import { useSendMarkOnce } from "../../lib/useSendMarkOnce";
 import { type DwellRef, useDwell } from "../shell/useDwell";
+import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 
 /** The owner a thread lives on, as `GET /api/v1/me/replies` narrows to it: an issue, or a project
  *  document (an issue's documents are the issue's). */
@@ -56,7 +56,8 @@ export function useMarkThreadRead({
   threadId,
 }: MarkThreadReadOptions): DwellRef {
   const queryClient = useQueryClient();
-  // The routes are human-only; any other principal never asks, so never cycles on a 403.
+  // The routes need the `person` scope, which a signed-in browser holds, so the surface waits for
+  // the sign-in read before it asks and nothing without the scope cycles on a 403.
   const human = useIsHuman();
   const watching = enabled && human && owner !== undefined && newestShownAt !== undefined;
   const unreadSet = useQuery({ ...myRepliesOwnerQuery(owner ?? NO_OWNER), enabled: watching });
@@ -80,8 +81,9 @@ export function useMarkThreadRead({
         ? undefined
         : { key: `${threadId} ${seen.at}`, value: seen.at },
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: myRepliesKey }),
-    send: (readThrough: string) => api.markThreadRead(threadId, readThrough),
+    request: (readThrough: string) => threadReadRequest(threadId, readThrough),
     shouldSend: unread,
+    target: `read:thread:${threadId}`,
     wake: unreadSet.dataUpdatedAt,
   });
   return ref;

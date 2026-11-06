@@ -31,12 +31,14 @@ const autoMergeTimeout = 30 * time.Second
 // which replaces the payload on purpose (readyMergeConflict), resets the two together and they can
 // never disagree. Measured from created_at they would: the upsert leaves it at the original
 // queueing, so a reopen of an hours-old row would warn at once about a submission seconds old.
-// Measured on sjawhar/legion on 2026-10-23, main requires the checks lint, typecheck, test and
-// pr-title; over the last eight main heads those took test 12-16 minutes, lint 3-5, typecheck and
-// pr-title under a minute, and across the last 97 completed pull_request runs the median was 2.5
-// minutes and the 90th percentile 17, with one 82-minute outlier. An hour is above every required
-// check's observed maximum and above the 90th percentile of every run, so a row still waiting then
-// waits on something the repository's own checks will not end.
+// With the CI router (INFRA-520), main requires ci-ok, which waits for every job its change
+// selected, and pr-title. One of those jobs, the Playwright browser job (dispatch), takes a median
+// of 46 minutes and a 90th percentile of 50, plus queue time
+// (dispatch://INFRA-490/artifact/ci-router-measurement-2026-10-26-md). A merge that waits for it
+// can pass an hour, so readyMergeWaiting can fire on a merge its checks will still end. The hour
+// stays as one informational notice (the INFRA-490 architect's decision). It was first set when,
+// measured on 2026-10-23, main required lint, typecheck, test and pr-title, test took 12-16
+// minutes, and the 90th percentile of every pull_request run was 17.
 const mergeWaitWarn = time.Hour
 
 // autoMergeDisable disarms pull request payload.Number as the implement App, which submits READY's
@@ -259,17 +261,25 @@ func readyMergeWaiting(payload record.ReadyMerge, waited time.Duration, cause er
 }
 
 // graphQL is a GitHub GraphQL client carrying the implement App's token, the App that writes the
-// issue branch and submits or disarms its pull request's merge, minted for the owner of the
-// repository issue's record names, and that repository.
+// issue branch and submits or disarms its pull request's merge, and the repository GitHub holds
+// the one issue's record names under now (serving), which the token is minted for the owner of.
+// What a record's old name cannot do is carry a token: after a transfer the App installation that
+// covers the repository is the new owner's. The address is the served name as well, though GitHub
+// answers the old one too (measured: `GET /repos/twitter/bootstrap` answers 301 to
+// `/repositories/2126244`, and GraphQL's `repository(owner:"twitter",name:"bootstrap")` answers
+// `twbs/bootstrap`), because a write such as createBranch's POST should not depend on a redirect,
+// and because the submission and the disarm its callers make name the repository in their log
+// lines.
 func (r *outbox) graphQL(ctx context.Context, issue string) (githubrest.Client, ghrepo.Repository, error) {
 	recorded, err := r.issue(ctx, issue)
 	if err != nil {
 		return githubrest.Client{}, ghrepo.Repository{}, err
 	}
-	repo, err := recorded.Repository()
+	named, err := recorded.Repository()
 	if err != nil {
 		return githubrest.Client{}, ghrepo.Repository{}, err
 	}
+	repo := r.repositories.serving(named)
 	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
 	if err != nil {
 		return githubrest.Client{}, ghrepo.Repository{}, fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)

@@ -38,7 +38,9 @@
               "--provider-env-dir",
               "/var/run/legion/providers",
               "--role-references",
-              "{\"LEGION_PROMPT_AGENTS\":{\"oracle\":[\"roles/core/planner.md\"]},\"LEGION_PROMPT_SKILLS\":{}}"
+              "{\"LEGION_PROMPT_AGENTS\":{\"oracle\":[\"roles/core/planner.md\"]},\"LEGION_PROMPT_SKILLS\":{}}",
+              "--role-namespaces",
+              "/var/run/legion/role-probe"
             ],
             "env": [
               {
@@ -46,7 +48,7 @@
                 "value": "/var/run/legion/providers/OMP_SESSION_SQL_DSN"
               }
             ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "image": "ghcr.io/cybermonklabs/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "probe",
             "resources": {
               "limits": {
@@ -72,6 +74,10 @@
               }
             },
             "volumeMounts": [
+              {
+                "mountPath": "/var/run/legion/role-probe",
+                "name": "role-probe"
+              },
               {
                 "mountPath": "/var/run/legion/providers",
                 "name": "providers",
@@ -103,6 +109,10 @@
           }
         ],
         "volumes": [
+          {
+            "emptyDir": {},
+            "name": "role-probe"
+          },
           {
             "name": "providers",
             "secret": {

@@ -152,8 +152,8 @@ func (d *postingDispatch) ListIssues(context.Context, string, []string) ([]dispa
 func (d *postingDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
 	return dispatch.Issue{Key: key}, nil
 }
-func (d *postingDispatch) SetStatus(context.Context, string, string) error {
-	return errors.New("postingDispatch takes no status")
+func (d *postingDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, errors.New("postingDispatch takes no status")
 }
 func (d *postingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("postingDispatch takes no hand-over")
@@ -170,12 +170,21 @@ func (d *postingDispatch) PostMessage(_ context.Context, key, body string) error
 func (d *postingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *postingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
 func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *postingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *postingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 // postsTo is how many messages were posted on issue.
@@ -203,16 +212,16 @@ func (d *laneBoard) GetIssue(_ context.Context, key string) (dispatch.Issue, err
 	defer d.mu.Unlock()
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
-func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) error {
+func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.failures > 0 {
 		d.failures--
-		return errors.New("dispatch unavailable")
+		return dispatch.Issue{}, errors.New("dispatch unavailable")
 	}
 	d.status = status
 	d.landed = append(d.landed, status)
-	return nil
+	return dispatch.Issue{}, nil
 }
 func (d *laneBoard) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("laneBoard takes no hand-over")
@@ -221,13 +230,20 @@ func (d *laneBoard) PostMessage(context.Context, string, string) error { return 
 func (d *laneBoard) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *laneBoard) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
 func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *laneBoard) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *laneBoard) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // statuses is each status that landed, in order.
 func (d *laneBoard) statuses() []string {
@@ -371,7 +387,7 @@ func startLaneTree(t *testing.T, log *slog.Logger) *laneTree {
 			tree.provisions.Add(1)
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 	tree.records = wakingRecords(tree.runner)
 	runLanes(t, tree.runner, tree.clock, tree.spawn.gate.open)
@@ -436,6 +452,45 @@ func TestACommittedRowRunsOnItsLaneWithoutASweep(t *testing.T) {
 	testwait.Eventually(t, "the sweep ran the unwoken row", func() bool {
 		return client.postsTo("LEGION-209") == 1 && outboxRows(t, pool) == 0
 	})
+}
+
+// enqueuingByID writes rows with their ids, as workflow.EnqueueNaming writes a start or catch-up
+// that claims kept decisions.
+type enqueuingByID struct {
+	records record.Store
+	rows    []record.OutboxRow
+}
+
+func (h enqueuingByID) Apply(ctx context.Context, tx pgx.Tx, _ intake.Fact) (intake.Result, error) {
+	for _, row := range h.rows {
+		if _, err := h.records.EnqueueID(ctx, tx, row); err != nil {
+			return intake.Result{}, err
+		}
+	}
+	return intake.Result{}, nil
+}
+
+// A row written with its id through the workflow's store wakes its lane as it commits, as a row
+// written without one does: a catch-up that claims kept decisions (workflow.EnqueueNaming, the
+// hand-over's and the ready's) is published at once rather than after the next sweep.
+func TestARowWrittenWithItsIDRunsOnItsLaneWithoutASweep(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	clock := microClock()
+	client := &postingDispatch{}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: client, log: quietLogger()}
+	runLanes(t, runner, clock)
+
+	row := mustOutboxRow(t, "LEGION-208", record.MessagePost{Body: "committed with its id"}, clock.Now())
+	if _, err := intake.ApplyFact(context.Background(), pool, "lanes-test", "by-id", intake.DaemonBooted{Boot: 1},
+		enqueuingByID{records: wakingRecords(runner), rows: []record.OutboxRow{row}}); err != nil {
+		t.Fatalf("commit the row: %v", err)
+	}
+	testwait.Eventually(t, "the row written with its id was posted", func() bool {
+		return client.postsTo("LEGION-208") == 1 && outboxRowsOf(t, pool, "LEGION-208") == 0
+	})
+	if _, sweeps := clock.armed(outboxLease); sweeps != 1 {
+		t.Fatalf("sweep timers armed = %d, want the one Run armed at boot and never fired", sweeps)
+	}
 }
 
 // A row due later runs at its moment and not before: the commit wakes its lane, which finds

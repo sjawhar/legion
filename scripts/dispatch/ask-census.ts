@@ -22,7 +22,7 @@ export const ISSUE_CONCURRENCY = 8;
 
 type Code = (typeof CODES)[number];
 
-type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token">;
+type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "credential">;
 
 /** The fields of an ask the census reads. */
 export type CensusAsk = Pick<
@@ -50,7 +50,9 @@ export interface CensusEvent {
   readonly payload: {
     /** The ask an `ask.*` event carries. */
     readonly id?: Ask["id"];
-    readonly kind?: Ask["kind"];
+    /** The ask kind an `ask.*` event carries, or the review kind an `artifact.*` event does:
+     *  one field, two vocabularies, of which the census reads `"approval"` alone. */
+    readonly kind?: Ask["kind"] | ArtifactReviewEventPayload["kind"];
     /** The ask a comment replied to or a review answered. */
     readonly ask_id?: ArtifactReviewEventPayload["ask_id"];
     readonly approval?: RecordedApproval;
@@ -92,6 +94,11 @@ export interface CensusOptions {
   readonly codesPath?: string;
 }
 
+/** What a run takes: the census's own options, and how it prints them. */
+interface RunOptions extends CensusOptions {
+  readonly json: boolean;
+}
+
 interface MutableApprovalRound {
   /** Where in the events the round's first approval event stands. */
   readonly start: number;
@@ -108,6 +115,27 @@ export interface IssueCensus {
   readonly issueRow: (AskSummary & { issue: string }) | undefined;
   readonly approvalRounds: Array<ApprovalRound & { issue: string }>;
   readonly standaloneQuestions: Array<CensusAsk & { issue: string }>;
+}
+
+/** One standalone question ask, as both output modes carry it. */
+interface QuestionRow {
+  readonly issue: string;
+  readonly ask: string;
+  readonly code: Code | "";
+  readonly question: string;
+}
+
+/** Every number one run counts, as both output modes print them, so neither can report a count
+ * the other does not. */
+export interface CensusReport {
+  readonly totals: AskSummary;
+  readonly issues: readonly (AskSummary & { issue: string })[];
+  readonly approvalRounds: readonly (ApprovalRound & { issue: string })[];
+  readonly standaloneQuestions: readonly QuestionRow[];
+  readonly codingTotals: Record<Code | "uncoded", number>;
+  /** The excluded sessions' asks, left out of every count above. */
+  readonly droppedAsks: number;
+  readonly sessions: readonly SessionSummary[];
 }
 
 function date(value: string, name: string): number {
@@ -327,7 +355,7 @@ export function parseCodes(source: string): Record<string, Code> {
   return parsed;
 }
 
-function parseArguments(argv: readonly string[]): CensusOptions {
+function parseArguments(argv: readonly string[]): RunOptions {
   const { values } = parseArgs({
     args: [...argv],
     options: {
@@ -336,6 +364,7 @@ function parseArguments(argv: readonly string[]): CensusOptions {
       project: { type: "string", multiple: true },
       "exclude-session": { type: "string", multiple: true },
       codes: { type: "string" },
+      json: { type: "boolean" },
     },
     strict: true,
   });
@@ -353,13 +382,17 @@ function parseArguments(argv: readonly string[]): CensusOptions {
     to,
     projects,
     excludedSessionIds,
+    json: values.json === true,
     ...(codesPath === undefined ? {} : { codesPath }),
   };
 }
 
 async function get<T>(config: DispatchConfig, path: string): Promise<T> {
-  const response = await fetch(`${config.url}${path}`, {
-    headers: { Authorization: `Bearer ${config.token}` },
+  const url = `${config.url}${path}`;
+  // The bearer, or the access token this machine traded its own identity for, with the proof
+  // that goes with it: this read goes around DispatchClient, so it presents the credential itself.
+  const response = await fetch(url, {
+    headers: await config.credential.headers("GET", url),
   });
   if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${await response.text()}`);
   return (await response.json()) as T;
@@ -398,7 +431,7 @@ async function censusIssue(
   const toTime = date(options.to, "to");
   // A client's deadline (DISPATCH_TOOL_DEADLINE_MS) runs from its construction, so each issue's
   // reads get one of their own, never what is left of the whole run's.
-  const client = new DispatchClient(config.url, config.token);
+  const client = new DispatchClient(config.url, config.credential);
   const issueAsks = await client.listIssueAsks(issue);
   const windowAsks = filterAsksInWindow(issueAsks, options.from, options.to);
   const asks = excludeSessionAsks(windowAsks, options.excludedSessionIds);
@@ -447,7 +480,64 @@ export async function censusIssues(
   return census;
 }
 
-async function run(options: CensusOptions): Promise<void> {
+/** Every table's numbers, counted once, so the text and the JSON mode print the same run. */
+export function censusReport(
+  census: readonly IssueCensus[],
+  codes: Readonly<Record<string, Code>>,
+  excludedSessionIds: ReadonlySet<string>
+): CensusReport {
+  const questions = census
+    .flatMap((issue) => issue.standaloneQuestions)
+    .sort((left, right) => left.created_at.localeCompare(right.created_at));
+  const sessions = summarizeSessions(
+    census.flatMap((issue) => issue.windowAsks),
+    excludedSessionIds
+  );
+  return {
+    totals: summarizeAsks(census.flatMap((issue) => issue.asks)),
+    issues: census
+      .flatMap((issue) => (issue.issueRow === undefined ? [] : [issue.issueRow]))
+      .sort((left, right) => right.asks - left.asks || left.issue.localeCompare(right.issue)),
+    approvalRounds: census.flatMap((issue) => issue.approvalRounds),
+    standaloneQuestions: questions.map((ask) => ({
+      issue: ask.issue,
+      ask: ask.id,
+      code: codes[ask.id] ?? "",
+      question: printable(ask.question),
+    })),
+    codingTotals: applyCodes(questions, codes),
+    droppedAsks: sessions.dropped,
+    sessions: sessions.sessions.map((session) => ({
+      ...session,
+      sessionId: printable(session.sessionId),
+      machine: printable(session.machine),
+      title: printable(session.title),
+    })),
+  };
+}
+
+function printCensus(report: CensusReport): void {
+  console.log("Ask totals");
+  console.table([report.totals]);
+  console.log("Issue counts");
+  console.table(report.issues);
+  console.log("Approval rounds");
+  console.table(report.approvalRounds);
+  console.log("Standalone question asks");
+  console.table(report.standaloneQuestions);
+  console.log("Coding totals");
+  console.table([report.codingTotals]);
+  console.log(`Excluded asks from old-plugin sessions: ${report.droppedAsks}`);
+  console.log("Sessions");
+  console.table(report.sessions);
+  const flagged = report.approvalRounds.filter((round) => round.exceedsHumanTurnBudget);
+  if (flagged.length > 0) {
+    console.log("Approval rounds above the human-turn budget");
+    console.table(flagged);
+  }
+}
+
+async function run(options: RunOptions): Promise<void> {
   const { dispatch: resolution, warnings } = sessionDispatchSettings(
     sessionConfigFile("command", process.env),
     process.env,
@@ -484,53 +574,10 @@ async function run(options: CensusOptions): Promise<void> {
     projectIssues.flat().map((issue) => issue.key),
     options
   );
-  const issueRows = census.flatMap((issue) =>
-    issue.issueRow === undefined ? [] : [issue.issueRow]
-  );
-  const approvalRounds = census.flatMap((issue) => issue.approvalRounds);
-  const standaloneQuestions = census.flatMap((issue) => issue.standaloneQuestions);
-
-  const totals = summarizeAsks(census.flatMap((issue) => issue.asks));
-  const sessions = summarizeSessions(
-    census.flatMap((issue) => issue.windowAsks),
-    options.excludedSessionIds
-  );
-  console.log("Ask totals");
-  console.table([totals]);
-  console.log("Issue counts");
-  console.table(
-    issueRows.sort((left, right) => right.asks - left.asks || left.issue.localeCompare(right.issue))
-  );
-  console.log("Approval rounds");
-  console.table(approvalRounds);
-  console.log("Standalone question asks");
-  console.table(
-    standaloneQuestions
-      .sort((left, right) => left.created_at.localeCompare(right.created_at))
-      .map((ask) => ({
-        issue: ask.issue,
-        ask: ask.id,
-        code: codes[ask.id] ?? "",
-        question: printable(ask.question),
-      }))
-  );
-  console.log("Coding totals");
-  console.table([applyCodes(standaloneQuestions, codes)]);
-  console.log(`Excluded asks from old-plugin sessions: ${sessions.dropped}`);
-  console.log("Sessions");
-  console.table(
-    sessions.sessions.map((session) => ({
-      ...session,
-      sessionId: printable(session.sessionId),
-      machine: printable(session.machine),
-      title: printable(session.title),
-    }))
-  );
-  const flagged = approvalRounds.filter((round) => round.exceedsHumanTurnBudget);
-  if (flagged.length > 0) {
-    console.log("Approval rounds above the human-turn budget");
-    console.table(flagged);
-  }
+  const report = censusReport(census, codes, options.excludedSessionIds);
+  // One object and nothing else on stdout under --json, so a program can read the whole of it.
+  if (options.json) console.log(JSON.stringify(report));
+  else printCensus(report);
 }
 
 if (import.meta.main) await run(parseArguments(Bun.argv.slice(2)));

@@ -12,10 +12,15 @@ import (
 
 // countingEmbedder answers errs in order (one per call, the last repeats once exhausted) and
 // records how many times Embed was called and when each call happened, so a test can assert on
-// both the limiter's pacing and its AIMD adjustment without a real Bedrock call.
+// both the limiter's pacing and its AIMD adjustment without a real model-service call.
 type countingEmbedder struct {
 	errs  []error
 	calls []time.Time
+}
+
+func (c *countingEmbedder) Identity() string { return "counting" }
+func (c *countingEmbedder) Limits() Limits {
+	return Limits{MaxBatchTexts: 3, BackgroundTokensPerMinute: 7}
 }
 
 func (c *countingEmbedder) Embed(_ context.Context, texts []string, _ InputType) ([][]float32, error) {
@@ -116,7 +121,7 @@ func TestRateLimitedEmbedderNeverBacksOffPastTheCeiling(t *testing.T) {
 // cmd/dispatch's wiring: a live search request holds a direct, unwrapped reference to the same
 // underlying Embedder embedqueue's RateLimitedEmbedder wraps, so it is never paced by this
 // limiter at all, however deep into backoff the wrapped side currently is - this is what "a
-// query never waits behind backfill/write-queue work" means at the type level, not something
+// query never waits behind background embedding work" means at the type level, not something
 // RateLimitedEmbedder itself has to coordinate.
 func TestRateLimitedEmbedderNeverGatesAnUnwrappedSiblingCall(t *testing.T) {
 	inner := &countingEmbedder{}
@@ -134,6 +139,18 @@ func TestRateLimitedEmbedderNeverGatesAnUnwrappedSiblingCall(t *testing.T) {
 		t.Errorf("unwrapped call took %v, want near-instant - it must never wait on limiter.interval", elapsed)
 	}
 	_ = limiter // the limiter exists only to prove it is irrelevant to the call above
+}
+
+// TestRateLimitedEmbedderForwardsIdentityAndLimits proves pacing never hides which embedder
+// actually embeds: the wrapper reports the inner one's identity and numbers, not its own.
+func TestRateLimitedEmbedderForwardsIdentityAndLimits(t *testing.T) {
+	limiter := NewRateLimitedEmbedder(&countingEmbedder{})
+	if got := limiter.Identity(); got != "counting" {
+		t.Errorf("Identity() = %q, want the inner embedder's %q", got, "counting")
+	}
+	if got, want := limiter.Limits(), (Limits{MaxBatchTexts: 3, BackgroundTokensPerMinute: 7}); got != want {
+		t.Errorf("Limits() = %+v, want the inner embedder's %+v", got, want)
+	}
 }
 
 func TestRateLimitedEmbedderStopsWaitingWhenContextEnds(t *testing.T) {

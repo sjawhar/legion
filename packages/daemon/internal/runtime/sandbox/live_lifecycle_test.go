@@ -13,7 +13,6 @@ import (
 	"math"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,7 +66,7 @@ func (r *liveRig) checkRootReady() error {
 	if string(pod.UID) != loc.Sandbox.PodUID {
 		return fmt.Errorf("pod %s is uid %s, the launch returned pod uid %s in %s", name, pod.UID, loc.Sandbox.PodUID, loc.Incarnation)
 	}
-	note("runtime", "Sandbox %s Ready=True; pod uid %s and role container %s form returned incarnation %s", name, pod.UID, loc.Sandbox.Container, loc.Incarnation)
+	note("runtime", "Sandbox %s Ready=True; pod uid %s, container %s and generation form returned incarnation %s", name, pod.UID, loc.Sandbox.Container, loc.Incarnation)
 	log, err := r.initLog(name)
 	if err != nil {
 		return err
@@ -98,7 +97,7 @@ func (r *liveRig) checkGVisor() error {
 	if err := r.ensureRunning(root); err != nil {
 		return err
 	}
-	kernel, err := r.exec(root, "uname", "-r")
+	kernel, err := r.execPod(root, "uname", "-r")
 	if err != nil {
 		return err
 	}
@@ -129,26 +128,18 @@ func (r *liveRig) checkGVisor() error {
 }
 
 // resources: every container of the root's pod, its init containers included, reserves cpu and
-// memory with the request equal to the limit and equal to what the rig configured for the
-// container's role (liveResources: some roles from liveOverrides, the rest from
-// config.DefaultResources(), and the root pod carries both), so the pod is Guaranteed; carries the
-// ephemeral-storage limit and request configured for it — the request under the limit for every
-// role except the tester, whose liveOverrides sets both explicitly and equal. On GKE the admitted
-// limit is the request, not whatever higher limit was configured, for every role where the two
-// differ (gkeEphemeralStorageClamped's and liveResources' own doc comments have the live evidence
-// and the capacity gap this clamp stands in for); checkResources asserts that admitted reality,
-// not the originally-configured bound, there. And carries no affinity but GKE Autopilot's own
-// extended-duration one (isGKEExtendedDurationAffinity's doc comment) under
-// LEGION_E2E_PLATFORM=gke-autopilot. The init containers take the reservation of the role whose
-// launch created the pod (issuePod.initContainers): the root's own Spawn at root-ready, which no
-// later launch of the issue replaces. Inside the pod, gVisor sizes the sandbox from the pod's
-// cgroup, which the kubelet sets to the regular containers' summed limits once the init containers
-// are done (the pod's effective request is max(the largest init container, the sum of the
-// containers), and no init container's reservation exceeds the sum): nproc is max(2, ceil(Σ cpu
-// limits)) and /proc/meminfo's MemTotal is within 3% of Σ memory limits — except on GKE, where
-// nproc reflects gVisor's own host-vCPU presentation rather than the pod's own cgroup
-// (gvisorCPUFloor's doc comment), so the cgroup's own cpu.cfs_quota_us/cpu.cfs_period_us are read
-// directly there instead, confirmed live to track the configured sum exactly.
+// memory with the request equal to the limit and equal to the issue pod's reservation the rig
+// configured (liveResources: liveIssueOverride over config.DefaultResources()), so the pod is
+// Guaranteed; carries the ephemeral-storage limit and request configured for it, equal, so GKE's
+// clamp of a limit to its request changes nothing (gkeEphemeralStorageClamped). And carries no
+// affinity but GKE Autopilot's own extended-duration one (isGKEExtendedDurationAffinity's doc
+// comment) under LEGION_E2E_PLATFORM=gke-autopilot. Inside the pod, gVisor sizes the sandbox from
+// the pod's cgroup, which the kubelet sets to the one container's limits once the init containers
+// are done: nproc is max(2, ceil(cpu limit)) and /proc/meminfo's MemTotal is within 3% of the
+// memory limit — except on GKE, where nproc reflects gVisor's own host-vCPU presentation rather
+// than the pod's own cgroup (gvisorCPUFloor's doc comment), so the cgroup's own
+// cpu.cfs_quota_us/cpu.cfs_period_us are read directly there instead, confirmed live to track the
+// configured limit exactly.
 func (r *liveRig) checkResources() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -159,47 +150,27 @@ func (r *liveRig) checkResources() error {
 	if err != nil {
 		return err
 	}
-	want := r.liveResources()
-	byContainer := make(map[string]corev1.ResourceRequirements, len(pod.Spec.Containers))
-	for _, c := range pod.Spec.Containers {
-		byContainer[c.Name] = want[claim.Role(c.Name)]
-	}
-	init := want[root.role]
-	if err := guaranteedPod(pod, byContainer, &init, resource.Quantity{}, r.gkeEphemeralStorageClamped(), r.gke()); err != nil {
+	want := r.liveResources().Issue
+	byContainer := map[string]corev1.ResourceRequirements{runtime.IssuePodContainer: want}
+	if err := guaranteedPod(pod, byContainer, &want, resource.Quantity{}, r.gkeEphemeralStorageClamped(), r.gke()); err != nil {
 		return fmt.Errorf("pod %s: %w", name, err)
 	}
 	var cpuSum, memorySum resource.Quantity
-	overrides, defaults := 0, 0
-	for _, c := range pod.Spec.InitContainers {
-		note("runtime", "init container %s: cpu %s, memory %s, the %s's reservation, request = limit; ephemeral-storage %s under a limit of %s", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), root.role, c.Resources.Requests.StorageEphemeral().String(), c.Resources.Limits.StorageEphemeral().String())
+	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
+		note("runtime", "container %s: cpu %s, memory %s, request = limit; ephemeral-storage %s under a limit of %s, the issue pod's reservation", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), c.Resources.Requests.StorageEphemeral().String(), c.Resources.Limits.StorageEphemeral().String())
 	}
 	for _, c := range pod.Spec.Containers {
-		role := claim.Role(c.Name)
 		cpuSum.Add(*c.Resources.Limits.Cpu())
 		memorySum.Add(*c.Resources.Limits.Memory())
-		source := []string{}
-		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
-			if overridden(role, resourceName) {
-				overrides++
-				source = append(source, string(resourceName)+" overridden")
-			} else {
-				defaults++
-				source = append(source, string(resourceName)+" default")
-			}
-		}
-		note("runtime", "container %s: cpu %s, memory %s, request = limit; ephemeral-storage %s under a limit of %s (%s)", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), c.Resources.Requests.StorageEphemeral().String(), c.Resources.Limits.StorageEphemeral().String(), strings.Join(source, ", "))
 	}
-	if overrides == 0 || defaults == 0 {
-		return fmt.Errorf("the root pod's reservations come from %d overrides and %d defaults; the rig must configure both paths (liveOverrides)", overrides, defaults)
-	}
-	note("operator", "pod %s: qosClass %s, no affinity but GKE Autopilot's own extended-duration one under LEGION_E2E_PLATFORM=gke-autopilot; %d reservation fields from liveOverrides and %d from config.DefaultResources()", name, pod.Status.QOSClass, overrides, defaults)
+	note("operator", "pod %s: qosClass %s, no affinity but GKE Autopilot's own extended-duration one under LEGION_E2E_PLATFORM=gke-autopilot; one container carrying runtime.kubernetes.resources.issue", name, pod.Status.QOSClass)
 
 	wantCPUs := max(2, int(math.Ceil(cpuSum.AsApproximateFloat64())))
 	wantMemory := memorySum.AsApproximateFloat64()
 
 	var memTotalKB int64
 	checkMemory := func() error {
-		meminfo, err := r.exec(root, "sh", "-c", "grep '^MemTotal:' /proc/meminfo")
+		meminfo, err := r.execPod(root, "sh", "-c", "grep '^MemTotal:' /proc/meminfo")
 		if err != nil {
 			return err
 		}
@@ -231,11 +202,11 @@ func (r *liveRig) checkResources() error {
 		// 3.0 cores; 250000/100000 = 2.5 cores) and is the direct observable of what the runtime
 		// actually reserved, which is the check's real intent. AWS keeps nproc below; it is
 		// proven reliable there.
-		quotaOut, err := r.exec(root, "cat", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+		quotaOut, err := r.execPod(root, "cat", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
 		if err != nil {
 			return err
 		}
-		periodOut, err := r.exec(root, "cat", "/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+		periodOut, err := r.execPod(root, "cat", "/sys/fs/cgroup/cpu/cpu.cfs_period_us")
 		if err != nil {
 			return err
 		}
@@ -254,7 +225,7 @@ func (r *liveRig) checkResources() error {
 		if err := checkMemory(); err != nil {
 			return err
 		}
-		nprocOut, nprocErr := r.exec(root, "nproc")
+		nprocOut, nprocErr := r.execPod(root, "nproc")
 		if nprocErr != nil {
 			nprocOut = fmt.Sprintf("(exec failed: %v)", nprocErr)
 		}
@@ -263,7 +234,7 @@ func (r *liveRig) checkResources() error {
 		return nil
 	}
 
-	nprocOut, err := r.exec(root, "nproc")
+	nprocOut, err := r.execPod(root, "nproc")
 	if err != nil {
 		return err
 	}
@@ -284,12 +255,13 @@ func (r *liveRig) checkResources() error {
 // gvisorCPUFloor is the cpu reservation a lone, small Sandbox container is admitted at on GKE,
 // never under: confirmed live, 2026-10-17, against the production GKE cluster, only for the
 // single-container probe Sandbox (its one container's 250m is the pod's whole cpu sum) — every
-// multi-container issue pod in this same cluster, already summing well past it, is admitted at
-// exactly its configured per-container cpu unchanged (checked directly against a real, already-
-// running production issue pod's six role containers). So only checkImageProbe passes this;
+// multi-container issue pod in this same cluster, already summing well past it, was admitted at
+// exactly its configured per-container cpu unchanged (checked directly against a real production
+// issue pod of the layout before one container, whose six containers summed past it), and an issue
+// pod's one container reserves more than the floor. So only checkImageProbe passes this;
 // checkResources passes a zero Quantity, asking for no floor. AWS carries no such floor either
 // way. guaranteedPod folds it into its comparison, not the daemon's own reservation
-// (RoleResources, config.DefaultResources(), probeReservation): those stay the production values
+// (config.Reservation, config.DefaultResources(), probeReservation): those stay the production values
 // on every runtime; only this live GKE check expects what the cluster will actually admit.
 func (r *liveRig) gvisorCPUFloor() resource.Quantity {
 	if r.env.runtimeIdentityKind == "kubernetes-service-account" {
@@ -311,22 +283,16 @@ func (r *liveRig) gke() bool {
 
 // gkeEphemeralStorageClamped reports whether this run's cluster admits a container's ephemeral-
 // storage limit equal to its request, discarding whatever limit was configured: confirmed live,
-// 2026-10-17, on both a bare debug pod and every role container of a real, already-running
-// production issue pod in this namespace (every one of its six containers carries request =
-// limit = 1Gi, its configured EphemeralStorageRequest, though config.DefaultResources() and
-// liveOverrides ask several of them for limits of 10Gi, 20Gi or 30Gi) — a gVisor-sandboxed pod's
-// ephemeral storage is never burstable on this cluster, cpu and memory floors notwithstanding.
-// AWS admits the configured limit unchanged. checkImageProbe and checkResources both pass this to
-// guaranteedPod, and for the same reason: checkImageProbe's reservation (probeReservation,
-// manifest_test.go) is the daemon's own fixed, hardcoded value, and checkResources' is
-// config.DefaultResources()'s own per-role default, for every role liveOverrides does not give a
-// matching EphemeralStorageRequest of its own — in both cases a configured limit this rig cannot
-// (and, for the daemon's hardcoded probe reservation, should not) simply raise the request to
-// match, so the clamp is the real, admitted bound to assert, not the originally-configured one.
-// liveOverrides' tester entry is the one role this rig does ask for a matching request on, which
-// defeats the clamp for it alone (its own doc comment has why that cannot extend to every role at
-// once): guaranteedPod's clamp only replaces a container's wantLimit with its own wantRequest, so
-// a container whose want already carries request = limit sees no change from either value.
+// 2026-10-17, on both a bare debug pod and every container of a real, already-running production
+// issue pod in this namespace (each carried request = limit = its configured
+// EphemeralStorageRequest, though its configured limit was higher) — a gVisor-sandboxed pod's
+// ephemeral storage is never burstable on this cluster, cpu and memory floors notwithstanding. AWS
+// admits the configured limit unchanged. checkImageProbe and checkResources both pass this to
+// guaranteedPod: checkImageProbe's reservation (probeReservation, manifest_test.go) is the
+// daemon's own fixed value, whose limit the rig cannot raise its request to, so the clamp is the
+// admitted bound to assert there; checkResources' is liveIssueOverride, whose request already
+// equals its limit, so guaranteedPod's clamp (it replaces a container's wantLimit with its
+// wantRequest) changes nothing for it.
 func (r *liveRig) gkeEphemeralStorageClamped() bool {
 	return r.gke()
 }
@@ -380,12 +346,12 @@ func isGKEExtendedDurationAffinity(a *corev1.Affinity) bool {
 }
 
 // guaranteedPod is the reservation rule the rig's pods are held to, since the rig configures no
-// cpu or memory request below a limit (liveOverrides): it carries no affinity but GKE's own
+// cpu or memory request below a limit (liveIssueOverride): it carries no affinity but GKE's own
 // extended-duration one when extendedDurationAffinity allows it (isGKEExtendedDurationAffinity's
 // doc has the evidence; the probe never carries it and always passes false), its qosClass is
 // Guaranteed, and every container — the init containers included — reserves cpu and memory with
 // the request equal to the limit and at least the reservation configured for it (cpu floored at
-// cpuFloor, zero off GKE and off every multi-container pod on it), and carries the
+// cpuFloor, zero off GKE and for every issue pod on it), and carries the
 // ephemeral-storage request and limit configured for it, the request under the limit, except that
 // ephemeralStorageClamped asks for the limit to equal the request instead of the configured limit
 // (GKE's own admission, gkeEphemeralStorageClamped's doc has the evidence): want's entry for each
@@ -460,11 +426,12 @@ func (r *liveRig) checkAdoptWorkingCopy() error {
 		return err
 	}
 	note("runtime", "AdoptWorkingCopy(%s, %s <%s>): nil", root.token, r.identity.Name, r.identity.Email)
-	author, err := r.exec(root, "sh", "-c", `cd "$LEGION_WORKSPACE" && jj log -r @ --no-graph -T author`)
+	// The agent's own environment names its workspace; an exec into the role carries none of it.
+	author, err := r.asAgent(root, `cd "$LEGION_WORKSPACE" && jj log -r @ --no-graph -T author`)
 	if err != nil {
 		return err
 	}
-	note("operator", "exec: cd \"$LEGION_WORKSPACE\" && jj log -r @ --no-graph -T author: %s", author)
+	note("operator", "as the root's agent: cd \"$LEGION_WORKSPACE\" && jj log -r @ --no-graph -T author: %s", author)
 	if !strings.Contains(author, r.identity.Name) || !strings.Contains(author, r.identity.Email) {
 		return fmt.Errorf("the working copy's author is %q, not %s <%s>", author, r.identity.Name, r.identity.Email)
 	}
@@ -472,7 +439,7 @@ func (r *liveRig) checkAdoptWorkingCopy() error {
 }
 
 // worker-shares-issue-pod: another role of the same issue starts in the root's existing issue pod.
-// Its process locator has the same pod UID but its own role container, and no init container runs
+// Its process locator has the same pod UID and the same one container, and no init container runs
 // again.
 func (r *liveRig) checkWorkerSharesIssuePod() error {
 	root, worker := r.claim("root"), r.claim("worker")
@@ -498,8 +465,8 @@ func (r *liveRig) checkWorkerSharesIssuePod() error {
 	if pod.Name != before.Name || string(pod.UID) != string(before.UID) || worker.loc.Sandbox.PodUID != root.loc.Sandbox.PodUID {
 		return fmt.Errorf("worker locator %+v and root locator %+v do not share one issue pod %s/%s", worker.loc.Sandbox, root.loc.Sandbox, before.Name, before.UID)
 	}
-	if worker.loc.Sandbox.Container != string(worker.role) || root.loc.Sandbox.Container != string(root.role) {
-		return fmt.Errorf("worker/root role containers are %q/%q, want %q/%q", worker.loc.Sandbox.Container, root.loc.Sandbox.Container, worker.role, root.role)
+	if worker.loc.Sandbox.Container != runtime.IssuePodContainer || root.loc.Sandbox.Container != runtime.IssuePodContainer {
+		return fmt.Errorf("worker/root containers are %q/%q, want %q for both", worker.loc.Sandbox.Container, root.loc.Sandbox.Container, runtime.IssuePodContainer)
 	}
 	if !slices.EqualFunc(init, pod.Status.InitContainerStatuses, func(a, b corev1.ContainerStatus) bool {
 		return a.Name == b.Name && a.ContainerID == b.ContainerID && a.State.Terminated != nil && b.State.Terminated != nil &&
@@ -513,10 +480,10 @@ func (r *liveRig) checkWorkerSharesIssuePod() error {
 
 // suspend: stopping the worker's process leaves its issue Sandbox, pod, root role and the pod's
 // own disk intact — the disk lives and dies with the pod, and a role stop takes neither. The
-// stopped locator probes Gone; the root remains Alive in its separate role container. The issue's
-// Sandbox owns no claim of its own any more (INFRA-80), so there is no PVC under the name an
-// issue's Sandbox-owned volume carried (IssueClaimName, now the project controller's alone): what
-// is there is the pod's, named for the pod and owned by it.
+// stopped locator probes Gone; the root remains Alive in the same container. The issue's Sandbox
+// owns no claim of its own any more (INFRA-80), so there is no PVC under the name an issue's
+// Sandbox-owned volume carried (IssueClaimName, now the project controller's alone): what is there
+// is the pod's, named for the pod and owned by it.
 func (r *liveRig) checkSuspend() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
@@ -573,9 +540,16 @@ func (r *liveRig) checkSuspend() error {
 	return nil
 }
 
-// role-container-isolation: a second role of the issue starts in the existing pod's own container,
-// keeps the root process alive, and can stop without changing the root container or the pod.
-func (r *liveRig) checkRoleContainerIsolation() error {
+// role-isolation: a second role of the issue starts as a process of the root's pod's one container,
+// in namespaces of its own (`legion launcher role-init`). Entered as it runs (roleEnter), it reads
+// its own gh bundle at GHConfigDir; finds the roles directory empty, so no sibling's gh, private,
+// state, agent-secrets or launcher token directory, nor its own launcher token, is there; and its
+// /proc lists its own role-init as PID 1, its shim and its agent, and none of the root's. The
+// container, which holds every role's directories, sees both roles' role-inits. The second role then
+// stops while the root stays Alive. That a role cannot signal a process outside its namespaces is
+// roleinit_test's (TestRoleInit…, "signal-outside"): a signal sent from here would prove only
+// what the harness's own namespaces allow.
+func (r *liveRig) checkRoleIsolation() error {
 	root, second := r.claim("root"), r.claim("second")
 	if err := r.ensureRunning(root); err != nil {
 		return err
@@ -587,9 +561,77 @@ func (r *liveRig) checkRoleContainerIsolation() error {
 	if _, err := r.awaitRunning(second, since); err != nil {
 		return err
 	}
-	if second.loc.Sandbox.PodUID != root.loc.Sandbox.PodUID || second.loc.Sandbox.Container == root.loc.Sandbox.Container {
-		return fmt.Errorf("second role locator %+v and root locator %+v are not separate containers of one issue pod", second.loc.Sandbox, root.loc.Sandbox)
+	if second.loc.Sandbox.PodUID != root.loc.Sandbox.PodUID || second.loc.Sandbox.Container != runtime.IssuePodContainer || root.loc.Sandbox.Container != runtime.IssuePodContainer {
+		return fmt.Errorf("second role locator %+v and root locator %+v are not processes of one issue pod's %s container", second.loc.Sandbox, root.loc.Sandbox, runtime.IssuePodContainer)
 	}
+	rootInit, err := r.rolePid(root)
+	if err != nil {
+		return err
+	}
+	secondInit, err := r.rolePid(second)
+	if err != nil {
+		return err
+	}
+	if rootInit == secondInit {
+		return fmt.Errorf("the root and the second role share role-init pid %s", rootInit)
+	}
+	own, err := r.exec(second, "sh", "-c", `ls -A "$1"`, "ls", GHConfigDir)
+	if err != nil || own == "" {
+		return fmt.Errorf("the second role's own gh bundle %s lists %q (%v), want its owners", GHConfigDir, own, err)
+	}
+	held, err := r.exec(second, "sh", "-c", `ls -A "$1"`, "ls", RolesDir)
+	if err != nil {
+		return err
+	}
+	if held != "" {
+		return fmt.Errorf("the second role sees %s holding %q, want it empty: a sibling's directories or its own launcher token are in reach", RolesDir, oneLine(held))
+	}
+	inContainer, err := r.execPod(second, "sh", "-c", `ls -A "$1"`, "ls", RolesDir)
+	if err != nil {
+		return err
+	}
+	for _, role := range []claim.Role{root.role, second.role} {
+		if !slices.Contains(strings.Fields(inContainer), string(role)) {
+			return fmt.Errorf("the container's %s lists %q, want %s's directory: the empty view above proves nothing", RolesDir, oneLine(inContainer), role)
+		}
+	}
+	note("operator", "inside %s: %s lists %v; %s is empty (the container's lists %v)", second.role, GHConfigDir, strings.Fields(own), RolesDir, strings.Fields(inContainer))
+	// One line a process: its pid, argv[1] and argv[2] (each alone, as the shim and role-init are
+	// told apart by position, never by a word anywhere in an argv), then its whole argv.
+	const processes = `for d in /proc/[0-9]*; do printf '%s\t%s\t%s\t%s\n' "${d#/proc/}" "$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed -n 2p)" "$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed -n 3p)" "$(tr '\0' ' ' <"$d/cmdline" 2>/dev/null)"; done`
+	listing, err := r.exec(second, "sh", "-c", processes)
+	if err != nil {
+		return err
+	}
+	var sawInit, sawShim, sawAgent bool
+	for _, line := range strings.Split(listing, "\n") {
+		fields := strings.SplitN(line, "\t", 4)
+		if len(fields) != 4 {
+			continue
+		}
+		pid, argv1, argv2, args := fields[0], fields[1], fields[2], fields[3]
+		switch {
+		case argv1 == "launcher" && argv2 == "role-init":
+			if pid != "1" || !strings.Contains(args, "--role "+string(second.role)+" ") {
+				return fmt.Errorf("the second role's /proc shows role-init %q at pid %s, want its own alone, at pid 1", args, pid)
+			}
+			sawInit = true
+		case argv1 == "worker-shim":
+			sawShim = true
+		case args == "sleep infinity ":
+			if sawAgent {
+				return fmt.Errorf("the second role's /proc shows two stub agents: %q", listing)
+			}
+			sawAgent = true
+		}
+		if strings.Contains(args, "--role "+string(root.role)+" ") || strings.Contains(args, "launcher --connect") {
+			return fmt.Errorf("the second role's /proc shows %q (pid %s), a process outside it", args, pid)
+		}
+	}
+	if !sawInit || !sawShim || !sawAgent {
+		return fmt.Errorf("the second role's /proc lacks its own role-init, shim or agent: %q", listing)
+	}
+	note("operator", "inside %s, /proc lists its role-init (pid 1), shim and agent alone: %s", second.role, oneLine(listing))
 	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
 		return fmt.Errorf("root process after starting %s is %s: %v", second.token, rootObs.Kind, err)
 	}
@@ -599,7 +641,7 @@ func (r *liveRig) checkRoleContainerIsolation() error {
 	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
 		return fmt.Errorf("root process after suspending %s is %s: %v", second.token, rootObs.Kind, err)
 	}
-	note("runtime", "role %s ran then stopped in container %s; root %s stayed Alive in container %s of pod uid %s", second.token, second.last.Sandbox.Container, root.token, root.loc.Sandbox.Container, root.loc.Sandbox.PodUID)
+	note("runtime", "role %s (role-init pid %s) ran then stopped in container %s; root %s (role-init pid %s) stayed Alive in pod uid %s", second.token, secondInit, second.last.Sandbox.Container, root.token, rootInit, root.loc.Sandbox.PodUID)
 	return nil
 }
 
@@ -705,7 +747,7 @@ func containsConsecutive(haystack, needle []string) bool {
 // release declares another contract: the install still lands (so the earlier generation's own
 // directory is gone, replaced by this one's `rm -rf .../g*`) but the wrapper's own check ends the
 // child before `exec`, which the runtime reports Gone, and the pod is still the one this check
-// started with. kill-launcher, the next check to touch worker, resumes it with ensureRunning on a
+// started with. kill-role-init, the next check to touch worker, resumes it with ensureRunning on a
 // plain launch, so this check leaves no resume of its own after the negative control.
 func (r *liveRig) checkStalePluginInstall() error {
 	root, worker := r.claim("root"), r.claim("worker")
@@ -722,8 +764,10 @@ func (r *liveRig) checkStalePluginInstall() error {
 		return err
 	}
 
+	// The worker is suspended, so the tarballs go where it will read them through the container
+	// every role shares: its state home is on the issue's volume.
 	dir := roleStateHome(worker.role) + "/stage4a-plugin-tarballs"
-	if _, err := r.exec(worker, "mkdir", "-p", dir); err != nil {
+	if _, err := r.execPod(worker, "mkdir", "-p", dir); err != nil {
 		return err
 	}
 	legionTar, envoyTar := dir+"/pi-legion.tgz", dir+"/pi-envoy.tgz"
@@ -731,12 +775,12 @@ func (r *liveRig) checkStalePluginInstall() error {
 		{r.env.piLegionTarball, legionTar},
 		{r.env.piEnvoyTarball, envoyTar},
 	} {
-		if _, err := r.kubectl("cp", cp.local, r.env.namespace+"/"+name+":"+cp.remote, "-c", string(worker.role)); err != nil {
+		if _, err := r.kubectl("cp", cp.local, r.env.namespace+"/"+name+":"+cp.remote, "-c", runtime.IssuePodContainer); err != nil {
 			return fmt.Errorf("kubectl cp %s %s: %w", cp.local, cp.remote, err)
 		}
 	}
 	note("operator", "kubectl cp the checkout's packed pi-legion@%s and pi-envoy@%s into %s:%s (-c %s)",
-		r.env.piLegionVersion, r.env.piEnvoyVersion, name, dir, worker.role)
+		r.env.piLegionVersion, r.env.piEnvoyVersion, name, dir, runtime.IssuePodContainer)
 
 	old := *worker.last
 	since := time.Now()
@@ -837,7 +881,7 @@ func (r *liveRig) checkStalePluginInstall() error {
 	note("operator", "pod %s is still uid %s after the negative control", name, final.UID)
 
 	oldGenDir := pluginGenDir(roleStateHome(worker.role), installedGen)
-	if _, err := r.exec(worker, "sh", "-c", `test ! -e "$1"`, "sh", oldGenDir); err != nil {
+	if _, err := r.execPod(worker, "sh", "-c", `test ! -e "$1"`, "sh", oldGenDir); err != nil {
 		return fmt.Errorf("%s still exists after the negative control's own install ran rm -rf .../g* first: %w", oldGenDir, err)
 	}
 	note("operator", "the earlier generation's %s is gone", oldGenDir)
@@ -905,7 +949,7 @@ func (r *liveRig) checkSameAgentNegative() error {
 	// Only second's own "tester:" lines are its to check (the marker is shared by every resident
 	// role of the issue pod); the refused generation above never started a child, so it never
 	// wrote one — this asserts only the one new line this check's own correct resume caused,
-	// never assuming role-container-isolation's earlier gen-1 line had already landed.
+	// never assuming role-isolation's earlier gen-1 line had already landed.
 	own := roleIncarnations(lines, second.role)
 	if len(own) != beforeOwn+1 || own[len(own)-1] != fixed.Incarnation {
 		return fmt.Errorf("the marker's %s lines went from %v to %v (of %v shared by the issue pod's resident roles): want exactly one more, the last %s", second.role, roleIncarnations(before, second.role), own, lines, fixed.Incarnation)
@@ -919,11 +963,26 @@ func (r *liveRig) checkSameAgentNegative() error {
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-// kill-launcher: a worker role's launcher PID 1 ends in place, is reported Gone for that role
-// process, and Resume(prev=dead) starts a new generation in the same issue pod. This is no pod
-// replacement — only one container's PID 1 died — so the pod's own disk is the same claim it was,
-// the same uid, and the workspace on it is the one the dead generation worked in.
-func (r *liveRig) checkKillLauncher() error {
+// descendants lists pid and every process descended from it, in the container's PID namespace.
+const descendants = `want=" $1 "; found=1
+while [ -n "$found" ]; do
+  found=
+  for d in /proc/[0-9]*; do
+    p=${d#/proc/}; case $want in *" $p "*) continue ;; esac
+    parent=$(sed -n 's/^PPid:[[:space:]]*//p' "$d/status" 2>/dev/null) || continue
+    case $want in *" $parent "*) want="$want$p "; found=1 ;; esac
+  done
+done
+for p in $want; do [ -d "/proc/$p" ] && echo "$p"; done; true`
+
+// kill-role-init: the operator SIGKILLs the worker's role-init from the issue pod's one container,
+// whose PID 1, the launcher, is every role's and is never the target. Every process of the
+// worker's namespaces ends with it; the launcher reports that generation's exit, which the runtime
+// reports Gone for that role process alone; the root stays Alive in the same pod; and
+// Resume(prev=dead) starts a new generation in that pod, the Sandbox's generation unchanged. This
+// is no pod replacement — only one role's processes died — so the pod's own disk is the same claim
+// it was, the same uid, and the workspace on it is the one the dead generation worked in.
+func (r *liveRig) checkKillRoleInit() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
 		return err
@@ -933,30 +992,46 @@ func (r *liveRig) checkKillLauncher() error {
 	}
 	old := *worker.loc
 	name := SandboxName(worker.token)
+	init, err := r.rolePid(worker)
+	if err != nil {
+		return err
+	}
+	tree, err := r.execPod(worker, "sh", "-c", descendants, "descendants", init)
+	if err != nil {
+		return err
+	}
+	if len(strings.Fields(tree)) < 3 {
+		return fmt.Errorf("the worker's role-init %s leads %v, want at least itself, its shim and its agent", init, strings.Fields(tree))
+	}
 	disk, err := r.assertPodOwnedDisk(worker)
 	if err != nil {
 		return err
 	}
 	mark := r.obs.mark()
-	if _, err := r.exec(worker, "sh", "-c", "kill 1"); err != nil {
+	if _, err := r.execPod(worker, "kill", "-KILL", init); err != nil {
 		return err
 	}
-	note("operator", "exec %s -c %s -- sh -c 'kill 1'", name, worker.role)
+	note("operator", "exec %s -c %s -- kill -KILL %s (the %s's role-init, leading pids %v)", name, runtime.IssuePodContainer, init, worker.role, strings.Fields(tree))
 	gone, ok := r.obs.await(mark, liveGoneLimit, func(o runtime.Observation) bool {
 		return o.Locator.Claim == worker.token && o.Kind == runtime.Gone
 	})
 	if !ok {
 		return fmt.Errorf("no gone for %s within %s", old.Incarnation, liveGoneLimit)
 	}
-	if !sameLocator(gone.Locator, old) || !strings.Contains(gone.Detail, string(old.Sandbox.PodUID)) || !strings.Contains(gone.Detail, "role container "+old.Sandbox.Container+" terminated") {
-		return fmt.Errorf("the gone carries %s, want the old %s with the role container's exit: %s", gone.Locator.Incarnation, old.Incarnation, gone.Detail)
+	exited := fmt.Sprintf("role %s reports generation %d exited", worker.role, old.Sandbox.Generation)
+	if !sameLocator(gone.Locator, old) || !strings.Contains(gone.Detail, string(old.Sandbox.PodUID)) || !strings.Contains(gone.Detail, exited) || !strings.Contains(gone.Detail, "signal killed") {
+		return fmt.Errorf("the gone carries %s, want the old %s with %q, signal killed: %s", gone.Locator.Incarnation, old.Incarnation, exited, gone.Detail)
 	}
-	exit := regexp.MustCompile(`exit code (-?\d+)`).FindStringSubmatch(gone.Detail)
-	if exit == nil {
-		return fmt.Errorf("the gone names no exit code: %s", gone.Detail)
-	}
-	note("runtime", "Observe: gone for old %s, role container %s exit code %s — %s", short(old.Incarnation), old.Sandbox.Container, exit[1], oneLine(firstLine(gone.Detail)))
+	note("runtime", "Observe: gone for old %s — %s", short(old.Incarnation), oneLine(firstLine(gone.Detail)))
 	worker.loc, worker.state = nil, stateDead
+	left, err := r.execPod(worker, append([]string{"sh", "-c", `for p; do [ -d "/proc/$p" ] && echo "$p $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)"; done; true`, "left"}, strings.Fields(tree)...)...)
+	if err != nil {
+		return err
+	}
+	if left != "" {
+		return fmt.Errorf("processes of the killed role-init's namespaces outlived it: %s", oneLine(left))
+	}
+	note("operator", "none of pids %v is left", strings.Fields(tree))
 	before, err := r.getSandbox(name)
 	if err != nil {
 		return err
@@ -984,13 +1059,13 @@ func (r *liveRig) checkKillLauncher() error {
 		return err
 	}
 	if kept.uid != disk.uid {
-		return fmt.Errorf("the pod's disk %s is uid %s after the launcher restart, not the %s it was: the pod never went, so neither may its disk", kept.name, kept.uid, disk.uid)
+		return fmt.Errorf("the pod's disk %s is uid %s after the role-init kill, not the %s it was: the pod never went, so neither may its disk", kept.name, kept.uid, disk.uid)
 	}
 	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
-		return fmt.Errorf("root after worker launcher restart is %s: %v", rootObs.Kind, err)
+		return fmt.Errorf("root after the worker's role-init was killed is %s: %v", rootObs.Kind, err)
 	}
 	note("runtime", "Resume(prev=dead %s) returned %s in the same pod uid %s; root stayed Alive", short(old.Incarnation), short(fresh.Incarnation), fresh.Sandbox.PodUID)
-	note("operator", "the pod's own disk %s is unchanged across the restart: uid %s, %s, owned by %s", kept.name, short(kept.uid), kept.phase, kept.owner)
+	note("operator", "the pod's own disk %s is unchanged across the role-init kill: uid %s, %s, owned by %s", kept.name, short(kept.uid), kept.phase, kept.owner)
 	r.killed.old, r.killed.fresh, r.killed.gone = old, fresh, gone
 	return nil
 }
@@ -1015,7 +1090,7 @@ func lineContaining(text, want string) string {
 // new one.
 func (r *liveRig) checkStaleIncarnation() error {
 	if r.killed.fresh.Incarnation == "" {
-		return errors.New("kill-launcher did not run; stale-incarnation rides its relaunch")
+		return errors.New("kill-role-init did not run; stale-incarnation rides its relaunch")
 	}
 	worker := r.claim("worker")
 	old, fresh := r.killed.old, r.killed.fresh

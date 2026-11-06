@@ -25,15 +25,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 )
 
 // TestShareVolumesMountInAnIssuePodLive writes every case's legion.yaml, holds each to the pod
 // block the loader must read from it, launches the `shares` case's issue pod, and holds that pod,
 // as the API server recorded it, to the block: the claim and the export as volumes, each mounted in
-// every role container, the claim read-only and the export writable, under gVisor. It writes
+// the roles container, the claim read-only and the export writable, under gVisor. It writes
 // `<case> <namespace>/<pod> <legion.yaml>` per case to LEGION_E2E_RESULT (`-` for a case it does
 // not launch) for the script.
 func TestShareVolumesMountInAnIssuePodLive(t *testing.T) {
+	fixtureenv.Live(t)
 	env := map[string]string{}
 	for _, name := range []string{"LEGION_E2E_KUBECONFIG", "LEGION_E2E_KUBE_CONTEXT", "LEGION_E2E_IMAGE", "LEGION_E2E_STREAM_HOST", "LEGION_E2E_WORK", "LEGION_E2E_RESULT", "LEGION_E2E_SHARE_SERVER"} {
 		if env[name] = os.Getenv(name); env[name] == "" {

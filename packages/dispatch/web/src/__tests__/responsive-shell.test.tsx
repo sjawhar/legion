@@ -10,6 +10,10 @@ import { AuthGate } from "../app";
 const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
+  holder_state: null,
+  last_seen: null,
+  takeable_at: null,
   artifacts: [
     {
       created_at: "2026-09-10T00:00:00Z",
@@ -83,7 +87,7 @@ function setViewport(width: number): void {
 
 function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0): void {
   setViewport(width);
-  api.whoAmI = async () => ({ kind: "user", login: "alice" });
+  api.whoAmI = async () => ({ event_head: "0", kind: "user", login: "alice" });
   api.listMyReplies = async (query) => ({
     limit: query.limit,
     offset: 0,
@@ -97,6 +101,7 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
       resolved_repo: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
       key: issue.key,
       open_asks: 0,
       progress: { tasks: null, children: null },
@@ -152,7 +157,11 @@ test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull()
   );
-  expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull();
+  // The margin's own code is fetched after the first paint (`features/margin/MarginColumn.tsx`),
+  // so its control arrives on a later frame than the shell's.
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull()
+  );
   expect(screen.queryByRole("navigation", { name: "Issues" })).toBeNull();
   expect(screen.queryByRole("complementary", { name: "Review margin" })).toBeNull();
 });
@@ -163,7 +172,10 @@ test("desktop exposes the persistent sidebar navigation and review margin", asyn
   await waitFor(() =>
     expect(screen.queryByRole("navigation", { name: "Navigation" })).not.toBeNull()
   );
-  expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull();
+  // As above: the margin lands once its chunk has.
+  await waitFor(() =>
+    expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull()
+  );
   expect(screen.queryByRole("button", { name: "Open navigation" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Open review panel/ })).toBeNull();
 });
@@ -183,7 +195,17 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
       multiple: false,
       opened_event_id: 1,
       options: [],
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+        route_status_reason: null,
+      },
       priority: null,
       snoozed_until: null,
       question: "Choose a direction",
@@ -204,7 +226,17 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
       multiple: false,
       opened_event_id: 2,
       options: [],
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+        route_status_reason: null,
+      },
       priority: null,
       snoozed_until: null,
       question: "Clarify this",

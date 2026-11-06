@@ -68,12 +68,19 @@ validates.
 
 `github.event.pull_request` is absent on a `merge_group` event. The PR-title check
 (`.github/workflows/pr-title.yaml`, moved out of `Tests` by LEGION-90 / #1059 because it alone
-needs the `edited` event) is therefore correctly on `pull_request` and the pull request's comment
-and review events only, never `merge_group`: a merge group has no title, comment or review to
+needs the `edited` event) is therefore correctly on `pull_request` and `pull_request_review` only,
+never `merge_group`: a merge group has no title, comment or review to
 check, and a merge-group payload never carries `edited`. Do not fold it back into `Tests`
 under "one workflow for the queue" pressure — re-derive that constraint first. A required check
 that is pull-request-only must not be in the ruleset's required list, or the queue waits for it
 forever.
+
+**Superseded 2026-10-27 (INFRA-520).** `pr-title` stays a required check beside `ci-ok` when main
+merges through the queue, so it must report on the merge group too, and keeping it off
+`merge_group` no longer holds. `pr-title.yaml` now runs on `merge_group` (`checks_requested`) and
+re-checks the pull request the group adds: it reads the number from the group's `head_ref`
+(`refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>`), fetches that pull request with
+`gh api`, and runs the same title and text checks on it. The rest of this note stands.
 
 ## 3. The trigger lands on `main` before the rule is switched on — never the other way round
 
@@ -81,7 +88,7 @@ Turning the merge queue rule on before the workflow answers `merge_group` leaves
 request waiting for checks that never start, and the group fails at its timeout. The change has
 three ordered steps: (1) the trigger merges into `main` (this is an ordinary pull request); (2) an
 administrator adds the merge queue rule to the `main` ruleset (a repository setting, not code — on
-`sjawhar/legion` it is Sami's click, requested as one plain `dispatch message` carrying the exact
+`cybermonklabs/legion` it is Sami's click, requested as one plain `dispatch message` carrying the exact
 settings, never an ask); (3) the merge-queue organizer's `gh pr merge --squash --match-head-commit
 <sha>` becomes an enqueue on its own, since GitHub routes the same command into the queue once the
 branch requires one. GitHub builds each queued pull request's merge commit **with the workflow
@@ -131,6 +138,14 @@ shape; a spec that does not is the place to fix.
   records only check runs that list a pull request, so no `pr.<n>.checks` settlement is ever
   produced from a queue commit. (The tracker settles any commit of a pull request, not only its
   head, so this rests on that list alone.)
+
+  **Superseded 2026-11-05 (INFRA-1211).** The tracker no longer records only check runs that list a
+  pull request: a run or suite that lists none, whose check suite's `head_branch` is exactly
+  `refs/pull/<n>/head`, is recorded under pull request n, and Dispatch's CI reconcile pass records
+  every completed run and suite at an open pull request's head whatever its webhook said. The
+  conclusion for a queue commit still holds, by the branch rather than by the list: a
+  `gh-readonly-queue/...` branch is not `refs/pull/<n>/head`, and the pass reads only the heads
+  GitHub lists as open pull requests', which a queue commit is not. The rest of this bullet stands.
 
 Related: [template-names-a-ci-check-the-repository-never-produces](../legion/template-names-a-ci-check-the-repository-never-produces.md)
 (the ruleset's required names must be names the repository's workflows actually emit).

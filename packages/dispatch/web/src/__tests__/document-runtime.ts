@@ -1,6 +1,8 @@
+import type { BlockMark } from "@legion/proof-editor";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
+import { installTypedBlocks } from "../features/doc/ask-block";
 import type {
   ConnectDocument,
   ConnectionCallbacks,
@@ -18,6 +20,8 @@ import type { PendingState } from "../features/doc/pending-sync";
 import type { DocumentRuntimeValue } from "../features/doc/runtime";
 
 export interface FakeEditor {
+  /** Each set of block marks the host handed the editor (`setBlockMarks`), in order. */
+  blockMarks: BlockMark[][];
   /** How many times the host asked to comment on the selection. */
   commented: number;
   destroyed: boolean;
@@ -30,6 +34,9 @@ export interface FakeEditor {
   root: HTMLElement;
   /** Whether the fake view's selection is empty (a caret); a test sets it to select text. */
   selectionEmpty: boolean;
+  /** The innermost block with an id that holds the selection, as `blockIdAtSelection` answers;
+   *  a test sets it to copy a block link. */
+  selectedBlock: string | null;
   /** The fake view's props bag, where `setProps` accumulates node views the host installs. */
   viewProps: Record<string, unknown>;
 }
@@ -95,6 +102,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       root.setAttribute(name, value);
     }
     const editor: FakeEditor = {
+      blockMarks: [],
       commented: 0,
       destroyed: false,
       focused: [],
@@ -105,12 +113,16 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       remoteMarks: [],
       root,
       selectionEmpty: true,
+      selectedBlock: null,
       viewProps: { nodeViews: {} },
     };
     root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
     const handle = {
       applyRemoteMarks(metadata: Record<string, StoredMark>) {
         editor.remoteMarks.push(metadata);
+      },
+      blockIdAtSelection() {
+        return editor.selectedBlock;
       },
       commentOnSelection() {
         editor.commented += 1;
@@ -130,10 +142,16 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         return new Map<string, number>();
       },
       removeMark() {},
+      remarkMark() {
+        return { refused: "gone" as const };
+      },
       retypeMark() {
         return { refused: "missing" as const };
       },
       setActiveBlocks() {},
+      setBlockMarks(marks: readonly BlockMark[]) {
+        editor.blockMarks.push([...marks]);
+      },
       setActiveMarks() {},
       setMarkdown(markdown: string) {
         editor.markdown = markdown;
@@ -163,6 +181,15 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         },
       },
     } as unknown as EditorHandle;
+    // The real `createEditor` installs Dispatch's node views once the editor library has
+    // loaded (`features/doc/editor.ts`); the fake stands in for that call too, so a test reads
+    // the same `viewProps.nodeViews` the host would.
+    installTypedBlocks(
+      handle.view,
+      options.blockSchema,
+      options.onAskBlockHosts,
+      options.watchPicture
+    );
     editors.push(editor);
     return handle;
   };

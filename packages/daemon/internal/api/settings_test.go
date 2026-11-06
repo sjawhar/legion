@@ -81,14 +81,23 @@ var settingsEmitted = map[string]string{
 	"Config.GitHubApps":                              "github_apps",
 	"Config.Linger":                                  "linger_hours",
 	"Config.ProductionCheckBound":                    "production_check_hours",
+	"Config.PodUpdateRetask":                         "pod_update_retask_hours",
+	"Config.PodUpdateNotice":                         "pod_update_notice_hours",
+	"Config.PodUpdateMaxOpenRounds":                  "pod_update_max_open_rounds",
+	"Config.PodUpdateRoundsPerMinute":                "pod_update_rounds_per_minute",
 	"Config.ReviewRoundCap":                          "review_round_cap",
 	"Config.MaxFixAttempts":                          "max_fix_attempts",
 	"Config.ControllerLaunch":                        "controller",
 	"Config.Capabilities":                            "capabilities",
 	"Config.WorkerBackends":                          "worker_backends",
+	"Config.RoleConfigFiles":                         "role_config_files",
+	"Config.RepositoryRenames":                       "repository_renames",
 	"Runtime.Name":                                   "runtime.name",
 	"Runtime.Kubernetes":                             "runtime.kubernetes",
-	"Runtime.Tmux":                                   "runtime.tmux (its session store's kind alone: session_store, files or postgres)",
+	"Runtime.Tmux":                                   "runtime.tmux",
+	"Tmux.PaneEnv":                                   "runtime.tmux.pane_env (the variable names alone)",
+	"Tmux.PiConfigFiles":                             "runtime.tmux.pi_config_files",
+	"Tmux.TakeOver":                                  "runtime.tmux.take_over",
 	"Kubernetes.Namespace":                           "runtime.kubernetes.namespace",
 	"Kubernetes.Image":                               "runtime.kubernetes.image",
 	"Kubernetes.StorageClass":                        "runtime.kubernetes.storage_class",
@@ -99,7 +108,12 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.SessionStore":                        "runtime.kubernetes.session_store (the kind alone: neither the Secret key nor the instance and login behind it is emitted)",
 	"Kubernetes.Plugins":                             "runtime.kubernetes.plugins",
 	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
+	"Kubernetes.SkillsRepository":                    "runtime.kubernetes.skills_repository",
+	"Kubernetes.TestPostgres":                        "runtime.kubernetes.test_postgres",
 	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
+	"Kubernetes.IdleRelease":                         "runtime.kubernetes.idle_release",
+	"IdleReleaseConfig.IdleMinutes":                  "runtime.kubernetes.idle_release.idle_minutes",
+	"IdleReleaseConfig.BackstopMinutes":              "runtime.kubernetes.idle_release.backstop_minutes",
 	"RepositoryCacheConfig.Volume":                   "runtime.kubernetes.repository_cache.volume",
 	"RepositoryCacheConfig.RefreshMinutes":           "runtime.kubernetes.repository_cache.refresh_minutes",
 	"RepositoryCacheConfig.RetainHours":              "runtime.kubernetes.repository_cache.retain_hours",
@@ -111,12 +125,14 @@ var settingsEmitted = map[string]string{
 	"Toleration.Operator":                            "runtime.kubernetes.scheduling.tolerations[].operator",
 	"Toleration.Value":                               "runtime.kubernetes.scheduling.tolerations[].value",
 	"Toleration.Effect":                              "runtime.kubernetes.scheduling.tolerations[].effect",
-	"RoleResources.CPU":                              "runtime.kubernetes.resources.<role>.cpu",
-	"RoleResources.CPURequest":                       "runtime.kubernetes.resources.<role>.cpu_request",
-	"RoleResources.Memory":                           "runtime.kubernetes.resources.<role>.memory",
-	"RoleResources.MemoryRequest":                    "runtime.kubernetes.resources.<role>.memory_request",
-	"RoleResources.EphemeralStorage":                 "runtime.kubernetes.resources.<role>.ephemeral_storage",
-	"RoleResources.EphemeralStorageRequest":          "runtime.kubernetes.resources.<role>.ephemeral_storage_request",
+	"PodResources.Issue":                             "runtime.kubernetes.resources.issue",
+	"PodResources.Controller":                        "runtime.kubernetes.resources.controller",
+	"Reservation.CPU":                                "runtime.kubernetes.resources.<pod>.cpu",
+	"Reservation.CPURequest":                         "runtime.kubernetes.resources.<pod>.cpu_request",
+	"Reservation.Memory":                             "runtime.kubernetes.resources.<pod>.memory",
+	"Reservation.MemoryRequest":                      "runtime.kubernetes.resources.<pod>.memory_request",
+	"Reservation.EphemeralStorage":                   "runtime.kubernetes.resources.<pod>.ephemeral_storage",
+	"Reservation.EphemeralStorageRequest":            "runtime.kubernetes.resources.<pod>.ephemeral_storage_request",
 	"AgentSecretsConfig.URL":                         "runtime.kubernetes.agent_secrets.url",
 	"AgentSecretsConfig.Audience":                    "runtime.kubernetes.agent_secrets.audience",
 	"AgentSecretsConfig.TokenExpirySeconds":          "runtime.kubernetes.agent_secrets.token_expiry_seconds",
@@ -127,6 +143,10 @@ var settingsEmitted = map[string]string{
 	"Project.Merge":                                  "projects.<KEY>.merge",
 	"Project.SlackChannels":                          "projects.<KEY>.slack_channels",
 	"Project.Deploys":                                "projects.<KEY>.deploys",
+	"Project.Memory":                                 "projects.<KEY>.memory",
+	"Memory.Mode":                                    "projects.<KEY>.memory.mode",
+	"Memory.ConfigFiles":                             "projects.<KEY>.memory.config_files",
+	"Memory.InstructionsPath":                        "projects.<KEY>.memory.instructions",
 	"Deploy.Repo":                                    "projects.<KEY>.deploys[].repo",
 	"Deploy.Workflow":                                "projects.<KEY>.deploys[].workflow",
 	"Deploy.Step":                                    "projects.<KEY>.deploys[].step",
@@ -166,7 +186,9 @@ var settingsExcluded = map[string]string{
 	"GitHubApp.PrivateKey":          "a credential: Config holds the PEM resolved whatever the file's source",
 	"GitHubApp.PrivateKeyCommand":   "the source of a credential",
 	"GitHubApp.PrivateKeySecret":    "the source of a credential",
+	"GitHubApp.TokenCommand":        "the source of a credential: the command that prints the App's installation tokens",
 	"ProviderKey.Secret":            "the source of a credential: a secretsd key or a providers Secret key",
+	"ProviderKey.File":              "the path of a file holding a credential",
 	"Config.OperatorTokenFile":      "the path of a file holding a credential",
 	"Config.EnvoyTokenFile":         "the path of a file holding a credential",
 	"Config.NatsNkeySeedFile":       "the path of a file holding a credential",
@@ -223,6 +245,27 @@ func TestSettingsOfClassifiesEveryConfigField(t *testing.T) {
 	}
 }
 
+// The tmux block shows the runtime whose claims the daemon takes over, and leaves the key out when
+// the file names none; its session store is always shown, `files` where the file names none.
+func TestTheTmuxSettingsShowTheTakeOver(t *testing.T) {
+	for _, tc := range []struct {
+		block *config.Tmux
+		want  string
+	}{
+		{&config.Tmux{TakeOver: config.TakeOverKubernetes}, `{"pane_env":[],"pi_config_files":[],"take_over":"kubernetes","session_store":"files"}`},
+		{&config.Tmux{}, `{"pane_env":[],"pi_config_files":[],"session_store":"files"}`},
+		{&config.Tmux{SessionDSNFile: "/etc/legion/session-dsn"}, `{"pane_env":[],"pi_config_files":[],"session_store":"postgres"}`},
+	} {
+		encoded, err := json.Marshal(tmuxSettingsOf(tc.block))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != tc.want {
+			t.Errorf("tmuxSettingsOf(%+v) = %s, want %s", tc.block, encoded, tc.want)
+		}
+	}
+}
+
 // settingsFixturePlanted is every value of settingsFixtureFile that is a credential, the source of
 // one, the path of a file holding one, the userinfo of an address, or an operator pod piece: each
 // is in the file (so the list cannot go stale) and none is in the settings' bytes.
@@ -242,7 +285,7 @@ var settingsFixturePlanted = []string{
 
 // settingsForbiddenKeys are the legion.yaml keys that never appear in `settings`, at any depth.
 var settingsForbiddenKeys = []string{
-	"postgres_dsn", "private_key", "private_key_command", "private_key_secret",
+	"postgres_dsn", "private_key", "private_key_command", "private_key_secret", "token_command",
 	"kubeconfig", "context", "session_dsn_secret", "session_database", "pod", "env", "volumes", "volume_mounts", "service_account",
 	"api_key_file", "api_key_command", "conversation_store", "dsn_file", "user",
 }
@@ -266,8 +309,10 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		"tree_stop_timeout_seconds", "slow_command_timeout_seconds", "probe_interval_seconds",
 		"controller_wake_interval_seconds", "worker_boot_registration_deadline_intervals",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit", "envoy_url", "nats_urls",
-		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours", "review_round_cap",
-		"max_fix_attempts", "controller", "capabilities", "worker_backends",
+		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours",
+		"pod_update_retask_hours", "pod_update_notice_hours", "pod_update_max_open_rounds",
+		"pod_update_rounds_per_minute", "review_round_cap",
+		"max_fix_attempts", "controller", "capabilities", "worker_backends", "role_config_files", "repository_renames",
 	}
 	top := keysOf(t, encoded)
 	assertKeys(t, "settings", top, wantTop)
@@ -278,7 +323,10 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
 	assertKeys(t, "settings.runtime.kubernetes", kubernetesKeys, []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
-		"agent_secrets", "plugins", "setup", "repository_cache",
+		"agent_secrets", "plugins", "setup", "skills_repository", "test_postgres", "repository_cache", "idle_release",
+	})
+	assertKeys(t, "settings.runtime.kubernetes.idle_release", keysOf(t, kubernetesKeys["idle_release"]), []string{
+		"idle_minutes", "backstop_minutes",
 	})
 	assertKeys(t, "settings.runtime.kubernetes.repository_cache", keysOf(t, kubernetesKeys["repository_cache"]), []string{
 		"volume", "refresh_minutes", "retain_hours", "resources",
@@ -307,7 +355,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		}
 	}
 
-	// (d) No null anywhere: the plugin's strict reader refuses one.
+	// (d) No null anywhere: the plugin's reader refuses one.
 	if bytes.Contains(encoded, []byte("null")) {
 		t.Errorf("settings carry null: %s", encoded)
 	}
@@ -332,8 +380,14 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	if want := map[string]string{"tester": "omp"}; !maps.Equal(settings.WorkerBackends, want) {
 		t.Errorf("worker_backends = %q, want %q", settings.WorkerBackends, want)
 	}
+	if want := []RepositoryRenameSettings{{From: "acme/widgets-legacy", To: "acme/widgets"}}; !slices.Equal(settings.RepositoryRenames, want) {
+		t.Errorf("repository_renames = %+v, want the file's pair %+v", settings.RepositoryRenames, want)
+	}
 	if want := []string{"/bin/sh", "-c", "echo fixture-setup"}; !slices.Equal(settings.Runtime.Kubernetes.Setup, want) {
 		t.Errorf("runtime.kubernetes.setup = %q, want %q", settings.Runtime.Kubernetes.Setup, want)
+	}
+	if got := settings.Runtime.Kubernetes.SkillsRepository; got != "acme/agent-skills" {
+		t.Errorf("runtime.kubernetes.skills_repository = %q, want the file's acme/agent-skills", got)
 	}
 	cache := settings.Runtime.Kubernetes.RepositoryCache
 	if cache.Volume != "40Gi" || cache.RefreshMinutes != 15 || cache.RetainHours != 48 || cache.Resources.CPU != "500m" || cache.Resources.CPURequest != "500m" || cache.Resources.Memory != "1Gi" || cache.Resources.EphemeralStorage != "2Gi" {
@@ -342,12 +396,12 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	if settings.LingerHours != 1.5 || settings.WorkerStopTimeoutSeconds != 30 || settings.Controller != config.ControllerLaunchDaemon {
 		t.Errorf("linger_hours %v, worker_stop_timeout_seconds %d, controller %q; want 1.5, 30, daemon", settings.LingerHours, settings.WorkerStopTimeoutSeconds, settings.Controller)
 	}
-	controller := settings.Runtime.Kubernetes.Resources["controller"]
+	controller := settings.Runtime.Kubernetes.Resources.Controller
 	if controller.CPU != "2" || controller.CPURequest != "1" || controller.MemoryRequest != "4Gi" || controller.EphemeralStorage != "10Gi" {
 		t.Errorf("resources.controller = %+v, want the file's cpu, cpu_request and memory_request with the default ephemeral storage", controller)
 	}
-	if len(settings.Runtime.Kubernetes.Resources) != 7 {
-		t.Errorf("resources names %d roles, want the six workflow roles and the controller", len(settings.Runtime.Kubernetes.Resources))
+	if issue := settings.Runtime.Kubernetes.Resources.Issue; issue != (ReservationSettings{CPU: "4", CPURequest: "4", Memory: "24Gi", MemoryRequest: "24Gi", EphemeralStorage: "80Gi", EphemeralStorageRequest: "6Gi"}) {
+		t.Errorf("resources.issue = %+v, want the file's cpu and memory, each requested in full, with the default disk bound", issue)
 	}
 	if want := []string{"C0123ABCD", "C0123ABCE"}; !slices.Equal(settings.Projects["LEGION"].SlackChannels, want) {
 		t.Errorf("projects.LEGION.slack_channels = %q, want %q", settings.Projects["LEGION"].SlackChannels, want)
@@ -484,6 +538,8 @@ func TestPluginSourceOfMasksOnlyTheURLForm(t *testing.T) {
 
 // A tmux file of the three required keys resolves to the defaults, with every optional block
 // absent and every collection empty rather than null; and a key the file sets is the file's.
+// The two pod-update round caps are the one exception: a file that names no limit carries them
+// as null, since an absent key is the one thing no number could say.
 func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 	settings := SettingsOf(minimalSettingsConfig(t))
 	encoded, err := json.Marshal(settings)
@@ -500,7 +556,7 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 		t.Errorf("github_apps = %+v, want none", settings.GitHubApps)
 	}
 	top := keysOf(t, encoded)
-	for key, want := range map[string]string{"provider_keys": "[]", "omp_launch_prefix": "[]", "nats_urls": "[]", "projects": "{}", "capabilities": `{"decided":{}}`} {
+	for key, want := range map[string]string{"provider_keys": "[]", "omp_launch_prefix": "[]", "nats_urls": "[]", "repository_renames": "[]", "projects": "{}", "capabilities": `{"decided":{}}`} {
 		if got := string(top[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
 		}
@@ -510,8 +566,13 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 			t.Errorf("%s = %s, want absent", absent, raw)
 		}
 	}
-	if bytes.Contains(encoded, []byte("null")) {
-		t.Errorf("settings carry null: %s", encoded)
+	var document any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantNull := []string{"settings.pod_update_max_open_rounds", "settings.pod_update_rounds_per_minute"}
+	if got := slices.Sorted(slices.Values(nullKeys(document, "settings"))); !slices.Equal(got, wantNull) {
+		t.Errorf("settings carry the null keys %q, want %q and no other: %s", got, wantNull, encoded)
 	}
 	if bytes.Contains(encoded, []byte("postgres://")) || bytes.Contains(encoded, []byte("fixture-dsn-password")) {
 		t.Errorf("settings carry the DSN: %s", encoded)
@@ -523,8 +584,9 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 	}
 }
 
-// A tmux file whose panes keep their sessions in Postgres shows runtime.tmux.session_store and
-// nothing else of the block: never the path of the file holding the session database's URL.
+// A tmux file whose panes keep their sessions in Postgres shows runtime.tmux.session_store beside
+// the block's other settled keys, and never the path of the file holding the session database's
+// URL.
 func TestSettingsOfATmuxSessionDatabaseShowsTheStoreAndNotItsFile(t *testing.T) {
 	const dsnFile = "/var/run/legion/TMUX_SESSION_DSN_FIXTURE"
 	settings := SettingsOf(loadSettingsFile(t, minimalSettingsFile+"runtime: {tmux: {session_store: postgres, session_dsn_file: "+dsnFile+"}}\n"))
@@ -534,12 +596,54 @@ func TestSettingsOfATmuxSessionDatabaseShowsTheStoreAndNotItsFile(t *testing.T) 
 	}
 	runtimeKeys := keysOf(t, keysOf(t, encoded)["runtime"])
 	assertKeys(t, "settings.runtime", runtimeKeys, []string{"name", "tmux"})
-	assertKeys(t, "settings.runtime.tmux", keysOf(t, runtimeKeys["tmux"]), []string{"session_store"})
+	assertKeys(t, "settings.runtime.tmux", keysOf(t, runtimeKeys["tmux"]), []string{"pane_env", "pi_config_files", "session_store"})
 	if settings.Runtime.Tmux == nil || settings.Runtime.Tmux.SessionStore != "postgres" {
 		t.Errorf("runtime.tmux = %+v, want session_store postgres", settings.Runtime.Tmux)
 	}
 	if bytes.Contains(encoded, []byte("TMUX_SESSION_DSN_FIXTURE")) {
 		t.Errorf("settings carry the session database's URL file: %s", encoded)
+	}
+}
+
+// The two pod-update round caps ride the settings as the numbers the maximal file names, and as
+// null under the minimal one, which names neither: the key is always on the wire, and its null is
+// how a reader learns the deployment caps nothing. An omitted key would say only that the daemon
+// is too old to know the setting.
+func TestSettingsPodUpdateRounds(t *testing.T) {
+	maximal := SettingsOf(settingsFixtureConfig(t))
+	if maximal.PodUpdateMaxOpenRounds == nil || maximal.PodUpdateRoundsPerMinute == nil {
+		t.Fatalf("pod_update_max_open_rounds = %v, pod_update_rounds_per_minute = %v; want the file's two numbers",
+			maximal.PodUpdateMaxOpenRounds, maximal.PodUpdateRoundsPerMinute)
+	}
+	if *maximal.PodUpdateMaxOpenRounds != 6 || *maximal.PodUpdateRoundsPerMinute != 2 {
+		t.Errorf("pod_update_max_open_rounds = %d, pod_update_rounds_per_minute = %d; want the file's 6 and 2",
+			*maximal.PodUpdateMaxOpenRounds, *maximal.PodUpdateRoundsPerMinute)
+	}
+	encoded, err := json.Marshal(maximal)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for key, want := range map[string]string{"pod_update_max_open_rounds": "6", "pod_update_rounds_per_minute": "2"} {
+		if got := string(keysOf(t, encoded)[key]); got != want {
+			t.Errorf("%s = %s, want %s", key, got, want)
+		}
+	}
+
+	minimal := SettingsOf(minimalSettingsConfig(t))
+	if minimal.PodUpdateMaxOpenRounds != nil || minimal.PodUpdateRoundsPerMinute != nil {
+		t.Errorf("pod_update_max_open_rounds = %v, pod_update_rounds_per_minute = %v; want nil for both, since the file names no limit",
+			minimal.PodUpdateMaxOpenRounds, minimal.PodUpdateRoundsPerMinute)
+	}
+	encoded, err = json.Marshal(minimal)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	top := keysOf(t, encoded)
+	for _, key := range []string{"pod_update_max_open_rounds", "pod_update_rounds_per_minute"} {
+		raw, present := top[key]
+		if !present || string(raw) != "null" {
+			t.Errorf("%s = %s (present: %v), want null, the limit no file named", key, raw, present)
+		}
 	}
 }
 
@@ -575,6 +679,27 @@ func everyKey(document any, prefix string) []string {
 	case []any:
 		for _, member := range value {
 			keys = append(keys, everyKey(member, prefix+"[]")...)
+		}
+	}
+	return keys
+}
+
+// nullKeys is every object key under document whose value is null, as a dotted path from prefix:
+// the keys a test holds to the short list the plugin's reader tolerates.
+func nullKeys(document any, prefix string) []string {
+	var keys []string
+	switch value := document.(type) {
+	case map[string]any:
+		for key, member := range value {
+			path := prefix + "." + key
+			if member == nil {
+				keys = append(keys, path)
+			}
+			keys = append(keys, nullKeys(member, path)...)
+		}
+	case []any:
+		for _, member := range value {
+			keys = append(keys, nullKeys(member, prefix+"[]")...)
 		}
 	}
 	return keys

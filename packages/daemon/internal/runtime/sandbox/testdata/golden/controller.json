@@ -15,7 +15,8 @@
       "metadata": {
         "annotations": {
           "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
-          "karpenter.sh/do-not-disrupt": "true"
+          "karpenter.sh/do-not-disrupt": "true",
+          "legion.dev/pod-shape": "{\"image\":\"ghcr.io/cybermonklabs/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef\",\"resources\":{\"limits\":{\"cpu\":\"1\",\"ephemeral-storage\":\"10Gi\",\"memory\":\"4Gi\"},\"requests\":{\"cpu\":\"1\",\"ephemeral-storage\":\"1Gi\",\"memory\":\"4Gi\"}},\"disk\":\"20Gi\"}"
         },
         "labels": {
           "legion.dev/project": "legion",
@@ -52,7 +53,7 @@
                 }
               }
             ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "image": "ghcr.io/cybermonklabs/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "controller",
             "resources": {
               "limits": {
@@ -122,6 +123,7 @@
         "runtimeClassName": "gvisor",
         "securityContext": {
           "fsGroup": 1000,
+          "fsGroupChangePolicy": "OnRootMismatch",
           "runAsGroup": 1000,
           "runAsNonRoot": true,
           "runAsUser": 1000

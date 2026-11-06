@@ -12,7 +12,7 @@ tags:
   - fingerprint
   - merge-ref
 date: 2026-09-15
-status: active
+status: superseded by sjawhar/legion#2423 — a pull request no longer rebuilds, commits or checks `dist/`, so a contracts change carries no dist commit, needs no rebase for one and leaves the fingerprint alone; main's Rebuild Claude Envoy plugin workflow commits a fresh build after each merge, and a pull request that carries changes there drops them with `jj restore --from main@origin`; that the bundles inline `@legion/contracts` and `@legion/envoy-client` and build only on the pinned Bun still stands
 module: packages/claude-envoy
 problem_type: process
 severity: medium

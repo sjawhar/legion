@@ -44,7 +44,7 @@ export function ArtifactRoutePanel({
     >
       {mounted ? (
         route.kind === "artifacts" ? (
-          <ArtifactsTab />
+          <ArtifactsTab isClosed={isClosed} />
         ) : artifactRoute !== undefined && !isPrimaryArtifactRoute ? (
           artifact === undefined ? (
             <section className="space-y-3">

@@ -1,14 +1,58 @@
 import { harnessPorts } from "./harness-ports";
 
 // Minimal GitHub App API for the architecture-source access check, the
-// architecture importer and the delivery reconcile: the installation lookup, the
-// installation-token mint, the repository read that proves the minted token works,
-// the exact branch read a source's save makes, the commit/tree/blob reads a sync
-// walks, and empty delivery listings. Tests seed
-// per-repository state through /__fixture/repos; the server reaches this via
+// architecture importer, the delivery reconcile and the issue header's GitHub link:
+// the installation lookup, the installation-token mint, the repository read that
+// proves the minted token works, the exact branch read a source's save makes, the
+// commit/tree/blob reads a sync walks, empty delivery listings, and a seeded pull
+// request with its head's check runs and workflow runs. Tests seed per-repository
+// state through /__fixture/repos; the server reaches this via
 // DISPATCH_GITHUB_API_BASE.
 
 const ARCHITECTURE_DIR = ".dispatch/architecture";
+
+/** A pull request the GitHub link reads: its title, state and head commit, and the branch,
+ *  base and body Dispatch's pull-request head tracking attributes it by. */
+interface FakePull {
+  readonly head_sha: string;
+  readonly merged?: boolean;
+  readonly state: string;
+  readonly title: string;
+  readonly body?: string;
+  readonly head_ref?: string;
+  /** The repository the head branch lives in, as GitHub's `head.repo.full_name`; the pull
+   *  request's own repository when unset. Dispatch attributes a result's currency to a pull
+   *  request only when the two are the same, so a fork's name here is how a fixture describes
+   *  a pull request that attributes nobody. */
+  readonly head_repo?: string;
+  readonly base_ref?: string;
+  readonly updated_at?: string;
+}
+
+/** One check run of a commit, in the check suite `check_suite_id` names. */
+interface FakeCheckRun {
+  readonly app_id?: number;
+  readonly check_suite_id: number;
+  readonly conclusion: string | null;
+  readonly id: number;
+  readonly name: string;
+  readonly status: string;
+}
+
+/** One workflow run of a commit: its workflow's name, its triggering event and its check suite. */
+interface FakeWorkflowRun {
+  readonly check_suite_id: number;
+  readonly event: string;
+  readonly id: number;
+  readonly name: string;
+}
+
+/** GitHub's page of a list: `per_page` (default 30, at most 100) items from page `page`. */
+function pageOf<T>(items: readonly T[], url: URL): T[] {
+  const perPage = Math.min(Number(url.searchParams.get("per_page") ?? 30), 100);
+  const page = Number(url.searchParams.get("page") ?? 1);
+  return items.slice((page - 1) * perPage, page * perPage);
+}
 
 interface FakeRepo {
   /** Contents permission the installation reports: "read", "write", "none". */
@@ -24,6 +68,23 @@ interface FakeRepo {
   /** The repository's branches, every one at the commit `files` derives; `["main"]` when
    *  unset, GitHub's default branch. The exact branch read answers 404 for any other name. */
   readonly branches?: readonly string[];
+  /** Pull requests keyed by number; a number not here answers a server error, as before. */
+  readonly pulls?: Record<string, FakePull>;
+  /** Check runs keyed by commit sha, in any order. */
+  readonly check_runs?: Record<string, readonly FakeCheckRun[]>;
+  /** Workflow runs keyed by head sha. */
+  readonly workflow_runs?: Record<string, readonly FakeWorkflowRun[]>;
+  /** The repository's default branch; "main" when unset. */
+  readonly default_branch?: string;
+  /** The pull request numbers GitHub names for a commit, keyed by commit sha: what
+   *  `GET /repos/{o}/{r}/commits/{sha}/pulls` answers, read from `pulls`. */
+  readonly commit_pulls?: Record<string, readonly number[]>;
+  /** The commits each branch holds, keyed by branch name: what the compare read answers
+   *  `behind` (or `identical`, for the last of them) about, and `diverged` about any other. */
+  readonly branch_commits?: Record<string, readonly string[]>;
+  /** A repository Dispatch's App is not installed on: every read of it answers, but the
+   *  installation lookup is GitHub's 404, so the server can reach no token for it. */
+  readonly installation_missing?: boolean;
 }
 
 /** Deterministic commit sha for a repository's current files. */
@@ -42,9 +103,11 @@ function permissionsOf(repo: FakeRepo): Record<string, string | undefined> {
 // installed).
 let repos = new Map<string, FakeRepo>();
 
-Bun.serve({
+// FAKE_GITHUB_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
+// port bound, which e2e/harness-start.ts reads.
+const server = Bun.serve({
   hostname: "127.0.0.1",
-  port: harnessPorts.fakeGithub.port,
+  port: harnessPorts().fakeGithub.port,
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "PUT" && url.pathname === "/__fixture/repos") {
@@ -56,7 +119,9 @@ Bun.serve({
     const installation = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/installation$/);
     if (request.method === "GET" && installation !== null) {
       const repo = repos.get(`${installation[1]}/${installation[2]}`);
-      if (repo === undefined) {
+      // A repository nobody seeded, and one seeded as not installed on: both are GitHub's 404,
+      // the answer the Go client reads as ErrNoInstallation.
+      if (repo === undefined || repo.installation_missing === true) {
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
       return Response.json({
@@ -121,11 +186,112 @@ Bun.serve({
       return Response.json({ total_count: 0, workflow_runs: [] });
     }
 
-    // A stored pull request's attribution read is skipped on a server error, leaving the row as
-    // seeded. A 404 would mark it unfetchable and change the delivery data under the test.
-    const pull = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/pulls\/\d+$/);
+    // A commit's workflow runs (`actions/runs?head_sha=`), which the GitHub link joins to the
+    // check runs by check suite for each run's workflow name and event.
+    const commitWorkflowRuns = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/actions\/runs$/);
+    if (request.method === "GET" && commitWorkflowRuns !== null) {
+      const repo = repos.get(`${commitWorkflowRuns[1]}/${commitWorkflowRuns[2]}`);
+      if (repo === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const headSHA = url.searchParams.get("head_sha") ?? "";
+      const runs = repo.workflow_runs?.[headSHA] ?? [];
+      return Response.json({
+        total_count: runs.length,
+        workflow_runs: pageOf(runs, url).map((run) => ({ ...run, head_sha: headSHA })),
+      });
+    }
+
+    // A seeded pull request answers as GitHub does. A stored pull request's attribution read is
+    // skipped on a server error, leaving the row as seeded, so an unseeded one answers 500: a 404
+    // would mark it unfetchable and change the delivery data under the test.
+    const pull = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
     if (request.method === "GET" && pull !== null) {
-      return Response.json({ message: "fixture has no pull request" }, { status: 500 });
+      const seeded = repos.get(`${pull[1]}/${pull[2]}`)?.pulls?.[pull[3] ?? ""];
+      if (seeded === undefined) {
+        return Response.json({ message: "fixture has no pull request" }, { status: 500 });
+      }
+      return Response.json({
+        head: {
+          repo: { full_name: seeded.head_repo ?? `${pull[1]}/${pull[2]}` },
+          sha: seeded.head_sha,
+        },
+        merged: seeded.merged ?? false,
+        number: Number(pull[3]),
+        state: seeded.state,
+        title: seeded.title,
+      });
+    }
+
+    const checkRuns = url.pathname.match(
+      /^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)\/check-runs$/
+    );
+    if (request.method === "GET" && checkRuns !== null) {
+      const repo = repos.get(`${checkRuns[1]}/${checkRuns[2]}`);
+      if (repo === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const runs = repo.check_runs?.[checkRuns[3] ?? ""] ?? [];
+      return Response.json({
+        check_runs: pageOf(runs, url).map(({ app_id, check_suite_id, ...run }) => ({
+          ...run,
+          app: { id: app_id ?? 15368, slug: "github-actions" },
+          check_suite: { id: check_suite_id },
+        })),
+        total_count: runs.length,
+      });
+    }
+
+    // The pull requests GitHub names for a commit, which Dispatch reads through when a result
+    // names a commit that is the head of no pull request it has an event for. It must match
+    // before the bare `commits/{ref}` route below.
+    const commitPulls = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)\/pulls$/);
+    if (request.method === "GET" && commitPulls !== null) {
+      const repo = repos.get(`${commitPulls[1]}/${commitPulls[2]}`);
+      if (repo === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const numbers = repo.commit_pulls?.[commitPulls[3] ?? ""] ?? [];
+      return Response.json(
+        numbers.flatMap((number) => {
+          const seeded = repo.pulls?.[String(number)];
+          if (seeded === undefined) return [];
+          return [
+            {
+              base: { ref: seeded.base_ref ?? "main" },
+              body: seeded.body ?? "",
+              head: {
+                ref: seeded.head_ref ?? `branch-${number}`,
+                repo: { full_name: seeded.head_repo ?? `${commitPulls[1]}/${commitPulls[2]}` },
+                sha: seeded.head_sha,
+              },
+              html_url: `https://github.com/${commitPulls[1]}/${commitPulls[2]}/pull/${number}`,
+              merged: seeded.merged ?? false,
+              number,
+              state: seeded.state,
+              title: seeded.title,
+              updated_at: seeded.updated_at ?? "2026-01-01T00:00:00Z",
+            },
+          ];
+        })
+      );
+    }
+
+    // `compare/{base}...{head}`, of which Dispatch decodes only `status`: a branch that holds
+    // the commit is `behind` it (`identical` when it is the branch's last commit), and one that
+    // does not is `diverged`.
+    const compare = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/compare\/(.+)$/);
+    if (request.method === "GET" && compare !== null) {
+      const repo = repos.get(`${compare[1]}/${compare[2]}`);
+      const [base, head] = decodeURIComponent(compare[3] ?? "").split("...", 2);
+      if (repo === undefined || base === undefined || head === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const commits = repo.branch_commits?.[base] ?? [];
+      const held = commits.indexOf(head);
+      return Response.json({
+        status: held === -1 ? "diverged" : held === commits.length - 1 ? "identical" : "behind",
+      });
     }
 
     // The exact branch read a source's save makes (`git/ref/heads/{branch}`, a `/` in the name
@@ -204,7 +370,10 @@ Bun.serve({
       if (!repos.has(`${repository[1]}/${repository[2]}`)) {
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
-      return Response.json({ full_name: `${repository[1]}/${repository[2]}` });
+      return Response.json({
+        default_branch: repos.get(`${repository[1]}/${repository[2]}`)?.default_branch ?? "main",
+        full_name: `${repository[1]}/${repository[2]}`,
+      });
     }
 
     if (url.pathname === "/healthz") return Response.json({ ok: true });
@@ -212,4 +381,4 @@ Bun.serve({
   },
 });
 
-console.log(`fake github listener on 127.0.0.1:${harnessPorts.fakeGithub.port}`);
+console.log(`fake github listener on 127.0.0.1:${server.port}`);

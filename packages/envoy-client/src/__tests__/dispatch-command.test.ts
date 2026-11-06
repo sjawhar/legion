@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { dispatchToolSpecs } from "@legion/contracts";
+import { dispatchToolSchema, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
+import { z } from "zod";
 import {
   commandFlags,
+  commandHelp,
   commandLine,
   commandName,
   flagName,
@@ -55,8 +57,8 @@ describe("the dispatch command surface", () => {
     }
   });
 
-  test("names map both ways for all 23 tools, and no two flags of one command collide", () => {
-    expect(dispatchToolSpecs).toHaveLength(23);
+  test("names map both ways for all 32 tools, and no two flags of one command collide", () => {
+    expect(dispatchToolSpecs).toHaveLength(32);
     for (const spec of dispatchToolSpecs) {
       expect(toolForCommand(commandName(spec.name))).toBe(spec.name);
       const flags = commandFlags(spec.name);
@@ -64,6 +66,65 @@ describe("the dispatch command surface", () => {
     }
     expect(commandName("dispatch_issue_update")).toBe("issue-update");
     expect(flagName("reply_to_ask")).toBe("reply-to-ask");
+  });
+
+  // A flag that takes JSON lists the keys of its object, or of each item of its list, from the
+  // schema the call is checked against, so a caller learns the field names from --help rather
+  // than from the refusal of a wrong one.
+  test("every JSON flag's help lists each key its object or list item takes", () => {
+    interface Node {
+      readonly type?: string;
+      readonly items?: Node;
+      readonly properties?: Readonly<Record<string, Node>>;
+    }
+    let checked = 0;
+    for (const spec of dispatchToolSpecs) {
+      const schema = z.toJSONSchema(dispatchToolSchema(spec, zodSchemaApi(z))) as Node;
+      const help = commandHelp(spec.name);
+      for (const [field, node] of Object.entries(schema.properties ?? {})) {
+        const keys = node.properties ?? node.items?.properties;
+        if (keys === undefined) continue;
+        const flag = `  --${flagName(field)}-json <json>\n`;
+        const at = help.indexOf(flag);
+        expect(at, `${spec.name} ${field}`).toBeGreaterThan(-1);
+        const end = help.indexOf("\n  --", at + flag.length);
+        const section = help.slice(at, end === -1 ? undefined : end);
+        for (const key of Object.keys(keys)) {
+          expect(section, `${spec.name} ${field}.${key}`).toContain(`\n        ${key} (`);
+          checked++;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(20);
+  });
+
+  test("doc-edit --help lists each key an operation takes, with its type and its values", () => {
+    const help = commandHelp("dispatch_doc_edit");
+    expect(help).toContain(
+      [
+        "  --ops-json <json>",
+        "      Flat tagged edits; an operation takes only the keys below, a misspelled one is refused rather than ignored, and the server validates the fields its op requires. Required.",
+        "      Each item's keys:",
+        "        op (required; replace|delete|insert|retype|move|delete_row|delete_column): Edit operation.",
+        "",
+      ].join("\n")
+    );
+    expect(help).toContain(
+      "\n        index (integer): Zero-based row or column index for delete_row or delete_column.\n"
+    );
+    expect(help).toContain("\n        type (text): Typed block name for retype.\n");
+    expect(help).toContain("\n        attributes (any JSON): Typed block attributes for retype;");
+    expect(help).toContain(
+      [
+        "      Its keys:",
+        "        document (text): Token for the exact canonical document returned by dispatch doc-read.",
+        "        blocks (list of objects): Every content block this batch changes, each with the token dispatch doc-read --blocks lists.",
+        "          Each item's keys:",
+        "            id (required; text): Stable block id dispatch doc-read --blocks lists.",
+        "            token (required; text): That block's full-state token, including inline marks.",
+        "",
+      ].join("\n")
+    );
   });
 
   test("dispatch project takes its key and name as one flag each", () => {
@@ -182,16 +243,142 @@ describe("the dispatch command surface", () => {
     expect(parseCommand(["isue"], noFiles)).toMatchObject({ kind: "refused" });
   });
 
-  test("a bare issue key is refused with the --issue form of the same command", () => {
+  test("a bare issue key first is the --issue of a command that takes --issue", () => {
+    expect(parseCommand(["read", "ACME-12"], noFiles)).toEqual(
+      parseCommand(["read", "--issue", "ACME-12"], noFiles)
+    );
     expect(parseCommand(["read", "ACME-12"], noFiles)).toEqual({
+      kind: "call",
+      tool: "dispatch_read",
+      args: { issue: "ACME-12" },
+      dryRun: false,
+    });
+    expect(parseCommand(["message", "ACME-12", "--body", "hi"], noFiles)).toMatchObject({
+      kind: "call",
+      args: { issue: "ACME-12", body: "hi" },
+    });
+  });
+
+  test("every command that takes --issue takes a bare key as its first argument", () => {
+    const commands = dispatchToolSpecs
+      .map((spec) => spec.name)
+      .filter((tool) => commandFlags(tool).includes("--issue"))
+      .map(commandName);
+    expect(commands.sort()).toEqual(
+      [
+        "artifact",
+        "ask",
+        "claim",
+        "comment",
+        "doc-edit",
+        "doc-read",
+        "handoff-read",
+        "handoff-write",
+        "issue-update",
+        "message",
+        "plan-approve",
+        "read",
+        "request-approval",
+        "result",
+        "results",
+        "suggest",
+      ].sort()
+    );
+    for (const command of commands) {
+      const bare = parseCommand([command, "ACME-12", "--dry-run"], noFiles);
+      expect(bare).toEqual(parseCommand([command, "--issue", "ACME-12", "--dry-run"], noFiles));
+      expect(JSON.stringify(bare)).not.toContain("unexpected argument");
+    }
+  });
+
+  test("a key-shaped word after the first argument is refused, not taken as --issue", () => {
+    expect(parseCommand(["message", "--body", "hi", "SHA-256"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_message",
+      problems: [
+        "unexpected argument SHA-256: a bare issue key is the --issue only as the first argument; otherwise write --issue SHA-256",
+      ],
+    });
+  });
+
+  test("a lowercase issue key is refused", () => {
+    expect(parseCommand(["read", "acme-12"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["unexpected argument acme-12: every value follows its flag"],
+    });
+  });
+
+  test("a bare issue key is refused by a command without --issue", () => {
+    expect(parseCommand(["search", "--query", "q", "ACME-12"], noFiles)).toMatchObject({
+      kind: "refused",
+      tool: "dispatch_search",
+    });
+  });
+
+  test("a bare issue key is refused when --issue is also given", () => {
+    expect(parseCommand(["read", "--issue", "ACME-1", "ACME-12"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["unexpected argument ACME-12: --issue is already ACME-1"],
+    });
+    const issueFile = {
+      readText: (path: string): string => {
+        if (path === "issue.txt") return "ACME-1";
+        throw new Error(`unexpected read ${path}`);
+      },
+    };
+    expect(parseCommand(["read", "--issue-file", "issue.txt", "ACME-12"], issueFile)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["unexpected argument ACME-12: --issue-file already set --issue to ACME-1"],
+    });
+    expect(parseCommand(["read", "ACME-12", "--issue", "ACME-1"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["the issue key ACME-12 and --issue both set issue"],
+    });
+  });
+
+  test("a second bare issue key is refused", () => {
+    expect(parseCommand(["read", "ACME-12", "ACME-13"], noFiles)).toEqual({
       kind: "refused",
       tool: "dispatch_read",
       problems: [
-        "unexpected argument ACME-12: use --issue <KEY>, as in: dispatch read --issue ACME-12",
+        "unexpected argument ACME-13: a bare issue key is the --issue only as the first argument; otherwise write --issue ACME-13",
       ],
     });
+  });
+
+  test("a bare value that is not an issue key is refused", () => {
     expect(parseCommand(["read", "hello"], noFiles)).toMatchObject({
       problems: ["unexpected argument hello: every value follows its flag"],
+    });
+  });
+
+  test("handoff-write reads its body from a file or stdin unchanged, and handoff-read takes a version", () => {
+    const body = '{"schemaVersion":1,\n  "phase": "implement"}\n';
+    const files = { readText: (path: string) => (path === "-" || path === "h.json" ? body : "") };
+    for (const source of ["h.json", "-"]) {
+      expect(
+        parseCommand(
+          ["handoff-write", "DSP-1", "--phase", "implement", "--body-file", source],
+          files
+        )
+      ).toEqual({
+        kind: "call",
+        tool: "dispatch_handoff_write",
+        args: { issue: "DSP-1", phase: "implement", body },
+        dryRun: false,
+      });
+    }
+    expect(
+      parseCommand(["handoff-read", "DSP-1", "--phase", "plan", "--version", "2"], noFiles)
+    ).toEqual({
+      kind: "call",
+      tool: "dispatch_handoff_read",
+      args: { issue: "DSP-1", phase: "plan", version: 2 },
+      dryRun: false,
     });
   });
 });

@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
@@ -19,6 +19,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import {
   ownerRepoPattern,
   settingsFieldLabel,
@@ -49,9 +50,13 @@ export function ArchitectureSourcesSection(): ReactNode {
   const submitGuard = useSubmitGuard();
   const sources = useQuery(architectureSourcesQuery());
   const projects = useQuery(projectsQuery());
-  const saveSource = useMutation({
-    mutationFn: (input: { project: string; repo: string; branch: string }) =>
-      api.putArchitectureSource(input.project, input.repo, { branch: input.branch }),
+  // The form shows a refused save beside the repository it was refused over.
+  const saveSource = useKeyedWrite({
+    inline: true,
+    label: (input: { project: string; repo: string; branch: string }) =>
+      `${input.project}'s architecture source ${input.repo}`,
+    write: (input, bounds) =>
+      api.putArchitectureSource(input.project, input.repo, { branch: input.branch }, bounds),
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
       // The settings list's key prefixes every project's own list, so both refresh.
@@ -61,16 +66,19 @@ export function ArchitectureSourcesSection(): ReactNode {
       setBranch("main");
     },
   });
-  const deleteSource = useMutation({
-    mutationFn: (source: SourceKey) => api.deleteArchitectureSource(source.project, source.repo),
+  const deleteSource = useKeyedWrite({
+    label: (source: SourceKey) => `${source.project}'s architecture source ${source.repo} removed`,
+    write: (source, bounds) => api.deleteArchitectureSource(source.project, source.repo, bounds),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey }),
   });
   // A refresh settles into the row either way: a rejected model comes back 200
   // with the reason in last_error, and even a 409 (access revoked, branch gone)
   // recorded its reason on the row before failing, so both invalidate.
-  const refreshSource = useMutation({
-    mutationFn: (source: SourceKey) => api.syncArchitectureSource(source.project, source.repo),
+  const refreshSource = useKeyedWrite({
+    label: (source: SourceKey) =>
+      `Refresh of ${source.project}'s architecture source ${source.repo}`,
+    write: (source, bounds) => api.syncArchitectureSource(source.project, source.repo, bounds),
     onSettled: () =>
       void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey }),
   });

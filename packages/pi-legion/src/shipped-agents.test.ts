@@ -64,26 +64,53 @@ test.each(agents)("%s autoloads exactly the skill:// names its body already has"
   );
 });
 
-// deep-worker.md's frontmatter says why.
-test("deep-worker.md is blocking", () => {
-  expect(definition("deep-worker.md").fields.blocking).toBe(true);
+// Legion's pods run Oh My Pi with async jobs and bash auto-background on, and a `blocking` agent
+// would hold its caller in the foreground instead. Each caller's prompt says where it waits for a
+// result, so no agent this package ships declares the field at all, true or false.
+test.each(agents)("%s declares no blocking field", (file) => {
+  expect(definition(file).fields, `${file}'s frontmatter`).not.toHaveProperty("blocking");
 });
 
-// The planner's two checks: the planner waits for each answer before it drafts or revises
-// (blocking), they change no file, and each runs on the deployment's model role for its job.
+// The planner's and the architect's two checks: each runs on the deployment's model role for its
+// job. They change no file: no edit or write tool. They carry bash to check live state themselves,
+// and Oh My Pi has no per-agent command limit, so each prompt holds the agent to commands that
+// read.
 test.each([
   ["plan-gap-analyst.md", "@oracle"],
   ["plan-reviewer.md", "@review"],
-])("%s is a blocking, read-only check on %s", (file, model) => {
-  const { fields } = definition(file);
+])("%s checks on %s, edits no file and runs only read-only commands", (file, model) => {
+  const { fields, body } = definition(file);
   expect(fields.model).toEqual([model]);
-  expect(fields.blocking).toBe(true);
-  const readOnly = new Set(["read", "glob", "grep", "find", "lsp", "ast_grep", "todo"]);
+  const allowed: Record<string, true> = {
+    read: true,
+    glob: true,
+    grep: true,
+    find: true,
+    lsp: true,
+    ast_grep: true,
+    todo: true,
+    bash: true,
+  };
   const tools = String(fields.tools)
     .split(",")
     .map((tool) => tool.trim());
   expect(
-    tools.filter((tool) => !readOnly.has(tool)),
+    tools.filter((tool) => allowed[tool] !== true),
     `${file} lists a mutation tool`
   ).toEqual([]);
+  expect(tools).toContain("bash");
+  expect(body.replace(/\s+/g, " ")).toContain("Run only commands that read.");
+});
+
+// dispatch://INFRA-331: a thermonuclear agent returned `{"verdict":"APPROVE","report":"see
+// markdown"}` and no report, and the reviewer answered the security rows itself. No Legion agent
+// or caller defines a `report` field and no Legion overlay sets an output schema, so the rule
+// names the whole result the agent hands back, whatever its shape.
+test.each([
+  "thermonuclear-deep-review.md",
+  "thermonuclear-code-quality.md",
+])("%s returns its whole report in the result, never a pointer to one", (file) => {
+  expect(definition(file).body.replace(/\s+/g, " ")).toContain(
+    'Your result is the report. Open it with the verdict line and then every finding with its evidence, and put nothing before them. Name no other place the report also lives — not a file you wrote, not a document, not "see markdown", not even beside the findings: a result that opens by sending the caller somewhere else is how a review with no report behind it gets recorded as a verdict. When the task also asks for the report as a file, write the file and say nothing about it in your result.'
+  );
 });

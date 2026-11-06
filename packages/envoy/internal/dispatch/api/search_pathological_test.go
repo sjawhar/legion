@@ -32,16 +32,16 @@ import (
 // linear-time test holds the parser on the same runs. The `)_` ladder stops at 256 KiB, as before
 // the element limit. `)_` saved in linear time before the fix too and is held to the same growth.
 //
-// A comment, a comment edit, a message and a broadcast hold up to contracts.DispatchBodyMax
-// characters - 32,000 since INFRA-45, sixteen times the 2,000 that was too short for a ladder to
-// tell the code before the fix from the code after it, whose removed timings measured a
-// 2,000-character `a_` comment at 51 ms before the fix and 56 ms after. The raised cap is
-// laddered here ("comment a_"), a full-cap `a_` comment being the longest pathological text a
-// caller can write outside a document; growsLinearly is what holds it, so a write that stops
-// being bounded at the cap fails this test rather than waiting for a reader to notice. An ask
-// question is still capped at 800 and an issue title at 1,000 (contracts.IssueTitleMax), both
-// too short to ladder; the title's ladders, and the duplicate check's against a stored title,
-// went with the title cap (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts
+// A comment, a comment edit, a message and a broadcast hold up to contracts.DispatchBlockUnits
+// characters in one block - 32,000 since INFRA-45, sixteen times the 2,000 that was too short
+// for a ladder to tell the code before the fix from the code after it, whose removed timings
+// measured a 2,000-character `a_` comment at 51 ms before the fix and 56 ms after. That bound is
+// laddered here ("comment a_"), a one-block `a_` comment at it being the longest pathological
+// text a caller can write outside a document; growsLinearly is what holds it, so a write that
+// stops being bounded at the block bound fails this test rather than waiting for a reader to
+// notice. An issue title is capped at 1,000 (contracts.IssueTitleMax), too short to ladder; the
+// title's ladders, and the duplicate check's against a stored title, went with the title cap
+// (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts
 // is indexed through the search_text the document ladders time.
 //
 // Settlement is held off. A document's settlement holds its issue's row while it renders, so a
@@ -78,11 +78,12 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 		})
 	}
 	// A comment's whole body is one search_text run, as a document's is, so the same pathological
-	// shape is timed at the cap a caller may send, in three rungs derived from it: the cap is a
-	// thirty-second of the largest document rung, enough of a span for a ladder since INFRA-45.
+	// shape is timed at the longest block a caller may send, in three rungs derived from it: the
+	// block bound is a thirty-second of the largest document rung, enough of a span for a ladder
+	// since INFRA-45.
 	t.Run("comment a_", func(t *testing.T) {
 		const shape = "a_"
-		sizes := []int{contracts.DispatchBodyMax / 32, contracts.DispatchBodyMax / 4, contracts.DispatchBodyMax}
+		sizes := []int{contracts.DispatchBlockUnits / 32, contracts.DispatchBlockUnits / 4, contracts.DispatchBlockUnits}
 		growsLinearly(t, "writing a comment of `"+shape+"`", sizes, func(size int) time.Duration {
 			body := strings.Repeat(shape, size/len(shape))
 			started := time.Now()
@@ -104,26 +105,34 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 	// 1.5 s after it, on one machine at a load of 309 to 343. Replaced blocks that stand apart, kept
 	// blocks between them, still cost a walk each in ygo (pmdoc's TestUpdateIsLinearInTheBlockCount).
 	// Each rung is timed in this process's CPU (cputest.Process), since a rung's wall time at these
-	// sizes is mostly the request's own cost and the runner's load. No test in this package calls
-	// t.Parallel.
+	// sizes is mostly the request's own cost and the runner's load, over as many replacements, each
+	// of a document of its own, as the clock needs to resolve their time (cputest.Measure). No test
+	// in this package calls t.Parallel.
 	t.Run("replacing many blocks", func(t *testing.T) {
 		const from, to = "> #\n", "> ***\n"
 		growsLinearly(t, "replacing a quote of headings with a quote of rules", []int{682 * len(to), 5_461 * len(to), 21_844 * len(to)}, func(size int) time.Duration {
 			blocks := size / len(to)
-			documents++
-			name := fmt.Sprintf("many-blocks-%d.md", documents)
-			for index, body := range []string{strings.Repeat(from, blocks), strings.Repeat(to, blocks)} {
-				before := cputest.Process()
-				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": name}, "body.md", "text/markdown", []byte(body), "alice")
-				took := cputest.Process() - before
+			headings, rules := []byte(strings.Repeat(from, blocks)), []byte(strings.Repeat(to, blocks))
+			upload := func(name string, body []byte) {
+				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": name}, "body.md", "text/markdown", body, "alice")
 				if response.Code != http.StatusCreated {
 					t.Fatalf("upload %d blocks of %q: status=%d body=%.200s", blocks, body[:len(from)], response.Code, response.Body.String())
 				}
-				if index == 1 {
-					return took
-				}
 			}
-			return 0
+			took, _ := cputest.Measure(func(runs int) (time.Duration, error) { // this batch has no error to report
+				names := make([]string, runs)
+				for i := range names {
+					documents++
+					names[i] = fmt.Sprintf("many-blocks-%d.md", documents)
+					upload(names[i], headings)
+				}
+				before := cputest.Process()
+				for _, name := range names {
+					upload(name, rules)
+				}
+				return cputest.Process() - before, nil
+			})
+			return took
 		})
 	})
 }

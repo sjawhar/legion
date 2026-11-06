@@ -1,1 +1,1 @@
-{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://example-dispatch.dispatch.svc.cluster.local:8766"}}}}}
+{"Services":{"svc:example-dispatch":{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://example-dispatch.dispatch.svc.cluster.local:8766"}}}}}}}

@@ -18,6 +18,7 @@ func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {
 		"___",
 		"-  -  -",
 		":::callout{kind=\"warning\"}",
+		":::ask{#a1}",
 		":::",
 		"::foo",
 		"::::x{a=\"b\"}",
@@ -95,7 +96,8 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 // misread. A `---` there opens front matter: a later line that is just `---` - a second rule, a
 // code line - closes it, and everything up to there reads as front matter; and with no such line
 // the browser editor's parser, having tried the front matter to the document's end, reads no
-// list, quote or footnote definition in the rest. Those documents write the rule `***`.
+// list, quote, footnote definition or typed block in the rest. Those documents write the rule
+// `***`.
 func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing.T) {
 	for name, test := range map[string]struct{ after, opener string }{
 		"alone":                     {"", "---"},
@@ -104,7 +106,7 @@ func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing
 		"a heading":                 {"# a\n", "---"},
 		"code":                      {"```\nc\n```\n", "---"},
 		"an image":                  {"![a](https://x.test/i.png)\n", "---"},
-		"a callout":                 {":::callout{#c1 kind=\"note\" title=\"T\"}\nx\n:::\n", "---"},
+		"a callout":                 {":::callout{#c1 kind=\"note\" title=\"T\"}\nx\n:::\n", "***"},
 		"a heading, then text":      {"## title: x\n\nBody.\n", "---"},
 		"a second rule":             {"x\n\n***\n\ny\n", "***"},
 		"a code line ---":           {"x\n\n```\n---\n```\n", "***"},
@@ -168,7 +170,9 @@ func TestRenderEscapesBlockFormsInAListNestedInABlockquote(t *testing.T) {
 // GFM reads a single tilde as strikethrough too, and refuses a delimiter run of three: text
 // `~a~` came back struck, and struck text ending or starting with a tilde lost its strike. Such a
 // paragraph writes its tildes as references; a paragraph whose tildes pair with nothing - "about
-// ~200ms" - and an ordinary strikethrough keep the bytes they have always had.
+// ~200ms" - and an ordinary strikethrough keep the bytes they have always had. Runs of different
+// lengths pair by goldmark's rules though not the browser editor's, so they are written as
+// references too, which both read back.
 func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	struck := Mark{Type: "strike_through"}
@@ -199,9 +203,17 @@ func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
 	}{
 		{paragraph(text("about ~200ms")), "about ~200ms\n"},
 		{paragraph(text("done", struck), text(" tail")), "~~done~~ tail\n"},
+		{paragraph(text("a ~b~~ c")), "a &#126;b&#126;&#126; c\n"},
+		{paragraph(text("Plain ~a~~ text.")), "Plain &#126;a&#126;&#126; text.\n"},
+		{paragraph(text("Plain "), text("~", struck), text(" end.")), "Plain ~~&#126;~~ end.\n"},
+		{paragraph(text("approx ~5", struck)), "~~approx &#126;5~~\n"},
+		// The writer before sjawhar/legion#2360 wrote `\~~~x~~`, which the reader before it read
+		// back as this text and the engine reads as a struck `x` after a `~`; the bytes change so
+		// both read the text.
+		{paragraph(text("~~~x~~")), "&#126;&#126;&#126;x&#126;&#126;\n"},
 	} {
 		if got := mustRender(t, test.doc); got != test.want {
-			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+			t.Errorf("Render() = %q, want %q", got, test.want)
 		}
 	}
 }
@@ -209,7 +221,8 @@ func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
 // A heading's text that ends in a run of `#` after a space reads back as the heading's closing
 // sequence, and the text loses it; a list item's text that begins `[ ]` or `[x]` reads back as a
 // task checkbox. Both are written so they come back as the text they are, while `C#`, a `#` in
-// the middle and `[ ]` outside a list item keep the bytes main writes.
+// the middle and `[ ]` outside a list item keep the bytes the writer before sjawhar/legion#1429
+// writes.
 func TestRenderKeepsHeadingAndTaskTextThatReadsAsSyntax(t *testing.T) {
 	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
 	heading := func(value string) *Node {
@@ -247,7 +260,7 @@ func TestRenderKeepsHeadingAndTaskTextThatReadsAsSyntax(t *testing.T) {
 		{&Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{text("[ ] later")}}}}, "[ ] later\n"},
 	} {
 		if got := mustRender(t, test.doc); got != test.want {
-			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+			t.Fatalf("Render() = %q, want the bytes the writer before sjawhar/legion#1429 writes, %q", got, test.want)
 		}
 	}
 }
@@ -267,7 +280,7 @@ func flatText(node *Node) string {
 // The parser trims whitespace at the start of a textblock's line and at the end of the
 // textblock, so text that begins or ends with it would lose it. The first leading and the last
 // trailing whitespace character are written as references; whitespace inside a mark or a link
-// keeps the bytes main writes, since the parser keeps it there.
+// keeps the bytes the writer before sjawhar/legion#1429 writes, since the parser keeps it there.
 func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
@@ -310,7 +323,7 @@ func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
 		{doc(paragraph(text("a  b"))), "a  b\n"},
 	} {
 		if got := mustRender(t, test.tree); got != test.want {
-			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+			t.Fatalf("Render() = %q, want the bytes the writer before sjawhar/legion#1429 writes, %q", got, test.want)
 		}
 	}
 }
@@ -355,7 +368,7 @@ func TestRenderKeepsWhitespaceAtAMarksEdges(t *testing.T) {
 		{paragraph(text("*.", strike), text(" b")), "~~*.~~ b\n"},
 	} {
 		if got := mustRender(t, test.tree); got != test.want {
-			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+			t.Fatalf("Render() = %q, want the bytes the writer before sjawhar/legion#1429 writes, %q", got, test.want)
 		}
 	}
 }
@@ -387,7 +400,8 @@ func TestRenderKeepsAsterisksAndUnderscoresThatWouldPair(t *testing.T) {
 			}
 		})
 	}
-	// A run that reads back as written keeps main's bytes, snake_case and a lone asterisk included.
+	// A run that reads back as written keeps the bytes the writer before sjawhar/legion#1429
+	// writes, snake_case and a lone asterisk included.
 	for _, test := range []struct {
 		tree *Node
 		want string
@@ -396,7 +410,7 @@ func TestRenderKeepsAsterisksAndUnderscoresThatWouldPair(t *testing.T) {
 		{paragraph(text("a * b"), hardBreak, text("c * d")), "a * b\\\nc * d\n"},
 	} {
 		if got := mustRender(t, test.tree); got != test.want {
-			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+			t.Fatalf("Render() = %q, want the bytes the writer before sjawhar/legion#1429 writes, %q", got, test.want)
 		}
 	}
 }
@@ -462,9 +476,14 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 		"a]b":                       "![a\\]b](https://x.test/i.png) after\n",
 		"a*b":                       "![a*b](https://x.test/i.png) after\n",
 		"Screenshot 2024-01-01.png": "![Screenshot 2024-01-01.png](https://x.test/i.png) after\n",
+		"~b~~":                      "![\\~b\\~\\~](https://x.test/i.png) after\n",
+		"**a*_":                     "![**a*_](https://x.test/i.png) after\n",
+		"*a**_":                     "![*a**_](https://x.test/i.png) after\n",
+		"_**a*":                     "![_**a*](https://x.test/i.png) after\n",
+		"_*a**":                     "![_*a**](https://x.test/i.png) after\n",
 	} {
 		if got := mustRender(t, image(alt)); got != want {
-			t.Fatalf("Render(alt %q) = %q, want the bytes main writes, %q", alt, got, want)
+			t.Fatalf("Render(alt %q) = %q, want the bytes an earlier writer stored, %q", alt, got, want)
 		}
 	}
 }
@@ -845,12 +864,13 @@ func blockKindsOf(doc *Node) string {
 	return strings.Join(kinds, ",")
 }
 
-// Stored markdown that main already renders byte for byte must come back byte for byte: a changed
-// rendering mints a new version of the document on its next anchor or edit, and on an approved
-// spec a stale approval. Each row is main's own rendering of text that reads back correctly, in
-// a context an escape rule could misjudge - a label split by formatting or a code span, a label
-// beside a different link, a heading, a table cell, the inside of a mark, a paragraph's later
-// line, a typed block.
+// Stored markdown that an earlier writer already rendered byte for byte must come back byte for
+// byte: a changed rendering mints a new version of the document on its next anchor or edit, and
+// on an approved spec a stale approval. Each row is a rendering an earlier writer stored of text
+// that reads back correctly - the first rows the writer before sjawhar/legion#1383's, later rows
+// later writers', some named on their own rows - in a context an escape rule could misjudge - a
+// label split by formatting or a code span, a label beside a different link, a heading, a table
+// cell, the inside of a mark, a paragraph's later line, a typed block.
 func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 	for _, markdown := range []string{
 		"See [`pmdoc.Parse` [source]](https://x.test) for details.\n",
@@ -862,6 +882,13 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"*___*\n",
 		"~~---~~\n",
 		"## ~~~ tildes\n",
+		"Plain &#126;a&#126;&#126; text.\n",
+		"~~approx &#126;5~~\n",
+		"![\\~b\\~\\~](u)\n",
+		// The rendering the writer before sjawhar/legion#2360 made of a struck `**` inside
+		// emphasis, which the engine reads back as written.
+		"*[~~**é~~*\n",
+		`x ~~\_\_\*\*é\_b~~**\ y [~~\_\_\*\*é\_b~~**]\(u) z` + "\n",
 		"| a | b |\n| :--- | :--- |\n| ::1 | --- |\n",
 		"<br is an element.\n",
 		"<span class is not closed.\n",
@@ -896,19 +923,21 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"[    x](https://x.test)\n",
 		// An empty typed block or code block written with a line holding only the prefix, where a
 		// quote stands between it and any list item or footnote definition around it: both parsers
-		// read that line as the quote's, so it stays as main wrote it.
+		// read that line as the quote's, so it stays as the writer before sjawhar/legion#1464
+		// wrote it.
 		"- > :::callout{#e kind=\"note\" title=\"T\"}\n  > \n  > :::\n",
 		":::callout{#t1 kind=\"note\" title=\"T\"}\n- ```\n  \n  ```\n:::\n",
 		"x[^f1]\n\n[^f1]: > ```\n    > \n    > ```\n",
 		// A blank code line in a list item in a quote inside a footnote definition carries the
 		// quote's marker after the definition's indentation, so the definition takes that
-		// indentation there as on any line, and the item's stays as main wrote it.
+		// indentation there as on any line, and the item's stays as the writer before
+		// sjawhar/legion#1464 wrote it.
 		"x[^f2]\n\n[^f2]: > - a\n    >\n    >   ```\n    >   \n    >   ```\n",
 		"- :::callout{#t1 kind=\"note\" title=\"T\"}\n  > ```\n  > \n  > ```\n  :::\n",
 		// An empty code block in a typed block in a spread list item, in a document holding no shape
 		// this parser reads only as the browser editor does: that line spreads the item for the
 		// browser editor, which is spread already, and goldmark's looseness reads it here, so it
-		// stays as main wrote it.
+		// stays as the writer before sjawhar/legion#1464 wrote it.
 		"- a\n\n  :::callout{#t1 kind=\"note\" title=\"T\"}\n  ```\n  \n  ```\n  :::\n",
 		"1. a\n\n   :::callout{#t1 kind=\"note\" title=\"T\"}\n   ```\n   \n   ```\n   :::\n2. b\n",
 		// No blank lines after an item that ends in a list in a quote, where that list is spread by
@@ -917,9 +946,13 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		// A blank line after a list in a typed block in a footnote definition, where it spreads a last
 		// item that is spread already.
 		"ref[^n] here.\n\n[^n]: :::callout{#c kind=\"note\" title=\"\"}\n    - a\n\n      > q\n\n    > q\n    :::\n\n    tail\n",
-		// Reference-shaped text whose label lowercases to a defined label's, which main escaped: the
-		// engine keeps `İ` apart from `i`, and the escaped text reads back as the same text.
+		// Reference-shaped text whose label lowercases to a defined label's, which the writer
+		// before sjawhar/legion#1464 escaped: the engine keeps `İ` apart from `i`, and the escaped
+		// text reads back as the same text.
 		"Ref[^i] and \\[^İ] text.\n\n[^i]: Def.\n",
+		// A link labelled with an address, to the address itself or to its mailto: URL.
+		"Write to [a@b.test](a@b.test).\n",
+		"Write to [a@b.test](mailto:a@b.test).\n",
 	} {
 		t.Run(markdown, func(t *testing.T) {
 			tree, err := Parse(markdown)

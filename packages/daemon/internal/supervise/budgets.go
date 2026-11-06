@@ -24,8 +24,10 @@ import (
 //     so is one killed in a turn no delivery started, a notice's, whose work waits for whatever
 //     next wakes the relaunched agent. Bounded by the launch failure limit.
 //   - PromptFailures: prompts the agent refused, acknowledged prompts that started no turn, and
-//     prompts refused after their acknowledgement. A prompt lost to the transport, or not sent for
-//     want of a connection, is re-queued at no charge. Reset by a started turn.
+//     prompts refused after their acknowledgement. A prompt lost to the transport, not sent for
+//     want of a connection, or refused because the agent is in a turn of its own (Oh My Pi's busy
+//     answer, before or after its acknowledgement), is re-queued at no charge. Reset by a started
+//     turn.
 //   - PromptRetires: processes retired because PromptFailures ran out. Reset by a started turn,
 //     never by the relaunch itself — a claim that keeps acknowledging and never turning runs out.
 type Budgets struct {

@@ -18,9 +18,8 @@ When the change is tested, reviewed and approved, the merger posts `READY` on th
 and submits the pull request for merge under the repository's own branch protection. The architect
 accepts the reviewed change before that, and the merge closes the issue. The implementer then
 drives the merged change in production, once your deploy carries it, and records what it saw on
-the pull request. Every step leaves a record you can read: the spec
-and the questions in Dispatch, the code and the reviews on GitHub, and each phase's handoff on the
-issue's branch.
+the pull request. Every step leaves a record you can read: the spec, the questions and each
+phase's handoff in Dispatch, and the code and the reviews on GitHub.
 
 ```mermaid
 flowchart LR

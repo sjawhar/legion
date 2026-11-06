@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 // The tags a namespace secret carries, and their fixed values.
@@ -46,8 +47,15 @@ const (
 	KindGitHubApp = "github-app"
 	// KindGoogleLogin exchanges the stored authorized-user refresh token for an access token.
 	KindGoogleLogin = "google-login"
+	// KindAzureLogin releases the broker's projected token with the stored Entra identity ids.
+	KindAzureLogin = "azure-login"
 	// TagMaxGrant bounds a request's signed grant lifetime for this secret (ParseMaxGrant).
 	TagMaxGrant = "max-grant"
+	// TagDefaultGrant, set to DefaultGrantSession, keeps a request that names no lifetime for this
+	// secret lasting until its session ends, rather than the broker's DefaultGrantLifetime.
+	TagDefaultGrant = "default-grant"
+	// DefaultGrantSession is the one value TagDefaultGrant takes.
+	DefaultGrantSession = "session"
 	// TagGitHubOwners lists the GitHub accounts a github-app secret mints installation tokens for
 	// (ParseGitHubOwners). A github-app secret without it is refused, since a public App can be
 	// installed by any account, and an installation on an account it does not list gets no token.
@@ -85,7 +93,7 @@ const (
 )
 
 // Kinds is every value a secret's kind tag may name. The broker holds a minter for each.
-var Kinds = []string{KindGitHubApp, KindGoogleLogin}
+var Kinds = []string{KindGitHubApp, KindGoogleLogin, KindAzureLogin}
 
 // ValidKind reports whether kind is one of Kinds.
 func ValidKind(kind string) bool {
@@ -129,25 +137,37 @@ var gitHubLogin = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 
 const maxGitHubLogin = 39
 
+// ParseGitHubLogin reads one GitHub account login, as written: up to 39 ASCII letters, digits and
+// hyphens, starting with a letter or digit, and not the word none (ErrGitHubOwnersLogin). It
+// answers it lowercased, since GitHub compares logins without regard to case. White space is no
+// part of a login, so "ada ada" is refused rather than read as one.
+func ParseGitHubLogin(raw string) (string, error) {
+	if len(raw) > maxGitHubLogin || !gitHubLogin.MatchString(raw) {
+		return "", fmt.Errorf("%w, not %q", ErrGitHubOwnersLogin, raw)
+	}
+	login := strings.ToLower(raw)
+	if login == TagRemoved {
+		return "", fmt.Errorf("%w, not %q: none removes the tag through agent-secrets and names no account", ErrGitHubOwnersLogin, raw)
+	}
+	return login, nil
+}
+
 // ParseGitHubOwners reads a github-owners tag: GitHub account logins separated by white space,
 // compared without regard to case. It refuses a comma anywhere (ErrGitHubOwnersComma), an entry that
-// is not a GitHub login or that is the word none (ErrGitHubOwnersLogin), and a list that names no
-// account (ErrGitHubOwnersMissing). It answers them lowercased, sorted and joined by single spaces,
-// so a Secret holding them stays comparable, two spellings of one list are one policy, and the value
-// is one that both stores hold: an AWS tag value and a Secret Manager annotation both take a space,
-// which a GitHub login never holds.
+// is not a GitHub login or that is the word none (ParseGitHubLogin's ErrGitHubOwnersLogin), and a
+// list that names no account (ErrGitHubOwnersMissing). It answers them lowercased, sorted and
+// joined by single spaces, so a Secret holding them stays comparable, two spellings of one list are
+// one policy, and the value is one that both stores hold: an AWS tag value and a Secret Manager
+// annotation both take a space, which a GitHub login never holds.
 func ParseGitHubOwners(raw string) (string, error) {
 	if strings.Contains(raw, ",") {
 		return "", ErrGitHubOwnersComma
 	}
 	var owners []string
 	for _, entry := range strings.Fields(raw) {
-		if len(entry) > maxGitHubLogin || !gitHubLogin.MatchString(entry) {
-			return "", fmt.Errorf("%w, not %q", ErrGitHubOwnersLogin, entry)
-		}
-		owner := strings.ToLower(entry)
-		if owner == TagRemoved {
-			return "", fmt.Errorf("%w, not %q: none removes the tag through agent-secrets and names no account", ErrGitHubOwnersLogin, entry)
+		owner, err := ParseGitHubLogin(entry)
+		if err != nil {
+			return "", err
 		}
 		owners = append(owners, owner)
 	}
@@ -156,6 +176,53 @@ func ParseGitHubOwners(raw string) (string, error) {
 	}
 	slices.Sort(owners)
 	return strings.Join(slices.Compact(owners), " "), nil
+}
+
+// gitHubRepositoryName is what a repository name GitHub creates can be: ASCII letters, digits,
+// '.', '-' and '_', at most 100 of them. The names . and .. are refused beside it.
+var gitHubRepositoryName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
+// NarrowingError is ParseGitHubNarrowing's refusal: Field is the narrowing's field it names,
+// "owner" or "repositories", so a caller can name it in its own terms (the API's
+// github_app.<field>, the CLI's flag), and Reason says what is wrong with it.
+type NarrowingError struct {
+	Field, Reason string
+}
+
+func (e *NarrowingError) Error() string {
+	return e.Field + " " + e.Reason
+}
+
+// ParseGitHubNarrowing checks one release's narrowing of its GitHub App tokens as a caller wrote it
+// and answers it in its canonical form: owner one GitHub login (ParseGitHubLogin, once white space
+// around it is trimmed), lowercased, and repositories names GitHub can hold, without the owner, at
+// most secrets.MaxNarrowedRepositories, sorted and each once. Repositories nil names none, so the
+// token reaches every repository of the installation; present but empty is refused, since a caller
+// that built it from a list that matched nothing would otherwise get that widest token. Nothing
+// else reaches GitHub: the permissions a narrowing can name are fixed, so a caller can only
+// narrow. It answers its refusal as a *NarrowingError, typed rather than error, so a caller names
+// the field without reading the text. The broker applies a narrowing in this form and names it back in
+// the release's answer, and the CLI builds its request with this function too, so the CLI's check
+// that the broker applied the narrowing it asked for compares like with like.
+func ParseGitHubNarrowing(owner string, repositories []string, readOnly bool) (secrets.GitHubNarrowing, *NarrowingError) {
+	login, err := ParseGitHubLogin(strings.TrimSpace(owner))
+	if err != nil {
+		return secrets.GitHubNarrowing{}, &NarrowingError{"owner", fmt.Sprintf("must name one GitHub login, not %q", owner)}
+	}
+	if repositories != nil && len(repositories) == 0 {
+		return secrets.GitHubNarrowing{}, &NarrowingError{"repositories", "is empty: name at least one repository, or leave it out for every repository of the installation"}
+	}
+	if len(repositories) > secrets.MaxNarrowedRepositories {
+		return secrets.GitHubNarrowing{}, &NarrowingError{"repositories", fmt.Sprintf("names %d repositories; the broker takes at most %d", len(repositories), secrets.MaxNarrowedRepositories)}
+	}
+	for _, name := range repositories {
+		if !gitHubRepositoryName.MatchString(name) || name == "." || name == ".." {
+			return secrets.GitHubNarrowing{}, &NarrowingError{"repositories", fmt.Sprintf("names %s's repositories by name alone, in ASCII letters, digits, '.', '-' and '_', not %q", login, name)}
+		}
+	}
+	sorted := slices.Clone(repositories)
+	slices.Sort(sorted)
+	return secrets.GitHubNarrowing{Owner: login, Repositories: slices.Compact(sorted), ReadOnly: readOnly}, nil
 }
 
 // KindNeedsGitHubOwners reports whether a secret of kind must carry a github-owners tag naming at
@@ -237,7 +304,10 @@ type Secret struct {
 	// GitHubOwners is a github-app secret's github-owners tag as ParseGitHubOwners answers it, and
 	// "" for every other secret. A string, not a slice, for the same reason as MaxGrant.
 	GitHubOwners string
-	ownership    ownerKind
+	// SessionDefault is true when the secret's default-grant tag is "session": a request naming
+	// no lifetime gets a grant that lasts until its session ends instead of DefaultGrantLifetime.
+	SessionDefault bool
+	ownership      ownerKind
 }
 
 // Kind is the kind the secret is served as, read back from its Source (KindSource), or "" for a
@@ -296,8 +366,12 @@ func NewSet(secrets map[string]Secret) *Set {
 	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
 	digest := sha256.New()
 	for _, s := range served {
-		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" {
+		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" && !s.secret.SessionDefault {
 			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
+			continue
+		}
+		if s.secret.SessionDefault {
+			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\tdefault-grant=session\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
 			continue
 		}
 		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
@@ -311,11 +385,11 @@ type Requester struct {
 	// for a pod.
 	Operator string
 	// Service is the service of the machine login that enrolled the session, set only when the
-	// session is a pod whose verified service account is one of the accounts BROKER_SERVICES maps to
-	// that same service (requests.enrollmentRow.requester); empty otherwise. A service may list
+	// session is a pod whose verified service account is one of the accounts BROKER_SERVICES maps
+	// to that same service (requests.Machine.requester); empty otherwise. A service may list
 	// several accounts, but each account is listed once and proves exactly one service, since a
-	// machine login's service is its own claim and only the pod's account can prove it: an account
-	// listed for another service, or for none, proves nothing here.
+	// machine login's service is its own claim and only the pod's account can prove it: an
+	// account listed for another service, or for none, proves nothing here.
 	Service string
 	// Withheld is the names the session's operator withheld from it by revoking a grant of them
 	// the session got without asking (requests.Machine.RevokeByApprover). Evaluate answers each as

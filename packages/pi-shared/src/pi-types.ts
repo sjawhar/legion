@@ -62,6 +62,12 @@ export interface SessionContext {
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
   readonly setTimeout: (callback: () => void | Promise<void>, delayMs: number) => void;
   /**
+   * The host's `ctx.mode` (`ExtensionMode`): how the process was launched, an RPC host (every
+   * Legion pane), a terminal, or a one-shot `-p` run printing text or JSON. Absent on a host that
+   * predates it.
+   */
+  readonly mode?: "tui" | "rpc" | "json" | "print";
+  /**
    * Oh My Pi 18.3 on: one side turn on the session's model over a snapshot of its conversation,
    * never added to the transcript. The host sends `promptText` as given. A context kept from
    * `session_start` may call it from later callbacks (upstream `docs/extensions.md`, "Ephemeral
@@ -71,9 +77,87 @@ export interface SessionContext {
     readonly promptText: string;
     readonly signal?: AbortSignal;
   }) => Promise<{ readonly replyText: string }>;
+  /**
+   * The host's `ctx.isIdle()`: whether it runs no turn now (`!session.isStreaming`), false while a
+   * turn runs and while a prompt is set up or recovered, read live from a context kept since
+   * `session_start`. Measured on Oh My Pi 18.8.9: true already in the `agent_end` of an aborted
+   * run; `pi.sendMessage` returns while it still reads true for an idle card, before the host
+   * starts the card's run.
+   */
+  readonly isIdle?: () => boolean;
+  /**
+   * Whether the host holds a queued message for its turn to take (`queuedMessageCount > 0`): a
+   * steered or follow-up card or user message. Measured on Oh My Pi 18.8.9: false once an
+   * interrupt (`clearQueue({ forInterrupt: true })`) withdrew the queue, true at the `agent_end` of
+   * a plain abort, whose queue the next run takes.
+   */
+  readonly hasPendingMessages?: () => boolean;
+  /**
+   * The host's `ctx.getAsyncJobSnapshot()`: this session's async-job manager as it stands now, or
+   * null when no session owns the context (upstream `docs/extensions.md`, "Handler context"). Read
+   * live from a context kept since `session_start`. Absent on a host that predates it.
+   */
+  readonly getAsyncJobSnapshot?: () => AsyncJobSnapshot | null;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
+    /**
+     * The host's extension widget (`ExtensionUIContext.setWidget`): `lines` shown above the editor
+     * under `key`, in place of what that key showed, until set again; `undefined` removes it.
+     * Oh My Pi keeps it across `/new`'s transcript reset. Absent where the host has none.
+     */
+    readonly setWidget?: (key: string, lines: string[] | undefined) => void;
   };
+}
+
+/**
+ * `ctx.getAsyncJobSnapshot()`'s answer: the session's own async jobs, the running ones and the
+ * ones that have just ended, with the manager's delivery queue for the results it still owes the
+ * conversation.
+ *
+ * Measured on Oh My Pi 18.12.2, the pin this repository runs (`.omp-pin`), by reading the
+ * snapshot from an extension while a backgrounded `bash` job ran. Running:
+ * `{"running":[{"id":"bg_1","type":"bash","status":"running","label":"sleep 8",
+ * "command":"sleep 8","startTime":1793568518094,"ownerId":"Main"}],"recent":[],
+ * "delivery":{"queued":0,"delivering":false,"pendingJobIds":[]}}`; once it had ended, the same
+ * job moved to `recent` with an `endTime` beside its `startTime`.
+ */
+export interface AsyncJobSnapshot {
+  readonly running: readonly AsyncJob[];
+  /** The jobs that have ended, newest first; five of them unless the caller asked for more. */
+  readonly recent: readonly AsyncJob[];
+  readonly delivery: AsyncJobDelivery;
+}
+
+/** One async job of the session. Measured on Oh My Pi 18.12.2: `command`, `endTime`, `agentId`
+ * and `ownerId` are absent from the JSON when the host has none for the job. */
+export interface AsyncJob {
+  readonly id: string;
+  /**
+   * What registered the job with the manager. Measured on Oh My Pi 18.12.2: `bash` for a
+   * backgrounded shell command, `task` for a subagent, `eval` for an eval run. Any extension or
+   * tool may register another, so it stays a string.
+   */
+  readonly type: string;
+  /** Every status the manager writes on Oh My Pi 18.12.2. */
+  readonly status: "running" | "completed" | "failed" | "cancelled";
+  readonly label: string;
+  readonly command?: string;
+  /** Epoch milliseconds. */
+  readonly startTime: number;
+  readonly endTime?: number;
+  /** The subagent the job belongs to, and the session or agent that owns it. */
+  readonly agentId?: string;
+  readonly ownerId?: string;
+}
+
+/** The results the manager still owes the conversation: how many jobs wait, whether one is being
+ * delivered now, when the next retry is due (epoch milliseconds, absent when none is), and the
+ * jobs waiting. */
+export interface AsyncJobDelivery {
+  readonly queued: number;
+  readonly delivering: boolean;
+  readonly nextRetryAt?: number;
+  readonly pendingJobIds: readonly string[];
 }
 
 /** A side turn: one question to the session's model, answered without touching the transcript. */
@@ -140,6 +224,29 @@ export interface AgentEndEvent {
   readonly messages?: readonly AgentEndMessage[];
 }
 
+/** A retry moved the session to the next model of its fallback chain (`shared-events.ts` in the
+ * host). Each model is `provider/id`; `role` is the model role the chain serves. */
+export interface RetryFallbackAppliedEvent {
+  readonly from: string;
+  readonly to: string;
+  readonly role: string;
+  readonly reason?: string;
+}
+
+/** Post-run auto-compaction ended (`shared-events.ts` in the host); `aborted` is an interrupt
+ * during it, which leaves no aborted assistant message behind. Only the field read is typed. */
+export interface AutoCompactionEndEvent {
+  readonly aborted: boolean;
+}
+
+/** A retry saga ended (`shared-events.ts` in the host); an abort during its backoff or credential
+ * wait ends it with `success: false` and `finalError` "Retry cancelled". Only the fields read are
+ * typed. */
+export interface AutoRetryEndEvent {
+  readonly success: boolean;
+  readonly finalError?: string;
+}
+
 /** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom
  * message, an assistant reply, or a tool result. `message_update` carries the same shape for a
  * message still being produced — one per streamed delta, with the partial message — and
@@ -170,6 +277,13 @@ export interface ToolCallEventResult {
   readonly block?: boolean;
   readonly reason?: string;
   readonly input?: Record<string, unknown>;
+  /** Text the host hands the agent as context once the call runs (AskGate's warn mode). */
+  readonly additionalContext?: string;
+}
+
+/** A tool's execution ended, whatever its result; AskGate abandons a gate still waiting on it. */
+export interface ToolExecutionEndEvent {
+  readonly toolCallId: string;
 }
 
 export interface ResourcesDiscoverResult {
@@ -234,6 +348,25 @@ export interface PiEventContract {
   readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly message_update: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly message_end: { readonly event: MessageStartEvent; readonly result: undefined };
+  /** Every turn of a run, each provider request and each tool round; it carries nothing an
+   *  extension reads here. */
+  readonly turn_start: { readonly event: unknown; readonly result: undefined };
+  /** A retry moved the session onto another model; the host fires no event for any other model or
+   *  thinking-level change. */
+  readonly retry_fallback_applied: {
+    readonly event: RetryFallbackAppliedEvent;
+    readonly result: undefined;
+  };
+  /** A compaction committed, automatic, manual or an extension's; it carries nothing an extension
+   *  reads here. */
+  readonly session_compact: { readonly event: unknown; readonly result: undefined };
+  /** Post-run auto-compaction ended, finished, skipped or interrupted. */
+  readonly auto_compaction_end: {
+    readonly event: AutoCompactionEndEvent;
+    readonly result: undefined;
+  };
+  /** A retry saga ended, succeeded, exhausted or cancelled. */
+  readonly auto_retry_end: { readonly event: AutoRetryEndEvent; readonly result: undefined };
   /** Every provider request the session's agent loop sends, each turn and each tool round. */
   readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
   /** Every input before it runs: the host's typed-input ingress, `sendUserInput` included. */
@@ -244,6 +377,10 @@ export interface PiEventContract {
   };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
+  readonly tool_execution_end: {
+    readonly event: ToolExecutionEndEvent;
+    readonly result: undefined;
+  };
 }
 
 /** The context OMP hands a registered slash-command handler. Its `sessionManager` is the same
@@ -257,6 +394,8 @@ export interface CommandContext {
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
   };
+  /** The host's `ctx.isIdle()`: false while a turn runs. */
+  readonly isIdle: () => boolean;
 }
 
 /** The host's text block (`TextContent` in `@oh-my-pi/pi-ai`), as far as this package writes it. */
@@ -397,16 +536,20 @@ export interface PiApi {
           readonly details?: Readonly<Record<string, unknown>>;
         }
       | { readonly type: string },
-    options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
+    options?: {
+      readonly deliverAs: "steer" | "aside" | "nextTurn" | "followUp";
+      readonly triggerTurn: boolean;
+    }
   ) => void;
   /**
    * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,
    * it steers. `deliverAs: "aside"` lands it at the next step without interrupting the running
-   * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
+   * tool batch; `deliverAs: "followUp"` queues it behind the running turn without starting one.
+   * The host queues the send, so the prompt's `message_start` comes after this returns.
    */
   readonly sendUserMessage: (
     content: string | readonly ContentBlock[],
-    options?: { readonly deliverAs: "aside" }
+    options?: { readonly deliverAs: "aside" | "followUp" }
   ) => void;
   /**
    * Runs text as if typed at the session's own terminal: a built-in its host can run headless, an

@@ -11,6 +11,10 @@ Current scope:
 - Go generation: `scripts/gen-go.ts`
 - generated Go output: `packages/envoy/internal/contracts/generated.go`
 
+This package has no release of its own, so nothing renders its changelog entries: each stays
+readable as the fragment file that holds it, under `.changes/unreleased/`. `CHANGELOG.md` is the
+history before that and stops where the fragments begin.
+
 ## GitHub Topic Hierarchy
 
 The GitHub receiver publishes per-resource topics. Consumers subscribe at the

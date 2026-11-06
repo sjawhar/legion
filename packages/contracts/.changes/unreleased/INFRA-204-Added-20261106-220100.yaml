@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+  Daemon API contract 52. The Legion state carries `questionsForController`: every question to a
+  stopped agent that the daemon's answer loop passed to the controller in the last seven days
+  (id, issue, role, session, asker, ref, reason, passedAt), newest first and at most 100. The
+  controller's `agent-question` notice is a live wake only, so a controller that starts later
+  reads here what it missed.
+time: 2026-11-06T22:01:00.000000000Z
+custom:
+    Issue: INFRA-204

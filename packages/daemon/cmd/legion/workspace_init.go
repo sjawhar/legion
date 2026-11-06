@@ -37,16 +37,21 @@ func secretFileFromEnv(name string) (string, error) {
 
 // workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's init containers, which
 // prepare a pod's disk before the main container's worker-shim starts, and the repository cache's
-// process, and the one list of them `legion workspace-init --help` names. An issue pod runs two,
-// which prepare the issue's clone and jj workspace on the pod's own disk: `fetch` is the first, the
-// one process of the pod that holds the provisioning token, in a container that mounts nothing an
-// agent of the issue can write; `provision` is the second, all the disk's work, in a container the
-// provisioning Secret is not mounted in. The controller's pod (`controller: daemon`) runs none. A
+// process, and the one list of them `legion workspace-init --help` names. An issue pod runs two of
+// them, three where the deployment names a skills repository, which prepare the issue's clone and
+// jj workspace on the pod's own disk and the skills its roles install from: `fetch` is the first,
+// one of the two processes of the pod that hold the provisioning token, in a container that mounts
+// nothing an agent of the issue can write; `skills` is the other such process, which clones the
+// deployment's skills marketplace into the pod's skills volume
+// (`runtime.kubernetes.skills_repository`), read-only in every other container, so no role's launch
+// clones anything; `provision` is the last, all the disk's work, in a container the provisioning
+// Secret is not mounted in. The controller's pod (`controller: daemon`) runs none. A
 // repository cache's pod runs `cache` as its one container, on its own volume, until it is stopped.
 // Each one's log lines go to stdout and its refusals and failures to stderr — together the init log
 // the runtime quotes — with exit 1.
 var workspaceInitCommands = map[string]command{
 	"fetch":     runWorkspaceFetch,
+	"skills":    runWorkspaceSkills,
 	"provision": runWorkspaceProvision,
 	"cache":     runWorkspaceCache,
 }
@@ -64,6 +69,16 @@ func runWorkspaceFetch(ctx context.Context, args []string, stdout, stderr io.Wri
 		return code
 	}
 	return workspaceInitExit(flags, workspaceFetch(ctx, *repo, *feed, *cacheURL, stdout), stderr)
+}
+
+func runWorkspaceSkills(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("workspace-init skills", "usage: "+workspaceSkillsUsage, stderr)
+	repo := flags.String("repo", "", "the skills marketplace repository as <owner>/<name> (required)")
+	dir := flags.String("dir", "", "the pod's skills volume root, the container's own (required)")
+	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
+		return code
+	}
+	return workspaceInitExit(flags, workspaceSkills(ctx, *repo, *dir, stdout), stderr)
 }
 
 func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -109,12 +124,12 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 // what every agent of the issue can write. Then it removes the git locks an interrupted git or jj
 // left and provisions from the feed, an issue with no branch at defaultBranch. It makes no other
 // directory: the disk is the pod's own and starts empty, and the workspace this provisions is the
-// only thing on it a role container reads. No lock guards the clone: it is the issue's own, on the
-// pod's own disk, and no other pod mounts it. For the same reason, and because no role container
-// of the pod has started, no process holds a git lock on the disk while this runs, so every one
-// there is stale and would fail each later write of what it locks (LEGION-731) — the kubelet
-// restarts a failed init container on the same pod, and so on the same disk, so a first attempt
-// killed mid-fetch leaves exactly those locks for the retry to clear.
+// only thing on it a role reads. No lock guards the clone: it is the issue's own, on the pod's own
+// disk, and no other pod mounts it. For the same reason, and because the pod's launcher container
+// has not started, no process holds a git lock on the disk while this runs, so every one there is
+// stale and would fail each later write of what it locks (LEGION-731) — the kubelet restarts a
+// failed init container on the same pod, and so on the same disk, so a first attempt killed
+// mid-fetch leaves exactly those locks for the retry to clear.
 func workspaceInit(ctx context.Context, issue, repo, defaultBranch, root, credentialHelper, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {

@@ -26,7 +26,7 @@ test.beforeEach(async () => {
 // The server writes RFC 3339 and drops trailing fractional zeros, so two replies in one second come
 // back as strings of different widths, and as text `…01.12Z` sorts after `…01.123456Z`, the later
 // time. The margin lists the replies in the order they were written.
-test("the margin lists replies written in the same second in the order they were written", async ({
+test("the margin lists replies written in the same second in the order they were written @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "ORDER", name: "Reply order" });
@@ -83,7 +83,7 @@ test("the margin lists replies written in the same second in the order they were
 
 // A standalone document's document-level threads have no mark, so none of them is placed, and the
 // margin lists them newest first: by time, where two written in one second are the trap above.
-test("the margin lists unplaced threads written in the same second newest first", async ({
+test("the margin lists unplaced threads written in the same second newest first @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "UNPL", name: "Unplaced order" });

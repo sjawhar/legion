@@ -73,14 +73,16 @@ func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 		t.Fatalf("the check task opens %q, want the line a resumed session tells the check by", lead)
 	}
 	for _, want := range []string{"sjawhar/legion", "#43", "merge-43", "Look 1, woken by the merge.", "handoff_complete", "pass", "pending", "fail", "the daemon wakes the check",
-		// A defect is a finding ask on the report issue, whose reference the implementer publishes
-		// to the controller, which follows it and files only on a person's answer.
-		"dispatch ask", "skill://legion-worker/references/findings.md", "report issue", "controller topic"} {
+		// A defect with a clear fix goes to the controller topic, which hands it to the tree that
+		// owns the code and files it for Legion only when none does; one that needs a decision is a
+		// finding ask on the report issue, whose reference the implementer publishes to the
+		// controller, which files only on a person's answer.
+		"a defect with a clear fix goes to the controller topic", "dispatch ask", "skill://legion-worker/references/findings.md", "report issue", "controller topic"} {
 		if !strings.Contains(start.Task, want) {
 			t.Fatalf("the check task lacks %q:\n%s", want, start.Task)
 		}
 	}
-	// A defect the check finds is an ask a person answers, never an issue the implementer files.
+	// The implementer never files an issue for a defect the check finds: the controller does.
 	for _, never := range []string{"dispatch issue", "issue of its own"} {
 		if strings.Contains(start.Task, never) {
 			t.Fatalf("the check task still says %q:\n%s", never, start.Task)
@@ -288,7 +290,7 @@ func TestAWaitingRootsChildCompletesItsPhase(t *testing.T) {
 	seedPhase(t, rig.pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
 
-	result := rig.apply("child-implemented", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer", Generation: 3, Commit: "head-43", Summary: "implemented"})
+	result := rig.apply("child-implemented", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer", Generation: 3, Commit: "head-43", HandoffRecord: "implement-1", HandoffVersion: 1, Summary: "implemented"})
 	if result.Refusal != nil {
 		t.Fatalf("the child's completion = %+v, want it accepted", result.Refusal)
 	}
@@ -395,8 +397,14 @@ func TestAnIssueReachingAwaitingMergeOnAMergedPullRequestWaitsForItsTree(t *test
 
 // Which members hold a merged root's close up: an issue is in the workflow when its status is one
 // the workflow runs in and its phase is short of done, so a child in backlog and a child already
-// done hold it not at all, while a released child that has not started a phase and one held
-// because its worker ran out of launches both do.
+// done hold it not at all, while one held because its worker ran out of launches does.
+//
+// A released child that has not started a phase holds it no longer. It stands at admitted
+// beneath a root in awaiting_merge, a root the daemon has already accepted, so the daemon itself
+// pins the child there until that root closes (record.AcceptedAncestor), and a child the daemon
+// pins is left out of the set the close waits on (record.OpenBeneath). Counting it would
+// deadlock the pair. This is the one recorded departure from the spec of dispatch://INFRA-980,
+// decided on dispatch://INFRA-980/comment/d642164a-31d2-4d6c-ae5e-4da5dd0b9104.
 func TestWhichChildrenHoldAMergedRootsCloseUp(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -405,7 +413,7 @@ func TestWhichChildrenHoldAMergedRootsCloseUp(t *testing.T) {
 	}{
 		{name: "parked in backlog", child: record.Issue{Key: "LEGION-209", Phase: phase.Implementing, Status: "backlog"}},
 		{name: "already done", child: record.Issue{Key: "LEGION-209", Phase: phase.Done, Status: "done"}},
-		{name: "released, no phase started", child: record.Issue{Key: "LEGION-209", Phase: phase.Admitted, Status: "todo"}, waits: true},
+		{name: "released, no phase started", child: record.Issue{Key: "LEGION-209", Phase: phase.Admitted, Status: "todo"}},
 		{name: "held out of launches", child: record.Issue{Key: "LEGION-209", Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing}, Status: "in_progress"}, waits: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -439,7 +447,8 @@ func TestARootWithNoOpenTreeClosesAtItsMerge(t *testing.T) {
 
 // A merged root stands in awaiting_merge for as long as its tree runs, so the two facts that would
 // take an awaiting pull request back to implementing can land on a merge GitHub already made. A
-// push past the head READY named takes neither move (withdrawMovedReady), and a red required check
+// synchronize past the head READY named is older than the merge, since GitHub synchronizes only an
+// open pull request, and changes nothing (pullRequestSynchronized), and a red required check
 // withdraws nothing there, as it never has (classify.RedWithdrawsReady): there is nothing left to
 // merge or to re-implement.
 func TestNothingWithdrawsTheREADYOfAWaitingMergedRoot(t *testing.T) {
@@ -617,14 +626,19 @@ func issueOutboxOf(t *testing.T, pool *pgxpool.Pool, issue, kind string) []outbo
 	return got
 }
 
-// superviseRowsOf decodes issue's supervise rows of op, oldest first.
+// superviseRowsOf decodes issue's supervise rows of op, oldest first, with the relaunch half of
+// a phase-worker start left out: a start is two rows (StartOrOwe), one that brings the role's
+// session back carrying no task and one that carries the task and waits for the issue's slot,
+// and it is the second every caller here is about.
 func superviseRowsOf(t *testing.T, pool *pgxpool.Pool, issue, op string) []record.SuperviseRequest {
 	t.Helper()
 	var requests []record.SuperviseRequest
 	for _, row := range issueOutboxOf(t, pool, issue, "supervise") {
-		if request := decodeSupervise(t, row); string(request.Op) == op {
-			requests = append(requests, request)
+		request := decodeSupervise(t, row)
+		if string(request.Op) != op || request.Op == "start" && request.Task == "" {
+			continue
 		}
+		requests = append(requests, request)
 	}
 	return requests
 }

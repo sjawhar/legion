@@ -1,5 +1,14 @@
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useQuery } from "@tanstack/react-query";
-import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FocusEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { inboxQuery, whoAmIQuery } from "../../api/queries";
@@ -8,40 +17,46 @@ import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
-import { QueryError } from "../../components/QueryError";
+import { capSearchQuery } from "../../lib/query-param";
 import {
   borderDefault,
   checkboxAccent,
   dangerText,
   focusVisibleRing,
-  secondaryButtonBorder,
-  secondaryButtonDisabledText,
-  secondaryButtonHoverBorder,
-  secondaryButtonText,
+  inputClasses,
+  surfaceMutedBg,
   textMutedOnCanvas,
+  textMutedOnSurfaceMuted,
 } from "../../theme/classes";
-import { useAgents } from "../conversation/useAgents";
+import { searchWords } from "../agents/agent-search";
 import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
 import { type CredentialRequests, useCredentialRequests } from "../credentials/pending";
 import { PriorityControl } from "../issue/PriorityControl";
-import { useIssueAssignee } from "../issue/useIssueAssignee";
-import { actorLabel } from "../refs/actor";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
 import { buildInboxPath, type InboxRoute, parseInboxSearch } from "../refs/routes";
 import { type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
+import { READING_PANE_QUERY, useMediaQuery } from "../shell/useDialog";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
 import { InboxOwnerLink } from "./AskOwnerLink";
 import { AssigneeFilter } from "./AssigneeFilter";
+import { AssignToMe } from "./AssignToMe";
+import { formatAskAge } from "./ask-age";
 import { outsideAskCard } from "./ask-card";
+import { isDecisionAsk } from "./ask-decision";
 import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
 import { BlockedOnYou, waitingOnHuman } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
 import { crossBandCounts, groupRows } from "./grouping";
 import { bandGroupItems, useGroupJump } from "./InboxGroups";
 import { ROW_ATTRIBUTE, ROW_SELECTOR } from "./inbox-row";
+import { matchesInboxSearch } from "./inbox-search";
 import { useMotionHold } from "./motion-hold";
+import { type PlacedRow, usePaneSelection } from "./pane-selection";
+import { questionLine } from "./question-line";
+import { ReadingPane } from "./ReadingPane";
 import { SnoozeControl } from "./SnoozeControl";
 import {
   COLLAPSED_SECTIONS,
@@ -65,13 +80,29 @@ function ReplyChip({ children }: { children: ReactNode }): ReactNode {
  *  <agent>") is the card's own status line. */
 function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
   if (ask.waiting_on === "human" && ask.last_reply?.author.kind === "session") {
-    return <ReplyChip>{actorLabel(ask.last_reply.author)} replied</ReplyChip>;
+    // One span, so the pill's flex box keeps the space between the name and "replied".
+    return (
+      <ReplyChip>
+        <span>
+          <AgentName actor={ask.last_reply.author} inline /> replied
+        </span>
+      </ReplyChip>
+    );
   }
   return null;
 }
 
 /** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
 const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
+
+/** The reading column's own scroller: `l` hands it focus and Escape takes it back to the list. */
+const PANE_SCROLLER_SELECTOR = '[data-testid="inbox-pane-scroller"]';
+
+/** The "Add a note or answer in your own words" disclosure an `AskCard` folds its answer box
+ *  behind in its compact variant - the card a decision block hosts, which is what the reading
+ *  column shows for a question written as one - while it is still shut. The card carries the
+ *  handle (`AskCard.tsx`), as it carries `data-ask-answer` and `data-ask-option`. */
+const NOTE_DISCLOSURE_SELECTOR = '[data-ask-note-disclosure][aria-expanded="false"]';
 
 /** The row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedRow(): HTMLElement | null {
@@ -82,104 +113,90 @@ function rowAround(node: Element | null): HTMLElement | null {
   return closestMatching(node, ROW_SELECTOR);
 }
 
-/** Takes an issue nobody holds for the viewer: one PATCH through the shared assignee write, so
- *  the row is theirs at once and rolls back if the server refuses. Under the Unassigned filter
- *  the row stops matching while the save is in flight, so the control tells the Inbox when its
- *  write is live (pending or failed) and the Inbox keeps the row listed until then: `Assigning…`,
- *  and on refusal the server's reason with Retry, are shown by this same instance rather than
- *  lost to a remount. */
-function AssignToMe({
-  askId,
-  issueKey,
-  onLive,
-  viewer,
-}: {
-  /** The row this control sits in; liveness is registered per row, never per issue, so a
-   *  sibling row of the same issue leaving the list cannot drop this row's registration. */
-  askId: string;
-  issueKey: string;
-  /** Registers this row while its write is in flight or failed; unregistered once it settles
-   *  cleanly or the control unmounts. */
-  onLive: (askId: string, live: boolean) => void;
-  viewer: string;
-}): ReactNode {
-  const write = useIssueAssignee(issueKey);
-  const live = write.pending || write.failed;
-  useEffect(() => {
-    if (!live) return;
-    onLive(askId, true);
-    return () => onLive(askId, false);
-  }, [askId, live, onLive]);
-  return (
-    <>
-      <button
-        aria-label={`Assign ${issueKey} to me`}
-        className={`min-h-11 shrink-0 rounded-lg px-2 py-1 text-xs font-medium md:min-h-8 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
-        disabled={write.pending}
-        onClick={() => write.submit(viewer)}
-        type="button"
-      >
-        {write.pending ? "Assigning…" : "Assign to me"}
-      </button>
-      {write.failed ? (
-        <div className="basis-full">
-          <QueryError
-            message={write.error ?? `Could not assign ${issueKey} to you.`}
-            onRetry={write.retry}
-            retrying={write.pending}
-          />
-        </div>
-      ) : null}
-    </>
-  );
+/** Everything inside a short row that answers a click itself: its owner link, its checkbox, and
+ *  whatever control a row gains later. A click on one of those is that control's - the link
+ *  opens the ask inside its issue or document, the checkbox marks the row - so the row's own
+ *  selection stands down for it, the rule the margin's cards hold to (`margin/ThreadCard.tsx`).
+ *  Everywhere else in the row, the question's first line and its age included, the click is the
+ *  row's and selects it. */
+const ROW_CONTROL_SELECTOR = "a, button, input, label, select, textarea";
+
+/** The kind a short row names: a question written as a decision block of a document, a request
+ *  to approve a document version, or any other question. */
+function askKind(ask: InboxRow): string {
+  if (isDecisionAsk(ask)) {
+    return "Decision";
+  }
+  return ask.kind === "approval" ? "Approval" : "Question";
 }
 
-function InboxItem({
-  ask,
-  assignLive,
-  grouped,
-  marked,
-  ordinal,
-  ownerKey,
-  onAnswered,
-  onAssignLive,
-  onMark,
-  onSnoozeLive,
-  onRelease,
-  section,
-  threadUpdatedAt,
-  viewer,
-}: {
+/** What both row layouts are given: the ask, where it sits, and the reader's marks on it. */
+interface InboxRowProps {
   ask: InboxRow;
-  /** True while this row's "Assign to me" write is in flight or failed, whatever section the
-   *  optimistic update put the row in. */
-  assignLive: boolean;
   /** Whether this row sits under a multi-ask owner header. */
   grouped: boolean;
   /** Whether the reader has marked this row for a bulk action. */
   marked: boolean;
-  /** This ask's place among its owner's rows, when the owner has more than one listed. */
-  ordinal: AskOrdinal | undefined;
-  /** The owner identity every row exposes for cross-band group jumps. */
-  ownerKey: string;
-  onAnswered: (id: string) => void;
-  onAssignLive: (askId: string, live: boolean) => void;
   /** Marks or unmarks this row; `x` and the row's own checkbox are the two ways in. */
   onMark: (askId: string) => void;
-  /** The same registration for this row's snooze write; the Inbox keeps a live row rendered
-   *  even when its band is folded, so `Snoozing…` and a refusal survive the fold. */
-  onSnoozeLive: (askId: string, live: boolean) => void;
   /** Set on the held row - one the server dropped or moved to another section that stays where
    *  the reader last saw it while they are still on it; called when their focus or pointer
    *  leaves it. */
   onRelease?: () => void;
-  /** Timestamp of the Inbox snapshot that supplied this row's initial thread. */
-  threadUpdatedAt: number;
+  /** This ask's place among its owner's rows, when the owner has more than one listed. */
+  ordinal: AskOrdinal | undefined;
+  /** The owner identity every row exposes for cross-band group jumps. */
+  ownerKey: string;
   section: InboxSection;
-  /** The signed-in person's lowercase email; "Assign to me" writes it. */
-  viewer: string;
+}
+
+/** The row's own checkbox, the pointer's way to the mark `x` makes. */
+function MarkCheckbox({
+  ask,
+  marked,
+  name,
+  onMark,
+}: {
+  ask: InboxRow;
+  marked: boolean;
+  name: string;
+  onMark: (askId: string) => void;
 }): ReactNode {
-  const name = controlName(ask, ordinal);
+  return (
+    <input
+      aria-label={`Select ${name}`}
+      checked={marked}
+      className={`size-4 shrink-0 ${checkboxAccent}`}
+      onChange={() => onMark(ask.id)}
+      type="checkbox"
+    />
+  );
+}
+
+/** The `<li>` both layouts sit in: where the row is, what the reader's hand does to it, and the
+ *  marks the selected row carries. Only the short row is selectable, so only it is ever drawn
+ *  as the selected one. */
+function InboxRowShell({
+  ask,
+  children,
+  grouped,
+  onRelease,
+  onSelect,
+  ownerKey,
+  section,
+  selected,
+}: {
+  ask: InboxRow;
+  children: ReactNode;
+  grouped: boolean;
+  onRelease: (() => void) | undefined;
+  /** Selects this row, which is what the reading column shows; the short row alone has one. */
+  onSelect: ((askId: string) => void) | undefined;
+  ownerKey: string;
+  section: InboxSection;
+  /** Whether this is the row the reading column is showing. */
+  selected: boolean;
+}): ReactNode {
   const releaseOnFocusOut =
     onRelease === undefined
       ? undefined
@@ -187,30 +204,138 @@ function InboxItem({
           if (!event.currentTarget.contains(event.relatedTarget)) onRelease();
         };
   return (
+    /* The keyboard selects a row through the Inbox's own registry (`j`, `k` and the arrows),
+       which needs no handler on the row itself; the click is the pointer's way to that same
+       selection.
+       biome-ignore lint/a11y/useKeyWithClickEvents: explained just above. */
     <li
+      aria-current={selected ? "true" : undefined}
       className={`rounded-xl outline-none focus-visible:ring-2 ${focusVisibleRing} ${
         grouped ? `border-l-2 pl-3 ${borderDefault}` : ""
-      }`}
+      } ${selected ? surfaceMutedBg : ""}`}
       data-inbox-group={grouped ? ownerKey : undefined}
       data-inbox-owner-key={ownerKey}
       data-inbox-row={ask.id}
       data-inbox-section={section}
+      data-inbox-selected={selected ? "true" : undefined}
       onBlur={releaseOnFocusOut}
+      onClick={
+        onSelect === undefined
+          ? undefined
+          : (event) => {
+              if (
+                event.target instanceof Element &&
+                closestMatching(event.target, ROW_CONTROL_SELECTOR) !== null
+              ) {
+                return;
+              }
+              onSelect(ask.id);
+            }
+      }
       onPointerLeave={onRelease}
       tabIndex={-1}
+    >
+      {children}
+    </li>
+  );
+}
+
+/** The row beside the reading column: one line, read left to right - what the question belongs
+ *  to, what kind of question it is, its first line, and how long it has been waiting. The
+ *  question line takes what the owner and the badge leave, and truncates; the age never
+ *  shrinks, since a row whose age is cut says nothing. The question itself, and every control
+ *  that acts on it, is in the column. */
+function InboxShortRow({
+  ask,
+  grouped,
+  marked,
+  onMark,
+  onRelease,
+  onSelect,
+  ordinal,
+  ownerKey,
+  section,
+  selected,
+}: InboxRowProps & {
+  onSelect: (askId: string) => void;
+  /** Whether this is the row the reading column is showing. */
+  selected: boolean;
+}): ReactNode {
+  return (
+    <InboxRowShell
+      ask={ask}
+      grouped={grouped}
+      onRelease={onRelease}
+      onSelect={onSelect}
+      ownerKey={ownerKey}
+      section={section}
+      selected={selected}
+    >
+      <div className="flex items-center gap-2 py-1.5">
+        <MarkCheckbox ask={ask} marked={marked} name={controlName(ask, ordinal)} onMark={onMark} />
+        {/* A div, not a span: a row with neither an issue nor a document names itself with a
+            paragraph (`InboxOwnerLink`), which no phrasing element may hold. */}
+        <div className="flex min-w-0 basis-64 items-baseline">
+          <InboxOwnerLink ask={ask} rowOwner />
+        </div>
+        <LabelPill>{askKind(ask)}</LabelPill>
+        <span className="min-w-0 grow truncate text-sm">{questionLine(ask.question)}</span>
+        <time className={`shrink-0 text-xs ${textMutedOnSurfaceMuted}`} dateTime={ask.created_at}>
+          {formatAskAge(ask.created_at)}
+        </time>
+      </div>
+    </InboxRowShell>
+  );
+}
+
+/** The row without a reading column beside it: the question's whole card, under the controls
+ *  that defer or reroute it. */
+function InboxCardRow({
+  ask,
+  assignLive,
+  grouped,
+  marked,
+  onAnswered,
+  onAssignLive,
+  onMark,
+  onRelease,
+  onSnoozeLive,
+  ordinal,
+  ownerKey,
+  section,
+  threadUpdatedAt,
+  viewer,
+}: InboxRowProps & {
+  /** True while this row's "Assign to me" write is in flight or failed, whatever section the
+   *  optimistic update put the row in. */
+  assignLive: boolean;
+  onAnswered: (id: string) => void;
+  onAssignLive: (askId: string, live: boolean) => void;
+  /** The same registration for this row's snooze write; the Inbox keeps a live row rendered
+   *  even when its band is folded, so `Snoozing…` and a refusal survive the fold. */
+  onSnoozeLive: (askId: string, live: boolean) => void;
+  /** Timestamp of the Inbox snapshot that supplied this row's initial thread. */
+  threadUpdatedAt: number;
+  /** The signed-in person's lowercase email; "Assign to me" writes it. */
+  viewer: string;
+}): ReactNode {
+  const name = controlName(ask, ordinal);
+  return (
+    <InboxRowShell
+      ask={ask}
+      grouped={grouped}
+      onRelease={onRelease}
+      onSelect={undefined}
+      ownerKey={ownerKey}
+      section={section}
+      selected={false}
     >
       {/* One line: the issue this question belongs to on the left, the controls that defer or
           reroute it on the right. It wraps rather than overlapping - a refusal from Snooze or
           Assign to me is a full-width row inside the right group, so it never draws over the
           issue key - and the reply chip truncates rather than squeezing the title away. */}
       <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <input
-          aria-label={`Select ${name}`}
-          checked={marked}
-          className={`size-4 shrink-0 ${checkboxAccent}`}
-          onChange={() => onMark(ask.id)}
-          type="checkbox"
-        />
+        <MarkCheckbox ask={ask} marked={marked} name={name} onMark={onMark} />
         <div className="flex min-w-0 grow basis-48 items-baseline gap-2">
           <InboxOwnerLink ask={ask} rowOwner />
           <span className="min-w-0 max-w-[40%] shrink truncate">
@@ -218,8 +343,8 @@ function InboxItem({
           </span>
         </div>
         {/* `max-w-full` bounds the group to the row: `shrink-0` alone lets a server's own
-            refusal reason - `snoozed_until must be in the future`, or anything longer - set the
-            group's width and widen the whole document past the viewport on a phone. */}
+            refusal reason - `snoozed_until must be in the future`, or anything longer - set
+            the group's width and widen the whole document past the viewport on a phone. */}
         <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
           {ask.issue_key === null ? null : (
             <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
@@ -246,14 +371,8 @@ function InboxItem({
         initialThreadUpdatedAt={threadUpdatedAt}
         onAnswered={onAnswered}
       />
-    </li>
+    </InboxRowShell>
   );
-}
-
-/** A row as the reader last saw it: the section it sat in, whatever the server says now. */
-interface PlacedRow {
-  ask: InboxRow;
-  section: InboxSection;
 }
 
 /** The rows of one section, with the held row - one the server no longer lists here but the
@@ -308,18 +427,23 @@ function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | 
   return `${head}, and ${others} other reason${others === 1 ? "" : "s"}.`;
 }
 
-/** What the Inbox says when no band has a row. An agent filter's line is about that agent's asks
- *  alone. Otherwise the credential requests above the bands wait on the viewer as much as an ask
- *  whose turn is theirs, so it says nothing until their list has come back empty: while the list
- *  loads, or after it fails, the Inbox cannot say that nothing needs them. The three filtered
- *  lines differ because only the reader's own list is about them: a cleared filter is about
- *  everyone, and any other selection is about whoever it names. */
+/** What the Inbox says when no band has a row. Typed text comes first: a reader who has narrowed
+ *  the list is told why it is empty before anything else is, whatever filter or agent the address
+ *  also carries. It answers on the words the box searches by rather than on a non-empty `q`, so
+ *  an address carrying only spaces narrows nothing and says nothing about it. An agent filter's
+ *  line is about that agent's asks alone, naming it in plain text (`useAgentText`): the empty
+ *  state is a message, not a byline. Otherwise the credential requests above the bands wait on
+ *  the viewer as much as an ask whose turn is theirs, so it says nothing until their list has
+ *  come back empty: while the list loads, or after it fails, the Inbox cannot say that nothing
+ *  needs them. The three filtered lines differ because only the reader's own list is about them:
+ *  a cleared filter is about everyone, and any other selection is about whoever it names. */
 function emptyStateMessage({
   agent,
   agentTitle,
   credentials,
   selection,
   viewer,
+  words,
 }: {
   agent: string | undefined;
   agentTitle: string | undefined;
@@ -327,7 +451,10 @@ function emptyStateMessage({
   /** Who the list is filtered to, as `?assignee=` reads: empty is the cleared filter. */
   selection: readonly string[];
   viewer: string;
+  /** What the search box narrows by, as the list reads it: `searchWords` of the capped `?q=`. */
+  words: readonly string[];
 }): string | undefined {
+  if (words.length > 0) return "Nothing matches this text";
   if (agent !== undefined) return `No open asks from ${agentTitle}`;
   if (credentials.status !== "listed" || credentials.requests.length > 0) return undefined;
   if (isOwnList(selection, viewer)) return "Nothing needs you";
@@ -335,30 +462,50 @@ function emptyStateMessage({
 }
 
 /**
- * `filter`/`onAssigneesChange`/`keymapScope` exist for `InboxDrawer` (LEGION-547): a peek
- * embedded on another route must not read or write the real URL for its assignee filter (that
- * would navigate the page it sits over), and its Escape/j/k/etc. must resolve under the drawer's
- * own `dialog` scope - the modal scope a dialog anywhere on the stack exclusively consults -
- * rather than the standalone page's `inbox` scope, which a dialog's keydown handling never
- * reaches. `InboxPage`'s unmodified `<Inbox/>` call keeps today's URL-backed behaviour untouched.
+ * `filter`/`onAssigneesChange`/`onQueryChange`/`keymapScope` exist for `InboxDrawer`
+ * (LEGION-547): a peek embedded on another route must not read or write the real URL for its
+ * assignee filter or its search text (either would navigate the page it sits over), and its
+ * Escape/j/k/etc. must resolve under the drawer's own `dialog` scope - the modal scope a dialog
+ * anywhere on the stack exclusively consults - rather than the standalone page's `inbox` scope,
+ * which a dialog's keydown handling never reaches. `pane` is the last: the drawer is a peek at
+ * any width, never a two-column reader. `InboxPage`'s unmodified `<Inbox/>` call keeps today's
+ * URL-backed behaviour untouched.
  */
+export interface InboxProps {
+  filter?: InboxRoute;
+  keymapScope?: KeymapScope;
+  onAssigneesChange?: (assignees: readonly string[] | undefined) => void;
+  onQueryChange?: (next: string) => void;
+  /** Whether this Inbox may show its reading column beside the list, which it does from
+   *  `READING_PANE_QUERY` (1280 px). False keeps today's Inbox - the card in the row, no
+   *  selection and nothing written to `?item=` - at every width, which is what the drawer is. */
+  pane?: boolean;
+}
+
 export function Inbox({
   filter: filterOverride,
   keymapScope = "inbox",
   onAssigneesChange,
-}: {
-  filter?: InboxRoute;
-  keymapScope?: KeymapScope;
-  onAssigneesChange?: (assignees: readonly string[] | undefined) => void;
-} = {}): ReactNode {
+  onQueryChange,
+  pane = true,
+}: InboxProps = {}): ReactNode {
   const { search } = useLocation();
   const navigate = useNavigate();
   const filter = filterOverride ?? parseInboxSearch(search);
+  // The reading column shows from 1280 px, and only where the host allows one: below that, and
+  // in the drawer, the Inbox is the list of cards it has always been.
+  const wideEnoughForPane = useMediaQuery(READING_PANE_QUERY);
+  const paneShown = pane && wideEnoughForPane;
   // One inbox query, shared with the nav badge, the sidebar, the agents page and the margin; the
   // list below is a client-side partition of it, so an answered row leaves every surface at once.
   const inbox = useQuery(inboxQuery());
   const whoAmI = useQuery(whoAmIQuery());
   const listRef = useRef<HTMLElement>(null);
+  /** The list column, which scrolls in itself beside the reading column. */
+  const listScroller = useRef<HTMLDivElement>(null);
+  /** The reading column, where `h`, `o`, `y`, Enter and `1`-`9` act while it is on. Written by
+   *  `holdPane` below rather than handed to the wrapper, so the column's unmount is seen. */
+  const paneRef = useRef<HTMLDivElement | null>(null);
   // A refetch can land while a pointer travels between rows; adopt it once that pointer settles.
   const adoptedInbox = useMotionHold(inbox.data, listRef);
   // The credential requests the Inbox lists above its asks: the section, the banner and the empty
@@ -382,7 +529,33 @@ export function Inbox({
       navigate(buildInboxPath({ ...filter, assignees: next }), { replace: true });
     }
   };
-  const { titles: agentTitles } = useAgents(filter.agent !== undefined);
+  /** The search box, so `f` can land the reader's focus in it from anywhere on the page. */
+  const searchRef = useRef<HTMLInputElement>(null);
+  // What the box narrows by: the address's text, cut as the box itself cuts what it writes, and
+  // split into words once per render rather than once per row. An address that arrived with a
+  // longer `?q=` is left as it is: the list is filtered by the cut text, while the box shows
+  // what the address holds.
+  const words = searchWords(capSearchQuery(filter.q ?? ""));
+  const typeQuery = (typed: string) => {
+    // One cut, here rather than a `maxLength` on the box as well: what the box writes and what
+    // the list filters by are then the one rule, and the cut stays provable from a browser.
+    const next = capSearchQuery(typed);
+    // A keypress on a box already at the cap produces the text the filter holds, and writing it
+    // would replace the history entry and re-render every row for nothing. React restores a
+    // controlled input's DOM value when the state does not move, so the cap still holds in the
+    // box.
+    if (next === (filter.q ?? "")) return;
+    if (onQueryChange) {
+      onQueryChange(next);
+    } else {
+      // Replace rather than push, for `selectAssignees`'s reason: a reader typing a word would
+      // otherwise have to walk Back through every letter of it.
+      navigate(buildInboxPath({ ...filter, q: next === "" ? undefined : next }), {
+        replace: true,
+      });
+    }
+  };
+  const agentText = useAgentText();
   // Rows (by ask id) whose "Assign to me" write is in flight or failed: their control stays
   // mounted through the optimistic assignment and the rollback out of it (see `AssignToMe`).
   const [assigning, setAssigning] = useState<ReadonlySet<string>>(() => new Set());
@@ -453,12 +626,14 @@ export function Inbox({
       : (adoptedInbox ?? []).filter(
           (ask) => ask.author.kind === "session" && ask.author.id === agent
         );
-  // The filter decides what is listed, with one exception: a row whose "Assign to me" write is
-  // live stays. Taking a question under the Unassigned filter is exactly that case - the row
-  // stops matching the moment the optimistic assignment lands - and unmounting the control
-  // would take `Assigning…`, a refusal and its Retry off the screen with it.
+  // The assignee filter and the typed text both decide what is listed, with one exception that
+  // outranks them both: a row whose "Assign to me" write is live stays. Taking a question under
+  // the Unassigned filter is exactly that case - the row stops matching the moment the
+  // optimistic assignment lands - and unmounting the control would take `Assigning…`, a refusal
+  // and its Retry off the screen with it.
   const shown = (filter.section === "needs-you" ? waitingOnHuman(fromAgent) : fromAgent).filter(
-    (row) => inAssigneeFilter(row, selection) || assigning.has(row.id)
+    (row) =>
+      (inAssigneeFilter(row, selection) && matchesInboxSearch(row, words)) || assigning.has(row.id)
   );
   // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
   const [laterOpen, setLaterOpen] = useState(false);
@@ -521,21 +696,230 @@ export function Inbox({
   // any other dropped row; `assigning` above keeps it listed only while the write is live.
   const viewport = useRef<ViewportAnchor>(null);
   const anchor = viewport.current?.interacted() ?? null;
+  /** The rows the reader can see, in the order they see them, as this list last rendered them:
+   *  what the motion hold is read against, and what the selection steps through. */
   const presented = useRef<readonly PlacedRow[]>([]);
   const answered = useRef<string | null>(null);
   const [, setReleased] = useState(0);
   const release = () => setReleased((count) => count + 1);
+  const paneSelection = usePaneSelection({
+    bulkSnoozing,
+    filter,
+    listRef,
+    openFoldedBand: useCallback(() => setLaterOpen(true), []),
+    paneShown,
+    presented,
+    snoozing,
+  });
   // The refetch a recorded answer triggers returns the list the optimistic removal already
-  // produced, so it re-renders nothing on its own; release explicitly.
+  // produced, so it re-renders nothing on its own; release explicitly. The reader's own answer
+  // is one of the ways the selection is handed on, and only while it is still the selected
+  // question: the column holds the question here until the server decides their answer, but a
+  // selection that moved on meanwhile - an approval reviewed from the head, a row they walked
+  // off - must not be pulled back off the row that took its place.
   const recordAnswered = (id: string) => {
     answered.current = id;
+    if (paneShown && paneSelection.selectedNow.current === id) {
+      paneSelection.select(paneSelection.nextAfterSelected());
+    }
     release();
   };
   const rows = () => [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])];
   const step = (delta: 1 | -1) => roveFocus(rows(), rowAround(document.activeElement), delta);
-  const inFocusedRow = (selector: string) => focusedRow()?.querySelector<HTMLElement>(selector);
-  // The bar is reached through its own ref: the empty state a pick can leave behind renders it
-  // outside the list.
+  const focusInPane = () => paneRef.current?.contains(document.activeElement) === true;
+  const focusInList = () => listRef.current?.contains(document.activeElement) === true;
+  /** The row a recorded origin names: null where nothing was recorded, and null where the row
+   *  it names has since left the list. One lookup, for the two ways back into the list below. */
+  const originRow = (origin: string | null): HTMLElement | null =>
+    origin === null
+      ? null
+      : (listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`) ?? null);
+  /** The row `l` was pressed on: the row Escape returns the focus to from inside the column,
+   *  which is another row than the selected one whenever `j` moved the selection while the
+   *  focus stayed in the list. Every other way into the column leaves it null, or names the row
+   *  of the question the column shows (below), and either way Escape returns to that row, as it
+   *  always has.
+   *
+   *  It is written by one key - `read-pane`'s `run` - and only where no record stands: a second
+   *  `l`, and the `l` a reader comes back in on after an unmount inside the column left the
+   *  record standing, both leave it alone, where either would otherwise write the row the
+   *  column is showing over the row the reader came from. So re-entry by key and re-entry by
+   *  click, which writes nothing at all, leave a standing record alike. The test is the record
+   *  alone, with no check of where the focus is, because none is needed: a press from inside
+   *  the column with no record standing finds no focused row there (`focusedRow()` is null in
+   *  the column), so it writes the row of the question the column shows, or null where that
+   *  question has no listed row, and either sends Escape exactly where `paneWayBack`'s fallback
+   *  already would - the stored value differs from a click's null, the row Escape reaches does
+   *  not. It is read by one accessor, `paneWayBack`, which both halves of Escape ask, so the
+   *  `when` and the `run` cannot disagree about where the key goes.
+   *
+   *  The record stands exactly while two facts hold of the reader, each with its own drops;
+   *  between them no route can outlive the record.
+   *
+   *  (a) The column still shows the question the record was made on. The layout effect below
+   *      drops it wherever `paneSelection.id` has changed under a standing column: a step of
+   *      `j` or `k`, the reader's own answer. Where the commit has nothing shown at all the
+   *      column itself goes and `holdPane` drops the record first - a snooze of theirs and a
+   *      question the server withdraws both take the selected row off the list before the next
+   *      one is handed the selection - and that is also the only drop for the Inbox falling
+   *      below the column's width, where the selection stands and the column goes.
+   *  (b) The reader's focus has not left the column. The document's `focusin` below drops the
+   *      record wherever the focus lands outside the wrapper, which is every route out at once:
+   *      `f` to the search box, Escape to the row, a Tab onto a row's checkbox, a click into
+   *      the list, the row a step out of the column focuses on its way, the dialog a picture
+   *      opens full size. `forgetPaneReturn`, the wrapper's `onBlur`, covers the one exit that
+   *      lands nowhere and so fires no `focusin`: a focus leaving the column for no node at all
+   *      - a `blur()` of the control holding it, a click on the page outside its focusable
+   *      `main` - which leaves `document.body` holding the focus. A click on non-focusable
+   *      content inside `main` focuses `main` itself, which is a `focusin` outside the wrapper.
+   *
+   *  Two cases look like a route out and keep the record, because neither breaks that pair. A
+   *  window or tab blur moves no focus at all: nothing is focused anew, so no `focusin` fires,
+   *  and the `onBlur` that does names no target while the scroller still holds the focus - the
+   *  reader is still in the column, and back on the tab Escape owes them the row they came
+   *  from. A focused node React removes from inside the column - one body component swapped
+   *  for another - while the column still shows the question the record was made on leaves
+   *  the reader on that question, so the record is still theirs: React fires no blur for a
+   *  node it removes, and the `document.body` the focus falls to is focused by nothing, so
+   *  neither drop of (b) reads it. Their next focus does. A control that disables itself is
+   *  not that case: Chromium blurs it as it is disabled, before React removes it - the head's
+   *  `Assign to me` while its write is in flight - so the wrapper's `onBlur` reads the focus
+   *  leaving for the body and drops the record, and Escape then goes to the row of the
+   *  question the column shows. */
+  const paneReturn = useRef<string | null>(null);
+  /** The question the column was showing when this component last looked, which is how the
+   *  layout effect below tells a commit that changed it from one that did not. Nothing else
+   *  writes it, so the record itself still names a row and nothing more. */
+  const shownQuestion = useRef<string | undefined>(undefined);
+  // The column shows another question, so the record is spent: the row it names belongs to a
+  // question the reader has been carried off, whichever route carried them. Read after every
+  // commit, as the selection's own settling is (`pane-selection.ts`), and dropped here rather
+  // than tested against the question at Escape, because a record kept past its question would
+  // come back the moment the reader selected that question again. On the layout lane, so that
+  // the drop lands in the commit that changed the question: React flushes a passive effect
+  // before the next key only for the changes it commits synchronously, and the question can
+  // change on another lane - a transition, a `?item=` the router settles - which would leave the
+  // reader one Escape with a record its question has already left.
+  useLayoutEffect(() => {
+    if (shownQuestion.current === paneSelection.id) return;
+    shownQuestion.current = paneSelection.id;
+    paneReturn.current = null;
+  });
+  /** The column wrapper: the node the keys above act in, and the drop its unmount makes. React
+   *  calls a ref callback with null whenever the callback's identity changes, so this one is
+   *  stable - an arrow written into the JSX would be a new callback every render, called with
+   *  null each time, and would drop a record the reader is still owed. */
+  const holdPane = useCallback((node: HTMLDivElement | null) => {
+    paneRef.current = node;
+    // The column has gone, taking the question the record was made on off the screen and the
+    // focus the scroller held to `document.body` with it. Nothing else reports that: no blur
+    // fires for a node React removes and `body` takes no `focusin`. So this is the drop that
+    // covers the commit a snooze or a withdrawal of the selected question leaves with nothing
+    // shown, before the next question is handed the selection - it is first there, ahead of the
+    // layout effect above - and the only one that covers the Inbox falling below the column's
+    // width, where the selection stands and the column goes.
+    if (node === null) paneReturn.current = null;
+  }, []);
+  // Fact (b), stated as itself: wherever the focus lands, the record stands only while that
+  // place is inside the column. A focus the column itself takes - the head's Snooze under `h`,
+  // a link in the drawn document, the scroller `l` focuses as it writes the record - lands
+  // inside the wrapper and changes nothing, so the key's own `focusin` cannot undo it, and
+  // Escape's `run` reads the record before it focuses the row, so the drop that press makes
+  // takes nothing it still needs.
+  //
+  // One listener for this component's life, not one put up and taken down around each record:
+  // the record is a ref precisely so that `l` commits nothing, so there is no render to hang a
+  // record-shaped subscription on, and making one would mean rendering the Inbox twice per `l`.
+  // The handler reads refs alone and nothing of this render, so it never goes stale and the
+  // effect has nothing to depend on: it binds once on mount, unbinds on unmount, and no render
+  // in between churns it.
+  useEffect(() => {
+    const dropWhereFocusLands = () => {
+      // `focusin` fires once the focus has landed, so the document already names where.
+      if (paneRef.current?.contains(document.activeElement) !== true) paneReturn.current = null;
+    };
+    document.addEventListener("focusin", dropWhereFocusLands);
+    return () => document.removeEventListener("focusin", dropWhereFocusLands);
+  }, []);
+  /** The drop a focus that lands nowhere makes, which is the half of fact (b) no `focusin`
+   *  reports: React's `onBlur` bubbles from the column's descendants, so a reader whose control
+   *  blurs itself, or who clicks the page outside its focusable `main`, has left the column with
+   *  `document.body` holding the focus, and nothing is focused for the listener above to read.
+   *
+   *  Where the focus went is `relatedTarget`, and `document.activeElement` where the event names
+   *  none, because those two nulls mean opposite things: a window or tab blur moves no focus and
+   *  keeps the record, while a focus that left for the body drops it. The routes out that land
+   *  on a node are this handler's too, an event before the listener above reads them, so what
+   *  needs it is only the focus that lands nowhere. */
+  const forgetPaneReturn = (event: FocusEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget ?? document.activeElement)) {
+      paneReturn.current = null;
+    }
+  };
+  /** The row Escape returns the focus to from inside the column: the row `l` recorded, else the
+   *  row the column is showing, and null where the list holds neither. The one reader of the
+   *  record - the binding's `when` tests it against null, its `run` focuses it, and there is no
+   *  second spelling of the way back for the two of them to disagree over. */
+  const paneWayBack = (): HTMLElement | null =>
+    originRow(paneReturn.current) ?? paneSelection.selectedRow();
+  /** One step of the reader's, in whichever mode the Inbox is in: the selection the column
+   *  follows, or the focus roving the rows. Chosen once, so no binding below asks again. */
+  const stepInMode = paneShown ? paneSelection.step : step;
+  /** That step, taken from wherever the reader is standing. From inside the column the focus
+   *  comes back to the selected row first: `j` fires in there, a `tabindex=0` section being no
+   *  editable target, and a step from an approval to a question the column draws as a card
+   *  swaps `ApprovalBody` for `CardBody`, which unmounts the focused scroller and drops the
+   *  focus to `document.body` - where neither of Escape's branches holds and the key would do
+   *  nothing. The reader then stands exactly where a click and then `j` leaves them today. */
+  const move = (delta: 1 | -1) => {
+    if (paneShown && focusInPane()) {
+      paneSelection.selectedRow()?.focus();
+    }
+    stepInMode(delta);
+  };
+  /** What the keys act on, for the bindings' labels: the row the column is showing, or the row
+   *  holding the focus. */
+  const acted = paneShown ? "selected" : "focused";
+  /** When the arrows move, and what their label says of it: in the reading column the arrows
+   *  are the column's - a document scrolls, an option list moves - so they move the selection
+   *  only while the focus is in the list beside it. */
+  const arrowsMove = paneShown ? focusInList : () => focusedRow() !== null;
+  const arrowsWhen = paneShown ? "the focus is in the list" : "a row is focused";
+  /** The row `x` marks: the one the column is showing, or the one holding the focus. */
+  const markableRow = () => (paneShown ? paneSelection.id : focusedRow()?.dataset.inboxRow);
+  /** Where the Inbox's keys act: the reading column while it is on - its head's Snooze, owner
+   *  link and Copy ref, and the answer form of whatever it is showing - else the row holding
+   *  the focus. Null where there is neither, which is an Inbox with nothing selected (a wide
+   *  but empty list, or the commit a snooze of the selected row leaves behind) and a list
+   *  nothing in is focused. */
+  const hand = () => (paneShown ? paneRef.current : focusedRow());
+  /** The control `selector` names in whichever of the two that is, or null for none: every
+   *  `when` below tests this against `null`, so the accessor never answers `undefined`. */
+  const inHand = (selector: string) => hand()?.querySelector<HTMLElement>(selector) ?? null;
+  /** The column's scroller, the focus stop `l` moves the reader into, or null where no column
+   *  is rendered. */
+  const paneScroller = () =>
+    paneRef.current?.querySelector<HTMLElement>(PANE_SCROLLER_SELECTOR) ?? null;
+  /** Where the answer keys - Enter and 1-9 - act: the selected question's own card, not the
+   *  whole column. The column of a question written as a decision block draws the whole live
+   *  document, and `ProofDocument` hosts an answerable card for every open block of it
+   *  (`ProofDocument.tsx`), so the first `[data-ask-option]` under the column is the first open
+   *  block's, which is another question than the one the reader selected. Null where the
+   *  selected question has no card drawn for it: an approval, whose column is the document's
+   *  version and whose answer is the head's own Approve, and a document whose block has not
+   *  mounted its card yet. Outside the column the keys act on the focused row, as all of them
+   *  do. */
+  const answerHand = () =>
+    paneShown
+      ? paneSelection.id === undefined
+        ? null
+        : (paneRef.current?.querySelector<HTMLElement>(
+            `[data-ask-card="${CSS.escape(paneSelection.id)}"]`
+          ) ?? null)
+      : focusedRow();
+  const inAnswerHand = (selector: string) =>
+    answerHand()?.querySelector<HTMLElement>(selector) ?? null;
+  // The bar is reached through its own ref, which holds wherever the header draws it.
   const bulkPicker = () => bulkBarRef.current?.querySelector<HTMLElement>(BULK_PICKER_SELECTOR);
   // Which row `h` was pressed on, so Escape from the bulk picker - which sits above the bands and
   // has no row to fall back through - is one level out rather than a dead end.
@@ -543,12 +927,14 @@ export function Inbox({
   useKeymapScope(keymapScope);
   useKeymap(keymapScope, [
     // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
+    // With the reading column on, movement is the selection's: the column follows it, and the
+    // focus stays where the reader left it in the list.
     {
       id: "next",
       keys: "j",
       label: "Next ask",
       palette: false,
-      run: () => step(1),
+      run: () => move(1),
       when: () => rows().length > 0,
     },
     {
@@ -556,46 +942,71 @@ export function Inbox({
       keys: "k",
       label: "Previous ask",
       palette: false,
-      run: () => step(-1),
+      run: () => move(-1),
       when: () => rows().length > 0,
     },
     {
       id: "arrows",
       keys: ["ArrowDown", "ArrowUp"],
-      label: "Next / previous ask while a row is focused",
-      run: (event) => step(event.key === "ArrowDown" ? 1 : -1),
-      when: () => focusedRow() !== null,
+      label: `Next / previous ask while ${arrowsWhen}`,
+      run: (event) => move(event.key === "ArrowDown" ? 1 : -1),
+      when: arrowsMove,
     },
     {
       id: "answer",
       keys: "Enter",
-      label: "Answer the focused ask",
-      run: () => inFocusedRow("[data-ask-answer]")?.focus(),
-      when: () => inFocusedRow("[data-ask-answer]") != null,
+      label: `Answer the ${acted} ask`,
+      run: () => {
+        // A decision block's compact card folds its answer box behind "Add a note or answer in
+        // your own words"; Enter presses that disclosure, and the card lands the focus in the
+        // box its own render reveals (`AskCard.tsx`) - the box does not exist in this tick, so
+        // nothing here could focus it. Only the column draws that compact card: from a row, and
+        // from a disclosure already open, the key goes straight to the box.
+        const box = inAnswerHand("[data-ask-answer]");
+        if (box === null && paneShown) {
+          inAnswerHand(NOTE_DISCLOSURE_SELECTOR)?.click();
+          return;
+        }
+        box?.focus();
+      },
+      // Enter is the list's key: it carries the reader from the row they are on into the
+      // column's answer box. Everywhere else the key belongs to the control that holds the
+      // focus - the card's own `Ask back instead` or an option inside the column, a row's owner
+      // link, `Later (n)`, the bulk-snooze bar, a filter control - and the registry's handler
+      // calls `preventDefault` for every binding that fires, so a binding that claimed the key
+      // there would press nothing. It fires from a row itself, and with the focus on nothing
+      // (`document.body`), where a reader who has pressed no key yet stands. `h` stands down
+      // inside an ask card for the same reason (`outsideAskCard`).
+      when: () =>
+        paneShown
+          ? (focusedRow() !== null || document.activeElement === document.body) &&
+            (inAnswerHand("[data-ask-answer]") !== null ||
+              inAnswerHand(NOTE_DISCLOSURE_SELECTOR) !== null)
+          : inAnswerHand("[data-ask-answer]") !== null,
     },
     {
       id: "option",
       keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"],
-      label: "Select option 1–9 of the focused ask",
-      run: (event) =>
-        focusedRow()
-          ?.querySelectorAll<HTMLElement>("[data-ask-option]")
-          [Number(event.key) - 1]?.click(),
-      when: () => inFocusedRow("[data-ask-option]") != null,
+      label: `Select option 1–9 of the ${acted} ask`,
+      run: (event) => {
+        const options = answerHand()?.querySelectorAll<HTMLElement>("[data-ask-option]");
+        options?.[Number(event.key) - 1]?.click();
+      },
+      when: () => inAnswerHand("[data-ask-option]") !== null,
     },
     {
       id: "open",
       keys: "o",
       label: "Open the ask's issue or document",
-      run: () => inFocusedRow("[data-inbox-owner]")?.click(),
-      when: () => inFocusedRow("[data-inbox-owner]") != null,
+      run: () => inHand("[data-inbox-owner]")?.click(),
+      when: () => inHand("[data-inbox-owner]") !== null,
     },
     {
       id: "copy-ref",
       keys: "y",
-      label: "Copy the focused ask's reference",
-      run: () => inFocusedRow(COPY_REF_SELECTOR)?.click(),
-      when: () => inFocusedRow(COPY_REF_SELECTOR) != null,
+      label: `Copy the ${acted} ask's reference`,
+      run: () => inHand(COPY_REF_SELECTOR)?.click(),
+      when: () => inHand(COPY_REF_SELECTOR) !== null,
     },
     {
       id: "back",
@@ -603,6 +1014,16 @@ export function Inbox({
       keys: "Escape",
       label: "Back to the ask row, then clear the focused row",
       run: () => {
+        // From the reading column, Escape is the way back to the row the reader came from: `l`
+        // recorded that row, which is not the selected one whenever `j` moved the selection
+        // without moving the focus. Every other way in records nothing, or the row the column
+        // is showing, and returns, as it always has, to that row. `paneWayBack` is both of
+        // those, and the `when` below asks it the same question, so the key never fires on a way
+        // back the run then cannot find.
+        if (paneShown && focusInPane()) {
+          paneWayBack()?.focus();
+          return;
+        }
         const row = rowAround(document.activeElement);
         if (row === focusedRow()) {
           row?.blur();
@@ -610,19 +1031,56 @@ export function Inbox({
           row?.focus();
         }
       },
-      when: () => rowAround(document.activeElement) !== null,
+      // Both ways back are tested, because either can be the only one left. The column keeps a
+      // question whose row the typed text hides while the reader has an unsent answer in it
+      // (`pane-selection.ts`'s `paneAsk`), and there the row `l` was pressed on is the way out,
+      // the selected row having none; every other way into the column records no row, and there
+      // the selected row is the way out. With only the selected row tested, Escape in a column
+      // held open over a hidden row would match no binding and do nothing.
+      when: () =>
+        rowAround(document.activeElement) !== null ||
+        (paneShown && focusInPane() && paneWayBack() !== null),
+    },
+    {
+      // The column is the other half of the page, and `l` is the step into it: the scroller
+      // takes the focus, and the browser scrolls it on the arrow keys, Page Up, Page Down,
+      // Space, Home and End from there.
+      id: "read-pane",
+      keys: "l",
+      label: "Move the focus into the reading pane",
+      run: () => {
+        // The record Escape reads, written only where no record stands. It names the row the
+        // reader came from - the one holding the focus, or the selected one where the focus is
+        // on nothing (`document.body`, where a reader who has pressed no key yet stands) or on
+        // something that is not a row, which includes a press from inside the column itself.
+        //
+        // A press with a record standing writes nothing, whether the reader is in the column
+        // already or on the body an unmount inside the column dropped their focus to: both
+        // would write the row the column is showing, or null, over the row the reader actually
+        // came from, which is the row Escape owes them. So the key leaves a standing record
+        // exactly as a click back into the column does, and the two ways back in agree.
+        if (paneReturn.current === null) {
+          paneReturn.current =
+            focusedRow()?.dataset.inboxRow ?? paneSelection.selectedRow()?.dataset.inboxRow ?? null;
+        }
+        paneScroller()?.focus();
+      },
+      // One test for all three cases the key does nothing in: below 1280 px and in the drawer
+      // `paneShown` is false (`pane && wideEnoughForPane`), and with no row selected no column
+      // is rendered at all, so `paneRef.current` is null and there is no scroller under it.
+      when: () => paneShown && paneScroller() !== null,
     },
     {
       // Marking walks the list with the row in hand, as `j`/`k` do, so it is no palette row.
       id: "select",
       keys: "x",
-      label: "Select or deselect the focused ask",
+      label: `Select or deselect the ${acted} ask`,
       palette: false,
       run: () => {
-        const askId = focusedRow()?.dataset.inboxRow;
+        const askId = markableRow();
         if (askId !== undefined) onMark(askId);
       },
-      when: () => focusedRow() !== null,
+      when: () => markableRow() !== undefined,
     },
     {
       id: "snooze",
@@ -631,7 +1089,9 @@ export function Inbox({
       label: "Snooze the focused ask, or every selected ask",
       run: () => {
         if (selected.length === 0) {
-          inFocusedRow("[data-inbox-snooze]")?.focus();
+          // The short row carries no Snooze of its own: the reading column's head does, for the
+          // row it is showing.
+          inHand("[data-inbox-snooze]")?.focus();
           return;
         }
         bulkPicker()?.focus();
@@ -640,8 +1100,11 @@ export function Inbox({
       // they just ticked, the bar - but not from inside an ask they are answering: an option
       // radio takes no typed text, so the registry passes the key through, and the card's own
       // controls are not the list's. The issue page withholds its writing keys the same way.
+      // Inside the column that rule covers the lone Snooze too, the card there being the
+      // column's own.
       when: () =>
-        (selected.length > 0 && outsideAskCard()) || inFocusedRow("[data-inbox-snooze]") != null,
+        (selected.length > 0 && outsideAskCard()) ||
+        (inHand("[data-inbox-snooze]") !== null && (!paneShown || outsideAskCard())),
     },
     {
       id: "back-from-bulk",
@@ -649,15 +1112,9 @@ export function Inbox({
       keys: "Escape",
       label: "Back to the list from the bulk snooze picker",
       run: () => {
-        const origin = pickerOrigin.current;
-        const row =
-          origin === null
-            ? null
-            : listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`);
         // With every marked row gone there is no row to return to, so the bar itself is the
-        // level out: it holds the count and the way to clear it. It is reached through its own
-        // ref, because the empty state a pick can leave behind renders it outside the list.
-        (row ?? rows()[0] ?? bulkBarRef.current)?.focus();
+        // level out: it holds the count and the way to clear it.
+        (originRow(pickerOrigin.current) ?? rows()[0] ?? bulkBarRef.current)?.focus();
       },
       when: () => document.activeElement?.matches(BULK_PICKER_SELECTOR) === true,
     },
@@ -677,6 +1134,31 @@ export function Inbox({
       // marked at the same time would be two undos for one key.
       when: () => focusedRow() === null && bulkBarShown && !filterOpen,
     },
+    {
+      // The box is one key away from anywhere on the page, and `f` is not `inEditable`: inside
+      // the box itself a `search` input takes typed text (`keymap.ts`'s `TEXT_INPUT_TYPES`), so
+      // the registry passes the key through and the reader types an `f` rather than re-focusing
+      // what they are already in.
+      id: "search",
+      keys: "f",
+      label: "Search asks",
+      run: () => searchRef.current?.focus(),
+      when: () => searchRef.current !== null,
+    },
+    {
+      // Escape is one level out, and out of the box is the list: the row the column is showing
+      // on the page, and the first row in the drawer, where nothing is selected. It is offered
+      // only while the focus is in the box, so the three Escapes above are untouched - `back`
+      // and `back-from-bulk` both answer false there, and `clear-selection` is not `inEditable`
+      // at all - and the drawer's own Close waits its turn, the Inbox's registration being the
+      // first of the scope to match (`keymap.ts`'s `resolve`).
+      id: "leave-search",
+      inEditable: true,
+      keys: "Escape",
+      label: "Back to the list from the search box",
+      run: () => (paneSelection.selectedRow() ?? rows()[0])?.focus(),
+      when: () => searchRef.current !== null && document.activeElement === searchRef.current,
+    },
   ]);
 
   if (inbox.isPending || whoAmI.isPending) {
@@ -686,10 +1168,22 @@ export function Inbox({
     return <p className={dangerText}>Could not load your inbox.</p>;
   }
 
+  // Which row the list holds in place while the server moves the list under it: the row the
+  // reader's hand is on (focus or pointer), with or without the reading column. A row the
+  // column is merely showing is not held - the Inbox selects the first row for the reader the
+  // moment it opens, and a question the server withdraws, resolves or answers elsewhere must
+  // not stay in the list on the strength of a selection nobody made. What the column does with
+  // a selected question the server takes away is `paneAsk` (`pane-selection.ts`).
+  //
+  // The hold is told which rows the typed text excludes rather than being handed the narrowed
+  // list: a row the reader's own typing drops must go at once, even with the pointer resting on
+  // it, so it is not "seen" here at all and there is nothing to hold. A row the server stopped
+  // sending is held exactly as it is today.
+  const handId = anchor?.id;
   const seen =
-    anchor === null || anchor.id === answered.current
+    handId === undefined || handId === answered.current
       ? undefined
-      : presented.current.find(({ ask }) => ask.id === anchor.id);
+      : presented.current.find(({ ask }) => ask.id === handId && matchesInboxSearch(ask, words));
   const listed = seen === undefined ? undefined : shown.find((ask) => ask.id === seen.ask.id);
   const now = listed === undefined ? undefined : sectionOf(listed, place);
   const held = heldRow(seen, listed, now);
@@ -704,26 +1198,38 @@ export function Inbox({
       viewer={viewer}
     />
   );
-  // The live agent's title when Envoy still lists it; otherwise the author label its asks carry.
-  const liveTitle = agent === undefined ? undefined : agentTitles.get(agent)?.trim();
-  const agentTitle =
-    liveTitle !== undefined && liveTitle !== ""
-      ? liveTitle
-      : fromAgent[0] === undefined
-        ? agent
-        : actorLabel(fromAgent[0].author);
+  // The filtered agent as its asks wrote it (the title it stamped, its attribution), or only its
+  // id when none of its asks is listed; either way its registry title names it when listed.
+  // Without the filter, `fromAgent` is every row, so it names no agent.
+  const agentAuthor = agent === undefined ? undefined : fromAgent[0]?.author;
+  const agentSubject =
+    agent === undefined
+      ? undefined
+      : agentAuthor === undefined
+        ? { sessionId: agent, storedTitle: undefined }
+        : { actor: agentAuthor };
+  const agentTitle = agentSubject === undefined ? undefined : agentText.part(agentSubject);
+  // The clear-filter link keeps its own text and name; the agent's live link sits beside it.
+  // `whitespace-pre` keeps the space before an attribution suffix, which a flex item would drop.
   const chip =
-    agent === undefined ? null : (
-      <Link
-        aria-label="Clear agent filter"
-        className="inline-flex min-h-11 items-center rounded-full"
-        to={buildInboxPath({ assignees: filter.assignees })}
-      >
-        <LabelPill selected>
-          Asks from {agentTitle}
-          {filter.section === "needs-you" ? " waiting on you" : ""} · clear
-        </LabelPill>
-      </Link>
+    agentSubject === undefined ? null : (
+      <AgentName
+        {...agentSubject}
+        className="flex items-center whitespace-pre"
+        control={(name) => (
+          <Link
+            aria-label="Clear agent filter"
+            className="inline-flex min-h-11 items-center rounded-full"
+            to={buildInboxPath({ assignees: filter.assignees, item: filter.item, q: filter.q })}
+          >
+            <LabelPill selected>
+              Asks from {name}
+              {filter.section === "needs-you" ? " waiting on you" : ""} · clear
+            </LabelPill>
+          </Link>
+        )}
+        kind="control"
+      />
     );
 
   // The bar outlives an empty list: a pick that empties this view leaves its write in the air, and
@@ -741,11 +1247,32 @@ export function Inbox({
       refusal={bulkRefusal}
     />
   ) : null;
+  // The box beside the filter, the two wrapping to a line each on a phone so the fields the box
+  // searches stay readable in its placeholder. Its classes are the Agents page's own field, the
+  // 44 px tap target included, plus the focus ring `inputClasses` does not carry: `f` lands the
+  // focus here, and a reader who arrived by key must see where they are. The cap is said in the
+  // title rather than enforced by a `maxLength`, so `capSearchQuery` in the change handler is
+  // the one rule that cuts what is written and what is filtered by.
+  const searchBox = (
+    <input
+      aria-label="Search asks"
+      className={`min-h-11 min-w-0 flex-1 basis-64 rounded-lg border px-3 py-2 text-sm outline-none focus-visible:ring-2 ${inputClasses(true)} ${focusVisibleRing}`}
+      onChange={(event) => typeQuery(event.target.value)}
+      placeholder="Issue, title, question or author"
+      ref={searchRef}
+      title={`At most ${SEARCH_QUERY_MAX} characters`}
+      type="search"
+      value={filter.q ?? ""}
+    />
+  );
   // Everything above the bands, the same whether or not any band has a row.
   const header = (
     <>
       <CredentialRequestsSection credentials={credentials} />
-      {assigneeFilter}
+      <div className="flex flex-wrap items-center gap-2">
+        {assigneeFilter}
+        {searchBox}
+      </div>
       {chip}
       {agent === undefined ? (
         <BlockedOnYou
@@ -758,17 +1285,31 @@ export function Inbox({
     </>
   );
 
-  if (shown.length === 0 && held === undefined) {
-    const emptyMessage = emptyStateMessage({ agent, agentTitle, credentials, selection, viewer });
-    return (
-      <div className="space-y-6">
-        {header}
-        {emptyMessage === undefined ? null : (
-          <EmptyState label="Inbox empty state" message={emptyMessage} />
-        )}
-      </div>
-    );
-  }
+  // Two columns, the reading column to the right of the list, each scrolling in itself inside
+  // the height the page gives them (`app.tsx` makes the Inbox page fill the viewport here).
+  //
+  // One root, selection or none: the column is what appears and disappears beside the list,
+  // never the list itself. A selection empties for a commit whenever the selected row leaves
+  // the rendered bands - the reader's own bulk snooze of that row does it, before the effect
+  // above hands the selection on - and a root that changed shape there would have React
+  // unmount the whole list, taking the keyboard's focus, the bulk bar and every row's state
+  // with it and mounting a fresh one a commit later.
+  const columns = (listColumn: ReactNode, subject: InboxRow | undefined): ReactNode => (
+    <div className="flex min-h-0 flex-1 gap-6">
+      {listColumn}
+      {subject === undefined ? null : (
+        // biome-ignore lint/a11y/noStaticElementInteractions: nothing here is made interactive - the handler only reads where the focus has already gone, so the column needs no role of its own.
+        <div className="min-w-0 flex-1" onBlur={forgetPaneReturn} ref={holdPane}>
+          <ReadingPane
+            ask={subject}
+            onAnswered={recordAnswered}
+            onSnoozeLive={onSnoozeLive}
+            viewer={viewer}
+          />
+        </div>
+      )}
+    </div>
+  );
 
   const rowsIn = (section: InboxSection) =>
     withHeld(
@@ -788,72 +1329,131 @@ export function Inbox({
   presented.current = sections.flatMap(({ groups, section }) =>
     groups.flatMap((group) => group.rows.map((ask) => ({ ask, section })))
   );
+  // Every row, a folded band's included: `?item=` naming a row the reader deferred opens that
+  // band rather than being read as an address this list cannot answer.
+  const listedRows = sections.flatMap(({ rows, section }) => rows.map((ask) => ({ ask, section })));
   // Names are read off the rows as they render - band by band, top to bottom - so "ask 2 of 2"
   // never sits above "ask 1 of 2", and a twin folded away in `Later` leaves the row on screen
   // with the short name rather than a count of something the reader cannot see.
   const ordinals = askOrdinals(presented.current.map(({ ask }) => ask));
+  const selectedAsk = paneSelection.showing(listedRows);
+  // The line the list shows in place of its bands when none of them has a row, and undefined
+  // where the Inbox has nothing to say yet: a credential list that has not come back, or
+  // credential requests of its own listed above (`emptyStateMessage`).
+  const emptyMessage =
+    sections.length > 0
+      ? undefined
+      : emptyStateMessage({ agent, agentTitle, credentials, selection, viewer, words });
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
   // it - its draft, selection, disclosures, and focus stay, and the viewport anchor can find it.
-  return (
-    <ViewportAnchor
-      className="space-y-4"
-      group="data-inbox-section"
-      item={ROW_ATTRIBUTE}
-      ref={viewport}
-      rootRef={listRef}
+  //
+  // One tree, rows or none: what appears and disappears under the header is the bands, never
+  // the header itself. That is the rule the comment above `columns` states for the columns
+  // root, and the header is under it for the same reason - drawing the empty list in a tree of
+  // its own would have React unmount the header on the letter that leaves nothing listed and
+  // mount a fresh one, taking the search box out from under the reader's hand and their focus
+  // to `document.body` with it, so the rest of the word, and the Backspace that would correct
+  // it, would reach the Inbox's own single-key bindings instead of the box (INFRA-963).
+  const list = (
+    // With the reading column beside it the list scrolls in itself rather than in the window,
+    // so the two columns move independently; the anchor is given that same box, so a refetch
+    // keeps the reader's row where it was in it.
+    <div
+      className={paneShown ? "min-w-0 flex-1 overflow-y-auto pr-1" : undefined}
+      data-testid="inbox-list"
+      ref={listScroller}
     >
-      {header}
-      <ul className="space-y-3">
-        {sections.flatMap(({ groups, rows, section }, index) => [
-          <li
-            className={index === 0 ? undefined : "pt-2"}
-            key={`heading-${section}`}
-            role="presentation"
-          >
-            {/* A band divider, not a heading that competes with the questions under it. */}
-            <h2 className={`text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}>
-              {COLLAPSED_SECTIONS[section] === true ? (
-                <DisclosureToggle
-                  expanded={laterOpen}
-                  label={`${titles[section]} (${rows.length})`}
-                  onToggle={() => setLaterOpen((open) => !open)}
-                  textClassName={textMutedOnCanvas}
-                />
-              ) : (
-                titles[section]
-              )}
-            </h2>
-          </li>,
-          ...bandGroupItems({
-            groups,
-            notes: notes.get(section),
-            onJump: jumpToGroup,
-            renderRow: (ask, group) => (
-              <InboxItem
-                ask={ask}
-                assignLive={assigning.has(ask.id)}
-                grouped={group.rows.length > 1}
-                key={ask.id}
-                marked={marked.has(ask.id)}
-                ordinal={ordinals.get(ask.id)}
-                ownerKey={group.owner.key}
-                onAnswered={recordAnswered}
-                onAssignLive={onAssignLive}
-                onMark={onMark}
-                onSnoozeLive={onSnoozeLive}
-                onRelease={ask.id === held?.ask.id ? release : undefined}
-                section={section}
-                threadUpdatedAt={inbox.dataUpdatedAt}
-                viewer={viewer}
-              />
-            ),
-            section,
-            titles,
-          }),
-        ])}
-      </ul>
-    </ViewportAnchor>
+      <ViewportAnchor
+        className="space-y-4"
+        group="data-inbox-section"
+        item={ROW_ATTRIBUTE}
+        ref={viewport}
+        rootRef={listRef}
+        scroller={paneShown ? listScroller : undefined}
+      >
+        {header}
+        {emptyMessage === undefined ? null : (
+          <EmptyState label="Inbox empty state" message={emptyMessage} />
+        )}
+        {sections.length === 0 ? null : (
+          <ul className="space-y-3">
+            {sections.flatMap(({ groups, rows, section }, index) => [
+              <li
+                className={index === 0 ? undefined : "pt-2"}
+                key={`heading-${section}`}
+                role="presentation"
+              >
+                {/* A band divider, not a heading that competes with the questions under it. */}
+                <h2
+                  className={`text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}
+                >
+                  {COLLAPSED_SECTIONS[section] === true ? (
+                    <DisclosureToggle
+                      expanded={laterOpen}
+                      label={`${titles[section]} (${rows.length})`}
+                      onToggle={() => setLaterOpen((open) => !open)}
+                      textClassName={textMutedOnCanvas}
+                    />
+                  ) : (
+                    titles[section]
+                  )}
+                </h2>
+              </li>,
+              ...bandGroupItems({
+                groups,
+                notes: notes.get(section),
+                onJump: jumpToGroup,
+                // The reader's hand holds the row, and lets it go when their focus or pointer
+                // leaves it, whichever layout it is drawn in.
+                renderRow: (ask, group) =>
+                  paneShown ? (
+                    <InboxShortRow
+                      ask={ask}
+                      grouped={group.rows.length > 1}
+                      key={ask.id}
+                      marked={marked.has(ask.id)}
+                      onMark={onMark}
+                      onRelease={ask.id === held?.ask.id ? release : undefined}
+                      onSelect={paneSelection.select}
+                      ordinal={ordinals.get(ask.id)}
+                      ownerKey={group.owner.key}
+                      section={section}
+                      selected={ask.id === paneSelection.id}
+                    />
+                  ) : (
+                    <InboxCardRow
+                      ask={ask}
+                      assignLive={assigning.has(ask.id)}
+                      grouped={group.rows.length > 1}
+                      key={ask.id}
+                      marked={marked.has(ask.id)}
+                      onAnswered={recordAnswered}
+                      onAssignLive={onAssignLive}
+                      onMark={onMark}
+                      onRelease={ask.id === held?.ask.id ? release : undefined}
+                      onSnoozeLive={onSnoozeLive}
+                      ordinal={ordinals.get(ask.id)}
+                      ownerKey={group.owner.key}
+                      section={section}
+                      threadUpdatedAt={inbox.dataUpdatedAt}
+                      viewer={viewer}
+                    />
+                  ),
+                section,
+                titles,
+              }),
+            ])}
+          </ul>
+        )}
+      </ViewportAnchor>
+    </div>
   );
+
+  // Nothing to read is nothing to select, so an empty list is the whole Inbox, as it is below
+  // the reading column's width. The one question that outlives every row is the one the column
+  // is keeping for an unsent answer, and `showing` hands that one back from an empty list too,
+  // so it keeps its column here: the reader's text is in it.
+  return paneShown ? columns(list, selectedAsk) : list;
 }

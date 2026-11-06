@@ -13,7 +13,11 @@
     ],
     "waiting": [
       "LEGION-209"
-    ]
+    ],
+    "trees": [
+      "LEGION-208"
+    ],
+    "blocked": []
   },
   "issues": {
     "LEGION-208": {
@@ -21,6 +25,7 @@
       "generation": 4,
       "phase": "reviewing",
       "status": "needs_review",
+      "tree": "LEGION-208",
       "repo": "sjawhar/legion-smoke",
       "defaultBranch": "main",
       "workers": {}
@@ -44,6 +49,7 @@
     "owners": [],
     "mapped": [],
     "refused": [],
+    "withoutWebhookApp": [],
     "caches": []
   },
   "settings": {
@@ -78,13 +84,20 @@
     },
     "linger_hours": 72,
     "production_check_hours": 336,
+    "pod_update_retask_hours": 1,
+    "pod_update_notice_hours": 4,
+    "pod_update_max_open_rounds": null,
+    "pod_update_rounds_per_minute": null,
     "review_round_cap": 3,
     "max_fix_attempts": 3,
     "controller": "operator",
     "capabilities": {
       "decided": {}
     },
-    "worker_backends": {}
+    "worker_backends": {},
+    "role_config_files": {},
+    "repository_renames": []
   },
+  "consumers": [],
   "questionsForController": []
 }

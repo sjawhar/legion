@@ -1,6 +1,6 @@
 ---
 title: Revoke a session or a grant
-description: End a grant from Dispatch, from your shell or from the session holding it, cancel a pending request, end a session so nothing it held still works, and end a machine's login.
+description: End a grant from Dispatch, from your shell or from the session holding it, cancel a pending request, end a session so nothing it held still works, end a machine's login, and end your sign-in on a machine.
 sidebar:
   order: 12
 ---
@@ -40,7 +40,9 @@ $ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_
 
 (That is the call Dispatch's server makes as its own ServiceAccount, the caller the broker lists
 in `BROKER_API_ACCOUNTS`; on the [local stack](/legion/broker/guides/run-locally/) you can make it
-yourself with the token in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.)
+yourself with the token in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`. The broker takes the revoking
+person the body names on its caller's word, as it does for a machine login's decision: a revoke
+only takes power away, so unlike approving a secret request it needs no sign-in to the broker.)
 
 ## Revoke a grant from your shell
 
@@ -61,9 +63,13 @@ $ agent-secrets grant list
 GRANT_ID                              SECRETS          GRANTED    APPROVER         SESSION                                       OPERATOR         EXPIRES
 f26b6b78-2819-4b1d-abbd-d6990ca1a776  DEMO_API_KEY     approval   ada@example.com  session/example-host-laptop:1989345:35362384  ada@example.com  2026-10-10T15:56:07Z
 cc63d479-ddae-4052-b93b-b4b5df37adf0  DEMO_READ_TOKEN  automatic  -                session/example-host-devbox:1989344:35362384  ada@example.com  session-end
+Every row is a grant from the broker AGENT_SECRETS_URL names (AWS Secrets Manager).
 $ agent-secrets grant revoke f26b6b78-2819-4b1d-abbd-d6990ca1a776
-revoked f26b6b78-2819-4b1d-abbd-d6990ca1a776
+revoked f26b6b78-2819-4b1d-abbd-d6990ca1a776 at the broker AGENT_SECRETS_URL names
 ```
+
+The line after the table goes to standard error, naming the broker and kind of store every row is from, so
+the table stays one row per grant for a script.
 
 `GRANTED` is `automatic` or `approval`, and `APPROVER` is `-` for an automatic grant. `EXPIRES` is
 `session-end` for a grant that lasts until its session ends, and a time for one its request gave a
@@ -77,12 +83,13 @@ ending its own grant withholds nothing: its next request is decided as before.
 
 ```console
 $ agent-secrets revoke b51e58bc-3b7b-4144-a2ed-5821f232d612
-revoked
+revoked at the broker AGENT_SECRETS_URL names
 $ agent-secrets self
 enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 ```
 
 ## End every session's access to a secret
@@ -112,16 +119,17 @@ approver's list. It names the request by the request id `agent-secrets` printed 
 
 ```console
 $ agent-secrets cancel 715ea84a-6f5c-4230-83c9-1cf258acd88b
-cancelled
+cancelled at the broker AGENT_SECRETS_URL names
 $ agent-secrets status 715ea84a-6f5c-4230-83c9-1cf258acd88b
 state: cancelled
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 decided_by: session:2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 ```
 
 ## End a session
 
 Ending a session's enrollment revokes all of its grants and cancels all of its pending requests
-in one step, and the approver's Inbox drops them. A session ends in one of three ways:
+in one step, and the approver's Inbox drops them. A session ends in one of four ways:
 
 - **Its launcher revokes it.** A machine session ends when its process exits: the helper sees the
   registered process go and revokes its enrollment (it logs
@@ -132,18 +140,32 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
   `ENROLLMENT_NOT_LIVE` on its next renewal from the moment its lease lapses,
   `BROKER_LEASE_SECONDS` after its last renewal. Other session calls are refused `PROOF_INVALID`.
   The broker's sweep ends it on its next run, within `BROKER_SWEEP_SECONDS`, and logs
-  `broker sweeper: ended an enrollment whose lease lapsed`. The
+  `broker sweeper: ended an enrollment whose lease lapsed`. A lease that ran out while no broker
+  was serving (every broker process down, or the database out of reach) is not ended: the broker
+  gives the session back that time once it serves again
+  ([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)). The
   [configuration reference](/legion/broker/reference/config/) gives both settings' defaults.
 - **Its machine login is revoked.** Whoever may revoke the machine login that enrolled it — the
   person who approved a person's machine login, or anyone signed in for a service's — revokes that
   login, which ends every session it enrolled ([end a machine's login](#end-a-machines-login)).
+- **Its machine login ends, for a machine's own session.** A session a machine enrolled under the
+  login its Google identity token traded for renews only while that login is live, so it also ends
+  when that login passes its expiry — an hour from the token it was minted from, unless the machine
+  trades again — or when the machine's account is dropped from the broker's `BROKER_VM_SERVICES`.
+  Its next renewal is refused `ENROLLMENT_NOT_LIVE`, the broker logs `broker: machine session
+  renewal refused: its machine login has ended`, and it lapses within `BROKER_LEASE_SECONDS`. A
+  person's sign-in sessions on that box are not ended this way; they end when the sign-in is
+  revoked ([end your sign-in on a machine](#end-your-sign-in-on-a-machine)).
 
 ## End a machine's login
 
 A person's machine login lapses `BROKER_LAUNCHER_CREDENTIAL_SECONDS` after its last refresh, and
 its helper refreshes it at least daily, but its sessions outlive it either way: a session renews its lease
-with its own key, never with the machine's credential, so a box keeps working after the machine's
-credential expires, and so does a machine session while the helper that renews it runs. A login
+with its own key, and the broker reads no credential to renew a session a person's machine login
+enrolled, so a box keeps working after the machine's credential expires, and so does a machine
+session while the helper that renews it runs. (A machine's own session, enrolled under the login
+its Google identity traded for, is the exception above: it renews only while that login is live.)
+A login
 can be ended, with every session it enrolled,
 at any time: for a machine that is lost, compromised or no longer used, or a Legion daemon whose pods
 must lose their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine
@@ -171,6 +193,39 @@ without secrets until the daemon replaces it. To keep a daemon from logging in a
 account from the broker's `BROKER_SERVICE_LOGINS` and redeploy the broker
 ([Operate](/legion/broker/operate/#what-to-run)).
 
+### A machine that logs in with its own identity
+
+A box of a listed fleet needs no human to log in again: its helper trades the Google identity the
+machine already holds, and that trade mints the login. Its credential is keyed by the machine and
+the key the trade proved, and `agent-secrets-helper` keeps that key at
+`~/.config/agent-secrets/identity-key.pem` so a restart moves the one credential the machine
+already holds rather than leaving a second behind. The two together mean a revoke alone does not
+cut such a box off: within the hour the helper trades again, the broker inserts a **new live
+credential bound to that same key** — a revoked row is no longer the one a trade of that subject
+moves — and anyone who copied that key file signs launcher proofs again under the new credential's
+id, enrolling sessions that read what the fleet's service may read.
+
+To cut off a machine whose key may have been copied, in this order:
+
+1. **Remove the key.** Delete `~/.config/agent-secrets/identity-key.pem` on the machine.
+
+2. **Restart the helper**, with `systemctl --user restart agent-secrets-helper.service` or
+   `agent-secrets-helper install --restart-with-sessions`. It makes a new key, and its next trade
+   holds a credential under a subject of its own, so the copied key is the old login's and
+   nothing else's. A restart ends the grants of the sessions registered with it, which is why
+   `install` refuses one without that flag.
+
+3. **Revoke the old login** on the machine-login page, by the credential id the old key held —
+   the row whose **Credential** id is not the one the new trade issued. That ends it and every
+   session it enrolled, as above.
+
+In the other order the revoke is undone within the hour, because step 1 has not happened yet and
+the helper trades the key it still holds. None of it reaches the machine's own Google identity
+token, which is what the trade proves in the first place: a box you believe is compromised comes
+out of its fleet (`BROKER_VM_SERVICES`, then redeploy the broker), after which its credential
+stops authenticating at its next call and no trade of it is answered
+([Operate](/legion/broker/operate/#a-copied-machine-token)).
+
 From your own shell on a logged-in machine, `agent-secrets machine list` lists your own machines'
 logins, row for row as the machine-login page lists them, and `agent-secrets machine revoke` ends
 one, under that machine's login. A service's login is not listed there, and `machine revoke` of
@@ -183,10 +238,11 @@ $ agent-secrets machine list
 CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
 d4187389-953c-4156-90c1-1dd937e9bf0b  example-host-devbox  ada@example.com  2026-10-10T14:56:01Z  2026-10-17T14:56:01Z  ok
 a2df6d16-adc1-434e-b479-496defb3a5c8  example-host-laptop  ada@example.com  2026-10-10T14:55:53Z  2026-10-17T14:55:53Z  ok
+Every row is a login to the broker AGENT_SECRETS_URL names.
 $ agent-secrets machine revoke 8f4c8ae4-b73e-4a60-a591-725667480f1a
-agent-secrets machine revoke: no such machine login (NOT_FOUND)
+agent-secrets machine revoke: no such machine login (NOT_FOUND); asked the broker AGENT_SECRETS_URL names
 $ agent-secrets machine revoke a2df6d16-adc1-434e-b479-496defb3a5c8
-revoked a2df6d16-adc1-434e-b479-496defb3a5c8
+revoked a2df6d16-adc1-434e-b479-496defb3a5c8 at the broker AGENT_SECRETS_URL names
 ```
 
 The machine-login page lists the services' logins, the Legion daemon's, beside them, and revokes
@@ -245,3 +301,44 @@ machine login ends both, and its row stays on the machine-login page while eithe
 `expired, sessions still running` once the login has expired. Without Dispatch, end each box with
 `agent-secrets unenroll --helper --enrollment <id>`, run against a helper logged in as the box's
 operator, or stop its `agent-secrets renew`, after which it lapses within `BROKER_LEASE_SECONDS`.
+
+## End your sign-in on a machine
+
+Signing in on a machine with `agent-secrets login` gives that machine a login of its own carrying
+you, so a session it enrols reads your secrets
+([Concepts](/legion/broker/concepts/#sessions-and-enrollment)). Dispatch's **Settings** page
+lists those sign-ins beside your live grants, as **Sign-ins**: one row per machine you have
+signed in on and not revoked, naming the machine's fleet account, the first characters of the box
+key's thumbprint, which is what tells two boxes of one fleet apart, when you signed in there and
+when that box last used the sign-in. Click **Revoke** on a row and confirm.
+
+Revoking ends three things at once: the sign-in, so the box key it was made with trades no token
+for you again; every access token it already minted, so the sessions running there lose Dispatch
+within seconds; and the machine login that sign-in held, so every session it enrolled ends as
+[ending a session](#end-a-session) does. Dispatch serves a revoked access token for up to five
+seconds: it asks the broker whether a token is live and reuses that answer for five seconds
+(`AffirmativeCacheTTL`, `packages/envoy/internal/brokertoken/brokertoken.go`) rather than asking
+once per request. Your sign-ins on other machines, and the fleet's own
+machine login, are untouched — the machine goes on reading what its service owns. Nobody sees or
+revokes anyone else's sign-ins: Dispatch names the person from its own session, so another
+person's id is an id the broker does not have.
+
+What it ends is the box key, not your Google grant. `agent-secrets login` keeps Google's refresh
+token on the machine beside that key, and anyone who can read that machine's files can copy both
+and sign in again from somewhere else, as a sign-in of its own, which this revoke does not reach.
+So to cut off a box you believe is compromised, revoke the grant at Google — your Google Account's
+**Security → Your connections to third-party apps** page, the entry for the sign-in client your
+deployment uses — which ends every copy of that refresh token at once. Revoking the sign-in here
+is the right tool for a box you have simply finished with.
+
+Signing in again with the very key that was revoked is refused: the box makes a new key, which is
+a sign-in of its own. Run `agent-secrets login` on the machine to sign in again.
+
+## End a person's sign-in to the broker
+
+The sessions above are agents'. A person's own sign-in to the broker's approval page is separate:
+it lasts a day at most, is never extended, and ends when they sign out. Nobody ends someone
+else's from a page; an operator ends every browser session one login holds by running the
+broker's own subcommand in a broker pod, `envoy-broker end-sessions <login>`
+([Ending a person's sessions](/legion/broker/operate/#ending-a-persons-sessions)). Revoking a
+grant or a machine login does not need a broker sign-in and never ends one.

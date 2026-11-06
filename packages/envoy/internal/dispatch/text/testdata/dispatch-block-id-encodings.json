@@ -1,0 +1,34 @@
+[
+  {
+    "id": "ship-it",
+    "encoded": "ship-it"
+  },
+  {
+    "id": "q:1",
+    "encoded": "q%3A1"
+  },
+  {
+    "id": "décision:1",
+    "encoded": "d%C3%A9cision%3A1"
+  },
+  {
+    "id": "it's",
+    "encoded": "it%27s"
+  },
+  {
+    "id": "a.b_c~d!e*f(g)",
+    "encoded": "a%2Eb%5Fc%7Ed%21e%2Af%28g%29"
+  },
+  {
+    "id": "x y#z%",
+    "encoded": "x%20y%23z%25"
+  },
+  {
+    "id": "it@v2",
+    "encoded": "it%40v2"
+  },
+  {
+    "id": "📊",
+    "encoded": "%F0%9F%93%8A"
+  }
+]

@@ -1,0 +1,11 @@
+# The held-port image's build reads the wrapper's sources, the package it imports and the
+# manifests of the infra workspace, nothing else of the repository root it takes as its context.
+*
+!packages/envoy/go.mod
+!packages/envoy/go.sum
+!packages/envoy/listenfd
+!packages/envoy/infra/go.mod
+!packages/envoy/infra/go.sum
+!packages/envoy/infra/go.work
+!packages/envoy/infra/go.work.sum
+!packages/envoy/infra/host/heldportwrapper

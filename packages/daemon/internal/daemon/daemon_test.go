@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -21,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/envoy/listenfd"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
@@ -39,11 +43,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -57,7 +63,7 @@ func testDSN(t *testing.T) string {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/daemon/")
 	}
@@ -209,6 +215,36 @@ func holdPortOn(t *testing.T, host string) int {
 	return port
 }
 
+// takeSocket binds address, whose port may be 0 for one the kernel chooses, and returns a
+// descriptor of its own for the listening socket, with the port it holds: the socket stays
+// listening once the listener is closed, so no other process can take the port before whatever is
+// handed the descriptor serves it. A port another process holds is the bind's error.
+func takeSocket(address string) (*os.File, int, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, 0, err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	file, err := listener.(*net.TCPListener).File()
+	_ = listener.Close()
+	if err != nil {
+		return nil, 0, fmt.Errorf("take the descriptor of %s: %w", address, err)
+	}
+	return file, port, nil
+}
+
+// heldSocket holds a loopback port the kernel chooses (takeSocket). The descriptor is closed when
+// t ends, if its caller has not closed it first.
+func heldSocket(t *testing.T) (*os.File, int) {
+	t.Helper()
+	file, port, err := takeSocket("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return file, port
+}
+
 // rebindHeldPorts hands cfg a freshly held API port. A daemon that has stopped closed the
 // listener it was handed, and from then on the port it used is any process's, so a test that
 // starts a second daemon on the same config holds one again first. The worker stream needs no
@@ -237,18 +273,6 @@ func heldListen(network, address string) (net.Listener, error) {
 // pollClient bounds each poll of a daemon's port: holdPortOn's listener queues a connection until a
 // daemon takes the listener and serves it, and a daemon that exits before then never answers it.
 var pollClient = &http.Client{Timeout: time.Second}
-
-// boundPort is a free loopback port for a process that binds it itself, such as a scratch server
-// launched as a command: until it does, the port is any process's.
-func boundPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
-}
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -399,6 +423,47 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 	}
 }
 
+// `legion start` hands Run the socket it inherited (LEGION_LISTEN_FD), which a harness opened on a
+// port the kernel chose and held from then on: the daemon serves its API on that socket without
+// binding an address of its own, and its boot line names the address it serves on.
+func TestRunServesTheSocketItIsHandedAndLogsItsAddress(t *testing.T) {
+	cfg := testConfig(t)
+	file, _ := heldSocket(t)
+	// The descriptor `legion start` inherits is a bare number no *os.File owns, which Adopt closes.
+	descriptor, err := syscall.Dup(int(file.Fd()))
+	_ = file.Close()
+	if err != nil {
+		t.Fatalf("copy the held socket's descriptor: %v", err)
+	}
+	socket, err := listenfd.Inspect("LEGION_LISTEN_FD", strconv.Itoa(descriptor))
+	if err != nil {
+		_ = syscall.Close(descriptor)
+		t.Fatalf("inspect the held socket: %v", err)
+	}
+	inherited, err := listenfd.Adopt(socket)
+	if err != nil {
+		t.Fatalf("adopt the held socket: %v", err)
+	}
+	address := socket.Addr().String()
+	if thief, err := net.Listen("tcp", address); err == nil {
+		_ = thief.Close()
+		t.Fatalf("another listener took %s before the daemon served it", address)
+	}
+	cfg.Port = socket.Addr().Port
+	cfg.DaemonURL = "http://" + address
+	// Run's listen: the handed socket in place of any bind. The socket still holds cfg's address, so
+	// a daemon that bound it rather than serve the socket would be refused, and never answer.
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.listen = handed(inherited)
+	logs := &syncBuffer{}
+
+	startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
+
+	if logged := bootField(t, logs.String(), "address"); logged != address {
+		t.Errorf("the boot line names address %q, want %q, the socket the daemon serves on", logged, address)
+	}
+}
+
 // The API the daemon serves answers from the store it just migrated: this is the whole of
 // `legion state` and of the plugin's read.
 func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {
@@ -472,8 +537,8 @@ func TestTheStateCarriesTheDaemonsSettingsAndNoSecret(t *testing.T) {
 // (api.State.HeldOutboxRows, contract 28). The architect's accepted retry_or_escalate of a held
 // phase enqueues the implementer's start while the issue's lifecycle lane is still running an
 // earlier row of the issue — here the planner's suspend, under a live lease — so GET
-// /legion/v1/state lists the start, by kind and id, with the row it waits on; once that row's lease
-// has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
+// /legion/v1/state lists each row the start is, by kind and id, with the row it waits on; once
+// that row's lease has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
 // route applies it with (intake.ApplyFact): the API-only daemon this harness boots carries no
 // workflow runtime, and so no lane that would run the rows the test seeds.
 func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T) {
@@ -518,19 +583,42 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("apply the retry = %+v, %v; want it accepted", result.Refusal, err)
 	}
-	var start int64
-	if err := st.Pool().QueryRow(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start'", issue, string(record.OutboxKindSupervise)).Scan(&start); err != nil {
-		t.Fatalf("read the retry's start row: %v", err)
+	// A phase worker's start is two outbox rows (workflow.StartOrOwe): the relaunch, which brings
+	// the held role's session back carrying no task, and the row that carries its task. Both are
+	// lifecycle rows of the issue, so the suspend under a live lease holds both of them.
+	var starts []int64
+	rows, err := st.Pool().Query(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start' order by id", issue, string(record.OutboxKindSupervise))
+	if err != nil {
+		t.Fatalf("read the retry's start rows: %v", err)
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan a start row: %v", err)
+		}
+		starts = append(starts, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the retry's start rows: %v", err)
+	}
+	if len(starts) != 2 {
+		t.Fatalf("the retry queued %d start rows, want its relaunch and its task", len(starts))
 	}
 
 	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
 	got := d.state().HeldOutboxRows
-	if len(got) != 1 || got[0].WaitedSeconds < 0 {
-		t.Fatalf("heldOutboxRows = %+v, want the retry's start alone, with a wait of zero or more seconds", got)
+	if len(got) != len(starts) {
+		t.Fatalf("heldOutboxRows = %+v, want the retry's two start rows alone", got)
 	}
-	got[0].WaitedSeconds = 0
-	if want := (api.HeldOutboxRow{ID: start, Kind: "supervise", Issue: issue, WaitsOn: running}); got[0] != want {
-		t.Fatalf("heldOutboxRows[0] = %+v, want %+v", got[0], want)
+	for i, id := range starts {
+		if got[i].WaitedSeconds < 0 {
+			t.Fatalf("heldOutboxRows[%d] = %+v, want a wait of zero or more seconds", i, got[i])
+		}
+		got[i].WaitedSeconds = 0
+		if want := (api.HeldOutboxRow{ID: id, Kind: "supervise", Issue: issue, WaitsOn: running}); got[i] != want {
+			t.Fatalf("heldOutboxRows[%d] = %+v, want %+v", i, got[i], want)
+		}
 	}
 
 	if _, err := st.Pool().Exec(ctx, "update outbox set lease_until = now() - interval '1 minute' where id = $1", running); err != nil {
@@ -924,6 +1012,69 @@ func TestWorkflowBootServingNoRepositoryReportsWhatItLeftOut(t *testing.T) {
 	}
 }
 
+// A project whose every mapped repository's installation read fails boots all the same, serving
+// none: its API answers, its state names each repository left out with the App, the repository and
+// GitHub's failure, and one ERROR line says so, where the boot used to exit into its supervisor's
+// restart and the same failure.
+func TestWorkflowBootWhoseEveryInstallationReadFailsAnswersItsState(t *testing.T) {
+	cfg := workflowConfig(t, workflowNATS(t))
+	failure := errors.New("read whether the implement App is installed on acme/widgets failed (403)")
+	tokens := &workflowTokenRecorder{failing: map[string]error{"implement acme/widgets": failure}}
+	var logged syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg, Build{}, slog.New(slog.NewJSONHandler(&logged, nil)), overrides{
+			listen: heldListen, runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{},
+			workflowTokens: tokens, githubAPI: repositoriesGitHub(t),
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+	var state api.State
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/legion/v1/state"); err == nil {
+			err = json.NewDecoder(response.Body).Decode(&state)
+			response.Body.Close()
+			if err == nil && response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("the daemon stopped instead of booting: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the daemon never answered its state")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	want := []api.RefusedRepositoryView{{Repo: "acme/widgets", Reason: "the implement App's installation on acme/widgets could not be read: " + failure.Error() + "; Legion reads it again"}}
+	if len(state.Repositories.Mapped) != 0 || !reflect.DeepEqual(state.Repositories.Refused, want) {
+		t.Fatalf("state's repositories = %+v, want none served and acme/widgets left out for its failed read", state.Repositories)
+	}
+	var errorLines []string
+	for line := range strings.SplitSeq(logged.String(), "\n") {
+		if strings.Contains(line, `"level":"ERROR"`) {
+			errorLines = append(errorLines, line)
+		}
+	}
+	if len(errorLines) != 1 || !strings.Contains(errorLines[0], "every mapped repository's GitHub App installation read failed") || !strings.Contains(errorLines[0], failure.Error()) {
+		t.Fatalf("ERROR lines = %q, want one naming the failed read", errorLines)
+	}
+}
+
 // The workflow has to assemble every integration boundary before opening its API. The order in
 // this log is the boot sequence operators rely on when an external dependency refuses.
 func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
@@ -1219,6 +1370,46 @@ func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	}
 }
 
+// The boot's first Dispatch read is the repository mapping. A Dispatch with no ready endpoint,
+// fronted here by a proxy that answers 503 for it, fails that read for as long as it has none, and
+// the boot waits that out (readinessRetry, without limit) as it waits out the listing for
+// admission, and comes up once Dispatch answers. Bounded at appMintRetry's attempts, the read
+// exited the daemon, and its supervisor restarted it straight back into the same refusal. Here
+// Dispatch fails the mapping read two times more than appMintRetry's budget allows.
+func TestRunWaitsForTheRepositoryMappingThroughADispatchOutage(t *testing.T) {
+	quickAppMints(t)
+	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
+	cfg := workflowConfig(t, workflowNATS(t))
+	refusals := int64(appMintRetry.Attempts + 2)
+	var reads atomic.Int64
+	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/settings/repo-projects" && reads.Add(1) <= refusals {
+			http.Error(w, "no healthy upstream", http.StatusServiceUnavailable)
+			return
+		}
+		if servedMapping(t, w, r, cfg.Project) {
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
+			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+			t.Errorf("write Dispatch issues: %v", err)
+		}
+	}))
+	t.Cleanup(dispatchServer.Close)
+	cfg.DispatchURL = dispatchServer.URL
+
+	if err := bootsOrExits(t, cfg, &workflowTokenRecorder{}, 60*time.Second); err != nil {
+		t.Fatalf("boot = %v, want it to wait out %d failed mapping reads and come up", err, refusals)
+	}
+	if got := reads.Load(); got <= refusals {
+		t.Fatalf("Dispatch saw %d mapping reads, want the %d it failed and the one the daemon booted on", got, refusals)
+	}
+}
+
 // workflowConfig is a Stage 3 configuration over natsURL and a Dispatch that lists no issues.
 func workflowConfig(t *testing.T, natsURL string) config.Config {
 	t.Helper()
@@ -1270,8 +1461,10 @@ func workflowJetStream(t *testing.T, natsURL string) jetstream.JetStream {
 type workflowTokenRecorder struct {
 	mu    sync.Mutex
 	roles []appauth.AppRole
-	// missing names the installations not made, "<role> <owner/name>"; every other is.
+	// missing names the installations not made, "<role> <owner/name>"; every other is. failing
+	// names the installation reads that fail, with their error.
 	missing map[string]bool
+	failing map[string]error
 }
 
 func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
@@ -1290,21 +1483,36 @@ func (r *workflowTokenRecorder) AppLogin(_ context.Context, role appauth.AppRole
 // Forget drops nothing: every lease is minted afresh.
 func (r *workflowTokenRecorder) Forget(appauth.AppRole, string) {}
 
-// InstalledOn answers each App installed on every repository but those missing names.
+// InstalledOn answers each App installed on every repository but those missing names, and fails
+// the reads failing names.
 func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {
-	return !r.missing[string(role)+" "+repo.String()], nil
+	key := string(role) + " " + repo.String()
+	if err := r.failing[key]; err != nil {
+		return false, err
+	}
+	return !r.missing[key], nil
 }
 
 // servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
-// reports whether r asked for it.
+// its webhook App check, Dispatch's GitHub App installed on every repository, and reports whether
+// r asked for either.
 func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
 	t.Helper()
-	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/settings/repo-projects" {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	var body any
+	switch {
+	case r.URL.Path == "/api/v1/settings/repo-projects":
+		body = []map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/github/app-installation/"):
+		body = map[string]bool{"installed": true}
+	default:
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode([]map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}); err != nil {
-		t.Errorf("write the repository mapping: %v", err)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Errorf("write %s: %v", r.URL.Path, err)
 	}
 	return true
 }
@@ -1335,4 +1543,34 @@ func workflowNATS(t *testing.T) string {
 	}
 	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 	return url
+}
+
+// The `runtime.tmux` block's take_over reaches the tmux runtime as the value the runtime knows,
+// and a block without it, or no block, takes nothing over.
+func TestTheTmuxOptionsCarryTheTakeOver(t *testing.T) {
+	cfg := config.Config{Runtime: config.Runtime{Name: "tmux", Tmux: &config.Tmux{TakeOver: config.TakeOverKubernetes}}}
+	if got := tmuxOptions(cfg, "test", nil, "", "", quietLogger()).TakeOver; got != tmux.TakeOverKubernetes {
+		t.Errorf("TakeOver = %q, want %q", got, tmux.TakeOverKubernetes)
+	}
+	for _, block := range []*config.Tmux{nil, {}} {
+		cfg.Runtime.Tmux = block
+		if got := tmuxOptions(cfg, "test", nil, "", "", quietLogger()).TakeOver; got != "" {
+			t.Errorf("TakeOver with block %+v = %q, want none", block, got)
+		}
+	}
+}
+
+// Every launch secret's pointer is a pane variable the operator may not set
+// (runtime.PaneVariableRefusal), refused at load and at boot rather than at every launch.
+func TestEveryLaunchSecretsPointerIsRefusedAsAPaneVariable(t *testing.T) {
+	cfg := config.Config{EnvoyTokenFile: "/var/run/legion/ENVOY_TOKEN", NatsNkeySeedFile: "/var/run/legion/NATS_NKEY_SEED"}
+	names := launchSecretNames(cfg, lookup(nil))
+	if len(names) != 2 {
+		t.Fatalf("launchSecretNames = %v, want both launch secrets of a daemon configured with each", names)
+	}
+	for _, name := range names {
+		if runtime.PaneVariableRefusal(name+"_FILE", "/etc/acme/secret") == "" {
+			t.Errorf("runtime.tmux.pane_env may set %s_FILE, the pointer every launch sets to the launch secret %s", name, name)
+		}
+	}
 }

@@ -9,8 +9,16 @@ import { harnessPorts } from "./harness-ports";
  *  nowhere else; `.localhost` would not do, Chromium treats it as loopback. */
 export const plainHttpHost = "dispatch-e2e.test";
 
-/** The plain-HTTP project's browser origin, and so the one `Host` the proxy answers. */
-export const plainHttpOrigin = `http://${plainHttpHost}:${harnessPorts.plainHttp.port}`;
+/** The plain-HTTP origin of a proxy listening on `port`, and so the one `Host` that proxy answers.
+ *  `e2e/plain-http-proxy.ts` passes the port it bound, which the OS chose when `PLAIN_HTTP_PORT`
+ *  is unset. */
+export function plainHttpOriginAt(port: number): string {
+  return `http://${plainHttpHost}:${port}`;
+}
+
+/** The plain-HTTP project's browser origin: the harness proxy's, from `PLAIN_HTTP_PORT`, which
+ *  `e2e/run.ts` exports from the proxy's report before Playwright starts. */
+export const plainHttpOrigin = plainHttpOriginAt(harnessPorts().plainHttp.port);
 
 /** This run targets a deployed https server, which the proxy cannot stand in front of: it forwards
  *  over plain HTTP. Every spec the `chromium-plain-http` project runs skips such a run with

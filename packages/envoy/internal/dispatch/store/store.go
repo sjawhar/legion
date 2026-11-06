@@ -6,8 +6,12 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"math"
+	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
@@ -36,7 +40,8 @@ const poolSizeParam = "pool_max_conns"
 
 // Open connects to databaseURL and verifies the database is reachable. The pool's size is
 // sharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
-// string that names its database.
+// string that names its database. Every connection it opens scans timestamptz in UTC
+// (scanTimestampsInUTC), as do the pools Pool.separate copies from its configuration.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	declared, err := declaresPoolSize(databaseURL)
 	if err != nil {
@@ -52,6 +57,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("parse Postgres URL: %w", err)
 	}
 	config.MaxConns = sharedPoolSize
+	config.AfterConnect = scanTimestampsInUTC
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open Postgres pool: %w", err)
@@ -61,6 +67,39 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("ping Postgres: %w", err)
 	}
 	return &Store{Pool: NewPool(pool)}, nil
+}
+
+// scanTimestampsInUTC makes every timestamptz a connection scans come back in UTC, whatever zone
+// the host runs in. pgx builds a scanned timestamptz with time.Unix, which carries time.Local,
+// and time.Time marshals JSON in the zone it carries - so one instant left Dispatch as
+// "2026-10-02T00:00:01.12Z" from a UTC host and "2026-10-01T17:00:01.12-07:00" from a Pacific
+// one, and every reader that compares a timestamp as a string (the dashboard's read-through
+// mark, a client ordering replies written in the same second) read two different servers. Only
+// the zone the value carries changes; the instant does not. The connection's own session
+// timezone is Postgres's and is untouched, so what a timestamptz is compared with and stored as
+// is unchanged too.
+//
+// Registered per connection rather than in pgtype's default map, which is shared with every
+// other pgx user in the process, and for the array and range types over timestamptz as well:
+// each holds the element type as it was registered when the map was built, so re-registering the
+// element alone would leave a timestamptz[] scanning in the host's zone.
+func scanTimestampsInUTC(_ context.Context, conn *pgx.Conn) error {
+	types := conn.TypeMap()
+	timestamptz := &pgtype.Type{
+		Name: "timestamptz", OID: pgtype.TimestamptzOID,
+		Codec: &pgtype.TimestamptzCodec{ScanLocation: time.UTC},
+	}
+	tstzrange := &pgtype.Type{
+		Name: "tstzrange", OID: pgtype.TstzrangeOID, Codec: &pgtype.RangeCodec{ElementType: timestamptz},
+	}
+	types.RegisterTypes([]*pgtype.Type{
+		timestamptz,
+		tstzrange,
+		{Name: "_timestamptz", OID: pgtype.TimestamptzArrayOID, Codec: &pgtype.ArrayCodec{ElementType: timestamptz}},
+		{Name: "_tstzrange", OID: pgtype.TstzrangeArrayOID, Codec: &pgtype.ArrayCodec{ElementType: tstzrange}},
+		{Name: "tstzmultirange", OID: pgtype.TstzmultirangeOID, Codec: &pgtype.MultirangeCodec{ElementType: tstzrange}},
+	})
+	return nil
 }
 
 // declaresPoolSize reports whether databaseURL carries poolSizeParam. It asks pgx.ParseConfig
@@ -96,7 +135,9 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	if err != nil {
 		return fmt.Errorf("migrations refused, none applied: %w", err)
 	}
-	if err := s.createVersionTable(ctx); err != nil {
+	// Only a set holding a version past an integer widens the column: see createVersionTable.
+	widen := slices.ContainsFunc(migrations, func(m pgmigrate.Migration) bool { return m.Version > math.MaxInt32 })
+	if err := s.createVersionTable(ctx, widen); err != nil {
 		return err
 	}
 	for _, migration := range migrations {
@@ -114,10 +155,22 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 const migrationLockKey int64 = 8150001
 
 // createVersionTable creates schema_migrations under the runner's advisory lock, as the broker's
-// runner creates its own. Created outside it, two processes booting at once against an empty
-// database race `create table if not exists` on the catalog, and the loser exits on pg_type's
-// unique index.
-func (s *Store) createVersionTable(ctx context.Context) error {
+// runner creates its own, and, when widen is set, widens the version column of a database that has
+// the table from before the versions became timestamps. Created outside the lock, two processes
+// booting at once against an empty database race `create table if not exists` on the catalog, and
+// the loser exits on pg_type's unique index.
+//
+// The column is a bigint because a migration added since the set stopped being numbered is named
+// for the UTC moment it was created, 14 digits, which is past the 2147483647 an integer column
+// holds. A database created before this change has the integer the statement below used to create.
+// It is widened only by a boot whose set holds such a version (widen), as the daemon widens its
+// own in the first timestamped migration's transaction, and not by a boot that records nothing past
+// an integer: the release before this change reads `max(version)` uncast, so a widening while its
+// processes still serve fails that read once on every connection that prepared it ("cached plan
+// must not change result type"). A release whose set first holds a timestamped migration is rolled
+// out over processes of this one, which read the version cast. The type is read before the ALTER
+// TABLE, which on a column already bigint rewrites nothing but still takes ACCESS EXCLUSIVE.
+func (s *Store) createVersionTable(ctx context.Context, widen bool) error {
 	ctx = WithTransactionTracking(ctx)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -129,16 +182,39 @@ func (s *Store) createVersionTable(ctx context.Context) error {
 	}
 	if _, err := tx.Exec(ctx, `
 		create table if not exists schema_migrations (
-			version integer primary key,
+			version bigint primary key,
 			applied_at timestamptz not null default now()
 		)
 	`); err != nil {
 		return fmt.Errorf("create schema migrations table: %w", err)
 	}
+	if !widen {
+		return tx.Commit(ctx)
+	}
+	var dataType string
+	if err := tx.QueryRow(ctx, `select data_type from information_schema.columns
+		where table_schema = current_schema() and table_name = 'schema_migrations' and column_name = 'version'`).Scan(&dataType); err != nil {
+		return fmt.Errorf("read the type of schema_migrations.version: %w", err)
+	}
+	if dataType == "integer" {
+		if _, err := tx.Exec(ctx, "alter table schema_migrations alter column version type bigint"); err != nil {
+			return fmt.Errorf("widen schema_migrations.version to bigint: %w", err)
+		}
+	}
 	return tx.Commit(ctx)
 }
 
+// applyMigration applies one migration in a transaction of its own, trying it again while its lock
+// wait outlasts its lock_timeout, up to pgmigrate.LockTimeoutAttempts times, holding nothing between
+// attempts (pgmigrate.RetryLockTimeouts). A migration that times out on every attempt fails the
+// runner, and boot with it.
 func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migration) error {
+	return pgmigrate.RetryLockTimeouts(ctx, migration.Name, func(ctx context.Context) error {
+		return s.applyMigrationOnce(ctx, migration)
+	})
+}
+
+func (s *Store) applyMigrationOnce(ctx context.Context, migration pgmigrate.Migration) error {
 	// A migration is a transaction like any other, so it is marked like any other: nothing it
 	// runs may take a second pooled connection while it is open.
 	ctx = WithTransactionTracking(ctx)
@@ -151,7 +227,11 @@ func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migratio
 		return fmt.Errorf("lock migrations: %w", err)
 	}
 	var applied bool
-	if err := tx.QueryRow(ctx, "select exists(select 1 from schema_migrations where version = $1)", migration.Version).Scan(&applied); err != nil {
+	// The parameter is cast, here and in the insert below, because pgx encodes it for the column
+	// it finds: a database whose column this boot is about to widen, or one widened by a boot
+	// whose statement this connection has not prepared again, would otherwise refuse a 14-digit
+	// version as too large for an int4.
+	if err := tx.QueryRow(ctx, "select exists(select 1 from schema_migrations where version = $1::bigint)", migration.Version).Scan(&applied); err != nil {
 		return fmt.Errorf("check migration: %w", err)
 	}
 	if applied {
@@ -160,7 +240,7 @@ func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migratio
 	if err := pgmigrate.Exec(ctx, tx, migration, s.Pool.Config().BeforeConnect); err != nil {
 		return fmt.Errorf("execute migration: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1)", migration.Version); err != nil {
+	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1::bigint)", migration.Version); err != nil {
 		return fmt.Errorf("record migration: %w", err)
 	}
 	return tx.Commit(ctx)

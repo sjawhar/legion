@@ -1,5 +1,7 @@
 import { expect, type Locator, test } from "@playwright/test";
 
+import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
 import { getUnsubscribeCalls, setInterests, setLiveSessions } from "./agents";
 import {
   createAsk,
@@ -16,6 +18,7 @@ import {
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { needsYouCards } from "./editor";
+import { nextFrames } from "./frames";
 import { clearIssueCreator, resetDatabase } from "./seed";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
@@ -126,7 +129,7 @@ const session = {
   as: "agent" as const,
 };
 
-test("issue header identifies session and human creators", async ({ browser }, testInfo) => {
+test("issue header identifies session and human creators @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   await setLiveSessions([
     {
@@ -189,7 +192,7 @@ test("issue header identifies session and human creators", async ({ browser }, t
   }
 });
 
-test("issue header copies its key and persists its title, status, and route", async ({
+test("issue header copies its key and persists its title, status, and route @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -212,7 +215,9 @@ test("issue header copies its key and persists its title, status, and route", as
 
   try {
     await page.goto(`/issues/${issue.key}`);
-    const heading = page.getByRole("heading", { level: 1, name: "First decision" });
+    const heading = page
+      .getByTestId("issue-header")
+      .getByRole("heading", { level: 1, name: "First decision" });
     await expect(heading).toBeVisible();
     const copyKey = page.getByRole("button", { name: `Copy issue key ${issue.key}` });
     await copyKey.click();
@@ -365,6 +370,52 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
   }
 });
 
+// The subscribers endpoint reads a row's own `last_seen` (the session's last heartbeat as the
+// listener still knows it) before the row's `updated_at`, which only says when the subscription
+// was last written and can lag the heartbeat by the listener's whole interest refresh age. The
+// two are hours apart here, so the chip's `<time>` says which one the page drew.
+test("a subscriber no longer live shows its last heartbeat, not its subscription's last write", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Heartbeat of a departed agent" });
+  const subscribedAt = Date.now() - 3 * 60 * 60 * 1000;
+  const lastHeartbeat = Date.now() - 60 * 60 * 1000;
+  // No live session at all: a session the registry still listed would carry its own heartbeat,
+  // which the endpoint prefers over both of these.
+  await setLiveSessions([]);
+  await setInterests([
+    {
+      last_seen: lastHeartbeat,
+      session_id: "e2e-departed-session",
+      topics: [
+        `notifications.dispatch.issue.${issue.key}`,
+        `notifications.dispatch.issue.${issue.key}.>`,
+      ],
+      updated_at: subscribedAt,
+    },
+  ]);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("button", { name: "Subscribers: 1" }).click();
+    const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
+    const row = subscribedAgents
+      .locator("li")
+      .filter({ has: page.locator("[title='e2e-departed-session']") });
+    await expect(row.locator("time")).toHaveAttribute(
+      "dateTime",
+      new Date(lastHeartbeat).toISOString()
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+// SLOW(>=2s): two open pages, and two parent changes made through the mover's own UI, each
+// landing live on the page that watches.
 test("editing the parent line moves the issue across Children tabs live", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const oldParent = await createIssue({ project: "CORE", title: "Old parent" });
@@ -379,18 +430,26 @@ test("editing the parent line moves the issue across Children tabs live", async 
   const parentPage = await context.newPage();
   const moverPage = await context.newPage();
   try {
-    await parentPage.goto(`/issues/${newParent.key}`);
-    await parentPage.getByRole("tab", { name: "Children" }).click();
-    await expect(parentPage.getByText("No child issues")).toBeVisible();
-
-    await moverPage.goto(`/issues/${mover.key}`);
-    await expect(moverPage.getByRole("link", { name: oldParent.key })).toBeVisible();
+    // Neither page waits on the other, and each keeps its own baseline, both taken before the
+    // first save below.
+    await Promise.all([
+      (async () => {
+        await parentPage.goto(`/issues/${newParent.key}`);
+        await parentPage.getByRole("tab", { name: "Children" }).click();
+        await expect(parentPage.getByText("No child issues")).toBeVisible();
+      })(),
+      (async () => {
+        await moverPage.goto(`/issues/${mover.key}`);
+        await expect(moverPage.getByRole("link", { name: oldParent.key })).toBeVisible();
+      })(),
+    ]);
     await moverPage.getByRole("button", { name: "Edit parent issue" }).click();
     await moverPage.getByLabel("Parent").fill(newParent.key);
     await moverPage.getByRole("button", { name: "Save parent" }).click();
     await expect(moverPage.getByRole("link", { name: newParent.key })).toBeVisible();
 
-    // The new parent's open page hears child.added over SSE and gains the row without a reload.
+    // The new parent's open page hears child.added on the live event feed and gains the row
+    // without a reload.
     const movedRow = parentPage
       .getByRole("tabpanel")
       .getByRole("link", { name: `${mover.key} · Moving decision` });
@@ -400,7 +459,9 @@ test("editing the parent line moves the issue across Children tabs live", async 
     await moverPage.getByLabel("Parent").fill("");
     await moverPage.getByRole("button", { name: "Save parent" }).click();
     await expect(moverPage.getByRole("button", { name: "Set parent issue" })).toBeVisible();
-    await expect.poll(() => getIssue(mover.key)).toMatchObject({ parent: null });
+    await expect
+      .poll(() => getIssue(mover.key), { intervals: [50, 50, 100, 200, 500] })
+      .toMatchObject({ parent: null });
 
     // And child.removed empties it again, still without a reload.
     await expect(movedRow).toHaveCount(0);
@@ -410,7 +471,7 @@ test("editing the parent line moves the issue across Children tabs live", async 
   }
 });
 
-test("an answered ask remains in the issue conversation", async ({ browser }, testInfo) => {
+test("an answered ask remains in the issue conversation @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "First decision" });
   const ask = await createAsk(
@@ -441,7 +502,7 @@ test("an answered ask remains in the issue conversation", async ({ browser }, te
   }
 });
 
-test("a quote-anchored ask identifies its document in the margin and Conversation", async ({
+test("a quote-anchored ask identifies its document in the margin and Conversation @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -489,7 +550,7 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
   }
 });
 
-test("closing an issue removes its asks from the inbox and pinning stays private", async ({
+test("closing an issue removes its asks from the inbox and pinning stays private @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -500,12 +561,14 @@ test("closing an issue removes its asks from the inbox and pinning stays private
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  const inboxContext = await asUser(browser, "alice");
-  const inbox = await inboxContext.newPage();
+  // The Inbox is a second tab of alice's own browser: it makes no write, so sharing the keyed
+  // write registry and `navigator.locks` with the issue page costs this row nothing.
+  const inbox = await alice.newPage();
   try {
-    await page.goto(`/issues/${issue.key}`);
-    await inbox.goto("/");
-    await expect(inbox.locator("[data-testid^=ask-]")).toHaveCount(2);
+    await Promise.all([page.goto(`/issues/${issue.key}`), inbox.goto("/")]);
+    // The Inbox's rows are what the close takes a question out of: from 1280 px a card is drawn
+    // for the selected row alone (INFRA-575), so the rows are the list.
+    await expect(inbox.locator("[data-inbox-row]")).toHaveCount(2);
     await page.getByRole("button", { name: "Close issue" }).click();
     await expect
       .poll(() => getIssue(issue.key))
@@ -514,12 +577,11 @@ test("closing an issue removes its asks from the inbox and pinning stays private
         status: "done",
       });
     await expect(page.getByText("This issue is closed.", { exact: true })).toBeVisible();
-    await expect(inbox.locator("[data-testid^=ask-]")).toHaveCount(1);
+    await expect(inbox.locator("[data-inbox-row]")).toHaveCount(1);
     await expect(inbox.getByText("First ask", { exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Pin issue" }).click();
     await expect(page.getByRole("button", { name: "Unpin issue" })).toBeEnabled();
-    await page.goto("/");
-    await page.goto(`/issues/${issue.key}`);
+    await page.reload();
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open navigation" }).click();
     }
@@ -533,19 +595,18 @@ test("closing an issue removes its asks from the inbox and pinning stays private
       // Alice's issues are nobody else's own work; the closed one is gone from the cleared
       // filter too.
       await bobPage.goto("/?assignee=everyone");
-      await expect(bobPage.locator("[data-testid^=ask-]")).toHaveCount(1);
+      await expect(bobPage.locator("[data-inbox-row]")).toHaveCount(1);
       await expect(bobPage.getByText("First ask", { exact: true })).toHaveCount(0);
       await expect(bobPage.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
     } finally {
       await bob.close();
     }
   } finally {
-    await inboxContext.close();
     await alice.close();
   }
 });
 
-test("pinning survives an immediate full navigation", async ({ browser }, testInfo) => {
+test("pinning survives an immediate full navigation @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Navigation-safe event pin" });
   await createMessage(issue.key, { body: "Pinned before navigation" });
@@ -642,7 +703,11 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
     await page.getByRole("button", { name: "Subscribers: 1" }).click();
     const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
     await expect(subscribedAgents.getByText("Worker (e2e)", { exact: true })).toBeVisible();
-    await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
+    // Its running state is the agent registry's, which lists it.
+    await expect(subscribedAgents.locator('[data-agent-name="e2e-unsub-session"]')).toHaveAttribute(
+      "data-agent-state",
+      "running"
+    );
 
     await subscribedAgents.getByRole("button", { name: "Unsubscribe" }).click();
     const dialog = page.getByRole("dialog", { name: "Unsubscribe" });
@@ -690,13 +755,9 @@ async function subscribeSession(issueKey: string): Promise<void> {
   ]);
 }
 
-test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width", async ({
+test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width @phone", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Header on a phone" });
   await patchIssue(issue.key, {
@@ -758,6 +819,11 @@ test("issue header keeps every control in a shared row on a phone and the whose-
     await testInfo.attach("issue header (390px)", { contentType: "image/png", path: phoneShot });
 
     await page.setViewportSize({ height: 900, width: 1280 });
+    // The shell swaps its phone bar for the sidebar, and the margin its sheet for the column, in
+    // a React commit after the media query's change event. Until then the phone DOM is laid out
+    // under the desktop CSS, which squeezes <main> to its padding at the right edge.
+    await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Review margin" })).toBeVisible();
     await expect(indicator).toHaveText("Waiting on you (1)");
     expect(await inView(indicator, 1280)).toBe(true);
     const desktopHeader = await header.boundingBox();
@@ -781,6 +847,8 @@ test("issue header keeps every control in a shared row on a phone and the whose-
   }
 });
 
+// SLOW(>=2s): a cold issue load and the reload the row proves the indicator survives, with a
+// live comment written on either side of it.
 test("issue header flips between Waiting on you and Waiting on agents as the newest reply changes", async ({
   browser,
 }) => {
@@ -812,16 +880,15 @@ test("issue header flips between Waiting on you and Waiting on agents as the new
 test("issue header gives the title the row's free space beside a short details line", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Header keeps its title readable" });
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  const title = page.getByRole("heading", { level: 1 });
+  // The title is not the page's only `h1`: the shell's loading skeleton is one, and a rendered
+  // document whose text opens on a top-level heading puts that heading on the page too. The
+  // header holds the one heading the issue is identified by.
+  const title = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
   const measureTitle = () =>
     page.evaluate(() => {
       const heading = document.querySelector("[data-testid=issue-header] h1") as HTMLElement;
@@ -836,12 +903,20 @@ test("issue header gives the title the row's free space beside a short details l
       };
     });
   try {
+    // One cold load for the whole row: the header's layout is CSS plus a `ResizeObserver`
+    // (`IssueHeader.tsx`), so a resize re-runs every decision a fresh load would make, and the
+    // writes below reach the open page on its event feed - whose refresh its own clock fires
+    // rather than the wall clock.
+    await page.clock.install();
+    await page.setViewportSize({ height: 800, width: 1024 });
+    await page.goto(`/issues/${issue.key}`);
+    await expect(title).toHaveText("Header keeps its title readable");
+
     // Below 1280 the details line shares the row with the title once it fits beside the state
     // controls; the title must still take the rest of the row rather than split it with the line.
     for (const width of [1024, 1200, 1279]) {
       await page.setViewportSize({ height: 800, width });
-      await page.goto(`/issues/${issue.key}`);
-      await expect(title).toHaveText("Header keeps its title readable");
+      await nextFrames(page);
       const measured = await measureTitle();
       expect(
         measured.width,
@@ -867,18 +942,26 @@ test("issue header gives the title the row's free space beside a short details l
     });
     await createAsk(issue.key, { question: "Which layout?" }, session);
     await subscribeSession(issue.key);
+    // One reload: the subscription is Envoy's, not an issue event, so no refresh carries it.
+    await page.reload();
+    await expect(title).toHaveText("Migrate the issue header to a single row");
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
+    await expect(page.getByRole("button", { name: "Subscribers: 1" })).toBeVisible();
+    const githubLink = page.locator(
+      '[data-testid=issue-header] a[href="https://github.com/sjawhar/legion/pull/1051"]'
+    );
     for (const withLink of [false, true]) {
       await patchIssue(issue.key, {
         external_links: withLink
           ? [{ kind: "github_pr", url: "https://github.com/sjawhar/legion/pull/1051" }]
           : [],
       });
+      // The link's own state is what the measurement below depends on, so it is waited for.
+      await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
+      await expect(githubLink).toHaveCount(withLink ? 1 : 0);
       for (const width of [1265, 1279]) {
         await page.setViewportSize({ height: 800, width });
-        await page.goto(`/issues/${issue.key}`);
-        await expect(title).toHaveText("Migrate the issue header to a single row");
-        await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
-        await expect(page.getByRole("button", { name: "Subscribers: 1" })).toBeVisible();
+        await nextFrames(page);
         const measured = await measureTitle();
         const label = `${width}px ${withLink ? "with" : "without"} the GitHub link`;
         expect(
@@ -895,10 +978,6 @@ test("issue header gives the title the row's free space beside a short details l
 test("issue header delivers the click that ends a title edit to the control under the pointer", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Short title" });
 
@@ -911,7 +990,7 @@ test("issue header delivers the click that ends a title edit to the control unde
   // `disabled` while their previous write is in flight, and a browser drops a click on a
   // disabled button.
   const pressWhileEditingTitle = async (control: Locator) => {
-    await page.getByRole("heading", { level: 1 }).click();
+    await page.getByTestId("issue-header").getByRole("heading", { level: 1 }).click();
     await expect(page.getByLabel("Issue title")).toBeFocused();
     await expect(control).toBeEnabled();
     const box = await control.boundingBox();
@@ -926,7 +1005,9 @@ test("issue header delivers the click that ends a title edit to the control unde
     for (const width of [1024, 1279]) {
       await page.setViewportSize({ height: 800, width });
       await page.goto(`/issues/${issue.key}`);
-      await expect(page.getByRole("heading", { level: 1, name: "Short title" })).toBeVisible();
+      await expect(
+        page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Short title" })
+      ).toBeVisible();
 
       const pin = page.getByRole("button", { name: "Pin issue" });
       await pressWhileEditingTitle(pin);
@@ -1134,6 +1215,9 @@ test("an open issue's header follows its project's default repository as the map
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   try {
+    // Each write below is followed by a refresh the scheduler holds for at most
+    // `MIN_REFETCH_INTERVAL_MS`; that is a page timer, so the page's own clock fires it.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
     const header = page.getByTestId("issue-header");
     const badge = (text: RegExp) => header.locator('span[aria-hidden="true"]', { hasText: text });
@@ -1141,10 +1225,12 @@ test("an open issue's header follows its project's default repository as the map
 
     // A new default: the page shows it without a reload.
     await putRepoProject("acme/gadgets", { default: true, project: "CORE" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(badge(/^acme\/gadgets$/)).toBeVisible();
 
     // The default removed: nothing resolves, and the project still maps acme/widgets to pick.
     await deleteRepoProject("acme/gadgets");
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(badge(/^No repository$/)).toBeVisible();
     await expect(page.getByLabel(`Repository of ${issue.key}`)).toHaveAccessibleDescription(
       "No repository"
@@ -1153,8 +1239,10 @@ test("an open issue's header follows its project's default repository as the map
     // The default again, then moved to another project: CORE maps nothing left to pick, so the
     // rail drops the item.
     await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(badge(/^acme\/widgets$/)).toBeVisible();
     await putRepoProject("acme/widgets", { project: "OPS" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByLabel(`Repository of ${issue.key}`)).toHaveCount(0);
     await expect(page.getByTestId("issue-metadata-rail").getByText("Repository:")).toHaveCount(0);
   } finally {
@@ -1175,10 +1263,22 @@ test("an issue page whose mappings read fails says so and retries it, rather tha
   const page = await context.newPage();
   try {
     let failing = true;
-    await page.route("**/api/v1/settings/repo-projects", (route) =>
-      failing ? route.abort() : route.continue()
-    );
+    let refused = 0;
+    await page.route("**/api/v1/settings/repo-projects", (route) => {
+      if (!failing) {
+        return route.continue();
+      }
+      refused += 1;
+      return route.abort();
+    });
+    // The read is retried twice, `QUERY_RETRY_DELAY_MS` apart (`web/src/api/query-client.ts`),
+    // before the rail may say so; those waits are page timers its own clock fires.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await expect.poll(() => refused).toBeGreaterThanOrEqual(attempt);
+      await page.clock.fastForward(QUERY_RETRY_DELAY_MS);
+    }
     const rail = page.getByTestId("issue-metadata-rail");
     await expect(rail.getByText("Could not load the repositories mapped to CORE.")).toBeVisible();
     await expect(rail.getByText("Repository:")).toBeVisible();
@@ -1193,7 +1293,7 @@ test("an issue page whose mappings read fails says so and retries it, rather tha
   }
 });
 
-test("an issue's whole title wraps at every width, whether prose or one unbroken word", async ({
+test("an issue's whole title wraps at every width, whether prose or one unbroken word @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1214,7 +1314,7 @@ test("an issue's whole title wraps at every width, whether prose or one unbroken
     const page = await context.newPage();
     for (const issue of [prose, oneWord]) {
       await page.goto(`/issues/${issue.key}`);
-      const title = page.getByRole("heading", { level: 1 });
+      const title = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
       await expect(title).toHaveText(issue.title);
       // Whole means nothing between the title and the document clips it: no clamp, ellipsis, or
       // box shorter or narrower than the text it holds, at the width this project renders.
@@ -1231,7 +1331,7 @@ test("an issue's whole title wraps at every width, whether prose or one unbroken
   }
 });
 
-test("the details rail fades its trailing edge only while it has somewhere to scroll", async ({
+test("the details rail fades its trailing edge only while it has somewhere to scroll @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the rail only overflows at a phone width");

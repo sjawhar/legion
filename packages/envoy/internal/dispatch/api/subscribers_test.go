@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -64,11 +65,17 @@ func TestMatchingTopics(t *testing.T) {
 // sessions surface (cmd/listener/api.go), stateful enough to prove the
 // unsubscribe flow round-trips through it.
 type fakeListener struct {
-	mu              sync.Mutex
-	interests       map[string][]string
+	mu        sync.Mutex
+	interests map[string][]string
+	// lastSeen is the last_seen each interest row carries, as the listener answers it from its
+	// session cache; a row for a session missing here carries none, as an older listener's does.
+	lastSeen        map[string]int64
 	sessions        []map[string]any
 	calls           []unsubscribeCall
 	failUnsubscribe bool
+	// refuseList, when set, answers a list read (its path: /v1/interests/ or /v1/sessions) in
+	// place of the rows when it returns true.
+	refuseList func(w http.ResponseWriter, path string) bool
 }
 
 type unsubscribeCall struct {
@@ -122,9 +129,16 @@ func newFakeListener(t *testing.T, interests map[string][]string, sessions []map
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		if sessionID == "" {
+			if state.refuseList != nil && state.refuseList(w, r.URL.Path) {
+				return
+			}
 			rows := make([]map[string]any, 0, len(state.interests))
 			for id, topics := range state.interests {
-				rows = append(rows, map[string]any{"session_id": id, "topics": topics, "updated_at": 1700000000000})
+				row := map[string]any{"session_id": id, "topics": topics, "updated_at": 1700000000000}
+				if lastSeen, ok := state.lastSeen[id]; ok {
+					row["last_seen"] = lastSeen
+				}
+				rows = append(rows, row)
 			}
 			WriteJSON(w, http.StatusOK, rows)
 			return
@@ -139,6 +153,9 @@ func newFakeListener(t *testing.T, interests map[string][]string, sessions []map
 	mux.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
+		if state.refuseList != nil && state.refuseList(w, r.URL.Path) {
+			return
+		}
 		WriteJSON(w, http.StatusOK, state.sessions)
 	})
 	server := httptest.NewServer(mux)
@@ -182,7 +199,7 @@ func newSubscribersHandler(t *testing.T, database *store.Store, envoyURL string)
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
@@ -236,7 +253,49 @@ func TestListIssueSubscribersFiltersEnrichesAndSortsByLastSeen(t *testing.T) {
 	}
 }
 
-func TestListIssueSubscribersRejectsBearerCallers(t *testing.T) {
+// A subscriber whose session is no longer live is shown with the last heartbeat the listener still
+// knows for it, which is later than its interest row's updated_at, and with that updated_at when
+// the listener sends none. A live subscriber keeps its session's own last_seen. The list is read
+// straight from the listener, so this asks the handler body with no database behind it.
+func TestSubscribersShowADeadSessionsLastHeartbeat(t *testing.T) {
+	const topic = "notifications.dispatch.issue.TEST-1.>"
+	envoyURL, listener := newFakeListener(t, map[string][]string{
+		"live":       {topic},
+		"known_dead": {topic},
+		"lost_dead":  {topic},
+	}, []map[string]any{
+		{"session_id": "live", "title": "planner", "last_seen": 1800000000000},
+	})
+	listener.lastSeen = map[string]int64{"live": 1700000100000, "known_dead": 1700000200000}
+	s := &server{deps: Deps{Envoy: envoy.New(envoyURL)}}
+
+	response := httptest.NewRecorder()
+	s.writeSubscribers(response, httptest.NewRequest(http.MethodGet, "/api/v1/issues/TEST-1/subscribers", nil), issueSubscriberBase("TEST-1"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	rows := decodeBody[[]subscriber](t, response)
+	got := make(map[string]subscriber, len(rows))
+	for _, row := range rows {
+		got[row.SessionID] = row
+	}
+	for id, want := range map[string]struct {
+		live     bool
+		lastSeen int64
+	}{
+		"live":       {live: true, lastSeen: 1800000000000},
+		"known_dead": {live: false, lastSeen: 1700000200000},
+		"lost_dead":  {live: false, lastSeen: 1700000000000},
+	} {
+		if row, ok := got[id]; !ok || row.Live != want.live || row.LastSeen != want.lastSeen {
+			t.Fatalf("subscriber %s = %+v (listed %v), want live %v and last_seen %d; all rows %+v", id, row, ok, want.live, want.lastSeen, rows)
+		}
+	}
+}
+
+// The subscriber list needs the person scope: the deployment's shared token holds none and is
+// turned away, and a person's own token reads the list their browser reads.
+func TestListIssueSubscribersRejectsACredentialWithoutThePersonScope(t *testing.T) {
 	database := storetest.Open(t)
 	key := createTestIssue(t, newSubscribersHandler(t, database, ""), "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, nil, nil)
@@ -247,8 +306,13 @@ func TestListIssueSubscribersRejectsBearerCallers(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token: status=%d body=%s, want 403 %s", response.Code, response.Body.String(), codeScopeRequired)
+	}
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/subscribers", nil,
+		personalTokenHolding(t, database, model.ScopePerson))
+	if own.Code != http.StatusOK {
+		t.Fatalf("a person's own token: status=%d body=%s", own.Code, own.Body.String())
 	}
 }
 
@@ -260,6 +324,47 @@ func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/subscribers", nil, "alice")
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// Both subscriber reads need the listener's interest list and its session list. Either one
+// refused as refilling answers 503 ENVOY_REFILLING with the listener's Retry-After, never a
+// subscriber list missing rows; any other refusal is still ENVOY_UNAVAILABLE.
+func TestListSubscribersReportsARefillingListenerAsRefilling(t *testing.T) {
+	database := storetest.Open(t)
+	bootstrap := newSubscribersHandler(t, database, "")
+	key := createTestIssue(t, bootstrap, "TEST", "Issue")
+	document := createProjectDocument(t, bootstrap, "TEST", "Design notes", "# Design notes\n")
+	envoyURL, listener := newFakeListener(t, map[string][]string{
+		"planner": {"notifications.dispatch.issue." + key + ".>"},
+		"writer":  {"notifications.dispatch.document." + document.Project + "." + document.Slug + ".>"},
+	}, []map[string]any{{"session_id": "planner", "title": "planner", "last_seen": 200}})
+	handler := newSubscribersHandler(t, database, envoyURL)
+	refuse := func(path string, answer func(http.ResponseWriter)) {
+		listener.mu.Lock()
+		defer listener.mu.Unlock()
+		listener.refuseList = func(w http.ResponseWriter, read string) bool {
+			if read != path {
+				return false
+			}
+			answer(w)
+			return true
+		}
+	}
+	refilling := func(w http.ResponseWriter) { answerListRefilling(w, "7") }
+	plain := func(w http.ResponseWriter) { http.Error(w, "listener restarting", http.StatusServiceUnavailable) }
+
+	for _, route := range []string{"/api/v1/issues/" + key + "/subscribers", "/api/v1/artifacts/" + document.ID + "/subscribers"} {
+		for _, path := range []string{"/v1/interests/", "/v1/sessions"} {
+			refuse(path, refilling)
+			requireEnvoyRefilling(t, dispatchRequest(t, handler, http.MethodGet, route, nil, "alice"), "7")
+
+			refuse(path, plain)
+			response := dispatchRequest(t, handler, http.MethodGet, route, nil, "alice")
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
+				t.Fatalf("GET %s with %s refused plainly: status=%d body=%s, want 503 ENVOY_UNAVAILABLE", route, path, response.Code, response.Body.String())
+			}
+		}
 	}
 }
 
@@ -504,7 +609,9 @@ func TestUnsubscribeIssueSessionReportsNotFoundForAnUnknownSession(t *testing.T)
 	}
 }
 
-func TestUnsubscribeIssueSessionRejectsBearerCallers(t *testing.T) {
+// Unsubscribing a session needs the person scope, which the deployment's shared token, holding
+// none, does not.
+func TestUnsubscribeIssueSessionRejectsACredentialWithoutThePersonScope(t *testing.T) {
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -516,8 +623,8 @@ func TestUnsubscribeIssueSessionRejectsBearerCallers(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token: status=%d body=%s, want 403 %s", response.Code, response.Body.String(), codeScopeRequired)
 	}
 }
 

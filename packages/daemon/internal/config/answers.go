@@ -425,7 +425,7 @@ func conversationStoreOf(read *answersFile, configDir string, rt Runtime) (Conve
 			}
 			return ConversationStore{}, fmt.Errorf("%s is not used under runtime tmux: every conversation is a file on the daemon's own host, which it reads where the pane wrote it; remove it", conversationStoreKey)
 		}
-		return ConversationStore{DSNFile: rt.Tmux.SessionDSNFile}, nil
+		return ConversationStore{DSNFile: rt.Tmux.SessionDSN()}, nil
 	}
 	switch kind := k.SessionStore.Kind; kind {
 	case ompsessions.StorePostgres:

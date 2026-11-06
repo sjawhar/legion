@@ -15,11 +15,16 @@ import (
 // to wait for a repair, and every callback, in the order the watcher armed them, which the test
 // fires itself. The production wait is a minute, so a test that slept for it could not run at
 // all. Each callback is kept, not just the last, because a real one can still run after a later
-// stop has armed its own: time.Timer.Stop does not wait for a callback already started.
+// stop has armed its own: time.Timer.Stop does not wait for a callback already started. A test
+// that counts or fires its waits turns the stream probe off (kvwatch.WithStreamProbeInterval(0)),
+// whose waits it would otherwise record among them. A read's scan idle wait, armed for
+// kvwatch.ScanIdleTimeout, is kept apart (idles), since every read arms one: waits, asked and
+// fireIt count and fire the others, and fireIdle fires the last idle wait.
 type armed struct {
 	mu    sync.Mutex
 	delay time.Duration
 	fires []func()
+	idles []func()
 }
 
 // afterFunc is the AfterFunc WithAfterFunc takes.
@@ -27,24 +32,41 @@ func (a *armed) afterFunc() kvwatch.AfterFunc {
 	return func(d time.Duration, f func()) kvwatch.Timer {
 		a.mu.Lock()
 		defer a.mu.Unlock()
+		if d == kvwatch.ScanIdleTimeout {
+			a.idles = append(a.idles, f)
+			return (*armedTimer)(a)
+		}
 		a.delay = d
 		a.fires = append(a.fires, f)
 		return (*armedTimer)(a)
 	}
 }
 
-// waits reports how many waits the watcher armed.
+// waits reports how many waits the watcher armed, scan idle waits aside.
 func (a *armed) waits() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.fires)
 }
 
-// asked is the delay of the last wait the watcher armed.
+// asked is the delay of the last wait the watcher armed, scan idle waits aside.
 func (a *armed) asked() time.Duration {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.delay
+}
+
+// fireIdle runs the last scan idle wait's callback, and fails when none was armed.
+func (a *armed) fireIdle(t *testing.T) {
+	t.Helper()
+	a.mu.Lock()
+	if len(a.idles) == 0 {
+		a.mu.Unlock()
+		t.Fatal("the watcher armed no scan idle wait")
+	}
+	fire := a.idles[len(a.idles)-1]
+	a.mu.Unlock()
+	fire()
 }
 
 // fireIt runs the last armed wait's callback, as the real timer would once its delay passed, and
@@ -147,8 +169,8 @@ func TestAWatcherRepairedAfterItsConsumerWentLogsOneWarn(t *testing.T) {
 	into := newSeen()
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, into.apply, into.reset,
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+	w := kvwatch.New("test cache", kv, into,
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
@@ -170,16 +192,18 @@ func TestAWatcherRepairedAfterItsConsumerWentLogsOneWarn(t *testing.T) {
 	}
 }
 
-// A repair that fails reports the stop at once rather than waiting out the minute: the bucket is
-// gone, so nothing will repair this watcher. The report is made once, so a self-health rebuild
-// retrying every few seconds adds no second ERROR for the same stop.
-func TestAWatcherWhoseBucketIsGoneLogsTheFailedRepair(t *testing.T) {
+// A repair that fails is no report of its own: it is not the end of the attempt, because the bus
+// arms another repair within seconds (internal/bus/recovery.go, recoverUntilHealthy), so one
+// Rewatch that failed says only that the outage is still running. The wait the stop armed stays
+// armed and makes the one report when its minute passes, and a second failed Rewatch adds no
+// second ERROR.
+func TestAWatcherWhoseBucketIsGoneReportsOnlyWhenItsWaitPasses(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {},
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+	w := kvwatch.New("test cache", kv, newSeen(),
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
@@ -189,19 +213,28 @@ func TestAWatcherWhoseBucketIsGoneLogsTheFailedRepair(t *testing.T) {
 	if err := w.Rewatch(conn); err == nil {
 		t.Fatal("a rewatch onto a deleted bucket succeeded")
 	}
-	errs := matching(records(), "ERROR", unrepairedErr)
-	if len(errs) != 1 {
-		t.Fatalf("a failed repair logged %d %q errors, want one: %v", len(errs), unrepairedErr, errs)
+	if errs := matching(records(), "ERROR", unrepairedErr); len(errs) != 0 {
+		t.Fatalf("a failed repair logged %d %q errors, want none: %v", len(errs), unrepairedErr, errs)
 	}
-	if reason, _ := errs[0]["reason"].(string); reason != "repair failed" {
-		t.Fatalf("reason = %q, want %q", reason, "repair failed")
+	if got := arm.waits(); got != 1 {
+		t.Fatalf("the stop armed %d repair waits after a failed repair, want one", got)
 	}
 
 	if err := w.Rewatch(conn); err == nil {
 		t.Fatal("a second rewatch onto a deleted bucket succeeded")
 	}
-	if errs := matching(records(), "ERROR", unrepairedErr); len(errs) != 1 {
-		t.Fatalf("a second failed repair logged %d %q errors in all, want one: %v", len(errs), unrepairedErr, errs)
+	if errs := matching(records(), "ERROR", unrepairedErr); len(errs) != 0 {
+		t.Fatalf("a second failed repair logged %d %q errors, want none: %v", len(errs), unrepairedErr, errs)
+	}
+
+	arm.fireIt(t)
+	errs := matching(records(), "ERROR", unrepairedErr)
+	if len(errs) != 1 {
+		t.Fatalf("the passed wait logged %d %q errors, want one: %v", len(errs), unrepairedErr, errs)
+	}
+	want := "no repair within " + time.Minute.String()
+	if reason, _ := errs[0]["reason"].(string); reason != want {
+		t.Fatalf("reason = %q, want %q", reason, want)
 	}
 }
 
@@ -213,8 +246,8 @@ func TestAWatcherNothingRepairsLogsWhenItsMinutePasses(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {},
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+	w := kvwatch.New("test cache", kv, newSeen(),
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
@@ -249,8 +282,8 @@ func TestAWaitARepairClearedReportsNotTheNextStop(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {},
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+	w := kvwatch.New("test cache", kv, newSeen(),
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
@@ -293,8 +326,8 @@ func TestAWatcherStoppedOnPurposeLogsNeither(t *testing.T) {
 	_, kv := bucket(t, uri)
 	arm := &armed{}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {},
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+	w := kvwatch.New("test cache", kv, newSeen(),
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 

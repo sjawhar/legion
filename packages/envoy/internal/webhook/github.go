@@ -50,14 +50,10 @@ func githubSenderField(payload map[string]any, field string) string {
 	return s
 }
 
-// CIRecorder folds check-run and check-suite observations into CI state.
+// CIRecorder folds check-run and check-suite observations into CI state, each within ctx.
 type CIRecorder interface {
-	Record(contracts.CIObservation) error
-	RecordSuite(contracts.CIObservation) error
-}
-
-func reviewerVerdict(name string) bool {
-	return name == "tester" || name == "architect"
+	Record(context.Context, contracts.CIObservation) error
+	RecordSuite(context.Context, contracts.CIObservation) error
 }
 
 // githubMaxBody is the largest webhook body the handler reads: GitHub's documented payload cap,
@@ -88,6 +84,11 @@ const githubBodyBudget = 64 << 20
 // to go past the limit, the other deliveries waiting for room for that long. A delivery waiting for
 // room reads its body under the same deadline, so its wait ends there too and it answers 400.
 // They are variables so a test can shorten them.
+//
+// The records and publishes run under the request's own context, with the write deadline as its
+// deadline, so they end when GitHub drops the delivery (it waits 10 s for an answer) and never run
+// past the moment their answer could still be written. Each record is also held to the CI store's
+// own wait (cistore's recordWait, 4 s: two 2 s write budgets), and each publish to the bus's 5 s.
 var (
 	githubBodyDeadline   = 60 * time.Second
 	githubHandleDeadline = 15 * time.Second
@@ -98,8 +99,10 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 	return githubHandler(secret, mentionTrigger, reviewerAppID, publisher, ci, newBodyBudget(githubBodyBudget))
 }
 
-// githubHandler is GitHubHandler reading bodies against the given budget.
+// githubHandler is GitHubHandler reading bodies against the given budget. Each handler remembers
+// the failed deliveries it has logged (failedDeliveries).
 func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder, bodies *bodyBudget) http.HandlerFunc {
+	failures := newFailedDeliveries(githubFailuresKept, githubFailureAge)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
@@ -154,6 +157,9 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			_, _ = w.Write([]byte("ok"))
 			return
 		}
+		// Records and publishes end with the request and at its write deadline (extendDeadlines).
+		answer, cancelAnswer := context.WithDeadline(r.Context(), start.Add(githubBodyDeadline+githubHandleDeadline))
+		defer cancelAnswer()
 		// A pull request's CI events only update durable state. The summary loop publishes one
 		// settled checks envelope for each commit whose suites and check runs are done. A finished
 		// Actions job on the default branch, of a run with no pull request, records nothing and is
@@ -161,24 +167,22 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
 			for _, o := range obs {
 				if o.CheckName == "" {
-					if err := ci.RecordSuite(o); err != nil {
-						deliveryFailed(w, "github ci suite record", err)
+					if err := ci.RecordSuite(answer, o); err != nil {
+						failures.deliveryFailed(w, delivery, "github ci suite record", err)
 						return
 					}
 					continue
 				}
-				if reviewerVerdict(o.CheckName) {
-					if reviewerAppID == "" {
-						log.Printf("WARN github ci verdict dropped: ENVOY_REVIEWER_APP_ID is not configured check=%q app_id=%q pr=%s", o.CheckName, o.AppID, o.Number)
-						continue
-					}
-					if o.AppID != reviewerAppID {
-						log.Printf("WARN github ci verdict ignored: untrusted publisher check=%q app_id=%q expected_app_id=%q pr=%s", o.CheckName, o.AppID, reviewerAppID, o.Number)
-						continue
-					}
+				switch contracts.ReviewerVerdictDecision(o.CheckName, o.AppID, reviewerAppID) {
+				case contracts.VerdictNoReviewerApp:
+					log.Printf("WARN github ci verdict dropped: ENVOY_REVIEWER_APP_ID is not configured check=%q app_id=%q pr=%s", o.CheckName, o.AppID, o.Number)
+					continue
+				case contracts.VerdictUntrusted:
+					log.Printf("WARN github ci verdict ignored: untrusted publisher check=%q app_id=%q expected_app_id=%q pr=%s", o.CheckName, o.AppID, reviewerAppID, o.Number)
+					continue
 				}
-				if err := ci.Record(o); err != nil {
-					deliveryFailed(w, "github ci record", err)
+				if err := ci.Record(answer, o); err != nil {
+					failures.deliveryFailed(w, delivery, "github ci record", err)
 					return
 				}
 			}
@@ -202,8 +206,8 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if err := publisher.Publish(item); err != nil {
-				deliveryFailed(w, "github publish", err)
+			if err := publisher.PublishWithin(answer, item); err != nil {
+				failures.deliveryFailed(w, delivery, "github publish", err)
 				return
 			}
 		}

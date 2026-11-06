@@ -56,38 +56,65 @@ func TestMigrateFromSeveralProcessesAtOnceOnAnEmptyDatabase(t *testing.T) {
 
 // A set in which two files share a version is refused whole, before the runner touches the
 // database. The runner records a migration by its version alone, so a set it accepted would apply
-// the first file numbered 2, pass over the second as already applied, and report success.
+// the first file of the pair, pass over the second as already applied, and report success. Two
+// timestamped files share a version only where one author's file carries the moment another's was
+// created rather than its own; the refusal is the same, since the runner reads the identifier and
+// not the name beside it.
 func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.T) {
-	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	set := fstest.MapFS{
-		"migrations/0001_first.up.sql":  {Data: []byte("create table guard_first (id integer)")},
-		"migrations/0002_second.up.sql": {Data: []byte("create table guard_second (id integer)")},
-		"migrations/0002_third.up.sql":  {Data: []byte("create table guard_third (id integer)")},
-	}
+	for _, tc := range []struct {
+		name string
+		set  fstest.MapFS
+		want []string
+	}{
+		{
+			name: "two numbered migrations",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":  {Data: []byte("create table guard_first (id integer)")},
+				"migrations/0002_second.up.sql": {Data: []byte("create table guard_second (id integer)")},
+				"migrations/0002_third.up.sql":  {Data: []byte("create table guard_third (id integer)")},
+			},
+			want: []string{"0002_second.up.sql", "0002_third.up.sql", "version 2"},
+		},
+		{
+			name: "two timestamped migrations carrying one moment",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":       {Data: []byte("create table guard_first (id integer)")},
+				"migrations/20261030120000_a.up.sql": {Data: []byte("create table guard_a (id integer)")},
+				"migrations/20261030120000_b.up.sql": {Data: []byte("create table guard_b (id integer)")},
+			},
+			want: []string{"20261030120000_a.up.sql", "20261030120000_b.up.sql", "version 20261030120000"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEmptyTestStore(t)
 
-	err := store.migrate(ctx, set)
-	left := existingTables(t, store, "guard_first", "guard_second", "guard_third", "schema_migrations")
-	if err == nil {
-		t.Errorf("migrate accepted two migrations numbered 2 and reported success; the tables it left: %v", left)
-	} else {
-		for _, want := range []string{"0002_second.up.sql", "0002_third.up.sql", "version 2"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("migrate error = %q, want it to name %q", err, want)
+			err := store.migrate(ctx, tc.set)
+			left := existingTables(t, store, "guard_first", "guard_second", "guard_third", "guard_a", "guard_b", "schema_migrations")
+			if err == nil {
+				t.Errorf("migrate accepted two migrations sharing a version and reported success; the tables it left: %v", left)
+			} else {
+				for _, want := range tc.want {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("migrate error = %q, want it to name %q", err, want)
+					}
+				}
 			}
-		}
-	}
-	if len(left) != 0 {
-		t.Errorf("the refused set left %v behind; want nothing applied, not even the version table", left)
+			if len(left) != 0 {
+				t.Errorf("the refused set left %v behind; want nothing applied, not even the version table", left)
+			}
+		})
 	}
 }
 
 // A migration whose lock another transaction holds gives up once the runner's lock timeout runs
-// out, naming itself, the lock it wanted and the session that held it, and applies nothing.
-// Unbounded, it waits for as long as the holder lives, and every read and write of the table
-// queues behind its request for that long.
+// out on every one of its attempts, naming itself, the lock it wanted and the session that held
+// it, and applies nothing. Unbounded, it waits for as long as the holder lives, and every read and
+// write of the table queues behind its request for that long.
 func TestMigrateBoundsTheWaitForALockAnotherTransactionHolds(t *testing.T) {
 	lockTimeout := pgmigrate.LockTimeout
+	// Every attempt waits out the lock timeout, with the runner's pause between attempts.
+	gaveUp := pgmigrate.LockTimeoutAttempts*lockTimeout + (pgmigrate.LockTimeoutAttempts-1)*pgmigrate.LockTimeoutRetryPause
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if _, err := store.Pool.Exec(ctx, "create table guard_held (id integer)"); err != nil {
@@ -112,9 +139,9 @@ func TestMigrateBoundsTheWaitForALockAnotherTransactionHolds(t *testing.T) {
 		"migrations/0001_widen_held.up.sql": {Data: []byte("alter table guard_held add column wider integer")},
 	}
 
-	// The test's own bound on the wait, six times the runner's: a runner that does not bound its
+	// The test's own bound on the wait, well past the runner's: a runner that does not bound its
 	// lock waits shows up here as a wait this long.
-	bound := 6 * lockTimeout
+	bound := gaveUp + 3*lockTimeout
 	bounded, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	started := time.Now()
@@ -126,8 +153,8 @@ func TestMigrateBoundsTheWaitForALockAnotherTransactionHolds(t *testing.T) {
 	if err == nil {
 		t.Fatalf("migrate applied a migration whose lock another transaction held, after %s", waited.Round(time.Millisecond))
 	}
-	if waited < lockTimeout || waited > lockTimeout+10*time.Second {
-		t.Errorf("migrate gave up after %s, want about the %s lock timeout", waited.Round(time.Millisecond), lockTimeout)
+	if waited < gaveUp || waited > gaveUp+10*time.Second {
+		t.Errorf("migrate gave up after %s, want about %s: %d attempts of the %s lock timeout", waited.Round(time.Millisecond), gaveUp, pgmigrate.LockTimeoutAttempts, lockTimeout)
 	}
 	t.Logf("migrate gave up after %s: %v", waited.Round(time.Millisecond), err)
 	holderPID := strconv.FormatUint(uint64(holder.PgConn().PID()), 10)

@@ -3,12 +3,17 @@ import { describe, expect, test } from "bun:test";
 import {
   AGENT_STREAM_LIMITS,
   AGENT_STREAM_TRUNCATION_SUFFIX,
+  AGENT_STREAM_WATCH_TTL_MS,
   type AgentStreamFrame,
 } from "@legion/contracts";
 
-import { AgentStreamPublisher } from "./agent-stream";
+import { AgentStreamPublisher, type AgentStreamSettingsState } from "./agent-stream";
 
 const SUBJECT = "agentstream.s1.frames";
+
+/** The sequence number a `harness()` publisher counts on from: its clock's milliseconds at
+ *  construction, a thousand to each. */
+const SEQ_START = 1_000 * 1_000;
 
 function harness(startAt = 1_000) {
   const published: AgentStreamFrame[] = [];
@@ -47,7 +52,11 @@ describe("AgentStreamPublisher", () => {
       published.map((frame) => (frame.kind === "message" ? frame.message.id : "tool"))
     );
     expect(ids.size).toBe(1);
-    expect(published.map((frame) => frame.seq)).toEqual([1, 2, 3]);
+    expect(published.map((frame) => frame.seq)).toEqual([
+      SEQ_START + 1,
+      SEQ_START + 2,
+      SEQ_START + 3,
+    ]);
     const last = published.at(-1);
     expect(last?.kind === "message" && last.message.streaming).toBe(false);
     expect(last?.kind === "message" && last.message.parts).toEqual([
@@ -357,6 +366,166 @@ describe("AgentStreamPublisher", () => {
   });
 });
 
+// The live view's header shows what the last `settings` frame says: it must reach a viewer who
+// opens the session after the settings were read, survive a full history and the longest command
+// list, and change only when the session's model or thinking level does.
+describe("the session's settings", () => {
+  const settings: AgentStreamSettingsState = {
+    model: "anthropic/claude-opus-5",
+    models: ["anthropic/claude-opus-5", "openai/gpt-5.5"],
+    reported: true,
+    thinking: { level: "auto", levels: ["off", "auto", "low", "high"] },
+  };
+
+  test("are published only when they change, and only while a viewer is attached", () => {
+    const { advance, published, publisher } = harness();
+    publisher.setSettings(SUBJECT, settings);
+    expect(published).toEqual([]);
+
+    publisher.noteViewer();
+    publisher.setSettings(SUBJECT, settings);
+    publisher.setSettings(SUBJECT, { ...settings, model: "openai/gpt-5.5" });
+    publisher.setSettings(SUBJECT, { ...settings, model: "openai/gpt-5.5" });
+    publisher.setSettings(SUBJECT, { ...settings, model: "openai/gpt-5.5", thinking: null });
+    expect(published).toEqual([
+      {
+        kind: "settings",
+        model: "openai/gpt-5.5",
+        models: ["anthropic/claude-opus-5", "openai/gpt-5.5"],
+        reported: true,
+        seq: SEQ_START + 2,
+        thinking: { level: "auto", levels: ["off", "auto", "low", "high"] },
+        v: 1,
+      },
+      {
+        kind: "settings",
+        model: "openai/gpt-5.5",
+        models: ["anthropic/claude-opus-5", "openai/gpt-5.5"],
+        reported: true,
+        seq: SEQ_START + 3,
+        thinking: null,
+        v: 1,
+      },
+    ]);
+
+    advance(AGENT_STREAM_WATCH_TTL_MS);
+    publisher.setSettings(SUBJECT, { reported: false });
+    expect(published).toHaveLength(2);
+    // What changed unwatched is what the next viewer is answered with.
+    publisher.noteViewer();
+    expect(publisher.replay("s1").frames).toEqual([
+      { kind: "settings", reported: false, seq: SEQ_START + 4, v: 1 },
+    ]);
+  });
+
+  test("name a model exactly as the host does, however long its id", () => {
+    const { published, publisher } = harness();
+    const long = `custom/${"x".repeat(AGENT_STREAM_LIMITS.modelChars * 2)}`;
+    publisher.noteViewer();
+    publisher.setSettings(SUBJECT, { ...settings, model: long, models: [long] });
+
+    expect(published.at(-1)).toMatchObject({ model: long, models: [long] });
+  });
+
+  test("ride in every replay after the history and before the commands, which stay last", () => {
+    const { publisher } = harness();
+    const body = "🚀".repeat(AGENT_STREAM_LIMITS.partChars);
+    for (let index = 0; index < 60; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
+    }
+    publisher.setCommands(SUBJECT, [{ name: "model", source: "builtin" }]);
+    publisher.setSettings(SUBJECT, settings);
+    publisher.noteViewer();
+
+    const { frames } = publisher.replay("s1");
+    expect(frames.map((frame) => frame.kind).slice(-3)).toEqual([
+      "message",
+      "settings",
+      "commands",
+    ]);
+    expect(frames.at(-2)).toMatchObject(settings);
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+  });
+
+  // A deployment's catalog is a few hundred models; 5,000 ids of about fifty bytes each is the
+  // bound the replay budget is sized for, beside a command list at every cap made of escaped text.
+  test("keep 5,000 models whole beside the longest escaped command list, inside the replay budget", () => {
+    const { published, publisher } = harness();
+    const body = "🚀".repeat(AGENT_STREAM_LIMITS.partChars);
+    for (let index = 0; index < 60; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
+    }
+    const escaped = "\u0001".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars);
+    const commands = Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+      description: escaped,
+      name: `c-${index}-${"\\".repeat(AGENT_STREAM_LIMITS.commandNameChars - 8)}`.slice(
+        0,
+        AGENT_STREAM_LIMITS.commandNameChars
+      ),
+      source: "extension" as const,
+    }));
+    const models = Array.from(
+      { length: 5_000 },
+      (_, index) =>
+        `provider-${index % 7}/model-${String(index).padStart(5, "0")}-preview-2026-10-25`
+    );
+    publisher.noteViewer();
+    // The commands first, filling the budget alone; the settings then take their room from them.
+    publisher.setCommands(SUBJECT, commands);
+    publisher.setSettings(SUBJECT, { ...settings, models });
+
+    const { frames } = publisher.replay("s1");
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+    const replayedSettings = frames.at(-2);
+    const replayedCommands = frames.at(-1);
+    expect(replayedSettings?.kind === "settings" && replayedSettings.reported).toBe(true);
+    expect(
+      replayedSettings?.kind === "settings" && replayedSettings.reported && replayedSettings.models
+    ).toEqual(models);
+    expect(replayedCommands?.kind).toBe("commands");
+    const listed =
+      replayedCommands?.kind === "commands"
+        ? replayedCommands.commands.map((command) => command.name)
+        : [];
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed).toEqual(commands.slice(0, listed.length).map((command) => command.name));
+    // Whole: the replay carries each frame exactly as the viewer was last sent it.
+    expect(replayedSettings).toEqual(published.findLast((frame) => frame.kind === "settings"));
+    expect(replayedCommands).toEqual(published.findLast((frame) => frame.kind === "commands"));
+  });
+
+  test("go with the conversation when the session is replaced", () => {
+    const { published, publisher } = harness();
+    publisher.setSettings(SUBJECT, settings);
+    publisher.reset();
+    publisher.noteViewer();
+    expect(publisher.replay("s2").frames).toEqual([]);
+
+    // The next session's first reading is news to its viewer, even when it reads the same.
+    publisher.setSettings(SUBJECT, settings);
+    expect(published.map((frame) => frame.kind)).toEqual(["settings"]);
+  });
+
+  // A page held open while its session is relaunched gets no replay from the new process, so a
+  // viewer arming it is sent what the process kept before then.
+  test("as kept unwatched, go to a viewer once it is attached, with the command list after them", () => {
+    const { published, publisher } = harness();
+    publisher.setSettings(SUBJECT, settings);
+    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.publishState(SUBJECT);
+    expect(published).toEqual([]);
+
+    publisher.noteViewer();
+    publisher.publishState(SUBJECT);
+    expect(published).toEqual([...publisher.replay("s1").frames]);
+    expect(published.map((frame) => frame.kind)).toEqual(["settings", "commands"]);
+  });
+});
+
 /**
  * Oh My Pi 18.3.2 hands `message_update` to extensions through its own queue while
  * `message_start` and `message_end` are emitted directly, so a message's last few updates arrive
@@ -402,6 +571,53 @@ describe("the session this publisher serves", () => {
     expect(publisher.watched).toBe(false);
     publisher.noteViewer();
     expect(publisher.replay("s2").frames).toEqual([]);
+  });
+
+  // A page held open while its session is relaunched with `--resume` keeps every frame the earlier
+  // process sent, and keeps a later `settings` or `commands` frame only when its `seq` beats the one
+  // already applied: the resumed process must number above everything the earlier one reached.
+  test("numbers every frame of a later process above every frame of an earlier one, across resets", () => {
+    const settings: AgentStreamSettingsState = {
+      model: "openai/gpt-5-nano",
+      models: ["openai/gpt-5-nano"],
+      reported: true,
+      thinking: { level: "medium", levels: ["minimal", "medium"] },
+    };
+    /** One process's life, its clock at `startAt`: a session, then the one `/new`, `/resume`, a
+     *  fork or a tree navigation replaces it with; each the seq of every frame it published or
+     *  replayed. */
+    const run = (startAt: number) => {
+      const { published, publisher } = harness(startAt);
+      publisher.noteViewer();
+      publisher.setSettings(SUBJECT, settings);
+      publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+      for (let index = 0; index < 300; index += 1) {
+        publisher.record(SUBJECT, assistant(index, [{ text: `${index}`, type: "text" }]), false);
+      }
+      const before = [...published, ...publisher.replay("s1").frames].map((frame) => frame.seq);
+      published.length = 0;
+      publisher.reset();
+      publisher.noteViewer();
+      publisher.setSettings(SUBJECT, {
+        ...settings,
+        thinking: { level: "minimal", levels: ["minimal", "medium"] },
+      });
+      publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+      publisher.record(SUBJECT, assistant(1, [{ text: "after", type: "text" }]), false);
+      const after = [...published, ...publisher.replay("s1").frames].map((frame) => frame.seq);
+      expect(before.length * after.length).toBeGreaterThan(0);
+      return { after, before };
+    };
+
+    const earlier = run(1_000);
+    // A reset never moves the counter back.
+    expect(Math.min(...earlier.after)).toBeGreaterThan(Math.max(...earlier.before));
+
+    // The relaunch: a new process, its clock one millisecond on.
+    const later = run(1_001);
+    expect(Math.min(...later.before, ...later.after)).toBeGreaterThan(
+      Math.max(...earlier.before, ...earlier.after)
+    );
   });
 });
 

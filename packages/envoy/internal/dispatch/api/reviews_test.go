@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -248,17 +250,21 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 			t.Fatalf("summary %q: status=%d body=%s", blank, refused.Code, refused.Body.String())
 		}
 	}
-	// "Approve spec.md (version 9999999999)? ", the prefix at the longest version a request can
-	// reach, leaves 762 of the 800 UTF-16 units for the summary; each "é" is one unit and two bytes,
-	// and the padding around a summary is not part of it.
-	over := strings.Repeat("é", 763)
-	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), "summary is 1 characters over the 762-character limit (763/762)") {
+	// "Approve spec.md (version 9999999999)?", the question at the longest version a request can
+	// reach, the space after it and the fixed options leave the rest of the ask bound for the
+	// summary; each "é" is one UTF-16 unit and two bytes, and the padding around a summary is
+	// not part of it.
+	room := contracts.DispatchEventBodyMax -
+		docs.AskWordingUnits(docs.ApprovalQuestion(approvalOf("spec.md", maxApprovalVersion), ""), approvalAskOptions) - 1
+	over := strings.Repeat("é", room+1)
+	overCap := "summary is 1 characters over the " + strconv.Itoa(room) + "-character limit (" + strconv.Itoa(room+1) + "/" + strconv.Itoa(room) + ")"
+	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), overCap) {
 		t.Fatalf("summary over the cap: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "draft" {
 		t.Fatalf("approval after refused requests = %#v, want draft with nothing opened", got.Approval)
 	}
-	atCap := strings.Repeat("é", 762)
+	atCap := strings.Repeat("é", room)
 	padded := "  " + atCap + "\n"
 	first := request(issue.PrimaryArtifactID, &padded)
 	if first.Code != http.StatusCreated {
@@ -273,7 +279,7 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	// reading: it is refused, and the card keeps its question and its revision.
 	other := "A different summary."
 	reworded := request(issue.PrimaryArtifactID, &other)
-	if reworded.Code != http.StatusConflict || !strings.Contains(reworded.Body.String(), `"code":"APPROVAL_WAITS_ON_HUMAN"`) || !strings.Contains(reworded.Body.String(), "a different summary would rewrite the card they are reading") {
+	if reworded.Code != http.StatusConflict || !strings.Contains(reworded.Body.String(), `"code":"APPROVAL_WAITS_ON_HUMAN"`) || !strings.Contains(reworded.Body.String(), "a different summary or another document would rewrite the card they are reading") {
 		t.Fatalf("a different summary while the request waits on the human: status=%d body=%s", reworded.Code, reworded.Body.String())
 	}
 	if shown := readAskDetail(t, handler, opened.ID); shown.Question != opened.Question || shown.EditedAt != nil || shown.WaitingOn != "human" {
@@ -303,40 +309,47 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	}
 }
 
+// approvalOf is the one-document list an approval request names, for the question tests.
+func approvalOf(name string, version int) []model.AskApprovalDocument {
+	return []model.AskApprovalDocument{{ArtifactID: "artifact-1", Name: name, Version: version, RequestedVersion: version}}
+}
+
 // A version move rebuilds an approval request's question at the document's new version without
 // asking again, so the summary is budgeted against the longest version a request can reach: the
-// longest summary the route accepts keeps the question within the ask cap however many digits the
-// version gains, and that budget is the tightest that does.
-func TestTheLongestAcceptedSummaryFitsTheCapAtEveryVersion(t *testing.T) {
+// longest summary the route accepts keeps the ask's question and options within the ask bound
+// however many digits the version gains, and that budget is the tightest that does.
+func TestTheLongestAcceptedSummaryFitsTheBoundAtEveryVersion(t *testing.T) {
 	for _, name := range []string{"spec.md", "a", strings.Repeat("n", 100)} {
 		for _, requested := range []int{1, 9, 12345} {
-			limit := 0
-			for length := 1; length <= maxAskQuestion16; length++ {
-				if _, err := approvalQuestion(name, requested, strings.Repeat("é", length)); err != nil {
-					break
-				}
-				limit = length
-			}
+			// The longest summary approvalQuestion accepts, by binary search over its verdict:
+			// it accepts every length up to that one and refuses every length past it.
+			refused := sort.Search(contracts.DispatchEventBodyMax+2, func(length int) bool {
+				_, err := approvalQuestion(approvalOf(name, requested), strings.Repeat("é", length))
+				return err != nil
+			})
+			limit := refused - 1
 			summary := strings.Repeat("é", limit)
-			if _, err := approvalQuestion(name, requested, summary+"é"); err == nil || !strings.Contains(err.Error(), "summary is 1 characters over") {
+			if _, err := approvalQuestion(approvalOf(name, requested), summary+"é"); err == nil || !strings.Contains(err.Error(), "summary is 1 characters over") {
 				t.Fatalf("%s at version %d: one past the %d-unit limit = %v, want CAP_EXCEEDED", name, requested, limit, err)
 			}
 			// A move to the first version of each digit count, then to the longest of all.
 			for boundary := 9; boundary < maxApprovalVersion; boundary = boundary*10 + 9 {
-				if length := len16(docs.ApprovalQuestion(name, boundary+1, summary)); length > maxAskQuestion16 {
-					t.Fatalf("%s requested at version %d, moved to %d: question is %d units, past the %d cap", name, requested, boundary+1, length, maxAskQuestion16)
+				moved := docs.ApprovalQuestion(approvalOf(name, boundary+1), summary)
+				if units := docs.AskWordingUnits(moved, approvalAskOptions); units > contracts.DispatchEventBodyMax {
+					t.Fatalf("%s requested at version %d, moved to %d: question and options are %d units, past the %d bound", name, requested, boundary+1, units, contracts.DispatchEventBodyMax)
 				}
 			}
-			if length := len16(docs.ApprovalQuestion(name, maxApprovalVersion, summary)); length != maxAskQuestion16 {
-				t.Fatalf("%s requested at version %d, moved to the longest version: question is %d units, want exactly the %d cap", name, requested, length, maxAskQuestion16)
+			longest := docs.ApprovalQuestion(approvalOf(name, maxApprovalVersion), summary)
+			if units := docs.AskWordingUnits(longest, approvalAskOptions); units != contracts.DispatchEventBodyMax {
+				t.Fatalf("%s requested at version %d, moved to the longest version: question and options are %d units, want exactly the %d bound", name, requested, units, contracts.DispatchEventBodyMax)
 			}
 		}
 	}
 }
 
-// The longest summary the route accepts at version 1 still fits the ask cap once a version move
-// rebuilds the question at version 10, whose number is one character longer.
-func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T) {
+// The longest summary the route accepts at version 1 still fits the ask bound once a version
+// move rebuilds the question at version 10, whose number is one character longer.
+func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskBound(t *testing.T) {
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -349,7 +362,7 @@ func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T)
 			"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
 			map[string]any{"actor": sessionActor(), "summary": summary})
 	}
-	refused := request(strings.Repeat("é", maxAskQuestion16))
+	refused := request(strings.Repeat("é", contracts.DispatchEventBodyMax))
 	match := regexp.MustCompile(`the (\d+)-character limit`).FindStringSubmatch(refused.Body.String())
 	if refused.Code != http.StatusBadRequest || match == nil {
 		t.Fatalf("summary past the cap: status=%d body=%s, want CAP_EXCEEDED naming the limit", refused.Code, refused.Body.String())
@@ -387,8 +400,8 @@ func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T)
 	if moved.Question != "Approve spec.md (version 10)? "+summary {
 		t.Fatalf("moved question = %q, want version 10 with the summary unchanged", moved.Question)
 	}
-	if length := len16(moved.Question); length > maxAskQuestion16 {
-		t.Fatalf("moved question is %d units, past the %d-unit ask cap", length, maxAskQuestion16)
+	if units := docs.AskWordingUnits(moved.Question, approvalAskOptions); units > contracts.DispatchEventBodyMax {
+		t.Fatalf("the moved question and its options are %d units, past the %d-unit ask bound", units, contracts.DispatchEventBodyMax)
 	}
 }
 
@@ -461,9 +474,10 @@ func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testi
 
 // An architect writes a spec whose decisions are ask blocks and a human approves it straight
 // away. Settlement indexes those blocks seconds later, over words nobody has touched since. A
-// version minted for that indexing stales an approval a human has just given, and Legion's
-// design gate - open exactly while the approved version is the latest - closes with nothing in
-// the event stream to explain it (LEGION-273).
+// version minted for that indexing staled an approval a human had just given and closed Legion's
+// design gate with nothing in the event log to explain it (LEGION-273); the approval carry would
+// now carry the approval to it instead, a version and an artifact.approved event nothing explains,
+// so settlement mints none and the approval stays at the version the human approved.
 func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
 	handler, _ := blockAskHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approve the decisions", "Context\n\n"+transportAsk)
@@ -480,5 +494,137 @@ func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
 	got := readApproval(t, handler, issue.PrimaryArtifactID)
 	if got.Approval.State != "approved" || got.Approval.LatestVersion != 1 || got.Approval.Version == nil || *got.Approval.Version != 1 {
 		t.Fatalf("approval after the settlement that indexed the block = %#v, want it still approved at version 1", got.Approval)
+	}
+}
+
+// Each review keeps the sequence of the artifact.* event it appended on its issue, and the
+// approval read returns the latest review's as `seq` beside its `at`, which equals the event's own
+// created_at: one transaction writes both. A person who requests changes twice with the same
+// reason at one version writes two reviews the read tells apart by their sequences. A review
+// recorded before Dispatch kept the sequence reads with its `at` and no `seq`.
+func TestTheApprovalReadNamesTheLatestReviewsEventSequence(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Review twice", "A spec")
+	type sequencedRead struct {
+		Approval struct {
+			State string  `json:"state"`
+			At    *string `json:"at"`
+			Seq   *int64  `json:"seq"`
+		} `json:"approval"`
+	}
+	type reviewEvent struct {
+		Seq       int64     `json:"seq"`
+		Type      string    `json:"type"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	latestReviewEvent := func() reviewEvent {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events?order=desc&limit=1", nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("read events: status=%d body=%s", response.Code, response.Body.String())
+		}
+		events := decodeBody[[]reviewEvent](t, response)
+		if len(events) != 1 || events[0].Type != "artifact.changes_requested" {
+			t.Fatalf("newest event = %#v, want the review's artifact.changes_requested", events)
+		}
+		return events[0]
+	}
+	var seqs []int64
+	for range 2 {
+		review := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews",
+			map[string]any{"state": "changes_requested", "reason": "Name the rollback path."}, "alice")
+		if review.Code != http.StatusCreated {
+			t.Fatalf("request changes: status=%d body=%s", review.Code, review.Body.String())
+		}
+		event := latestReviewEvent()
+		read := decodeBody[sequencedRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+		if read.Approval.State != "changes_requested" || read.Approval.Seq == nil || *read.Approval.Seq != event.Seq {
+			t.Fatalf("approval = %#v, want changes_requested naming its event's sequence %d", read.Approval, event.Seq)
+		}
+		at, err := time.Parse(time.RFC3339Nano, *read.Approval.At)
+		if err != nil || !at.Equal(event.CreatedAt) {
+			t.Fatalf("approval at = %v (%v), want its event's created_at %s", read.Approval.At, err, event.CreatedAt)
+		}
+		seqs = append(seqs, event.Seq)
+	}
+	if seqs[1] <= seqs[0] {
+		t.Fatalf("review sequences = %v, want the second review's later than the first's", seqs)
+	}
+
+	// A review recorded before the column (event_seq null) reads with its time and no sequence.
+	if _, err := database.Pool.Exec(context.Background(), `update artifact_reviews set event_seq = null where artifact_id = $1`, issue.PrimaryArtifactID); err != nil {
+		t.Fatalf("clear the reviews' sequences: %v", err)
+	}
+	read := decodeBody[sequencedRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+	if read.Approval.Seq != nil || read.Approval.At == nil {
+		t.Fatalf("approval of a review with no recorded sequence = %#v, want its at and no seq", read.Approval)
+	}
+}
+
+// The approval read names the review whose event committed last, not the one whose transaction
+// started last. Two reviews are written here as two real transactions: the second begins first and
+// takes the document owner's lock after the first commits, so it carries the earlier created_at
+// (its transaction's start) and the later event sequence. The read must name it, since every
+// reader of the approval — the Legion daemon's design gate above all — decides from the newest
+// review.
+func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "TEST", "Review order", "A spec")
+	artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+	ctx := context.Background()
+	// The delayed transaction begins before the first review, so its now() — the artifact_reviews
+	// created_at default — is earlier than that review's.
+	delayed, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the delayed review's transaction: %v", err)
+	}
+	defer func() { _ = delayed.Rollback(ctx) }()
+	if _, err := delayed.Exec(ctx, "select now()"); err != nil {
+		t.Fatalf("start the delayed review's transaction clock: %v", err)
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews",
+		map[string]any{"state": "changes_requested", "reason": "Name the rollback path."}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("request changes: status=%d body=%s", response.Code, response.Body.String())
+	}
+	first := decodeBody[model.ArtifactReview](t, response)
+	// The production writer, so no time or sequence is fabricated.
+	reason := "And name who runs the restore."
+	second, event, err := docs.WriteReview(ctx, delayed, deps.Events, artifact, first.Version, "changes_requested",
+		docs.ReviewKindPerson, model.Actor{Kind: "user", ID: "alice"}, &reason, nil)
+	if err != nil {
+		t.Fatalf("write the delayed review: %v", err)
+	}
+	if err := delayed.Commit(ctx); err != nil {
+		t.Fatalf("commit the delayed review: %v", err)
+	}
+	// The HTTP review response carries no sequence (EventSeq is not serialized), so read the first
+	// review's from its row.
+	var firstSeq int64
+	if err := database.Pool.QueryRow(ctx, `select event_seq from artifact_reviews where id = $1`, first.ID).Scan(&firstSeq); err != nil {
+		t.Fatalf("read the first review's sequence: %v", err)
+	}
+	if !second.CreatedAt.Before(first.CreatedAt) || second.EventSeq == nil || *second.EventSeq <= firstSeq {
+		t.Fatalf("delayed review at=%s seq=%v, first at=%s seq=%d; want the delayed one earlier in time and later in sequence",
+			second.CreatedAt, second.EventSeq, first.CreatedAt, firstSeq)
+	}
+	type orderedRead struct {
+		Approval struct {
+			Reason *string `json:"reason"`
+			Seq    *int64  `json:"seq"`
+		} `json:"approval"`
+	}
+	got := decodeBody[orderedRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+	if got.Approval.Seq == nil || *got.Approval.Seq != int64(event.Seq) || got.Approval.Reason == nil || *got.Approval.Reason != reason {
+		t.Fatalf("approval = %#v, want the review that committed last (sequence %d, reason %q)", got.Approval, event.Seq, reason)
+	}
+	// The reviews list names the same order: the delayed review, which committed last, first.
+	listed := documentReviews(t, handler, issue.PrimaryArtifactID)
+	if len(listed) != 2 || listed[0].ID != second.ID || listed[1].ID != first.ID {
+		ids := make([]string, len(listed))
+		for i, review := range listed {
+			ids[i] = review.ID
+		}
+		t.Fatalf("reviews listed %v, want the delayed review %s, which committed last, before %s", ids, second.ID, first.ID)
 	}
 }

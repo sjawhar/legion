@@ -14,6 +14,26 @@
     ],
     "waiting": [
       "LEGION-211"
+    ],
+    "trees": [
+      "LEGION-208",
+      "LEGION-210",
+      "LEGION-212"
+    ],
+    "blocked": [
+      {
+        "issue": "LEGION-209",
+        "blockedBy": [
+          "LEGION-210",
+          "LEGION-213"
+        ]
+      },
+      {
+        "issue": "LEGION-211",
+        "blockedBy": [
+          "LEGION-210"
+        ]
+      }
     ]
   },
   "issues": {
@@ -22,6 +42,7 @@
       "generation": 2,
       "phase": "done",
       "status": "done",
+      "tree": "LEGION-207",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {
@@ -64,6 +85,7 @@
       "generation": 3,
       "phase": "implementing",
       "status": "in_progress",
+      "tree": "LEGION-208",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "architect": {
@@ -93,7 +115,7 @@
                 "namespace": "legion",
                 "name": "legion-legion-legion-208",
                 "podUid": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-                "container": "implementer",
+                "container": "roles",
                 "generation": 5
               }
             },
@@ -111,7 +133,8 @@
                 }
               ]
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11"
           },
           "rounds": 2
         },
@@ -127,13 +150,18 @@
                 "namespace": "legion",
                 "name": "legion-legion-legion-208",
                 "podUid": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-                "container": "planner",
+                "container": "roles",
                 "generation": 2
               }
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+            "updateHead": "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128"
           },
-          "handoffCommit": "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+          "handoffRecord": {
+            "id": "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+            "version": 1
+          },
           "rounds": 0
         }
       },
@@ -154,13 +182,29 @@
       "slot": {
         "index": 0,
         "admittedAt": "2026-09-21T18:42:11Z"
-      }
+      },
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
+    },
+    "LEGION-209": {
+      "key": "LEGION-209",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
     },
     "LEGION-210": {
       "key": "LEGION-210",
       "generation": 1,
       "phase": "held",
       "status": "in_progress",
+      "tree": "LEGION-210",
       "repo": "zeta/tools",
       "defaultBranch": "release/v7.1",
       "holdReason": "escalated",
@@ -173,6 +217,23 @@
           },
           "rounds": 1
         }
+      }
+    },
+    "LEGION-212": {
+      "key": "LEGION-212",
+      "generation": 1,
+      "phase": "awaiting_person",
+      "status": "in_progress",
+      "tree": "LEGION-212",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "waitingOn": {
+        "kind": "ask",
+        "ask": "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+        "since": "2026-09-22T08:05:00Z",
+        "answeredAt": "2026-09-22T09:21:00Z",
+        "answeredBy": "ask"
       }
     }
   },
@@ -191,6 +252,11 @@
       "issue": "LEGION-210",
       "role": "implementer",
       "state": "failed"
+    },
+    {
+      "issue": "LEGION-211",
+      "role": "implementer",
+      "state": "suspended"
     }
   ],
   "controllerLocator": {
@@ -283,9 +349,14 @@
       "detail": "checked by the daemon's probe of the worker image, which passed"
     },
     {
+      "name": "claude-code",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
       "name": "resource-limits",
       "status": "open",
-      "detail": "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
+      "detail": "no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod",
       "configLine": "capabilities.decided.resource-limits: \"\u003creason\u003e\"",
       "source": "configuration"
     },
@@ -349,6 +420,12 @@
         "reason": "the review App is not installed on acme/gadgets"
       }
     ],
+    "withoutWebhookApp": [
+      {
+        "repo": "zeta/tools",
+        "reason": "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"
+      }
+    ],
     "caches": [
       {
         "repo": "acme/legacy",
@@ -369,7 +446,7 @@
       "name": "kubernetes",
       "kubernetes": {
         "namespace": "legion",
-        "image": "ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "image": "ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "storage_class": "gp3",
         "issue_volume": "30Gi",
         "scheduling": {
@@ -392,13 +469,13 @@
           "priority_class": "legion-workers"
         },
         "resources": {
-          "architect": {
-            "cpu": "250m",
-            "cpu_request": "250m",
-            "memory": "1Gi",
-            "memory_request": "1Gi",
-            "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
+          "issue": {
+            "cpu": "4",
+            "cpu_request": "4",
+            "memory": "24Gi",
+            "memory_request": "24Gi",
+            "ephemeral_storage": "80Gi",
+            "ephemeral_storage_request": "6Gi"
           },
           "controller": {
             "cpu": "2",
@@ -406,46 +483,6 @@
             "memory": "6Gi",
             "memory_request": "4Gi",
             "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "implementer": {
-            "cpu": "1500m",
-            "cpu_request": "1500m",
-            "memory": "8Gi",
-            "memory_request": "8Gi",
-            "ephemeral_storage": "20Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "merger": {
-            "cpu": "250m",
-            "cpu_request": "250m",
-            "memory": "1Gi",
-            "memory_request": "1Gi",
-            "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "planner": {
-            "cpu": "250m",
-            "cpu_request": "250m",
-            "memory": "1Gi",
-            "memory_request": "1Gi",
-            "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "reviewer": {
-            "cpu": "750m",
-            "cpu_request": "750m",
-            "memory": "4Gi",
-            "memory_request": "4Gi",
-            "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "tester": {
-            "cpu": "750m",
-            "cpu_request": "750m",
-            "memory": "6Gi",
-            "memory_request": "6Gi",
-            "ephemeral_storage": "20Gi",
             "ephemeral_storage_request": "1Gi"
           }
         },
@@ -464,6 +501,8 @@
           "-c",
           "echo fixture-setup"
         ],
+        "skills_repository": "acme/agent-skills",
+        "test_postgres": false,
         "repository_cache": {
           "volume": "40Gi",
           "refresh_minutes": 15,
@@ -476,6 +515,10 @@
             "ephemeral_storage": "2Gi",
             "ephemeral_storage_request": "1Gi"
           }
+        },
+        "idle_release": {
+          "idle_minutes": 10,
+          "backstop_minutes": 60
         }
       }
     },
@@ -520,7 +563,10 @@
             "workflow": ".github/workflows/release.yaml",
             "step": "Apply"
           }
-        ]
+        ],
+        "memory": {
+          "config_files": []
+        }
       },
       "WIDGETS": {
         "merge_queue_role": "merge-queue",
@@ -531,7 +577,10 @@
           ]
         },
         "slack_channels": [],
-        "deploys": []
+        "deploys": [],
+        "memory": {
+          "config_files": []
+        }
       }
     },
     "gates": {
@@ -554,6 +603,10 @@
     },
     "linger_hours": 1.5,
     "production_check_hours": 240,
+    "pod_update_retask_hours": 1,
+    "pod_update_notice_hours": 4,
+    "pod_update_max_open_rounds": 6,
+    "pod_update_rounds_per_minute": 2,
     "review_round_cap": 4,
     "max_fix_attempts": 5,
     "controller": "daemon",
@@ -564,8 +617,42 @@
     },
     "worker_backends": {
       "tester": "omp"
-    }
+    },
+    "role_config_files": {},
+    "repository_renames": [
+      {
+        "from": "acme/widgets-legacy",
+        "to": "acme/widgets"
+      }
+    ]
   },
+  "consumers": [
+    {
+      "name": "legion-go-LEGION-dispatch",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": "2026-09-22T09:17:50Z",
+      "stalled": false
+    },
+    {
+      "name": "legion-go-LEGION-dispatch-server",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": null,
+      "stalled": false,
+      "unavailable": "read the consumer's info: context deadline exceeded"
+    },
+    {
+      "name": "legion-go-LEGION-github",
+      "waiting": 412,
+      "oldestAt": "2026-09-22T09:05:34Z",
+      "oldestAgeSeconds": 754,
+      "lastHandledAt": "2026-09-22T09:16:41Z",
+      "stalled": true
+    }
+  ],
   "questionsForController": [
     {
       "id": "5f0c2a9e7b14d3866a1e0c4b9d2f7a35",

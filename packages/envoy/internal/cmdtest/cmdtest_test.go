@@ -1,126 +1,126 @@
 package cmdtest
 
 import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/listenfd"
 )
 
-// 500 draws repeat no port only because FreeTCPPort keeps the ports it handed out: random picks
-// from the 12,768 ports of its range repeat one after about 140 draws on average, and within 500
-// draws more than 9,999 times in 10,000. Half the draws are a subtest's, so a port stays out of
-// another test's hands while the test it went to still runs, not only out of its own.
-func TestFreeTCPPortHandsOutNoPortTwiceWhileItsTestRuns(t *testing.T) {
-	seen := map[int]bool{}
-	draw := func(t *testing.T) {
-		for range 250 {
-			port := FreeTCPPort(t)
-			if seen[port] {
-				t.Fatalf("FreeTCPPort handed out port %d a second time, after %d other ports, while the test it first went to still ran", port, len(seen))
-			}
-			seen[port] = true
-		}
+const (
+	// heldPortChildEnv makes this test binary run heldPortChild instead of its tests.
+	heldPortChildEnv = "CMDTEST_HELD_PORT_CHILD"
+	// heldPortFD is the variable Pass names the child's inherited socket in.
+	heldPortFD = "CMDTEST_LISTEN_FD"
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv(heldPortChildEnv) == "1" {
+		os.Exit(heldPortChild())
 	}
-	draw(t)
-	t.Run("another test", draw)
+	os.Exit(m.Run())
 }
 
-// A port goes back once the test it went to ends, so a long run never runs out of ports.
-func TestFreeTCPPortTakesItsPortsBackWhenTheirTestEnds(t *testing.T) {
-	var ports []int
-	t.Run("holder", func(t *testing.T) {
-		for range 50 {
-			ports = append(ports, FreeTCPPort(t))
-		}
-	})
-	handedOutMu.Lock()
-	defer handedOutMu.Unlock()
-	for _, port := range ports {
-		if handedOut[port] {
-			t.Errorf("port %d is still held for a test that has ended", port)
-		}
+// heldPortChild is the process TestHeldPortStaysHeldUntilItsProcessServes starts. It waits for a
+// line on standard input, then serves one connection on the socket it inherited, answering its own
+// pid, and exits once the test closes that connection, so the test is the one to close first.
+func heldPortChild() int {
+	fail := func(format string, args ...any) int {
+		fmt.Fprintf(os.Stderr, "held-port child: "+format+"\n", args...)
+		return 1
 	}
-}
-
-// The second process of a pair draws its port while the first still boots, so the first one's port
-// is free and can come up again as a candidate, as the kernel offered it in the CI run
-// FreeTCPPort's comment names. The draw must not bind it even for a moment, since the first
-// process binds it whenever its boot gets there. Here every other candidate is that port, and a
-// goroutine stands in for the booting process, binding the port over and over while the draws run:
-// none of its binds may be refused.
-func TestFreeTCPPortNeverBindsAPortWhileTheProcessItWentToBindsIt(t *testing.T) {
-	booting := FreeTCPPort(t)
-	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(booting))
-	proposals := 0
-	candidate := func() int {
-		proposals++
-		if proposals%2 == 1 {
-			return booting
-		}
-		return freePortLow + proposals%(freePortHigh-freePortLow+1)
+	if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
+		return fail("wait for the line to serve: %v", err)
 	}
-
-	var bound, refused atomic.Int64
-	var lastRefusal atomic.Value
-	stop, stopped := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(stopped)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			listener, err := net.Listen("tcp", address)
-			if err != nil {
-				refused.Add(1)
-				lastRefusal.Store(err.Error())
-				continue
-			}
-			bound.Add(1)
-			_ = listener.Close()
-		}
-	}()
-	// The binding goroutine stops at the test's end however it ends, a draw's t.Fatalf included:
-	// left running, it would go on binding the port through every later -count repetition.
-	var stopOnce sync.Once
-	halt := func() {
-		stopOnce.Do(func() { close(stop) })
-		<-stopped
-	}
-	t.Cleanup(halt)
-	for range 1000 {
-		freeTCPPortFrom(t, candidate)
-	}
-	halt()
-
-	t.Logf("the booting process bound port %d %d times while 1000 draws were offered it", booting, bound.Load())
-	if refused.Load() > 0 {
-		t.Errorf("the booting process's bind of port %d was refused %d times while the draws ran; the last: %v", booting, refused.Load(), lastRefusal.Load())
-	}
-}
-
-// The ports FreeTCPPort hands out lie below the range this machine's kernel takes ports from for
-// itself, which is what keeps a listener on port 0 or an outgoing connection, the booting
-// process's own among them, off them.
-func TestFreeTCPPortsLieOutsideTheKernelsOwnPortRange(t *testing.T) {
-	configured, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	socket, err := listenfd.Inspect(heldPortFD, os.Getenv(heldPortFD))
 	if err != nil {
-		t.Skipf("this machine shows no Linux port range: %v", err)
+		return fail("%v", err)
 	}
-	bounds := strings.Fields(string(configured))
-	if len(bounds) != 2 {
-		t.Fatalf("ip_local_port_range reads %q, want two ports", configured)
-	}
-	low, err := strconv.Atoi(bounds[0])
+	listener, err := listenfd.Adopt(socket)
 	if err != nil {
-		t.Fatalf("ip_local_port_range reads %q: %v", configured, err)
+		return fail("%v", err)
 	}
-	if freePortHigh >= low {
-		t.Errorf("FreeTCPPort hands out ports up to %d, inside this kernel's own range from %d", freePortHigh, low)
+	defer listener.Close()
+	conn, err := listener.Accept()
+	if err != nil {
+		return fail("accept: %v", err)
 	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "%d\n", os.Getpid()); err != nil {
+		return fail("answer: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, conn); err != nil {
+		return fail("wait for the test to close the connection: %v", err)
+	}
+	return 0
+}
+
+// A held port stays bound from HoldPort until the process it was passed to serves on it, with only
+// that process holding it once Start returns: another program's bind in the meantime is refused,
+// the process serves on the socket, and the port is free again once it exits.
+func TestHeldPortStaysHeldUntilItsProcessServes(t *testing.T) {
+	held := HoldPort(t)
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), heldPortChildEnv+"=1")
+	held.Pass(cmd, heldPortFD)
+	serve, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := Start(t, "the held-port child", cmd)
+
+	// The child is waiting for its line and has not served, so only its inherited copy can hold the
+	// port.
+	competitor, err := net.Listen("tcp", held.Addr)
+	if err == nil {
+		_ = competitor.Close()
+		t.Fatalf("another listener bound %s after Start, before the child served; want address already in use", held.Addr)
+	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatalf("another listener's bind of %s before the child served: %v; want address already in use", held.Addr, err)
+	}
+
+	if _, err := io.WriteString(serve, "serve\n"); err != nil {
+		t.Fatalf("tell the child to serve: %v\n%s", err, child.Output.String())
+	}
+	_ = serve.Close()
+	conn, err := net.Dial("tcp", held.Addr)
+	if err != nil {
+		t.Fatalf("dial %s: %v\n%s", held.Addr, err, child.Output.String())
+	}
+	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		_ = conn.Close()
+		t.Fatalf("read the answer on %s: %v\n%s", held.Addr, err, child.Output.String())
+	}
+	if got, want := strings.TrimSpace(answer), strconv.Itoa(cmd.Process.Pid); got != want {
+		_ = conn.Close()
+		t.Fatalf("%s answered pid %q; want the child's %s", held.Addr, got, want)
+	}
+	_ = conn.Close()
+	child.WaitExit(t, "the test closed its connection")
+	if code := cmd.ProcessState.ExitCode(); code != 0 {
+		t.Fatalf("the child exited %d:\n%s", code, child.Output.String())
+	}
+
+	// The test's cleanup has not run yet, so a bind that succeeds now shows Start closed the test's
+	// copy, and the child released its own on exit.
+	rebound, err := net.Listen("tcp", held.Addr)
+	if err != nil {
+		t.Fatalf("bind %s after the child exited: %v; want it free", held.Addr, err)
+	}
+	_ = rebound.Close()
 }

@@ -52,14 +52,14 @@ before and after it named the daemon whole, with git's `:(glob)` pathspecs:
 ```bash
 paths() { git show "$1:.github/workflows/worker-image.yaml" | python3 -c 'import sys,yaml; print(" ".join(":(glob)"+p for p in yaml.safe_load(sys.stdin)[True]["pull_request"]["paths"]))'; }
 old=$(paths dab7f13d); new=$(paths 2b6dec37)
-gh pr list -R sjawhar/legion --state merged -L 50 --json number,mergeCommit -q '.[] | "\(.number) \(.mergeCommit.oid)"' |
+gh pr list -R cybermonklabs/legion --state merged -L 50 --json number,mergeCommit -q '.[] | "\(.number) \(.mergeCommit.oid)"' |
   while read -r n sha; do
     git diff --quiet "$sha~1" "$sha" -- $old; o=$?; git diff --quiet "$sha~1" "$sha" -- $new; w=$?
     echo "$n old=$o new=$w"
   done | awk '{o+=($2=="old=1"); w+=($3=="new=1")} END {print "merged PRs:", NR, "built before:", o, "built after:", w}'
 # merged PRs: 50 built before: 27 built after: 28   (the one added is #1466, packages/contracts)
 
-gh api "repos/sjawhar/legion/actions/workflows/worker-image.yaml/runs?event=pull_request&status=success&per_page=100" \
+gh api "repos/cybermonklabs/legion/actions/workflows/worker-image.yaml/runs?event=pull_request&status=success&per_page=100" \
   --jq '[.workflow_runs[] | ((.updated_at|fromdate)-(.run_started_at|fromdate))] | sort | "runs: \(length) median_s: \(.[length/2|floor])"'
 # runs: 100 median_s: 274
 ```
