@@ -109,6 +109,7 @@ func TestDocumentEditsKeepEmojiWhenOneReplacesAnotherSharingASurrogate(t *testin
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			handler := newTestHandler(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Emoji replace", "before "+test.was+" after\n")
 			applyEdits(t, handler, issue.PrimaryArtifactID, []map[string]any{

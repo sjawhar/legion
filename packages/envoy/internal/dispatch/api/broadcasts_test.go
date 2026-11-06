@@ -906,6 +906,7 @@ func TestBroadcastRecipientsReadBackInRequestOrder(t *testing.T) {
 		{name: "an excluded session leaves the remaining order intact", excluded: "bravo"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
 			live := make([]string, 0, len(requested))
 			want := make([]string, 0, len(requested))
 			for _, sessionID := range requested {

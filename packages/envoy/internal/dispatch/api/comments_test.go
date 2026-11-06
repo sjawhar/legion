@@ -260,6 +260,7 @@ func TestReplyToADecidedSuggestionLandsAndKeepsTheDecision(t *testing.T) {
 	t.Parallel()
 	for _, action := range []string{"accept", "reject"} {
 		t.Run(action, func(t *testing.T) {
+			t.Parallel()
 			handler := newTestHandler(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Reply after "+action, "The quick brown fox")
 			root := createThreadComment(t, handler, issue.Key, map[string]any{

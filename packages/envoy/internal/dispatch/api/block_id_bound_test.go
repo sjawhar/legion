@@ -104,6 +104,7 @@ func TestAWriteNamingABlockIDPastTheBoundIsWritten(t *testing.T) {
 			}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Long block id", "Context paragraph.\n")
 
@@ -114,6 +115,7 @@ func TestAWriteNamingABlockIDPastTheBoundIsWritten(t *testing.T) {
 	}
 
 	t.Run("an id at the bound", func(t *testing.T) {
+		t.Parallel()
 		_, handler, _ := browserDocumentService(t)
 		issue := createInteractionIssue(t, handler, "TEST", "Block id at the bound", "Context paragraph.\n")
 		atBound := randomBlockID(t, text.MaxBlockIDBytes)

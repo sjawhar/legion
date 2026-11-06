@@ -260,6 +260,7 @@ func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
 			quote: "Which one?", action: "reject", want: "Intro.", browserInsert: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			documentService, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Beside a malformed ask", test.seed)
 			if test.browser != "" {
@@ -307,6 +308,7 @@ func TestSuggestionAcceptKeepsTheCalloutItLandsIn(t *testing.T) {
 		{name: "two paragraphs", replaceWith: "a\n\nb\n", body: "a\n\nb\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			var documentService *docs.Service
 			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -411,6 +413,7 @@ func TestSuggestionAcceptRewritesOnlyTheTypedBlockUnderItsOwnID(t *testing.T) {
 			want: "::::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n\nTail.\n::::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			var documentService *docs.Service
 			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -486,6 +489,7 @@ func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.
 			replaceWith: ":::callout{#c9 kind=\"note\" title=\"\"}\n" + newAsk, want: "Intro.\n\n::::callout{#c9 kind=\"note\" title=\"\"}\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nReworded?\n:::\n::::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			handler, _ := blockAskHandler(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Rewritten in place", test.spec)
 			if strings.Contains(test.spec, ":::ask") {
@@ -625,6 +629,7 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 			replaceWith: "```\ncode\n```\n", code: "INVALID_OP", reason: `field \"replace_with\"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			documentService, handler, _ := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "A refused accept", test.spec)
 			if test.browser != "" {
@@ -715,10 +720,12 @@ func TestAnchorInputRequiresQuoteXorMarkID(t *testing.T) {
 		{name: "empty quote", anchor: map[string]any{"artifact": "spec", "quote": ""}, code: "INVALID_ANCHOR"},
 		{name: "legacy range", anchor: map[string]any{"artifact": "spec", "from": 0, "to": 3}, code: "INVALID_JSON"},
 	}
+	// Every case is refused before the server writes anything, so one server and one issue
+	// serve them all: no case can see another's work.
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Invalid anchor", "The quick brown fox")
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			handler := newTestHandler(t)
-			issue := createInteractionIssue(t, handler, "TEST", "Invalid anchor", "The quick brown fox")
 			created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 				"question": "Why?",
 				"anchor":   test.anchor,

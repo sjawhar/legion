@@ -268,6 +268,7 @@ func TestOnlyAVerdictIsStored(t *testing.T) {
 		http.StatusRequestTimeout, http.StatusTooManyRequests,
 	} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			t.Parallel()
 			rig := newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
 				if run == 1 {
 					writeError(w, "SOMETHING", status, "this attempt")
@@ -289,6 +290,7 @@ func TestOnlyAVerdictIsStored(t *testing.T) {
 	}
 	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			t.Parallel()
 			rig := newKeyedRig(t, func(_ int32, w http.ResponseWriter, _ *http.Request) {
 				writeError(w, "REFUSED", status, "refused")
 			})

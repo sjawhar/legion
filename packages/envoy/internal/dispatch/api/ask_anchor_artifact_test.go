@@ -24,6 +24,7 @@ func TestAskRoutesAnswerOverAnAnchorArtifactIDThatNamesNoDocument(t *testing.T) 
 		{name: "a json number", rawJSON: `5`},
 	} {
 		t.Run(stored.name, func(t *testing.T) {
+			t.Parallel()
 			handler, database := newTestHandlerWithStore(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Anchored asks", "The quick brown fox jumps over the lazy dog")
 			blockDocument, _ := secondDocument(t, handler, issue.Key)

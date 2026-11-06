@@ -392,6 +392,7 @@ func TestABrowsersNulLeavesTheDocumentVersionable(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			documentService, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Browser NUL", test.spec)
 			if test.anchor != "" {
@@ -465,6 +466,7 @@ func TestABlockIDHoldingANulIsMintedAgain(t *testing.T) {
 		{"callout", "before\n\n:::callout{#c1 kind=\"note\"}\ninside\n:::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			documentService, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Crafted block id", test.spec)
 			peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
@@ -512,6 +514,7 @@ func TestABlockIDTheEditorKeepsFromAPasteSurvivesSettlement(t *testing.T) {
 	t.Parallel()
 	for _, id := range []string{"q:1", "décision"} {
 		t.Run(id, func(t *testing.T) {
+			t.Parallel()
 			documentService, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Pasted block id", "before\n")
 			pasted, err := pmdoc.Parse(":::ask{#pasted urgency=\"med\"}\nWhich one?\n\n- A\n- B\n:::\n")
@@ -619,6 +622,7 @@ func TestABlockIDHoldingANulIsServedAndVersionedAsAReplacementCharacter(t *testi
 		{"callout", "before\n\n:::callout{#c1 kind=\"note\"}\ninside\n:::\n", 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			documentService, handler, _ := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Unsettled NUL id", test.spec)
 			peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)

@@ -113,6 +113,7 @@ func TestPutDeliverySettingsRefusesABadProductionJobList(t *testing.T) {
 		"duplicate": {[]string{"release / release", " release / release"}, `production_job_names names "release / release" twice`},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}}
 			handler, database := newArchitectureSourceServer(t, fake)
 			body := map[string]any{

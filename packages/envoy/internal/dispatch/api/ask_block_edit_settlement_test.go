@@ -484,6 +484,7 @@ func TestEditBlockAskCarriesAQuestionWhoseLineLooksLikeABlock(t *testing.T) {
 		"Which transport?\\\nnext",
 	} {
 		t.Run(question, func(t *testing.T) {
+			t.Parallel()
 			handler, _ := blockAskHandler(t)
 			issue, askID := seedBlockAsk(t, handler, "Block ask block-marker line", "decision", transportAsk, "Which transport?")
 

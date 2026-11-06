@@ -229,6 +229,7 @@ func TestRouteStatusIsUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
 // route reads unknown with the reason, never no_holder, and reads live again once the list is
 // back.
 func TestRouteStatusIsUnknownWhileTheListenerRefills(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _ := routeStatusServer(t, roster)
@@ -431,6 +432,7 @@ func stateRosterServer(t *testing.T, rows []map[string]any) *server {
 // reads as "nobody is working this", and which would have a person hand the work to someone
 // else). Both kinds of route answer the same way, since both reach one session.
 func TestRouteReachNamesAnUnresponsiveHolderRatherThanDroppingIt(t *testing.T) {
+	t.Parallel()
 	served := stateRosterServer(t, []map[string]any{
 		{"session_id": "ses-live", "state": "live", "last_seen": 1700000000000, "roles": []string{"legion-merger"}},
 		{"session_id": "ses-stalled", "state": "unresponsive", "last_seen": 1699999000000, "roles": []string{"legion-planner"}},
@@ -462,6 +464,7 @@ func TestRouteReachNamesAnUnresponsiveHolderRatherThanDroppingIt(t *testing.T) {
 // whose holder has stopped answering - and no_holder, which is the filter an audit uses to find
 // unworked issues, keeps excluding them.
 func TestRouteStatusFilterTakesHolderUnresponsive(t *testing.T) {
+	t.Parallel()
 	for _, value := range []string{"live", "holder_unresponsive", "no_holder", "unknown", ""} {
 		if got, err := parseRouteStatusFilter(value); err != nil || got != value {
 			t.Errorf("route_status=%q: %q, %v; want it accepted", value, got, err)
@@ -478,6 +481,7 @@ func TestRouteStatusFilterTakesHolderUnresponsive(t *testing.T) {
 // does not list as gone; takeable_at is the instant another agent may take the claim without a
 // person, which is only ever answered for a holder that will come free.
 func TestClaimLivenessDatesWhenAnUnresponsiveHoldersClaimComesFree(t *testing.T) {
+	t.Parallel()
 	const lastSeen = 1700000000000
 	served := stateRosterServer(t, []map[string]any{
 		{"session_id": "ses-live", "state": "live", "last_seen": lastSeen},
@@ -540,6 +544,7 @@ func TestClaimLivenessDatesWhenAnUnresponsiveHoldersClaimComesFree(t *testing.T)
 // stores names a state on every session it carries - and never gone, which is a session the
 // list does not carry at all - so a state it does name is read as it stands.
 func TestAStoredRowFromBeforeSessionStatesReadsItsSessionsLive(t *testing.T) {
+	t.Parallel()
 	const lastSeen = 1700000000000
 	stored := []byte(`[
 		{"session_id":"ses-old","title":"worker ses-old","roles":["sre"],"last_seen":1700000000000},
@@ -688,6 +693,7 @@ func TestAListenerFailureOneServerMetReadsUnknownOnTheOther(t *testing.T) {
 // Agents read the ENVOY_REFILLING answer with the listener's own Retry-After. Both TTLs are a
 // minute, so a slow machine's reads stay inside them.
 func TestARefillOneServerMetIsARefillOnTheOther(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	roster.refilling.Store(true)

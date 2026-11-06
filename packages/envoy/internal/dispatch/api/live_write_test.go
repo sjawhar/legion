@@ -204,6 +204,7 @@ func TestCommentProjectionFailureNeverReachesTheRoom(t *testing.T) {
 	t.Parallel()
 	for _, action := range []string{"reply", "resolve"} {
 		t.Run(action, func(t *testing.T) {
+			t.Parallel()
 			f := newHeldWriteFixture(t, time.Hour, func(failure *postApplyFailureDocs) {
 				failure.failProjectMark = true
 				failure.projectMarkPasses = 1

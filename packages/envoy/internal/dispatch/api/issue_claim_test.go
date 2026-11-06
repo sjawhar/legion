@@ -1046,6 +1046,7 @@ func TestContendedClaimEndsTheCycleAtTheBound(t *testing.T) {
 func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 	t.Parallel()
 	t.Run("a stale self-release", func(t *testing.T) {
+		t.Parallel()
 		live := &liveRegistry{}
 		live.set("session-one", "session-two")
 		handler, database, deps := claimHandler(t, live)
@@ -1064,6 +1065,7 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 	})
 
 	t.Run("a claim judged against nobody", func(t *testing.T) {
+		t.Parallel()
 		live := &liveRegistry{}
 		live.set("session-one", "session-two")
 		handler, database, deps := claimHandler(t, live)

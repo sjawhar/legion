@@ -137,6 +137,7 @@ func TestRelatedCheckRanksMoreChosenWordsAboveOneRepeated(t *testing.T) {
 		{"meaning and keywords", testServerOptions{embedder: &fakeEmbedder{}}, "meaning_and_keywords"},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
+			t.Parallel()
 			handler, database, deps := newTestServer(t, stage.options)
 			createSuggestionProject(t, handler, "COORD")
 			for index := range 5 {

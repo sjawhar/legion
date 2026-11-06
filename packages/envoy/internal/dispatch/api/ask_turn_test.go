@@ -403,6 +403,7 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 		},
 	} {
 		t.Run(path.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			live := true
 			sent := []map[string]any{}

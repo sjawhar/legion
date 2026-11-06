@@ -56,6 +56,7 @@ func TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing(t *test
 		{"copied_from_document", "dispatch://TEST/artifact/other", `copied_from_document="dispatch://TEST/artifact/other"`},
 	} {
 		t.Run(tc.attribute, func(t *testing.T) {
+			t.Parallel()
 			handler, database, documents := settlingCarryDocuments(t, 2*time.Second)
 			issue := createInteractionIssue(t, handler, "TEST", "Approved "+tc.attribute+" other than the row's", "Context\n\n"+regionAsk)
 			asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -93,6 +94,7 @@ func TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing(t *test
 		})
 	}
 	t.Run("row-true", func(t *testing.T) {
+		t.Parallel()
 		handler, _, documents := settlingCarryDocuments(t, 2*time.Second)
 		issue := createInteractionIssue(t, handler, "TEST", "Approved as the row has it", "Context\n\n"+regionAsk)
 		asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})

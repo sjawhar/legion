@@ -71,6 +71,7 @@ func TestRepeatedInsertsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T
 		{"a thousand table rows", tableSpec + strings.Repeat("| x | y |\n", 4_000), "A10", strings.Repeat("| x | y |\n", 1_000)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			handler := newTestHandler(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Repeated growth", test.spec)
 			const inserts = 2
@@ -238,6 +239,8 @@ func TestAskEditsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 //
 // It runs on its own: the bound is on what the whole process allocates (runtime.ReadMemStats), so
 // every byte a test running beside it allocates would count against this one.
+// Serial: it measures the process, reading runtime.ReadMemStats, which counts what every test
+// running beside it allocates as well.
 func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 	handler, _ := blockAskHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask text", openAsksSpec(1))
@@ -283,6 +286,7 @@ func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 func TestAnAnswerTheDocumentHasNoRoomForIsKeptOnItsAskAndLeftOutOfItsBlock(t *testing.T) {
 	t.Parallel()
 	t.Run("words", func(t *testing.T) {
+		t.Parallel()
 		prose := boundedAnswer()
 		handler, _ := blockAskHandler(t)
 		const asks = 3
@@ -312,6 +316,7 @@ func TestAnAnswerTheDocumentHasNoRoomForIsKeptOnItsAskAndLeftOutOfItsBlock(t *te
 		}
 	})
 	t.Run("a choice of an option at the ask bound", func(t *testing.T) {
+		t.Parallel()
 		handler, _ := blockAskHandler(t)
 		// The label takes the ask bound less the question, since an upload is held to an ask's
 		// wording as a route is (validateWrittenAskBlocks). Each ">" renders escaped as seven
@@ -356,6 +361,7 @@ func TestAnAnswerTheDocumentHasNoRoomForIsKeptOnItsAskAndLeftOutOfItsBlock(t *te
 // INVALID_ASK_BLOCK naming the block, and no issue is written; the same spec at the bound is
 // taken, and it is the project's first issue.
 func TestAnUploadedDecisionBlockIsHeldToTheSameBoundAsAnAskRoute(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "TEST project"}, "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())

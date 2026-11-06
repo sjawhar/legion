@@ -12,6 +12,7 @@ import (
 // Every field of GET /api/v1/limits is the constant that enforces it, so a client that prints
 // them (`dispatch limits`) says what this server refuses rather than a number of its own.
 func TestLimitsAnswersTheConstantsTheServerEnforces(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/limits", nil)

@@ -23,6 +23,7 @@ func paragraphBody(count, width int) string {
 // its six blocks. A comment whose second paragraph alone passes contracts.DispatchBlockUnits is
 // refused naming that block, and the issue's comments are as they were.
 func TestACommentIsBoundedBlockByBlockRatherThanAsAWhole(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "BLK", "Block bounds", "before")
 

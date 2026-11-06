@@ -74,6 +74,7 @@ func TestAWriteRepeatingAHeldBlockIDIsRefused(t *testing.T) {
 			}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			handler, _ := blockAskHandler(t)
 			issue, askID := seedBlockAsk(t, handler, "Held block id", "decision", transportAsk, "Which transport?")
 			read := readBlockAsk(t, handler, askID)
@@ -115,6 +116,7 @@ func TestAnAcceptRewritingATypedBlockUnderItsOwnIDIsTaken(t *testing.T) {
 		{name: "a span across the ask", quote: "Context Which transport?"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			handler, _ := blockAskHandler(t)
 			issue, askID := seedBlockAsk(t, handler, "Rewritten in place", "decision", freeText, "Which transport?")
 			read := readBlockAsk(t, handler, askID)
@@ -167,6 +169,7 @@ func TestABlockReplacementInsideAParagraphIsTaken(t *testing.T) {
 			want: "Alpha&#32;\n\n:::callout{#<minted> kind=\"note\" title=\"\"}\nA note.\n:::\n\n&#32;gamma.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			handler, _ := blockAskHandler(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Split paragraph", "Alpha beta gamma.\n")
 			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
@@ -225,6 +228,7 @@ func TestAWriteNamingEachBlockIDOnceIsStoredAsBefore(t *testing.T) {
 			":::ask{#q-1 urgency=\"med\" multiple=\"false\"}\nWhich one?\n:::\n\n:::callout{#note-2 kind=\"warning\"}\nCareful.\n:::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			parsed, err := pmdoc.Parse(test.markdown)
 			if err != nil {
 				t.Fatal(err)

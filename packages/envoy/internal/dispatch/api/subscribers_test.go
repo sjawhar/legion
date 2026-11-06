@@ -336,6 +336,7 @@ func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
 // refused as refilling answers 503 ENVOY_REFILLING with the listener's Retry-After, never a
 // subscriber list missing rows; any other refusal is still ENVOY_UNAVAILABLE.
 func TestListSubscribersReportsARefillingListenerAsRefilling(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")

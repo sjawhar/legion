@@ -888,6 +888,7 @@ func TestARefusedFileUploadLeavesNoObjectInTheFileStore(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			files := filestest.NewMemory()
 			handler, _, _ := newTestServer(t, testServerOptions{files: files})
 			issue := createArtifactIssue(t, handler)

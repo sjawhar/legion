@@ -550,6 +550,7 @@ func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
 		{"copied_from_document", "dispatch://TEST/artifact/other", `copied_from_document="dispatch://TEST/artifact/other"`},
 	} {
 		t.Run(tc.attribute, func(t *testing.T) {
+			t.Parallel()
 			handler, database, documents := settlingCarryDocuments(t, time.Second)
 			issue := createInteractionIssue(t, handler, "TEST", "Forged "+tc.attribute+" under the answer", "Context\n\n"+regionAsk)
 			asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})

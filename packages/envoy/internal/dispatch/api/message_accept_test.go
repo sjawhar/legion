@@ -704,6 +704,7 @@ func TestEveryPathThatOpensAnAttemptRecordsWhoAskedForIt(t *testing.T) {
 	}
 
 	t.Run("direct message, retries and a direct reply", func(t *testing.T) {
+		t.Parallel()
 		handler, database, root, _, _ := directConversationFrom(t, "alice")
 		assertRequester(t, database, root.ID, 1, alice)
 		if retry := retryDelivery(t, handler, root.ID, "steer", "bob"); retry.Code != http.StatusCreated {
@@ -724,6 +725,7 @@ func TestEveryPathThatOpensAnAttemptRecordsWhoAskedForIt(t *testing.T) {
 	})
 
 	t.Run("a reply that inherits its thread's delivery", func(t *testing.T) {
+		t.Parallel()
 		live := true
 		sent := []map[string]any{}
 		listener := sessionListener(t, &live, &sent)
@@ -744,6 +746,7 @@ func TestEveryPathThatOpensAnAttemptRecordsWhoAskedForIt(t *testing.T) {
 	})
 
 	t.Run("a new mode supersedes a stranded attempt; the same mode resumes it", func(t *testing.T) {
+		t.Parallel()
 		handler, database, root, _, _ := directConversationFrom(t, "alice")
 		strandMessageAttempt(t, database, root.ID)
 		// The same mode resumes attempt 1 under its own number: whoever resumes it, alice is still
@@ -763,6 +766,7 @@ func TestEveryPathThatOpensAnAttemptRecordsWhoAskedForIt(t *testing.T) {
 	})
 
 	t.Run("a broadcast", func(t *testing.T) {
+		t.Parallel()
 		listener, _ := newBroadcastListener(t, broadcastSessions)
 		handler, database := newTargetedMessageHandler(t, listener.URL)
 		created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{

@@ -142,6 +142,7 @@ func TestClosingAnIssueWithdrawsItsOpenAsksAndReopeningRestoresThem(t *testing.T
 	t.Parallel()
 	for _, closer := range closers {
 		t.Run(closer.name, func(t *testing.T) {
+			t.Parallel()
 			f := newCloseAsksFixture(t)
 			preClose := readIssueDetail(t, f.handler, f.issue)
 			if len(preClose.OpenAsks) != 4 {
@@ -287,6 +288,7 @@ func TestClosingAnIssueWithdrawsADecisionBlockNotYetSettled(t *testing.T) {
 			name = "settlement fails"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			var documentService *docs.Service
 			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -368,6 +370,7 @@ func TestClosingAnIssueWithdrawsADecisionBlockPastedUnderARepeatedID(t *testing.
 			name = "settlement fails"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			var documentService *docs.Service
 			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Settle: time.Hour})

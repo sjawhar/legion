@@ -85,6 +85,8 @@ func TestBlocksListATablesRowsAndCellsWhereTheBlockRoutePlacesThem(t *testing.T)
 //
 // It runs on its own: the bound is on what the whole process allocates (runtime.ReadMemStats), so
 // every byte a test running beside it allocates would count against this one.
+// Serial: it measures the process, reading runtime.ReadMemStats, which counts what every test
+// running beside it allocates as well.
 func TestBlocksOfAHeldDocumentShareOneSpanBudget(t *testing.T) {
 	documentService, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Spanned tables", "Intro.\n")

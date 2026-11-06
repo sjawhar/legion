@@ -88,6 +88,7 @@ func requireAskReadsEmptySelected(t *testing.T, handler http.Handler, issueKey, 
 func TestAskAnswerWithoutSelectedReadsAsEmptyList(t *testing.T) {
 	t.Parallel()
 	t.Run("answered with text only", func(t *testing.T) {
+		t.Parallel()
 		handler := newTestHandler(t)
 		issue := createInteractionIssue(t, handler, "TEST", "Text-only answer", "A spec")
 		askID := createSearchAsk(t, handler, issue.Key, "Which bell metal?", "Bronze", "Brass")
@@ -98,6 +99,7 @@ func TestAskAnswerWithoutSelectedReadsAsEmptyList(t *testing.T) {
 
 	// A row and an event stored before answers wrote an empty list hold null; the reads fix it.
 	t.Run("stored null", func(t *testing.T) {
+		t.Parallel()
 		handler, database := newTestHandlerWithStore(t)
 		issue := createInteractionIssue(t, handler, "TEST", "Stored null answer", "A spec")
 		askID := createSearchAsk(t, handler, issue.Key, "Which clapper wood?", "Oak", "Ash")

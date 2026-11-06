@@ -33,6 +33,7 @@ func TestEveryReadServesATreeAtTheDepthBound(t *testing.T) {
 		{name: "past the bound", depth: pmdoc.MaxTreeDepth + 1, status: http.StatusConflict, versions: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			documentService, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Deep document", "before\n")
 			artifactID := issue.PrimaryArtifactID

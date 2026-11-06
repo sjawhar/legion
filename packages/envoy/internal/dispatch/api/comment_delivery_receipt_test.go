@@ -16,6 +16,7 @@ import (
 func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 	t.Parallel()
 	t.Run("different sessions", func(t *testing.T) {
+		t.Parallel()
 		const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
 			`{"session_id":"s2","title":"reviewer","capabilities":["steer"]}]`
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +53,7 @@ func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 	})
 
 	t.Run("role and direct mention share a session", func(t *testing.T) {
+		t.Parallel()
 		const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {

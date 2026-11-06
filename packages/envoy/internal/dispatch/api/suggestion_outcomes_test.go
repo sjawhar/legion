@@ -209,6 +209,8 @@ func TestAnEventByTheActorOnTheSuggestedIssueWakesTheSweepAndMarksActedOn(t *tes
 // on the suggestion. The comment wakes the sweep at once, but an event is judged by only once it
 // is settle old, by which time the update is written too, so the rules see both and the acted_on
 // rules run before the overridden one: the comment is not judged alone as an override.
+// Serial: startIdleSweep measures a quiet window of wall-clock time (storetest.AwaitQuiet)
+// before the test's own write, and a parallel test's CPU is what would stretch that window.
 func TestWritesMomentsApartAreJudgedTogetherAsActedOn(t *testing.T) {
 	const settle = 1500 * time.Millisecond
 	sweep := startIdleSweep(t, "OTOGETHER", settle)
@@ -290,6 +292,9 @@ func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
 // visible only after a pass has read that event and moved its cursor past it. The next pass
 // judges it against that event all the same, with no further event written, because a suggestion
 // no pass has swept is judged against all its events rather than only the page's.
+// Serial: it reads the event log by id cursor up to the safe horizon, which is instance-wide -
+// proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+// (internal/dispatch/events, horizon.go).
 func TestASuggestionCommittedAfterALaterStartedEventIsStillJudged(t *testing.T) {
 	ctx := context.Background()
 	handler, database, deps := newTestServer(t, testServerOptions{})
@@ -592,6 +597,9 @@ func suggestionOutcomeAt(t *testing.T, srv *server, sourceIssueKey, suggestedID 
 // Once A commits, the next pass reads its event and judges the suggestion by it, once. A pass
 // reading `id > cursor` uncapped moves the cursor past A's event on the first pass, and the
 // suggestion is then never judged.
+// Serial: it reads the event log by id cursor up to the safe horizon, which is instance-wide -
+// proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+// (internal/dispatch/events, horizon.go).
 func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	ctx := t.Context()
 	handler, database, deps := newTestServer(t, testServerOptions{})
@@ -860,6 +868,9 @@ func TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway(t *testin
 // read that 0 as its safe horizon would move the cursor to the highest event id at or below it
 // (startSuggestionCursor), which is 0, and every later pass would then page through the whole
 // event log before reaching anything it has to judge.
+// Serial: it reads the event log by id cursor up to the safe horizon, which is instance-wide -
+// proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+// (internal/dispatch/events, horizon.go).
 func TestTheFirstPassOfAJustStartedProcessStartsAtTheNewestEvent(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	// srv's is the one events.Horizon of a process that has just started: on the store's horizon

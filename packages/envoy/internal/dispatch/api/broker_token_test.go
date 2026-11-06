@@ -435,6 +435,7 @@ func TestABrokerTokenProvedByAnotherKeyIsRefused(t *testing.T) {
 func TestBrokerTokenRefusalsEachHaveTheirOwnCode(t *testing.T) {
 	t.Parallel()
 	t.Run("not live", func(t *testing.T) {
+		t.Parallel()
 		rig := newBrokerTokenRig(t)
 		caller := newBrokerCaller(t)
 		const token = "a-token-the-broker-revoked"
@@ -450,6 +451,7 @@ func TestBrokerTokenRefusalsEachHaveTheirOwnCode(t *testing.T) {
 		}
 	})
 	t.Run("a spent proof", func(t *testing.T) {
+		t.Parallel()
 		rig := newBrokerTokenRig(t)
 		caller := newBrokerCaller(t)
 		const token = "a-token-whose-proof-is-captured"
@@ -468,6 +470,7 @@ func TestBrokerTokenRefusalsEachHaveTheirOwnCode(t *testing.T) {
 		}
 	})
 	t.Run("the broker unreachable", func(t *testing.T) {
+		t.Parallel()
 		rig := newBrokerTokenRig(t)
 		caller := newBrokerCaller(t)
 		const token = "a-token-nobody-can-be-asked-about"
@@ -682,6 +685,7 @@ func TestTheRateRefusalCarriesTheWaitInItsHeader(t *testing.T) {
 // session's credential like any other — whoami names the session and the service, and a read
 // answers — and only its writes are refused (the test below).
 func TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-naming-no-person"
@@ -718,6 +722,7 @@ func TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami(t *testing.T) {
 // the rows below are one of each. Each refusal names the command that makes the write possible,
 // and nothing lands.
 func TestAServiceOnlyBrokerTokenIsRefusedEveryWrite(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-that-may-not-write"
@@ -781,6 +786,7 @@ func TestAServiceOnlyBrokerTokenIsRefusedEveryWrite(t *testing.T) {
 // was — the broker holds it live and the proof check is what turns it down — so no write
 // refusal is ever reached, there being no caller to refuse, and a write under it lands nothing.
 func TestAServiceOnlyBrokerTokenWithNoProofIsRefused(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-sent-without-its-proof"

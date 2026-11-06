@@ -273,6 +273,7 @@ func TestACommentsMentionFinishesWhenItsClientGivesUp(t *testing.T) {
 		"a document comment": sweepRoutes["a document comment's mention"].path,
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			sending, proceed := make(chan struct{}), make(chan struct{})
 			letProceed := sync.OnceFunc(func() { close(proceed) })
 			var once sync.Once
@@ -647,6 +648,7 @@ func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
 func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 	t.Parallel()
 	t.Run("a comment's mention", func(t *testing.T) {
+		t.Parallel()
 		listener, sends := newBroadcastListener(t, agentSessions)
 		handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
 		rig := sweepRig{t: t, database: database}
@@ -684,6 +686,7 @@ func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 		}
 	})
 	t.Run("a message", func(t *testing.T) {
+		t.Parallel()
 		listener, sends := newBroadcastListener(t, agentSessions)
 		handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
 		rig := sweepRig{t: t, database: database}

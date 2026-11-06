@@ -36,6 +36,7 @@ func TestClosingAnIssueAgainstAConcurrentResolveLeavesOneRecord(t *testing.T) {
 			name = "a decision block's ask"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			f := newCloseAsksFixture(t)
 			ask := f.personAsk
 			if block {

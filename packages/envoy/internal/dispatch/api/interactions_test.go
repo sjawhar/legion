@@ -1442,6 +1442,7 @@ func TestAnUploadClearsPendingCreditOnlyWhenItChangesTheDocument(t *testing.T) {
 		{name: "an unchanged re-upload", replacement: "before\n\nAlice wrote this.\n", find: "before", want: []model.Actor{session, alice}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			documentService, handler, _ := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Overwritten author", "before")
 			path := "/api/v1/issues/" + issue.Key + "/artifacts"
@@ -2147,6 +2148,7 @@ func TestEditArtifactThatChangesNothingMintsNoVersionAndSaysSo(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			handler := newTestHandler(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Unchanged edit", "before")
 			edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", test.request)

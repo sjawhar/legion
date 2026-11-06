@@ -967,6 +967,7 @@ func TestArchitectureSourcesSyncEverySource(t *testing.T) {
 			"CORE legion/arch@main enabled=true commit=" + shaArch + " error=the branch does not exist: main on legion/arch components=2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			fake := twoSourceFake()
 			handler, _ := newArchitectureSourceServer(t, fake)
 			createTestProject(t, handler, "CORE")

@@ -587,6 +587,7 @@ func TestMentionDuringAnUnanswerableRegistryReadIsNotRecordedAsNoLiveSession(t *
 // A record the registry itself calls gone is the other half: a 200 is not a live session, and
 // the state, never the status code, says which.
 func TestDeliveryResolvesAnUnresponsiveHolderAndRefusesAGoneOne(t *testing.T) {
+	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("include") != "unresponsive" {
 			w.WriteHeader(http.StatusNotFound)

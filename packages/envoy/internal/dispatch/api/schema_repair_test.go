@@ -151,6 +151,7 @@ func TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike(t *testing.T) {
 	t.Parallel()
 	for _, test := range outsideSchemaCorruptions {
 		t.Run(test.Name, func(t *testing.T) {
+			t.Parallel()
 			handler, database, deps := newTestServer(t, testServerOptions{})
 			issue := createArtifactIssue(t, handler)
 			artifact := createBeforeDocument(t, handler, issue.Key, "routes.md")
@@ -200,6 +201,7 @@ func TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike(t *testing.T) {
 	}
 
 	t.Run("a paragraph whose text holds a string embed", func(t *testing.T) {
+		t.Parallel()
 		handler, database, deps := newTestServer(t, testServerOptions{})
 		issue := createArtifactIssue(t, handler)
 		artifact := createCorruptedDocument(t, handler, database, deps, issue.Key, "routes.md", appendStringEmbed)
@@ -231,6 +233,7 @@ func TestOutsideSchemaArtifactIsRepairableThroughUpload(t *testing.T) {
 	t.Parallel()
 	for _, test := range outsideSchemaCorruptions {
 		t.Run(test.Name, func(t *testing.T) {
+			t.Parallel()
 			handler, database, deps := newTestServer(t, testServerOptions{})
 			issue := createArtifactIssue(t, handler)
 			artifact := createCorruptedDocument(t, handler, database, deps, issue.Key, "repair.md", test.Corrupt)

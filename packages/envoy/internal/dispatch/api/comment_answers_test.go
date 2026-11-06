@@ -37,6 +37,7 @@ func requireReplyTo(t *testing.T, what string, got *string, want string) {
 // reply_to is still the root, exactly as before, and its answers is the middle comment; a reply
 // to the root records the root in both, so a reader never has to guess which replies carry it.
 func TestAReplyKeepsTheCommentItAnswers(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Nested replies", "A spec")
 
@@ -114,6 +115,7 @@ func TestAReplyKeepsTheCommentItAnswers(t *testing.T) {
 // A reply that names an ask and no comment answers no comment: its thread hangs under the ask,
 // which ask_id records, and answers stays null.
 func TestAReplyNamingAnAskAnswersNoComment(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Replies to an ask", "A spec")
 	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?")
@@ -149,6 +151,7 @@ func TestAReplyNamingAnAskAnswersNoComment(t *testing.T) {
 // A reply that names a block of a comment keeps both pointers: replies_to_block for the block
 // and answers for the comment it is a block of, while reply_to stays the thread's head.
 func TestAReplyNamingABlockKeepsBothPointers(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "A block and its comment", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "The root."}, "alice")
@@ -217,6 +220,7 @@ func TestAReplyNamingABlockKeepsBothPointers(t *testing.T) {
 // the leaf's edge to it, and the replies_to edges the view listed before are unchanged - both
 // replies still point at the thread's head and at nothing else.
 func TestTheGraphListsTheCommentAReplyAnswers(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "The answers arm", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "The root."}, "alice")
@@ -266,6 +270,7 @@ func TestTheGraphListsTheCommentAReplyAnswers(t *testing.T) {
 // both replies, each with reply_to the root, and a reply read by id carries the root as its
 // reply_to and its own thread beside it.
 func TestTheThreadReadsAreUnchangedByTheAnswersColumn(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Thread reads", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "The root."}, "alice")
@@ -321,6 +326,7 @@ func TestTheThreadReadsAreUnchangedByTheAnswersColumn(t *testing.T) {
 // A delivery callback's reply answers the comment it was handed, not the head of that comment's
 // thread: its reply_to climbs to the head exactly as before, and answers is comment {id}.
 func TestADeliveryCallbackReplyAnswersTheCommentItWasHanded(t *testing.T) {
+	t.Parallel()
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -359,6 +365,7 @@ func TestADeliveryCallbackReplyAnswersTheCommentItWasHanded(t *testing.T) {
 }
 
 func TestARootsDirectReplyIsReferencedOnce(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "One direct reply", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Root."}, "alice")
@@ -380,6 +387,7 @@ func TestARootsDirectReplyIsReferencedOnce(t *testing.T) {
 }
 
 func TestANestedReplyIsReferencedByTheCommentItAnswers(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "The direct parent", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Root."}, "alice")
@@ -405,6 +413,7 @@ func TestANestedReplyIsReferencedByTheCommentItAnswers(t *testing.T) {
 }
 
 func TestAskingForAnswersListsEveryAnswer(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Explicit answers", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Root."}, "alice")

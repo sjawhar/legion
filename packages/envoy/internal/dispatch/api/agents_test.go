@@ -198,6 +198,7 @@ func TestAgentsReportsListenerUnavailable(t *testing.T) {
 	t.Parallel()
 	for name, envoyURL := range map[string]string{"refused": "http://127.0.0.1:1", "unconfigured": ""} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			response := dispatchRequest(t, agentsHandler(t, envoyURL), http.MethodGet, "/api/v1/agents", nil, "alice")
 			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
 				t.Fatalf("status %d: %s", response.Code, response.Body.String())
@@ -466,6 +467,7 @@ func requireEnvoyRefilling(t *testing.T, response *httptest.ResponseRecorder, re
 // server process to read (route_roster) and the two cases run different listeners: sharing one
 // database would serve the second case the first one's stored silence, with its Retry-After.
 func TestAgentsReportsARefillingListenerAsRefilling(t *testing.T) {
+	t.Parallel()
 	for retryAfter, want := range map[string]string{"7": "7", "": "5"} {
 		database := storetest.Open(t)
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -86,6 +86,7 @@ func TestAReviewThePreviousReleaseWritesDuringARolloutReadsAsTheNewest(t *testin
 			{name: "approval by an old pod after a changes request", first: "changes_requested", second: "approved"},
 		} {
 			t.Run(owner+"/"+order.name, func(t *testing.T) {
+				t.Parallel()
 				handler, database, deps := newTestServer(t, testServerOptions{})
 				var artifact model.Artifact
 				if owner == "issue document" {

@@ -987,6 +987,24 @@ func TestDocumentEditsCanonicalizeRaggedTableBeforeColumnDeletion(t *testing.T) 
 
 func TestDocumentEditsRejectDeletionOfLastTableRowOrColumn(t *testing.T) {
 	t.Parallel()
+	// Both deletions are refused before the server writes anything, so one server and one
+	// document serve them both: neither case can see the other's work.
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Last table row or column edit", "| Key |\n| --- |\n| A10 |\n")
+	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
+	var tableID string
+	for _, block := range blocks {
+		if block.Type == "table" {
+			tableID = block.ID
+			break
+		}
+	}
+	if tableID == "" {
+		t.Fatalf("blocks = %#v, want a table", blocks)
+	}
+	before := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
 	for _, test := range []struct {
 		name  string
 		op    string
@@ -996,23 +1014,6 @@ func TestDocumentEditsRejectDeletionOfLastTableRowOrColumn(t *testing.T) {
 		{name: "column", op: "delete_column", index: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			handler := newTestHandler(t)
-			issue := createInteractionIssue(t, handler, "TEST", "Last table "+test.name+" edit", "| Key |\n| --- |\n| A10 |\n")
-			blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
-			var tableID string
-			for _, block := range blocks {
-				if block.Type == "table" {
-					tableID = block.ID
-					break
-				}
-			}
-			if tableID == "" {
-				t.Fatalf("blocks = %#v, want a table", blocks)
-			}
-			before := decodeBody[struct {
-				Markdown string `json:"markdown"`
-			}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-
 			rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 				"ops": []map[string]any{{"op": test.op, "block": tableID, "index": test.index}},
 			}, "alice")
@@ -1216,6 +1217,8 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 
 // It runs on its own: the bound is on what the whole process allocates (runtime.ReadMemStats), so
 // every byte a test running beside it allocates would count against this one.
+// Serial: it measures the process, reading runtime.ReadMemStats, which counts what every test
+// running beside it allocates as well.
 func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
 	const maximumAllocation = 128 << 20
 	handler := newTestHandler(t)
@@ -1285,6 +1288,8 @@ func TestDocumentEditsChargeAConditionalBatchItsPaddingOnce(t *testing.T) {
 //
 // It runs on its own: the bound is on what the whole process allocates (runtime.ReadMemStats), so
 // every byte a test running beside it allocates would count against this one.
+// Serial: it measures the process, reading runtime.ReadMemStats, which counts what every test
+// running beside it allocates as well.
 func TestDocumentEditsRefuseANarrowHeaderTableBeforeItsCells(t *testing.T) {
 	const maximumAllocation = 64 << 20
 	handler := newTestHandler(t)

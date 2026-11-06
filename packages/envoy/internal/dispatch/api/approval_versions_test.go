@@ -326,6 +326,7 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 		{name: "after a version move with the summary omitted", move: true, version: 2},
 	} {
 		t.Run(flow.name, func(t *testing.T) {
+			t.Parallel()
 			var documentService *docs.Service
 			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -523,6 +524,7 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 		{name: "request changes", state: "changes_requested", reason: "Name the rollback path.", event: "artifact.changes_requested"},
 	} {
 		t.Run(review.name, func(t *testing.T) {
+			t.Parallel()
 			var documentService *docs.Service
 			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -770,6 +772,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		}, 1, bob, true},
 	} {
 		t.Run(write.name, func(t *testing.T) {
+			t.Parallel()
 			doc := open(t, write.settle)
 			write.write(t, doc)
 			// The last peer to leave settles the room, which versions whatever the peers wrote.
@@ -831,6 +834,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 	}
 
 	t.Run("a write that versions nothing", func(t *testing.T) {
+		t.Parallel()
 		doc := open(t, time.Hour)
 		unchanged := sessionRequest(t, doc.handler, http.MethodPost, "/api/v1/artifacts/"+doc.artifactID+"/edits", map[string]any{
 			"ops":     []map[string]string{{"op": "replace", "find": "A spec", "with": "A spec"}},

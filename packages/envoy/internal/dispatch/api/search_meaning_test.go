@@ -740,6 +740,7 @@ func requireNoKeywordHit(t *testing.T, query string) {
 // window over all three, and a hit on that window names the block whose own text ranks highest
 // for the query, not the comment's first block.
 func TestMeaningSearchFindsACommentByItsBestBlock(t *testing.T) {
+	t.Parallel()
 	const query = "theodolite recalibration"
 	embedder := &fakeEmbedder{vectors: map[string][]float32{query: queryVector()}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
@@ -772,6 +773,7 @@ func TestMeaningSearchFindsACommentByItsBestBlock(t *testing.T) {
 // document, so no keyword leg can find it, and the hit names the long block and opens the
 // document at it.
 func TestALongBlocksTailIsFoundByMeaning(t *testing.T) {
+	t.Parallel()
 	const tail = "Vernier scales are read against the limb."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{"wibbleflorp": queryVector()}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
@@ -825,6 +827,7 @@ func TestALongBlocksTailIsFoundByMeaning(t *testing.T) {
 // option finds the ask through that window and names the option's own part - not the question,
 // which the window is named for and whose text is its context.
 func TestAnOptionIsTheHitThroughTheWindowHoldingItsQuestion(t *testing.T) {
+	t.Parallel()
 	const query = "graphite powder"
 	embedder := &fakeEmbedder{vectors: map[string][]float32{query: queryVector()}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
@@ -868,6 +871,7 @@ func uploadSearchDocument(t *testing.T, handler http.Handler, issueKey, name, bo
 // then yields that one document, and every other document the query matches by meaning is
 // lost. A comment, whose arm is its own, stands beside them as the rest of the page.
 func TestMeaningSearchFindsOtherItemsPastOneLongDocumentsWindows(t *testing.T) {
+	t.Parallel()
 	embedder := &fakeEmbedder{vectors: map[string][]float32{"wibbleflorp": queryVector()}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "CROWD", "Crowded windows", "Body text.")
