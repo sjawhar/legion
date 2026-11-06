@@ -1444,6 +1444,11 @@ func (maxBytesDiscarder) Header() http.Header             { return nil }
 func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
 func (maxBytesDiscarder) WriteHeader(int)                 {}
 
+// actorInput is the body of every route whose only input is who acts.
+type actorInput struct {
+	Actor *model.Actor `json:"actor"`
+}
+
 // decodeJSON decodes r's body, one JSON value of at most maxJSONRequestBytes, into value, which
 // declares every member the body may carry. A string the body holds anywhere that carries U+0000
 // is refused, naming where it stands (unstorableJSON).

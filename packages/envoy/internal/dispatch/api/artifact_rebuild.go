@@ -8,6 +8,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
+// rebuildArtifactInput is the body of POST /api/v1/artifacts/{id}/rebuild.
+type rebuildArtifactInput struct {
+	Markdown *string `json:"markdown"`
+}
+
 // rebuildArtifact discards only a history ygo cannot load and replaces it with one seed update
 // from the latest saved markdown, or supplied markdown. It needs the person scope (routeScopes)
 // because a rebuild intentionally deletes durable history, so only a credential acting as its
@@ -22,9 +27,7 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var input struct {
-		Markdown *string `json:"markdown"`
-	}
+	var input rebuildArtifactInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

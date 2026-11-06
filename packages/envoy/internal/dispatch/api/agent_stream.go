@@ -80,6 +80,12 @@ func responderEvent(responding bool) []byte {
 	return []byte(`{"v":1,"responding":false}`)
 }
 
+// publishFrameResponderInput is the body of POST
+// /api/v1/agents/{session_id}/stream/_test/publish under `?as=responder`.
+type publishFrameResponderInput struct {
+	Responding bool `json:"responding"`
+}
+
 // publishAgentStreamFrame injects one frame into a session's viewers on every process. Mounted
 // only with Deps.TestHooksEnabled: the e2e harness runs Dispatch with NATS disabled, so a browser
 // test of the conversation view has no session and no bus to take frames from, and each process
@@ -123,9 +129,7 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 	case "responder":
 		// Whether anyone is on the session's control subject, with no history behind it: a live
 		// session that has produced nothing, or one whose plugin cannot stream at all.
-		var body struct {
-			Responding bool `json:"responding"`
-		}
+		var body publishFrameResponderInput
 		if err := json.Unmarshal(frame, &body); err != nil {
 			writeError(w, "FRAME_INPUT", http.StatusBadRequest, "responder takes {\"responding\": bool}")
 			return

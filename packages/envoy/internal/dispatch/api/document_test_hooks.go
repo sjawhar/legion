@@ -85,6 +85,11 @@ func (s *server) getRoomCounters(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, counters)
 }
 
+// holdPersistenceInput is the body of POST /api/v1/artifacts/{id}/_test/hold-persistence.
+type holdPersistenceInput struct {
+	Duration string `json:"duration"`
+}
+
 // holdRoomPersistence takes {"duration": "<Go duration>"} and holds, for that long from now, every
 // append of a browser update this process's rooms of the document make. 204 once the hold is set.
 func (s *server) holdRoomPersistence(w http.ResponseWriter, r *http.Request) {
@@ -92,9 +97,7 @@ func (s *server) holdRoomPersistence(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var input struct {
-		Duration string `json:"duration"`
-	}
+	var input holdPersistenceInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

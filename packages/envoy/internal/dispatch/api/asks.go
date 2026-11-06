@@ -128,19 +128,22 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	s.createAskFor(w, r, issueOwner(r.PathValue("key")))
 }
 
+// createAskInput is the body of POST /api/v1/issues/{key}/asks and POST /api/v1/artifacts/{id}/asks.
+type createAskInput struct {
+	Question string             `json:"question"`
+	Kind     string             `json:"kind"`
+	Options  []model.AskOption  `json:"options"`
+	Multiple *bool              `json:"multiple"`
+	Urgency  string             `json:"urgency"`
+	Anchor   *model.AnchorInput `json:"anchor"`
+	Actor    *model.Actor       `json:"actor"`
+}
+
 func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owner) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var input struct {
-		Question string             `json:"question"`
-		Kind     string             `json:"kind"`
-		Options  []model.AskOption  `json:"options"`
-		Multiple *bool              `json:"multiple"`
-		Urgency  string             `json:"urgency"`
-		Anchor   *model.AnchorInput `json:"anchor"`
-		Actor    *model.Actor       `json:"actor"`
-	}
+	var input createAskInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -315,17 +318,20 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	WriteJSON(w, http.StatusCreated, withSuggestions(ask, advice, suggestions))
 }
 
+// editAskInput is the body of PATCH /api/v1/asks/{id}.
+type editAskInput struct {
+	Question *string            `json:"question"`
+	Options  *[]model.AskOption `json:"options"`
+	Multiple *bool              `json:"multiple"`
+	Urgency  *string            `json:"urgency"`
+	Actor    *model.Actor       `json:"actor"`
+}
+
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var input struct {
-		Question *string            `json:"question"`
-		Options  *[]model.AskOption `json:"options"`
-		Multiple *bool              `json:"multiple"`
-		Urgency  *string            `json:"urgency"`
-		Actor    *model.Actor       `json:"actor"`
-	}
+	var input editAskInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

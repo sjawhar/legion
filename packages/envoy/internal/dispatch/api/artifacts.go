@@ -932,14 +932,18 @@ func (s *server) commitArtifactVersionEvent(
 	return event, nil
 }
 
+// createVersionInput is the body of POST /api/v1/artifacts/{id}/versions and its issue and
+// project artifact patterns.
+type createVersionInput struct {
+	Summary string       `json:"summary"`
+	Actor   *model.Actor `json:"actor"`
+}
+
 func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var input struct {
-		Summary string       `json:"summary"`
-		Actor   *model.Actor `json:"actor"`
-	}
+	var input createVersionInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -1003,16 +1007,20 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, version)
 }
 
+// editArtifactInput is the body of POST /api/v1/artifacts/{id}/edits and its issue and project
+// artifact patterns.
+type editArtifactInput struct {
+	Ops          []model.EditOp          `json:"ops"`
+	Summary      string                  `json:"summary"`
+	Precondition *model.EditPrecondition `json:"precondition"`
+	Actor        *model.Actor            `json:"actor"`
+}
+
 func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var input struct {
-		Ops          []model.EditOp          `json:"ops"`
-		Summary      string                  `json:"summary"`
-		Precondition *model.EditPrecondition `json:"precondition"`
-		Actor        *model.Actor            `json:"actor"`
-	}
+	var input editArtifactInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

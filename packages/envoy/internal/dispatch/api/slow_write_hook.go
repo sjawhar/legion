@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// slowWriteInput is the body of POST /api/v1/writes/_test/slow.
+type slowWriteInput struct {
+	Method  string `json:"method"`
+	Path    string `json:"path"`
+	DelayMS int64  `json:"delay_ms"`
+}
+
 // armSlowWrite is POST /api/v1/writes/_test/slow, {method, path, delay_ms}: from now on every keyed
 // run of that method and exact request path, once its key is claimed, waits delay_ms on its
 // handler's context before the handler runs (slowedByTestHook), so a browser test can drive a
@@ -16,11 +23,7 @@ func (s *server) armSlowWrite(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var input struct {
-		Method  string `json:"method"`
-		Path    string `json:"path"`
-		DelayMS int64  `json:"delay_ms"`
-	}
+	var input slowWriteInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

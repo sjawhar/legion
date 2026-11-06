@@ -57,19 +57,22 @@ func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, state)
 }
 
+// userIssueStateInput is the body of PUT /api/v1/me/issues/{key}/state.
+type userIssueStateInput struct {
+	Pinned      *bool     `json:"pinned"`
+	LastReadSeq *int      `json:"last_read_seq"`
+	Dismissed   *[]string `json:"dismissed"`
+	Seq         *int64    `json:"seq"`
+	// Actor names no writer of this row: the state is the calling person's, keyed on the
+	// login actingPerson resolves, and the row has no column for a session. The session it
+	// names is the acting agent's, which goes on the act of the event this write appends
+	// (actSessionFromBody); a client that has always sent one is not refused for an unknown
+	// key either (decodeJSON).
+	Actor *model.Actor `json:"actor"`
+}
+
 func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Pinned      *bool     `json:"pinned"`
-		LastReadSeq *int      `json:"last_read_seq"`
-		Dismissed   *[]string `json:"dismissed"`
-		Seq         *int64    `json:"seq"`
-		// Actor names no writer of this row: the state is the calling person's, keyed on the
-		// login actingPerson resolves, and the row has no column for a session. The session it
-		// names is the acting agent's, which goes on the act of the event this write appends
-		// (actSessionFromBody); a client that has always sent one is not refused for an unknown
-		// key either (decodeJSON).
-		Actor *model.Actor `json:"actor"`
-	}
+	var input userIssueStateInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -265,6 +268,13 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 	return &parsed, nil
 }
 
+// userAgentStateInput is the body of PUT /api/v1/me/agents/{session_id}/state.
+type userAgentStateInput struct {
+	ClearedBefore *string  `json:"cleared_before"`
+	ReadThrough   *string  `json:"read_through"`
+	ReadReplies   []string `json:"read_replies"`
+}
+
 // putUserAgentState records a Clear (cleared_before, which replaces the previous one), a read
 // mark (read_through, which only ever moves forward, so a tab that read less a moment ago cannot
 // make a reply unread again), and/or replies read one by one (read_replies, the session's own
@@ -277,11 +287,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var input struct {
-		ClearedBefore *string  `json:"cleared_before"`
-		ReadThrough   *string  `json:"read_through"`
-		ReadReplies   []string `json:"read_replies"`
-	}
+	var input userAgentStateInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

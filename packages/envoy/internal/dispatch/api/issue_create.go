@@ -37,25 +37,28 @@ func parseIssuePriority(raw json.RawMessage) (priority *int, provided bool, err 
 	return &value, true, nil
 }
 
+// createIssueInput is the body of POST /api/v1/issues.
+type createIssueInput struct {
+	Project    string          `json:"project"`
+	Title      string          `json:"title"`
+	Parent     *string         `json:"parent"`
+	BlockedBy  []string        `json:"blocked_by"`
+	External   string          `json:"external"`
+	Force      bool            `json:"force"`
+	Spec       *string         `json:"spec"`
+	Labels     []string        `json:"labels"`
+	Priority   json.RawMessage `json:"priority"`
+	Assignee   json.RawMessage `json:"assignee"`
+	Components json.RawMessage `json:"components"`
+	Repo       json.RawMessage `json:"repo"`
+	Actor      *model.Actor    `json:"actor"`
+}
+
 func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var input struct {
-		Project    string          `json:"project"`
-		Title      string          `json:"title"`
-		Parent     *string         `json:"parent"`
-		BlockedBy  []string        `json:"blocked_by"`
-		External   string          `json:"external"`
-		Force      bool            `json:"force"`
-		Spec       *string         `json:"spec"`
-		Labels     []string        `json:"labels"`
-		Priority   json.RawMessage `json:"priority"`
-		Assignee   json.RawMessage `json:"assignee"`
-		Components json.RawMessage `json:"components"`
-		Repo       json.RawMessage `json:"repo"`
-		Actor      *model.Actor    `json:"actor"`
-	}
+	var input createIssueInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return

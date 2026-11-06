@@ -98,9 +98,7 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 	// bearerSessionActor and actingPerson, which record none either.
 	actor = actor.Recorded()
 	if !human {
-		var input struct {
-			Actor *model.Actor `json:"actor"`
-		}
+		var input actorInput
 		// A credential that holds no `person` scope acts only as a session, which the body has
 		// to name, so the body is required of it exactly as it always was. A person's own
 		// credential may send none: it acts as the person, and the body only names the agent

@@ -623,12 +623,15 @@ func (s *server) claimCycle(
 	WriteJSON(w, http.StatusOK, claimAnswer{Issue: applied.issue, LegionManagedStatus: applied.legionManagedStatus})
 }
 
+// claimIssueInput is the body of POST /api/v1/issues/{key}/claim.
+type claimIssueInput struct {
+	Actor *model.Actor `json:"actor"`
+	Force bool         `json:"force"`
+}
+
 // claimIssue is POST /api/v1/issues/{key}/claim: this session (or human) takes the issue.
 func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Actor *model.Actor `json:"actor"`
-		Force bool         `json:"force"`
-	}
+	var input claimIssueInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -708,9 +711,7 @@ func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	if !human {
 		// A bearer names its own session in the body, as it does on every other write.
-		var input struct {
-			Actor *model.Actor `json:"actor"`
-		}
+		var input actorInput
 		if err := decodeJSON(r, &input); err != nil {
 			s.writeHandlerError(w, err)
 			return

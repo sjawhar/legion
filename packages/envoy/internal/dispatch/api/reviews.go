@@ -302,12 +302,15 @@ func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, reviews)
 }
 
+// createArtifactReviewInput is the body of POST /api/v1/artifacts/{id}/reviews.
+type createArtifactReviewInput struct {
+	State  string  `json:"state"`
+	Reason *string `json:"reason"`
+}
+
 // POST /api/v1/artifacts/{id}/reviews  {state, reason?}  (the person and approve scopes)
 func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		State  string  `json:"state"`
-		Reason *string `json:"reason"`
-	}
+	var input createArtifactReviewInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -441,16 +444,19 @@ func (s *server) writeApprovalReviews(
 	return reviews, events, nil
 }
 
+// approvalRequestInput is the body of POST /api/v1/artifacts/{id}/approval-requests.
+type approvalRequestInput struct {
+	Actor   *model.Actor `json:"actor"`
+	Summary *string      `json:"summary"`
+	// IncludeVerification asks the human to approve the issue's Verification document in the
+	// same request, each document at its own current settled version.
+	IncludeVerification bool `json:"include_verification"`
+}
+
 // POST /api/v1/artifacts/{id}/approval-requests  {summary?, include_verification?}  (any
 // authenticated actor)
 func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Actor   *model.Actor `json:"actor"`
-		Summary *string      `json:"summary"`
-		// IncludeVerification asks the human to approve the issue's Verification document in the
-		// same request, each document at its own current settled version.
-		IncludeVerification bool `json:"include_verification"`
-	}
+	var input approvalRequestInput
 	if !s.decodeOptionalJSON(w, r, &input) {
 		return
 	}
@@ -886,6 +892,12 @@ func (s *server) verificationDocumentFor(ctx context.Context, q queryer, issueKe
 	}, nil
 }
 
+// createPlanReviewInput is the body of POST /api/v1/artifacts/{id}/plan-reviews.
+type createPlanReviewInput struct {
+	Actor   *model.Actor `json:"actor"`
+	Version int          `json:"version"`
+}
+
 // POST /api/v1/artifacts/{id}/plan-reviews  {version}  (any authenticated actor)
 //
 // A plan is approved by the plan review an agent runs over it, never by a person: this records
@@ -893,10 +905,7 @@ func (s *server) verificationDocumentFor(ctx context.Context, q queryer, issueKe
 // document shows it approved and a later version makes it stale. It is refused on any document
 // whose role is not plan, the issue's spec included.
 func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Actor   *model.Actor `json:"actor"`
-		Version int          `json:"version"`
-	}
+	var input createPlanReviewInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
