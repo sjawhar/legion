@@ -7,10 +7,9 @@ building READY. Every path it cites is in cybermonklabs/legion.
 The order, in full: the tester's evidence green → the reviewer's approval of the head → the
 architect's acceptance, in `accepting` → retro → the merger's READY → the merge, which closes the
 issue → the implementer's production check, after the close. Every handoff is a record on the
-Dispatch issue, never a commit, so the head that merges carries none. Retro's one commit closes
-the pull request's open review threads (*Retro: retro's commits do not void the reviewer's
-approval*, below), so the head that merges is the head that commit made. READY still lets a commit
-that changes only `docs/solutions/` stand, and a file under `.legion/` that GitHub's compare lists as
+Dispatch issue, never a commit, so the head that merges carries none. Retro commits nothing
+(*Retro*, below), so the approved head is the head that merges. READY still lets a commit that
+changes only `docs/solutions/` stand, and a file under `.legion/` that GitHub's compare lists as
 removed, the commit `legion handoffs import` makes to remove the directory where handoffs lived
 before they moved to Dispatch. A conflict-forced merge goes back to the reviewer for a
 confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
@@ -95,8 +94,8 @@ other change to the head voids it.
   nothing restarts. Different, or either run printed no fingerprint: a new round — thermo again,
   one review. A return whose task's `Reason:` names a READY refusal is never a confirmation, even
   after a forward merge, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
-  after it reviews the refused change in full from the last `APPROVE` (*Retro: retro's commits do
-  not void the reviewer's approval* below). That round's approval needs the tester's results current
+  after it reviews the refused change in full from the last `APPROVE` (*Retro*, below). That
+  round's approval needs the tester's results current
   at the head it approves, or at an ancestor with only files under `.legion/` removed since.
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
@@ -110,12 +109,20 @@ other change to the head voids it.
   a document, a comment, a changelog fragment, a census line, a name inside prose. When every
   finding that stands is text, approve the head you read, by SHA, and say in the approval body
   that the open threads are the work the merge waits for. Each of them stays the inline review
-  thread you already wrote, and the implementer closes it in retro (`skill://legion-retro`), so
-  you write no commit of your own for one.
+  thread you already wrote. The implementer fixes the text and pushes it, and you resolve the
+  thread and approve the head that fix landed on, so you write no commit of your own for one.
+- **After an approval with text threads open.** The implementer reads your approval in its own
+  live session, fixes the text and makes one push of one commit, while the architect reads the
+  issue for acceptance; it runs in no phase and resolves no thread. You then resolve each thread
+  you opened, one call per thread, and approve the head that push made, by SHA, reading that
+  head's checks as you read any head's
+  (`skill://legion-worker/references/review-threads.md` gives the loop and the calls). A thread
+  the fix cannot close is a message to the architect, who moves the issue back to `implementing`:
+  neither you nor the implementer moves it.
 - **A text finding stays text where a test pins the sentence it fixes.** A check that is green at
   the approved head is not a `before_merge` check of the issue with no current passing result, so
-  it asks for no changes; a text fix that breaks such a pin is caught by retro's wait for its own
-  head's required checks.
+  it asks for no changes; a text fix that breaks such a pin is caught at the head the fix made,
+  which you read before you approve it.
 
 A reviewer's phase ends with its completion, not with its review. Every round records a handoff
 and takes this order: read CI as above; write the handoff and record it with
@@ -154,15 +161,12 @@ reviewing until you finish.
   head the review App pushed is the exception: the daemon marks it a planned red and acts on it
   nowhere, and GitHub holds the merge under the base branch's own rules.
 
-## Retro: retro's commits do not void the reviewer's approval
+## Retro
 
-- **Retro commits the text fixes that close the pull request's open review threads, and nothing
-  else.** It reads the evidence, writes what the work taught as a `dispatch comment` on the issue
-  for the skill librarian, lists the pull request's unresolved threads itself with the
-  `reviewThreads` query of `skill://legion-worker/references/review-threads.md`, replies on each,
-  resolves each one it answered, brings the PR body up to date, pushes that one commit, and waits
-  for its head's required checks before it completes (`skill://legion-retro` gives the
-  steps), so the head READY names is the head that commit made. Anything else above the approved
+- **Retro commits nothing.** It reads the evidence, writes what the work taught as a
+  `dispatch comment` on the issue for the skill librarian, brings the PR body up to date and
+  completes (`skill://legion-retro` gives the steps), so the approved head is the head READY
+  names. Anything above the approved
   head voids the approval, except the handoff import's removal of `.legion/` files and a commit
   that changes only `docs/solutions/`, which READY still lets through: READY is refused
   `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send
@@ -184,20 +188,8 @@ reviewing until you finish.
 
 ## The merger
 
-- **Nothing in Legion holds the merge for an open review thread.** The merger resolves none and
-  reads none: the reviewer's approval already judged them, no Go code of the daemon reads a
-  thread's state, and READY requires no thread state beyond that approval. A repository that wants
-  that gate sets GitHub's `required_review_thread_resolution` on its base branch, which only a
-  repository administrator can set, and leaves `dismiss_stale_reviews_on_push` and
-  `require_last_push_approval` off, since either would void the approval when retro commits the
-  text fixes; neither cybermonklabs/legion nor theorem-labs/agent-infra sets it today. Where the
-  repository sets none, the rule itself is what holds a finding: the reviewer writes the thread
-  and retro closes it. In a repository that does set it, GitHub refuses the merge of a pull
-  request whose conversation is unresolved, and that refusal is the merger's to report: it does
-  not merge, tells the architect, and moves the issue back to `retro` with
-  `request_backward_move`, the reason naming each unresolved thread, because GitHub grants
-  `resolveReviewThread` to the pull request's author App and retro runs as that App.
-- The merger quotes what sits above the approved head with
+- The merger resolves no review thread: the reviewer's approval already judged them, and READY
+  requires no thread state beyond it. It quotes what sits above the approved head with
   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` in READY; the daemon,
   not the merger, holds those commits to retro's: READY reads GitHub's compare of the round's

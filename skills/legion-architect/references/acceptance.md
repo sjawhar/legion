@@ -6,17 +6,16 @@ at.
 ## Retro's result
 
 Retro output is one `dispatch comment` on the issue with what the work taught, the PR body content
-the repository's instructions derive from the pull request's changed paths at that head, the
-closing of every review thread the approval left open, and one `dispatch message` on the issue.
-Its one commit is the text fixes that close those threads, pushed to the issue branch, since every
-handoff is a record on the Dispatch issue and `docs/solutions/` is history no role writes to now.
-Retro writes no handoff and never rewrites the reviewer-approved head.
+the repository's instructions derive from the pull request's changed paths at that head, and one
+`dispatch message` on the issue. Retro commits nothing and pushes nothing, since every handoff is
+a record on the Dispatch issue and `docs/solutions/` is history no role writes to now. Retro
+writes no handoff and never rewrites the reviewer-approved head.
 
 When the implementer reports that it cannot compute that body content or do the work a line of it
 affirms, that its read of the body failed or came back empty, or that GitHub refused the body, it
-has pushed no fix of its own and is still in its phase. Answer it with `envoy_publish` to its role
-topic, saying how from the deployment instructions; when they do not say, open a `dispatch ask`
-naming the missing instruction.
+has pushed nothing and is still in its phase. Answer it with `envoy_publish` to its role topic,
+saying how from the deployment instructions; when they do not say, open a `dispatch ask` naming the
+missing instruction.
 
 ## Accepting
 
@@ -32,9 +31,12 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 
 - The issue's Dispatch status stays `needs_review` in `accepting`; `sign_off` moves it to `retro`.
 - An approval may stand with text threads open: the reviewer leaves each text finding as the
-  inline review thread it already wrote, and retro closes those threads before READY. Where you
-  doubt the reviewer's call between a text and a behavioural finding, read the threads yourself
-  and send the issue back with `request_backward_move` rather than accepting.
+  inline review thread it already wrote, the implementer fixes that text and pushes it once in
+  its own live session while you read the issue, and the reviewer then resolves each thread and
+  approves the head the fix landed on. Accept on that approval. Where you doubt the reviewer's
+  call between a text and a behavioural finding, read the threads yourself and send the issue
+  back with `request_backward_move` rather than accepting; a thread the fix cannot close reaches
+  you the same way (*A review thread that cannot be closed*, below).
 - A `catch-up` whose `reason` names an issue as waiting for your acceptance is the wake for it: it
   is in `accepting`, and the `phase-finished` notice that moved it there may never have reached you
   (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its
@@ -98,10 +100,9 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 1. The tester's last result is green and the reviewer approves the head.
 2. The reviewer's approval of the head by SHA moves the issue to `accepting`; your `sign_off` moves
    it to `retro`.
-3. Retro records what the work taught as a `dispatch comment` on the issue, closes the review
-   threads the approval left open and brings the PR body up to date. Its one commit of those text
-   fixes makes the head READY names. No merge carries a handoff onto the default branch, since no
-   commit carries one.
+3. Retro records what the work taught as a `dispatch comment` on the issue and brings the PR body
+   up to date. It commits nothing, so the approved head is the head READY names. No merge carries
+   a handoff onto the default branch, since no commit carries one.
 4. The merger quotes what sits above the approved head
    (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in READY and sends the READY packet
    with its completion. The daemon refuses a head carrying anything above the approved head but a
@@ -157,15 +158,17 @@ every earlier round's findings at the new head; the reviewer approves the
 new head by SHA, or continues its round if it had not approved; the daemon carries the issue
 through your acceptance and retro to the merger's new READY.
 
-## A review thread GitHub will not resolve
+## A review thread that cannot be closed
 
-GitHub lets only the pull request author's App resolve a thread, so the implementer resolves every
-thread with plain `gh`: the ones it answers and the bot threads the reviewer accepted and named to
-it. The reviewer resolves none. If the implementer reports that GitHub refused its
-`resolveReviewThread`, open a `dispatch ask` naming the thread's id or URL and GitHub's message, for
-a human to resolve it by hand, with options for resolved / could not. The merger does not complete
-while that ask is open; READY itself checks no thread state, and the only gate that reads one is
-the base branch's own GitHub rules, which neither repository Legion runs in sets today
+The reviewer resolves each thread it opened, with plain `gh`, once it has read the fix that
+closed it: its own threads and the bot threads it accepted. The implementer replies and resolves
+none. A thread whose text fix the implementer cannot make — the sentence is false because the
+code is wrong, or closing it would change code that runs — reaches you from whichever of the two
+found it, and you move the issue back to `implementing` with `request_backward_move`, the reason
+naming the thread. If the reviewer reports that GitHub refused its `resolveReviewThread`, open a
+`dispatch ask` naming the thread's id or URL and GitHub's message, for a human to resolve it by
+hand, with options for resolved / could not. The merger does not complete while that ask is open;
+READY itself checks no thread state
 (`skill://legion-worker/references/merge-gate.md`).
 
 ## The close

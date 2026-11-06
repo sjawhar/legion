@@ -46,9 +46,8 @@ export function sessionId(entries: SessionEntry[]): string | undefined {
   return typeof id === "string" ? id : undefined;
 }
 
-/** The file of the run's own session transcript, or undefined when it never got a model turn. */
-function sessionFile(runDir: string): string | undefined {
-  const dir = path.join(runDir, "sessions");
+/** The file of the transcript in session directory `dir`, or undefined when it holds none. */
+function fileIn(dir: string): string | undefined {
   const file = existsSync(dir)
     ? readdirSync(dir).find((name) => name.endsWith(".jsonl"))
     : undefined;
@@ -70,7 +69,15 @@ function parsedSession(full: string): SessionEntry[] {
 /** The run's own session transcript, parsed whole, or empty when it never got a model turn. A line
  * that does not parse is the rig's fault. */
 export function session(runDir: string): SessionEntry[] {
-  const full = sessionFile(runDir);
+  const full = fileIn(path.join(runDir, "sessions"));
+  return full === undefined ? [] : parsedSession(full);
+}
+
+/** The transcript in session directory `dir`, parsed whole, or empty when it holds none: the
+ * session directory of one agent of a run that boots more than one (rig.sh's worker_boot gives
+ * the first agent the run's own and each later one <run>/sessions/<role>). */
+export function sessionIn(dir: string): SessionEntry[] {
+  const full = fileIn(dir);
   return full === undefined ? [] : parsedSession(full);
 }
 
@@ -79,7 +86,7 @@ export function session(runDir: string): SessionEntry[] {
  * session's own, whatever started it: a `task` tool call, or `tool.task(…)` or the `agent(…)`
  * helper inside an eval cell. A subagent's own subagents, one directory deeper, are left out. */
 export function subagentSessions(runDir: string): { name: string; entries: SessionEntry[] }[] {
-  const full = sessionFile(runDir);
+  const full = fileIn(path.join(runDir, "sessions"));
   if (full === undefined) return [];
   const dir = full.replace(/\.jsonl$/, "");
   if (!existsSync(dir)) return [];

@@ -752,10 +752,11 @@ Closing the terminal leaves the project without one, and the daemon logs
    `Unknown key "projects.<KEY>.review_workflows"`, by `legion start --check-config` and by the
    daemon's boot alike, so the daemon does not come up on it: delete the key before or with the
    image pin (an empty list is refused too). A review bot's red is now CI like any other: it sends
-   the work back to the implementer, which answers and resolves the bot's threads and pushes, and
-   the bot runs again; the reviewer adjudicates nothing of it and re-runs nothing. Where the bot's
-   threads must be closed before a merge, make that the repository's own rule (a ruleset's
-   "Require conversation resolution before merging").
+   the work back to the implementer, which answers or fixes the bot's threads and pushes, and the
+   bot runs again; the reviewer adjudicates each of those findings and resolves its thread in the
+   round that reads the fix, and re-runs nothing. Where the bot's threads must be closed before a
+   merge, make that the repository's own rule (a ruleset's "Require conversation resolution
+   before merging").
 
    **After the first upgrade to the release where an issue's disk dies with its pod,** the
    `runtime.kubernetes` block must name a `session_store` that keeps sessions in a database, with

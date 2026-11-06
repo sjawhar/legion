@@ -1139,9 +1139,9 @@ describe("tester-proof", () => {
     expect(dispatch.results).toEqual([]);
   });
 
-  // Catches: a review handoff recorded under the run's own session, which a retro would read as
-  // its own, or one that records a result against the issue's check, which a reviewer records
-  // none of.
+  // Catches: a review handoff recorded under the run's own session, which the agent reading the
+  // approval would read as its own, or one that records a result against the issue's check,
+  // which a reviewer records none of.
   test("records the review handoff under the reviewer's session, and no result", async () => {
     const dir = freshDir("seed");
     const file = path.join(dir, "fixture.json");

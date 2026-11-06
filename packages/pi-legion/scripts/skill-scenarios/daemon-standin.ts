@@ -30,7 +30,7 @@
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
  * mintedGrantId?, handoffId?, handoffVersion?, to?, reason?}`, the run's record of what reached
  * the daemon; a completion's line carries the record it named, and a backward move's the phase it
- * asked for and why (score.ts retroThreads).
+ * asked for and why (score.ts threadsClosed).
  *
  * Usage: `bun daemon-standin.ts <port> <log file> <boot token file> <project> <issue> <role>
  * [<phase>]`

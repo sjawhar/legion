@@ -20,14 +20,15 @@
 //                                          tester's own passing result on check k1 at <commit>,
 //                                          which a reviewer's approval gate reads (test: {id,
 //                                          version} in <file>). reviewer-text-findings and
-//                                          retro-threads seed it beside the implementer's;
+//                                          threads-closed seed it beside the implementer's;
 //                                          tester-proof seeds neither, since its tester records
 //                                          both itself
 //   seed.ts review-handoff <file> <body file>
 //                                          <body file> as the issue's review handoff under the
 //                                          session REVIEWER, and no result, since a review round
-//                                          records none (review: {id, version} in <file>). A
-//                                          retro reads it at the version its task names
+//                                          records none (review: {id, version} in <file>). The
+//                                          agents of threads-closed read it at the version their
+//                                          tasks name
 //   seed.ts capture-handoffs <file> <run dir>
 //                                          every handoff record of the issue <file> names, newest
 //                                          first as Dispatch lists them, each with the body it
@@ -696,14 +697,14 @@ export async function implementHandoff(
  * under the tester's session. A reviewer refuses an approval while a `before_merge` check of the
  * issue has no passing result current at the head it reads, so the reviewer scenario seeds this
  * one beside the implementer's and the reviewer's verdict rests on what it found in the change;
- * retro reads both results as the evidence its step 1 names. */
+ * threads-closed seeds both so that neither of its agents reads a gate of its own as open. */
 export async function testerResult(file: string, bodyFile: string, commit: string): Promise<void> {
   await phaseHandoff(file, bodyFile, "test", TESTER, { role: "tester", commit });
 }
 
 /** `review-handoff <file> <body file>`: the round's review handoff, under the reviewer's session
- * and with no result of its own, since a reviewer records none against a check. Retro's task
- * names its version, and step 1 of skill://legion-retro reads it there. */
+ * and with no result of its own, since a reviewer records none against a check. The task of each
+ * agent of threads-closed names its version, and the record is the approval they work from. */
 export async function reviewHandoff(file: string, bodyFile: string): Promise<void> {
   await phaseHandoff(file, bodyFile, "review", REVIEWER);
 }

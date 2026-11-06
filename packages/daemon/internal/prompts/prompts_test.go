@@ -52,7 +52,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
 			"read CI for everything static", "try to break it", "dispatch handoff-write --issue <issue> --phase test"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"What sits above your approved head is retro's one commit of the text fixes that close the threads your approval left open", "`pullRequest.head` is the commit the pull request stands on"}},
+			"the implementer's one commit of the text fixes follows it, and your approval of the head that commit made is the one READY reads", "`pullRequest.head` is the commit the pull request stands on"}},
 		// The merger is told how its over-long packet is refused, at the call that carries it.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
 			"that GitHub's compare lists as removed", "`READY_DISARM_PENDING`",

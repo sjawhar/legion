@@ -2,8 +2,7 @@
 
 Read this at step 3 of `skill://legion-retro`, when you write what the work taught. It is one
 `dispatch comment` on the issue, and its reader is the skill librarian, who turns a point into a
-rule in a skill, a role prompt or a repository guide. Retro writes no learning into the tree, and
-the only commit it makes is the text fixes that close the pull request's open review threads:
+rule in a skill, a role prompt or a repository guide. Retro commits nothing:
 `docs/solutions/` stays as the history of the rules written before this, and no role writes there.
 
 ## What a point must carry

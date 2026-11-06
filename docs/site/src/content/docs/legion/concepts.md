@@ -118,7 +118,7 @@ head — brings the pod back and resumes the same sessions where they stopped.
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
 | `accepting` | the architect | Reads the tester's handoff, each check of the issue's Verification document with its latest result, and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. Issues still running beneath it do not hold the acceptance: a root's close waits for them instead (`awaiting_merge`). No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
-| `retro` | implementer | Writes down what the work taught, as one comment on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes. It also closes the review threads the approval left open: it lists them, replies on each, resolves each one, and commits and pushes those text fixes and nothing else. | implement App |
+| `retro` | implementer | Writes down what the work taught, as one comment on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes. It commits nothing. | implement App |
 | `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head, and submits the merge, which GitHub completes under the base branch's own rules. | implement App |
 | `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue; a root whose tree still runs records the merge and waits here until the last other issue of its tree is done or parked. | none |
 
@@ -224,11 +224,11 @@ A worker's completion names its record, and the daemon reads that record back fr
 it moves the issue: it refuses a record another session wrote, one of another issue, phase or
 version, and the record the role named for its previous phase. No handoff is a commit, so the
 issue branch carries only work, every push gets its own CI, and the merge brings no handoff onto
-the default branch. The head `READY` names is the head retro made: its one commit is the text
-fixes that close the pull request's open review threads, and the daemon compares that head with
-the approved head on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
-but that commit and a commit under `docs/solutions/` changed since the approval, so that change
-goes back to review. The one other change it lets
+the default branch. Retro commits nothing, so the head `READY` names is the head the reviewer
+approved: the daemon compares the two
+on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
+but a commit under `docs/solutions/` changed since the approval, so that change goes back to
+review. The one other change it lets
 through is the removal of files under `.legion/`, where handoffs were committed before they moved
 to Dispatch: `legion handoffs import` makes that commit once on each branch in flight at the move.
 

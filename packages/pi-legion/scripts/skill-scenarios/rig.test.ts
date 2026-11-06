@@ -550,11 +550,12 @@ describe("next_run", () => {
 // gives all three worker scenarios the same issue key. So the project is the only thing that keeps
 // one run's Envoy messages out of another's session, and `skills<label>r<n>` does not: it names no
 // scenario. Measured on 2026-11-06, with the batch's NATS given through SKILL_SCENARIOS_NATS_URL
-// and so left running between batches, the retro run retro-threads-text-fixes-head-2 was delivered
-// the Envoy message the reviewer run reviewer-text-findings-text-only-head-2 published 44 minutes
-// earlier, under the project both were given, skillsheadr2: it named the bot thread
-// PRRT_kwDOrig0001, which exists only in the reviewer scenario's world, and the retro agent
-// resolved it. A run that reads another run's instructions measures nothing about its own rule.
+// and so left running between batches, a run of the scenario threads-closed replaced, numbered 2
+// of the label head, was delivered the Envoy message the reviewer run
+// reviewer-text-findings-text-only-head-2 published 44 minutes earlier, under the project both
+// were given, skillsheadr2: it named the bot thread PRRT_kwDOrig0001, which exists only in the
+// reviewer scenario's world, and the agent resolved it. A run that reads another run's
+// instructions measures nothing about its own rule.
 describe("run_project", () => {
   const project = (scenario: string, runCase: string, label: string, n: string) =>
     bash(`${fn("run_project")}\nrun_project "$1" "$2" "$3" "$4"`, [scenario, runCase, label, n]);
@@ -563,12 +564,12 @@ describe("run_project", () => {
   // of one label and number share, so Envoy delivers each run's messages to both.
   test("two scenarios of one label and run number get projects of their own", () => {
     const reviewer = project("reviewer-text-findings", "text-only", "head", "2");
-    const retro = project("retro-threads", "text-fixes", "head", "2");
+    const closed = project("threads-closed", "text-fixes", "head", "2");
     const tester = project("tester-proof", "", "head", "2");
     expect(reviewer.code).toBe(0);
-    expect(retro.code).toBe(0);
+    expect(closed.code).toBe(0);
     expect(tester.code).toBe(0);
-    expect(new Set([reviewer.stdout, retro.stdout, tester.stdout]).size).toBe(3);
+    expect(new Set([reviewer.stdout, closed.stdout, tester.stdout]).size).toBe(3);
   });
 
   // Catches: a project that keeps a hyphen or an upper-case letter from the scenario, the case or
@@ -576,7 +577,7 @@ describe("run_project", () => {
   test("each project is a Legion project token", () => {
     for (const [scenario, runCase, label] of [
       ["reviewer-text-findings", "text-only", "head"],
-      ["retro-threads", "code-defect", "base"],
+      ["threads-closed", "code-defect", "base"],
       ["tester-proof", "", "ablate-R2"],
     ] as const)
       expect(project(scenario, runCase, label, "3").stdout.trim()).toMatch(/^[a-z0-9]+$/);
@@ -585,8 +586,8 @@ describe("run_project", () => {
   // Catches: a project that drops the case, so the two cases of one scenario, which run as two
   // batches against the same NATS, share their role topics.
   test("two cases of one scenario get projects of their own", () => {
-    expect(project("retro-threads", "text-fixes", "head", "1").stdout).not.toBe(
-      project("retro-threads", "code-defect", "head", "1").stdout
+    expect(project("threads-closed", "text-fixes", "head", "1").stdout).not.toBe(
+      project("threads-closed", "code-defect", "head", "1").stdout
     );
   });
 });
@@ -598,7 +599,7 @@ describe("run_project", () => {
 describe("scenario_case", () => {
   const cases = (scenario: string, env: Record<string, string> = {}) =>
     bash(
-      `${fn("fail")}\n${fn("scenario_case")}\n${fn("askgate_case")}\n${fn("reviewer_case")}\n${fn("retro_case")}\nscenario_case "$1"`,
+      `${fn("fail")}\n${fn("scenario_case")}\n${fn("askgate_case")}\n${fn("reviewer_case")}\n${fn("threads_case")}\nscenario_case "$1"`,
       [scenario],
       env
     );
@@ -640,20 +641,20 @@ describe("scenario_case", () => {
     });
   });
 
-  // Catches: a retro batch that runs no case at all, which the issue's check runs with no
-  // variable set, or one that takes a misspelt case for the measured arm.
-  test("retro-threads takes both cases, runs text-fixes unset, and fails on any other word", () => {
+  // Catches: a threads-closed batch that runs no case at all, which the issue's check runs with
+  // no variable set, or one that takes a misspelt case for the measured arm.
+  test("threads-closed takes both cases, runs text-fixes unset, and fails on any other word", () => {
     for (const name of ["text-fixes", "code-defect"])
-      expect(cases("retro-threads", { SKILL_SCENARIOS_RETRO_CASE: name })).toEqual({
+      expect(cases("threads-closed", { SKILL_SCENARIOS_THREADS_CASE: name })).toEqual({
         code: 0,
         stdout: `${name}\n`,
         stderr: "",
       });
-    expect(cases("retro-threads")).toEqual({ code: 0, stdout: "text-fixes\n", stderr: "" });
-    const result = cases("retro-threads", { SKILL_SCENARIOS_RETRO_CASE: "text" });
+    expect(cases("threads-closed")).toEqual({ code: 0, stdout: "text-fixes\n", stderr: "" });
+    const result = cases("threads-closed", { SKILL_SCENARIOS_THREADS_CASE: "text" });
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("SKILL_SCENARIOS_RETRO_CASE");
+    expect(result.stderr).toContain("SKILL_SCENARIOS_THREADS_CASE");
     expect(result.stderr).toContain("not text-fixes or code-defect");
   });
 

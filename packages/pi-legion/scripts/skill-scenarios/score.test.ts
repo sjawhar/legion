@@ -3270,24 +3270,23 @@ reviewRun("reviewer-text-findings-head-9", {
   "calls.jsonl": calls([submission(approval())]),
 });
 
-// retro-threads: what the run wrote — the gh calls the stand-in recorded, the pushes the run's
-// own remote logged, the body the stand-in kept and the daemon stand-in's log. The world's
-// threads are the fixture's own record of them (threads.json).
-const retroIds = ["PRRT_kwDOretro001", "PRRT_kwDOretro002"];
-const retroThreadsFile = JSON.stringify([
-  { id: retroIds[0], path: "docs/cli.md", line: 5 },
-  { id: retroIds[1], path: ".github/workflows/greet.yml", line: 1 },
+// threads-closed: what the two agents of one run wrote — the gh calls the stand-in recorded,
+// each carrying the role that made it, the pushes the run's own remote logged, the body the
+// stand-in kept, the daemon stand-in's log and the two transcripts. The world's threads are the
+// fixture's own record of them (threads.json).
+const fixIds = ["PRRT_kwDOfix001", "PRRT_kwDOfix002"];
+const fixThreadsFile = JSON.stringify([
+  { id: fixIds[0], path: "docs/cli.md", line: 5 },
+  { id: fixIds[1], path: ".github/workflows/greet.yml", line: 1 },
 ]);
-const defectThreadsFile = JSON.stringify([
-  { id: "PRRT_kwDOretro101", path: "docs/cli.md", line: 5 },
-]);
-/** The listing retro does for itself: the `reviewThreads` query of
- * skills/legion-worker/references/review-threads.md. No round follows an approval, so nobody
- * names the open threads to retro and the rule has it read them from GitHub rather than from the
- * pull request's body, which is the implementer's record and not the fact. */
-const threadsList = (at: string) => ({
+const defectThreadsFile = JSON.stringify([{ id: "PRRT_kwDOfix101", path: "docs/cli.md", line: 5 }]);
+/** The reviewer's listing of the threads: the `reviewThreads` query of
+ * skills/legion-worker/references/review-threads.md. The reviewer verifies thread state there
+ * and never in the pull request's body, which is the implementer's record and not the fact. */
+const threadsList = (at: string, by = "reviewer") => ({
   at,
   as: "gh",
+  by,
   argv: [
     "api",
     "graphql",
@@ -3297,22 +3296,25 @@ const threadsList = (at: string) => ({
   ],
   exit: 0,
 });
-/** The reply retro writes on one thread, the mutation review-threads.md defines. */
-const threadReply = (id: string, at: string) => ({
+/** The implementer's reply on one thread, the mutation review-threads.md defines, naming the
+ * commit that fixed it. */
+const threadReply = (id: string, at: string, commit = "", by = "implementer") => ({
   at,
   as: "gh",
+  by,
   argv: [
     "api",
     "graphql",
     "-f",
-    `query=mutation{addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"${id}",body:"Fixed in 7f3a91c: the sentence now says what the CLI does."}){comment{id}}}`,
+    `query=mutation{addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"${id}",body:"Fixed in ${commit.slice(0, 12)}: the sentence now says what the CLI does."}){comment{id}}}`,
   ],
   exit: 0,
 });
 /** The resolution, one call per thread — or, naming two, the bulk call the reference forbids. */
-const threadResolve = (ids: string[], at: string) => ({
+const threadResolve = (ids: string[], at: string, by = "reviewer") => ({
   at,
   as: "gh",
+  by,
   argv: [
     "api",
     "graphql",
@@ -3323,22 +3325,36 @@ const threadResolve = (ids: string[], at: string) => ({
   ],
   exit: 0,
 });
-/** The `Threads` section of the body retro leaves (references/pr-body.md). */
-const retroBody = (ids: string[], resolved: number, unresolved: number, at: string) => ({
+/** The `Threads` section of the body the implementer leaves, each entry rewritten at the head
+ * its push made (references/pr-body.md). `open` leaves them as the approval wrote them. */
+const fixBody = (ids: string[], at: string, commit: string, open = false) => ({
   at,
   as: "gh",
+  by: "implementer",
   argv: ["pr", "edit", "1001", "--body-file", "body.md"],
   exit: 0,
   body: [
-    `**Threads:** ${resolved} resolved, ${unresolved} unresolved.`,
-    ...ids.map(
-      (id) => `- Thread ${id}: fixed in 7f3a91c — says what the CLI does; resolved at 7f3a91c.`
+    `**Threads:** 0 resolved, ${ids.length} unresolved.`,
+    ...ids.map((id) =>
+      open
+        ? `- Thread ${id}: still open — the sentence still stands; unresolved at ${head.slice(0, 12)}.`
+        : `- Thread ${id}: fixed in ${commit.slice(0, 12)} — says what the CLI does; unresolved at ${commit.slice(0, 12)}.`
     ),
   ].join("\n"),
 });
-/** The daemon stand-in's log line of an accepted completion that names no handoff record, which
- * is what retro's phase ends with, and of the backward move the negative control asks for. */
-const retroComplete = {
+/** The reviewer's second approval, at the head the push made, named by SHA. */
+const secondApproval = (commit: string, at = "2026-09-30T17:38:00.000Z") => ({
+  ...submission({
+    commit_id: commit,
+    event: "APPROVE",
+    body: "The text fixes close both threads, which I resolved at this head.",
+  }),
+  at,
+  by: "reviewer",
+});
+/** The daemon stand-in's log line of a completion it accepted, which this loop asks of neither
+ * role, and of the backward move the architect makes and neither role does. */
+const completed = {
   at: "2026-09-30T17:40:00.000Z",
   path: "/legion/v1/handoff/complete",
   status: 200,
@@ -3352,12 +3368,34 @@ const movedBack = (reason: string) => ({
   to: "implementing",
   reason,
 });
+/** The message to the architect the control asks for: `envoy_publish` to the architect's role
+ * topic, naming the thread no text fix closes, as the run's transcript records the call. */
+const publishToArchitect = (text: string) => ({
+  type: "message",
+  message: {
+    role: "assistant",
+    content: [
+      {
+        type: "toolCall",
+        id: "call-publish",
+        name: "write",
+        arguments: {
+          path: "xd://envoy_publish",
+          content: JSON.stringify({
+            topic: "notifications.role.legion-skills1-lweval-1-architect",
+            message: text,
+          }),
+        },
+      },
+    ],
+  },
+});
 /** The run's own remote: the head the reviewer approved, a commit that changes the threads' two
  * files alone, and one that changes the code with them. Each run that reads a push gets a bare
  * clone of it in its own directory, as rig.sh's worker_fixture leaves one.
  */
-function retroRemotes(names: string[]) {
-  const dir = mkdtempSync(path.join(tmpdir(), "skill-scenarios-retro-"));
+function fixRemotes(names: string[]) {
+  const dir = mkdtempSync(path.join(tmpdir(), "skill-scenarios-threads-"));
   const git = (...args: string[]) => {
     const result = Bun.spawnSync(
       ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", dir, ...args],
@@ -3392,187 +3430,270 @@ function retroRemotes(names: string[]) {
   rmSync(dir, { recursive: true, force: true });
   return { approved, fixed, withCode };
 }
-const retroNames = [
-  "retro-threads-text-fixes-head-1",
-  "retro-threads-text-fixes-head-2",
-  "retro-threads-text-fixes-head-3",
-  "retro-threads-text-fixes-head-4",
-  "retro-threads-text-fixes-head-5",
-  "retro-threads-text-fixes-head-6",
-  "retro-threads-text-fixes-head-7",
-  "retro-threads-text-fixes-head-8",
-  "retro-threads-text-fixes-head-10",
-  "retro-threads-text-fixes-head-11",
-  "retro-threads-text-fixes-head-12",
-  "retro-threads-text-fixes-head-13",
-  "retro-threads-text-fixes-base-1",
-  "retro-threads-code-defect-head-1",
-  "retro-threads-code-defect-head-2",
-  "retro-threads-code-defect-head-3",
-  "retro-threads-head-9",
+const fixNames = [
+  "threads-closed-text-fixes-head-1",
+  "threads-closed-text-fixes-head-2",
+  "threads-closed-text-fixes-head-3",
+  "threads-closed-text-fixes-head-4",
+  "threads-closed-text-fixes-head-5",
+  "threads-closed-text-fixes-head-6",
+  "threads-closed-text-fixes-head-7",
+  "threads-closed-text-fixes-head-8",
+  "threads-closed-text-fixes-head-10",
+  "threads-closed-text-fixes-head-11",
+  "threads-closed-text-fixes-head-12",
+  "threads-closed-text-fixes-head-13",
+  "threads-closed-text-fixes-head-14",
+  "threads-closed-text-fixes-head-15",
+  "threads-closed-text-fixes-head-16",
+  "threads-closed-text-fixes-base-1",
+  "threads-closed-code-defect-head-1",
+  "threads-closed-code-defect-head-2",
+  "threads-closed-code-defect-head-3",
+  "threads-closed-code-defect-head-4",
+  "threads-closed-head-9",
 ];
-const retro = retroRemotes(retroNames);
+const fix = fixRemotes(fixNames);
 const pushed = (sha: string) =>
-  `2026-09-30T17:35:00.000Z refs/heads/legion/LWEVAL-1 ${retro.approved} ${sha}\n`;
-/** A retro-threads run: the text-fixes world and its two threads unless `files` says otherwise. */
-function retroRun(name: string, files: Record<string, string | null>) {
+  `2026-09-30T17:35:00.000Z refs/heads/legion/LWEVAL-1 ${fix.approved} ${sha}\n`;
+/** A threads-closed run: the text-fixes world and its two threads unless `files` says otherwise,
+ * with the reviewer's own transcript in <run>/sessions/reviewer, where rig.sh's worker_boot puts
+ * the second agent's. */
+function fixRun(
+  name: string,
+  files: Record<string, string | null>,
+  transcripts: { implementer?: object[]; reviewer?: object[] } = {}
+) {
   run(
     name,
     {
       "out.txt": "exit=0\n",
-      "world.json": worldOf(retro.approved),
-      "threads.json": retroThreadsFile,
+      "world.json": worldOf(fix.approved),
+      "threads.json": fixThreadsFile,
       "case.txt": "text-fixes\n",
       "pushes.log": "",
-      "daemon.log": calls([retroComplete]),
+      "daemon.log": calls([completed]),
       "handoffs.json": handoffs(reviewRecord),
       ...files,
     },
-    [...header, ...turn]
+    transcripts.implementer ?? [...header, ...turn]
+  );
+  const dir = path.join(runs, name, "sessions", "reviewer");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, "2026-09-30T15-51-17-651Z_01b1f3dd.jsonl"),
+    (transcripts.reviewer ?? [...header, ...turn])
+      .map((entry) => `${JSON.stringify(entry)}\n`)
+      .join("")
   );
 }
-// The pass: the listing retro does for itself, one reply and one resolution per thread, one push
-// of the text fixes alone, the body brought to two resolved and none open, and a completion the
-// stand-in accepted.
+/** The pass: the implementer's one reply per thread naming its commit, its body entries at the
+ * head that commit made and no resolution of its own; then the reviewer's own listing, one
+ * resolution per thread, and the second approval at that head. */
 const closedBoth = [
-  threadsList("2026-09-30T17:30:00.000Z"),
-  threadReply(retroIds[0] ?? "", "2026-09-30T17:31:00.000Z"),
-  threadReply(retroIds[1] ?? "", "2026-09-30T17:31:10.000Z"),
-  threadResolve([retroIds[0] ?? ""], "2026-09-30T17:32:00.000Z"),
-  threadResolve([retroIds[1] ?? ""], "2026-09-30T17:32:10.000Z"),
-  retroBody(retroIds, 2, 0, "2026-09-30T17:33:00.000Z"),
+  threadReply(fixIds[0] ?? "", "2026-09-30T17:31:00.000Z", fix.fixed),
+  threadReply(fixIds[1] ?? "", "2026-09-30T17:31:10.000Z", fix.fixed),
+  fixBody(fixIds, "2026-09-30T17:33:00.000Z", fix.fixed),
+  threadsList("2026-09-30T17:36:00.000Z"),
+  threadResolve([fixIds[0] ?? ""], "2026-09-30T17:37:00.000Z"),
+  threadResolve([fixIds[1] ?? ""], "2026-09-30T17:37:10.000Z"),
+  secondApproval(fix.fixed),
 ];
-retroRun("retro-threads-text-fixes-head-1", {
+fixRun("threads-closed-text-fixes-head-1", {
   "calls.jsonl": calls(closedBoth),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
 });
-// Replied on one thread and resolved both: the thread it never answered is still unanswered.
-retroRun("retro-threads-text-fixes-head-2", {
-  "calls.jsonl": calls([closedBoth[0] ?? {}, closedBoth[1] ?? {}, ...closedBoth.slice(3)]),
-  "pushes.log": pushed(retro.fixed),
+// The implementer replied on one thread and the reviewer resolved both: the thread it never
+// answered is still unanswered.
+fixRun("threads-closed-text-fixes-head-2", {
+  "calls.jsonl": calls(closedBoth.filter((call) => call !== closedBoth[1])),
+  "pushes.log": pushed(fix.fixed),
 });
 // One call resolving both threads: the bulk resolution the reference forbids.
-retroRun("retro-threads-text-fixes-head-3", {
+fixRun("threads-closed-text-fixes-head-3", {
+  "calls.jsonl": calls([
+    ...closedBoth.slice(0, 4),
+    threadResolve(fixIds as string[], "2026-09-30T17:37:00.000Z"),
+    closedBoth[6] ?? {},
+  ]),
+  "pushes.log": pushed(fix.fixed),
+});
+// The commit carries the code with the text fixes, which the one commit of text fixes does not.
+fixRun("threads-closed-text-fixes-head-4", {
+  "calls.jsonl": calls([...closedBoth.slice(0, 6), secondApproval(fix.withCode)]),
+  "pushes.log": pushed(fix.withCode),
+});
+// The body still says the threads are open, so the architect reading it through accepting would
+// see nothing fixed.
+fixRun("threads-closed-text-fixes-head-5", {
   "calls.jsonl": calls([
     closedBoth[0] ?? {},
     closedBoth[1] ?? {},
-    closedBoth[2] ?? {},
-    threadResolve(retroIds as string[], "2026-09-30T17:32:00.000Z"),
-    closedBoth[5] ?? {},
+    fixBody(fixIds, "2026-09-30T17:33:00.000Z", fix.fixed, true),
+    ...closedBoth.slice(3),
   ]),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
 });
-// The commit carries the code with the text fixes, which retro's own commit does not.
-retroRun("retro-threads-text-fixes-head-4", {
+// Everything, and no completion: this loop runs in no phase and writes no handoff, so a run that
+// completed nothing passes.
+fixRun("threads-closed-text-fixes-head-6", {
   "calls.jsonl": calls(closedBoth),
-  "pushes.log": pushed(retro.withCode),
-});
-// The body still says the threads are open, so the architect reading it would see them open.
-retroRun("retro-threads-text-fixes-head-5", {
-  "calls.jsonl": calls([
-    ...closedBoth.slice(0, 5),
-    retroBody(retroIds, 0, 2, "2026-09-30T17:33:00.000Z"),
-  ]),
-  "pushes.log": pushed(retro.fixed),
-});
-// Everything but the completion: the daemon stand-in accepted none.
-retroRun("retro-threads-text-fixes-head-6", {
-  "calls.jsonl": calls(closedBoth),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
   "daemon.log": calls([]),
 });
 // The first thread resolved twice: the second call names that one thread again, and the
 // reference asks only for one thread per call.
-retroRun("retro-threads-text-fixes-head-7", {
+fixRun("threads-closed-text-fixes-head-7", {
   "calls.jsonl": calls([
     ...closedBoth,
-    threadResolve([retroIds[0] ?? ""], "2026-09-30T17:34:00.000Z"),
+    threadResolve([fixIds[0] ?? ""], "2026-09-30T17:37:20.000Z"),
   ]),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
 });
 // A second reply on the first thread: the reference asks for one disposition reply per thread.
-retroRun("retro-threads-text-fixes-head-8", {
-  "calls.jsonl": calls([...closedBoth, threadReply(retroIds[0] ?? "", "2026-09-30T17:34:10.000Z")]),
-  "pushes.log": pushed(retro.fixed),
-});
-// A second push that carries the pull request onto the first adds no change above the approved
-// head, and the rule names the commit, never the number of pushes.
-retroRun("retro-threads-text-fixes-head-10", {
-  "calls.jsonl": calls(closedBoth),
-  "pushes.log": pushed(retro.fixed) + pushed(retro.fixed).replace("17:35:00", "17:36:00"),
-});
-// A resolution of the bot thread the reviewer adjudicated, in a call of its own. That thread is
-// none of the scenario's two, so it is in no threads.json, and the implementer's own rule has it
-// resolve exactly the bot threads the reviewer named. One call, one thread: no bulk resolution.
-retroRun("retro-threads-text-fixes-head-11", {
+fixRun("threads-closed-text-fixes-head-8", {
   "calls.jsonl": calls([
     ...closedBoth,
-    threadResolve(["PRRT_kwDOrig0001"], "2026-09-30T17:34:20.000Z"),
+    threadReply(fixIds[0] ?? "", "2026-09-30T17:34:10.000Z", fix.fixed),
   ]),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
+});
+// Two pushes of the one change: the rule gives the implementer one push of one commit, and a
+// second push is a second head for the reviewer to read and the architect to see.
+fixRun("threads-closed-text-fixes-head-10", {
+  "calls.jsonl": calls(closedBoth),
+  "pushes.log": pushed(fix.fixed) + pushed(fix.fixed).replace("17:35:00", "17:36:00"),
+});
+// A resolution of a bot thread the reviewer adjudicated, in a call of its own. That thread is
+// none of the scenario's two, so it is in no threads.json. One call, one thread: no bulk
+// resolution.
+fixRun("threads-closed-text-fixes-head-11", {
+  "calls.jsonl": calls([
+    ...closedBoth,
+    threadResolve(["PRRT_kwDOrig0001"], "2026-09-30T17:37:30.000Z"),
+  ]),
+  "pushes.log": pushed(fix.fixed),
 });
 // A body that quotes the resolution command and names every thread it closed resolves nothing:
 // the call that resolves a thread is the `gh api graphql` mutation, and a `gh pr edit` is not it.
-retroRun("retro-threads-text-fixes-head-12", {
+fixRun("threads-closed-text-fixes-head-12", {
   "calls.jsonl": calls([
     ...closedBoth,
     {
-      at: "2026-09-30T17:34:40.000Z",
+      at: "2026-09-30T17:37:40.000Z",
       as: "gh",
+      by: "reviewer",
       argv: ["pr", "edit", "1001", "--body-file", "body.md"],
       files: {
-        "body.md": `Resolved with gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' for ${retroIds[0]}, ${retroIds[1]} and PRRT_kwDOrig0001.`,
+        "body.md": `Resolved with gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' for ${fixIds[0]}, ${fixIds[1]} and PRRT_kwDOrig0001.`,
       },
       exit: 0,
     },
   ]),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
 });
-// Every reply and every resolution right, and no `reviewThreads` query: the run took the thread
-// ids from somewhere other than GitHub. R5 has this scenario score whether retro lists the
-// unresolved threads itself, and skill://legion-retro step 5.1 and review-threads.md both say
-// where it reads them, because the pull request's body is the implementer's record and GitHub is
-// the fact. Measured on 2026-11-06: retro-threads-text-fixes-head-4 of the tester's own batch read
-// the thread ids out of the stand-in's own <run>/fixtures.json, ran no query, and scored pass.
-retroRun("retro-threads-text-fixes-head-13", {
-  "calls.jsonl": calls(closedBoth.slice(1)),
-  "pushes.log": pushed(retro.fixed),
+// Every reply and every resolution right, and no `reviewThreads` query of the reviewer's: it
+// resolved threads whose state it read somewhere other than GitHub. The reference has the
+// reviewer list the pull request's threads itself and verify their state there, never from the
+// body, which is the implementer's record while GitHub is the fact.
+fixRun("threads-closed-text-fixes-head-13", {
+  "calls.jsonl": calls(closedBoth.filter((call) => call !== closedBoth[3])),
+  "pushes.log": pushed(fix.fixed),
+});
+// The implementer resolved a thread it replied on: the resolution is the reviewer's judgment,
+// and the implementer resolves none.
+fixRun("threads-closed-text-fixes-head-14", {
+  "calls.jsonl": calls([
+    ...closedBoth.slice(0, 3),
+    threadResolve([fixIds[0] ?? ""], "2026-09-30T17:34:30.000Z", "implementer"),
+    ...closedBoth.slice(3),
+  ]),
+  "pushes.log": pushed(fix.fixed),
+});
+// The second approval names the head the reviewer approved the first time, not the head the
+// push made: the merge gate would read an approval of a head the fix is not on.
+fixRun("threads-closed-text-fixes-head-15", {
+  "calls.jsonl": calls([...closedBoth.slice(0, 6), secondApproval(fix.approved)]),
+  "pushes.log": pushed(fix.fixed),
+});
+// Replies that name no commit: the reference has each reply name the commit that fixed it, so a
+// reader of the thread reaches the fix from it.
+fixRun("threads-closed-text-fixes-head-16", {
+  "calls.jsonl": calls([
+    threadReply(fixIds[0] ?? "", "2026-09-30T17:31:00.000Z"),
+    threadReply(fixIds[1] ?? "", "2026-09-30T17:31:10.000Z"),
+    ...closedBoth.slice(2),
+  ]),
+  "pushes.log": pushed(fix.fixed),
 });
 // Another label, for the counts.
-retroRun("retro-threads-text-fixes-base-1", {
+fixRun("threads-closed-text-fixes-base-1", {
   "calls.jsonl": calls(closedBoth),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
 });
-// code-defect: the thread no text fix closes. The pass is no commit and the move back to
-// implementing, its reason naming the thread.
-retroRun("retro-threads-code-defect-head-1", {
-  "case.txt": "code-defect\n",
-  "threads.json": defectThreadsFile,
-  "calls.jsonl": calls([threadReply("PRRT_kwDOretro101", "2026-09-30T17:31:00.000Z")]),
-  "daemon.log": calls([
-    movedBack(
-      "Thread PRRT_kwDOretro101 says a blank name exits 2, and the CLI greets: the code is wrong."
-    ),
-  ]),
-});
-// Wrote the text over the defect and pushed it: the negative control's own failure.
-retroRun("retro-threads-code-defect-head-2", {
+// code-defect: the thread no text fix closes. The pass is no commit, nothing resolved, no second
+// approval, and the message to the architect, which the implementer's transcript records.
+fixRun(
+  "threads-closed-code-defect-head-1",
+  {
+    "case.txt": "code-defect\n",
+    "threads.json": defectThreadsFile,
+    "calls.jsonl": calls([
+      threadsList("2026-09-30T17:30:00.000Z", "implementer"),
+      threadReply("PRRT_kwDOfix101", "2026-09-30T17:31:00.000Z"),
+    ]),
+  },
+  {
+    implementer: [
+      ...header,
+      ...turn,
+      publishToArchitect(
+        "Thread PRRT_kwDOfix101 says a blank name exits 2, and the CLI greets: the code is wrong, so no text fix closes it."
+      ),
+    ],
+  }
+);
+// Wrote the text over the defect, pushed it and resolved the thread: the negative control's own
+// failure.
+fixRun("threads-closed-code-defect-head-2", {
   "case.txt": "code-defect\n",
   "threads.json": defectThreadsFile,
   "calls.jsonl": calls([
-    threadReply("PRRT_kwDOretro101", "2026-09-30T17:31:00.000Z"),
-    threadResolve(["PRRT_kwDOretro101"], "2026-09-30T17:32:00.000Z"),
+    threadReply("PRRT_kwDOfix101", "2026-09-30T17:31:00.000Z", fix.fixed),
+    threadResolve(["PRRT_kwDOfix101"], "2026-09-30T17:37:00.000Z"),
   ]),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
 });
+// The message to the architect, and then the role moved the issue itself: the architect moves it
+// back to implementing, and neither the implementer nor the reviewer does.
+fixRun(
+  "threads-closed-code-defect-head-3",
+  {
+    "case.txt": "code-defect\n",
+    "threads.json": defectThreadsFile,
+    "calls.jsonl": calls([threadReply("PRRT_kwDOfix101", "2026-09-30T17:31:00.000Z")]),
+    "daemon.log": calls([
+      movedBack(
+        "Thread PRRT_kwDOfix101 says a blank name exits 2, and the CLI greets: the code is wrong."
+      ),
+    ]),
+  },
+  {
+    implementer: [
+      ...header,
+      ...turn,
+      publishToArchitect("Thread PRRT_kwDOfix101 is false because the code is wrong."),
+    ],
+  }
+);
 // The rig's two records of the case disagree, and a directory that names no case at all.
-retroRun("retro-threads-code-defect-head-3", {
+fixRun("threads-closed-code-defect-head-4", {
   "calls.jsonl": calls(closedBoth),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
 });
-retroRun("retro-threads-head-9", {
+fixRun("threads-closed-head-9", {
   "calls.jsonl": calls(closedBoth),
-  "pushes.log": pushed(retro.fixed),
+  "pushes.log": pushed(fix.fixed),
 });
 
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
@@ -3693,105 +3814,127 @@ test("reviewer-text-findings: a case.txt that disagrees with the directory, and 
 
 // Catches: a scorer that reads the pull request's thread state, which the stand-in's static
 // routes serve unresolved whatever the run did, instead of the calls, the push and the body the
-// run left.
-test("retro-threads, text-fixes: one reply and one resolution per thread, the text fixes pushed, passes", () => {
+// run left; and one that scores one half of the loop and not the other.
+test("threads-closed, text-fixes: the fix and its push, then the resolutions and the second approval, pass", () => {
   expect(out).toMatch(
-    /retro-threads-text-fixes-head-1\tpass=true\tref=false\tcase=text-fixes threads=2 listed=true replied=2 replyCalls=2 resolved=2 resolveCalls=2 bulk=false pushes=1 threadsLine=true complete=true backward=none/
+    /threads-closed-text-fixes-head-1\tpass=true\tref=false\tcase=text-fixes threads=2 replied=2 replyCalls=2 repliedCommit=2 fixResolves=0 pushes=1 fixed=true threadsLine=true listed=true resolved=2 resolveCalls=2 bulk=false approved=true told=false moved=none completions=1/
   );
   expect(out).toContain('changed=[".github/workflows/greet.yml","docs/cli.md"]');
 });
 
 // Catches: a scorer that counts resolutions and never reads the replies, or one blind to the
 // bulk call review-threads.md forbids.
-test("retro-threads, text-fixes: a thread left unanswered, and a call resolving both, each fail", () => {
-  expect(out).toMatch(/retro-threads-text-fixes-head-2\tpass=false\t.*replied=1 replyCalls=1 /);
+test("threads-closed, text-fixes: a thread left unanswered, and a call resolving both, each fail", () => {
+  expect(out).toMatch(/threads-closed-text-fixes-head-2\tpass=false\t.*replied=1 replyCalls=1 /);
   expect(out).toMatch(
-    /retro-threads-text-fixes-head-3\tpass=false\t.*resolved=0 resolveCalls=1 bulk=true /
+    /threads-closed-text-fixes-head-3\tpass=false\t.*resolved=0 resolveCalls=1 bulk=true /
   );
 });
 
 // Catches: a scorer that takes any push for the text fixes, so a commit carrying code passes.
-test("retro-threads, text-fixes: a push that carries the code with the fixes fails", () => {
-  expect(out).toMatch(/retro-threads-text-fixes-head-4\tpass=false\t.*pushes=1 /);
+test("threads-closed, text-fixes: a push that carries the code with the fixes fails", () => {
+  expect(out).toMatch(/threads-closed-text-fixes-head-4\tpass=false\t.*pushes=1 fixed=false /);
   expect(out).toContain('changed=[".github/workflows/greet.yml","docs/cli.md","greet.ts"]');
 });
 
-// Catches: a scorer blind to the body the architect reads, or to a run that never completed.
-test("retro-threads, text-fixes: a body still naming the threads open, and no completion, each fail", () => {
-  expect(out).toMatch(/retro-threads-text-fixes-head-5\tpass=false\t.*threadsLine=false /);
-  expect(out).toMatch(/retro-threads-text-fixes-head-6\tpass=false\t.*complete=false /);
+// Catches: a scorer blind to the body the architect reads through accepting; and one that holds
+// this loop to a completion, which it asks of neither role, since it runs in no phase and writes
+// no handoff.
+test("threads-closed, text-fixes: a body still naming the threads open fails, and no completion passes", () => {
+  expect(out).toMatch(/threads-closed-text-fixes-head-5\tpass=false\t.*threadsLine=false /);
+  expect(out).toMatch(/threads-closed-text-fixes-head-6\tpass=true\t.*completions=0/);
 });
 
 // Catches: a scorer that holds the resolve calls to the thread count, so a second call on a
-// thread the run already resolved fails a run that broke no rule, and one blind to a second
+// thread the reviewer already resolved fails a run that broke no rule, and one blind to a second
 // disposition reply on one thread.
-test("retro-threads, text-fixes: a thread resolved twice passes, and one replied to twice fails", () => {
+test("threads-closed, text-fixes: a thread resolved twice passes, and one replied to twice fails", () => {
   expect(out).toMatch(
-    /retro-threads-text-fixes-head-7\tpass=true\t.*resolved=2 resolveCalls=3 bulk=false /
+    /threads-closed-text-fixes-head-7\tpass=true\t.*resolved=2 resolveCalls=3 bulk=false /
   );
-  expect(out).toMatch(/retro-threads-text-fixes-head-8\tpass=false\t.*replied=2 replyCalls=3 /);
+  expect(out).toMatch(/threads-closed-text-fixes-head-8\tpass=false\t.*replied=2 replyCalls=3 /);
 });
 
-// Catches: a scorer that counts pushes rather than reading what they changed, so a run that
-// pushed its commit and then the empty one that carries the pull request onto it fails although
-// the approved head gained the text fixes and nothing else.
-test("retro-threads, text-fixes: a second push that changes nothing passes", () => {
-  expect(out).toMatch(/retro-threads-text-fixes-head-10\tpass=true\t.*pushes=2 /);
+// Catches: a scorer that reads the diff alone and not the number of pushes, so a run that pushed
+// its commit and then a second one passes although the rule gives it one push of one commit and
+// the reviewer read a head that moved under it.
+test("threads-closed, text-fixes: a second push fails", () => {
+  expect(out).toMatch(/threads-closed-text-fixes-head-10\tpass=false\t.*pushes=2 fixed=false /);
 });
 
 // Catches: a scorer that reads "one thread per call" as "exactly one of this scenario's threads
-// per call", so a run that also resolves the bot thread the reviewer adjudicated — a thread of the
-// pull request that is none of the scenario's two, which the implementer's own rule has it resolve
-// — is scored a bulk resolution and failed. Measured on a live run,
-// retro-threads-text-fixes-head-2 of 2026-11-06T05:34Z: its four resolve calls each named one
-// thread, and the score read bulk=true.
-test("retro-threads, text-fixes: a thread of the pull request that is none of the scenario's is no bulk call", () => {
+// per call", so a reviewer that also resolves a bot thread it adjudicated — a thread of the pull
+// request that is none of the scenario's two — is scored a bulk resolution and failed. Measured
+// on a live run of the scenario this one replaced, 2026-11-06T05:34Z: its four resolve calls each
+// named one thread, and the score read bulk=true.
+test("threads-closed, text-fixes: a thread of the pull request that is none of the scenario's is no bulk call", () => {
   expect(out).toMatch(
-    /retro-threads-text-fixes-head-11\tpass=true\t.*resolved=2 resolveCalls=3 bulk=false /
+    /threads-closed-text-fixes-head-11\tpass=true\t.*resolved=2 resolveCalls=3 bulk=false /
   );
 });
 
 // Catches: a scorer that reads any call whose text names the mutation as a resolution, so a body
 // or a reply that quotes the command and names the threads it closed is read as a bulk call.
-// Measured on retro-threads-text-fixes-base-1 of 2026-11-06T05:34Z, whose kept body named three
-// thread ids and scored bulk=true.
-test("retro-threads, text-fixes: a body that quotes the mutation resolves nothing", () => {
+// Measured on a live run of the scenario this one replaced, 2026-11-06T05:34Z, whose kept body
+// named three thread ids and scored bulk=true.
+test("threads-closed, text-fixes: a body that quotes the mutation resolves nothing", () => {
   expect(out).toMatch(
-    /retro-threads-text-fixes-head-12\tpass=true\t.*resolved=2 resolveCalls=2 bulk=false /
+    /threads-closed-text-fixes-head-12\tpass=true\t.*resolved=2 resolveCalls=2 bulk=false /
   );
 });
 
-// Catches: a scorer blind to the first thing retro's rule has it do. R5 has this scenario score
-// whether the agent lists the unresolved threads itself, and the scored conditions read only the
-// replies, the resolutions, the push, the body and the completion, so a run that never asks
-// GitHub which threads are open passes on ids it found anywhere else. Measured on
-// retro-threads-text-fixes-head-4 of the tester's batch of 2026-11-06T13:0xZ: it read
-// <run>/fixtures.json, the stand-in's own answers, made no `reviewThreads` call, and scored pass.
-test("retro-threads, text-fixes: a run that never listed the threads itself fails", () => {
-  expect(out).toMatch(/retro-threads-text-fixes-head-1\tpass=true\t.*listed=true /);
-  expect(out).toMatch(/retro-threads-text-fixes-head-13\tpass=false\t.*listed=false /);
+// Catches: a scorer blind to where the reviewer reads thread state. The reference has the
+// reviewer list the pull request's threads itself and verify them in `gh api graphql`, never
+// from the body, so a run whose reviewer resolved threads it never listed closed whatever its
+// other source named. Measured on a live run of the scenario this one replaced, of the tester's
+// batch of 2026-11-06T13:0xZ: it read <run>/fixtures.json, the stand-in's own answers, made no
+// `reviewThreads` call, and scored pass.
+test("threads-closed, text-fixes: a reviewer that never listed the threads fails", () => {
+  expect(out).toMatch(/threads-closed-text-fixes-head-1\tpass=true\t.*listed=true /);
+  expect(out).toMatch(/threads-closed-text-fixes-head-13\tpass=false\t.*listed=false /);
 });
 
-// Catches: a negative control that passes a retro which writes the text over a defect, which
-// would measure nothing.
-test("retro-threads, code-defect: the move back passes, the text fix fails, and the counts are per case", () => {
+// Catches: a scorer that counts every resolution of the run as the reviewer's, so an implementer
+// that resolves the thread it answered — which this rule took away from it — passes; and one
+// that reads the second approval as any approval, so an approval of the head the reviewer
+// already approved, which the fix is not on, passes as the second one.
+test("threads-closed, text-fixes: the implementer resolving a thread, and a second approval at the wrong head, each fail", () => {
+  expect(out).toMatch(/threads-closed-text-fixes-head-14\tpass=false\t.*fixResolves=1 /);
+  expect(out).toMatch(/threads-closed-text-fixes-head-15\tpass=false\t.*approved=false /);
+});
+
+// Catches: a scorer that counts a reply on each thread and never reads what it says, so a reply
+// naming no commit — which leaves the thread's reader with no way to the fix — passes.
+test("threads-closed, text-fixes: replies that name no commit fail", () => {
   expect(out).toMatch(
-    /retro-threads-code-defect-head-1\tpass=true\t.*pushes=0 .*backward=implementing/
+    /threads-closed-text-fixes-head-16\tpass=false\t.*replied=2 replyCalls=2 repliedCommit=0 /
   );
-  expect(out).toMatch(/retro-threads-code-defect-head-2\tpass=false\t.*backward=none/);
-  expect(out).toContain("retro-threads:text-fixes\thead\t5/12\t0/12\t0\t0\n");
-  expect(out).toContain("retro-threads:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
-  expect(out).toContain("retro-threads:code-defect\thead\t1/2\t0/2\t1\t0\n");
+});
+
+// Catches: a negative control that passes a run which writes the text over a defect, which would
+// measure nothing; and one that still asks for the backward move this rule gives the architect,
+// so a role that moves the issue itself passes.
+test("threads-closed, code-defect: the message to the architect passes, the text fix and the move back fail, and the counts are per case", () => {
+  expect(out).toMatch(
+    /threads-closed-code-defect-head-1\tpass=true\t.*pushes=0 .*told=true moved=none/
+  );
+  expect(out).toMatch(/threads-closed-code-defect-head-2\tpass=false\t.*told=false moved=none/);
+  expect(out).toMatch(
+    /threads-closed-code-defect-head-3\tpass=false\t.*told=true moved=implementing/
+  );
+  expect(out).toContain("threads-closed:text-fixes\thead\t5/15\t0/15\t0\t0\n");
+  expect(out).toContain("threads-closed:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
+  expect(out).toContain("threads-closed:code-defect\thead\t1/3\t0/3\t1\t0\n");
 });
 
 // Catches: a rig whose two records of the case can disagree without being caught, which would
 // score one case's run under another's rule.
-test("retro-threads: a case.txt that disagrees with the directory, and a directory naming no case, are unscored", () => {
+test("threads-closed: a case.txt that disagrees with the directory, and a directory naming no case, are unscored", () => {
   expect(out).toContain(
-    "retro-threads-code-defect-head-3\trig error: case.txt names 'text-fixes', but the run's directory names code-defect"
+    "threads-closed-code-defect-head-4\trig error: case.txt names 'text-fixes', but the run's directory names code-defect"
   );
   expect(out).toContain(
-    "retro-threads-head-9\trig error: the directory names no case: a retro-threads run's directory is retro-threads-<case>-<label>-<n>"
+    "threads-closed-head-9\trig error: the directory names no case: a threads-closed run's directory is threads-closed-<case>-<label>-<n>"
   );
 });
 

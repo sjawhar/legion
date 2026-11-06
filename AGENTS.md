@@ -650,8 +650,7 @@ nothing beneath the issue holds it, since the tree's order is kept at the close,
 An architect's `handoff_complete` there is refused (`ACCEPTANCE_IS_SIGN_OFF`); CI red there returns the issue to `implementing`.
 The architect's `catch-up` at each launch names, in its `reason`, every issue of the tree in `accepting`, since the reviewer's notice that moved it there is dropped while the architect's claim has failed.
 
-**Retro:** runs after the architect's acceptance and before the merger completes with its `READY` packet; it records what the work taught as a `dispatch comment` on the issue.
-It also closes the review threads the approval left open — it lists them, replies on each and resolves each one — and commits and pushes those text fixes and nothing else.
+**Retro:** runs after the architect's acceptance and before the merger completes with its `READY` packet; it commits nothing and records what the work taught as a `dispatch comment` on the issue.
 
 **The merge closes the issue:** a pull request merged while the issue is in `awaiting_merge` writes `done`.
 A child's close tells its architect `child-closed`, retires five of its six claims and hands the implementer the production check's first look in its live session;
@@ -876,7 +875,7 @@ A registration of a newer version keeps the gate's approval of an older one, as 
 with `off` the root architect is told so in its system prompt and adds no approval step, a registration approves the gate whatever it held, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
-Above the reviewer's approved head may sit a commit that changes `docs/solutions/`, the removal of `.legion/` files (GitHub's compare lists them `removed`) that `legion handoffs import` commits, and retro's own commit of the text fixes that close the pull request's open review threads:
+Only a commit that changes `docs/solutions/` may sit above the reviewer's approved head, beside the removal of `.legion/` files (GitHub's compare lists them `removed`) that `legion handoffs import` commits, and retro commits nothing, so an ordinary head carries neither:
 READY compares the review round's recorded approved head with READY's head on GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming the paths;
 also a compare GitHub may have cut at its 300 files or that gives no file list, a head not built on the approved one, or an approved head GitHub does not know) and a round with no recorded approval (`READY_NOT_APPROVED`), so the change goes back to review.
 The merger sends its `READY` packet with its completion;

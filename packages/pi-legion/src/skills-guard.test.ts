@@ -530,9 +530,10 @@ test("the worker skill tells a role to read the pull request's head after its ow
     onlyInTheWorkerPrompt
   );
   countedOncePerFile("Three waits stand rather than proceed", ["skills/legion-worker/SKILL.md"]);
-  // The reviewer pushes nothing since dispatch://INFRA-764 — a text finding is the thread retro
-  // closes, not a commit of the reviewer's — so the carrying commit is no more its work than the
-  // merger's, and its part says so rather than naming a push it never makes.
+  // The reviewer pushes nothing since dispatch://INFRA-764 — a text finding is the thread the
+  // implementer fixes and the reviewer then resolves, not a commit of the reviewer's — so the
+  // carrying commit is no more its work than the merger's, and its part says so rather than
+  // naming a push it never makes.
   countedOncePerFile(
     "the empty commit that carries a pull request onto a pushed commit is never yours to make either",
     ["packages/daemon/internal/prompts/roles/reviewer.md"]
@@ -568,16 +569,25 @@ test("one verdict rule for the reviewer, in every copy", () => {
   }
 });
 
-// The other half of the same rule: the finding the reviewer leaves open is closed by retro, which
-// is why the reviewer may approve over it at all.
-test("retro commits the text fixes that close the threads, in every copy", () => {
+// The other half of the same rule: the finding the reviewer leaves open is fixed by the
+// implementer in its own live session and resolved by the reviewer that judged it, which is why
+// the reviewer may approve over it at all. Each half is pinned in the three parts of the role
+// that does it; retro carries neither, since it commits nothing.
+test("one post-approval thread loop for each role, in every copy", () => {
   countedOncePerFile(
-    "Retro commits the text fixes that close the pull request's open review threads, and nothing else.",
+    "When an approval leaves text findings open, you fix that text in your own live session, in no phase and with no handoff, and make one push of one commit; you reply on each thread naming that commit, resolve none, and wait for no resolution.",
     [
-      "skills/legion-retro/SKILL.md",
-      "skills/legion-worker/references/merge-gate.md",
       "packages/daemon/internal/prompts/roles/implementer.md",
+      "packages/daemon/internal/prompts/roles/core/implementer.md",
       "packages/daemon/internal/prompts/go/implementer.md",
+    ]
+  );
+  countedOncePerFile(
+    "You resolve each thread you opened once you have read the fix that closed it, one call per thread, and then approve the head the fix landed on, by SHA, reading that head's checks as you read any head's; a thread the fix cannot close is a message to the architect, who moves the issue back to `implementing`.",
+    [
+      "packages/daemon/internal/prompts/roles/reviewer.md",
+      "packages/daemon/internal/prompts/roles/core/reviewer.md",
+      "packages/daemon/internal/prompts/go/reviewer.md",
     ]
   );
 });

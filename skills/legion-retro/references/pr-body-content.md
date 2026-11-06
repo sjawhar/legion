@@ -27,9 +27,8 @@ required check failed, so the merge waits.
    `@json` makes `base` a quoted jj string literal; never paste a branch name between quotes
    yourself, because a name with a quote or revset character then breaks the command. For each
    path pattern the step 1 sources name, write the line they require when a listed path matches
-   it. A line that says work was done names work this pull request did: the only commit retro
-   makes is the text fixes that close the pull request's open review threads, so a line whose
-   work is undone is a finding for the architect, not work you do here.
+   it. A line that says work was done names work this pull request did: retro commits nothing, so
+   a line whose work is undone is a finding for the architect, not work you do here.
 3. Make a directory outside `$LEGION_WORKSPACE` with `dir=$(mktemp -d)`, the one place you write
    outside it: jj would commit a file inside it, and a fixed name in a shared `/tmp` can hold
    another session's body. Save the live body as `$dir/before.md` (to restore on failure) and
@@ -52,13 +51,6 @@ required check failed, so the merge waits.
 
    A body edit changes no commit, so the reviewer's approval stands, and a check that judges the
    body runs again at once on the head as it is.
-
-The `Threads:` count and its per-thread entries are the body's other retro content: retro writes
-them at step 5 of `skill://legion-retro`, once its own commit has closed the pull request's open
-review threads, through the same read, edit and write-back as above
-(`skill://legion-worker/references/pr-body.md` holds that section's shape). When that commit
-changes a path the derived lines read, recompute them at the head it made and write both in one
-edit.
 
 When the write back is refused, or the check it feeds fails, report it to the architect as *When
 retro stops* says, with the command and its output.
