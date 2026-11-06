@@ -29,7 +29,7 @@ severity: high
 
 With two envoy-dispatch processes on one document, a room can stand behind the durable head:
 the other process appended an update this room instance never took. The durable gate
-(`refuseRoomBehindHead`, under the document's advisory lock) refuses a settlement from such a
+(`gateAppend`, under the document's advisory lock) refuses a settlement from such a
 room, so it never writes a version over text missing that update.
 
 `settleRoomWithin` (`packages/envoy/internal/dispatch/docs/service.go`) treated the refusal as a

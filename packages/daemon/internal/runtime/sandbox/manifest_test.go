@@ -1016,13 +1016,17 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 }
 
 // The provisioning token never shares a process with anything a tree agent can write (Stage 4b
-// Task 4b.6b): the claim's Secret projects it into workspace-fetch alone, the only container told
-// where it is, and no other container can write a volume workspace-fetch mounts — the feed it
-// fills is read-only in workspace-init, and its TMPDIR, where its one-shot credential goes, is an
-// in-memory volume no other container mounts. So workspace-fetch mounts neither the tree volume
-// nor the config home. Every pod's manifest holds to it, by every route Kubernetes offers into a
-// Secret, the worker's container included; the controller's pod has no workspace-fetch, so none of
-// its containers reaches the token at all.
+// Task 4b.6b): the claim's Secret projects it into the pod's token-holding init containers alone —
+// workspace-fetch, and skills-fetch where the deployment names a skills repository — which are the
+// only containers told where it is, and no other container can write a volume one of them mounts.
+// The feed workspace-fetch fills is read-only in workspace-init; the skills volume skills-fetch
+// clones into is read-only in the roles container; and each holder's TMPDIR, where its one-shot
+// credential goes, is an in-memory volume of its own that no other container mounts, the sibling
+// holder included. So neither holder mounts the tree volume or the config home, and neither
+// carries an operator's mount (runtime.kubernetes.pod), which reaches the launcher containers and
+// the image probe's and no init container. Every pod's manifest holds to it, by every route
+// Kubernetes offers into a Secret, the worker's container included; the controller's pod has no
+// workspace-fetch and no skills-fetch, so none of its containers reaches the token at all.
 //
 // What the boundary protects is identity, not a repository-write token kept off the tree volume:
 // an implement role now holds the implement App's token — the same lease as the
@@ -1031,117 +1035,201 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
 // from the App that made it.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, tc := range manifestCases(t) {
-		t.Run(name, func(t *testing.T) {
-			l, err := r.prepare(tc.spec)
+	for options, skills := range map[string]bool{"no skills repository": false, "a skills repository": true} {
+		t.Run(options, func(t *testing.T) {
+			opts := goldenOptions()
+			// An operator pod with volumes and mounts of its own, so the no-operator-mount
+			// assertion below has something to find: with none configured, that check would pass
+			// on a manifest that handed every one of them to the token-holding containers.
+			opts.Pod = operatorPod()
+			if skills {
+				opts.SkillsRepository = testSkillsRepository(t)
+			}
+			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			template := r.podTemplate(l)
-			pod := template.Spec
-			claimSecret := secretName(l.name)
-			volumes := map[string]corev1.Volume{}
-			for _, volume := range pod.Volumes {
-				volumes[volume.Name] = volume
-			}
-			// A Secret source that maps no keys maps every key.
-			maps := func(items []corev1.KeyToPath) bool {
-				return len(items) == 0 || slices.ContainsFunc(items, func(item corev1.KeyToPath) bool { return item.Key == provisionTokenKey })
-			}
-			reaches := func(c corev1.Container) []string {
-				var routes []string
-				for _, mount := range c.VolumeMounts {
-					volume := volumes[mount.Name]
-					if secret := volume.Secret; secret != nil && secret.SecretName == claimSecret && maps(secret.Items) {
-						routes = append(routes, "secret volume "+mount.Name)
+			for name, tc := range manifestCases(t) {
+				t.Run(name, func(t *testing.T) {
+					l, err := r.prepare(tc.spec)
+					if err != nil {
+						t.Fatal(err)
 					}
-					if projected := volume.Projected; projected != nil {
-						for _, source := range projected.Sources {
-							if secret := source.Secret; secret != nil && secret.Name == claimSecret && maps(secret.Items) {
-								routes = append(routes, "projected volume "+mount.Name)
+					template := r.podTemplate(l)
+					pod := template.Spec
+					claimSecret := secretName(l.name)
+					volumes := map[string]corev1.Volume{}
+					for _, volume := range pod.Volumes {
+						volumes[volume.Name] = volume
+					}
+					// A Secret source that maps no keys maps every key.
+					maps := func(items []corev1.KeyToPath) bool {
+						return len(items) == 0 || slices.ContainsFunc(items, func(item corev1.KeyToPath) bool { return item.Key == provisionTokenKey })
+					}
+					reaches := func(c corev1.Container) []string {
+						var routes []string
+						for _, mount := range c.VolumeMounts {
+							volume := volumes[mount.Name]
+							if secret := volume.Secret; secret != nil && secret.SecretName == claimSecret && maps(secret.Items) {
+								routes = append(routes, "secret volume "+mount.Name)
+							}
+							if projected := volume.Projected; projected != nil {
+								for _, source := range projected.Sources {
+									if secret := source.Secret; secret != nil && secret.Name == claimSecret && maps(secret.Items) {
+										routes = append(routes, "projected volume "+mount.Name)
+									}
+								}
+							}
+						}
+						for _, v := range c.Env {
+							if from := v.ValueFrom; from != nil && from.SecretKeyRef != nil && from.SecretKeyRef.Name == claimSecret && from.SecretKeyRef.Key == provisionTokenKey {
+								routes = append(routes, "env "+v.Name)
+							}
+						}
+						for _, from := range c.EnvFrom {
+							if from.SecretRef != nil && from.SecretRef.Name == claimSecret {
+								routes = append(routes, "envFrom")
+							}
+						}
+						return routes
+					}
+					containers := slices.Concat(pod.InitContainers, pod.Containers)
+					holderNames := []string{fetchContainer, skillsContainer}
+					for _, c := range containers {
+						_, pointed := envOf(c)["LEGION_PROVISION_TOKEN_FILE"]
+						routes := reaches(c)
+						if holds := slices.Contains(holderNames, c.Name); (len(routes) > 0) != holds || pointed != holds {
+							t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
+						}
+					}
+					kind, err := podKindOf(template.Metadata.Labels)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if kind == (controllerPod{}) {
+						for _, name := range holderNames {
+							if slices.ContainsFunc(containers, func(c corev1.Container) bool { return c.Name == name }) {
+								t.Errorf("the controller's pod runs %s", name)
+							}
+						}
+						return
+					}
+					in := func(c corev1.Container, path string) string {
+						for _, mount := range c.VolumeMounts {
+							if mount.MountPath == path {
+								return mount.Name
+							}
+						}
+						return ""
+					}
+					// Every container that holds the token: no other container may write what it
+					// mounts. The feed, a subPath of the issue volume, is reachable through another
+					// container's read-write mount of the volume (or of a subPath above the feed)
+					// unless that container mounts the feed read-only over exactly the path the
+					// read-write mount reaches it at; the skills volume is reachable only through a
+					// whole-volume mount, so a read-only one there is the same rule with no subPath.
+					var holders []corev1.Container
+					for _, name := range holderNames {
+						if c := slices.IndexFunc(containers, func(c corev1.Container) bool { return c.Name == name }); c >= 0 {
+							holders = append(holders, containers[c])
+						}
+					}
+					if want := 1 + boolToInt(skills); len(holders) != want {
+						t.Fatalf("the issue pod runs %d token-holding containers (%v), want %d", len(holders), holderNames, want)
+					}
+					for _, holder := range holders {
+						for _, mount := range holder.VolumeMounts {
+							for _, other := range containers {
+								if other.Name == holder.Name {
+									continue
+								}
+								for _, theirs := range other.VolumeMounts {
+									if theirs.Name != mount.Name || theirs.ReadOnly {
+										continue
+									}
+									below, ok := strings.CutPrefix(mount.SubPath, theirs.SubPath)
+									if !ok || (theirs.SubPath != "" && below != "" && !strings.HasPrefix(below, "/")) {
+										continue
+									}
+									reached := path.Join(theirs.MountPath, below)
+									shadowed := slices.ContainsFunc(other.VolumeMounts, func(m corev1.VolumeMount) bool {
+										return m.Name == mount.Name && m.ReadOnly && m.SubPath == mount.SubPath && m.MountPath == reached
+									})
+									if !shadowed {
+										t.Errorf("%s can write volume %s at %s, which %s mounts at %s", other.Name, mount.Name, reached, holder.Name, mount.MountPath)
+									}
+								}
+							}
+						}
+						// Each holder's TMPDIR is an in-memory volume of its own: a TMPDIR two
+						// holders shared would be one each could read the other's one-shot
+						// credential in.
+						temp := envOf(holder)["TMPDIR"]
+						volume := in(holder, temp)
+						if dir := volumes[volume].EmptyDir; temp == "" || dir == nil || dir.Medium != corev1.StorageMediumMemory {
+							t.Errorf("%s's TMPDIR %q is not an in-memory volume of its own", holder.Name, temp)
+						}
+						// "Of its own" is about the volume, not the path: another container that
+						// mounted the same volume read-only somewhere else would read the
+						// credential just as well, and the write-overlap check above passes a
+						// read-only mount by design. So compare by volume name across every mount
+						// of every other container, whatever its path and whether it is read-only.
+						for _, other := range containers {
+							if other.Name == holder.Name {
+								continue
+							}
+							for _, mount := range other.VolumeMounts {
+								if mount.Name == volume {
+									t.Errorf("%s mounts %s's TMPDIR volume %s at %s (readOnly %t)",
+										other.Name, holder.Name, volume, mount.MountPath, mount.ReadOnly)
+								}
+							}
+						}
+						// No operator mount reaches a token holder: the operator's pod block
+						// (runtime.kubernetes.pod) names volumes of its own, and one of them in a
+						// container holding the token would share the token with whatever the
+						// operator put there.
+						if len(r.pod.VolumeMounts) == 0 {
+							t.Fatal("the operator's pod carries no mount, so this check would pass on a manifest that gave the token holders every one of them")
+						}
+						for _, mount := range holder.VolumeMounts {
+							if slices.ContainsFunc(r.pod.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == mount.Name }) {
+								t.Errorf("%s carries the operator's mount %s at %s", holder.Name, mount.Name, mount.MountPath)
 							}
 						}
 					}
-				}
-				for _, v := range c.Env {
-					if from := v.ValueFrom; from != nil && from.SecretKeyRef != nil && from.SecretKeyRef.Name == claimSecret && from.SecretKeyRef.Key == provisionTokenKey {
-						routes = append(routes, "env "+v.Name)
+					fetch := containerNamed(t, pod, fetchContainer)
+					if feed := in(containerNamed(t, pod, initContainer), FeedDir); feed == "" || feed != in(fetch, FeedDir) {
+						t.Errorf("workspace-init reads the feed from %q, and %s fills %q", feed, fetch.Name, in(fetch, FeedDir))
 					}
-				}
-				for _, from := range c.EnvFrom {
-					if from.SecretRef != nil && from.SecretRef.Name == claimSecret {
-						routes = append(routes, "envFrom")
-					}
-				}
-				return routes
-			}
-			containers := slices.Concat(pod.InitContainers, pod.Containers)
-			for _, c := range containers {
-				_, pointed := envOf(c)["LEGION_PROVISION_TOKEN_FILE"]
-				routes := reaches(c)
-				if holds := c.Name == fetchContainer; (len(routes) > 0) != holds || pointed != holds {
-					t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
-				}
-			}
-			kind, err := podKindOf(template.Metadata.Labels)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if kind == (controllerPod{}) {
-				if slices.ContainsFunc(containers, func(c corev1.Container) bool { return c.Name == fetchContainer }) {
-					t.Errorf("the controller's pod runs %s", fetchContainer)
-				}
-				return
-			}
-			// No other container may write what workspace-fetch mounts: the feed, a subPath of the issue
-			// volume, is reachable through another container's read-write mount of the volume (or of a
-			// subPath above the feed) unless that container mounts the feed read-only over exactly the
-			// path the read-write mount reaches it at.
-			fetch := containerNamed(t, pod, fetchContainer)
-			for _, mount := range fetch.VolumeMounts {
-				for _, other := range containers {
-					if other.Name == fetch.Name {
-						continue
-					}
-					for _, theirs := range other.VolumeMounts {
-						if theirs.Name != mount.Name || theirs.ReadOnly {
-							continue
+					if !skills {
+						if _, held := volumes[skillsVolume]; held {
+							t.Errorf("a pod of a deployment with no skills repository carries the %s volume", skillsVolume)
 						}
-						below, ok := strings.CutPrefix(mount.SubPath, theirs.SubPath)
-						if !ok || (theirs.SubPath != "" && below != "" && !strings.HasPrefix(below, "/")) {
-							continue
-						}
-						reached := path.Join(theirs.MountPath, below)
-						shadowed := slices.ContainsFunc(other.VolumeMounts, func(m corev1.VolumeMount) bool {
-							return m.Name == mount.Name && m.ReadOnly && m.SubPath == mount.SubPath && m.MountPath == reached
-						})
-						if !shadowed {
-							t.Errorf("%s can write volume %s at %s, which %s mounts at %s", other.Name, mount.Name, reached, fetch.Name, mount.MountPath)
-						}
+						return
 					}
-				}
-			}
-			temp := envOf(fetch)["TMPDIR"]
-			in := func(c corev1.Container, path string) string {
-				for _, mount := range c.VolumeMounts {
-					if mount.MountPath == path {
-						return mount.Name
+					// The roles container reads the skills volume and never writes it, at the one
+					// path every role of the pod sees it at.
+					roles := containerNamed(t, pod, kind.container())
+					mounted := slices.IndexFunc(roles.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == skillsVolume })
+					if mounted < 0 {
+						t.Fatalf("%s does not mount the skills volume", roles.Name)
 					}
-				}
-				return ""
-			}
-			if dir := volumes[in(fetch, temp)].EmptyDir; temp == "" || dir == nil || dir.Medium != corev1.StorageMediumMemory {
-				t.Errorf("%s's TMPDIR %q is not an in-memory volume of its own", fetch.Name, temp)
-			}
-			if feed := in(containerNamed(t, pod, initContainer), FeedDir); feed == "" || feed != in(fetch, FeedDir) {
-				t.Errorf("workspace-init reads the feed from %q, and %s fills %q", feed, fetch.Name, in(fetch, FeedDir))
+					if mount := roles.VolumeMounts[mounted]; !mount.ReadOnly || mount.MountPath != SkillsDir {
+						t.Errorf("%s mounts the skills volume %+v, want it read-only at %s", roles.Name, mount, SkillsDir)
+					}
+				})
 			}
 		})
 	}
+}
+
+// boolToInt is 1 for true and 0 for false, for a count a case's shape decides.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // A launch the runtime cannot honour exactly is refused before any API call.
@@ -1814,8 +1902,10 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
-	// With every optional piece configured: the pod's own test database is one (testPGVolume).
+	// With every optional piece configured: the pod's own test database is one (testPGVolume), and
+	// the skills marketplace is another (skillsVolume, skillsTempVolume and SkillsDir).
 	opts.TestPostgres = true
+	opts.SkillsRepository = testSkillsRepository(t)
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
