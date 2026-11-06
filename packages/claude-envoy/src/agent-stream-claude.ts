@@ -24,7 +24,6 @@ import {
 } from "@legion/pi-shared/agent-stream"
 import type {
   ModAppendMessage,
-  ModAppendOrigin,
   ModCommandInfo,
   ModConfigRow,
   ModContentBlock,
@@ -127,14 +126,15 @@ export interface ClaudeAgentStreamDeps {
    */
   readonly tagFor?: (row: string) => string | undefined
   /**
-   * Whether a row of the `command` door is one this session's own `$.command.run` produced
-   * (`./mod-session`, `runsCommandRow`). Claude Code echoes the command it ran rather than the
-   * one that was asked for - `/cost` ran as `/usage`, and `/model anthropic/haiku` as
-   * `/model haiku`, measured live on 2.1.310 - so the echo row drawn is a second message the
-   * person never wrote, beside Dispatch's stored copy of the one they did send (INFRA-1026).
-   * Absent where no run of this session's can exist, and every command row is a person's own.
+   * Whether a row of the `command` door is the echo row a `$.command.run` of this session's
+   * claimed (`./mod-session`, `runsCommandRow`), asked by the row's own id. Claude Code echoes
+   * the command it ran rather than the one that was asked for - `/cost` ran as `/usage`, and
+   * `/model anthropic/haiku` as `/model haiku`, measured live on 2.1.310 - so the echo row
+   * drawn is a second message the person never wrote, beside Dispatch's stored copy of the one
+   * they did send (INFRA-1026). Absent where no run of this session's can exist, and every
+   * command row is a person's own.
    */
-  readonly runsCommandRow?: (origin: ModAppendOrigin) => boolean
+  readonly runsCommandRow?: (row: string) => boolean
 }
 
 export interface ClaudeAgentStream {
@@ -359,6 +359,17 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     // The step that produced the answer already carried it, and the publisher would key this row
     // into a slot of its own: publishing both shows the viewer the same answer twice.
     if (door === "response") return
+    // A row Claude Code marks `isMeta` is one the person does not see as typed
+    // (`ModAppendMessage.isMeta`), so drawing it attributes to a person something they never
+    // wrote. Measured on live Claude Code 2.1.310 (INFRA-1026): a `/rename` typed at a
+    // terminal left, behind its echo and its `<local-command-stdout>` row, a `type: "user"`
+    // row carrying `isMeta: true` whose whole text is
+    // `<system-reminder> The user named this session "…". …</system-reminder>`, which the live
+    // view drew as the person's own message - model-facing XML under their name. A line the
+    // person types while a turn runs is not marked: it arrives `origin composer`,
+    // `type: "attachment"`, `name: "queued_command"` and no `isMeta` (same measurement), so it
+    // reaches the reader this rule leaves untouched (`./claude-rows`, `claudeMidTurnMessage`).
+    if (message.isMeta === true) return
     // Claude Code's own note of where it put a picture's bytes, which it writes beside the
     // message that carried the picture (`./claude-rows`, `isPictureAttachmentRow`). Nobody wrote
     // it, and published it draws a second user row for the one message the person sent: measured
@@ -432,7 +443,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
         // reaches the page as the message Dispatch stored, which the Agents page shows beside
         // this stream. Drawn, a `/cost` the person sent put `/cost` and `/usage` in front of
         // them as two messages of theirs, measured live on 2.1.310 (INFRA-1026).
-        if (deps.runsCommandRow?.(origin) === true) return
+        if (deps.runsCommandRow?.(uuid) === true) return
         record(
           subject,
           {

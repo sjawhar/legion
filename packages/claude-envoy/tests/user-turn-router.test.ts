@@ -141,9 +141,12 @@ async function harness(input: {
     readonly eventId?: string
   }) => Promise<void>
   readonly commandWaitingMs?: number
-  /** How long a command whose result carried no output waits for the row Claude Code wrote
-   *  for it; short, so a test that drives that wait does not sit through the real bound. */
+  /** How long a run whose echo row has been claimed waits for the output row behind it; short,
+   *  so a test that drives that wait does not sit through the real bound. */
   readonly commandOutputMs?: number
+  /** How long after its own answer a run may still claim an echo row; short, for the same
+   *  reason. */
+  readonly commandEchoMs?: number
   readonly directory?: string
 }): Promise<Harness> {
   const directory = input.directory ?? (await mkdtemp(join(tmpdir(), "claude-envoy-turns-")))
@@ -155,6 +158,7 @@ async function harness(input: {
   const session = modSession({
     link: input.link,
     warn: () => undefined,
+    ...(input.commandEchoMs === undefined ? {} : { commandEchoMs: input.commandEchoMs }),
     ...(input.commandOutputMs === undefined ? {} : { commandOutputMs: input.commandOutputMs }),
   })
   const router = createUserTurnRouter({
@@ -648,8 +652,8 @@ test("a command that printed nothing is answered saying so rather than with sile
 
 // A command does not run under the name the person sent it with: measured live on 2.1.310, a
 // `/cost` from Dispatch was run and echoed by Claude Code as `/usage`, and a
-// `/model anthropic/haiku` as `/model haiku` (INFRA-1026). So what ties the output row to the
-// run is that the run is outstanding, never the command the rows name.
+// `/model anthropic/haiku` as `/model haiku` (INFRA-1026). So what ties the rows to the run is
+// that they arrived just after its call answered, never the command the rows name.
 test("a command Claude Code runs under another name is still answered from that run's output", async () => {
   const mod = fakeMod({ "command.run": () => ({}) })
   const session = await harness({
@@ -667,6 +671,41 @@ test("a command Claude Code runs under another name is still answered from that 
     await waitFor(async () => session.replies.length === 1, "the command's reply")
 
     expect(session.replies.map((posted) => posted.body)).toEqual(["Total cost:            $0.0993"])
+  } finally {
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})
+
+// A run whose command opened a dialog at the terminal has written no row of its own while the
+// person answers it, and the rows that arrive meanwhile are the person's own typing. Measured
+// on live Claude Code 2.1.310 (INFRA-1026): a Dispatch `/cost` asked at 08:09:56.390 was still
+// unanswered when the person typed `/config` at that terminal 36 seconds later, and the rule
+// before this one answered their `/cost` with `Config dialog dismissed` - the other command's
+// output, posted to Dispatch as the reply to theirs.
+test("a command a person typed at the terminal is not the answer to one still waiting", async () => {
+  const dialog = Promise.withResolvers<ModCallResults["command.run"]>()
+  const mod = fakeMod({ "command.run": () => dialog.promise })
+  const session = await harness({
+    link: mod.link,
+    accept: () => accepted("/cost"),
+    commandEchoMs: 100,
+    commandOutputMs: 100,
+  })
+  try {
+    expect(await session.router.route(frame(personSends("/cost")))).toBe(true)
+    await waitFor(async () => mod.madeOf("command.run").length === 1, "the command to run")
+
+    // What the person typed at their own terminal while the dialog waited for them.
+    session.observe(commandEcho("config", ""))
+    session.observe(commandOutput("Config dialog dismissed"))
+    await settled()
+    expect(session.replies).toEqual([])
+
+    // Their `/cost` answers for itself once the dialog closes, and it printed nothing.
+    dialog.resolve({})
+    await waitFor(async () => session.replies.length === 1, "the command's reply")
+
+    expect(session.replies.map((posted) => posted.body)).toEqual([commandPrintedNothing("/cost")])
   } finally {
     await rm(session.directory, { recursive: true, force: true })
   }

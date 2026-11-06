@@ -73,7 +73,7 @@ function harness(
   startAt = 1_000,
   tagFor?: (row: string) => string | undefined,
   isPane = false,
-  runsCommandRow?: (origin: ModAppendOrigin) => boolean,
+  runsCommandRow?: (row: string) => boolean,
 ): Harness {
   let clock = startAt
   const now = (): number => clock
@@ -156,23 +156,54 @@ function appendRow(
  *  tag after the first indented (the transcripts `COMMAND_BOOKKEEPING_TAGS` names in
  *  `../src/claude-rows`).
  *
- *  `origin` says who ran it. A command a person typed at the session's own terminal carries
- *  `unclassified`, which is what this writes by default
- *  (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:178-188`,
- *  `logs/mod3-q2-310.jsonl:118-119`); a row of a run this plugin asked for carries `plugin` or
- *  `engine` (`logs/mod2.jsonl:312-321`, `logs/mod2.jsonl:70-72`). */
+ *  `origin` says nothing about who ran it, and the default is what a terminal writes: measured
+ *  on live Claude Code 2.1.310 (INFRA-1026), a `/config` a person typed and the `/usage` echo
+ *  of a run this session made both carried `{"kind":"engine"}`, a run's echo in a Legion pane
+ *  carried `{"kind":"plugin"}`, and the pane's own seeded command carried
+ *  `{"kind":"unclassified"}`. The row Claude Code writes carries `type: "system"` and
+ *  `name: "local_command"` with it. */
 function commandEcho(
   name: string,
   args: string,
   uuid: string,
-  origin: ModAppendOrigin = { kind: "unclassified" },
+  origin: ModAppendOrigin = { kind: "engine" },
 ): ModEvent {
   const text = [
     `<command-name>/${name}</command-name>`,
     `            <command-message>${name}</command-message>`,
     `            <command-args>${args}</command-args>`,
   ].join("\n")
-  return appendRow("command", [{ text, type: "text" }], { origin, uuid })
+  return appendRow("command", [{ text, type: "text" }], {
+    message: {
+      content: [{ text, type: "text" }],
+      name: "local_command",
+      role: "user",
+      type: "system",
+    },
+    origin,
+    uuid,
+  })
+}
+
+/** The output row Claude Code writes behind a command's echo: one text block wrapped in
+ *  `<local-command-stdout>`, `type: "system"`, `name: "local_command"`, measured on live
+ *  Claude Code 2.1.310 beside the echo above (INFRA-1026). */
+function commandStdout(
+  text: string,
+  uuid: string,
+  origin: ModAppendOrigin = { kind: "engine" },
+): ModEvent {
+  const wrapped = `<local-command-stdout>${text}</local-command-stdout>`
+  return appendRow("command", [{ text: wrapped, type: "text" }], {
+    message: {
+      content: [{ text: wrapped, type: "text" }],
+      name: "local_command",
+      role: "user",
+      type: "system",
+    },
+    origin,
+    uuid,
+  })
 }
 
 test("a streaming step's snapshots stay one message, and its text grows", () => {
@@ -436,29 +467,104 @@ test("a command typed at the terminal shows although its origin is the run's own
   ])
 })
 
-// A Legion pane is named before anything else happens in it: the daemon's bridge writes
-// `/rename <title>` to the session's input (`packages/daemon/internal/claudebridge/bridge.go`,
-// lines 210-213), so the prompt row it leaves and the echo Claude Code answers it with are the
-// pane being named rather than a person's first message. A terminal session has no such seed,
-// and a person who runs `/rename` there sees the command they ran (INFRA-1026).
-test("a pane's seeded rename records nothing, and a terminal session's rename still shows", () => {
-  const seeded = commandEcho("rename", "legion/INFRA-1026 worker", "row-rename")
-  const written = appendRow(
-    "prompt",
-    [{ text: "/rename legion/INFRA-1026 worker", type: "text" }],
-    { uuid: "row-rename-prompt" },
+// A run whose `$.command.run` has not been answered has written no row of its own yet, so a row
+// that arrives while it waits belongs to whoever typed it. Measured on live Claude Code 2.1.310
+// (INFRA-1026): a Dispatch `/cost` asked at 08:09:56.390 opened a dialog at the terminal and
+// had written no row 36 seconds later, when the person typed `/config` there - and the rule
+// before this one handed that run the person's echo and output rows, so their command vanished
+// from the view.
+test("a command typed at the terminal shows while a command this session ran is still waiting", () => {
+  const waiting = Promise.withResolvers<ModCallResults["command.run"]>()
+  const session = modSession({
+    commandOutputMs: 500,
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
+        call === "command.run"
+          ? (waiting.promise as unknown as Promise<ModCallResults[N]>)
+          : Promise.reject(new Error(`no answer for ${call}`)),
+    },
+    warn: () => undefined,
+  })
+  const live = harness(1_000, undefined, false, (row) => session.runsCommandRow(row))
+  // As the runner wires the two (`../src/agent-stream-runner`): the session takes each event,
+  // then the view records it.
+  const feed = (event: ModEvent): void => {
+    session.observe(event)
+    live.feed(event)
+  }
+
+  // The person's `/cost` is still waiting on a dialog at the terminal.
+  void session.runCommand("cost", "")
+  // What they typed there meanwhile, and what it printed.
+  feed(commandEcho("config", "", "row-config"))
+  feed(commandStdout("Set model to sonnet", "row-config-stdout"))
+
+  expect(messages(live.replay()).map((message) => [message.role, textOf(message)])).toEqual([
+    ["user", "/config"],
+  ])
+})
+
+// A `/rename` typed at a terminal leaves three rows, measured on live Claude Code 2.1.310
+// (INFRA-1026) at 08:29:23: the echo by the `command` door (`{"kind":"engine"}`,
+// `type: "system"`, `name: "local_command"`) at .018, its `<local-command-stdout>` row at .048,
+// and at .070 a row by the `note` door - `{"kind":"engine"}`, `type: "user"`, `isMeta: true` -
+// whose whole text is the `<system-reminder>` naming the session. Drawn, that reminder is
+// model-facing XML under the person's name: the live view showed it as a message of theirs
+// beside the command they typed.
+test("a terminal rename shows the command line alone", () => {
+  const live = harness()
+  const reminder =
+    '<system-reminder>\nThe user named this session "m1 rename probe". This may indicate the session\'s focus or intent.\n</system-reminder>'
+  live.feed(
+    commandEcho("rename", "m1 rename probe", "row-rename"),
+    commandStdout("Session renamed to: m1 rename probe", "row-rename-stdout"),
+    appendRow("note", [{ text: reminder, type: "text" }], {
+      message: {
+        content: [{ text: reminder, type: "text" }],
+        isMeta: true,
+        role: "user",
+        type: "user",
+      },
+      origin: { kind: "engine" },
+      uuid: "row-rename-reminder",
+    }),
   )
 
-  const pane = harness(1_000, undefined, true)
-  pane.feed(seeded, written)
-  expect(messages(pane.replay())).toEqual([])
-
-  const terminal = harness()
-  terminal.feed(seeded, written)
-  expect(messages(terminal.replay()).map(textOf)).toEqual([
-    "/rename legion/INFRA-1026 worker",
-    "/rename legion/INFRA-1026 worker",
+  expect(messages(live.replay()).map((message) => [message.role, textOf(message)])).toEqual([
+    ["user", "/rename m1 rename probe"],
   ])
+})
+
+// A Legion pane is named before anything else happens in it: the daemon's bridge types
+// `/rename <title>` into the session's input
+// (`packages/daemon/internal/claudebridge/bridge.go`, lines 210-213), and Claude Code runs it
+// as the command it is. Measured on live 2.1.310 in a pane (INFRA-1026): the caveat row
+// (`{"kind":"unclassified"}`, `isMeta: true`), the echo (`{"kind":"unclassified"}`) and the
+// `<local-command-stdout>` row (`{"kind":"engine"}`), and no prompt row at all. The pane being
+// named is no message of a person's, and nothing of it is drawn.
+test("a pane's seeded rename draws nothing", () => {
+  const caveat =
+    "<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>"
+  const pane = harness(1_000, undefined, true)
+  pane.feed(
+    appendRow("command", [{ text: caveat, type: "text" }], {
+      message: {
+        content: [{ text: caveat, type: "text" }],
+        isMeta: true,
+        role: "user",
+        type: "user",
+      },
+      origin: { kind: "unclassified" },
+      uuid: "row-pane-caveat",
+    }),
+    commandEcho("rename", "legion/INFRA-1026 worker", "row-pane-rename", {
+      kind: "unclassified",
+    }),
+    commandStdout("Session renamed to: legion/INFRA-1026 worker", "row-pane-stdout"),
+  )
+
+  expect(messages(pane.replay())).toEqual([])
 })
 
 test("an unknown content part renders as its type in brackets", () => {

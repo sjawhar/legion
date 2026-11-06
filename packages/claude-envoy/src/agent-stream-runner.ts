@@ -12,7 +12,7 @@ import {
 } from "@legion/contracts"
 import { messageFor } from "@legion/envoy-client/errors"
 import { AgentStreamPublisher } from "@legion/pi-shared/agent-stream"
-import type { ModAppendOrigin, ModConfigRow, ModEffort, ModEvent } from "../hooks/mod-protocol"
+import type { ModConfigRow, ModEffort, ModEvent } from "../hooks/mod-protocol"
 import { claudeAgentStreamCommands, createClaudeAgentStream } from "./agent-stream-claude"
 import type { ChannelForwarderConnection, ChannelTopicSubscription } from "./channel-forwarder"
 import type { ModLink } from "./mod-link"
@@ -59,12 +59,12 @@ export interface AgentStreamOptions {
   /** The Dispatch message a row of the conversation is, which tags that row so the Agents page
    *  shows a person's own message once rather than beside its stored copy. */
   readonly tagFor?: (row: string) => string | undefined
-  /** Whether a row of the `command` door is one this session's own `$.command.run` produced
-   *  (`./mod-session`, `runsCommandRow`), which the view draws nothing of: it is the command
-   *  Claude Code ran rather than the one the person sent. The order below is what makes it
-   *  answer for the row being recorded - `observe` hands the session each event before this
-   *  stream records it. */
-  readonly runsCommandRow?: (origin: ModAppendOrigin) => boolean
+  /** Whether a row of the `command` door is the echo row a `$.command.run` of this session's
+   *  claimed (`./mod-session`, `runsCommandRow`), asked by the row's own id: the view draws
+   *  nothing of it, since Claude Code echoes the command it ran rather than the one the person
+   *  sent. The order below is what makes it answer for the row being recorded - `observe`
+   *  hands the session each event before this stream records it. */
+  readonly runsCommandRow?: (row: string) => boolean
 }
 
 export interface AgentStreamRunner {

@@ -26,14 +26,13 @@
 // opens a socket or reads the link's stream.
 import { messageFor } from "@legion/envoy-client/errors"
 import type {
-  ModAppendOrigin,
   ModCallResults,
   ModConfigValue,
   ModContentBlock,
   ModEffort,
   ModEvent,
 } from "../hooks/mod-protocol"
-import { claudeCommandOutput } from "./claude-rows"
+import { claudeCommandOutput, claudeEchoedCommandLine } from "./claude-rows"
 import type { ModLink } from "./mod-link"
 
 /**
@@ -55,15 +54,39 @@ const COMMAND_TIMEOUT_MS = SUBMIT_TIMEOUT_MS
 const FORK_TIMEOUT_MS = 10 * 60 * 1_000
 
 /**
- * How long a command whose result carried no output of its own waits for the output row Claude
- * Code wrote for it. The row reaches this process as a `session.append` event on a post of its
- * own, so it and the call's result can cross: measured on 2.1.310, the row followed the result
- * by 29 ms for `/context` (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:70-73`)
- * and by 158 ms for `/effort low` (`logs/mod3-q2-310.jsonl:98-102`). Two seconds is more than
- * ten times either, and it is all a command that wrote no row costs the person before they are
- * told it printed nothing.
+ * How long a run whose echo row has been claimed waits for the output row Claude Code wrote
+ * behind it. The row reaches this process as a `session.append` event on a post of its own, so
+ * it and the call's result can cross: measured on 2.1.310, the row followed the result by 29 ms
+ * for `/context` (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:70-73`) and by
+ * 158 ms for `/effort low` (`logs/mod3-q2-310.jsonl:98-102`). Two seconds is more than ten times
+ * either, and it is all a command that wrote no row costs the person before they are told it
+ * printed nothing.
  */
 const COMMAND_OUTPUT_MS = 2_000
+
+/**
+ * How long after its own answer a `$.command.run` may still claim the echo row Claude Code
+ * wrote for it.
+ *
+ * Measured on live Claude Code 2.1.310 (INFRA-1026): a `/model haiku` this session ran answered
+ * at 08:14:06.839 and its echo row landed at 08:14:06.858, 19 ms later; an earlier recording of
+ * the same shape put that echo 90 ms after the answer. One second is more than ten times the
+ * longest seen.
+ *
+ * It is bounded at all because a run that claims every later row takes rows that are not its
+ * own: a Dispatch `/cost` whose dialog waited for the person was asked at 08:09:56.390 and had
+ * written no row of its own when the person typed `/config` at their own terminal 36 seconds
+ * later, and the rule before this one gave that run the person's echo and output rows - the
+ * person's command vanished from the live view, and their `/cost` reply read
+ * `Config dialog dismissed`.
+ */
+const COMMAND_ECHO_MS = 1_000
+
+/** The most claimed echo rows this session remembers. The live view asks about a row in the
+ *  same tick this session claimed it (`runsCommandRow`), so a handful would answer every ask;
+ *  this is the bound that keeps the record from growing for the session's life, as
+ *  `ANSWERED_DELIVERIES_MAX` bounds the one in `./user-turn-router`. */
+const CLAIMED_ECHO_ROWS_MAX = 64
 
 /** A message a turn never read: the person's own words, and the Dispatch message they are. */
 export interface UnreadMessage {
@@ -105,22 +128,19 @@ export interface ModSession {
   /** Take one of the mod's events. The live view hands over every event it reads, in order. */
   observe(event: ModEvent): void
   /**
-   * Whether a row of the `command` door is one this session's own `$.command.run` produced,
+   * Whether the row `row` names is the echo row a `$.command.run` of this session's claimed,
    * which is the row the live view must not draw as a person's message: Claude Code echoes the
    * command it ran rather than the one that was asked for - `/cost` ran as `/usage`, and
    * `/model anthropic/haiku` as `/model haiku`, measured live on 2.1.310 (INFRA-1026) - so the
    * echo drawn is a second message the person never wrote, beside Dispatch's stored copy of the
    * one they did send.
    *
-   * True while a run of this session's is outstanding and `origin` is not `unclassified`. The
-   * rows of a run carry `{"kind":"plugin"}` or `{"kind":"engine"}`
-   * (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:312-321` and `:70-72`,
-   * `logs/mod3-q1q3q5.jsonl:195-196`) and a command a person typed at the session's own
-   * terminal carries `{"kind":"unclassified"}` (`logs/mod2.jsonl:178-188` and `:218-222`,
-   * `logs/mod3-q2-310.jsonl:118-119`), so `origin` tells the two apart where the command's own
-   * name cannot.
+   * One echo row per run, claimed inside `COMMAND_ECHO_MS` of that run's own answer: `origin`
+   * separates nothing, since a run's rows and a person's terminal command both reach
+   * `{"kind":"engine"}` (measured on live Claude Code 2.1.310, INFRA-1026). Every other row of
+   * the `command` door is a person's own, and the live view draws it.
    */
-  runsCommandRow(origin: ModAppendOrigin): boolean
+  runsCommandRow(row: string): boolean
   /** Add one row the model reads at its next request, and resolve with the row's id. Nothing is
    *  started by it: a card joins the conversation without a turn of its own. */
   show(content: readonly ModContentBlock[]): Promise<string>
@@ -158,9 +178,12 @@ export interface ModSessionOptions {
   readonly link: Pick<ModLink, "request" | "connected">
   /** Where a failure that must not stop the session is written. */
   readonly warn: (text: string) => void
-  /** How long a command whose result carried no output waits for the row Claude Code wrote for
-   *  it; `COMMAND_OUTPUT_MS` by default, named by the tests that drive it. */
+  /** How long a run whose echo row has been claimed waits for the output row behind it;
+   *  `COMMAND_OUTPUT_MS` by default, named by the tests that drive it. */
   readonly commandOutputMs?: number
+  /** How long after its own answer a run may still claim an echo row; `COMMAND_ECHO_MS` by
+   *  default, named by the tests that drive it. */
+  readonly commandEchoMs?: number
 }
 
 /** One row handed to a running turn, watched until that turn has read it or ended. */
@@ -175,13 +198,19 @@ interface WatchedRow {
   readonly messageId: string
 }
 
-/** One `$.command.run` outstanding, and the output row Claude Code wrote for it. A run is
- *  outstanding past its own result: its rows arrive after the call answers
- *  (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:35-42`, where the caveat, echo and
- *  output rows followed the result by 7 ms, 90 ms and 119 ms), and nothing but the run being
- *  outstanding ties them to it. */
+/** One `$.command.run` whose rows are still to come, and the rows it claimed. A run's rows
+ *  arrive after the call answers - 5 ms, 19 ms and 49 ms behind it for a `/model haiku`
+ *  measured on live Claude Code 2.1.310 (INFRA-1026) - so a run claims the first echo row
+ *  inside `COMMAND_ECHO_MS` of its own answer, and the output row directly behind that echo. */
 interface CommandRun {
-  /** What the output row held, once one has been read as this run's. */
+  /** Whether this run may claim an echo row now: true from the moment its own call answers
+   *  until it has claimed one or `COMMAND_ECHO_MS` has passed. */
+  claiming: boolean
+  /** The echo row this run claimed, which is the row the live view draws nothing of. */
+  echo?: string
+  /** Woken by that row, so a run claims and moves on the moment its echo lands. */
+  claimed?: () => void
+  /** What the output row held, once the row behind this run's echo has been read. */
   output?: string
   /** Woken by that row, so a result carrying no output answers the moment the row lands. */
   arrived?: () => void
@@ -224,27 +253,51 @@ export function modSession(options: ModSessionOptions): ModSession {
   /** Whether a `$.prompt.submit` is in flight: it holds until its turn ends, so the next one
    *  waits behind it. */
   let submitting: Promise<void> = Promise.resolve()
-  /** The `$.command.run` calls outstanding, oldest first. A run is outstanding from the call
-   *  going out until its output row has been read or the wait for that row has passed, so this
-   *  holds what a person has running and nothing else. */
+  /** The `$.command.run` calls whose rows are still to come, oldest first. A run is here from
+   *  the call going out until the rows it claims have been read or the waits for them have
+   *  passed, so this holds what a person has running and nothing else. */
   const commandRuns: CommandRun[] = []
+  /** The echo rows this session's runs claimed, newest last and bounded by
+   *  `CLAIMED_ECHO_ROWS_MAX`: what `runsCommandRow` answers from. */
+  const claimedEchoes = new Set<string>()
+  /** The run whose claimed echo row was the last row of the `command` door to arrive, so the
+   *  output row directly behind that echo is read as its output and no later row is. */
+  let behindEcho: CommandRun | undefined
   const outputMs = options.commandOutputMs ?? COMMAND_OUTPUT_MS
+  const echoMs = options.commandEchoMs ?? COMMAND_ECHO_MS
 
-  const runsCommandRow = (origin: ModAppendOrigin): boolean =>
-    commandRuns.length > 0 && origin.kind !== "unclassified"
+  const runsCommandRow = (row: string): boolean => claimedEchoes.has(row)
 
-  /** One row of the `command` door of a run of this session's: the output row is what that run
-   *  printed, and the caveat and echo rows beside it say nothing this session needs. */
-  const commandRow = (content: readonly ModContentBlock[]): void => {
+  /** One row of the `command` door, given to the run it belongs to or to no run at all.
+   *
+   * A run claims one echo row: the first to arrive after its own call answered and inside
+   * `COMMAND_ECHO_MS` of that answer, oldest unclaimed run first. The output row directly
+   * behind that echo is what the run printed. An echo no run claimed is a command a person
+   * typed at their own terminal, and the output row behind it is theirs too: measured on live
+   * Claude Code 2.1.310 (INFRA-1026), the two are told apart by that timing and by nothing
+   * else - the person's `/config` echo and the `/usage` echo of a run this session made both
+   * carried `origin {"kind":"engine"}`, and the command a row names says nothing either, since
+   * `/cost` runs as `/usage`.
+   */
+  const commandRow = (uuid: string, content: readonly ModContentBlock[]): void => {
+    if (claudeEchoedCommandLine(content) !== undefined) {
+      const claiming = commandRuns.find((waiting) => waiting.claiming)
+      behindEcho = claiming
+      if (claiming === undefined) return
+      claiming.claiming = false
+      claiming.echo = uuid
+      claimedEchoes.add(uuid)
+      if (claimedEchoes.size > CLAIMED_ECHO_ROWS_MAX) {
+        const oldest = claimedEchoes.values().next().value
+        if (oldest !== undefined) claimedEchoes.delete(oldest)
+      }
+      claiming.claimed?.()
+      return
+    }
+    const run = behindEcho
+    behindEcho = undefined
     const output = claudeCommandOutput(content)
-    if (output === undefined) return
-    // The oldest run with no output yet: Claude Code runs a session's commands one after
-    // another and writes each run's echo before its output
-    // (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:35-42`), so the output rows arrive
-    // in the order the runs were asked for. The command the row names says nothing about which
-    // run it is: `/cost` is run as `/usage`.
-    const run = commandRuns.find((waiting) => waiting.output === undefined)
-    if (run === undefined) return
+    if (output === undefined || run === undefined) return
     run.output = output
     run.arrived?.()
   }
@@ -255,13 +308,29 @@ export function modSession(options: ModSessionOptions): ModSession {
     if (at !== -1) commandRuns.splice(at, 1)
   }
 
-  /** What the output row of `run` held, waited for a bounded moment: the row and the call's
-   *  result cross (`COMMAND_OUTPUT_MS`), and a run whose row never came printed nothing. The
-   *  run is outstanding until this wait ends, which is one wait per run however many callers
-   *  read it: the rows of a run arrive after its call has answered, and `runsCommandRow` has to
-   *  know them for the run's as they do. */
-  const outputRowOf = async (run: CommandRun): Promise<string> => {
+  /**
+   * What the rows of `run` held, waited for in the order they arrive: the echo row inside
+   * `COMMAND_ECHO_MS` of the call's answer, then the output row directly behind it inside
+   * `COMMAND_OUTPUT_MS`. The waits are started the moment the call answers, which is when the
+   * run may first claim a row, and the run is one wait however many callers read it.
+   *
+   * A run that claimed no echo claimed nothing: it printed nothing here, and whatever the call
+   * itself answered is the only reply there is (`runCommand`). A run whose echo was claimed and
+   * whose output row never came printed nothing too.
+   */
+  const commandRowsOf = async (run: CommandRun): Promise<string> => {
     try {
+      const echoed = Promise.withResolvers<void>()
+      const echoTimer = setTimeout(echoed.resolve, echoMs)
+      echoTimer.unref()
+      run.claimed = () => {
+        clearTimeout(echoTimer)
+        echoed.resolve()
+      }
+      run.claiming = true
+      await echoed.promise
+      run.claiming = false
+      if (run.echo === undefined) return ""
       if (run.output === undefined) {
         const waited = Promise.withResolvers<void>()
         const timer = setTimeout(waited.resolve, outputMs)
@@ -333,12 +402,10 @@ export function modSession(options: ModSessionOptions): ModSession {
         return
       }
       if (event.kind === "append") {
-        // A row of the `command` door is read only where it is a row of a run of this
-        // session's: the rows of a command a person ran at their own terminal belong to nobody
-        // here, and `origin` is what tells the two apart (`runsCommandRow`).
-        if (event.door === "command" && runsCommandRow(event.origin)) {
-          commandRow(event.message.content)
-        }
+        // Every row of the `command` door is read, and `commandRow` says whose it is: a row a
+        // run this session made claimed, or a row of a command a person typed at their own
+        // terminal, which belongs to nobody here.
+        if (event.door === "command") commandRow(event.uuid, event.message.content)
         return
       }
       if (event.kind === "turn-complete") turnEnded(event.turnId)
@@ -369,7 +436,7 @@ export function modSession(options: ModSessionOptions): ModSession {
     },
     runsCommandRow,
     async runCommand(command, args) {
-      const run: CommandRun = {}
+      const run: CommandRun = { claiming: false }
       commandRuns.push(run)
       let result: ModCallResults["command.run"]
       try {
@@ -382,18 +449,19 @@ export function modSession(options: ModSessionOptions): ModSession {
         endRun(run)
         throw error
       }
-      // The run's own rows are still to come: measured on 2.1.310, the result landed 7 ms
-      // before the caveat row, 90 ms before the echo and 119 ms before the output
-      // (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:35-42`). So the wait for the
-      // output row is started whatever the result carried, and the run is outstanding until it
-      // ends - that is what makes those rows this run's rather than a person's typing.
-      const row = outputRowOf(run)
+      // The run's own rows are still to come: measured on live Claude Code 2.1.310
+      // (INFRA-1026), a `/model haiku` answered at 08:14:06.839 and its caveat, echo and
+      // output rows followed at .844, .858 and .888. So the wait for them is started whatever
+      // the result carried - the echo this run claims is the row the live view must not draw,
+      // and the claim is what makes the output row behind it this run's rather than a
+      // person's typing.
+      const rows = commandRowsOf(run)
       // What the command printed, in the order the measurements put it: the result's own
       // text, then its `context` entries, which is where a terminal `/context` puts its table
       // and the only place it puts it
       // (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:70-73`, a result with no
-      // `text` field at all), then the output row Claude Code wrote for this run.
-      return resultOutput(result) ?? (await row)
+      // `text` field at all), then the output row this run claimed.
+      return resultOutput(result) ?? (await rows)
     },
     async fork(prompt) {
       const result = await link.request("model.fork", { prompt }, { timeoutMs: FORK_TIMEOUT_MS })

@@ -2289,11 +2289,11 @@ export async function runEnvoyChannelServer(): Promise<void> {
             claude.observe(event)
             live.observe(event)
           },
-          // The echo row of a command this session ran for a person: the view draws nothing of
-          // it, since Claude Code echoes the command it ran rather than the one they sent
-          // (`claude.runsCommandRow`). The `observe` above runs first, so the session already
-          // knows the run is outstanding when this row is recorded.
-          runsCommandRow: (origin) => claude.runsCommandRow(origin),
+          // The echo row a command this session ran for a person claimed: the view draws
+          // nothing of it, since Claude Code echoes the command it ran rather than the one
+          // they sent (`claude.runsCommandRow`). The `observe` above runs first, so the
+          // session has already claimed the row when this stream records it.
+          runsCommandRow: (row) => claude.runsCommandRow(row),
           tagFor: (row) => live.messageOf(row),
         })
         // The session takes messages once the mod is there, and says so: a terminal session
