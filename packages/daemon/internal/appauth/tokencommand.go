@@ -10,12 +10,19 @@ package appauth
 //
 // one entry per installation of the App the release covers. The command's environment names what
 // the daemon wants: TokenCommandOwner, the account whose installation token it needs ("" for every
-// installation the command may release), and TokenCommandReadOnly, "1" for a read-only token
-// (ReadToken) and "" otherwise; an operator's command passes them on (`agent-secrets <NAME>
-// ${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"}
-// ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$<NAME>"'`). A read-only
-// token holds what the command's read-only release gives: the broker's holds contents, metadata,
-// pull requests and Actions read, key mode's ReadToken set, less the Actions read an
+// installation the command may release), TokenCommandRepos, the repositories of that account the
+// token may touch, separated by single spaces ("" for a token the daemon narrows to none), and
+// TokenCommandReadOnly, "1" for a read-only token (ReadToken) and "" otherwise. An operator's
+// command maps each onto the flag `agent-secrets` narrows the release by, one --github-repo per
+// repository:
+//
+//	agent-secrets <NAME> ${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} ${LEGION_GITHUB_REPOS:+$(printf ' --github-repo %s' $LEGION_GITHUB_REPOS)} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$<NAME>"'
+//
+// Keeping to that narrowing is the command's, not the daemon's: a key-mode exchange holds GitHub's
+// answer against what it asked for (narrowedTo), where a release carries nothing to hold it to, so
+// a command that drops the variable hands every role a token over the whole installation. A
+// read-only token holds what the command's read-only release gives: the broker's holds contents,
+// metadata, pull requests and Actions read, key mode's ReadToken set, less the Actions read an
 // installation that is not granted it does not hold.
 //
 // No token reaches a log or an error: the command's stdout is never quoted, and its stderr, which
@@ -49,6 +56,11 @@ const (
 	// TokenCommandOwner names, in a token_command's environment, the account whose installation
 	// token the daemon wants, empty for every installation the command may release.
 	TokenCommandOwner = "LEGION_GITHUB_OWNER"
+	// TokenCommandRepos names, in a token_command's environment, the repositories of
+	// TokenCommandOwner's account the token may touch, separated by single spaces, which a
+	// GitHub repository name holds none of (ghrepo.Parse). It is empty where the daemon asks
+	// for no narrowing at all: the release of every installation AppLogin reads.
+	TokenCommandRepos = "LEGION_GITHUB_REPOS"
 	// TokenCommandReadOnly is "1" in a token_command's environment when the daemon wants a
 	// read-only token (ReadToken), and empty otherwise.
 	TokenCommandReadOnly = "LEGION_GITHUB_READ_ONLY"
@@ -94,13 +106,16 @@ func tokenCommandField(role AppRole) string {
 	return "github_apps." + string(role) + ".token_command"
 }
 
-// runTokenCommand returns the release of app's token_command for owner ("" for every installation)
-// and readOnly, keyed by lowercased account login, from a run that outlives ctx (commandRun): ctx
-// ending first returns ErrCommandPending, transient. A release of every installation records its
-// accounts as role's installations (recordOwners), the set a narrowed run that fails is read
-// against.
-func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, readOnly bool) (map[string]releasedInstallation, error) {
-	key := fmt.Sprintf("%s|%s|%t", role, strings.ToLower(owner), readOnly)
+// runTokenCommand returns the release of app's token_command for owner ("" for every
+// installation), repos and readOnly, keyed by lowercased account login, from a run that outlives
+// ctx (commandRun): ctx ending first returns ErrCommandPending, transient. A release of every
+// installation records its accounts as role's installations (recordOwners), the set a narrowed
+// run that fails is read against.
+//
+// The repositories are part of the key one run is shared under, as they are part of a lease's own
+// scope: a run narrowed to one repository must never answer a caller that asked for another.
+func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, repos []string, readOnly bool) (map[string]releasedInstallation, error) {
+	key := fmt.Sprintf("%s|%s|%s|%t", role, strings.ToLower(owner), strings.ToLower(strings.Join(repos, ",")), readOnly)
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -115,7 +130,7 @@ func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.
 			defer m.runs.Done()
 			bounded, cancel := context.WithTimeout(m.root, tokenCommandLimit)
 			defer cancel()
-			run.installations, run.err = m.execTokenCommand(bounded, role, app, owner, readOnly)
+			run.installations, run.err = m.execTokenCommand(bounded, role, app, owner, repos, readOnly)
 			if run.err == nil && owner == "" {
 				m.recordOwners(role, run.installations)
 			}
@@ -174,11 +189,12 @@ func (m *Manager) recordOwners(role AppRole, installations map[string]releasedIn
 	m.mu.Unlock()
 }
 
-// execTokenCommand runs app's token_command once, under ctx, for owner and readOnly. A run ctx
-// ended, or that exited 75 (`agent-secrets`' request still waiting for approval), is transient;
-// one that exited otherwise, printed too much, or printed no release is the configuration's
-// answer. Its stderr reaches the daemon's and the error with every GitHub token redacted.
-func (m *Manager) execTokenCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, readOnly bool) (map[string]releasedInstallation, error) {
+// execTokenCommand runs app's token_command once, under ctx, for owner, repos and readOnly. A run
+// ctx ended, or that exited 75 (`agent-secrets`' request still waiting for approval), is
+// transient; one that exited otherwise, printed too much, or printed no release is the
+// configuration's answer. Its stderr reaches the daemon's and the error with every GitHub token
+// redacted.
+func (m *Manager) execTokenCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, repos []string, readOnly bool) (map[string]releasedInstallation, error) {
 	field := tokenCommandField(role)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -188,9 +204,12 @@ func (m *Manager) execTokenCommand(ctx context.Context, role AppRole, app config
 	if readOnly {
 		readOnlyValue = "1"
 	}
+	// Each of the three is set, empty where the daemon asks nothing by it, so a value the daemon
+	// inherited never reads as one it meant.
 	command.Env = append(slices.DeleteFunc(runtime.WithoutNATSSeeds(os.Environ()), func(entry string) bool {
-		return strings.HasPrefix(entry, TokenCommandOwner+"=") || strings.HasPrefix(entry, TokenCommandReadOnly+"=")
-	}), TokenCommandOwner+"="+owner, TokenCommandReadOnly+"="+readOnlyValue)
+		return strings.HasPrefix(entry, TokenCommandOwner+"=") || strings.HasPrefix(entry, TokenCommandRepos+"=") ||
+			strings.HasPrefix(entry, TokenCommandReadOnly+"=")
+	}), TokenCommandOwner+"="+owner, TokenCommandRepos+"="+strings.Join(repos, " "), TokenCommandReadOnly+"="+readOnlyValue)
 	stdout := &boundedBuffer{limit: releaseLimit, overflow: cancel}
 	var stderr bytes.Buffer
 	relay := &redactingLines{out: m.stderr, keep: &stderr, limit: releaseLimit, overflow: cancel}
@@ -343,16 +362,17 @@ func parseRelease(output []byte, field string, now time.Time) (map[string]releas
 // `agent-secrets` prints on stderr and runTokenCommand's error carries.
 const brokerNoInstallation = "has no installation on"
 
-// mintFromCommand is mint in token mode: the command's release for owner, narrowed to read-only
-// when readOnly, and the token checked to be the configured App's on every release (tokenIdentity,
-// since a later release could carry another App's token). A release without owner's installation
-// is ErrNotInstalled, and so is a run that failed with the broker's refusal for an account with no
-// installation, or failed for an owner the last release of every installation did not name: no
-// second, wider release is asked for to decide it, so a read-only request never mints a write
-// token.
-func (m *Manager) mintFromCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, readOnly bool) (Lease, error) {
+// mintFromCommand is mint in token mode: the command's release for owner, narrowed to repos and
+// to read-only when readOnly, and the token checked to be the configured App's on every release
+// (tokenIdentity, since a later release could carry another App's token). A release without
+// owner's installation is ErrNotInstalled, and so is a run that failed with the broker's refusal
+// for an account with no installation, or failed for an owner the last release of every
+// installation did not name: no second, wider release is asked for to decide it, so a read-only
+// request never mints a write token, and one narrowed to a repository never mints a token over
+// the installation.
+func (m *Manager) mintFromCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, repos []string, readOnly bool) (Lease, error) {
 	notInstalled := fmt.Errorf("%w: the %s App's %s released no installation on %s", ErrNotInstalled, role, tokenCommandField(role), owner)
-	installations, err := m.runTokenCommand(ctx, role, app, owner, readOnly)
+	installations, err := m.runTokenCommand(ctx, role, app, owner, repos, readOnly)
 	if err != nil {
 		var transient *TransientError
 		switch {
@@ -382,9 +402,10 @@ func (m *Manager) mintFromCommand(ctx context.Context, role AppRole, app config.
 }
 
 // anyInstallation is one installation of the release of every installation app's token_command
-// gives, the first by account login: AppLogin needs a token of any installation, no owner's.
+// gives, the first by account login: AppLogin needs a token of any installation, no owner's and
+// no repository's, so the run it shares is the one that asks for no narrowing at all.
 func (m *Manager) anyInstallation(ctx context.Context, role AppRole, app config.GitHubApp) (releasedInstallation, error) {
-	installations, err := m.runTokenCommand(ctx, role, app, "", false)
+	installations, err := m.runTokenCommand(ctx, role, app, "", nil, false)
 	if err != nil {
 		return releasedInstallation{}, err
 	}

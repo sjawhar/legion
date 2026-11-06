@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,10 +20,10 @@ import (
 )
 
 // fakeBroker is a token_command that answers as `agent-secrets <NAME> [--github-owner O
-// [--github-read-only]] -- sh -c 'printf %s "$NAME"'` does: the release of every installation it
-// holds, or of the owner LEGION_GITHUB_OWNER names alone (a non-zero exit, as the broker's
-// refusal, for an owner it holds none on), each token naming the owner and whether it is
-// read-only. Every run appends its owner and read-only flag to the calls file.
+// [--github-repo R]... [--github-read-only]] -- sh -c 'printf %s "$NAME"'` does: the release of
+// every installation it holds, or of the owner LEGION_GITHUB_OWNER names alone (a non-zero exit,
+// as the broker's refusal, for an owner it holds none on), each token naming the owner and
+// whether it is read-only. Every run appends its owner, repositories and read-only flag to calls.
 type fakeBroker struct {
 	dir     string
 	command string
@@ -41,7 +42,7 @@ func newFakeBroker(t *testing.T, owners []string, expires time.Time) fakeBroker 
 		fmt.Fprintf(&cases, "  %s) printf '{\"installations\":{%%s}}' \"%s\" ;;\n", strings.ToLower(owner), strings.ReplaceAll(entry, `"`, `\"`))
 	}
 	script := fmt.Sprintf(`#!/bin/sh
-printf '%%s|%%s\n' "$LEGION_GITHUB_OWNER" "$LEGION_GITHUB_READ_ONLY" >>%q
+printf '%%s|%%s|%%s\n' "$LEGION_GITHUB_OWNER" "$LEGION_GITHUB_REPOS" "$LEGION_GITHUB_READ_ONLY" >>%q
 mode=write
 [ -z "$LEGION_GITHUB_READ_ONLY" ] || mode=read
 [ -z "$FAKE_BROKER_FAIL" ] || { echo "broker: refused" >&2; exit 3; }
@@ -162,15 +163,15 @@ func TestTokenModeMintsTheOwnersEntryAndRefreshes(t *testing.T) {
 	if _, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("sjawhar/legion")); err != nil {
 		t.Fatalf("cached Token: %v", err)
 	}
-	if got := broker.runs(t); len(got) != 1 || got[0] != "SJAWHAR|" {
-		t.Fatalf("command runs = %q, want one for SJAWHAR, write", got)
+	if got := broker.runs(t); len(got) != 1 || got[0] != "SJAWHAR|legion|" {
+		t.Fatalf("command runs = %q, want one for SJAWHAR over legion, write", got)
 	}
 
 	read, err := tokens.ReadToken(context.Background(), Implement, "acme", []string{"legion"})
 	if err != nil || read.Token != "ghs_acme_read" {
 		t.Fatalf("ReadToken = %+v, %v; want the read-only release's token", read, err)
 	}
-	if got := broker.runs(t); len(got) != 2 || got[1] != "acme|1" {
+	if got := broker.runs(t); len(got) != 2 || got[1] != "acme|legion|1" {
 		t.Fatalf("command runs = %q, want the read token's run with LEGION_GITHUB_READ_ONLY=1", got)
 	}
 
@@ -273,7 +274,7 @@ func TestTokenModeKeepsTokensOutOfLogsAndErrors(t *testing.T) {
 	var stderr bytes.Buffer
 	leaky := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: `echo "denied for ghs_abcdefghijklmnopqrstuvwxyz0123" >&2; exit 3`}},
 		Options{Now: func() time.Time { return now }, Stderr: &stderr})
-	_, err := leaky.runTokenCommand(context.Background(), Implement, leaky.apps.Implement, "acme", false)
+	_, err := leaky.runTokenCommand(context.Background(), Implement, leaky.apps.Implement, "acme", []string{"legion"}, false)
 	if err == nil || strings.Contains(err.Error(), "ghs_abc") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("error = %v, want the stderr with its token redacted", err)
 	}
@@ -289,7 +290,7 @@ func TestTokenModeKeepsTokensOutOfLogsAndErrors(t *testing.T) {
 	huge := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: "yes ghs_secret_value_padding"}}, Options{Now: func() time.Time { return now }})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err = huge.runTokenCommand(ctx, Implement, huge.apps.Implement, "acme", false)
+	_, err = huge.runTokenCommand(ctx, Implement, huge.apps.Implement, "acme", []string{"legion"}, false)
 	if err == nil || !strings.Contains(err.Error(), "printed more than") || ctx.Err() != nil {
 		t.Fatalf("a command printing without end = %v (ctx %v), want the over-limit refusal before the deadline", err, ctx.Err())
 	}
@@ -306,7 +307,7 @@ func TestTokenModeReadTokenForAMissingOwnerReleasesNothingWider(t *testing.T) {
 	if _, err := tokens.ReadToken(context.Background(), Implement, "stranger", []string{"legion"}); !errors.Is(err, ErrNotInstalled) {
 		t.Fatalf("ReadToken for an owner with no installation = %v, want ErrNotInstalled", err)
 	}
-	if got := broker.runs(t); len(got) != 1 || got[0] != "stranger|1" {
+	if got := broker.runs(t); len(got) != 1 || got[0] != "stranger|legion|1" {
 		t.Fatalf("command runs = %q, want the one narrowed read-only run", got)
 	}
 }
@@ -333,13 +334,13 @@ func TestTokenModeACallerDeadlineNeitherKillsNorRepeatsTheCommand(t *testing.T) 
 	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	var transient *TransientError
-	if _, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", false); !errors.Is(err, ErrCommandPending) || !errors.As(err, &transient) {
+	if _, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", []string{"legion"}, false); !errors.Is(err, ErrCommandPending) || !errors.As(err, &transient) {
 		t.Fatalf("a caller past its deadline = %v, want a transient ErrCommandPending", err)
 	}
 	if err := os.WriteFile(gate, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := tokens.runTokenCommand(context.Background(), Implement, tokens.apps.Implement, "acme", false)
+	got, err := tokens.runTokenCommand(context.Background(), Implement, tokens.apps.Implement, "acme", []string{"legion"}, false)
 	if err != nil || got["acme"].token != "ghs_x" {
 		t.Fatalf("the next caller = %v, %v; want the running command's release", got, err)
 	}
@@ -358,13 +359,13 @@ func TestTokenModeACallerAfterTheRunFinishedGetsItsResult(t *testing.T) {
 	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: command}}, Options{Now: func() time.Time { return now }})
 	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", false); !errors.Is(err, ErrCommandPending) {
+	if _, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", []string{"legion"}, false); !errors.Is(err, ErrCommandPending) {
 		t.Fatalf("a caller past its deadline = %v, want ErrCommandPending", err)
 	}
 	time.Sleep(800 * time.Millisecond)
 	later, cancelLater := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancelLater()
-	got, err := tokens.runTokenCommand(later, Implement, tokens.apps.Implement, "acme", false)
+	got, err := tokens.runTokenCommand(later, Implement, tokens.apps.Implement, "acme", []string{"legion"}, false)
 	if err != nil || got["acme"].token != "ghs_x" {
 		t.Fatalf("the caller after the run finished = %v, %v; want the finished run's release", got, err)
 	}
@@ -410,8 +411,8 @@ func TestTokenModeAppLoginReadsTheViewerAndChecksTheAppID(t *testing.T) {
 	if err != nil || login != "legion-reviewer[bot]" {
 		t.Fatalf("AppLogin = %q, %v; want legion-reviewer[bot]", login, err)
 	}
-	if got := broker.runs(t); len(got) != 1 || got[0] != "|" {
-		t.Fatalf("command runs = %q, want one with no owner", got)
+	if got := broker.runs(t); len(got) != 1 || got[0] != "||" {
+		t.Fatalf("command runs = %q, want one naming neither an owner nor a repository", got)
 	}
 
 	other := tokenModeManager(github.serve(t), broker, &now, &stderr)
@@ -458,22 +459,24 @@ func TestTokenModeInstalledOnReadsTheInstallationsRepositories(t *testing.T) {
 	}
 }
 
-// The command sees the daemon's environment less the NATS seeds, with the two variables the daemon
-// sets replacing any it inherited; a command cut off by its context is transient.
+// The command sees the daemon's environment less the NATS seeds, with the three variables the
+// daemon sets replacing any it inherited; a command cut off by its context is transient.
 func TestTokenModeCommandEnvironmentAndDeadline(t *testing.T) {
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	dir := t.TempDir()
 	seen := filepath.Join(dir, "env")
 	t.Setenv("NATS_NKEY_SEED", "seed-value")
 	t.Setenv(TokenCommandOwner, "inherited")
+	t.Setenv(TokenCommandRepos, "inherited")
 	t.Setenv(TokenCommandReadOnly, "inherited")
 	command := fmt.Sprintf(`env >%q; printf '{"installations":{"acme":{"installation_id":1,"token":"ghs_x","expires_at":"%s"}}}'`, seen, now.Add(time.Hour).Format(time.RFC3339))
 	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: command}}, Options{Now: func() time.Time { return now }})
-	if _, err := tokens.runTokenCommand(context.Background(), Implement, tokens.apps.Implement, "acme", false); err != nil {
+	if _, err := tokens.runTokenCommand(context.Background(), Implement, tokens.apps.Implement, "acme", []string{"legion", "nats-server"}, false); err != nil {
 		t.Fatal(err)
 	}
 	env, _ := os.ReadFile(seen)
 	if strings.Contains(string(env), "seed-value") || !strings.Contains(string(env), "\nLEGION_GITHUB_OWNER=acme\n") ||
+		!strings.Contains(string(env), "\nLEGION_GITHUB_REPOS=legion nats-server\n") ||
 		!strings.Contains(string(env), "\nLEGION_GITHUB_READ_ONLY=\n") || strings.Contains(string(env), "inherited") {
 		t.Fatalf("the command's environment:\n%s", env)
 	}
@@ -482,7 +485,7 @@ func TestTokenModeCommandEnvironmentAndDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	var transient *TransientError
-	if _, err := slow.runTokenCommand(ctx, Implement, slow.apps.Implement, "acme", false); !errors.As(err, &transient) {
+	if _, err := slow.runTokenCommand(ctx, Implement, slow.apps.Implement, "acme", []string{"legion"}, false); !errors.As(err, &transient) {
 		t.Fatalf("a command past its deadline = %v, want a transient error", err)
 	}
 }
@@ -550,5 +553,81 @@ func TestTokenModeCloseEndsARunningCommand(t *testing.T) {
 	}
 	if _, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("acme/legion")); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("Token after Close = %v, want a refusal", err)
+	}
+}
+
+// The command is told which repositories the token may touch, for a write mint and for a read
+// one: a write mint names the issue's repository alone, a read mint every repository its caller
+// named, sorted and separated by single spaces, so an operator's command can pass one
+// --github-repo for each. The daemon cannot narrow what a command releases, so saying what it
+// needs is all it can do.
+func TestTokenModeTellsTheCommandWhichRepositoriesTheTokenMayTouch(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	broker := newFakeBroker(t, []string{"acme"}, now.Add(time.Hour))
+	github := &fakeTokenGitHub{slug: "legion-implementer", appID: "12345"}
+	var stderr bytes.Buffer
+	tokens := tokenModeManager(github.serve(t), broker, &now, &stderr)
+
+	if _, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("acme/legion")); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if _, err := tokens.ReadToken(context.Background(), Implement, "acme", []string{"nats-server", "legion"}); err != nil {
+		t.Fatalf("ReadToken: %v", err)
+	}
+	want := []string{"acme|legion|", "acme|legion nats-server|1"}
+	if got := broker.runs(t); !slices.Equal(got, want) {
+		t.Fatalf("command runs = %q, want %q", got, want)
+	}
+}
+
+// Two repository scopes of one owner are two runs: the repositories are part of the key a run is
+// shared under, so a caller that asked for one repository never gets the run narrowed to another,
+// while a caller asking for the same scope joins the run already going.
+func TestTokenModeTwoRepositoryScopesOfOneOwnerDoNotShareOneRun(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	runs, gate := filepath.Join(dir, "runs"), filepath.Join(dir, "gate")
+	command := fmt.Sprintf(`echo run >>%q; while [ ! -e %q ]; do sleep 0.05; done; printf '{"installations":{"acme":{"installation_id":1,"token":"ghs_x","expires_at":"%s"}}}'`,
+		runs, gate, now.Add(time.Hour).Format(time.RFC3339))
+	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: command}}, Options{Now: func() time.Time { return now }})
+	defer tokens.Close()
+	for _, repos := range [][]string{{"alpha"}, {"beta"}, {"alpha"}} {
+		short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", repos, true)
+		cancel()
+		if !errors.Is(err, ErrCommandPending) {
+			t.Fatalf("the run for %q = %v, want ErrCommandPending while it goes on", repos, err)
+		}
+	}
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokens.Close()
+	data, _ := os.ReadFile(runs)
+	if ran := strings.Count(string(data), "run"); ran != 2 {
+		t.Fatalf("the command ran %d times, want one run for each of the two scopes", ran)
+	}
+}
+
+// A read-only release never stands in for a write request of the same owner and repository: the
+// two are separate scopes, so the command runs again and the write lease is the write release's.
+func TestTokenModeAReadOnlyReleaseDoesNotStandInForAWriteRequest(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	broker := newFakeBroker(t, []string{"acme"}, now.Add(time.Hour))
+	github := &fakeTokenGitHub{slug: "legion-implementer", appID: "12345"}
+	var stderr bytes.Buffer
+	tokens := tokenModeManager(github.serve(t), broker, &now, &stderr)
+
+	read, err := tokens.ReadToken(context.Background(), Implement, "acme", []string{"legion"})
+	if err != nil || read.Token != "ghs_acme_read" {
+		t.Fatalf("ReadToken = %+v, %v; want the read-only release's token", read, err)
+	}
+	write, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("acme/legion"))
+	if err != nil || write.Token != "ghs_acme_write" {
+		t.Fatalf("Token after a read-only release = %+v, %v; want the write release's token", write, err)
+	}
+	want := []string{"acme|legion|1", "acme|legion|"}
+	if got := broker.runs(t); !slices.Equal(got, want) {
+		t.Fatalf("command runs = %q, want %q", got, want)
 	}
 }

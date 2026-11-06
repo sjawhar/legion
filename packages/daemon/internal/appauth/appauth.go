@@ -464,7 +464,7 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, repos []
 		return Lease{}, err
 	}
 	if app.TokenCommand != "" {
-		return m.mintFromCommand(ctx, role, app, owner, read)
+		return m.mintFromCommand(ctx, role, app, owner, repos, read)
 	}
 	installation, err := m.installation(ctx, role, app, owner)
 	if err != nil {

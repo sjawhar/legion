@@ -41,18 +41,25 @@ A daemon that holds no App key uses them through `token_command`, as the live pr
 github_apps:
   implement:
     app_id: "5341240"
-    token_command: "agent-secrets LEGION_IMPLEMENT_APP --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP\"'"
+    token_command: "agent-secrets LEGION_IMPLEMENT_APP --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_REPOS:+$(printf ' --github-repo %s' $LEGION_GITHUB_REPOS)} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP\"'"
   review:
     app_id: "5341243"
-    token_command: "agent-secrets LEGION_REVIEW_APP --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_REVIEW_APP\"'"
+    token_command: "agent-secrets LEGION_REVIEW_APP --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_REPOS:+$(printf ' --github-repo %s' $LEGION_GITHUB_REPOS)} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_REVIEW_APP\"'"
 ```
 
 The daemon runs the command with `sh -c` whenever it needs a lease: at boot, and again once fewer
 than 20 minutes remain on a lease it holds.
-Its environment is the daemon's, less the NATS seeds, with two variables the daemon sets:
+Its environment is the daemon's, less the NATS seeds, with three variables the daemon sets:
 `LEGION_GITHUB_OWNER`, the account whose installation token the daemon wants (empty for every
-installation the command may release, which the boot's read of the App's login asks for), and
+installation the command may release, which the boot's read of the App's login asks for),
+`LEGION_GITHUB_REPOS`, the repositories of that account the token may touch, separated by single
+spaces (empty where the daemon asks for no narrowing at all), and
 `LEGION_GITHUB_READ_ONLY`, `1` for a read-only token and empty otherwise.
+The command maps each onto the flag `agent-secrets` narrows the release by, one `--github-repo`
+per repository.
+Keeping to that narrowing is the command's: the daemon holds GitHub's answer against what it
+asked for only where it mints with a key of its own, so a command that drops
+`LEGION_GITHUB_REPOS` hands every role a token over the whole installation.
 Its stdout must be the broker's release,
 `{"installations":{"<account login>":{"installation_id":<id>,"token":"ghs_…","expires_at":"<RFC 3339>"}}}`,
 and the daemon takes the owner's entry, matched without regard to case.
@@ -477,7 +484,7 @@ Rotate the keys in the broker's `github-app` secrets, not on the daemon's machin
    its value is the JSON document `{"app_id": …, "private_key": "<the new PEM>"}`, set with `agent-secrets secret set <NAME> < app-key.json`, never the bare PEM.
    Keep the secret's `github-app` kind and its GitHub owners.
 
-3. Open a registered shell of your own (`agent-secrets register --wait 10 --exec -- sh`; the daemon's session cannot be entered from another terminal), then run each role's `token_command` from [the App section](#the-legion-implementer-and-legion-reviewer-apps) there, with `LEGION_GITHUB_OWNER` and `LEGION_GITHUB_READ_ONLY` unset, and confirm it prints the installations' tokens (`LEGION_REVIEW_APP` waits for a person's approval).
+3. Open a registered shell of your own (`agent-secrets register --wait 10 --exec -- sh`; the daemon's session cannot be entered from another terminal), then run each role's `token_command` from [the App section](#the-legion-implementer-and-legion-reviewer-apps) there, with `LEGION_GITHUB_OWNER`, `LEGION_GITHUB_REPOS` and `LEGION_GITHUB_READ_ONLY` unset, and confirm it prints the installations' tokens (`LEGION_REVIEW_APP` waits for a person's approval).
    Then confirm a fresh worker pane's `gh auth status` succeeds with account `x-access-token`.
    The daemon needs no restart: `token_command` gets fresh tokens as its cached leases near expiry.
 
