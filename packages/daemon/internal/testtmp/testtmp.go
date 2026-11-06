@@ -56,12 +56,13 @@ const fallbackBase = "/tmp"
 //   - packages/daemon/internal/shim/socketpath_test.go's roleTempDir, which builds a deliberately
 //     long directory, as long as the TMPDIR a Legion role is told, so that its test proves sockets
 //     still bind where a role runs. A short directory would take the proof away.
-//   - the once-per-binary build directories of
+//   - the once-per-binary directories a package's TestMain owns: the build directories of
 //     packages/daemon/internal/daemon/idle_rig_listener_test.go,
-//     packages/daemon/internal/stream/integration_test.go,
-//     packages/daemon/internal/runtime/tmux/tmux_real_test.go, packages/daemon/cmd/legion/main_test.go
-//     and packages/daemon/internal/workspace/workspace_test.go. They bind no socket, so they need
-//     no byte budget, and no *testing.T outlives them, so they keep os.MkdirTemp("", …) and a
+//     packages/daemon/internal/stream/integration_test.go and
+//     packages/daemon/internal/runtime/tmux/tmux_real_test.go, the jj configuration directory of
+//     packages/daemon/cmd/legion/main_test.go and the home of
+//     packages/daemon/internal/workspace/workspace_test.go. They bind no socket, so they need no
+//     byte budget, and no *testing.T outlives them, so they keep os.MkdirTemp("", …) and a
 //     removal of their own.
 func Dir(t testing.TB, longest string) string {
 	t.Helper()

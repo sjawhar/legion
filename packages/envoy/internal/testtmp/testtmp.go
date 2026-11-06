@@ -52,9 +52,12 @@ const fallbackBase = "/tmp"
 //     code that predicted its base instead returns a path that fails later at bind with
 //     `invalid argument`.
 //
-// No site in this module keeps a directory of its own on purpose: every test here that wants a
-// temporary directory comes to Dir, and internal/testtmp is the sole exception the guard beside
-// this file lists. The daemon copy of this file names that module's exempt sites.
+// One kind of site keeps a directory of its own on purpose and does not come here: the
+// once-per-binary directories a package's TestMain owns, the sign-in secret directory of
+// packages/envoy/internal/broker/config/config_test.go and the certificate directory of
+// packages/envoy/infra/seed/main_test.go. They bind no socket, so they need no byte budget, and
+// no *testing.T outlives them, so they keep os.MkdirTemp("", …) and a removal of their own. The
+// daemon copy of this file names that module's sites.
 func Dir(t testing.TB, longest string) string {
 	t.Helper()
 	base := os.TempDir()

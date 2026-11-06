@@ -26,12 +26,12 @@ var exceptions = map[string]string{
 // package, so that one place measures a socket path against what Linux holds and one place knows
 // where to fall back to (docs/testing.md, "Unix sockets in Go tests"). The check reads the
 // module's test files and fails on the two shapes the copied helpers were written in: an
-// os.MkdirTemp whose first argument names a directory, which writes there wherever the test runs
-// and whatever TMPDIR says, and an os.TempDir, which reads TMPDIR without measuring anything.
-// os.MkdirTemp("", …) is not one of them: the empty first argument is the placement this package
-// asks for, and the build directories and the fixtures rooted at t.TempDir() use it. The walk
-// takes in infra, a module of its own under this root, whose tests reach this package through the
-// replace directive in its go.mod.
+// os.MkdirTemp whose first argument is a string literal naming a directory, which writes there
+// wherever the test runs and whatever TMPDIR says, and an os.TempDir, which reads TMPDIR without
+// measuring anything. os.MkdirTemp("", …) is not one of them: the empty first argument is the
+// placement this package asks for, and the once-per-binary directories a TestMain owns and the
+// fixtures rooted at t.TempDir() use it. The walk takes in infra, a module of its own under this
+// root, whose tests reach this package through the replace directive in its go.mod.
 //
 // It reads the source as the parser does rather than as text, so a comment that spells
 // os.TempDir() in English is prose rather than an offence.
