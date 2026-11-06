@@ -2344,6 +2344,23 @@ func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
 	return head
 }
 
+// editorAppendHangGuard bounds every wait the row below and openSyncedEditor make on an event of
+// the editor's append: the append queueing behind the held lock, the setup returning once the
+// commit releases it, and the marker's own storage. Each is a hang guard and none of them is a
+// measurement of the work: what runs inside them is a browser's whole open - a websocket dial,
+// the room's load of the document, the sync that renders it, then one round trip to Postgres -
+// and the row logs what each wait really took, so this bound is read against those numbers
+// rather than standing in for them. Twenty runs on a two-CPU pod under two busy loops, each
+// taking 25 to 28 seconds in all, queued that append 50 to 148 milliseconds after the lock was
+// taken and returned the setup within 20 milliseconds of the commit, so two minutes is some
+// eight hundred times the wait it guards. The waits were ten seconds until
+// dispatch://INFRA-1248, which is the same order as that open on a runner under a merge
+// queue's load: run 41942809232 lost this row with "editor setup never sent an append" while
+// its editor was alive and already past its send. It stays well inside the 20-minute deadline
+// the dispatch-multiprocess job gives the whole package (ci.yaml), so a row that reaches it
+// fails saying so rather than leaving the package to time out around it.
+const editorAppendHangGuard = 2 * time.Minute
+
 // Rendering is not an acknowledgement of a browser update's durable append.
 func TestSyncedEditorWaitsForItsOwnAppend(t *testing.T) {
 	pair := startPair(t, nil)
@@ -2359,8 +2376,14 @@ func TestSyncedEditorWaitsForItsOwnAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	opened := make(chan *docstest.Peer, 1)
+	held := time.Now()
 	go func() { opened <- openSyncedEditor(t, pair, artifactID, "before\n") }()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+	// The event the row turns on: the editor's own append, queued behind the lock the gate
+	// holds, which is the append the setup under test must wait for. The setup is read on every
+	// pass, so a setup that returned at any moment of the hold - the whole window a setup that
+	// took rendering for an acknowledgement would return in - is caught here rather than at the
+	// end, where its return is owed anyway.
+	for deadline := time.Now().Add(editorAppendHangGuard); ; time.Sleep(10 * time.Millisecond) {
 		select {
 		case <-opened:
 			t.Fatal("editor setup returned while its append was held")
@@ -2371,33 +2394,46 @@ func TestSyncedEditorWaitsForItsOwnAppend(t *testing.T) {
 			t.Fatal(err)
 		}
 		if waiting > 0 {
-			select {
-			case <-opened:
-				t.Fatal("editor setup returned before its held append committed")
-			case <-time.After(100 * time.Millisecond):
-			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("editor setup never sent an append")
+			t.Fatalf("hang guard: the editor's append never queued behind the held lock within %v:\nA:\n%s", editorAppendHangGuard, pair.a.Output.String())
 		}
+	}
+	queued := time.Since(held)
+	// Its append is queued and its setup has not returned. Postgres holds that append until the
+	// commit below, so no later moment can make this read answer differently, and the row waits
+	// out no window of its own to ask it again.
+	select {
+	case <-opened:
+		t.Fatal("editor setup returned once its append was queued, before the commit released it")
+	default:
 	}
 	if err := gate.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	released := time.Now()
 	select {
 	case editor := <-opened:
 		if got := markdown(editor); got != "before\n" {
 			t.Fatalf("sync marker changed the document to %q", got)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("editor setup did not finish after its append was released")
+		t.Logf("the editor's append queued behind the lock %v after it was taken, and its setup returned %v after the commit released it", queued, time.Since(released))
+	case <-time.After(editorAppendHangGuard):
+		t.Fatalf("hang guard: the editor setup did not finish within %v of its append being released:\nA:\n%s", editorAppendHangGuard, pair.a.Output.String())
 	}
 }
 
 // openSyncedEditor sends a metadata marker after the tab renders and returns only once that
 // specific update is stored. Sync frames ahead of it on the socket have then been processed too,
 // so only a subsequent write on B can leave A's room behind the durable head.
+//
+// What it waits on is that update's own row, and what bounds the wait is a hang guard
+// (editorAppendHangGuard): the row above holds this very append behind a table lock for as long
+// as its own observation of it takes, so a bound of the order an unheld append costs would be a
+// bound on that observation instead - which is what it became on a loaded runner. An editor
+// whose socket ends is the one fast failure here, since nothing it sent can be stored after
+// that.
 func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
 	t.Helper()
 	editor := pair.a.openEditor(t, artifactID, want)
@@ -2407,7 +2443,7 @@ func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string)
 	if err != nil {
 		t.Fatalf("send the editor's sync marker: %v", err)
 	}
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(editorAppendHangGuard); ; time.Sleep(10 * time.Millisecond) {
 		var stored bool
 		if err := pair.database.Pool.QueryRow(context.Background(),
 			`select exists(select 1 from doc_updates where artifact_id = $1 and update = $2)`, artifactID, update).Scan(&stored); err != nil {
@@ -2422,7 +2458,7 @@ func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string)
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the editor's sync marker was never stored:\n%s", pair.a.Output.String())
+			t.Fatalf("hang guard: the editor's sync marker was not stored within %v:\n%s", editorAppendHangGuard, pair.a.Output.String())
 		}
 	}
 }
