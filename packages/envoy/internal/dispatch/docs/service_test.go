@@ -52,13 +52,21 @@ func newTestService(t *testing.T) (*Service, string) {
 		ServerURL: "https://dispatch.example",
 		Settle:    20 * time.Millisecond,
 	})
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
+	t.Cleanup(func() { shutdownTestService(t, service) })
 	return service, artifactID
 }
+
+// shutdownTestService shuts service down as a test's teardown does: with the package's own drain
+// budget (teardownDrainBudget) rather than production's, since a teardown is not a test of
+// ShutdownDrainBudget, and failing the test when the shutdown itself fails, which is a service
+// left holding a room its test never released.
+func shutdownTestService(t *testing.T, service *Service) {
+	t.Helper()
+	if err := service.shutdown(context.Background(), teardownDrainBudget); err != nil {
+		t.Errorf("shutdown document service: %v", err)
+	}
+}
+
 func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
 	t.Parallel()
 	service, artifactID := newTestService(t)

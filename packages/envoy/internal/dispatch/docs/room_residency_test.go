@@ -423,6 +423,15 @@ func (w *roomLoads) count() int {
 	return w.loads
 }
 
+// minPeerWrites and minProjections are the rounds TestTheUpdateObserverNeverRendersAWriteHalfWay
+// judges on: fewer than these says nothing about an observer under concurrent writes, whatever
+// the renders showed. They are dispatch://INFRA-985's numbers and are unchanged; what changed is
+// that the test waits for them rather than counting what a two-second window held.
+const (
+	minPeerWrites  = 20
+	minProjections = 5
+)
+
 // The room's update observer renders a copy of the room brought up to date under the room's lock
 // (renderedReplica), never the live tree. ygo fires the observer once the transaction has released
 // the document's lock, so another writer can be integrating into the live tree while a render walks
@@ -455,13 +464,32 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	}
 	ctx := context.Background()
 	bob := model.Actor{Kind: "user", ID: "bob"}
-	deadline := time.Now().Add(2 * time.Second)
+	// The three run until the test has the rounds it judges on - minPeerWrites peer writes and
+	// minProjections projections - rather than for a window of wall clock. A window counts what
+	// the machine managed in it, and these two rounds cost wildly different things: a peer write
+	// is an in-memory Apply of a few milliseconds, while a projection's transaction also stores
+	// every peer append the room's persistence has not stored yet (recordLiveOperation's
+	// flushThrough), so it costs what Postgres charges for that backlog. On a runner where every
+	// package of the module tests against one Postgres a projection round measured 0.7 to 3.4
+	// seconds against the peers' 9 ms, and a two-second window held three of them rather than
+	// five: what the window measured was the machine's CPU-to-Postgres ratio, not this property
+	// (dispatch://INFRA-1075, run 42239459430). The numbers it judges on are unchanged; only the
+	// way it decides it has seen them is. The deadline is the package's own bound on a room's
+	// work, so only a room that stopped reaches it, and the check after the wait is the one that
+	// reports it.
+	deadline := time.Now().Add(roomWait(t))
 	failures := make(chan error, 3)
 	var writes, projections atomic.Int64
+	// running is what every one of the three loops runs under: it stops them all at the first
+	// round that completes the set, so the writers stop with the projections they were made to
+	// run beside rather than at a clock of their own.
+	running := func() bool {
+		return (writes.Load() < minPeerWrites || projections.Load() < minProjections) && time.Now().Before(deadline)
+	}
 	var writers sync.WaitGroup
 	peer := func(first int) {
 		defer writers.Done()
-		for round := first; time.Now().Before(deadline); round++ {
+		for round := first; running(); round++ {
 			tree := trees[round%len(trees)]
 			var updateErr error
 			err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
@@ -480,11 +508,21 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	go peer(1)
 	go func() {
 		defer writers.Done()
-		for round := 0; time.Now().Before(deadline); round++ {
+		for round := 0; running(); round++ {
+			// The peers' counter before and after this projection: a projection counted here is
+			// one the writers were writing through, which is the whole point of counting them.
+			// The first is exempt, since a peer's first Apply can still be loading the room
+			// when the projection beside it starts.
+			beside := writes.Load()
 			if err := joinedProjectMark(service, artifactID, fmt.Sprintf("projection-%d", round), MarkRecord{
 				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 			}, bob); err != nil {
 				failures <- fmt.Errorf("projection %d: %w", round, err)
+				return
+			}
+			if round > 0 && writes.Load() == beside {
+				failures <- fmt.Errorf("projection %d ran with no peer write landing beside it (%d writes before it and after): it rendered a document nobody was writing",
+					round, beside)
 				return
 			}
 			projections.Add(1)
@@ -495,7 +533,7 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	for err := range failures {
 		t.Fatal(err)
 	}
-	if writes.Load() < 20 || projections.Load() < 5 {
+	if writes.Load() < minPeerWrites || projections.Load() < minProjections {
 		t.Fatalf("%d peer writes and %d projections, too few to say anything", writes.Load(), projections.Load())
 	}
 

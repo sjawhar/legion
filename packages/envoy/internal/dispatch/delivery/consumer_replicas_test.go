@@ -25,6 +25,11 @@ func TestDispatchDurablesMoveToThreeCopiesWhenAStartRaisesTheStream(t *testing.T
 		return client
 	}
 	js := start(1).JS()
+	// The stream's create returns once the meta group holds the assignment, which is before
+	// every member can answer for it: a consumer create that reaches a member still catching up
+	// is refused with "stream not found". Production retries such a bind on its next poll
+	// (bindDurableConsumer); this waits for the stream to stand on its one copy instead.
+	testnats.AwaitStreamCopies(t, js, bus.Stream, 1)
 	for _, config := range []natsgo.ConsumerConfig{deliveryConsumerConfig(), jobConsumerConfig()} {
 		if _, err := js.AddConsumer(bus.Stream, &config); err != nil {
 			t.Fatalf("create durable %s: %v", config.Durable, err)

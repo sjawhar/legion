@@ -803,11 +803,16 @@ func TestAnAnswerAfterABlockHeApprovedWasRemovedDoesNotCarry(t *testing.T) {
 // carries the approval (approval_restore_test.go).
 func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(t *testing.T) {
 	t.Parallel()
-	handler := approvalCarryHandler(t)
+	// Every version here is settled on this goroutine (settledVersion) rather than after a
+	// settle window, because the test reads the document between the settlement that restores
+	// the block open (version 4) and the one that writes the row's answer back into it (version
+	// 5): with a window, those reads race it, and a loaded runner outlasts any window wide
+	// enough to read in (dispatch://INFRA-1075).
+	handler, _, documents := settlingCarryDocuments(t, time.Hour)
 	issue := createInteractionIssue(t, handler, "TEST", "Answered block restored", "Context\n\n"+regionAsk)
-	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
 	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 2)
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
 	deleted := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 		"actor": sessionActor(),
@@ -816,7 +821,7 @@ func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete the answered block: status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 3)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 3)
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 
 	restored := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -826,17 +831,18 @@ func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(
 	if restored.Code != http.StatusOK {
 		t.Fatalf("insert the answered block again: status=%d body=%s", restored.Code, restored.Body.String())
 	}
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 4)
 	if markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4); !strings.Contains(markdown, `:::ask{#region urgency="low" multiple="false" state="open"}`) {
 		t.Fatalf("version 4 = %s, want the block inserted again, showing open", markdown)
 	}
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+	documents.SettleNow(issue.PrimaryArtifactID)
 	awaitDocumentText(t, handler, issue.PrimaryArtifactID, "the row's answer written back into the restored block",
 		contains(`:::ask{#region urgency="low" multiple="false" state="answered" answered_by="alice"`), nil)
 	if ask := readBlockAsk(t, handler, asks["region"]); ask.State != "answered" || ask.Answer == nil || ask.Answer.User != "alice" {
 		t.Fatalf("the block's ask after the delete and the insert = state %q answer %#v, want alice's answer kept", ask.State, ask.Answer)
 	}
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 5)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 5)
 	if restoredText, approvedText := versionMarkdown(t, handler, issue.PrimaryArtifactID, 5), versionMarkdown(t, handler, issue.PrimaryArtifactID, 2); restoredText != approvedText {
 		t.Fatalf("version 5 = %s, want the approved version 2's text, %s", restoredText, approvedText)
 	}

@@ -526,9 +526,21 @@ const (
 	// stopped.
 	roomWaitCap = 2 * time.Minute
 	// roomWaitMargin is what roomWait leaves of the test binary's deadline for the failed test's
-	// cleanups, which hold the document service's Shutdown, bounded by ShutdownDrainBudget (9 s):
+	// cleanups, which hold the document service's shutdown, bounded by teardownDrainBudget:
 	// they took at most 85 ms after a wait that timed out, over every test that uses roomWait.
 	roomWaitMargin = 30 * time.Second
+	// teardownDrainBudget is the drain budget a test's teardown gives Service.shutdown in place
+	// of production's ShutdownDrainBudget (9 s). Nine seconds is what a deployment gives the
+	// process before the node takes it away; a teardown asserts nothing about it, and on a
+	// runner where every package of the module tests against one Postgres a room's last durable
+	// appends can take longer than that: CI run 42239459430 failed
+	// TestASettlementFromARoomBehindTheHeadKeepsItsRoomWithWorkInFlightOnIt in this cleanup,
+	// with "shutdown document service: context deadline exceeded", after the test itself had
+	// passed. It is roomWaitMargin, which is what the binary's deadline keeps for a failed
+	// test's cleanups, so a teardown that spends its whole budget still leaves the package's
+	// later tests the deadline roomWait counts on. A test that is about the budget passes its
+	// own (shutdown_test.go's shutdownTestBudget).
+	teardownDrainBudget = roomWaitMargin
 )
 
 // connectedBrowsers is how many browsers the room has registered (state.connected).
@@ -784,11 +796,7 @@ func newTestServiceInstance(t *testing.T, database *store.Store) (*Service, *htt
 		ServerURL: "https://dispatch.example",
 		Settle:    time.Hour,
 	})
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
+	t.Cleanup(func() { shutdownTestService(t, service) })
 	return service, newTestServer(t, service)
 }
 
