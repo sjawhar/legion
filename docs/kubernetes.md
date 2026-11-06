@@ -270,7 +270,9 @@ Then:
   what `ensure` tests is the DSN, not the port.
   It is not `runtime.kubernetes.setup`: that command runs inside a role's own PID namespace, so the server would be a child of that role's generation and would die with it, and the next role would find a stale data directory and no postmaster.
 
-- The **daemon** puts `LEGION_TEST_PG_DSN` in every role's environment and refuses the name in `runtime.kubernetes.pod.env`, so one deployment line cannot disagree with the server the launcher started.
+- The **daemon** puts `LEGION_TEST_PG_DSN` in the start command of every role of such an issue pod, and refuses the name in `runtime.kubernetes.pod.env`, so no deployment line can point a role at another server.
+  The value it sends is `postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`, the one database every image's server serves, and the pod's launcher replaces it with the DSN that launcher serves, or takes the variable out when it serves none.
+  The deployment pins the daemon and the worker image apart, so the process that serves the database is the one that names it: a role is told the database its own pod's server holds, whichever of the two builds is older.
 
 - The **data directory** is `/var/run/legion/roles/testpg` (`LEGION_TESTPG_DIR`), a disk `emptyDir` the daemon mounts there and covers inside every role namespace, so no role can write or corrupt the cluster while its tests use it, and it dies with the pod
   — every issue starts on an empty cluster.

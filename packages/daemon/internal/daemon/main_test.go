@@ -30,9 +30,10 @@ import (
 // skips the guard, keeping what its launcher handed it, which is what Guard's own doc asks for a
 // helper child ("that child keeps the variables its test hands it"); it runs no git or jj of its
 // own, and goes on into m.Run as any other run of this binary does, where the one test it names
-// serves the rig. That child takes no database either: it inherits LEGION_TEST_PG_DSN, it leaves
-// through an os.Exit inside its test, so nothing after m.Run runs in it, and a database made
-// there would be one per role process and dropped by none.
+// serves the rig. That child takes no database either, and is told of none: the rig's launchers
+// run without TestPostgres, so testPGEnv takes LEGION_TEST_PG_DSN out of the child. It also
+// leaves through an os.Exit inside its test, so nothing after m.Run runs in it, and a database
+// made there would be one per role process and dropped by none.
 func TestMain(m *testing.M) {
 	if os.Getenv(idleRigURLVariable) != "" {
 		os.Exit(testnats.Main(m))

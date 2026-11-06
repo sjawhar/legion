@@ -963,9 +963,9 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # killed instead would leave its shutdown checkpoint running and the `rm -rf` below would race it.
 # An issue pod's launcher runs the same command, so a build whose server package, extension or
 # script no longer works fails here rather than at every role's start in every pod. The DSN is the
-# one the runtime sets for every role: a loopback host, no password, and legion_test for both the
-# login and the database — the non-superuser role `ensure` creates, not the cluster's own
-# superuser, and the database `ensure` creates with that role as its owner.
+# one this image's own launcher serves to every role of an issue pod: a loopback host, no password,
+# and legion_test for both the login and the database — the non-superuser role `ensure` creates,
+# not the cluster's own superuser, and the database `ensure` creates with that role as its owner.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \

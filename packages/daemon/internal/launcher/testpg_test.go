@@ -5,12 +5,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // stubTestPG puts a `legion-testpg` on PATH that appends one line per call — the subcommand, the
@@ -38,26 +35,7 @@ func stubTestPG(t *testing.T) (calls string) {
 // including the empty string, and "unset" only for a name its environment does not hold.
 func (g *rig) toldDSN(generation uint64, env []string) string {
 	g.t.Helper()
-	told := filepath.Join(g.t.TempDir(), "told")
-	command := shimwire.LauncherStart{
-		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
-		Argv: []string{"/bin/sh", "-c", `printf '%s' "${` + TestPGVariable + `-unset}" > "$TOLD.tmp" && mv "$TOLD.tmp" "$TOLD"; exec sleep 600`},
-		Env:  append([]string{"TOLD=" + told}, env...),
-	}
-	if got := g.start(command); !got.OK {
-		g.t.Fatalf("start of generation %d = %#v", generation, got)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if body, err := os.ReadFile(told); err == nil {
-			g.stop(generation)
-			return string(body)
-		}
-		if time.Now().After(deadline) {
-			g.t.Fatalf("generation %d's child never said what it was told", generation)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	return g.told(generation, "${"+TestPGVariable+"-unset}", env, "")
 }
 
 // The launcher that serves the pod's test database names it to every generation it starts, over

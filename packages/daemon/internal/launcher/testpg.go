@@ -51,9 +51,12 @@ func testPGDir(rolesDir string) string { return filepath.Join(rolesDir, TestPGDi
 
 // testPGEnv is what a generation of this launcher is told about the pod's test database: when
 // this launcher serves one (serves, from Config.TestPostgres), TestPGVariable is TestPGDSN of
-// this binary, over whatever value the daemon's start command carried; when it serves none — a
-// deployment with no test database, and the controller's own pod — the variable is taken out of
-// that environment, so a role is never told of a server its pod does not run.
+// this binary, over whatever value the daemon's start command carried; when it serves none the
+// variable is taken out of that environment, so a role is never told of a server its pod does not
+// run. The daemon puts the variable in a role's start command for an issue pod alone, and only
+// while that deployment sets `runtime.kubernetes.test_postgres` (the sandbox package's manifest),
+// so what the removal serves is a pod started before that key was turned on and kept since: its
+// launcher was given no such flag, while the daemon that starts its roles now sends the DSN.
 //
 // It overrides the start command because the daemon and the worker image are deployed from two
 // separately pinned builds, and this launcher, which comes from the image, is the process that
