@@ -2408,3 +2408,33 @@ func wholeTextScans(plan retirePlanNode, kind string) []retirePlanNode {
 	}
 	return scans
 }
+
+// Each entry of wholeTextOwners takes its window kind and its owner prefix from one
+// refs.ItemKind, so the two always agree. The retire statement rests on that: it reads the owner
+// out of a window's key with substring(o.owner_key from length('<ownerPrefix>') + 1), which
+// removes that many characters whatever they are. Under the statement this one replaced, a
+// window kind whose owner key did not carry its entry's prefix matched nothing; under this one
+// it would strip the wrong characters and retire another owner's whole-text row. A pairing
+// taken from two places is where that would start, so the pairing is checked here.
+func TestEveryWholeTextOwnersWindowKindAndPrefixComeFromOneItemKind(t *testing.T) {
+	for _, owner := range wholeTextOwners {
+		t.Run(owner.kind, func(t *testing.T) {
+			if owner.kind == "document" {
+				if owner.windowKind != refs.DocumentWindowKind {
+					t.Errorf("the document entry stands for windows of kind %q, want %q: the retire statement reads the owners of that kind alone, and a document's windows are written under refs.DocumentWindowKind", owner.windowKind, refs.DocumentWindowKind)
+				}
+				if owner.ownerPrefix != "" {
+					t.Errorf("the document entry strips the prefix %q, want the empty one: refs.WriteDocumentWindows writes the owner key as the artifact id itself, so only substring(key from 1), the identity, reads that id back", owner.ownerPrefix)
+				}
+				return
+			}
+			kind := refs.ItemKind(owner.kind)
+			if got := kind.WindowKind(); got != owner.windowKind {
+				t.Errorf("the %s entry stands for windows of kind %q, while %s writes its windows under %q: the retire statement would strip the %s prefix from the owner keys of another kind", owner.kind, owner.windowKind, owner.kind, got, owner.kind)
+			}
+			if got, want := kind.WindowOwnerKey("x"), owner.ownerPrefix+"x"; got != want {
+				t.Errorf("%s writes the owner key of item x as %q, while the entry's prefix %q reads the owner back only out of %q: the retire statement would take the wrong characters off every %s owner key and delete the whole-text row of whatever id is left", owner.kind, got, owner.ownerPrefix, want, owner.kind)
+			}
+		})
+	}
+}
