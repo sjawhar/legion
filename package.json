@@ -26,6 +26,7 @@
     "packages/claude-envoy",
     "packages/proof-editor",
     "packages/dispatch",
+    "packages/test-fixtures",
     "packages/envoy/internal/dispatch/pmdoc/gen",
     "docs/site"
   ],

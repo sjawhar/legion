@@ -252,6 +252,15 @@
         "typescript": "^5.3.0",
       },
     },
+    "packages/test-fixtures": {
+      "name": "@legion/test-fixtures",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@biomejs/biome": "^2.3.14",
+        "@types/bun": "1.4.2",
+        "typescript": "^5.3.0",
+      },
+    },
   },
   "patchedDependencies": {
     "micromark-core-commonmark@2.0.3": "patches/micromark-core-commonmark@2.0.3.patch",
@@ -619,6 +628,8 @@
     "@legion/pi-shared": ["@legion/pi-shared@workspace:packages/pi-shared"],
 
     "@legion/proof-editor": ["@legion/proof-editor@workspace:packages/proof-editor"],
+
+    "@legion/test-fixtures": ["@legion/test-fixtures@workspace:packages/test-fixtures"],
 
     "@lezer/common": ["@lezer/common@1.5.2", "", {}, "sha512-sxQE460fPZyU3sdc8lafxiPwJHBzZRy/udNFynGQky1SePYBdhkBl1kOagA9uT3pxR8K09bOrmTUqA9wb/PjSQ=="],
 
