@@ -14,48 +14,37 @@ import (
 // listener, and two steps past it.
 var registrySizes = []int{400, 1000, 3000}
 
-// benchRegistry is a registry with n cached sessions, every tenth one already past its expiry,
-// and n/10 last-seen records, built from a struct literal as cache_test.go's are, so no NATS is
-// involved. live lists the ids that have not expired, all lists every cached id, and gone is one
-// id that has only a last-seen record.
+// benchRegistry is a registry with n cached sessions and n/10 last-seen records, built from a
+// struct literal as cache_test.go's are, so no NATS is involved. live lists every cached id, all
+// is the same list, and gone is one id that has only a last-seen record.
 //
-// On code where a read prunes, the first read (Get, List, LastSeen) pays for moving the expired
-// tenth into lastSeen, and every later read still walks the whole cache to look for more. Where
-// entries expire on a timer, no read removes anything, and these entries, written into the struct
-// rather than through a write, have no deadline scheduled, so the expired tenth stays in the cache
-// and reads only skip it. Each sub-benchmark builds its own registry, so each starts from this same
-// state.
+// The rows go in through the copy's apply path (applyWatched), which is the only way into it, so
+// each one's deadline is scheduled as a delivered record's is (storedLocked). They are all live: a
+// copy that follows its bucket removes a row at its deadline, so a cache holding rows past theirs
+// is not a state the merged registry can be left in, and a benchmark cannot pin one. Each
+// sub-benchmark builds its own registry, so each starts from this same state.
 func benchRegistry(n int) (r *SessionRegistry, live, all []string, gone string) {
 	now := time.Now()
-	r = &SessionRegistry{
-		ttl:            5 * time.Minute,
-		cache:          make(map[string]cachedSession, n),
-		cacheRevisions: make(map[string]uint64, n),
-		lastSeen:       make(map[string]lastSeenSession, n/10),
-	}
+	r = newTestRegistry(5 * time.Minute)
 	for i := range n {
 		id := fmt.Sprintf("ses_bench_%05d", i)
-		expiresAt := now.Add(5 * time.Minute)
-		if i%10 == 0 {
-			expiresAt = now.Add(-time.Minute)
-		} else {
-			live = append(live, id)
+		value, err := json.Marshal(SessionEntry{
+			Port:           4000 + i,
+			MachineID:      "bench-machine",
+			Dir:            "/bench/" + id,
+			Title:          "bench session " + id,
+			Capabilities:   []string{"aside", "btw"},
+			UpdatedAt:      now.UnixMilli(),
+			SelfSubscribed: true,
+		})
+		if err != nil {
+			panic("session: encode a benchmark entry: " + err.Error())
 		}
+		r.applyWatched(benchEntry{key: id, value: value, revision: uint64(i + 1), created: now})
+		live = append(live, id)
 		all = append(all, id)
-		r.cache[id] = cachedSession{
-			entry: SessionEntry{
-				Port:           4000 + i,
-				MachineID:      "bench-machine",
-				Dir:            "/bench/" + id,
-				Title:          "bench session " + id,
-				Capabilities:   []string{"aside", "btw"},
-				UpdatedAt:      now.UnixMilli(),
-				SelfSubscribed: true,
-			},
-			expiresAt: expiresAt,
-		}
-		r.cacheRevisions[id] = uint64(i + 1)
 	}
+	r.mu.Lock()
 	for i := range n / 10 {
 		id := fmt.Sprintf("ses_gone_%05d", i)
 		r.lastSeen[id] = lastSeenSession{
@@ -66,6 +55,7 @@ func benchRegistry(n int) (r *SessionRegistry, live, all []string, gone string) 
 			gone = id
 		}
 	}
+	r.mu.Unlock()
 	return r, live, all, gone
 }
 
@@ -145,14 +135,17 @@ func BenchmarkRegistry(b *testing.B) {
 
 // benchmarkParallelGetWithWriter times Gets of live ids from every P while one goroutine applies
 // a fresh put of a live session through applyWatched in a loop, as the session bucket's watcher
-// does on every heartbeat. The writer keeps each session live (Created is now) and never touches
-// an expired one, so the registry's shape holds for the whole run. The writer stops before the
-// benchmark returns.
+// does on every heartbeat. The writer keeps each session live (Created is now), so the registry's
+// shape holds for the whole run. The writer stops before the benchmark returns.
 func benchmarkParallelGetWithWriter(b *testing.B, n int) {
 	r, live, _, _ := benchRegistry(n)
 	values := make([][]byte, len(live))
 	for i, id := range live {
-		value, err := json.Marshal(r.cache[id].entry)
+		entry, err := r.Get(id)
+		if err != nil {
+			b.Fatalf("Get(%s): %v", id, err)
+		}
+		value, err := json.Marshal(entry)
 		if err != nil {
 			b.Fatalf("marshal %s: %v", id, err)
 		}

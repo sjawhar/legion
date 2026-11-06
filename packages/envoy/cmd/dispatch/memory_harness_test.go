@@ -334,18 +334,18 @@ func (h *memoryHarness) writeOwedBlockIndex(t *testing.T, service *docs.Service)
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(120 * time.Second)
-	var cursor string
+	var cursors docs.BlockIndexCursors
 	// liveAheadTicks counts the ticks in a row that indexed nothing and found a document live
 	// ahead: a document whose stored text is ahead of its latest version is moved on by a
 	// settlement, which settleOwed has already run for every issue that owed one, so two such
 	// ticks say the drain cannot finish.
 	liveAheadTicks := 0
 	for {
-		tick, err := service.ReconcileBlockIndex(ctx, cursor, nil)
+		tick, err := service.ReconcileBlockIndex(ctx, cursors, nil)
 		if err != nil {
 			t.Fatalf("write the block index a starting server would write: %v", err)
 		}
-		cursor = tick.Cursor
+		cursors = tick.Cursor
 		documents += tick.Documents
 		items += tick.Items
 		itemBlocks += tick.ItemBlocks

@@ -72,12 +72,13 @@ func TestSearchLinksAnAskBlockOnlyWhileTheBlockIsANode(t *testing.T) {
 
 	// Each ask is a meaning match for wibbleflorp, at a cosine above the floor, on an axis of
 	// its own, under the embedder's identity, which meaning search compares a query with alone;
-	// no other row has an embedding.
+	// no other row has an embedding. Each short ask holds one window over its parts.
 	for index, ask := range asks {
-		tag, err := database.Pool.Exec(context.Background(), `update embeddings set embedding = $2::vector, model = $3 where kind = 'ask' and id = $1`,
+		tag, err := database.Pool.Exec(context.Background(),
+			`update embeddings set embedding = $2::vector, model = $3 where kind = 'ask_part' and split_part(id, '#', 1) = 'ask/' || $1`,
 			ask.id, embed.Literal(angledVector(0.9-0.05*float64(index), 2+index)), embedder.Identity())
 		if err != nil || tag.RowsAffected() != 1 {
-			t.Fatalf("embed the ask %q: %v (%d rows)", ask.question, err, tag.RowsAffected())
+			t.Fatalf("embed the window of the ask %q: %v (%d rows)", ask.question, err, tag.RowsAffected())
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -65,7 +66,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "title must not be blank")
 			return
 		}
-		if length := len16(*input.Title); length > contracts.IssueTitleMax {
+		if length := itemblocks.Units16(*input.Title); length > contracts.IssueTitleMax {
 			capExceeded(w, "title", length, contracts.IssueTitleMax)
 			return
 		}

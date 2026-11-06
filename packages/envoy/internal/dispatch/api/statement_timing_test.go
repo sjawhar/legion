@@ -130,9 +130,10 @@ func TestStatementTimings(t *testing.T) {
 	relatedArguments := []any{lexemeQuery, subjects.Project, suggestionSearchDepth,
 		subjects.RareWord, headlineOptions, 0, contracts.SearchKindDepth, searchFusionK}
 
-	// The check raises hnsw.ef_search for its own transaction, so a measurement of its meaning
-	// query without it would be of a statement production never runs (relatedEFSearch).
-	meaningSetup := []string{relatedEFSearch}
+	// Both meaning queries run in the transaction beginMeaningScan opens, which sets
+	// hnsw.ef_search and hnsw.iterative_scan (searchMeaningScan), so a measurement without them
+	// would be of a statement production never runs.
+	meaningSetup := searchMeaningScan
 	searchMeaningArguments := slices.Concat(searchArguments, meaning)
 	relatedKeywordArguments := slices.Concat(relatedArguments, []any{lexemes, weights})
 	relatedMeaningArguments := slices.Concat(relatedArguments, meaning, []any{lexemes, weights})
@@ -161,7 +162,13 @@ func TestStatementTimings(t *testing.T) {
 	// all: each before text is measured alone instead, under the name it carries here, and the
 	// reading to compare it with is this schema's own reading of the same before text, which
 	// every pair below logs beside its after text. The two-commit run is therefore this one
-	// test against two databases rather than a second harness.
+	// test against two databases rather than a second harness. The two meaning statements are
+	// the exception, and their names say so: this release deletes the whole-text rows four of
+	// main's five meaning arms read, so main's meaning text measures a statement whose arms
+	// find nothing here, and the pair and report below take a before side of their own under a
+	// name of its own. Those two have no reading common to both schemas: a reader comparing by
+	// name across two commits finds main's text under its own name on the old schema, and this
+	// schema's readings under names that say which before text they are.
 	if !thisReleasesSchema {
 		runner.Before(t, "searchQuery, keywords only",
 			benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments})
@@ -182,8 +189,15 @@ func TestStatementTimings(t *testing.T) {
 	runner.Pair(t, "searchQuery, keywords only",
 		benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments},
 		benchtime.Statement{SQL: searchQuery, Args: searchArguments})
-	runner.Pair(t, "searchQueryMeaning",
-		benchtime.Statement{SQL: mainSearchQueryMeaning, Args: searchMeaningArguments},
+	// The before side is this release's own meaning body over main's document arm
+	// (searchQueryMeaningOverMainsDocumentArm), not main's frozen meaning text: this release
+	// moved meaning search to one vector per window and deletes the whole-text rows four of
+	// main's five meaning arms read, so that text would measure a statement whose arms find
+	// nothing and the gate would compare two designs rather than the one arm this change
+	// rewrote. Main's own text still measures the pre-release schema, in the Before branch
+	// above, where the window kinds and the covers column do not exist.
+	runner.Pair(t, "searchQueryMeaning, over main's document arm",
+		benchtime.Statement{SQL: searchQueryMeaningOverMainsDocumentArm, Args: searchMeaningArguments},
 		benchtime.Statement{SQL: searchQueryMeaning, Args: searchMeaningArguments})
 	// relatedKeywordQuery and relatedMeaningQuery are gated on the document arm they share
 	// rather than on either whole statement. The arm is the piece whose text differs, and it is
@@ -214,8 +228,8 @@ func TestStatementTimings(t *testing.T) {
 	runner.Report(t, "relatedKeywordQuery, the whole statement",
 		benchtime.Statement{SQL: mainRelatedKeywordQuery, Args: relatedKeywordArguments},
 		benchtime.Statement{SQL: relatedKeywordQuery, Args: relatedKeywordArguments})
-	runner.Report(t, "relatedMeaningQuery, the whole statement",
-		benchtime.Statement{SQL: mainRelatedMeaningQuery, Args: relatedMeaningArguments, Setup: meaningSetup},
+	runner.Report(t, "relatedMeaningQuery, the whole statement, over main's document arm",
+		benchtime.Statement{SQL: relatedMeaningQueryOverMainsDocumentArm, Args: relatedMeaningArguments, Setup: meaningSetup},
 		benchtime.Statement{SQL: relatedMeaningQuery, Args: relatedMeaningArguments, Setup: meaningSetup})
 
 	runner.Pair(t, "relatedProbeSQL",
