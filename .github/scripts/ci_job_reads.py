@@ -26,6 +26,9 @@ header says what is proved).
   PUSH_WORKFLOWS  filter -> a workflow that runs that filter's job's work on a push to main in a
             workflow of its own, selected by its `on.push.paths`, which must equal the filter: the
             filter decides the pull request's and merge group's run, the paths main's.
+  TAG_RUNS  one entry per step that runs a package under a build tag and passes -run: the job
+            whose untagged run of that package that -run leans on, whose filter must therefore
+            cover every file the tag step's filter covers.
 
 A Read's glob is expanded over the repository's files; a why cites the step (at()) or the
 source line that reads it. at()'s third argument is the workflow file that holds the step, and
@@ -41,7 +44,7 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-from ci_filter_coverage import Read, at, exact, gate, go_skips_dir, run
+from ci_filter_coverage import Read, TagRun, at, exact, gate, go_skips_dir, run
 
 ENVOY = "packages/envoy"
 DAEMON = "packages/daemon"
@@ -474,6 +477,11 @@ UNIT_TEST_SCRIPT = f"go list ./... | grep -Ev '{UNIT_TEST_PATTERN}' | xargs go t
 # A test of a Go file: `go help test`'s Test, Fuzz and Example functions, whose name goes on with
 # no lower-case letter. TestMain is the package's entry point, not a test.
 GO_TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?:[^\Wa-z]\w*)?)\(", re.M)
+# Every top-level function declaration, test or not, and the line that closes one's body: a
+# gofmt'd file puts both in column 0, so the body of the declaration at one start runs to the
+# next such closing line.
+GO_TOP_FUNC = re.compile(r"^func\b", re.M)
+GO_TOP_CLOSE = re.compile(r"^\}", re.M)
 GO_BUILD_LINE = re.compile(r"^//go:build +(.+?) *$", re.M)
 RACE_ENABLED = re.compile(r"\braceEnabled\b")
 RACE_ENABLED_DECLARATION = re.compile(r"^const +raceEnabled\b|^\t*raceEnabled +=", re.M)
@@ -510,8 +518,10 @@ def race_impossible_tests_of(path: Path) -> set:
     constant behind which a test runs smaller under the detector, so the plain run is its full-size
     one. The constant's own declaration, and any mention of it in a comment or a string, count for
     nothing. Raises on a //go:build that names race in a form this does not read, and on a
-    raceEnabled it cannot attribute to a test: an idiom it misreads makes ci-filters red rather
-    than dropping a test from the plain run unseen."""
+    raceEnabled a test does not enclose: the read is attributed to the top-level function whose
+    body holds it, and only when that function is itself a test, so a read in a helper - which a
+    later test may be the one caller of - makes ci-filters red rather than giving a test that does
+    not run smaller the plain run and dropping the one that does."""
     text = path.read_text()
     found = GO_BUILD_LINE.search(text)
     constraint = found.group(1) if found else ""
@@ -531,6 +541,9 @@ def race_impossible_tests_of(path: Path) -> set:
     tests = [] if constraint == "race" else [(m.start(), m.group(1)) for m in GO_TEST_FUNC.finditer(code)
                                              if m.group(1) != "TestMain"]
     names = {name for _, name in tests} if constraint == "!race" else set()
+    enclosing = dict(tests)  # the start of a top-level test -> its name
+    starts = [m.start() for m in GO_TOP_FUNC.finditer(code)]
+    closes = [m.start() for m in GO_TOP_CLOSE.finditer(code)]
     # Each declaration's own line, read from the declaration rather than from the use, so a file
     # that declares the constant and also reads it in a test has that read attributed, not passed
     # over.
@@ -538,12 +551,15 @@ def race_impossible_tests_of(path: Path) -> set:
     for use in RACE_ENABLED.finditer(code):
         if any(start <= use.start() < (len(code) if end < 0 else end) for start, end in declarations):
             continue
-        before = [name for start, name in tests if start < use.start()]
-        if not before:
+        before = [start for start in starts if start < use.start()]
+        holder = before[-1] if before else None
+        body_end = next((close for close in closes if close > holder), len(code)) if holder is not None else 0
+        if holder is None or use.start() > body_end or holder not in enclosing:
             raise ValueError(f"{path}:{code.count(chr(10), 0, use.start()) + 1}: raceEnabled is read where no "
-                             "top-level test precedes it, so ci_job_reads.py cannot say which test runs smaller "
-                             "under the detector; move the read into a test or teach it the idiom")
-        names.add(before[-1])
+                             "top-level test encloses it, so ci_job_reads.py cannot say which test runs smaller "
+                             "under the detector; move the read into the test that runs smaller for it, or teach "
+                             "race_impossible_tests_of() the idiom")
+        names.add(enclosing[holder])
     return names
 
 
@@ -1059,6 +1075,29 @@ GATES = [
         (".github/scripts/ci_images.py", "both scripts read a row's upstream with it"),
         (".github/actions/install-crane/**", at("ci-images", "./.github/actions/install-crane")),
     ) + CI_SELF),
+]
+
+# One entry per step of ci.yaml that runs a package under a build tag and passes -run: the job
+# whose untagged run of that package the -run leans on, which check-ci-filters.sh holds to running
+# in every run the tag step runs (check_tag_runs). The note says which step runs the untagged
+# tests, the judgement the check cannot derive. The last two entries pair a job with itself: the
+# untagged run is a step of the same job, so the filters are the same one and the subset holds
+# trivially; they are here all the same, so the rule covers every -run step and a later move of
+# one to another job is caught.
+TAG_RUNS = [
+    TagRun("dispatch_memory", "dispatch-memory", MEMORY_STEP, "envoy_go", "envoy-go",
+           f"envoy-go's \"{UNIT_TEST_STEP}\" runs ./cmd/dispatch's untagged tests"),
+    TagRun("dispatch_multiprocess", "dispatch-multiprocess", DISPATCH_MP_STEP, "envoy_go", "envoy-go",
+           f"envoy-go's \"{UNIT_TEST_STEP}\" runs ./cmd/dispatch's untagged tests"),
+    TagRun("broker_multiprocess", "broker-multiprocess", BROKER_MP_STEP, "envoy_go", "envoy-go",
+           f"envoy-go's \"{UNIT_TEST_STEP}\" runs ./cmd/broker's untagged tests"),
+    # envoy-go's unit step leaves /cmd/listener$ out, since the lane runs it under the detector.
+    TagRun("listener_server_change", "listener-server-change", SOAK_STEP, "envoy_go_race", "envoy-go-race",
+           f"envoy-go-race's \"{RACE_JOBS['envoy-go-race'].step}\" runs ./cmd/listener's untagged tests"),
+    TagRun("envoy_go", "envoy-go", NATS_MATRIX_STEP, "envoy_go", "envoy-go",
+           f"envoy-go's own \"{UNIT_TEST_STEP}\" runs ./internal/testnats's untagged tests"),
+    TagRun("envoy_infra_go", "envoy-infra-go", INFRA_NATSLIVE_STEP, "envoy_infra_go", "envoy-infra-go",
+           f"envoy-infra-go's own \"Unit test envoy-infra\" runs {', '.join(INFRA_NATSLIVE_PACKAGES)} untagged"),
 ]
 
 EXCLUDED = {

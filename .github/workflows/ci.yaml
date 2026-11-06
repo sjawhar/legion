@@ -971,6 +971,9 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/**'
+              # listener-server-change takes its -run from this script, and this is the job that
+              # runs cmd/listener's untagged tests, so it must run whenever the script changes.
+              - '.github/scripts/go-tagged-tests.sh'
               # The fixture cmd/listener/api_test.go:191,436,480 reads.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
             # The API race job. internal/dispatch/api's lock_level_test.go:120-133 walks every
@@ -2828,8 +2831,9 @@ jobs:
       # horizon, which any open transaction on this job's Postgres delays. The three -run lists are
       # derived in .github/scripts/ci_job_reads.py from the race lane's own packages and those
       # files' //go:build !race and raceEnabled, so a test added to either and missing here fails
-      # the ci-filters job naming this step. Measured: the bus 0.06 s, the API 8.7 s, the documents
-      # package 92.2 s, so 10 minutes each is ample.
+      # the ci-filters job naming this step. Measured over three runs on a two-vCPU pod: the bus
+      # under a tenth of a second, the API 8 to 10 s, the documents package 92 to 127 s, so 10
+      # minutes each is ample.
       - name: Test what the race build cannot run at all or at full size
         run: |
           go test -count=1 -timeout 10m -run '^(TestHoldsSeedAllocatesAtMostOneCopyPerDecoding)$' ./internal/bus
@@ -3331,18 +3335,19 @@ jobs:
   # drives two real envoy-listener binaries over a three-server NATS cluster, with a session
   # stand-in moved between the servers by lame-duck shutdowns and forced kills and three senders
   # publishing through the listener, and holds every message to reaching its session or failing
-  # its sender. It builds only under the `serverchange` tag, so envoy-go's unit run leaves it
-  # out, and it is a job of its own because it outlives that step: it sends for at least a minute
-  # and waits out each server's restart and the JetStream catch-up after it, which, beside the
-  # listener's other tests, is past what envoy-go's unit step holds under go test's default
-  # ten-minute package deadline. It runs only the tests the serverchange tag adds, since envoy-go
-  # runs the package's untagged tests already: the -run comes from
-  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time, so a
-  # second serverchange test added later runs here instead of being left out of a hand-written
-  # list. The assignment is a line of its own: under bash -e it carries the script's exit status,
-  # so an empty or refused list fails the step instead of running -run "", which matches every
-  # test. The cluster runs in the test process (internal/testnats), so the job needs no container
-  # runtime and no database.
+  # its sender. It builds only under the `serverchange` tag, so no untagged run of the package
+  # builds it, and it is a job of its own because it is slow and serial: it sends for at least a
+  # minute and waits out each server's restart and the JetStream catch-up after it, which, beside
+  # the listener's other tests, would hold up the job that runs them - envoy-go-race, which runs
+  # cmd/listener under the race detector, where it would be slower still. It runs only the tests
+  # the serverchange tag adds, since envoy-go-race runs the package's untagged tests already
+  # (envoy-go's unit step leaves /cmd/listener$ out, for the lane to run under the detector): the
+  # -run comes from .github/scripts/go-tagged-tests.sh, which reads the names off the source at
+  # run time, so a second serverchange test added later runs here instead of being left out of a
+  # hand-written list. The assignment is a line of its own: under bash -e it carries the script's
+  # exit status, so an empty or refused list fails the step instead of running -run "", which
+  # matches every test. The cluster runs in the test process (internal/testnats), so the job needs
+  # no container runtime and no database.
   listener-server-change:
     needs: changes
     if: needs.changes.outputs.listener_server_change == 'true'

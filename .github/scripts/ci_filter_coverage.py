@@ -106,6 +106,22 @@ def gate_runs(g: Gate) -> list:
     return list(g.runs) + [r for e in g.exact for r in e.runs]
 
 
+@dataclass(frozen=True)
+class TagRun:
+    """A step of ci.yaml that runs a package under a build tag and selects with `-run` only the
+    tests the tag adds, paired with the job that runs that package's untagged tests: `filter`,
+    `job` and `step` are the tag step's gate, job and step name, `untagged_filter` and
+    `untagged_job` the other job's filter and name, and `why` names the step that runs the
+    untagged tests - the judgement check_tag_runs cannot derive and this table records."""
+
+    filter: str
+    job: str
+    step: str
+    untagged_filter: str
+    untagged_job: str
+    why: str
+
+
 # Every workflow step a why cites through at(), checked to exist so a renamed step fails here.
 # Each entry is (the workflow file that holds the step, the job, the step).
 CITED: list = []
@@ -884,6 +900,54 @@ def check_push_workflows(data, filters: dict, problems: list) -> list:
     return report
 
 
+def check_tag_runs(document: dict, data, filters: dict, quantifiers: dict, files: list, problems: list) -> list:
+    """A step that runs a package under a build tag and passes `-run` runs only the tests the tag
+    adds, so the package's untagged tests must run elsewhere in every run that step runs. The job
+    that runs them is declared (TAG_RUNS), and its filter must cover every file the tag step's
+    filter covers; otherwise a change to a file only the tag step's filter matches runs the tagged
+    tests alone and the untagged ones nowhere. The table cannot go stale either: an entry naming a
+    filter the changes job does not have, a job ci.yaml does not have, a step that job does not
+    have, or a step whose run: holds no -run is a failure of its own. Returns the report lines."""
+    report = []
+    jobs = document.get("jobs") or {}
+    for entry in data.TAG_RUNS:
+        where = f'{entry.job} step "{entry.step}"'
+        gone_filters = [name for name in (entry.filter, entry.untagged_filter) if name not in filters]
+        for name in gone_filters:
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::TAG_RUNS names filter {name} for {where}, "
+                            f"which the changes job does not have")
+        gone_jobs = [name for name in (entry.job, entry.untagged_job) if name not in jobs]
+        for name in gone_jobs:
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::TAG_RUNS names job {name}, which "
+                            f"{WORKFLOW} does not have")
+        if gone_filters or gone_jobs:
+            continue
+        job = jobs[entry.job] or {}
+        steps = [s for s in job.get("steps") or [] if "run" in s and step_matches(s, entry.step)]
+        if len(steps) != 1:
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::TAG_RUNS names step \"{entry.step}\" of "
+                            f"job {entry.job}, which is not one run: step of it; update or remove the entry")
+            continue
+        if "-run" not in str(steps[0]["run"]):
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::TAG_RUNS names {where}, which passes no "
+                            f"-run, so it runs the package's untagged tests itself; drop the entry")
+            continue
+        tagged = PathsFilter(filters[entry.filter], quantifiers[entry.filter])
+        untagged = PathsFilter(filters[entry.untagged_filter], quantifiers[entry.untagged_filter])
+        selected = [f for f in files if tagged.covers(f)]
+        uncovered = [f for f in selected if not untagged.covers(f)]
+        report.append(f"{where}: {len(selected)} files selected by filter {entry.filter}, {len(uncovered)} "
+                      f"uncovered by {entry.untagged_job} (filter {entry.untagged_filter})")
+        if uncovered:
+            more = f", and {len(uncovered) - SHOWN} more" if len(uncovered) > SHOWN else ""
+            problems.append(f"::error file={WORKFLOW}::{where} runs only what its tag adds (-run), so {entry.untagged_job} "
+                            f"must run that package's untagged tests in every run it runs ({entry.why}), but filter "
+                            f"{entry.untagged_filter} does not match {' '.join(uncovered[:SHOWN])}{more}, which filter "
+                            f"{entry.filter} matches: a change to one of them runs the tagged tests alone and the "
+                            f"untagged ones nowhere")
+    return report
+
+
 def declared_reads(data) -> list:
     """Every read pattern ci_job_reads.py declares, each with where it is: a gate's reads, or a
     RULES row's (a row's Runs declare go commands, not patterns)."""
@@ -975,6 +1039,7 @@ def main() -> int:
             problems += held
     problems += session.problems
     report += check_push_workflows(data, filters, problems)
+    report += check_tag_runs(document, data, filters, quantifiers, files, problems)
     for line in report:
         print(line)
     problems = list(dict.fromkeys(problems))
