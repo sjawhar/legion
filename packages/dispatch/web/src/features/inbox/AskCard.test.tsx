@@ -382,10 +382,11 @@ for (const shape of ["inline", "collapsed"] as const) {
       act(() => {
         jest.advanceTimersByTime(1_000);
       });
-      for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-      expect(card.mark.mock.calls).toEqual([
-        ["ask-1", { read_through: "2026-10-08T04:00:00.5Z" }, keyedAttempt],
-      ]);
+      await waitFor(() =>
+        expect(card.mark.mock.calls).toEqual([
+          ["ask-1", { read_through: "2026-10-08T04:00:00.5Z" }, keyedAttempt],
+        ])
+      );
     } finally {
       card.cleanup();
     }
@@ -421,8 +422,9 @@ test("an answer given after every reply is what the mark watches and reads throu
     act(() => {
       jest.advanceTimersByTime(1_000);
     });
-    for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(card.mark.mock.calls).toEqual([["ask-1", { read_through: answer.at }, keyedAttempt]]);
+    await waitFor(() =>
+      expect(card.mark.mock.calls).toEqual([["ask-1", { read_through: answer.at }, keyedAttempt]])
+    );
   } finally {
     card.cleanup();
   }

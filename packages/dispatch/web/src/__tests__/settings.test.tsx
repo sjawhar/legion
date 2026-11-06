@@ -106,7 +106,7 @@ test("human users manage repository project mappings from the settings route", a
 
     expect(await screen.findByRole("heading", { name: "Repositories → Projects" })).toBeDefined();
     expect(screen.getByRole("link", { name: "Settings" }).getAttribute("href")).toBe("/settings");
-    expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
+    expect(await screen.findByRole("cell", { name: "owner/repo" })).toBeDefined();
     expect(screen.getByRole("columnheader", { name: "Default" })).toBeDefined();
     const radio = (repo: string) =>
       screen.getByRole("radio", {

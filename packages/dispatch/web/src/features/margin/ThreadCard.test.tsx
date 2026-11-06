@@ -13,6 +13,7 @@ import { type ComponentProps, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { tick } from "../../__tests__/fake-clock";
 import {
   type IntersectionControl,
   installIntersectionObserver,
@@ -655,10 +656,7 @@ function renderUnreadCard(expanded: boolean) {
 
 async function dwellOn(element: Element, screen: IntersectionControl) {
   act(() => screen.show(element));
-  act(() => {
-    jest.advanceTimersByTime(1_000);
-  });
-  for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+  await tick(1_000);
 }
 
 test("an expanded thread is marked read once its newest reply has been on screen", async () => {

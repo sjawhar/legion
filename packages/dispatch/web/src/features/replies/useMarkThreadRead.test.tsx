@@ -1,8 +1,9 @@
 import { afterEach, expect, jest, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { tick } from "../../__tests__/fake-clock";
 import {
   type IntersectionControl,
   installIntersectionObserver,
@@ -63,10 +64,7 @@ function renderThread(set: MyRepliesResponse, props: { at: string | undefined; t
 
 async function dwell(screen: IntersectionControl, element: Element) {
   act(() => screen.show(element));
-  act(() => {
-    jest.advanceTimersByTime(1_000);
-  });
-  for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+  await tick(1_000);
 }
 
 test("a thread outside the viewer's unread set is never watched or marked", async () => {
@@ -110,8 +108,9 @@ test("an unread thread is marked through its newest reply once that reply dwells
     act(() => {
       jest.advanceTimersByTime(1);
     });
-    for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(mark.mock.calls).toEqual([["thread-1", { read_through: first }, keyedAttempt]]);
+    await waitFor(() =>
+      expect(mark.mock.calls).toEqual([["thread-1", { read_through: first }, keyedAttempt]])
+    );
 
     // The same reply seen again sends nothing more.
     act(() => screen.hide(newest));

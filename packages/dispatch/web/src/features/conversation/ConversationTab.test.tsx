@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
+import { tick } from "../../__tests__/fake-clock";
 import {
   type IntersectionControl,
   installIntersectionObserver,
@@ -2015,10 +2016,7 @@ function renderThreads(lists: Lists, unread: readonly string[], focusItemId?: st
 async function dwellOn(viewport: IntersectionControl, element: Element, placement?: Placement) {
   jest.useFakeTimers();
   act(() => viewport.show(element, placement));
-  act(() => {
-    jest.advanceTimersByTime(1_000);
-  });
-  for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+  await tick(1_000);
 }
 
 /** A session's reply in a message thread. */
@@ -2216,17 +2214,19 @@ test("the read mark writes the issue's head seq as the reader, and retries an un
     const card = view.container.querySelector('[data-turn="comment:comment-1"]');
     if (card === null) throw new Error("expected the newest card");
     await dwellOn(viewport, card);
-    for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(putIssueState.mock.calls).toEqual([["CORE-1", { last_read_seq: 7 }, keyedAttempt]]);
+    await waitFor(() =>
+      expect(putIssueState.mock.calls).toEqual([["CORE-1", { last_read_seq: 7 }, keyedAttempt]])
+    );
     expect(putIssueState.mock.calls[0]?.[2]?.login).toBe("alice");
     act(() => {
       jest.advanceTimersByTime(1_000);
     });
-    for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(putIssueState.mock.calls.map(([key, input]) => [key, input])).toEqual([
-      ["CORE-1", { last_read_seq: 7 }],
-      ["CORE-1", { last_read_seq: 7 }],
-    ]);
+    await waitFor(() =>
+      expect(putIssueState.mock.calls.map(([key, input]) => [key, input])).toEqual([
+        ["CORE-1", { last_read_seq: 7 }],
+        ["CORE-1", { last_read_seq: 7 }],
+      ])
+    );
     const [first, second] = putIssueState.mock.calls;
     expect(second?.[2]?.key).toBe(first?.[2]?.key);
     await waitFor(() =>

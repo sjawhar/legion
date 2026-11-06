@@ -1,5 +1,5 @@
 import { afterEach, expect, jest, test } from "bun:test";
-import { act, render } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { installIntersectionObserver } from "../../__tests__/intersection-observer";
@@ -157,14 +157,11 @@ test("a dwell whose write fails dwells again while the element stays on screen",
     act(() => {
       jest.advanceTimersByTime(1_000);
     });
-    // Let the failed write settle and re-arm the timer.
-    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
-    expect(calls).toBe(1);
+    await waitFor(() => expect(calls).toBe(1));
     act(() => {
       jest.advanceTimersByTime(1_000);
     });
-    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
-    expect(calls).toBe(2);
+    await waitFor(() => expect(calls).toBe(2));
   } finally {
     view.unmount();
     screen.restore();
@@ -220,8 +217,7 @@ test("every watch on the page shares one observer, and one ending leaves the res
     act(() => {
       jest.advanceTimersByTime(1_000);
     });
-    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
-    expect([dwelled, built]).toEqual([["first"], 1]);
+    await waitFor(() => expect([dwelled, built]).toEqual([["first"], 1]));
   } finally {
     view.unmount();
     screen.restore();
