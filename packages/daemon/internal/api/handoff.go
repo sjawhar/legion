@@ -387,7 +387,7 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	applied, err := intake.Applied(ctx, s.pool, "api", []string{eventID})
 	if err != nil {
-		s.log.Error("api: read whether a completion is already applied", "issue", issue.Key, "error", err)
+		s.logReadFailure(r, "api: read whether a completion is already applied", "issue", issue.Key, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read whether this completion was already received")
 		return false
 	}
@@ -449,7 +449,7 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 	}
 	fact, read := intake.OpenedRead(issue.Project, issue.GitHubRepo, branch, pull, issue.Generation, recorded)
 	if _, err := intake.ApplyFact(ctx, s.pool, "github", read, fact, s.handlers...); err != nil {
-		s.log.Error("api: apply the open pull request a completing implementer's branch shows", "issue", issue.Key, "pullRequest", pull.Number, "error", err)
+		s.logReadFailure(r, "api: apply the open pull request a completing implementer's branch shows", "issue", issue.Key, "pullRequest", pull.Number, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply the open pull request read from GitHub; this completion changed nothing")
 		return false
 	}
@@ -540,7 +540,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	ctx := r.Context()
 	pr, disarmPending, approvedHead, err := s.readyRecord(ctx, issue.Key)
 	if err != nil {
-		s.log.Error("api: read the pull request and approved head of a completing issue", "issue", issue.Key, "error", err)
+		s.logReadFailure(r, "api: read the pull request and approved head of a completing issue", "issue", issue.Key, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's pull request and approved head")
 		return readyAnswer{}, false
 	}

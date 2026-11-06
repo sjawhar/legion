@@ -167,7 +167,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 	}
 	matched, err := s.controllerCapabilityCurrent(r, req.Secret)
 	if err != nil {
-		s.log.Error("api: read the controller record for a GitHub credential", "error", err)
+		s.logReadFailure(r, "api: read the controller record for a GitHub credential", "error", err)
 		writeFailure(w, http.StatusInternalServerError, "CONTROLLER_RECORD_UNREADABLE", "could not read the controller record")
 		return
 	}
@@ -195,7 +195,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, http.StatusBadRequest, "DEFAULT_OWNER_OUTSIDE_PROJECT", err.Error())
 		return
 	case err != nil:
-		s.log.Error("api: mint the controller's GitHub App tokens", "error", err)
+		s.logReadFailure(r, "api: mint the controller's GitHub App tokens", "error", err)
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
 		return
 	}
@@ -334,7 +334,7 @@ func (s *server) controllerSessionGrant(w http.ResponseWriter, r *http.Request, 
 	defer s.controllerMu.Unlock()
 	record, found, err := s.controller.Controller(r.Context(), s.project)
 	if err != nil {
-		s.log.Error("api: read the controller record for a grant", "error", err)
+		s.logReadFailure(r, "api: read the controller record for a grant", "error", err)
 		writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
 		return
 	}

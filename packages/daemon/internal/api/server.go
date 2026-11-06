@@ -102,7 +102,7 @@ type Options struct {
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
-	// (logFailure), since the stop is what cut it short. Nil is never.
+	// (logFailure, logReadFailure), since the stop is what cut it short. Nil is never.
 	Stopping context.Context
 	// Drained is done once the daemon's stop has drained the API, or the drain ran out, and ends
 	// every decision a route asked of a machine (decision). A decision in flight at the stop's
@@ -505,6 +505,18 @@ func (s *server) logFailure(msg string, args ...any) {
 	s.log.Error(msg, args...)
 }
 
+// logReadFailure logs at Error the failure of a call a route made on the request's own context,
+// or at Info when nobody is left to act on it: the client that asked for it went away, so every
+// call under its context fails with that cancellation, or the daemon's own stop cut the call
+// short, which is what logFailure reports.
+func (s *server) logReadFailure(r *http.Request, msg string, args ...any) {
+	if r.Context().Err() != nil {
+		s.log.Info(msg, args...)
+		return
+	}
+	s.logFailure(msg, args...)
+}
+
 // stopped answers 503 and reports true once the daemon's stop has begun (Options.Stopping): an
 // operator's request that would change a claim is refused then, rather than decided without the
 // claim's worker stream connection, which the stop closes for every claim no route holds. The
@@ -533,7 +545,7 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
 	})
 	if err != nil {
-		s.log.Error("api: begin state transaction failed", "error", err)
+		s.logReadFailure(r, "api: begin state transaction failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
@@ -541,12 +553,12 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 
 	state, err := s.state.State(r.Context(), tx)
 	if err != nil {
-		s.log.Error("api: state source failed", "error", err)
+		s.logReadFailure(r, "api: state source failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.log.Error("api: commit state transaction failed", "error", err)
+		s.logReadFailure(r, "api: commit state transaction failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
