@@ -935,6 +935,8 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
+              # Its natslive step takes that tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The envoy-infra module's own workspace (packages/envoy/infra/go.work binds it and
             # packages/envoy), the envoy packages its tests compile, and the Dispatch server and
             # listener infra/core/permissions_live_test.go:298-299 builds in the root workspace.
@@ -957,6 +959,8 @@ jobs:
               # The image pull before its tests, of the consts in testnats/nats.go and
               # testpg/testpg.go.
               - '.github/actions/pull-test-images/**'
+              # Its natslive step takes that tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The shared race job: the closure of `go test -race` over delivery, the Dispatch
             # store, the bus, the listener, the registry store, the session cache and kvwatch (`go
             # list -deps -test -race` in packages/envoy). internal/dispatch/store's
@@ -1035,12 +1039,16 @@ jobs:
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
+              # The step takes the memory tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # `go test -tags multiprocess ./cmd/dispatch`, the same closure as dispatch_memory.
             dispatch_multiprocess:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
+              # The step takes the multiprocess tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The server-change soak (listener-server-change): `go test -tags serverchange
             # ./cmd/listener`. The listener's own packages, and what its test binary compiles
             # beyond them - the in-process NATS and Postgres helpers, the builder of the binary it
@@ -1105,6 +1113,8 @@ jobs:
               - 'packages/envoy/internal/webhook/testdata/**'
               # cmd/listener/api_test.go:191,436,480, which the soak's run compiles too.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+              # The soak step takes the serverchange tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # `go test -tags multiprocess ./cmd/broker`, and the agent-secrets binary
             # cmd/broker/outage_test.go:317-318 builds.
             broker_multiprocess:
@@ -1147,6 +1157,8 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              # The step takes the multiprocess tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
             # the image it smokes changes, every file the held-port image built on top of it reads
             # (packages/envoy/infra/host/heldportwrapper/Dockerfile and its .dockerignore), and what
@@ -2834,9 +2846,16 @@ jobs:
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
       # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
-      # behind the natslive tag, and this step is where it runs (INFRA-250).
+      # behind the natslive tag, and this step is where it runs (INFRA-250). It runs only the
+      # tests that tag adds: `-tags natslive ./internal/testnats/` would re-run the package's
+      # untagged tests, which the unit step above already ran, so the -run comes from
+      # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+      # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+      # empty or refused list fails the step instead of running -run "", which matches every test.
       - name: Test the container-backed NATS matrix (natslive)
-        run: go test -count=1 -tags natslive ./internal/testnats/
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/testnats)
+          go test -count=1 -tags natslive -run "$pattern" ./internal/testnats/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -2911,7 +2930,10 @@ jobs:
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
   # tests start no container; the natslive files run in a step of their own against real
   # nats-server and Postgres, on testnats.Image, testnats.HubImage and testpg.Image, pulled first
-  # for the reason .github/actions/pull-test-images gives. The gcp natslive tests pull no image:
+  # for the reason .github/actions/pull-test-images gives. That step runs only the tests the tag
+  # adds, one call per package: the unit step above already ran every untagged test of core, seed
+  # and gcp, so each call takes its -run from .github/scripts/go-tagged-tests.sh, which reads the
+  # names off the source at run time. The gcp natslive tests pull no image:
   # they install helm, nats-server, the config reloader and the exporter with go install, at the
   # versions the clustered hub runs, and render the vendored chart in gcp/testdata. The per-target
   # compile runs in the lint job's notices step.
@@ -2965,7 +2987,15 @@ jobs:
       - name: Live tests of envoy-infra against nats-server (natslive)
         # gcp's live tests build helm, nats-server, the config reloader and the exporter with go
         # install first, minutes on a cold cache, so the package gets more than go test's 10 m.
-        run: go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/
+        # One call per package, never one union -run over the three: a name an untagged test of
+        # one package shares with a natslive test of another would then run a second time with
+        # nothing to say so. Each assignment is a line of its own, so under bash -e an empty or
+        # refused list fails the step instead of running -run "", which matches every test.
+        run: |
+          for pkg in ./core ./seed ./gcp; do
+            pattern=$(../../../.github/scripts/go-tagged-tests.sh natslive "$pkg")
+            go test -timeout 30m -tags natslive -run "$pattern" "$pkg"
+          done
         working-directory: packages/envoy/infra
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3190,7 +3220,12 @@ jobs:
   # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
   # resident memory from /proc, and together they run past go test's default ten-minute deadline,
   # which took envoy-go red at 600 s (run 37116639565). They build only under the `memory` tag, so
-  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own.
+  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own. It runs
+  # only the tests the tag adds: `-tags memory ./cmd/dispatch` would run the package's untagged
+  # tests a second time, envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   dispatch-memory:
     needs: changes
     if: needs.changes.outputs.dispatch_memory == 'true'
@@ -3219,7 +3254,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Memory tests of the Dispatch server
-        run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh memory ./cmd/dispatch)
+          go test -tags memory -count=1 -timeout 60m -v -run "$pattern" ./cmd/dispatch
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3237,7 +3274,12 @@ jobs:
   # step runs under go test's default ten-minute package deadline, which the memory tests
   # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
   # or a maintenance loop's tick, tens of seconds each. Each row's NATS runs in its own test
-  # process (internal/testnats), so the job needs no container runtime of its own.
+  # process (internal/testnats), so the job needs no container runtime of its own. It runs only
+  # the tests the tag adds: `-tags multiprocess ./cmd/dispatch` would run the package's untagged
+  # tests a second time, envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   dispatch-multiprocess:
     needs: changes
     if: needs.changes.outputs.dispatch_multiprocess == 'true'
@@ -3266,7 +3308,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Two-process tests of the Dispatch server
-        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/dispatch)
+          go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/dispatch
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3284,9 +3328,14 @@ jobs:
   # out, and it is a job of its own because it outlives that step: it sends for at least a minute
   # and waits out each server's restart and the JetStream catch-up after it, which, beside the
   # listener's other tests, is past what envoy-go's unit step holds under go test's default
-  # ten-minute package deadline. It runs the soak alone (-run TestServerChange), since envoy-go
-  # runs the package's untagged tests already; the cluster runs in the test process
-  # (internal/testnats), so it needs no container runtime and no database.
+  # ten-minute package deadline. It runs only the tests the serverchange tag adds, since envoy-go
+  # runs the package's untagged tests already: the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time, so a
+  # second serverchange test added later runs here instead of being left out of a hand-written
+  # list. The assignment is a line of its own: under bash -e it carries the script's exit status,
+  # so an empty or refused list fails the step instead of running -run "", which matches every
+  # test. The cluster runs in the test process (internal/testnats), so the job needs no container
+  # runtime and no database.
   listener-server-change:
     needs: changes
     if: needs.changes.outputs.listener_server_change == 'true'
@@ -3311,7 +3360,9 @@ jobs:
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
       - name: Server-change soak of the listener
-        run: go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh serverchange ./cmd/listener)
+          go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener
         working-directory: packages/envoy
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3344,7 +3395,12 @@ jobs:
   # Postgres service and shape this copies, so that each runs only on what it reads: the broker's
   # closure (broker_multiprocess) shares little with the Dispatch server's
   # (dispatch_multiprocess). They need no NATS and no test-container pull - the broker starts
-  # nothing in a container - so neither step is here.
+  # nothing in a container - so neither step is here. The step runs only the tests the tag adds:
+  # `-tags multiprocess ./cmd/broker` would run the package's untagged tests a second time,
+  # envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   broker-multiprocess:
     needs: changes
     if: needs.changes.outputs.broker_multiprocess == 'true'
@@ -3373,7 +3429,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Two-process tests of the secrets broker
-        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/broker)
+          go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/broker
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job

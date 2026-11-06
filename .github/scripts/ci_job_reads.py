@@ -335,8 +335,8 @@ def go_notices_runs():
     return out
 
 
-# The steps of envoy-go, envoy-smoke and listener-server-change whose go commands are not in the
-# simple form, pinned whole.
+# The steps whose go commands are not in the simple form, pinned whole: envoy-go's pack step,
+# envoy-smoke's schema step, and the tag steps below.
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -354,10 +354,44 @@ SCHEMA_SCRIPT = (
     "# shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion\n"
     """pulumi package get-schema "$RUNNER_TEMP/pr" | jq -e '.version == "1.2.3" and .pluginDownloadURL == "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"'"""
 )
-# The soak's `-run` is not a flag the simple form reduces, and it moves no closure: the whole
-# cmd/listener package compiles under the serverchange tag, whichever test the run selects.
+# The six steps that run only what their build tag adds. A tag adds files to a package and
+# subtracts none, so `go test -tags T ./pkg` would run the untagged tests another job already
+# ran: each step takes its -run from .github/scripts/go-tagged-tests.sh, which reads the names
+# off the source at run time. The assignment is a line of its own, so that under bash -e an empty
+# or refused list fails the step instead of running -run "", which matches every test. That
+# substitution and quote are outside the simple form, so each step is pinned whole here. A -run
+# moves no closure: the whole package compiles under the tag, whichever tests the run selects, so
+# each entry's Run is the plain tagged go test the step ran before.
+TAGGED_TESTS = ".github/scripts/go-tagged-tests.sh"
+NATS_MATRIX_STEP = "Test the container-backed NATS matrix (natslive)"
+NATS_MATRIX_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} natslive ./internal/testnats)
+go test -count=1 -tags natslive -run "$pattern" ./internal/testnats/"""
+# One call per package, never one union -run over the three: a name an untagged test of one
+# package shares with a natslive test of another would then run a second time unremarked.
+INFRA_NATSLIVE_STEP = "Live tests of envoy-infra against nats-server (natslive)"
+INFRA_NATSLIVE_PACKAGES = ["./core", "./seed", "./gcp"]
+INFRA_NATSLIVE_SCRIPT = f"""\
+for pkg in {" ".join(INFRA_NATSLIVE_PACKAGES)}; do
+  pattern=$(../../../{TAGGED_TESTS} natslive "$pkg")
+  go test -timeout 30m -tags natslive -run "$pattern" "$pkg"
+done"""
+MEMORY_STEP = "Memory tests of the Dispatch server"
+MEMORY_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} memory ./cmd/dispatch)
+go test -tags memory -count=1 -timeout 60m -v -run "$pattern" ./cmd/dispatch"""
+DISPATCH_MP_STEP = "Two-process tests of the Dispatch server"
+DISPATCH_MP_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} multiprocess ./cmd/dispatch)
+go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/dispatch"""
+BROKER_MP_STEP = "Two-process tests of the secrets broker"
+BROKER_MP_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} multiprocess ./cmd/broker)
+go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/broker"""
 SOAK_STEP = "Server-change soak of the listener"
-SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
+SOAK_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} serverchange ./cmd/listener)
+go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener"""
 
 
 # The four packages the test job's race step runs, and which its plain step therefore leaves out.
@@ -817,8 +851,6 @@ GATES = [
     gate("envoy_go", "envoy-go", runs=[
         step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
-        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -count=1 -tags natslive ./internal/testnats/", ENVOY,
-                 ["./internal/testnats/"], tags="natslive"),
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
     ], exact=[
@@ -840,6 +872,10 @@ GATES = [
              {"mode": "build", "env": {"GOOS": "linux", "GOARCH": arch}})
             for arch in targets(GO_TARGETS, "envoy")
         ]),
+        # Only what the natslive tag adds to internal/testnats; the unit step ran the rest.
+        pinned_step("envoy-go", NATS_MATRIX_STEP, ENVOY, NATS_MATRIX_SCRIPT, [
+            (ENVOY, ["./internal/testnats/"], "go test -tags natslive ./internal/testnats/", {"tags": "natslive"}),
+        ]),
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
         ("packages/contracts/scripts/gen-go.ts", f"{at('envoy-go', 'Check Go contracts are generated from the shared schema')} (packages/contracts/package.json check:go)"),
@@ -855,6 +891,7 @@ GATES = [
         (f"{ENVOY}/loadtest/common.sh", "packages/envoy/loadtest/common.test.sh sources it; run-step.sh and run-series.sh source it"),
         (NOTICES, f"{at('envoy-go', 'Pack envoy binaries')} runs it"),
         (GO_TARGETS, f"{at('envoy-go', 'Pack envoy binaries')}: jq -r '.envoy[]'"),
+        (TAGGED_TESTS, f"{at('envoy-go', NATS_MATRIX_STEP)} takes its -run from it"),
     ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
 
 
@@ -862,13 +899,18 @@ GATES = [
         step_run("envoy-infra-go", "Vet envoy-infra, its live-test tags included", "go vet -tags pulumilive,natslive ./...", INFRA, ["./..."],
                  tags="pulumilive,natslive", mode="vet"),
         step_run("envoy-infra-go", "Unit test envoy-infra", "go test ./...", INFRA, ["./..."]),
-        step_run("envoy-infra-go", "Live tests of envoy-infra against nats-server (natslive)", "go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/", INFRA,
-                 ["./core/", "./seed/", "./gcp/"], tags="natslive"),
+    ], exact=[
+        # One go test per package, each running only what the natslive tag adds to it.
+        pinned_step("envoy-infra-go", INFRA_NATSLIVE_STEP, INFRA, INFRA_NATSLIVE_SCRIPT, [
+            (INFRA, [pkg], f"go test -tags natslive {pkg}", {"tags": "natslive"})
+            for pkg in INFRA_NATSLIVE_PACKAGES
+        ]),
     ], reads=reads(
         (f"{INFRA}/**", f"{at('envoy-infra-go', 'Check Go formatting')}: gofmt -l . in packages/envoy/infra reads every .go file under it"),
         (".github/actions/pull-test-images/**", at("envoy-infra-go", "Pull the NATS and Postgres test container images")),
         (f"{ENVOY}/internal/testnats/nats.go", f"{at('envoy-infra-go', 'Pull the NATS and Postgres test container images')}: consts Image, HubImage"),
         (f"{ENVOY}/internal/testpg/testpg.go", f"{at('envoy-infra-go', 'Pull the NATS and Postgres test container images')}: const Image"),
+        (TAGGED_TESTS, f"{at('envoy-infra-go', INFRA_NATSLIVE_STEP)} takes each call's -run from it"),
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
     # The lane's three jobs: each step's text and packages come from ENVOY_RACE_LANE, which the
@@ -882,26 +924,37 @@ GATES = [
     gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[race_step(RACE_JOBS["envoy-go-race-docs"])],
          reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("dispatch_memory", "dispatch-memory", runs=[
-        step_run("dispatch-memory", "Memory tests of the Dispatch server", "go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch",
-                 ENVOY, ["./cmd/dispatch"], tags="memory"),
-    ], reads=setup_go("dispatch-memory", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("dispatch_memory", "dispatch-memory", exact=[
+        pinned_step("dispatch-memory", MEMORY_STEP, ENVOY, MEMORY_SCRIPT, [
+            (ENVOY, ["./cmd/dispatch"], "go test -tags memory ./cmd/dispatch", {"tags": "memory"}),
+        ]),
+    ], reads=reads(
+        (TAGGED_TESTS, f"{at('dispatch-memory', MEMORY_STEP)} takes its -run from it"),
+    ) + setup_go("dispatch-memory", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("dispatch_multiprocess", "dispatch-multiprocess", runs=[
-        step_run("dispatch-multiprocess", "Two-process tests of the Dispatch server",
-                 "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch", ENVOY, ["./cmd/dispatch"], tags="multiprocess"),
-    ], reads=setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("dispatch_multiprocess", "dispatch-multiprocess", exact=[
+        pinned_step("dispatch-multiprocess", DISPATCH_MP_STEP, ENVOY, DISPATCH_MP_SCRIPT, [
+            (ENVOY, ["./cmd/dispatch"], "go test -tags multiprocess ./cmd/dispatch", {"tags": "multiprocess"}),
+        ]),
+    ], reads=reads(
+        (TAGGED_TESTS, f"{at('dispatch-multiprocess', DISPATCH_MP_STEP)} takes its -run from it"),
+    ) + setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("listener_server_change", "listener-server-change", exact=[
         pinned_step("listener-server-change", SOAK_STEP, ENVOY, SOAK_SCRIPT, [
             (ENVOY, ["./cmd/listener"], "go test -tags serverchange ./cmd/listener", {"tags": "serverchange"}),
         ]),
-    ], reads=setup_go("listener-server-change", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=reads(
+        (TAGGED_TESTS, f"{at('listener-server-change', SOAK_STEP)} takes its -run from it"),
+    ) + setup_go("listener-server-change", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("broker_multiprocess", "broker-multiprocess", runs=[
-        step_run("broker-multiprocess", "Two-process tests of the secrets broker",
-                 "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker", ENVOY, ["./cmd/broker"], tags="multiprocess"),
-    ], reads=setup_go("broker-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("broker_multiprocess", "broker-multiprocess", exact=[
+        pinned_step("broker-multiprocess", BROKER_MP_STEP, ENVOY, BROKER_MP_SCRIPT, [
+            (ENVOY, ["./cmd/broker"], "go test -tags multiprocess ./cmd/broker", {"tags": "multiprocess"}),
+        ]),
+    ], reads=reads(
+        (TAGGED_TESTS, f"{at('broker-multiprocess', BROKER_MP_STEP)} takes its -run from it"),
+    ) + setup_go("broker-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
 
 
     # The listener image this job builds and smokes is left to check-image-trigger-paths.sh,
