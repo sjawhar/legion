@@ -12,7 +12,10 @@ body: |-
   the delete recreating the consumer of a session whose record it finds in the bucket and the
   registration recreating the consumer its own read finds gone. A consumer that comes back starts
   at the later of the start its registration was answered with and the sequence after the ack
-  floor read of it, so nothing a session has acknowledged is offered again. The consumers'
+  floor read of it, so nothing a session has acknowledged is offered again. A session that comes
+  back after a stop with no resume point of its own, which both shipped plugins send from their
+  ledger, gets a consumer at the first message the stream still holds on its own agent subject, so
+  it is offered that history again and its ledger is what reads each message once. The consumers'
   72-hour inactive threshold stays the backstop for a consumer no delete names, and a
   delete that failed is logged and left to it.
 custom:

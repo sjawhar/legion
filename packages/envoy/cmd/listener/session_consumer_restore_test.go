@@ -2,7 +2,11 @@ package main
 
 // The consumer a delete took comes back: to a session whose registration raced that delete, even
 // where the delete was made on another listener, and at the position the session had acked
-// through rather than at the start its record names.
+// through rather than at the start its record names. Two things order a delete against a
+// registration, and a case here holds each: the session's lock, which a registration holds from
+// its consumer call through its interest row, its session entry and the read of its consumer
+// after it, and the bucket, which the restore reads the record from because the watched cache
+// need not hold a write yet.
 
 import (
 	"context"
@@ -11,10 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // A registration answered 200 with consumer delivery holds a consumer however a delete on
@@ -125,4 +131,267 @@ func TestARestoredConsumerDoesNotOfferTheAckedFramesAgain(t *testing.T) {
 			sessionID, info.NumPending)
 	}
 	standIn.none(t, time.Second)
+}
+
+// sessionEntryWriteDelay is the round trip the case below puts between the listener and its
+// session bucket, and nothing else: its interest rows, its consumer calls and the delete's own
+// reads go direct. A delete released at the interest row rather than at the end of the
+// registration's pass therefore reads the bucket while the entry write is still in flight, which
+// is the whole of what makes that interleaving certain: the delete's three calls take about a
+// millisecond, a four-hundredth of this.
+const sessionEntryWriteDelay = 400 * time.Millisecond
+
+// A session that races a delete is offered nothing it has acknowledged, whatever the delete's
+// calls fall between. The registration holds the session's lock from its consumer call through
+// its session entry and the read of its consumer after it (listenerDeps.registerPass), so a
+// delete made on this listener reads the ack floor and the record only once that entry is
+// written: it reads the floor the session has acked through now, finds the record the
+// registration wrote, and gives the consumer back at the sequence after that floor.
+//
+// A registration that released the lock at its interest row instead leaves the delete reading
+// the bucket while the entry is unwritten: the delete finds no record and restores nothing, and
+// the repair left is the registration's own (confirmRegistered), which creates the consumer at
+// the floor its answer carried - the floor as it stood before the frames the session acked since
+// the consumer call. Every one of those frames is then sent to the session again, and the
+// position it had acked through is lost.
+//
+// The interleaving is built rather than waited for. The hook runs under the registration's lock,
+// after its consumer call: there the session acks three more frames, so the floor the answer
+// carries is behind the server's, and the record is deleted, as a reaper pass and a clean stop
+// both delete the record before the consumer. The delete starts there and the hook holds the
+// registration until it waits for the lock, so the delete's first call is made the moment that
+// lock is released.
+func TestASessionThatRacesADeleteThroughItsEntryWriteIsOfferedNothingItAcked(t *testing.T) {
+	rig := newRelayRig(t)
+	sessionID := "ses_entry_write_race_" + id.New()
+	agent := contracts.AgentSubject(sessionID)
+	hub := testnats.StartProxy(t, rig.url, testnats.ProxyLatency(sessionEntryWriteDelay))
+	slow, err := session.OpenSessionRegistry(testnats.Connect(t, hub.URL()), session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the registry the listener writes its session entries through: %v", err)
+	}
+	t.Cleanup(slow.StopWatch)
+	waitForSessions(t, slow)
+	// The session entries this listener writes go to the same bucket a round trip away, and
+	// every other call it makes stays direct.
+	rig.deps.sessions = slow
+	// The delete reads the bucket on the listener's direct connection, as every call but the
+	// entry write makes here: what this case holds open is that write alone. deleteConsumer
+	// reads the record and the session's stored topics through the stores it is given
+	// (restoreRegistered), and nothing else of them.
+	deleteDeps := &listenerDeps{registry: rig.harness.registry, sessions: rig.harness.sessions}
+
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	first, firstSeq := rig.storeEvent(t, agent)
+	requireFrames(t, standIn.collect(t, 1, 10*time.Second), first)
+	awaitAcked(t, rig.consumers, sessionID, firstSeq)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	var (
+		deleteErr error
+		acked     uint64
+	)
+	deleted := make(chan struct{})
+	var raced sync.Once
+	rig.deps.consumers.afterRegisterFilter = func() {
+		raced.Do(func() {
+			// Frames the session acks after this registration's consumer call: from here the
+			// floor that call read, which the registration's own repair would restore at, is
+			// behind the floor the server holds, and only a read made after this pass sees the
+			// newer one.
+			var sent []contracts.Envelope
+			for range 3 {
+				item, seq := rig.storeEvent(t, agent)
+				sent = append(sent, item)
+				acked = seq
+			}
+			requireFrames(t, standIn.collect(t, len(sent), 10*time.Second), sent...)
+			awaitAcked(t, rig.consumers, sessionID, acked)
+			// The record delete every delete of a consumer follows, so the bucket holds no
+			// record of this session while the registration is between its row and its entry.
+			if err := rig.harness.sessions.Delete(ctx, sessionID); err != nil {
+				t.Errorf("delete the record of %s the delete below follows: %v", sessionID, err)
+			}
+			go func() {
+				defer close(deleted)
+				deleteErr = rig.deps.consumers.deleteConsumer(ctx, deleteDeps, sessionID)
+			}()
+			awaitDeleteWaitingForTheLock(t, &rig.deps.consumers.locks, sessionID)
+		})
+	}
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	rig.deps.consumers.afterRegisterFilter = nil
+	<-deleted
+	if deleteErr != nil {
+		t.Fatalf("the delete that raced %s's registration: %v", sessionID, deleteErr)
+	}
+
+	// The session is sent nothing it has acked, and its consumer stands at the sequence after
+	// the floor the delete read of it.
+	standIn.none(t, 2*time.Second)
+	info, err := rig.consumers.Info(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("read the consumer of %s after the delete that raced its registration: %v", sessionID, err)
+	}
+	if info.Config.OptStartSeq != acked+1 {
+		t.Fatalf("the consumer of %s is back at %d, want %d, the sequence after the floor it had acked through when the delete read it",
+			sessionID, info.Config.OptStartSeq, acked+1)
+	}
+}
+
+// A delete made while a registration holds the session's lock gives the consumer back with the
+// topics that registration stored, never with the ones it is replacing. The restore filters the
+// consumer it creates on the session's stored interest row (restoreRegistered), and a
+// registration holds the lock from the consumer call that set its filter through the write of
+// that row (sessionDelivery.consumerFor, listenerDeps.registerPass), so a delete made on this
+// listener reads that row wholly before the filter call or wholly after the write.
+//
+// A delete that took no lock reads it in between: it gives back a consumer filtered on the row
+// the session followed before, and the registration's own read leaves it there, since it asks
+// only whether a consumer exists (confirmRegistered). Every message published on the topic the
+// session was answered 200 for is then skipped until its next heartbeat, which is the loss the
+// lock exists for.
+//
+// The interleaving is built rather than waited for: the hook runs under the registration's lock,
+// after its consumer call and before its row, and leaves that window once the delete waits for
+// the lock - where the lock holds it until the pass is done - or, taking none, once the delete
+// has already given the consumer back.
+func TestADeleteThatRacesARegistrationRestoresTheConsumerWithTheTopicItAnswered(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const sessionID = "ses_delete_row_lock"
+	const followed = "notifications.dispatch.issue.DELLOCK.>"
+	// The row the restore must not go back to: this registration follows no topic of its own.
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var deleteErr error
+	deleted := make(chan struct{})
+	var raced sync.Once
+	rig.deps.consumers.afterRegisterFilter = func() {
+		raced.Do(func() {
+			go func() {
+				defer close(deleted)
+				deleteErr = rig.deps.consumers.deleteConsumer(ctx, rig.deps, sessionID)
+			}()
+			awaitDeleteWaitingOrDone(t, &rig.deps.consumers.locks, sessionID, deleted)
+		})
+	}
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1", followed))
+	rig.deps.consumers.afterRegisterFilter = nil
+	<-deleted
+	if deleteErr != nil {
+		t.Fatalf("the delete that raced %s's registration: %v", sessionID, deleteErr)
+	}
+
+	requireFilters(t, rig, sessionID, followed)
+	// A message on the topic the registration was answered 200 for is the consumer's to deliver.
+	rig.store(t, "notifications.dispatch.issue.DELLOCK.comment")
+	rig.awaitPending(t, sessionID, 1)
+}
+
+// A delete gives the consumer back to a session whose record its own listener's cache holds none
+// of. Every delete of a consumer follows the delete of that session's record, so the read the
+// restore makes is of a key this listener has just deleted: the bucket answers the record a
+// registration made on another listener wrote since, and the watched cache answers that delete
+// until its watch delivers the write. A restore reading the cache gives nothing back, and the
+// session answered 200 with consumer delivery has no consumer until its next heartbeat.
+//
+// The window is built rather than waited for: the deleting listener's watch is stopped once its
+// own delete has reached its cache and before the registration it must not hear, which is the
+// same reader as a watch that has not delivered that write yet, held there for certain.
+func TestADeleteRestoresTheConsumerOfASessionItsCacheHasNoRecordOf(t *testing.T) {
+	registering := newSessionConsumerRig(t)
+	deleting := newSessionConsumerRig(t)
+	const sessionID = "ses_cache_behind"
+	registering.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// The record delete the consumer delete below follows: the first half of a clean stop, or of
+	// a reaper pass, made on the second listener.
+	if err := deleting.deps.sessions.Delete(ctx, sessionID); err != nil {
+		t.Fatalf("the second listener could not delete the record of %s: %v", sessionID, err)
+	}
+	awaitCacheHasNoRecord(t, deleting.deps.sessions, sessionID)
+	deleting.deps.sessions.StopWatch()
+
+	// The registration that lands between that record delete and the consumer delete, made on
+	// the listener the session registers through: the bucket holds its record, and the second
+	// listener's cache will not hear of it.
+	registering.subscribe(t, consumerRegistration(sessionID, "epoch-2"))
+	registering.store(t, contracts.AgentSubject(sessionID))
+	registering.awaitPending(t, sessionID, 1)
+	if entry, err := deleting.deps.sessions.Get(sessionID); !errors.Is(err, nats.ErrKeyNotFound) {
+		t.Fatalf("the cache of the deleting listener holds %+v (%v) for %s; this case needs it holding none, which is what the bucket read is for", entry, err, sessionID)
+	}
+
+	if err := deleting.deps.consumers.deleteConsumer(ctx, deleting.deps, sessionID); err != nil {
+		t.Fatalf("the delete made on the listener whose cache holds no record of %s: %v", sessionID, err)
+	}
+
+	info, err := deleting.consumers.Info(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("the consumer of %s after that delete: %v; want it given back from the record the bucket holds", sessionID, err)
+	}
+	if info.NumPending != 1 {
+		t.Fatalf("the consumer given back to %s holds %d messages for delivery, want the one stored for it since it registered",
+			sessionID, info.NumPending)
+	}
+}
+
+// awaitDeleteWaitingForTheLock holds a registration inside its hook until the delete it started
+// waits for the session's lock, so that delete's first call is made the moment the registration
+// releases it. The wait is short and what it waits for is one goroutine reaching one mutex, so
+// a deadline here is a delete that takes no lock at all: it is reported and the pass goes on,
+// within the registration's own budget, and the reads after the pass say what that delete did.
+func awaitDeleteWaitingForTheLock(t *testing.T, locks *sessionLocks, sessionID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for lockUsers(locks, sessionID) < 2 {
+		if time.Now().After(deadline) {
+			t.Errorf("after 2s the delete of %s's consumer does not wait for the session's lock the registration holds", sessionID)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// awaitDeleteWaitingOrDone holds a registration inside its hook until the delete it started
+// waits for the session's lock (two callers, this registration and it) or is done, which is what
+// a delete taking no lock is by then. A deadline reached is reported and not fatal: the caller
+// holds the session's lock, and the reads after the pass say what the delete did.
+func awaitDeleteWaitingOrDone(t *testing.T, locks *sessionLocks, sessionID string, done <-chan struct{}) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for lockUsers(locks, sessionID) < 2 {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("after 10s the delete of %s's consumer neither waits for the session's lock nor is done with it", sessionID)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// awaitCacheHasNoRecord waits until sessions holds no cached record of sessionID, the state a
+// delete made through it leaves once its own watch has delivered that delete.
+func awaitCacheHasNoRecord(t *testing.T, sessions *session.SessionRegistry, sessionID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := sessions.Get(sessionID); errors.Is(err, nats.ErrKeyNotFound) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after 10s the cache still holds a record of %s; want the delete made through it delivered", sessionID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
