@@ -66,9 +66,10 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		},
 	}
 	architectLocator := sandboxLocator(architect, "legion-legion-legion-208", "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04", 1)
-	// The architect's session reported its live rows with its ready (LEGION-663), from the process
-	// the locator names, so the fixture carries a claim's capability report; the controller's ready
-	// carries none, and its claim is on no issue besides.
+	// The architect's session sent its live rows on a `claims/ready` of its own, measured at an
+	// idle tick of its own interval rather than at its boot (LEGION-663, INFRA-927), from the
+	// process the locator names, so the fixture carries a claim's capability report; the
+	// controller measures nothing and sends none, and its claim is on no issue besides.
 	reports := map[claim.Token]capabilities.Report{
 		architect: {
 			Claim: architect, Generation: 1, Locator: *architectLocator,

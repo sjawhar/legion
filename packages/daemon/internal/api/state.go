@@ -393,7 +393,8 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 
 // ClaimView is one role claim as the record holds it: the session its agent registered as, where
 // it is in its life (`supervise.ClaimState`), its locator, and the capability report its session
-// sent with its ready (LEGION-663). The locator is the runtime's own nested shape —
+// sent on a `claims/ready` of its own while it ran (LEGION-663, INFRA-927). The locator is the
+// runtime's own nested shape —
 // `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or the `sandbox`
 // member for a pod — marshalled by the standard library from `runtime.Locator`; the process
 // incarnation lives there and in the capability report's `incarnation`, which is the reporting

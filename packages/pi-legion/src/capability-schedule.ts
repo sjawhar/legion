@@ -2,6 +2,7 @@ import { LEGION_ROLES } from "@legion/contracts";
 import type { LegionCapabilityReportBody } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
+import { budgetLabel } from "./capability-report";
 
 /**
  * INFRA-927: a capability check that loses the boot-time race stayed reported open for the
@@ -30,8 +31,9 @@ import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
  * exists to end.
  *
  * Every collaborator is injected — the claim, the idle answer, the measurement, the send and the
- * log — so this module reaches no Legion module of its own, and a test drives the machine tick
- * by tick on its own clock.
+ * log — so the only module this one reaches is `./capability-report`, for the label the bound's
+ * message shares with the checks' own budgets, and a test drives the machine tick by tick on its
+ * own clock.
  */
 
 /** The earliest tick at which the architect measures: 30 s after the interval was registered,
@@ -46,10 +48,6 @@ export const CAPABILITY_ATTEMPTS = 3;
  * `CAPABILITY_RETRY_TICKS` leaves before the next due tick, so a send that times out never
  * overlaps the attempt that follows it. */
 export const CAPABILITY_SEND_TIMEOUT_MS = 10_000;
-
-/** `10 s` for a whole number of seconds, else the milliseconds, as the measurement's own budgets
- * read (`budgetLabel`, ./capability-report). */
-const label = (ms: number): string => (ms % 1_000 === 0 ? `${ms / 1_000} s` : `${ms} ms`);
 
 export interface CapabilitySchedule {
   /** One reading of the session's own interval. It never rejects, and the caller never awaits it:
@@ -84,7 +82,10 @@ export function createCapabilitySchedule(deps: {
   /** The ticks since the interval was registered; `1` at the first tick. */
   let count = 0;
   /** The tick the next attempt is due at: the architect at the sixth (30 s), the merger at the
-   * eleventh (55 s), so one pod's roles never measure on the same tick. */
+   * eleventh (55 s), so one pod's roles start their attempts on different ticks. Each role counts
+   * from its own interval, which starts at its own boot, and a role busy at its due tick measures
+   * at its first idle tick instead, so the offset spreads the attempts rather than keeping two
+   * measurements from ever overlapping. */
   let dueTick = CAPABILITY_FIRST_DUE_TICK + LEGION_ROLES.indexOf(deps.claim.role);
   /** The measurements spent, bounded by `CAPABILITY_ATTEMPTS` for the life of the process. */
   let attempts = 0;
@@ -133,7 +134,9 @@ export function createCapabilitySchedule(deps: {
     const controller = new AbortController();
     const deadline = Promise.withResolvers<never>();
     const timer = setTimeout(() => {
-      const late = new Error(`claims/ready did not answer within ${label(deps.sendTimeoutMs)}`);
+      const late = new Error(
+        `claims/ready did not answer within ${budgetLabel(deps.sendTimeoutMs)}`
+      );
       deadline.reject(late);
       controller.abort(late);
     }, deps.sendTimeoutMs);

@@ -1,10 +1,10 @@
 // Package capabilities is the one list of what a Legion worker can do (LEGION-578: every worker is
 // a full agent). Each capability is checked at one site — in the image by `legion probe-image`
-// (CheckImage), by each session at its start, which reports the row with its ready and the daemon
-// renders (LEGION-663), by the daemon from the deployment's configuration, or withheld by a
-// ruling — and the probe prints the whole table, one line per row, so an operator reads a single
-// declared list in the probe pod's log rather than inferring what was checked from which probes
-// happened to run.
+// (CheckImage), by each claimed session at an idle tick of the 5 s interval it already runs, which
+// sends the row on a `claims/ready` of its own and the daemon renders (LEGION-663, INFRA-927), by
+// the daemon from the deployment's configuration, or withheld by a ruling — and the probe prints
+// the whole table, one line per row, so an operator reads a single declared list in the probe
+// pod's log rather than inferring what was checked from which probes happened to run.
 package capabilities
 
 import (
@@ -144,8 +144,9 @@ func render(ctx context.Context, r renderer) ([]State, error) {
 // and what the daemon measures from its deployment (Deployment.Report).
 func Decidable() []Name { return namesAtSite(SiteDeployment) }
 
-// Live is the SiteLive names in Table order: the rows each session measures at its start and
-// reports with its ready, which Normalize fills out and Deployment.Report renders.
+// Live is the SiteLive names in Table order: the rows each claimed session measures at an idle
+// tick of the 5 s interval it already runs and sends on a `claims/ready` of its own (INFRA-927),
+// which Normalize fills out and Deployment.Report renders.
 func Live() []Name { return namesAtSite(SiteLive) }
 
 // namesAtSite is the names of Table's rows checked at site, in Table order.
