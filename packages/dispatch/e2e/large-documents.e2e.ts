@@ -1,14 +1,19 @@
 // What a large document costs a reader on a phone, measured under the set-up
 // dispatch://INFRA-341/spec names: the `iphone` project under 4x CPU throttling, the time from
-// the start of navigation until the document's first block is in the viewport, and the longest
-// main-thread task until the page has scrolled to the end. The two documents are
+// the start of navigation until the editor's first visible block is in the viewport, and the
+// longest main-thread task until the page has scrolled to the end. The two documents are
 // `large-documents.ts`: one shaped like dispatch://AHXV6-1/artifact/intermediate-specs-md, and
 // one five times as large.
 //
 // The two measuring rows fail when a target of "Targets for large documents" is missed: the
-// first block within 3 s for the smaller document and 5 s for the larger, and no main-thread
-// task longer than 500 ms for either. Every number is still printed, since a target met says
-// nothing about how much room is left.
+// editor's first visible block within 3 s for the smaller document and 5 s for the larger, and
+// no main-thread task longer than 500 ms for either. That block is the one the reader can type
+// in - the editor's own, while its root carries `data-write-path="live"` - and never the
+// server's draw or the page's own in front of it, which each row reads off the timed block
+// itself and holds it to (`large-documents-page.ts`). Those two draws are printed as numbers of
+// their own, `first painted` and the page's own draw, against no target. Every number is
+// printed whether or not its target was met, since a target met says nothing about how much
+// room is left.
 //
 // The rest of acceptance A7 is here too, and each of those rows reads a build rather than a
 // clock: a link to the decision block at the end of the larger document lands on that block, a
@@ -230,8 +235,20 @@ for (const row of rows) {
       });
       printMeasurement(
         `${row.what}, ${row.content.length} characters, ${row.diagrams} diagrams`,
-        measured
+        measured,
+        row.firstBlockTargetMs
       );
+
+      // The number the targets are read against is the editor's block, not the draw in front of
+      // it: the block that was timed stood in an editor root carrying `data-write-path="live"`,
+      // it was inside an editable host, and it was in neither the blocks the server drew nor
+      // the page's own draw of the document's text. A rig reading the preview's block fails
+      // here rather than printing that draw as the editor's.
+      expect(measured.firstBlock).toEqual({
+        editable: true,
+        inLiveEditor: true,
+        inPreview: false,
+      });
 
       // What a measured number needs to mean anything: the document really drew, the editor
       // really opened, and the page really scrolled afterwards, so the longest task covers the
@@ -242,6 +259,12 @@ for (const row of rows) {
       expect(measured.windowClosedMs).toBeGreaterThan(measured.editorOpenedMs ?? 0);
       expect(measured.scrollSteps).toBeGreaterThan(0);
       expect(measured.longestTaskMs).toBeGreaterThan(0);
+      // And the editor's block came no earlier than either draw in front of it: the first block
+      // on the screen, which is the server's own where it drew one, and the first block the
+      // page's own code drew, which is the preview's and which this rig read as the editor's
+      // until INFRA-341. A number at or under that one is the preview's block timed again.
+      expect(measured.firstBlockMs).toBeGreaterThanOrEqual(measured.firstPaintedMs ?? 0);
+      expect(measured.firstBlockMs).toBeGreaterThan(measured.pageDrawnMs ?? 0);
 
       expect(measured.firstBlockMs).toBeLessThanOrEqual(row.firstBlockTargetMs);
       expect(measured.longestTaskMs).toBeLessThanOrEqual(longTaskTargetMs);
@@ -351,8 +374,9 @@ test(`${documentNames.small} is on the screen before its editor is @phone`, asyn
     await documentTransport(page, { holding: true });
     await page.goto(path);
 
-    // The same first block the measurement reads (`large-documents-page.ts`), drawn with no
-    // socket, no sync and no editor: it carries `data-block-id` as the editor's blocks do.
+    // The first block the measurement records as `first painted`, drawn with no socket, no sync
+    // and no editor (`large-documents-page.ts`): it carries `data-block-id` as the editor's
+    // blocks do, and it is not the block the measurement's targets are read against.
     const firstBlock = page.locator('[aria-label="Document text"] [data-block-id]').first();
     await expect(firstBlock).toBeInViewport({ timeout: 120_000 });
     await expect(firstBlock).toContainText(documentTitle(documentDiagrams.small));

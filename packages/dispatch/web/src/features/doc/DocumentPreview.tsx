@@ -67,8 +67,9 @@ export function takeTheBuiltBlocks(preview: HTMLElement, built: readonly string[
  * editor: it takes no edits, and a reader whose screen reader announced the document editor
  * would be told they were in something they cannot type in. The page's one editable document
  * is the editor, and nothing reaching for that textbox finds this instead. What reads either
- * surface reads both by name (`e2e/large-documents-page.ts`, which measures the document's
- * first block whichever of the two is drawing it).
+ * surface reads it by name (`e2e/large-documents-page.ts` times this draw's first block as a
+ * number of its own, against no target, and the editor's own first block - a block under a
+ * root carrying `data-write-path="live"` - as the number R11's targets are read against).
  *
  * It draws the document in two passes, because a reader needs the screen in front of them
  * before they need the rest. The first is the blocks the source opens with, cut at a boundary
