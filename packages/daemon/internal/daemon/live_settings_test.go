@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -362,14 +364,12 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	// The daemon's own open reads what the consumers hear as the rebuild starts
 	// (workflowRuntime.connect); this one, whose consumers hear the boot's set and whose
 	// rebuild is what the test is about, opens with it. The open and the swap run under the
-	// mapping's own lock, and the handover under the lock every fact applies under, both the
-	// daemon's own holds of them.
-	w.nats = newNATSHolder(conn, consumers, w.log, open, func() func() {
-		w.mappingMu.Lock()
-		return w.mappingMu.Unlock
-	}, func(held func(context.Context) error) error {
-		return w.serializeFacts(t.Context(), held)
-	})
+	// mapping's own lock, the handover under the lock every fact applies under, and what the
+	// rebuilt consumers hear is worked out there (natsHearing), all the daemon's own.
+	w.nats = newNATSHolder(conn, consumers, w.log, open, &w.mappingMu, w.natsHearing,
+		func(held func(context.Context, pgx.Tx) error) error {
+			return w.serializeFacts(t.Context(), held)
+		})
 	rebuild.register(w.nats)
 	t.Cleanup(w.stop)
 	before := w.nats.connection()
@@ -590,6 +590,93 @@ func TestANatsRebuildOpensNoConsumerWhileAMappingReadHoldsTheMappingLock(t *test
 	if filters := githubFiltersOf(t, stream, cfg.Project); !slices.Contains(filters, "notifications.github.acme.widgets.>") {
 		t.Fatalf("the GitHub durable consumer filters on %v, want the subject of the repository the mapping read mapped among them", filters)
 	}
+}
+
+// A `repository_renames` change on a running daemon has GitHub intake hear the pair's other
+// name. Four things hold that key (config.Classes' row), the intake consumers among them, and
+// their rebuild is what must add the partner: the set the last mapping read left was worked out
+// under the renames before the change, so a rebuild that copied it would answer the operator
+// `rebuilt` with the GitHub durable still filtering the old name's subjects alone — the merges,
+// check runs and reviews GitHub publishes under the name the repository moved to delivered to
+// nothing, and never redelivered, until something unrelated read the mapping again.
+//
+// The mapping holder is registered after the NATS one here, as the daemon's boot registers it
+// (daemon.go's serve, after workflowRuntime.connect), so the consumers are rebuilt before the
+// equivalence reaches the mapping: what they hear is worked out from the configuration the
+// rebuild is handed, not from the mapping's own (workflowRuntime.natsHearing).
+func TestAChangedRepositoryRenamesHasGitHubIntakeHearThePartner(t *testing.T) {
+	url := testnats.URL(t)
+	probe, err := nats.Connect(url, nats.Timeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("connect to the test NATS server: %v", err)
+	}
+	t.Cleanup(probe.Close)
+	js, err := jetstream.New(probe)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
+	w := grantWorkflow(t, &syncBuffer{})
+	cfg := daemonGrantConfig(url)
+	rebuild := newRebuilder(w.log, config.Settled(cfg))
+	if err := w.connect(t.Context(), cfg, rebuild, func(string) (string, bool) { return "", false }); err != nil {
+		t.Fatalf("connect the workflow's NATS: %v", err)
+	}
+	t.Cleanup(w.stop)
+	rebuild.register(newMappingHolder(w.repositories))
+	stream, err := js.Stream(t.Context(), "ENVOY_NOTIFICATIONS")
+	if err != nil {
+		t.Fatalf("open the notification stream: %v", err)
+	}
+	const moved = "notifications.github.cybermonklabs.legion.>"
+	if filters := githubFiltersOf(t, stream, cfg.Project); slices.Contains(filters, moved) {
+		t.Fatalf("the GitHub durable consumer filters on %v before the change, so this proves nothing", filters)
+	}
+
+	// The operator configures the transfer while the daemon runs.
+	changed := cfg
+	changed.RepositoryRenames = ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion"))
+	rebuild.observe(&changed, []config.Change{changeOfPath(t, "repository_renames")})
+
+	if filters := githubFiltersOf(t, stream, cfg.Project); !slices.Contains(filters, moved) {
+		t.Fatalf("the GitHub durable consumer filters on %v, want the subject of the name the repository moved to among them", filters)
+	}
+
+	// And the event GitHub publishes under that name reaches the daemon: JetStream matches the
+	// subject onto the durable, and the decoder takes an event's repository from the set the
+	// same swap set (intake's SetRepositories).
+	heard := &heardPullRequests{}
+	stop := runDaemonGrantConsumers(t, w, heard)
+	defer stop()
+	publishDaemonGrantEnvelope(t, js, "notifications.github.cybermonklabs.legion.pr.42", "github", "renamed-partner-pr-opened",
+		`{"action":"opened","author":"author","base_ref":"main","body":"Dispatch: CAPTURE-1","head_ref":"legion/CAPTURE-1",`+
+			`"head_sha":"head-captured","kind":"pr","number":"42","repo":"cybermonklabs/legion","title":"Captured GitHub event",`+
+			`"updated_at":"2026-09-23T00:00:00Z","url":"https://github.com/cybermonklabs/legion/pull/42"}`)
+	testwait.Eventually(t, "the daemon applying the pull request GitHub published under the name the repository moved to", func() bool {
+		return slices.Contains(heard.repositories(), "cybermonklabs/legion")
+	})
+}
+
+// heardPullRequests is an intake handler that records the repository of every pull request the
+// daemon applied, so a test can say whose event reached it.
+type heardPullRequests struct {
+	mu    sync.Mutex
+	repos []string
+}
+
+func (h *heardPullRequests) Apply(_ context.Context, _ pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	if opened, is := fact.(intake.PullRequestOpened); is {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.repos = append(h.repos, opened.Repo)
+	}
+	return intake.Result{}, nil
+}
+
+func (h *heardPullRequests) repositories() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.repos)
 }
 
 // stillOpen fails unless the shim's connection is still open: a read of it times out rather than

@@ -278,6 +278,14 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
+// heldConsumers is the NATS holder of a workflow test that never rebuilds one: the intake loop
+// and every mapping read reach the consumers through the holder, as they do in the daemon, and
+// nothing here opens a connection, holds the mapping lock or serializes a handover
+// (natsHolder.rebuild is what reads those).
+func heldConsumers(consumers *intake.Consumers) *natsHolder {
+	return &natsHolder{consumers: consumers, log: quietLogger()}
+}
+
 // stillClock is time that never moves: the machines' timers are armed and never fire, so a test
 // sees only what it drove.
 type stillClock struct{}

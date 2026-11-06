@@ -125,7 +125,8 @@ type workflowRuntime struct {
 	defaultBranches *defaultBranches
 	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
 	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
-	// mapped repository; mappingMu serializes the mapping's re-reads; mappingChanged carries a
+	// mapped repository; mappingMu serializes the mapping's re-reads, and a rebuild of the NATS
+	// holder takes it across its own (natsHolder.rebuild); mappingChanged carries a
 	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
 	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
 	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
@@ -461,32 +462,19 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	if err != nil {
 		return err
 	}
-	// The boot's set is what the boot heard; a rebuild's connection is opened with the set the
-	// consumers hear as it starts, and the consumers it opened are handed the set those
-	// consumers hear at the swap, read under one hold of the lock every fact applies under
-	// (serialize, intake.SerializeFacts), which a mapping read takes across its own
-	// SetRepositories (refreshMapping). One that landed between that read and the swap would
-	// set its repositories on the consumers being replaced, and they would go with them: the
-	// repository it mapped would be unheard until something else moved the mapping again.
-	//
-	// The rebuild's own read of that set, and the open it hands the set to, run under the
-	// mapping's lock (mappingMu), because opening the consumers updates the very GitHub durable
-	// the old intake still pulls from: a mapping read that widened its filter while the rebuild
-	// dialled would see it written back to the rebuild's older set, and the events of a
-	// repository mapped in that window would be stepped past and never delivered
-	// (natsHolder.rebuild). A mapping read is the only other writer of that filter and takes
-	// this lock before the fact lock, so the rebuild taking the two in that same order adds no
-	// cycle and leaves no fact waiting on a dial.
+	// A rebuild's connection is opened with the set the consumers hear as it starts, and the
+	// consumers it opened are handed, at the swap, the set the daemon is to hear then: worked
+	// out again from the mapping, the records and the renames the rebuild's own configuration
+	// carries (natsHearing), under one hold of the lock every fact applies under (serialize,
+	// intake.SerializeFacts) and under the lock a mapping read is made under (mappingMu).
+	// natsHolder.rebuild is where both holds are explained, and what they cost.
 	rebuildOpen := func(c config.Config) (*nats.Conn, *intake.Consumers, error) {
 		return open(c, w.nats.intake().Repositories())
 	}
-	holdMapping := func() func() {
-		w.mappingMu.Lock()
-		return w.mappingMu.Unlock
-	}
-	w.nats = newNATSHolder(conn, consumers, w.log, rebuildOpen, holdMapping, func(held func(ctx context.Context) error) error {
-		return w.serializeFacts(ctx, held)
-	})
+	w.nats = newNATSHolder(conn, consumers, w.log, rebuildOpen, &w.mappingMu, w.natsHearing,
+		func(held func(ctx context.Context, tx pgx.Tx) error) error {
+			return w.serializeFacts(ctx, held)
+		})
 	rebuild.register(w.nats)
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
@@ -495,11 +483,12 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 // serializeFacts runs held under one hold of the lock every fact applies under
 // (intake.SerializeFacts), in a transaction of its own that writes nothing and is rolled back:
 // pg_advisory_xact_lock is held for the transaction's life and let go by a rollback as by a
-// commit, so what held did has no commit behind it that could fail once it has happened. The
-// NATS holder's rebuild hands its consumers the repositories this daemon hears and swaps there
+// commit, so what held did has no commit behind it that could fail once it has happened. held is
+// handed that transaction, so what it reads of the record it reads under the hold: the NATS
+// holder's rebuild works out there what its consumers are to hear, hands it to them and swaps
 // (natsHolder.rebuild), and a swap reported as a failure would leave the rebuilder logging a
 // rebuild that happened as one that did not.
-func (w *workflowRuntime) serializeFacts(ctx context.Context, held func(ctx context.Context) error) error {
+func (w *workflowRuntime) serializeFacts(ctx context.Context, held func(ctx context.Context, tx pgx.Tx) error) error {
 	tx, err := w.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("serialize with every fact: %w", err)
@@ -508,7 +497,7 @@ func (w *workflowRuntime) serializeFacts(ctx context.Context, held func(ctx cont
 	if err := intake.SerializeFacts(ctx, tx); err != nil {
 		return fmt.Errorf("serialize with every fact: %w", err)
 	}
-	return held(ctx)
+	return held(ctx, tx)
 }
 
 // phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task carries the phase
