@@ -701,3 +701,37 @@ func TestStoppingABackgroundClientBeforeItsFirstConnectionStartsNoKeeper(t *test
 		})
 	}
 }
+
+// The keeper names the consumer cap it raised, with the deployed value and the new one, so an
+// operator who lowered the cap reads what put it back within a period instead of finding it
+// raised with nothing saying so. A stream already at the cap has it named for nothing.
+func TestRestoredFieldsNamesTheConsumerCapTheKeeperRaised(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		deployed int
+		want     string
+	}{
+		{"a cap an operator lowered", 1000, fmt.Sprintf("max_consumers 1000 -> %d", StreamMaxConsumers)},
+		{"a stream with no cap", -1, fmt.Sprintf("max_consumers -1 -> %d", StreamMaxConsumers)},
+		{"a stream already at the cap", StreamMaxConsumers, ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			info := &nats.StreamInfo{Config: nats.StreamConfig{
+				Name:         Stream,
+				Subjects:     StreamCarriedSubjects(),
+				MaxConsumers: row.deployed,
+			}}
+			kept := keptStream(info, streamCfg)
+			restored := restoredFields(&info.Config, &kept)
+			if row.want == "" {
+				if i := slices.IndexFunc(restored, func(field string) bool { return strings.HasPrefix(field, "max_consumers ") }); i >= 0 {
+					t.Fatalf("the keeper restored %q, want no cap named", restored[i])
+				}
+				return
+			}
+			if !slices.Contains(restored, row.want) {
+				t.Fatalf("the keeper restored %q, want %q among them", restored, row.want)
+			}
+		})
+	}
+}

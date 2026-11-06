@@ -463,12 +463,13 @@ the old subjects, copies, limit and metadata back.
 
 So every program that owns the stream, each listener and Dispatch's server, reads it again every
 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a limit below its
-`ENVOY_STREAM_MAX_BYTES` or none (when set), a missing `envoy_stream_id`, and the 72-hour age and
-duplicate window and the discard policy (the same in every release), and adds back each subject
-its own build carries that the stream lacks, unless it overlaps a subject the stream has or is a
-role lane. It logs a WARN line `envoy nats keeper restored the stream` with, for example,
-`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
-It never lowers the copies or the limit, so raising the limit of a full stream with
+`ENVOY_STREAM_MAX_BYTES` or none (when set), a consumer cap below the 16000 its binary carries, a
+missing `envoy_stream_id`, and the 72-hour age and duplicate window and the discard policy (the
+same in every release), and adds back each subject its own build carries that the stream lacks,
+unless it overlaps a subject the stream has or is a role lane. It logs a WARN line
+`envoy nats keeper restored the stream` with, for example,
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 16000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+It never lowers the copies, the limit or the cap, so raising the limit of a full stream with
 `nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` takes effect at once and stays. It only
 adds subjects and never removes or replaces one, so two releases with different subject
 lists do not switch the stream back and forth, and a subject a concurrent write dropped comes
@@ -479,11 +480,25 @@ with `replicas="1 -> 3"`). A pass that fails logs `envoy nats keeper could not r
 or `envoy nats keeper could not raise a bucket` and is tried again 30 seconds later; it never
 stops the program.
 
+The consumer cap is the one of these the binary carries rather than reads from a setting: 16000
+session consumers, which is what bounds how many sessions can hold a consumer of their own. A
+stream whose cap reads `-1` or `0` has no cap of its own, and the NATS server then applies its own
+default of 1000, so a start and the keeper raise either to 16000 as they raise a smaller cap.
+Setting the cap on a stream the server already holds needs nats-server v2.12.5 or later: every
+server before it refuses an update that changes `MaxConsumers` with
+`nats: stream configuration update can not change MaxConsumers` (measured on v2.10.29, v2.11.0 and
+v2.12.0), which stops the listener's start with an error naming `max_consumers` and that version.
+A create carries the cap on every version. So a deployment whose NATS is older and whose stream
+already exists upgrades the NATS server first, keeping its store, and the next listener start sets
+the cap.
+
 During a rollout with mixed settings the stream can therefore sit below the setting for up to 30
 seconds after the last start. To lower the copies, or to lower or remove the limit, change the
 setting in every program first, then run `nats stream edit <stream> --replicas=<n>` or
 `nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` (`-1` for none); otherwise the next pass
-puts it back.
+puts it back. Lowering the cap
+(`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`, which also needs nats-server v2.12.5
+or later) needs every program's binary carrying the lower cap first, for the same reason.
 
 On a clustered NATS (nats-server v2.10.29 among them), the server keeps the id of a message the
 full stream refused on the stream's leader for 72 hours, a purge notwithstanding, and
@@ -558,6 +573,18 @@ checkout of this repository; the images are public. The two services listen on `
 `8222` (NATS monitoring) and `9020` (the listener). When something else on the machine uses one,
 move it in `.env` (`NATS_PORT`, `NATS_MONITOR_PORT`, `ENVOY_LISTENER_PORT`) and use that port
 wherever a command or the `envoy.json` below names the default.
+
+The file pins NATS 2.15.1 by digest, the image the hub runs. The listener sets the
+`ENVOY_NOTIFICATIONS` stream's consumer cap, and a NATS server older than v2.12.5 refuses an
+update that changes that cap on a stream it already holds
+(`nats: stream configuration update can not change MaxConsumers`), which stops the listener's
+start; a server that creates the stream takes the cap at any version. A machine that ran an
+earlier version of this file has an older server and a stream in its `envoy-single-node_nats-data`
+volume: update your checkout, then
+`docker compose -f single-node.compose.yml pull && docker compose -f single-node.compose.yml up -d --wait`,
+which starts 2.15.1 on the same volume, and the listener's next start sets the cap. A store
+written by nats-server 2.10.29 opens on 2.15.1 with its stream, its messages and its consumers
+intact.
 
 1. Write the machine's settings:
 

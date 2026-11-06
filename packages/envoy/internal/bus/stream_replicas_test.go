@@ -56,7 +56,11 @@ func startOnCluster(t *testing.T, cluster *testnats.Cluster, options ...ConnectO
 
 // deployedClusterStream is the stream as a deployment with three copies and a byte limit holds it,
 // with limits this binary does not own and an id, changed by change. It discards old messages, as
-// a stream an earlier build created does.
+// a stream an earlier build created does. Its consumer cap is the binary's own, taken from
+// streamCfg with the rest, so a start's reconcile has no cap change to write and the in-process
+// nats-server, older than streamMaxConsumersFloor, has none to refuse; the raise of an uncapped
+// deployed stream to the cap is proved on a real server image instead, by the natslive matrix in
+// this package.
 func deployedClusterStream(change func(*nats.StreamConfig)) nats.StreamConfig {
 	deployed := *streamCfg
 	deployed.Replicas = 3
@@ -631,4 +635,52 @@ func (js *countingJetStream) UpdateStream(cfg *nats.StreamConfig, opts ...nats.J
 func (js *countingJetStream) CreateKeyValue(cfg *nats.KeyValueConfig) (nats.KeyValue, error) {
 	js.record("create bucket " + cfg.Bucket)
 	return js.JetStreamContext.CreateKeyValue(cfg)
+}
+
+// The reconcile owns the consumer cap as it owns the byte limit: it raises a deployed cap below
+// the one this binary compiles, a deployed -1 and a deployed 0 included, since nats-server reads
+// either as no cap at all and then applies its own default of 1000, and it leaves a deployed cap
+// above the compiled one as it is, so an operator's raise stands.
+func TestOwnedStreamRaisesTheConsumerCapAndKeepsAHigherDeployedOne(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		deployed int
+		want     int
+	}{
+		{"a stream with no cap, which the server answers as -1", -1, StreamMaxConsumers},
+		{"a stream whose cap is 0, which the server reads as none too", 0, StreamMaxConsumers},
+		{"a stream capped below the compiled cap", 1000, StreamMaxConsumers},
+		{"a stream an operator capped above it", StreamMaxConsumers + 4000, StreamMaxConsumers + 4000},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			info := &nats.StreamInfo{Config: nats.StreamConfig{Name: Stream, MaxConsumers: row.deployed}}
+			if owned := ownedStream(info, streamCfg); owned.MaxConsumers != row.want {
+				t.Fatalf("a stream deployed at %d is owned at %d, want %d", row.deployed, owned.MaxConsumers, row.want)
+			}
+		})
+	}
+}
+
+// A server below the floor refuses the update that carries the cap with a bare `can not change
+// MaxConsumers`, which names neither the value asked for nor a server that would take it, so the
+// bus names the field as nats-server spells it, the cap this binary asks for and the first server
+// that takes the change. A refusal of an update whose cap is the deployed stream's own is returned
+// as it is: that refusal is not the cap's.
+func TestARefusedUpdateNamesTheConsumerCapAndTheServerThatTakesIt(t *testing.T) {
+	refusal := errors.New("nats: stream configuration update can not change MaxConsumers")
+	deployed := &nats.StreamConfig{Name: Stream, MaxConsumers: -1}
+	request := &nats.StreamConfig{Name: Stream, MaxConsumers: StreamMaxConsumers}
+	named := refusedSettings(refusal, deployed, request)
+	for _, want := range []string{fmt.Sprintf("max_consumers %d", StreamMaxConsumers), streamMaxConsumersFloor, refusal.Error()} {
+		if !strings.Contains(named.Error(), want) {
+			t.Fatalf("the refused update reads %q, want it to name %q", named, want)
+		}
+	}
+	if !errors.Is(named, refusal) {
+		t.Fatalf("the refused update reads %q, want the server's error wrapped in it", named)
+	}
+	unchanged := &nats.StreamConfig{Name: Stream, MaxConsumers: StreamMaxConsumers}
+	if named := refusedSettings(refusal, unchanged, unchanged); named.Error() != refusal.Error() {
+		t.Fatalf("the refusal of an update that changes no cap reads %q, want the server's error as it is", named)
+	}
 }

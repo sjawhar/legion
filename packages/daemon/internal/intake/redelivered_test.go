@@ -53,6 +53,14 @@ const (
 	redeliveredSecret   = "redelivered-webhook-secret"
 	redeliveredClientID = "Iv1.redelivered"
 	githubSubjects      = "notifications.github.>"
+	// listenerMaxConsumers is the consumer cap Envoy's listener compiles into
+	// ENVOY_NOTIFICATIONS (bus.StreamMaxConsumers in packages/envoy/internal/bus/stream.go),
+	// written out because Go's internal-package rule refuses this module that import, as it
+	// refuses it bus.Stream, spelled out above. The stream below is created with it, as a
+	// deployment the listener's start reconciles is, so that start writes no cap change the
+	// test's nats-server, which is older than the first that can change a deployed stream's cap,
+	// would refuse.
+	listenerMaxConsumers = 16000
 )
 
 // redeliveredRepositories serves acme/widgets at main, as the daemon's mapping would.
@@ -82,7 +90,7 @@ func TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied(t *testing.T) {
 	seedRedeliveredIssue(t, pool)
 
 	js := testnats.JetStream(t)
-	stream := testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
+	stream := testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}, MaxConsumers: listenerMaxConsumers})
 	natsURL := js.Conn().ConnectedUrl()
 
 	listener := startListener(t, binaries.listener, natsURL)

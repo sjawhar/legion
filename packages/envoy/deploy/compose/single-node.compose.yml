@@ -5,7 +5,16 @@ name: envoy-single-node
 
 services:
   nats:
-    image: mirror.gcr.io/library/nats:2.10-alpine
+    # nats:2.15.1-alpine by digest: the image the hub runs, which CI's registry copy of the same
+    # digest, packages/envoy/internal/testnats/nats.go's HubImage, also runs
+    # (.github/ci-images.yaml). The listener needs nats-server v2.12.5 or later: it sets the
+    # ENVOY_NOTIFICATIONS stream's consumer cap, and every server before v2.12.5 refuses an update
+    # that changes MaxConsumers on a stream that already exists (`nats: stream configuration
+    # update can not change MaxConsumers`), so a start against one fails. An operator whose server
+    # is older and whose nats-data volume already holds the stream upgrades the server first,
+    # keeping the volume, and then starts the listener, which sets the cap: a store written by
+    # nats-server 2.10.29 opens on 2.15.1 with its stream, its messages and its consumers intact.
+    image: mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6
     network_mode: host
     # No configuration file: the image's default one opens a cluster port this server has no use
     # for. The monitoring port follows --addr onto loopback.

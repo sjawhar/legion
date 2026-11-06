@@ -85,7 +85,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Stream definition**: `internal/bus/stream.go`
 
-  `ENVOY_NOTIFICATIONS` subjects, age and duplicate window, replicas, byte limit and discard policy, and their reconciliation at start (`ensureStreamWithConfig`);
+  `ENVOY_NOTIFICATIONS` subjects, age and duplicate window, replicas, byte limit, consumer cap (`bus.StreamMaxConsumers`, 16000) and discard policy, and their reconciliation at start (`ensureStreamWithConfig`);
   the names of the stores' KV buckets, listener and Dispatch durables, the Dispatch webhook-redelivery bucket, the listener role-lane queue, and the notification and exception topic prefixes, which envoy-infra's NATS grants are built from (`packages/envoy/infra/core/permissions.go`)
 
 - **Stream and bucket copies, stream byte limit**:
@@ -108,6 +108,20 @@ Each item below names a task and where its code is, then notes on it.
   a clustered deployment sets both alike in every envoy-listener and in the Dispatch server.
   A server's refusal of a create or raise stops the listener's start naming the setting and its value, while Dispatch's server, which reconciles in the background, keeps serving with the refusal logged;
   a bucket raise's refusal also names the bucket (`refusedSettings`, `raiseReplicas`)
+
+- **Stream consumer cap**:
+  `internal/bus/stream.go` (`StreamMaxConsumers`, `ownedStream`, `refusedSettings`), `internal/bus/keeper.go`
+
+  The `ENVOY_NOTIFICATIONS` stream's consumer cap is compiled in rather than read from a setting:
+  `bus.StreamMaxConsumers`, 16000, which bounds how many sessions can hold a session consumer of their own.
+  A start and the keeper raise a smaller deployed cap to it and never lower one, as for the copies and the byte limit;
+  a deployed `-1` or `0` is raised too, because nats-server reads either as no cap and then applies its own default of 1000.
+  Lowering the cap (`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`) is an operator step that needs every program's binary lowered first.
+  A stream the server already holds takes a cap change only on nats-server v2.12.5 or later:
+  every server before it refuses such an update with `nats: stream configuration update can not change MaxConsumers`, measured on v2.10.29, v2.11.0 and v2.12.0.
+  That refusal names `max_consumers`, the value the binary asks for and the floor (`refusedSettings`), and stops the listener's start;
+  a deployment on an older server that already holds the stream therefore cannot start a listener of this release.
+  A create carries the cap on every nats-server, so such an operator upgrades the nats-server first, keeping its store, and the listener's next start sets the cap
 
 - **Session delivery**: `internal/session/session.go`
 
@@ -3542,17 +3556,22 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
 
 - Every stream update the reconcile sends starts from the deployed configuration and sets only what Envoy owns (`reconciledStream`, `internal/bus/stream.go`):
   the subjects (above), the age and the duplicate window (72 hours), the replicas (the deployed count or `ENVOY_NATS_REPLICAS`, whichever is more), the byte limit (the deployed one or `ENVOY_STREAM_MAX_BYTES`, whichever is more;
-  the setting on a stream with none, the deployed one when unset) and `DiscardNew`, which switches a stream an earlier build created with `DiscardOld`.
+  the setting on a stream with none, the deployed one when unset), the consumer cap (the deployed cap or `bus.StreamMaxConsumers`, 16000, whichever is more;
+  the compiled cap on a stream whose cap is a deployed `-1` or `0`, which nats-server reads as no cap and then answers with its own default of 1000) and `DiscardNew`, which switches a stream an earlier build created with `DiscardOld`.
   The metadata and every other deployed field - `MaxMsgsPerSubject`, `MaxMsgSize`, storage, placement, compression and the rest - stay as they are, and a start that finds all of that in place sends no update.
-  A start's own write never lowers the stream's copies or its byte limit, so an operator's raise of either stands, and the stream holds the most copies and the largest limit any program of a deployment carries;
+  A start's own write never lowers the stream's copies, its byte limit or its consumer cap, so an operator's raise of any of them stands, and the stream holds the most copies and the largest limit any program of a deployment carries;
   a clustered deployment sets both alike in every envoy-listener and in the Dispatch server.
+  A create carries the consumer cap on every nats-server, but a stream the server already holds takes a cap change only on v2.12.5 or later:
+  every server before it refuses such an update with `nats: stream configuration update can not change MaxConsumers`, measured on v2.10.29, v2.11.0 and v2.12.0.
+  That refusal names `max_consumers`, the value the binary asks for and the floor, and stops the listener's start (`refusedSettings`), so a deployment on an older server that already holds the stream upgrades the nats-server first, keeping its store;
+  the next start then sets the cap.
   JetStream's stream update has no compare-and-swap:
   a start with other (or no) settings, or another subject list, that reads the stream before another start's write and writes after it puts the old subjects, copies, byte limit and metadata back.
 
 - The keeper (`internal/bus/keeper.go`) ends that:
-  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
-  `discard DiscardOld -> DiscardNew` in its line), and adds back each subject its binary compiles that the stream lacks, unless it overlaps a subject the stream carries or captures a role lane (`keptStream`, `keptSubjects`, `internal/bus/stream.go`), logging `envoy nats keeper restored the stream` at WARN with, for example, `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
-  Like a start, it never lowers the copies or the byte limit (`ownedStream`), so an operator's emergency raise of a full stream's limit stands (`TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne`).
+  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a consumer cap below its `bus.StreamMaxConsumers` (16000), a deployed `-1` or `0` included, a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
+  `discard DiscardOld -> DiscardNew` in its line), and adds back each subject its binary compiles that the stream lacks, unless it overlaps a subject the stream carries or captures a role lane (`keptStream`, `keptSubjects`, `internal/bus/stream.go`), logging `envoy nats keeper restored the stream` at WARN with, for example, `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 16000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+  Like a start, it never lowers the copies, the byte limit or the cap (`ownedStream`), so an operator's emergency raise of a full stream's limit stands (`TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne`), and an operator who lowers the cap by hand has it raised back within one period, with `max_consumers` in that WARN line.
   Its write is the stream as it read it with that put back, so it only adds subjects and removes or replaces none:
   two releases with different subject lists do not switch the stream back and forth, and a concurrent write the keeper's lands over loses its subject only until that release's own keeper adds it back a period later.
   A subject that a start had put in place of an overlapping one is the exception:
@@ -3566,6 +3585,8 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   So with mixed settings during a rollout the stream can sit below the setting for up to one period after the last start;
   programs with different byte limits do not fight, since no keeper lowers a limit, and the largest stands.
   Lowering the copies (`nats stream edit ENVOY_NOTIFICATIONS --replicas=<n>`) and lowering or removing the limit (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`, `--max-bytes=-1` for none) are operator steps that need every program's setting changed first, or the keeper puts them back.
+  Lowering the cap (`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`) is one too, and needs every program's binary lowered first, since the cap is compiled in;
+  that edit, like any change of `MaxConsumers` on a stream that already exists, needs nats-server v2.12.5 or later.
 
 - Every KV bucket Envoy opens through `bus.EnsureKeyValue` is created at `ENVOY_NATS_REPLICAS`, and one found with fewer copies is raised by an update of its stream `KV_<bucket>` that changes only its replicas, which needs `$JS.API.STREAM.UPDATE.KV_<bucket>` in the program's NATS grant (`bucketPermissions`, `packages/envoy/infra/core/permissions.go`);
   lowering a bucket (`nats stream edit KV_<bucket> --replicas=<n>`) likewise needs every program's setting lowered first.
