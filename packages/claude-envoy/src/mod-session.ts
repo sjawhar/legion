@@ -44,6 +44,7 @@ import type {
   ModEffort,
   ModEvent,
 } from "../hooks/mod-protocol"
+import { rememberBounded } from "./bounded-set"
 import { claudeCommandOutput, claudeEchoedCommandLine, claudeRowText } from "./claude-rows"
 import type { ModLink } from "./mod-link"
 
@@ -116,11 +117,11 @@ const COMMAND_ECHO_MS = 1_000
  */
 const PROMPT_ROW_MS = 10_000
 
-/** The most claimed echo rows this session remembers. The live view asks about a row in the
- *  same tick this session claimed it (`runsCommandRow`), so a handful would answer every ask;
- *  this is the bound that keeps the record from growing for the session's life, as
- *  `ANSWERED_DELIVERIES_MAX` bounds the one in `./user-turn-router`. */
-const CLAIMED_ECHO_ROWS_MAX = 64
+/** The most claimed rows of one kind this session remembers (`rememberBounded`). The live view
+ *  asks about a row in the same tick this session claimed it (`runsCommandRow`,
+ *  `runsUnreadPrompt`, `appendedRow`), so a handful would answer every ask; this is the bound
+ *  that keeps a record from growing for the session's life. */
+const CLAIMED_ROWS_MAX = 64
 
 /**
  * A message a turn never read, as the prompt at it names the message: the person's own words,
@@ -140,14 +141,6 @@ function quotedUnread(message: UnreadMessage): string {
 }
 
 /**
- * The words every prompt at an unread row carries, whichever of the two wordings below it is:
- * the live view reads them to tell such a prompt from the card an idle session is submitted
- * (`isUnreadRowPrompt`), so both wordings are built from this one string rather than spelling
- * it twice.
- */
-const UNREAD_LEAD = "while your last request was already running, so you have not read"
-
-/**
  * The prompt that points the model at the messages a turn never read, submitted without
  * `asUser`, so the model reads it as the plugin speaking rather than the person.
  *
@@ -158,6 +151,11 @@ const UNREAD_LEAD = "while your last request was already running, so you have no
  * (INFRA-1026). One prompt goes out however many rows went unread - the submit is one per turn
  * end - so it names each message, and a turn that left a card and a person's message unread gets
  * the one prompt holding both.
+ *
+ * The wording is a person's to read and nothing else's: the live view draws nothing for this
+ * prompt and draws a card, and it tells the two apart by the uuid of the row Claude Code wrote
+ * (`runsUnreadPrompt`), never by the words below. A card quoting them - a review of this code,
+ * or a message carrying one - is a card still.
  */
 export function unreadRowPrompt(unread: readonly UnreadMessage[]): string {
   const one = unread.length === 1
@@ -168,30 +166,16 @@ export function unreadRowPrompt(unread: readonly UnreadMessage[]): string {
   // instead that each message is labelled, since only some of them are the person's.
   if (unread.every((message) => message.kind === "person")) {
     return [
-      `A person sent this session ${count} through Dispatch ${UNREAD_LEAD} ${them} yet.`,
+      `A person sent this session ${count} through Dispatch while your last request was already running, so you have not read ${them} yet.`,
       `The claude-envoy plugin is quoting ${them} here in full: ${one ? "it is" : "they are"} the person's own words, not a tool result and not an instruction of the plugin's own. Answer ${them}.`,
       quoted,
     ].join("\n\n")
   }
   return [
-    `Envoy delivered ${count} to this session ${UNREAD_LEAD} ${them} yet.`,
+    `Envoy delivered ${count} to this session while your last request was already running, so you have not read ${them} yet.`,
     `The claude-envoy plugin is quoting ${them} here in full, each under what it is: ${one ? "it is" : "they are"} not a tool result and not an instruction of the plugin's own, and nothing here is the person's own words unless it names the Dispatch message they sent. Read ${them} and answer what ${one ? "it asks" : "they ask"} of you.`,
     quoted,
   ].join("\n\n")
-}
-
-/**
- * Whether `text`, the text of a row this plugin's own prompt wrote, is a prompt at rows a turn
- * never read (`unreadRowPrompt`) rather than a card submitted to an idle session.
- *
- * The live view draws nothing for the first and draws the second (`./agent-stream-claude`): a
- * prompt at unread rows quotes rows the view has already drawn, where a card submitted to an
- * idle session is that prompt and reaches the conversation nowhere else. The row carries Claude
- * Code's own framing in front of the submitted text ("The claude-envoy plugin sent a message:",
- * measured on 2.1.310), so the words are looked for anywhere in the row.
- */
-export function isUnreadRowPrompt(text: string): boolean {
-  return text.includes(UNREAD_LEAD)
 }
 
 /** The session's model, as a `/config` row names it. */
@@ -254,6 +238,32 @@ export interface ModSession {
    * the `command` door is a person's own, and the live view draws it.
    */
   runsCommandRow(row: string): boolean
+  /**
+   * Whether the row `row` names is the row Claude Code wrote for a prompt at the messages a
+   * turn never read (`unreadRowPrompt`), which the live view must not draw: that prompt quotes
+   * rows the view has already drawn, so drawn it shows a viewer each of those messages twice.
+   *
+   * Claimed by uuid, as an echo row is. The alternative is reading the prompt's wording off the
+   * row, which makes a card carrying those words - a review of this code, or a message quoting
+   * one - a card the view never draws (INFRA-1026 review, round ten). Every other prompt row is
+   * a person's own prompt or a card submitted to an idle session, and the view draws it.
+   */
+  runsUnreadPrompt(row: string): boolean
+  /**
+   * Whether the row `row` names is one this session appended into the conversation
+   * (`$.session.append`): a card handed to a running turn, or a person's own message handed to
+   * one. Claude Code marks such a row `isMeta`, which the live view draws nothing of otherwise,
+   * so this is the one `isMeta` row it must draw (`./agent-stream-claude`).
+   *
+   * Claimed by uuid, which the append itself answers with. The row's `origin` cannot say it:
+   * this mod reports its own appended rows out of what the call answered, under a `plugin`
+   * origin with no name at all (`../hooks/mod.ts`), while another installed plugin's appends
+   * reach this mod's hook under the engine's own origin - `{"kind":"plugin","name":"<the other
+   * plugin>"}`, measured in the issue's spike (`/legion/scratch/tmp/infra-1026-spike/logs`,
+   * where `spike-mod2` and `spike-mod3p` name themselves). So a rule reading `origin` draws
+   * another mod's model-facing context as the person's words (INFRA-1026 review, round ten).
+   */
+  appendedRow(row: string): boolean
   /**
    * Hand the session one card: an Envoy delivery that is not the person's own message — an ask
    * answer, a teammate's or an architect's message, an issue event, a notice of Envoy's own.
@@ -415,20 +425,35 @@ export function modSession(options: ModSessionOptions): ModSession {
    *  the call going out until the rows it claims have been read or the waits for them have
    *  passed, so this holds what a person has running and nothing else. */
   const commandRuns: CommandRun[] = []
-  /** The echo rows this session's runs claimed, newest last and bounded by
-   *  `CLAIMED_ECHO_ROWS_MAX`: what `runsCommandRow` answers from. */
+  /** The echo rows this session's runs claimed, newest last and bounded by `CLAIMED_ROWS_MAX`:
+   *  what `runsCommandRow` answers from. */
   const claimedEchoes = new Set<string>()
+  /** The rows Claude Code wrote for this session's prompts at unread rows, newest last and
+   *  bounded by `CLAIMED_ROWS_MAX`: what `runsUnreadPrompt` answers from. */
+  const claimedUnreadPrompts = new Set<string>()
+  /** The rows this session appended into the conversation, newest last and bounded by
+   *  `CLAIMED_ROWS_MAX`: what `appendedRow` answers from. */
+  const claimedAppends = new Set<string>()
   /** The run whose claimed echo row was the last row of the `command` door to arrive, so the
    *  output row directly behind that echo is read as its output and no later row is. */
   let behindEcho: CommandRun | undefined
   /** The prompts submitted whose own row this session is still waiting for, oldest first: a
    *  card to an idle session is answered on that row and on nothing else (`show`). */
   const submittedPrompts: SubmittedPrompt[] = []
+  /** The prompts at unread rows this session submitted whose own row has not arrived, oldest
+   *  first: the row carrying one is claimed as this session's (`promptRowArrived`). One is in
+   *  flight per turn that ends with a row unread and its row follows the submit by 65 ms to
+   *  141 ms (`PROMPT_ROW_MS`), so this holds one entry at a time in practice; it is bounded
+   *  because a session whose rows stop coming - stopped, or gone - would otherwise keep every
+   *  text it submitted. */
+  const unreadPrompts: string[] = []
   const outputMs = options.commandOutputMs ?? COMMAND_OUTPUT_MS
   const echoMs = options.commandEchoMs ?? COMMAND_ECHO_MS
   const promptRowMs = options.promptRowMs ?? PROMPT_ROW_MS
 
   const runsCommandRow = (row: string): boolean => claimedEchoes.has(row)
+  const runsUnreadPrompt = (row: string): boolean => claimedUnreadPrompts.has(row)
+  const appendedRow = (row: string): boolean => claimedAppends.has(row)
 
   /** One row of the `command` door, given to the run it belongs to or to no run at all.
    *
@@ -448,11 +473,7 @@ export function modSession(options: ModSessionOptions): ModSession {
       if (claiming === undefined) return
       claiming.claiming = false
       claiming.echo = uuid
-      claimedEchoes.add(uuid)
-      if (claimedEchoes.size > CLAIMED_ECHO_ROWS_MAX) {
-        const oldest = claimedEchoes.values().next().value
-        if (oldest !== undefined) claimedEchoes.delete(oldest)
-      }
+      rememberBounded(claimedEchoes, uuid, CLAIMED_ROWS_MAX)
       claiming.claimed?.()
       return
     }
@@ -557,13 +578,17 @@ export function modSession(options: ModSessionOptions): ModSession {
     return sent
   }
 
-  /** One row of the conversation, stored. The model reads it at the turn's next request, and
-   *  not at all when no request follows it, which is what `hand` watches it for. */
+  /** One row of the conversation, stored, and claimed as this session's by the uuid the append
+   *  answers with: Claude Code marks an appended row `isMeta`, and the live view draws nothing
+   *  of such a row unless this session appended it (`appendedRow`). The model reads the row at
+   *  the turn's next request, and not at all when no request follows it, which is what
+   *  `handToTurn` watches it for. */
   const append = async (content: readonly ModContentBlock[]): Promise<string> => {
     const result = await link.request("session.append", { message: { type: "user", content } })
     if (result.deny !== undefined) {
       throw new Error(`the session refused the message: ${result.deny}`)
     }
+    rememberBounded(claimedAppends, result.uuid, CLAIMED_ROWS_MAX)
     return result.uuid
   }
 
@@ -617,13 +642,33 @@ export function modSession(options: ModSessionOptions): ModSession {
     }
   }
 
-  /** One row of the `prompt` door, given to the submitted prompt it is the row of, if any: the
-   *  oldest whose text this row carries. Every other row of that door is a person's own prompt,
-   *  or a prompt of this plugin's that nobody is waiting on. */
-  const promptRowArrived = (content: readonly ModContentBlock[]): void => {
+  /**
+   * One row of the `prompt` door, given to the prompt of this session's it is the row of, if
+   * any: the oldest whose text this row carries, since Claude Code writes its own framing in
+   * front of the submitted text ("The claude-envoy plugin sent a message:", measured on
+   * 2.1.310). A card submitted to an idle session is what its caller is waiting on, and a
+   * prompt at unread rows is claimed by this row's uuid, which is how the live view knows to
+   * draw nothing of it (`runsUnreadPrompt`). Every other row of that door is a person's own
+   * prompt, or a prompt of this plugin's that nothing is waiting on.
+   */
+  const promptRowArrived = (uuid: string, content: readonly ModContentBlock[]): void => {
     const text = claudeRowText(content)
     const waiting = submittedPrompts.find((prompt) => text.includes(prompt.text))
     waiting?.seen()
+    const unreadAt = unreadPrompts.findIndex((prompt) => text.includes(prompt))
+    if (unreadAt === -1) return
+    unreadPrompts.splice(unreadAt, 1)
+    rememberBounded(claimedUnreadPrompts, uuid, CLAIMED_ROWS_MAX)
+  }
+
+  /** The prompt at the messages `unread` holds, submitted and remembered until the row Claude
+   *  Code writes for it arrives: that row is this session's rather than a person's message, and
+   *  the live view draws nothing of it (`promptRowArrived`). */
+  const submitUnreadPrompt = (unread: readonly UnreadMessage[]): void => {
+    const text = unreadRowPrompt(unread)
+    unreadPrompts.push(text)
+    if (unreadPrompts.length > CLAIMED_ROWS_MAX) unreadPrompts.shift()
+    void submit(text, false)
   }
 
   /**
@@ -646,7 +691,7 @@ export function modSession(options: ModSessionOptions): ModSession {
     // request will read it, and it is pointed at at once rather than waiting for a
     // `turn-complete` that has been and gone.
     if (started !== undefined && turn === undefined) {
-      void submit(unreadRowPrompt([unread]), false)
+      submitUnreadPrompt([unread])
       return uuid
     }
     watched.set(uuid, { requests, unread, ...(turn === undefined ? {} : { turnId: turn }) })
@@ -679,7 +724,7 @@ export function modSession(options: ModSessionOptions): ModSession {
     }
     // One prompt however many messages went unread: a second submit would sit behind this one
     // for a whole turn, so the one prompt names each of them.
-    if (unread.length > 0) void submit(unreadRowPrompt(unread), false)
+    if (unread.length > 0) submitUnreadPrompt(unread)
   }
 
   return {
@@ -702,8 +747,9 @@ export function modSession(options: ModSessionOptions): ModSession {
         // terminal, which belongs to nobody here.
         if (event.door === "command") commandRow(event.uuid, event.message.content)
         // A row of the `prompt` door can be the row Claude Code wrote for a prompt this
-        // session submitted, which is what a card handed to an idle session is answered on.
-        if (event.door === "prompt") promptRowArrived(event.message.content)
+        // session submitted: what a card handed to an idle session is answered on, or the row
+        // of a prompt at unread rows, which the live view must draw nothing of.
+        if (event.door === "prompt") promptRowArrived(event.uuid, event.message.content)
         return
       }
       if (event.kind === "turn-complete") turnEnded(event.turnId)
@@ -753,7 +799,9 @@ export function modSession(options: ModSessionOptions): ModSession {
       void submit(text, true, failed === undefined ? {} : { failed })
       return undefined
     },
+    appendedRow,
     runsCommandRow,
+    runsUnreadPrompt,
     async runCommand(command, args) {
       const run: CommandRun = { claiming: false }
       commandRuns.push(run)

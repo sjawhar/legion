@@ -90,6 +90,7 @@ import { name as packageName, version as packageVersion } from "../package.json"
   type: "json",
 }
 import { type AgentStreamRunner, startAgentStream } from "./agent-stream-runner"
+import { rememberBounded } from "./bounded-set"
 import {
   type ChannelForwarder,
   type ChannelForwarderConnection,
@@ -170,7 +171,7 @@ const CHANNEL_INBOX_LIMIT = 50
  * The most Envoy events one session remembers having a card of in the conversation
  * (`createChannelDelivery`). A resend follows its frame within the listener's own retry, so a
  * handful would answer every one; this is the bound that keeps the record from growing for the
- * session's life, as `AGENT_STREAM_SEEN_ROWS_MAX` bounds the one in `./agent-stream-runner`.
+ * session's life.
  */
 const ENTERED_CARDS_MAX = 64
 const EMPTY_RECEIPT = new Uint8Array()
@@ -526,11 +527,7 @@ export function createChannelDelivery(input: {
   const entered = new Set<string>()
   const remember = (eventId: string | undefined): void => {
     if (eventId === undefined) return
-    entered.add(eventId)
-    if (entered.size > ENTERED_CARDS_MAX) {
-      const oldest = entered.values().next().value
-      if (oldest !== undefined) entered.delete(oldest)
-    }
+    rememberBounded(entered, eventId, ENTERED_CARDS_MAX)
   }
 
   /** Runs `work` behind everything queued before it, keeping the frames in order. */
@@ -2346,11 +2343,21 @@ export async function runEnvoyChannelServer(): Promise<void> {
             claude.observe(event)
             live.observe(event)
           },
-          // The echo row a command this session ran for a person claimed: the view draws
-          // nothing of it, since Claude Code echoes the command it ran rather than the one
-          // they sent (`claude.runsCommandRow`). The `observe` above runs first, so the
-          // session has already claimed the row when this stream records it.
+          // The rows this session claims as its own, each asked by the row's own id and each
+          // drawn by what it is (`./agent-stream-claude`). The `observe` above runs
+          // first, so the session has already claimed a row when this stream records it.
+          //
+          //   - the echo row a command this session ran for a person claimed: the view draws
+          //     nothing of it, since Claude Code echoes the command it ran rather than the one
+          //     they sent (`claude.runsCommandRow`);
+          //   - the row of a prompt at the messages a turn never read, which quotes rows the
+          //     view has already drawn (`claude.runsUnreadPrompt`);
+          //   - a row this session appended, which is the one `isMeta` row the view draws: a
+          //     card handed to a running turn is such a row and nothing else
+          //     (`claude.appendedRow`).
+          appendedRow: (row) => claude.appendedRow(row),
           runsCommandRow: (row) => claude.runsCommandRow(row),
+          runsUnreadPrompt: (row) => claude.runsUnreadPrompt(row),
           tagFor: (row) => live.messageOf(row),
         })
         // The session takes messages once the mod is there, and says so: a terminal session

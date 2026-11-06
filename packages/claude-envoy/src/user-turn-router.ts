@@ -21,7 +21,7 @@ import type { DispatchDelivery, RenderInboundResult } from "@legion/envoy-client
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http"
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures"
 import { messageFor } from "@legion/envoy-client/errors"
-import { acceptUserTurn } from "@legion/pi-shared/accept-user-turn"
+import { type AcceptedUserTurnDelivery, acceptUserTurn } from "@legion/pi-shared/accept-user-turn"
 import { withDeliveredPictures } from "@legion/pi-shared/delivery-pictures"
 import {
   type AcceptedUserTurn,
@@ -31,6 +31,7 @@ import {
 import type { ContentBlock } from "@legion/pi-shared/pi-types"
 import type { ModContentBlock, ModEffort, ModEvent } from "../hooks/mod-protocol"
 import { CLAUDE_EFFORT_LEVELS, CLAUDE_PROVIDER } from "./agent-stream-claude"
+import { rememberBounded } from "./bounded-set"
 import type { ModSession } from "./mod-session"
 import type { UserTurnState } from "./user-turn-state"
 
@@ -228,11 +229,7 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
    * the steps is the rule itself, and it is stated where the step is written; the comment at
    * the top of this file says what this host puts into it.
    */
-  const accepted = (
-    rendered: RenderInboundResult,
-  ): Promise<
-    { readonly delivery: DispatchDelivery; readonly turn: AcceptedUserTurn } | undefined
-  > =>
+  const accepted = (rendered: RenderInboundResult): Promise<AcceptedUserTurnDelivery | undefined> =>
     acceptUserTurn({
       actorId: options.sessionId(),
       dispatch: () => options.dispatch(ACCEPT_TIMEOUT_MS),
@@ -315,12 +312,7 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
     if (!followUp) {
       // A reply Dispatch refused leaves the attempt unsettled, and a follow-up on an unsettled
       // attempt is inserted as the first reply anyway, so the record is kept either way.
-      answered.add(key)
-      // A `Set` yields what was added first, which is the delivery answered longest ago.
-      for (const oldest of answered) {
-        if (answered.size <= ANSWERED_DELIVERIES_MAX) break
-        answered.delete(oldest)
-      }
+      rememberBounded(answered, key, ANSWERED_DELIVERIES_MAX)
     }
     await reply(delivery, { ...result, followUp })
   }

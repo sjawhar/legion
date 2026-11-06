@@ -125,7 +125,7 @@ import {
   mergeInterestSources,
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
-import { acceptUserTurn } from "@legion/pi-shared/accept-user-turn";
+import { type AcceptedUserTurnDelivery, acceptUserTurn } from "@legion/pi-shared/accept-user-turn";
 import {
   AgentStreamPublisher,
   type AgentStreamSettingsState,
@@ -1373,9 +1373,7 @@ export default function envoyExtension(pi: PiApi): void {
   const acceptedUserTurn = (
     rendered: RenderInboundResult,
     acceptedSessionID: string
-  ): Promise<
-    { readonly turn: AcceptedUserTurn; readonly delivery: DispatchDelivery } | undefined
-  > =>
+  ): Promise<AcceptedUserTurnDelivery | undefined> =>
     acceptUserTurn({
       actorId: acceptedSessionID,
       dispatch: () => timedDispatchClient(USER_TURN_ACCEPT_TIMEOUT_MS),

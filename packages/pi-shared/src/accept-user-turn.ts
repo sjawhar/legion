@@ -1,11 +1,7 @@
 import type { DispatchDelivery, RenderInboundResult } from "@legion/envoy-client/delivery";
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http";
-import {
-  type AcceptedUserTurn,
-  handledAttemptKey,
-  isUserTurnCandidate,
-  turnFromAccept,
-} from "./dispatch-user-turn";
+import { z } from "zod";
+import { type AcceptedUserTurn, handledAttemptKey } from "./dispatch-user-turn";
 
 /**
  * The accept step every Envoy plugin takes before a frame becomes a person's own user turn
@@ -69,6 +65,50 @@ export interface UserTurnAcceptOptions {
   readonly actorId: string;
   /** Where the host says why a frame kept its card. */
   readonly warn: (refusal: UserTurnRefusal) => void;
+}
+
+/**
+ * Whether a frame could be a person's direct Send or Aside, worth asking Dispatch to accept: a
+ * Dispatch `message.created` delivery (renderInbound builds a message delivery for no other event)
+ * on no issue, whose actor is a person, in aside or steer, and that names no broadcast. An issue
+ * message and a comment mention keep their envelope, since their flow replies on the issue; a BTW
+ * is a side turn; a broadcast keeps its envelope and its reply counts, and a frame that falsely
+ * claims one only yields the card. It rules frames out and never in: Dispatch decides the rest.
+ *
+ * It is the first of the steps and is not exported, because a host that could take it alone
+ * could take the steps in another order, which is what this module exists to prevent.
+ */
+function isUserTurnCandidate(
+  rendered: RenderInboundResult
+): rendered is RenderInboundResult & { readonly delivery: DispatchDelivery } {
+  const { delivery } = rendered;
+  return (
+    rendered.envelope?.source === "dispatch" &&
+    delivery?.resource === "message" &&
+    delivery.issueKey === null &&
+    delivery.broadcastId === undefined &&
+    rendered.dispatchActor?.kind === "user" &&
+    (delivery.mode === "aside" || delivery.mode === "steer")
+  );
+}
+
+/** The fields of the accept's answer the session injects and tags, and nothing else. */
+const AcceptedDeliverySchema = z.object({
+  message_id: z.string(),
+  body: z.string(),
+  delivery: z.enum(["aside", "steer"]),
+});
+
+/**
+ * The turn Dispatch's 200 from the accept route says to inject: the message's stored body in the
+ * stored attempt's mode, never the frame's text or mode. The answer is JSON off the network, so
+ * one without that shape injects nothing. It is the last of the steps and is not exported, for
+ * the reason `isUserTurnCandidate` is not: only an accept this module made reaches it.
+ */
+function turnFromAccept(accepted: unknown): AcceptedUserTurn | undefined {
+  const parsed = AcceptedDeliverySchema.safeParse(accepted);
+  if (!parsed.success) return undefined;
+  return { body: parsed.data.body, messageId: parsed.data.message_id, mode: parsed.data.delivery };
 }
 
 /**

@@ -270,6 +270,37 @@ test("a card no request read is quoted by the prompt the turn's end submits", as
   expect(submits[0]?.text).toContain("which nobody here typed")
 })
 
+// Which rows of the conversation are this session's own is a question the live view asks by
+// uuid (`../src/agent-stream-claude`): it draws nothing of the row Claude Code writes for a
+// prompt at unread rows, since that prompt quotes rows it has already drawn, and it draws the
+// one `isMeta` row this session appended, since a card handed to a running turn is that row and
+// nothing else. Read off what a row says instead, a card carrying the prompt's words was drawn
+// for nobody and another mod's appended context was drawn as the person's (INFRA-1026 review,
+// round ten).
+test("the rows this session wrote are claimed by their uuids", async () => {
+  const mod = driven({
+    "prompt.submit": (args) => ({ text: args.text }),
+    "session.append": () => ({ uuid: "row-card" }),
+  })
+  mod.observe({ kind: "turn-start", turnId: "turn-1" })
+  mod.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
+
+  await mod.session.show({ content: BLOCKS, text: CARD })
+  expect(mod.session.appendedRow("row-card")).toBe(true)
+  // A row of another mod's append, or of Claude Code's own bookkeeping: this session wrote
+  // neither, and the view draws neither as a person's message.
+  expect(mod.session.appendedRow("row-elsewhere")).toBe(false)
+
+  // No request read the row, so the turn's end submits the prompt quoting it, and the row
+  // Claude Code writes for that prompt is this session's.
+  mod.observe({ kind: "turn-complete", stopReason: "answer", turnId: "turn-1" })
+  await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt at the card")
+  mod.promptRow("row-unread-prompt")
+
+  expect(mod.session.runsUnreadPrompt("row-unread-prompt")).toBe(true)
+  expect(mod.session.runsUnreadPrompt("row-card")).toBe(false)
+})
+
 // One submit per turn end, whatever went unread: a second would sit behind the first for a whole
 // turn (`SUBMIT_TIMEOUT_MS` and the measurement above it, `../src/mod-session`).
 test("a card and a person's message left unread by one turn share the one prompt", async () => {

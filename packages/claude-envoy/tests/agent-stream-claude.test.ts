@@ -67,15 +67,20 @@ interface Harness {
   readonly replay: () => AgentStreamReplay
 }
 
+/** What a test gives the mapper besides the events: the deps the server wires from the session
+ *  it runs beside (`../src/agent-stream-runner`), each absent by default. */
+interface HarnessOptions {
+  readonly tagFor?: (row: string) => string | undefined
+  readonly isPane?: boolean
+  readonly runsCommandRow?: (row: string) => boolean
+  readonly runsUnreadPrompt?: (row: string) => boolean
+  readonly appendedRow?: (row: string) => boolean
+}
+
 /** A publisher a viewer is already watching, with a clock the test moves itself: a real one would
  *  make a step's allocated timestamp unpredictable, and the slot is the timestamp. */
-function harness(
-  startAt = 1_000,
-  tagFor?: (row: string) => string | undefined,
-  isPane = false,
-  runsCommandRow?: (row: string) => boolean,
-): Harness {
-  let clock = startAt
+function harness(options: HarnessOptions = {}): Harness {
+  let clock = 1_000
   const now = (): number => clock
   const published: AgentStreamFrame[] = []
   const publisher = new AgentStreamPublisher({
@@ -83,11 +88,15 @@ function harness(
     publish: (_subject, payload) => published.push(JSON.parse(payload) as AgentStreamFrame),
   })
   const stream = createClaudeAgentStream({
-    isPane,
+    isPane: options.isPane === true,
     now,
     publisher,
-    ...(runsCommandRow === undefined ? {} : { runsCommandRow }),
-    ...(tagFor === undefined ? {} : { tagFor }),
+    ...(options.appendedRow === undefined ? {} : { appendedRow: options.appendedRow }),
+    ...(options.runsCommandRow === undefined ? {} : { runsCommandRow: options.runsCommandRow }),
+    ...(options.runsUnreadPrompt === undefined
+      ? {}
+      : { runsUnreadPrompt: options.runsUnreadPrompt }),
+    ...(options.tagFor === undefined ? {} : { tagFor: options.tagFor }),
   })
   publisher.noteViewer()
   return {
@@ -289,7 +298,13 @@ test("two prompts stamped in one millisecond keep separate slots", () => {
 })
 
 test("a person's message shows as their own, and the prompt pointing at a row it left shows nothing", () => {
-  const live = harness(1_000, (row) => (row === "row-sent" ? "msg-7" : undefined))
+  const live = harness({
+    // The session claims the row of the prompt it submitted at the row that turn never read
+    // (`../src/mod-session`, `runsUnreadPrompt`), which is how this view knows the row from a
+    // person's own prompt.
+    runsUnreadPrompt: (row) => row === "row-nudge",
+    tagFor: (row) => (row === "row-sent" ? "msg-7" : undefined),
+  })
   // What Claude Code puts in front of the text a plugin submitted without `asUser`, measured on
   // 2.1.310. Such a prompt quotes rows of the conversation this view has already drawn, so
   // nothing is drawn for the prompt itself (`unreadRowPrompt` and `hand`, `../src/mod-session`).
@@ -318,22 +333,28 @@ test("a person's message shows as their own, and the prompt pointing at a row it
 // An Envoy card reaches the conversation in one of two shapes, and the view draws each of them
 // once.
 //
-// During a turn it is the row `$.session.append` writes: by the `note` door, with this plugin's
-// origin and `isMeta: true`, both of which the engine sets on a row a plugin appends
-// (`SessionAppendArgs`, `../hooks/claude-mod.d.ts`), reported by the mod itself because Claude
-// Code does not re-enter a mod's own `session.append` hook for it (`../hooks/mod.ts`). Measured
-// on 2.1.310
+// During a turn it is the row `$.session.append` writes: by the `note` door, `isMeta: true`,
+// which the engine sets on a row a plugin appends (`SessionAppendArgs`,
+// `../hooks/claude-mod.d.ts`), reported by the mod itself because Claude Code does not re-enter
+// a mod's own `session.append` hook for it (`../hooks/mod.ts`), under a `plugin` origin with no
+// name - the call's answer carries no origin, so the mod names the kind alone. Measured on
+// 2.1.310
 // (`/legion/scratch/tmp/t-term-uz/config/projects/-legion-scratch-tmp-t-term-uz-cwd/9bdfebc9-06e5-496a-ad93-06105d0af932.jsonl:167`,
 // the HAZEL card delivered while a turn ran). That row is all such a card ever becomes - no
 // prompt of its own carries it - so a view that drew nothing of an `isMeta` row showed the
-// model answering a message the viewer never saw (INFRA-1026 review).
+// model answering a message the viewer never saw (INFRA-1026 review). The session says which
+// `isMeta` row is its own by the uuid its append answered with (`appendedRow`).
 //
 // While the session is idle it is the prompt itself, submitted without `asUser` and stored
 // nowhere else (`../src/mod-session`, `show`), which reaches the view as a `prompt`-door row
 // under Claude Code's own framing. Drawn, because it is the card; the prompt at rows a turn
-// never read is the one such prompt that is not (`isUnreadRowPrompt`, the test above).
+// never read is the one such prompt that is not, and the session claims that row by its uuid
+// too (`runsUnreadPrompt`, the test above).
 test("a card shows in both states, appended during a turn and submitted while idle", () => {
-  const live = harness()
+  const live = harness({
+    appendedRow: (row) => row === "row-card",
+    runsUnreadPrompt: (row) => row === "row-unread-prompt",
+  })
   const appended = "Dispatch message from alice: the migration is approved."
   const submitted = "Dispatch message from bob: the rollback is done."
   live.feed(
@@ -344,7 +365,7 @@ test("a card shows in both states, appended during a turn and submitted while id
         role: "user",
         type: "user",
       },
-      origin: { kind: "plugin", name: "claude-envoy" },
+      origin: { kind: "plugin" },
       uuid: "row-card",
     }),
     appendRow(
@@ -374,6 +395,113 @@ test("a card shows in both states, appended during a turn and submitted while id
     appended,
     `The claude-envoy plugin sent a message:\n${submitted}`,
   ])
+})
+
+// A card's text is whatever Envoy delivered, and a card can carry the words the prompt at
+// unread rows is built from: a review of this plugin's code, or a message quoting one, holds
+// them (`../src/mod-session`, `unreadRowPrompt`). The rule before this one read those words off
+// the row, so such a card reached the model and was drawn for nobody, and the prompt's wording
+// was a contract with this mapper that no test of the wording could keep (INFRA-1026 review,
+// round ten). The session says which prompt row is its own prompt at unread rows by the uuid
+// Claude Code wrote the row under, and claims no other.
+test("a card carrying the unread prompt's own words is drawn for the person", async () => {
+  // A submit resolves at the end of the turn it starts, so nothing answers this one: what the
+  // card is shown on is the row Claude Code writes for the prompt.
+  const submitting = Promise.withResolvers<ModCallResults["prompt.submit"]>()
+  const session = modSession({
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
+        call === "prompt.submit"
+          ? (submitting.promise as unknown as Promise<ModCallResults[N]>)
+          : Promise.reject(new Error(`no answer for ${call}`)),
+    },
+    warn: () => undefined,
+  })
+  // As the server wires the two (`../src/envoy-channel-server`): the session takes each event,
+  // then the view records it, and the view asks the session whose row it is.
+  const live = harness({ runsUnreadPrompt: (row) => session.runsUnreadPrompt(row) })
+  const card = [
+    "Dispatch message from carol: the reviewer asked why a message sent",
+    unreadRowPrompt([{ kind: "card", text: "the deploy is done" }]),
+  ].join("\n\n")
+  const framed = `The claude-envoy plugin sent a message:\n${card}`
+
+  // The session is idle, so the card is the prompt of a turn and reaches the conversation
+  // nowhere else (`../src/mod-session`, `show`).
+  const showing = session.show({ content: [{ text: card, type: "text" }], text: card })
+  const row = appendRow("prompt", [{ text: framed, type: "text" }], {
+    origin: { kind: "plugin", name: "claude-envoy" },
+    uuid: "row-card-prompt",
+  })
+  session.observe(row)
+  live.feed(row)
+  await showing
+
+  expect(session.runsUnreadPrompt("row-card-prompt")).toBe(false)
+  expect(messages(live.replay()).map(textOf)).toEqual([framed])
+})
+
+// Another installed mod writes model-facing context of its own with `$.session.append`, and
+// that row reaches this plugin's hook marked `isMeta` under a `plugin` origin naming that mod:
+// `{"kind":"plugin","name":"spike-mod2"}` and `{"kind":"plugin","name":"spike-mod3p"}` in the
+// 2.1.310 recordings of the issue's spike (`/legion/scratch/tmp/infra-1026-spike/logs`). The
+// rule before this one kept every `isMeta` row whose origin was a plugin's, so that mod's
+// context was drawn as the person's own words (INFRA-1026 review, round ten). This session's
+// own appended rows carry no name at all - the mod reports them out of what the append
+// answered, which has no origin in it (`../hooks/mod.ts`) - so what separates them is the uuid
+// the append answered with, and nothing on the row.
+test("another plugin's meta row is not the person's, and this session's appended card is", async () => {
+  const session = modSession({
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
+        call === "session.append"
+          ? (Promise.resolve({ uuid: "row-card" }) as Promise<ModCallResults[N]>)
+          : Promise.reject(new Error(`no answer for ${call}`)),
+    },
+    warn: () => undefined,
+  })
+  const live = harness({ appendedRow: (row) => session.appendedRow(row) })
+  const feed = (event: ModEvent): void => {
+    session.observe(event)
+    live.feed(event)
+  }
+  const card = "Dispatch message from alice: the migration is approved."
+  const theirs = "<system-reminder>The repository's branch is main.</system-reminder>"
+
+  // A turn is running, so the card is a row of the conversation rather than a prompt.
+  feed({ kind: "turn-start", turnId: "turn-1" })
+  await session.show({ content: [{ text: card, type: "text" }], text: card })
+  // What the mod reports of the row it appended: the `note` door, `isMeta`, and a `plugin`
+  // origin with no name (`../hooks/mod.ts`).
+  feed(
+    appendRow("note", [{ text: card, type: "text" }], {
+      message: {
+        content: [{ text: card, type: "text" }],
+        isMeta: true,
+        role: "user",
+        type: "user",
+      },
+      origin: { kind: "plugin" },
+      uuid: "row-card",
+    }),
+  )
+  // Another mod's own append, as the engine hands it to this mod's hook.
+  feed(
+    appendRow("note", [{ text: theirs, type: "text" }], {
+      message: {
+        content: [{ text: theirs, type: "text" }],
+        isMeta: true,
+        role: "user",
+        type: "user",
+      },
+      origin: { kind: "plugin", name: "spike-mod3p" },
+      uuid: "row-theirs",
+    }),
+  )
+
+  expect(messages(live.replay()).map(textOf)).toEqual([card])
 })
 
 test("a command row keeps the row's own role and a note row an assistant one", () => {
@@ -466,7 +594,7 @@ test("the echo of a command this session ran shows nothing, and one typed at the
     },
     warn: () => undefined,
   })
-  const live = harness(1_000, undefined, false, (origin) => session.runsCommandRow(origin))
+  const live = harness({ runsCommandRow: (row) => session.runsCommandRow(row) })
   // As the runner wires the two (`../src/agent-stream-runner`): the session takes each event,
   // then the view records it.
   const feed = (event: ModEvent): void => {
@@ -514,7 +642,7 @@ test("a command typed at the terminal shows although its origin is the run's own
     },
     warn: () => undefined,
   })
-  const live = harness(1_000, undefined, false, (origin) => session.runsCommandRow(origin))
+  const live = harness({ runsCommandRow: (row) => session.runsCommandRow(row) })
   const feed = (event: ModEvent): void => {
     session.observe(event)
     live.feed(event)
@@ -552,7 +680,7 @@ test("a command typed at the terminal shows while a command this session ran is 
     },
     warn: () => undefined,
   })
-  const live = harness(1_000, undefined, false, (row) => session.runsCommandRow(row))
+  const live = harness({ runsCommandRow: (row) => session.runsCommandRow(row) })
   // As the runner wires the two (`../src/agent-stream-runner`): the session takes each event,
   // then the view records it.
   const feed = (event: ModEvent): void => {
@@ -612,7 +740,7 @@ test("a terminal rename shows the command line alone", () => {
 test("a pane's seeded rename draws nothing", () => {
   const caveat =
     "<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>"
-  const pane = harness(1_000, undefined, true)
+  const pane = harness({ isPane: true })
   pane.feed(
     appendRow("command", [{ text: caveat, type: "text" }], {
       message: {
@@ -656,7 +784,7 @@ test("an unknown content part renders as its type in brackets", () => {
 // "Look at this\n[image]" part it matches no stored message, and the message shows twice
 // (INFRA-1026).
 test("a person's message with a picture keeps the person's text as a part of its own", () => {
-  const live = harness(1_000, () => "m1")
+  const live = harness({ tagFor: () => "m1" })
   live.feed(
     appendRow(
       "prompt",
@@ -686,7 +814,7 @@ test("a person's message with a picture keeps the person's text as a part of its
 // Recorded as it stands, it draws a second user row for the one message the person sent
 // (INFRA-1026).
 test("Claude Code's note of where it put a picture's bytes records nothing", () => {
-  const live = harness(1_000, () => "m1")
+  const live = harness({ tagFor: () => "m1" })
   const source =
     "[Image: source: /legion/scratch/tmp/i3-k5-pane/tmp/claude-1000/-legion-scratch-tmp-i3-k5-pane-cwd/f376a3a9-6e75-461b-806b-22dea4e83ddf/images/1.png]"
   live.feed(
@@ -728,7 +856,7 @@ test("Claude Code's note of where it put a picture's bytes records nothing", () 
 // Recorded as it stands, it draws the tags and Claude Code's note to the model where the person
 // wrote one sentence (INFRA-1026).
 test("a line typed while a turn runs shows the person's words and none of the wrapper", () => {
-  const live = harness(1_000, () => "m1")
+  const live = harness({ tagFor: () => "m1" })
   const typed = "TYPED-AT-TERMINAL-h1: say the word CEDAR when you can."
   const wrapped = [
     "<system-reminder>",

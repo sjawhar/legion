@@ -14,6 +14,7 @@ import { messageFor } from "@legion/envoy-client/errors"
 import { AgentStreamPublisher } from "@legion/pi-shared/agent-stream"
 import type { ModConfigRow, ModEffort, ModEvent } from "../hooks/mod-protocol"
 import { claudeAgentStreamCommands, createClaudeAgentStream } from "./agent-stream-claude"
+import { rememberBounded } from "./bounded-set"
 import type { ChannelForwarderConnection, ChannelTopicSubscription } from "./channel-forwarder"
 import type { ModLink } from "./mod-link"
 
@@ -35,8 +36,8 @@ const AGENT_STREAM_RESUBSCRIBE_MS = 1_000
  * own `session.append` hook for one (`../hooks/mod.ts`); a host that does fire that hook as
  * well would send the row twice, and the view would draw it twice and the session would read
  * the same `command` row twice (`./mod-session`). The two copies are a moment apart, so a few
- * hundred ids is past any window one could cross, and the record is bounded as the session's
- * own are (`CLAIMED_ECHO_ROWS_MAX` there).
+ * hundred ids is past any window one could cross, and the record is bounded (`rememberBounded`)
+ * rather than kept for the session's life.
  */
 const AGENT_STREAM_SEEN_ROWS_MAX = 512
 
@@ -77,6 +78,17 @@ export interface AgentStreamOptions {
    *  sent. The order below is what makes it answer for the row being recorded - `observe`
    *  hands the session each event before this stream records it. */
   readonly runsCommandRow?: (row: string) => boolean
+  /** Whether a row of the `prompt` door is the row Claude Code wrote for this session's prompt
+   *  at the messages a turn never read (`./mod-session`, `runsUnreadPrompt`), asked by the
+   *  row's own id: the view draws nothing of it, since that prompt quotes rows it has already
+   *  drawn. Answered for the row being recorded by the same order `runsCommandRow` relies on. */
+  readonly runsUnreadPrompt?: (row: string) => boolean
+  /** Whether a row is one this session appended into the conversation (`./mod-session`,
+   *  `appendedRow`), asked by the row's own id: the one `isMeta` row the view draws, since the
+   *  card a running turn is handed is such a row and nothing else. Answered for the row being
+   *  recorded by the same order `runsCommandRow` relies on - the append has answered with the
+   *  uuid before Claude Code's own report of that row arrives. */
+  readonly appendedRow?: (row: string) => boolean
 }
 
 export interface AgentStreamRunner {
@@ -120,7 +132,11 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
     isPane: options.isPane === true,
     now,
     publisher,
+    ...(options.appendedRow === undefined ? {} : { appendedRow: options.appendedRow }),
     ...(options.runsCommandRow === undefined ? {} : { runsCommandRow: options.runsCommandRow }),
+    ...(options.runsUnreadPrompt === undefined
+      ? {}
+      : { runsUnreadPrompt: options.runsUnreadPrompt }),
     ...(options.tagFor === undefined ? {} : { tagFor: options.tagFor }),
   })
   /** The id both subjects name now; it moves with the mod's own id after a `/clear`. */
@@ -149,11 +165,7 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
    *  link passes here, which is the one place both readers below are behind. */
   const readTwice = (uuid: string): boolean => {
     if (seenRows.has(uuid)) return true
-    seenRows.add(uuid)
-    if (seenRows.size > AGENT_STREAM_SEEN_ROWS_MAX) {
-      const oldest = seenRows.values().next().value
-      if (oldest !== undefined) seenRows.delete(oldest)
-    }
+    rememberBounded(seenRows, uuid, AGENT_STREAM_SEEN_ROWS_MAX)
     return false
   }
 

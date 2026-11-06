@@ -337,15 +337,19 @@ above says how to run it).
   the `note` door under a `plugin` origin, and the server ignores an `append` event whose row
   id it has already read (`AGENT_STREAM_SEEN_ROWS_MAX`, `src/agent-stream-runner.ts`) in case a
   host fires the hook as well.
-- Draw a row Claude Code marks `isMeta` only where this plugin wrote it (`origin.kind`
-  `plugin`): the engine marks every row `$.session.append` writes, so a card delivered during a
-  turn — which is that row and nothing else — is the one `isMeta` row the page must show, while
-  a terminal `/rename`'s `<system-reminder>` (`origin.kind` `engine`) stays model-facing XML
-  under the person's name and is drawn nothing for, as the `<local-command-caveat>` row of a
-  run is by the bookkeeping rule of the `command` door. Of the two prompts this plugin submits
+- Claim every row of the conversation this session wrote by its uuid, never by what the row says
+  or whose origin it carries (`src/mod-session.ts`, `appendedRow`, `runsUnreadPrompt`,
+  `runsCommandRow`). Draw a row Claude Code marks `isMeta` only where this session appended it:
+  the engine marks every row `$.session.append` writes, so a card delivered during a turn —
+  which is that row and nothing else — is the one `isMeta` row the page must show, while a
+  terminal `/rename`'s `<system-reminder>` and the `<local-command-caveat>` row of a run stay
+  model-facing and are drawn nothing for. `origin` cannot stand in for the claim: the mod
+  reports its own appended rows under a `plugin` origin with no name, and another installed
+  mod's appends reach this mod's hook under that mod's own name, so a rule on `origin.kind`
+  drew another mod's context as the person's words. Of the two prompts this plugin submits
   without `asUser`, the card an idle session is handed is drawn, because it is the card, and
-  the prompt at unread rows is not, because it quotes rows the view has already drawn
-  (`isUnreadRowPrompt`).
+  the prompt at unread rows is not, because it quotes rows the view has already drawn — told
+  apart by the claimed uuid, since a card may quote that prompt's own words.
 - Keep the mod's socket where only its own user can create anything: `resolveModSocketPath`
   (`hooks/mod-protocol.ts`) puts `claude-envoy/ce-<hash of the session id>.sock` under
   `XDG_RUNTIME_DIR`, else Claude Code's own configuration directory (`CLAUDE_CONFIG_DIR`, else
