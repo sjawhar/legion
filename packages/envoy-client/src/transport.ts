@@ -2,6 +2,7 @@ import {
   DELIVERY_DUPLICATE_WINDOW_MS,
   type Envelope,
   EnvelopeSchema,
+  type ExpectsReply,
   MINTED_DEDUPE_KEY_PATTERN,
 } from "@legion/contracts";
 import { z } from "zod";
@@ -316,7 +317,7 @@ export type MessageMetadataInput = {
   readonly inReplyTo?: string;
   readonly supersedes?: string;
   readonly urgency?: "low" | "med" | "high" | "blocking";
-  readonly expectsReply?: "none" | "optional" | "required";
+  readonly expectsReply?: ExpectsReply;
   readonly expiresAt?: number;
 };
 

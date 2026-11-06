@@ -1568,6 +1568,30 @@ describe("renderInbound non-dispatch envelopes", () => {
     );
   });
 
+  // A card prints one vocabulary. The envelope carries the JSON literal `false` for "no reply
+  // wanted", while a replayed frame and a session on an older plugin build still carry the
+  // string "none" for the same thing. Both read as the one line, and neither leaves the field
+  // unread and listed as unrecognised.
+  test("renders either spelling of no reply as one expects_reply: false line", () => {
+    const card = (expects_reply: unknown): string =>
+      renderInbound(
+        JSON.stringify({ ...envelope({ event_id: "agent-no-reply" }), expects_reply }),
+        reader
+      ).content;
+
+    expect(card(false)).toBe(
+      [
+        "envoy:",
+        "  from: agent",
+        '  at: "1970-01-01T00:00:00Z"',
+        "  id: agent-no-reply",
+        "  expects_reply: false",
+        "  summary: message",
+      ].join("\n")
+    );
+    expect(card("none")).toBe(card(false));
+  });
+
   test("renders when a message forwarded from a role's kept lane was kept", () => {
     // The listener could not deliver this when it was sent, so it kept it until this session
     // claimed the role. The card says when, so the holder can judge how long it waited.
