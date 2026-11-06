@@ -14,6 +14,8 @@ import {
 } from "../src/legion-claim"
 
 const SESSION = "0b9c2f4e-2d3a-4c55-9a1e-6f7d8e9a0b1c"
+/** The channel server's client instance, which the pane's claim names as its process. */
+const INSTANCE = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
 const scratch: string[] = []
 afterEach(async () => {
   for (const dir of scratch.splice(0)) await rm(dir, { recursive: true, force: true })
@@ -118,6 +120,7 @@ test("registers once the transcript exists, claims the claim token's role soft, 
     pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    clientInstanceID: INSTANCE,
     client: {
       setRole: async (input): Promise<SetRoleResult> => {
         setRoles.push(input)
@@ -169,8 +172,15 @@ test("registers once the transcript exists, claims the claim token's role soft, 
     },
     { path: "/legion/v1/claims/ready", body: ready },
   ])
+  // Soft, and naming this process: the listener holds the claim for this channel server alone,
+  // so a second `claude` on the same session id neither takes nor releases it.
   expect(setRoles).toEqual([
-    { sessionID: SESSION, role: String(registered["claimToken"]), soft: true },
+    {
+      sessionID: SESSION,
+      role: String(registered["claimToken"]),
+      soft: true,
+      clientInstanceID: INSTANCE,
+    },
   ])
   expect(remembered).toEqual([String(registered["claimToken"])])
   expect(claim.capability()).toEqual({
@@ -207,6 +217,7 @@ test("a registration the daemon refuses logs the refusal, stops the pane, and cl
     pane: { daemonUrl: "http://daemon.test", bootToken: "spent", configDir, launcherSaves: false },
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    clientInstanceID: INSTANCE,
     client: {
       setRole: async (input) => {
         setRoles.push(input)
@@ -239,6 +250,7 @@ test("a role another live session holds stops the pane after the registration, l
     pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    clientInstanceID: INSTANCE,
     client: { setRole: async () => ({ claimed: false, holder: "ses_other" }) },
     session: { rememberRole: async () => undefined, onRoleRegained: () => undefined },
     signal: new AbortController().signal,
@@ -268,6 +280,7 @@ test("a registration the daemon failed (5xx) is logged and leaves the pane to th
     pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    clientInstanceID: INSTANCE,
     client: { setRole: async () => ({ claimed: false, holder: "x" }) },
     session: { rememberRole: async () => undefined, onRoleRegained: () => undefined },
     signal: new AbortController().signal,
@@ -312,6 +325,7 @@ async function bootOn(env: Record<string, string>): Promise<{
     pane,
     sessionID: SESSION,
     daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    clientInstanceID: INSTANCE,
     client: {
       setRole: async (): Promise<SetRoleResult> => ({
         claimed: true,

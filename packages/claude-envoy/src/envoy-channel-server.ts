@@ -1029,8 +1029,15 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     if (relay?.sessionID === identity.id) relay.delivery.setFollowed(registeredTopics())
     return {
       dropping,
+      // The release names this process, so the listener frees the role claim of this process
+      // alone where one of these topics is a role's: a second process that resumed this session
+      // id keeps the role it holds.
       unsubscribing: serialized(() =>
-        options.client.unsubscribe({ sessionID: identity.id, topics }),
+        options.client.unsubscribe({
+          sessionID: identity.id,
+          topics,
+          clientInstanceID: options.clientInstanceID,
+        }),
       ),
     }
   }
@@ -1115,6 +1122,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * carries this process's own client instance id, or when either side carries none; a
    * predecessor still live under another client instance keeps the role.
    *
+   * A record another process wrote is pressed only while this process holds no role. One state
+   * directory is read by two processes whenever a second `claude` resumes a live session's id,
+   * and a record is keyed by session id alone, so the record found here can be the other
+   * process's claim rather than a predecessor of this one's (dispatch://INFRA-783). With no role
+   * of its own this process has nothing to lose by asking, and the listener decides between the
+   * two; holding one, it leaves that record where its writer can still use it. A record written
+   * before the writer was named is nobody's in particular and is pressed as it always was.
+   *
    * Which is why a refusal naming the predecessor itself keeps the record: it belongs to that
    * live holder, another process sharing this state directory, and deleting it would cost that
    * process its only way back to the role. A refusal naming any other session says the
@@ -1125,11 +1140,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID)
     const persisted = await readPersistedRole(previousFile)
     if (persisted === undefined) return
+    const writer = persisted.client_instance_id
+    if (writer !== undefined && writer !== options.clientInstanceID && heldRole !== undefined) {
+      return
+    }
     const claim = await options.client.setRole({
       sessionID: identity.id,
       role: persisted.role,
       soft: true,
       previousSessionID: persisted.session_id,
+      clientInstanceID: options.clientInstanceID,
     })
     if (!claim.claimed) {
       if (claim.holder !== persisted.session_id) await rm(previousFile, { force: true })
@@ -1138,7 +1158,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     heldRole = persisted.role
     const currentFile = roleStateFile(options.stateDirectory, identity.id)
     if (previousFile !== currentFile) await rm(previousFile, { force: true })
-    await writePersistedRole(currentFile, { session_id: identity.id, role: persisted.role })
+    await writePersistedRole(currentFile, {
+      session_id: identity.id,
+      role: persisted.role,
+      client_instance_id: options.clientInstanceID,
+    })
   }
 
   let regained: RoleRegainHook | undefined
@@ -1185,15 +1209,32 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
   }
 
-  /** `afterOutage`: the last tick's registration failed, so a holder the listener still names
-   * may have been answered "no holder" meanwhile. */
+  /**
+   * Re-establishes this session as the live holder of the role it holds, on every heartbeat.
+   * `afterOutage`: the last tick's registration failed, so a holder the listener still names may
+   * have been answered "no holder" meanwhile.
+   *
+   * The lookup confirms the role only when it names this session *and* this process: a claim
+   * standing under this very session id that another process made is not this one's to renew,
+   * and reading it as confirmation is how a lane kept heartbeating while a continuation's claim
+   * held the role and then lapsed (dispatch://INFRA-783). Anything else is claimed again, soft.
+   *
+   * A refusal naming a different session ends the role here: that session holds it, and this
+   * one's record is the only thing that would claim otherwise, so it goes. A refusal naming this
+   * session is the standing claim of another process under this id, which the listener grants
+   * the moment that process stops renewing it; the role and its record stay, and the next
+   * heartbeat asks again. The record's mtime is refreshed as it is on a confirmed holder, so the
+   * age sweep never expires a record this process is still pressing a claim for.
+   */
   const reassertRole = async (afterOutage: boolean): Promise<void> => {
     if (heldRole === undefined) return
     const role = heldRole
-    const holder = await options.client
-      .getRole(role)
-      .then((info) => info.holder, undefinedOnNotFound)
-    if (holder === identity.id) {
+    const holding = await options.client.getRole(role).catch(undefinedOnNotFound)
+    const holdingProcess = holding?.client_instance_id
+    if (
+      holding?.holder === identity.id &&
+      (holdingProcess === undefined || holdingProcess === options.clientInstanceID)
+    ) {
       await refreshRoleRecord()
       if (afterOutage) fireRegained(role, "reregistered")
       return
@@ -1202,10 +1243,15 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       sessionID: identity.id,
       role,
       soft: true,
+      clientInstanceID: options.clientInstanceID,
     })
     if (!result.claimed) {
-      heldRole = undefined
-      await rm(roleStateFile(options.stateDirectory, identity.id), { force: true })
+      if (result.holder !== identity.id) {
+        heldRole = undefined
+        await rm(roleStateFile(options.stateDirectory, identity.id), { force: true })
+        return
+      }
+      await refreshRoleRecord()
       return
     }
     fireRegained(role, "reclaimed")
@@ -1388,7 +1434,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic),
     )
     if (drifted.length === 0) return
-    await options.client.unsubscribe({ sessionID: identity.id, topics: drifted })
+    await options.client.unsubscribe({
+      sessionID: identity.id,
+      topics: drifted,
+      clientInstanceID: options.clientInstanceID,
+    })
   }
 
   // One tick at a time, and at most one pending behind it. `serialized` already
@@ -1635,9 +1685,12 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     },
     async rememberRole(role) {
       heldRole = role
+      // The record names this process, so a second one reading the same state directory — a
+      // `claude` that resumed this session id — tells its own record from this one's.
       await writePersistedRole(roleStateFile(options.stateDirectory, identity.id), {
         session_id: identity.id,
         role,
+        client_instance_id: options.clientInstanceID,
       })
     },
     async shutdown() {
@@ -1679,6 +1732,9 @@ export interface ChannelToolRuntime {
   readonly identity: SessionIdentity
   readonly client: EnvoyClient
   readonly session: ChannelSession
+  /** The process the tools act as: the id every registration and every claim of this channel
+   *  server carries (`ChannelSessionOptions.clientInstanceID`). */
+  readonly clientInstanceID: string
 }
 export async function executeEnvoyTool(
   runtime: ChannelToolRuntime,
@@ -1766,7 +1822,14 @@ export async function executeEnvoyTool(
     }
     case EnvoyToolOperation.setRole: {
       const args = parseArguments(spec, input)
-      const result = await runtime.client.setRole({ sessionID: identity.id, role: args.role })
+      // The claim names this process, as every claim this server makes does: the listener
+      // records it as the role's holder, so a second process on this session id cannot be
+      // mistaken for the one holding the role.
+      const result = await runtime.client.setRole({
+        sessionID: identity.id,
+        role: args.role,
+        clientInstanceID: runtime.clientInstanceID,
+      })
       if (!result.claimed) throw new Error(`role ${args.role} is held by ${result.holder}`)
       await runtime.session.rememberRole(args.role)
       return result.interest
@@ -2084,13 +2147,14 @@ export async function runEnvoyChannelServer(): Promise<void> {
         ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
       })
     }
-    runtime = { identity, client, session }
+    runtime = { identity, client, session, clientInstanceID }
     if (pane !== undefined && daemon !== undefined && !stopping) {
       claim = startLegionClaim({
         pane,
         sessionID: identity.id,
         daemon,
         client,
+        clientInstanceID,
         session,
         signal: booting.signal,
         log: logLegion,

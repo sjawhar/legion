@@ -154,6 +154,9 @@ export function startLegionClaim(deps: {
   readonly sessionID: string
   readonly daemon: LegionDaemonClient
   readonly client: Pick<EnvoyClient, "setRole">
+  /** The channel server's own client instance: the id its registrations carry, which this
+   *  claim names as the process holding the role. */
+  readonly clientInstanceID: string
   readonly session: Pick<ChannelSession, "rememberRole" | "onRoleRegained">
   readonly signal: AbortSignal
   /** Writes one line to the pane's log, the server's stderr. */
@@ -188,7 +191,15 @@ export function startLegionClaim(deps: {
         capability = registered
       },
       claimRole: async (role) => {
-        const claimed = await deps.client.setRole({ sessionID, role, soft: true })
+        // Soft, so a role another live session holds is left with it, and naming this process,
+        // so the listener records the claim as this process's: a second `claude` that resumed
+        // this session id can then neither be taken for the holder nor release what it holds.
+        const claimed = await deps.client.setRole({
+          sessionID,
+          role,
+          soft: true,
+          clientInstanceID: deps.clientInstanceID,
+        })
         if (!claimed.claimed) {
           throw new Error(`Envoy role ${role} is held by live session ${claimed.holder}`)
         }

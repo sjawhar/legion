@@ -33,8 +33,9 @@ function sessionWith(followed: string[]): ChannelSession {
     shutdown: async () => undefined,
   }
 }
-
 const identity = new SessionIdentity("ses_claude", process.cwd())
+/** The client instance of the channel-server process the tools act for. */
+const INSTANCE = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
 
 test("declares exactly the shared Envoy tools, the bounded inbox included", () => {
   const definitions = channelToolDefinitions()
@@ -64,7 +65,12 @@ test("sends Envoy messages through the shared transport", async () => {
     },
   })
   const followed: string[] = []
-  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith(followed) }
+  const runtime: ChannelToolRuntime = {
+    identity,
+    client,
+    session: sessionWith(followed),
+    clientInstanceID: INSTANCE,
+  }
 
   const result = await executeEnvoyTool(runtime, "envoy_send", {
     session_id: "ses_receiver",
@@ -110,7 +116,12 @@ test("lists the unresponsive sessions too, each with its state and last_seen", a
       ])
     },
   })
-  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+  const runtime: ChannelToolRuntime = {
+    identity,
+    client,
+    session: sessionWith([]),
+    clientInstanceID: INSTANCE,
+  }
 
   const result = await executeEnvoyTool(runtime, "envoy_sessions", {})
 
@@ -150,7 +161,12 @@ test("renders a kept role publish as a success that says no session holds the ro
       )
     },
   })
-  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+  const runtime: ChannelToolRuntime = {
+    identity,
+    client,
+    session: sessionWith([]),
+    clientInstanceID: INSTANCE,
+  }
 
   const result = (await executeEnvoyTool(runtime, "envoy_publish", {
     topic: "notifications.role.legion-architect",
@@ -162,6 +178,39 @@ test("renders a kept role publish as a success that says no session holds the ro
   )
   expect(result.kept).toBe(true)
   expect(result.kept_reason).toBe("unclaimed")
+})
+
+test("the role a tool claims names the process claiming it on the wire", async () => {
+  // The listener records the claim's process as the role's holder, and frees a claim only for
+  // the process that made it, so a role this `claude` takes cannot be released or taken by a
+  // second one that resumed its session id (dispatch://INFRA-783).
+  let body = ""
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (_request, init) => {
+      body = String(init?.body)
+      return Response.json({
+        session_id: "ses_claude",
+        machine_id: "devbox",
+        dir: "/work",
+        topics: ["notifications.role.reviewer"],
+      })
+    },
+  })
+  const runtime: ChannelToolRuntime = {
+    identity,
+    client,
+    session: sessionWith([]),
+    clientInstanceID: INSTANCE,
+  }
+
+  await executeEnvoyTool(runtime, "envoy_role_set", { role: "reviewer" })
+
+  expect(JSON.parse(body)).toEqual({
+    session_id: "ses_claude",
+    role: "reviewer",
+    client_instance_id: INSTANCE,
+  })
 })
 
 test("a send that is not confirmed names its key, and a resend under that key sends it again", async () => {
@@ -187,7 +236,12 @@ test("a send that is not confirmed names its key, and a resend under that key se
       })
     },
   })
-  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+  const runtime: ChannelToolRuntime = {
+    identity,
+    client,
+    session: sessionWith([]),
+    clientInstanceID: INSTANCE,
+  }
 
   const failed = await executeEnvoyTool(runtime, "envoy_send", {
     session_id: "ses_receiver",
@@ -250,6 +304,7 @@ test("replies in a Slack thread with slack_post, with the token the broker grant
       fetch: async () => Response.json({}),
     }),
     session: sessionWith([]),
+    clientInstanceID: INSTANCE,
   }
 
   try {
@@ -295,6 +350,7 @@ test("a dispatch_* call is an unknown tool even with Dispatch configured, and re
     identity,
     client: {} as EnvoyClient,
     session: sessionWith([]),
+    clientInstanceID: INSTANCE,
   }
 
   try {
@@ -322,6 +378,7 @@ test("envoy_list reports the union of live NATS subscriptions and registry inter
     identity,
     client,
     session: sessionWith(["notifications.dispatch.issue.DSP-3.>"]),
+    clientInstanceID: INSTANCE,
   }
 
   const result = await executeEnvoyTool(runtime, "envoy_list", {})
@@ -370,7 +427,12 @@ test("envoy_sessions filters by the machine a session runs on and by the listene
     baseUrl: "http://envoy.test",
     fetch: async () => Response.json(sessions),
   })
-  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+  const runtime: ChannelToolRuntime = {
+    identity,
+    client,
+    session: sessionWith([]),
+    clientInstanceID: INSTANCE,
+  }
   const listed = async (machine: string) =>
     (
       (await executeEnvoyTool(runtime, "envoy_sessions", { machine })) as { session_id: string }[]
