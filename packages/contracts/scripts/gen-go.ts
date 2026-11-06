@@ -56,6 +56,27 @@ import {
   SESSION_HEARTBEAT_MS,
   SESSION_LIVE_WINDOW_MS,
 } from "../src/envoy-session";
+import {
+  GOING_ANSWER_WORD_MAX,
+  GOING_ERROR_ANSWER_DID_NOT_ARRIVE,
+  GOING_ERROR_ANSWER_FAILED,
+  GOING_ERROR_NO_MODEL_CONFIGURED,
+  GOING_EVENT_CHANGED,
+  GOING_EVENT_CUT,
+  GOING_EVENT_END,
+  GOING_EVENT_ERROR,
+  GOING_EVENT_ITEM,
+  GOING_EVENT_NONE,
+  GOING_EVENT_TEXT,
+  GOING_HIT_RUNE_MAX,
+  GOING_MODEL_CALL_MAX,
+  GOING_REQUEST_RUNE_MAX,
+  GOING_REQUEST_TTL_MS,
+  GOING_RUN_MS,
+  GOING_SEARCH_MAX,
+  GOING_SEARCH_TOOL,
+  GOING_WORDS_MAX,
+} from "../src/going";
 import { SUBJECT_MAX_BYTES, SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -187,6 +208,74 @@ const SearchKindDepth = ${SEARCH_KIND_DEPTH}
 // Generated from SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE in packages/contracts so the string
 // Dispatch writes and the string search-answer.ts compares against cannot drift apart.
 const SearchDegradedEmbedderUnavailable = ${JSON.stringify(SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE)}
+
+// The names of the frames one answer's stream carries: text as the answer arrives, item for each
+// thing the answer cites, cut when the answer reached its word cap, changed when the server did
+// not pass the answer on as the model wrote it, none when the model produced no answer text at
+// all, and end and error, the two that end a stream. A text frame carries plain text, every
+// ASCII punctuation byte of it backslash-escaped, which closes markdown's own constructs, so a
+// renderer makes no link, image, tag or code span of any of it; an escape closes none of GFM's
+// literal autolinks, so a word a renderer would link on its own is dropped from the answer
+// rather than sent; and an item frame is where the links of an answer live, each carrying a
+// cited item's own href.
+// Generated from GOING_EVENT_TEXT, GOING_EVENT_ITEM, GOING_EVENT_CUT,
+// GOING_EVENT_CHANGED, GOING_EVENT_NONE, GOING_EVENT_END and GOING_EVENT_ERROR in
+// packages/contracts so the frames the server writes and the frames the page reads cannot drift
+// apart.
+const GoingEventText = ${JSON.stringify(GOING_EVENT_TEXT)}
+const GoingEventItem = ${JSON.stringify(GOING_EVENT_ITEM)}
+const GoingEventCut = ${JSON.stringify(GOING_EVENT_CUT)}
+const GoingEventChanged = ${JSON.stringify(GOING_EVENT_CHANGED)}
+const GoingEventNone = ${JSON.stringify(GOING_EVENT_NONE)}
+const GoingEventEnd = ${JSON.stringify(GOING_EVENT_END)}
+const GoingEventError = ${JSON.stringify(GOING_EVENT_ERROR)}
+
+// The codes an error frame carries: the run reached its window without an answer, the deployment
+// has no text model configured, and the model service refused or failed. Generated from
+// GOING_ERROR_ANSWER_DID_NOT_ARRIVE, GOING_ERROR_NO_MODEL_CONFIGURED and
+// GOING_ERROR_ANSWER_FAILED in packages/contracts so the code the server writes and the wording
+// the page keys on it cannot drift apart.
+const GoingErrorAnswerDidNotArrive = ${JSON.stringify(GOING_ERROR_ANSWER_DID_NOT_ARRIVE)}
+const GoingErrorNoModelConfigured = ${JSON.stringify(GOING_ERROR_NO_MODEL_CONFIGURED)}
+const GoingErrorAnswerFailed = ${JSON.stringify(GOING_ERROR_ANSWER_FAILED)}
+
+// GoingSearchTool is the name of the one tool the model is given, another search of Dispatch.
+// Generated from GOING_SEARCH_TOOL in packages/contracts so the name the server declares and the
+// name the page explains cannot drift apart.
+const GoingSearchTool = ${JSON.stringify(GOING_SEARCH_TOOL)}
+
+// GoingAnswerWordMax is the most words an answer carries, past which the stream cuts it and says
+// so. Generated from GOING_ANSWER_WORD_MAX in packages/contracts so the server's cut and the
+// page's account of it cannot drift apart.
+const GoingAnswerWordMax = ${GOING_ANSWER_WORD_MAX}
+
+// GoingHitRuneMax is the most of one hit's own text the model is shown, and GoingRequestRuneMax
+// the most hit text one run shows it in total; a hit past the total is still named to the model
+// with no body, and stays something the answer may cite.
+// Generated from GOING_HIT_RUNE_MAX and GOING_REQUEST_RUNE_MAX in packages/contracts so the
+// server's bounds and the page's account of them cannot drift apart.
+const GoingHitRuneMax = ${GOING_HIT_RUNE_MAX}
+const GoingRequestRuneMax = ${GOING_REQUEST_RUNE_MAX}
+
+// GoingSearchMax is the most searches one run makes, the server's own seeding search counting as
+// the first, and GoingModelCallMax the most calls it makes to the model, which bounds a model
+// that keeps searching instead of answering. Generated from GOING_SEARCH_MAX and
+// GOING_MODEL_CALL_MAX in packages/contracts so the server's bounds and the page's account of
+// them cannot drift apart.
+const GoingSearchMax = ${GOING_SEARCH_MAX}
+const GoingModelCallMax = ${GOING_MODEL_CALL_MAX}
+
+// GoingWordsMax is the longest question the route accepts, in UTF-16 units. Generated from
+// GOING_WORDS_MAX in packages/contracts so the server's refusal and the page's own cannot drift
+// apart.
+const GoingWordsMax = ${GOING_WORDS_MAX}
+
+// GoingRunWindow is how long one run may take, measured from the POST that started it, and
+// GoingRequestTTL how long a run's rows are kept, so a reader that reconnects still finds its
+// answer. Generated from GOING_RUN_MS and GOING_REQUEST_TTL_MS in packages/contracts so the
+// server's windows and the page's account of them cannot drift apart.
+const GoingRunWindow = ${GOING_RUN_MS} * time.Millisecond
+const GoingRequestTTL = ${GOING_REQUEST_TTL_MS} * time.Millisecond
 
 // MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
 // MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.

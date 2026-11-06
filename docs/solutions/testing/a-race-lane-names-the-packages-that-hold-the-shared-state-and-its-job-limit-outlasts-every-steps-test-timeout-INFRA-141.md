@@ -55,7 +55,8 @@ That note says to add the packages that gain goroutines. Three points it does no
   to 5 for the second step's race compile, and 30 for the second step. The lane is now one job per
   package group, each with one `-race` step of its own: `envoy-go-race` (delivery, the Dispatch
   store, the bus, the listener, the registry store, the session cache and kvwatch) and
-  `envoy-go-race-api` at `-timeout 30m` with `timeout-minutes: 45`, and `envoy-go-race-pmdoc` at
-  `-timeout 40m` with `timeout-minutes: 50`, because that package measured 1023.519 s on a runner
-  of its own and 1210 s while it contended. The document service has a race job of its own beside
-  them, `envoy-go-race-docs`, at `-timeout 60m` with `timeout-minutes: 70`.
+  `envoy-go-race-api` at `-timeout 30m` with `timeout-minutes: 45`. A pmdoc race job stood beside
+  them at `-timeout 40m` with `timeout-minutes: 50`, because that package measured 1023.519 s on
+  a runner of its own and 1210 s while it contended; INFRA-1408 removed it, and pmdoc now runs
+  plain in `envoy-go`. The document service has a race job of its own beside them,
+  `envoy-go-race-docs`, at `-timeout 60m` with `timeout-minutes: 70`.

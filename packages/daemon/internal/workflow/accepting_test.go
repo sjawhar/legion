@@ -238,22 +238,18 @@ func seedAcceptingChild(t *testing.T, pool *pgxpool.Pool, key, parent string, at
 	seedIssue(t, pool, record.Issue{Key: key, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: at, Generation: 1, Status: status, Rank: "U"})
 }
 
-// Nothing beneath an issue holds its acceptance: the architect accepts the issue's own reviewed
-// head, and the sign-off moves it to retro whether the issues under it, however deep, still run,
-// are done or are parked. The tree's order is kept at the close, where a root whose pull request
-// merged waits in awaiting_merge for the rest of its tree (closeMerged).
-func TestSignOffIsAcceptedWhateverIsBeneathIt(t *testing.T) {
+// A sign-off of an issue with nothing beneath it is taken whatever the rest of the tree does: a
+// child done, a child parked, a sibling elsewhere. The rule that nothing beneath an issue held
+// its acceptance is gone (dispatch://INFRA-980, "A parent is accepted after its children"): an
+// issue beneath that is still in the workflow now refuses the sign-off
+// (TestSignOffIsRefusedWhileAnIssueBeneathIsInTheWorkflow), because a parent's head proves its
+// children's merged work and must carry their merges.
+func TestSignOffIsAcceptedWhenNothingBeneathIsInTheWorkflow(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		seed func(t *testing.T, pool *pgxpool.Pool)
 	}{
-		{"a child still running", func(t *testing.T, pool *pgxpool.Pool) {
-			seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", phase.Implementing, "in_progress")
-		}},
-		{"a grandchild still running under a closed child", func(t *testing.T, pool *pgxpool.Pool) {
-			seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", phase.Done, "done")
-			seedAcceptingChild(t, pool, "LEGION-210", "LEGION-209", phase.Testing, "testing")
-		}},
+		{"nothing beneath at all", func(*testing.T, *pgxpool.Pool) {}},
 		{"a child done", func(t *testing.T, pool *pgxpool.Pool) {
 			seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", phase.Done, "done")
 		}},
