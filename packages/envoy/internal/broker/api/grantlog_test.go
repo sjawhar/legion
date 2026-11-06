@@ -408,7 +408,7 @@ func TestGrantLog(t *testing.T) {
 		}
 	})
 
-	t.Run("a limit above the cap is answered with the cap", func(t *testing.T) {
+	t.Run("a limit above the cap, and one of zero, are both answered with the cap", func(t *testing.T) {
 		// A thousand and two hundred rows of their own, in a period of their own, so that the
 		// cap is read off a real answer: the page the route sends back is counted, which is the
 		// only way the caller can see the cap at all.
@@ -431,6 +431,15 @@ func TestGrantLog(t *testing.T) {
 		second := decode[wireGrantLog](t, body)
 		if status != http.StatusOK || len(second.Events) != 200 {
 			t.Fatalf("the second page = %d, %d events, want 200 and the period's remaining 200 rows", status, len(second.Events))
+		}
+		// Zero names no page at all, which store.ReadGrantLog refuses; the route reads it as
+		// naming nothing and answers the same cap, so a caller sending it is never refused.
+		params.Del("after")
+		params.Set("limit", "0")
+		status, body = ts.grantLog(t, reviewToken, params)
+		zero := decode[wireGrantLog](t, body)
+		if status != http.StatusOK || len(zero.Events) != 1000 {
+			t.Fatalf("limit=0 = %d with %d events, want 200 and the cap's 1000", status, len(zero.Events))
 		}
 	})
 
@@ -581,7 +590,7 @@ func (e *explainTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data p
 
 func (e *explainTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
-// grantLogPage is the page the route answers with (handlers_grantlog.go's grantLogDefaultLimit),
+// grantLogPage is the page the route answers with (handlers_grantlog.go's grantLogLimit),
 // so the pages measured below are the pages a review really reads.
 const grantLogPage = 1000
 

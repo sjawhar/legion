@@ -1057,10 +1057,17 @@ const PolicyDeniedActor = "broker:policy"
 // approver, so it leaves the approval to the record's approver; Values refuses a grant of the last
 // two at its first read. The one deny it answers for is a name the requesters tag no longer lists
 // this session for (*policyDenial): no owner change could put it back in the session's reach, so
-// ApplyDecision records the request denied rather than leaving a card no one can answer.
-// A withheld name the policy denies or no longer serves is refused instead:
-// only its owner may approve it for the session, and no owner can be read while it is out of the
-// policy, nor approves it while a service owns it (the one way the policy denies a withheld name).
+// ApplyDecision records the request denied rather than leaving a card no one can answer. That
+// deny is read in a pass of its own over every name, ahead of every refusal below, because a
+// request holding such a name has to be answered however its other names read: in one pass the
+// first name that cannot be admitted wins, and both of the refusals below can come first — a
+// name that is withheld as well as dropped from the list, and, in a request of several names, an
+// earlier name the deciding login may not approve — each leaving on the approver's page a card
+// that no person can ever act on, until it expires.
+// A withheld name the policy denies for any other reason, or no longer serves, is refused
+// instead: only its owner may approve it for the session, and no owner can be read while it is
+// out of the policy, nor approves it while a service owns it (the one way left, once that pass
+// has answered the list's own deny, for the policy to deny a withheld name).
 // Admitted, such an approval would release the name once it returns with the tags it had, since
 // that brings back the policy version the request was made under and Values re-checks the grant
 // (stillAllowed) only when the version has moved. A secret whose max-grant the current policy sets
@@ -1075,6 +1082,18 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 	for _, g := range names {
 		d, err := set.Evaluate(g.name, requester)
 		if errors.Is(err, policy.ErrUnknownSecret) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if d.Outcome == policy.Deny && d.Reason == policy.ReasonRequesterNotListed {
+			return &policyDenial{name: g.name}
+		}
+	}
+	for _, g := range names {
+		d, err := set.Evaluate(g.name, requester)
+		if errors.Is(err, policy.ErrUnknownSecret) {
 			if slices.Contains(requester.Withheld, g.name) {
 				return fmt.Errorf("%w: %s is withheld from this session and the current policy does not serve it, so no one may approve it now", record.ErrNotApprover, g.name)
 			}
@@ -1085,9 +1104,6 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 		}
 		if d.Outcome == policy.Deny && slices.Contains(requester.Withheld, g.name) {
 			return fmt.Errorf("%w: %s is withheld from this session and the current policy denies it, so no one may approve it now", record.ErrNotApprover, g.name)
-		}
-		if d.Outcome == policy.Deny && d.Reason == policy.ReasonRequesterNotListed {
-			return &policyDenial{name: g.name}
 		}
 		if d.Outcome == policy.Approval && !record.MayDecide(record.KindAgentSecret, d.Approver, "", login) {
 			return fmt.Errorf("%w: the current policy has %s approve %s", record.ErrNotApprover, d.Approver, g.name)
@@ -1339,6 +1355,14 @@ func lockLiveEnrollment(ctx context.Context, tx pgx.Tx, id string) error {
 // which the policy's version does not cover (policy.Set.ServiceOwned).
 func anyServiceOwned(set *policy.Set, granted []requestedSecret) bool {
 	return slices.ContainsFunc(granted, func(g requestedSecret) bool { return set.ServiceOwned(g.name) })
+}
+
+// anyListed reports whether set serves any of granted as a secret whose requesters tag says who
+// may ask for it, whose grant is re-checked on every use: an entry naming a service names the
+// pods whose account BROKER_SERVICES maps to it (Machine.requester), which the policy's version
+// does not cover, so a pod can fall off a list the tag never changed.
+func anyListed(set *policy.Set, granted []requestedSecret) bool {
+	return slices.ContainsFunc(granted, func(g requestedSecret) bool { return set.Secrets[g.name].Requesters != "" })
 }
 
 // auditDetail is an audit row's non-secret detail object; audit writes it as JSON.

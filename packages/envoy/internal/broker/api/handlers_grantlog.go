@@ -14,15 +14,14 @@ import (
 )
 
 const (
-	// grantLogDefaultLimit is the page a caller that names no size gets, and grantLogMaxLimit the
-	// largest page the broker answers. A limit above the cap is held at it rather than refused,
-	// because a review asking for more is asking for the whole period and pages through it
-	// either way, and a refusal would only make it guess the number this constant already
-	// fixes. A thousand events keeps one answer under about a mebibyte, which is small enough
-	// that the broker holds it, marshals it and writes it without a page of its own becoming
-	// the expensive part of the read.
-	grantLogDefaultLimit = 1000
-	grantLogMaxLimit     = 1000
+	// grantLogLimit is both the page a caller that names no size gets and the largest page the
+	// broker answers. A limit above the cap is held at it rather than refused, because a review
+	// asking for more is asking for the whole period and pages through it either way, and a
+	// refusal would only make it guess the number this constant already fixes. A thousand
+	// events keeps one answer under about a mebibyte, which is small enough that the broker
+	// holds it, marshals it and writes it without a page of its own becoming the expensive
+	// part of the read.
+	grantLogLimit = 1000
 	// grantLogSettleTime is how far before now a period's end must be for the period to count as
 	// closed. An audit id comes from a bigserial, which hands it out when the row is inserted
 	// and not when its transaction commits, so a row with a lower id can become visible after
@@ -75,15 +74,16 @@ func (s *server) listGrantLog(w http.ResponseWriter, r *http.Request, _ string) 
 	if !ok {
 		return
 	}
-	limit, ok := grantLogNumber(w, query.Get("limit"), "limit", grantLogDefaultLimit)
+	limit, ok := grantLogNumber(w, query.Get("limit"), "limit", grantLogLimit)
 	if !ok {
 		return
 	}
-	// Zero and anything above the cap are both held at the cap rather than passed on:
-	// store.ReadGrantLog reads the WHOLE period for a limit of zero or less, which is the one
-	// thing this route must never ask it for.
-	if limit == 0 || limit > grantLogMaxLimit {
-		limit = grantLogMaxLimit
+	// A caller naming zero names no page at all, which store.ReadGrantLog refuses
+	// (store.ErrGrantLogLimit). The route reads it as it reads a caller that named no limit,
+	// and holds it at the cap, where it holds anything above the cap too: the review is
+	// answered a page either way rather than told the number it should have sent.
+	if limit == 0 || limit > grantLogLimit {
+		limit = grantLogLimit
 	}
 	// The audit table is the request machine's own store, and this route only reads it, so it
 	// reaches it through the machine the broker already wires rather than through a dependency

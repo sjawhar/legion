@@ -38,22 +38,23 @@ const NarrowingRefusedMessage = "broker: narrowing refused"
 // Values releases the values of a live grant to its own enrollment, and when the grant expires:
 // nil for a grant that lasts until its session ends. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
-// the policy has changed since the grant's request was decided, or any granted name is a service's
+// the policy has changed since the grant's request was decided, any granted name is a service's
 // (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
-// prove) — that the current policy still allows the session, with the names its operator withheld
-// from it, every granted name under the login that decided it (stillAllowed), and that no granted
-// name's max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant). A
-// stored secret releases its frozen source. A kind secret reads that same stored source and
-// passes its value to the kind's minter. Once every value is read, each stored one is checked
-// against the policy as it stands then (recheckStoredSources), so a retag that lands during the
-// reads never releases what the secret stores once it is a kind. It holds no pooled connection
-// across a Secrets Manager read: the grant's names are read into memory before the first value is
-// fetched. A non-nil narrowing is this release's alone: it reaches the github-app minter of every
-// github-app name the grant holds, and the grant records nothing of it, so its next release
-// without one is owner-wide again. A grant that holds no github-app name refuses a narrowing
-// (ErrNarrowingNotApplicable), and so does one whose github-app name does not list the
-// narrowing's owner in the snapshot the release mints from (ErrNarrowingOwnerNotListed); each
-// releases nothing and runs no minter.
+// prove), or any granted name carries a requesters tag (anyListed: an entry naming a service
+// matches by those same accounts) — that the current policy still allows the session, with the
+// names its operator withheld from it, every granted name under the login that decided it
+// (stillAllowed), and that no granted name's max-grant is now shorter than the lifetime the
+// grant's request signed (overMaxGrant). A stored secret releases its frozen source. A kind
+// secret reads that same stored source and passes its value to the kind's minter. Once every
+// value is read, each stored one is checked against the policy as it stands then
+// (recheckStoredSources), so a retag that lands during the reads never releases what the secret
+// stores once it is a kind. It holds no pooled connection across a Secrets Manager read: the
+// grant's names are read into memory before the first value is fetched. A non-nil narrowing is
+// this release's alone: it reaches the github-app minter of every github-app name the grant
+// holds, and the grant records nothing of it, so its next release without one is owner-wide
+// again. A grant that holds no github-app name refuses a narrowing (ErrNarrowingNotApplicable),
+// and so does one whose github-app name does not list the narrowing's owner in the snapshot the
+// release mints from (ErrNarrowingOwnerNotListed); each releases nothing and runs no minter.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narrowing *secrets.GitHubNarrowing) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires *time.Time
@@ -86,7 +87,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	}
 	// One policy snapshot serves both the grant re-check and the minters' name, tier and owners.
 	set := m.Policy.Get()
-	if policyVersion != set.Version || anyServiceOwned(set, granted) {
+	if policyVersion != set.Version || anyServiceOwned(set, granted) || anyListed(set, granted) {
 		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
 			return nil, nil, err
@@ -588,13 +589,14 @@ func writtenBeforeMigration13(alias string) string {
 // requests), asking for the same lifetime (or, asking for none, a request written before
 // migration 0013: writtenBeforeMigration13), against a still-live grant (not revoked, not expired)
 // under this enrollment is returned as-is, with no new request row and no new record, as long as
-// the policy it was decided under is still current and no granted name is a service's
+// the policy it was decided under is still current, no granted name is a service's
 // (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
-// prove), or the current policy still allows it to the session (stillAllowed, the check Values
-// makes), and its whole approval chain still verifies (VerifyChain, the same check Values
-// makes). A caller that already holds a live grant for these exact names never re-asks a human
-// who already approved it, a policy tightened since then is never bypassed by reuse, and neither
-// is a chain that no longer verifies.
+// prove) and no granted name carries a requesters tag (anyListed: an entry naming a service
+// matches by those same accounts), or the current policy still allows it to the session
+// (stillAllowed, the check Values makes), and its whole approval chain still verifies
+// (VerifyChain, the same check Values makes). A caller that already holds a live grant for these
+// exact names never re-asks a human who already approved it, a policy tightened since then is
+// never bypassed by reuse, and neither is a chain that no longer verifies.
 // A grant whose secret no longer lists this requester is not merely passed over: it is ended for
 // good here, as Values ends it (errRequesterNotListed), and Create goes on to write the denied
 // request that tells the session why.
@@ -622,7 +624,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 	if err != nil {
 		return Request{}, false, err
 	}
-	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
+	if rulesVersion != set.Version || anyServiceOwned(set, granted) || anyListed(set, granted) {
 		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
 			return Request{}, false, err

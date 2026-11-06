@@ -69,11 +69,16 @@ func nameSession(t *testing.T, m *Machine, enrollmentID, sessionID string) {
 	}
 }
 
+// grantLogPage is the limit these reads pass: ReadGrantLog answers a page at a time and requires
+// its size (store.ErrGrantLogLimit), and a hundred rows is far more than any test below writes,
+// so one read still answers everything it wrote.
+const grantLogPage = 100
+
 // readGrantLog is the grant-log route's read of everything the test has written.
 func readGrantLog(t *testing.T, m *Machine, since time.Time) []store.GrantLogEvent {
 	t.Helper()
 	events, err := store.ReadGrantLog(context.Background(), m.Store.Pool, store.GrantLogQuery{
-		Since: since, Until: time.Now().Add(time.Hour),
+		Since: since, Until: time.Now().Add(time.Hour), Limit: grantLogPage,
 	})
 	if err != nil {
 		t.Fatalf("ReadGrantLog: %v", err)

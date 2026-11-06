@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -113,9 +115,16 @@ type GrantLogQuery struct {
 	Since, Until time.Time
 	// After resumes after the audit row of that id; zero starts at the period's first row.
 	After int64
-	// Limit bounds the page; zero or less reads the whole period in one answer.
+	// Limit bounds the page and is required: it must be positive, and ReadGrantLog refuses
+	// anything else (ErrGrantLogLimit) rather than reading a whole quarter into memory for a
+	// caller that forgot to say how much of it it wanted.
 	Limit int
 }
+
+// ErrGrantLogLimit is ReadGrantLog's refusal of a GrantLogQuery whose Limit is zero or less: the
+// page's size is required, so that no caller reads a whole period's audit rows by leaving it
+// out.
+var ErrGrantLogLimit = errors.New("store: the grant log is read a page at a time: Limit must be positive")
 
 // readGrantLog is the one SQL read behind the grant log. It is ordered by id and filtered on at
 // because the audit table's only index besides its primary key is audit_request (request_id):
@@ -153,7 +162,7 @@ const readGrantLog = `select a.id, a.at, a.kind, a.actor,
 	) created on true
 	where a.at >= $1 and a.at < $2 and a.id > $3
 	order by a.id
-	limit case when $4 > 0 then $4 end`
+	limit $4`
 
 // ReadGrantLog answers the audit rows of q's period, oldest first, as the access review reads
 // them: every grant and every refusal the broker recorded, each naming its session, that
@@ -162,19 +171,20 @@ const readGrantLog = `select a.id, a.at, a.kind, a.actor,
 // it is ordered by id and filtered on at.
 //
 // A page holds at most q.Limit rows; the caller reads the next page with After set to the last
-// row's ID, and has read the period whole when a page comes back short.
+// row's ID, and has read the period whole when a page comes back short. A limit of zero or less
+// is refused (ErrGrantLogLimit): a quarter's audit rows are more than one answer should hold, so
+// the size of the page is the caller's to state and not this read's to guess.
 func ReadGrantLog(ctx context.Context, pool *pgxpool.Pool, q GrantLogQuery) ([]GrantLogEvent, error) {
+	if q.Limit <= 0 {
+		return nil, fmt.Errorf("%w: %d", ErrGrantLogLimit, q.Limit)
+	}
 	rows, err := pool.Query(ctx, readGrantLog, q.Since, q.Until, q.After, q.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	// The page is as big as the limit allows, so a full page is read into one allocation. A
-	// limit of zero or less reads the whole period and bounds nothing, so it starts from nil.
-	var events []GrantLogEvent
-	if q.Limit > 0 {
-		events = make([]GrantLogEvent, 0, q.Limit)
-	}
+	// The page is as big as the limit allows, so a full page is read into one allocation.
+	events := make([]GrantLogEvent, 0, q.Limit)
 	for rows.Next() {
 		var ev GrantLogEvent
 		var secrets, raw []byte

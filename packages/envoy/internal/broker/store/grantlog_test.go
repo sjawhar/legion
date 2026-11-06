@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -85,11 +86,21 @@ func seedGrantLog(t *testing.T, st *store.Store) grantLogSeed {
 	return seed
 }
 
-// readGrantLog is ReadGrantLog over the seeded period, failing t on an error.
+// grantLogPage is the limit the reads below pass when they are not pinning paging itself: a page
+// far larger than the handful of rows seedGrantLog writes, so one read answers the whole seeded
+// period. ReadGrantLog requires a positive limit (store.ErrGrantLogLimit), so no read here can
+// leave it out.
+const grantLogPage = 100
+
+// readGrantLog is ReadGrantLog over the seeded period under grantLogPage, failing t on an error.
+// A query of its own period or its own limit keeps them.
 func readGrantLog(t *testing.T, st *store.Store, q store.GrantLogQuery) []store.GrantLogEvent {
 	t.Helper()
 	if q.Since.IsZero() {
 		q.Since, q.Until = grantLogSince, grantLogUntil
+	}
+	if q.Limit == 0 {
+		q.Limit = grantLogPage
 	}
 	events, err := store.ReadGrantLog(context.Background(), st.Pool, q)
 	if err != nil {
@@ -261,5 +272,21 @@ func TestGrantLogReadsNothingOutsideItsPeriod(t *testing.T) {
 				t.Fatalf("[%s, %s) reads %d rows %v, want %d", tc.since, tc.until, len(events), kinds, tc.want)
 			}
 		})
+	}
+}
+
+// TestGrantLogRefusesAPageOfNoSize pins that the page's size is the caller's to state: a limit of
+// zero or less is refused, and the read answers no rows at all rather than a whole period's.
+func TestGrantLogRefusesAPageOfNoSize(t *testing.T) {
+	st := storetest.Open(t)
+	seedGrantLog(t, st)
+
+	for _, limit := range []int{0, -1} {
+		events, err := store.ReadGrantLog(context.Background(), st.Pool, store.GrantLogQuery{
+			Since: grantLogSince, Until: grantLogUntil, Limit: limit,
+		})
+		if !errors.Is(err, store.ErrGrantLogLimit) || events != nil {
+			t.Errorf("ReadGrantLog(limit %d) = %d events, %v; want no events and ErrGrantLogLimit", limit, len(events), err)
+		}
 	}
 }

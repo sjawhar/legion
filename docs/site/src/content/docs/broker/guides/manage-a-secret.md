@@ -104,7 +104,10 @@ machine's Application Default Credentials are its own identity, and so does ever
 - **`--kind`** is optional. Use `github-app` for a GitHub App key, `google-login` for an
   authorized-user Google login, and `google-service-account` for one Google service account the
   broker mints an access token as, whose stored value names that account:
-  `{"service_account": "<id>@<project>.iam.gserviceaccount.com"}`.
+  `{"service_account": "<id>@<project>.iam.gserviceaccount.com"}`. That last one is an
+  administrator's to write, not a self-service step: the stored value alone chooses which account
+  the broker acts as, so whoever writes it gets a token as any account the broker may impersonate,
+  whatever `--owner` and `--requesters` say. Ask whoever runs your deployment for one.
   Use `none`, or omit the flag, for a stored secret. A kind also
   writes `mint-service-account: kind-secret`, which makes an earlier broker refuse the secret
   rather than serve its stored key.
@@ -116,8 +119,9 @@ machine's Application Default Credentials are its own identity, and so does ever
   by spaces, so the shell quotes it: `--requesters "ada@example.com legion-daemon"`. Nobody else
   may ask, whatever the owner and tier allow. A secret with such a list bounds its grants to an
   hour, so give it `--max-grant 1h` or less. A `google-service-account` secret is served to the
-  one person who owns it, so its list is exactly that person: `--owner me --requesters <your
-  email>`. A comma, an email with a capital letter and a list that names nobody are refused
+  one person who owns it, so the administrator who writes it gives it that person's own address
+  and nobody else: `--owner <their email> --requesters <their email>`. A comma, an email with a
+  capital letter and a list that names nobody are refused
   before anything is written. Whether an entry naming a service is one your deployment registers
   is the broker's to say
   ([what the broker answers after a write](#what-the-broker-answers-after-a-write)).

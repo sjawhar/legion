@@ -1,7 +1,8 @@
 // requesters_test.go drives a secret whose requesters tag names who may ask for it through the
 // request machine: what a refused session is told, what becomes of a live grant the list drops
-// the session from, what an approval of such a request records, and the hour a listed secret
-// bounds its grants to.
+// the session from — by a retag, or by an account mapping that stops proving the pod's service
+// — what an approval of such a request records, even when another of its names would be refused
+// first, and the hour a listed secret bounds its grants to.
 package requests
 
 import (
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
@@ -268,5 +270,137 @@ func TestRequestersAListedSecretGrantsForAnHourAtMost(t *testing.T) {
 	}
 	if expires == nil || time.Until(*expires) > time.Hour || time.Until(*expires) < 59*time.Minute {
 		t.Fatalf("the grant expires %v; want an hour from now", expires)
+	}
+}
+
+// TestRequestersAPodsGrantEndsWhenItsAccountStopsProvingItsService: an entry naming a service
+// names the pods whose account BROKER_SERVICES maps to it, and the policy's version covers the
+// tag and not that mapping. A broker restarted with a mapping that no longer names this pod's
+// account answers it requester-not-listed, so its live grant stops releasing at its very next
+// read and is ended for good, instead of running to its expiry on a list it is no longer on.
+// The mapping left standing is the control: the same release answers the value, which is what
+// makes the end the mapping's doing and not the re-check's.
+func TestRequestersAPodsGrantEndsWhenItsAccountStopsProvingItsService(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		unmap bool
+	}{
+		{name: "the account no longer proves the service", unmap: true},
+		{name: "the mapping stands", unmap: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, _, _, _ := newFixture(t)
+			retag(t, m, listedSecret("LISTED_POD_KEY", policy.OwnerShared, policy.TierAgent, fixtureService))
+			pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
+			granted, err := m.Create(ctx, pod, signRequestFor(t, m, podKey, anHour, "LISTED_POD_KEY"), "")
+			if err != nil || granted.State != "granted" || granted.GrantID == nil {
+				t.Fatalf("Create(LISTED_POD_KEY) = %+v, %v; want it granted at once to the pod the list names", granted, err)
+			}
+			if values, _, err := m.Values(ctx, *granted.GrantID, pod, nil); err != nil || values["LISTED_POD_KEY"] != listedValue {
+				t.Fatalf("Values while the account proves the service = %v, %v; want the value", values, err)
+			}
+			version := m.Policy.Get().Version
+
+			if tc.unmap {
+				m.ServicesByAccount = map[string]string{}
+			}
+			values, _, err := m.Values(ctx, *granted.GrantID, pod, nil)
+			if now := m.Policy.Get().Version; now != version {
+				t.Fatalf("the policy moved from version %s to %s; this case turns on the version standing still", version, now)
+			}
+			if !tc.unmap {
+				if err != nil || values["LISTED_POD_KEY"] != listedValue {
+					t.Fatalf("Values while the mapping stands = %v, %v; want the value", values, err)
+				}
+				if by, audits := endedForGood(t, m, *granted.GrantID); by != "" || audits != 0 {
+					t.Fatalf("grant revoked_by %q with %d grant.revoked rows; want it live", by, audits)
+				}
+				return
+			}
+			if !errors.Is(err, ErrGrantNotLive) || values != nil {
+				t.Fatalf("Values once the account no longer proves the service = %v, %v; want ErrGrantNotLive", values, err)
+			}
+			if by, audits := endedForGood(t, m, *granted.GrantID); by != GrantEndedActor || audits != 1 {
+				t.Fatalf("grant revoked_by %q with %d grant.revoked rows by %s; want it ended once", by, audits, GrantEndedActor)
+			}
+		})
+	}
+}
+
+// TestRequestersADroppedNameIsDeniedBeforeAnEarlierNameRefusesTheApprover: a request of two names
+// whose first name the deciding login may no longer approve, and whose second the list has
+// dropped, is answered rather than left pending. The first name's refusal would keep the card on
+// a page where approving it does nothing and denying it is the only move left, for a request no
+// owner change could ever make releasable, so the list's deny is read over every name first.
+func TestRequestersADroppedNameIsDeniedBeforeAnEarlierNameRefusesTheApprover(t *testing.T) {
+	ctx := context.Background()
+	m, enr, key, approver := newFixture(t)
+	retag(t, m,
+		policytest.Secret("ALPHA_HUMAN_KEY", fixtureOperator, policy.TierHuman, "alpha-v1"),
+		listedSecret("ZETA_LISTED_KEY", fixtureOperator, policy.TierHuman, fixtureOperator))
+	req, err := m.Create(ctx, enr, signRequestFor(t, m, key, anHour, "ALPHA_HUMAN_KEY", "ZETA_LISTED_KEY"), "")
+	if err != nil || req.State != "pending" || req.RecordID == nil {
+		t.Fatalf("Create(ALPHA_HUMAN_KEY, ZETA_LISTED_KEY) = %+v, %v; want one card pending on their owner", req, err)
+	}
+
+	// ALPHA_HUMAN_KEY, which the names are read in order of, moves to another owner, so the
+	// current policy has someone other than the approver decide it; ZETA_LISTED_KEY leaves the
+	// list.
+	retag(t, m,
+		policytest.Secret("ALPHA_HUMAN_KEY", otherPerson, policy.TierHuman, "alpha-v1"),
+		listedSecret("ZETA_LISTED_KEY", fixtureOperator, policy.TierHuman, otherPerson))
+	const want = "ZETA_LISTED_KEY: " + policy.ReasonRequesterNotListed
+	decision, err := m.ApplyDecision(ctx, *req.RecordID, true, approver)
+	if err != nil {
+		t.Fatalf("ApplyDecision(approve) = %+v, %v; want the dropped name's denial, not a refusal that leaves the card pending", decision, err)
+	}
+	if decision.State != "denied" || decision.GrantID != "" || decision.Detail != want {
+		t.Fatalf("ApplyDecision = %+v; want it denied with no grant and the detail %q", decision, want)
+	}
+	var state, decidedBy, detail string
+	var grants int
+	if err := m.Store.Pool.QueryRow(ctx, `select r.state, coalesce(r.decided_by,''), coalesce(r.decision_detail,''),
+		(select count(*) from grants g where g.request_id=r.id) from requests r where r.id=$1`, req.ID).
+		Scan(&state, &decidedBy, &detail, &grants); err != nil {
+		t.Fatalf("read the request row: %v", err)
+	}
+	if state != "denied" || decidedBy != PolicyDeniedActor || detail != want || grants != 0 {
+		t.Fatalf("the request row = state %q decided_by %q detail %q with %d grants; want it denied by %s, %q, and no grant",
+			state, decidedBy, detail, grants, PolicyDeniedActor, want)
+	}
+}
+
+// TestRequestersAWithheldNameTheListDropsIsDeniedRatherThanRefused: a name its operator withheld
+// from the session is the owner's alone to approve, and one the policy denies them is no one's —
+// but a name the list dropped is no one's for good, so it is answered as the list's denial and
+// not as that refusal, which would leave the card pending until it expired.
+func TestRequestersAWithheldNameTheListDropsIsDeniedRatherThanRefused(t *testing.T) {
+	ctx := context.Background()
+	m, enr, key, approver := newFixture(t)
+	retag(t, m, listedSecret("LISTED_KEY", fixtureOperator, policy.TierAgent, fixtureOperator))
+	auto, err := m.Create(ctx, enr, signRequestFor(t, m, key, anHour, "LISTED_KEY"), "")
+	if err != nil || auto.GrantID == nil {
+		t.Fatalf("Create(LISTED_KEY) = %+v, %v; want the automatic grant the list allows", auto, err)
+	}
+	if err := m.RevokeByApprover(ctx, *auto.GrantID, fixtureOperator, record.HumanActor(fixtureOperator)); err != nil {
+		t.Fatalf("RevokeByApprover: %v", err)
+	}
+	pending, err := m.Create(ctx, enr, signRequestFor(t, m, key, anHour, "LISTED_KEY"), "")
+	if err != nil || pending.State != "pending" || pending.RecordID == nil {
+		t.Fatalf("Create(LISTED_KEY) once it is withheld = %+v, %v; want a card pending on its owner", pending, err)
+	}
+
+	retag(t, m, listedSecret("LISTED_KEY", fixtureOperator, policy.TierAgent, otherPerson))
+	const want = "LISTED_KEY: " + policy.ReasonRequesterNotListed
+	decision, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
+	if err != nil {
+		t.Fatalf("ApplyDecision(approve) of a withheld name the list dropped = %+v, %v; want its denial", decision, err)
+	}
+	if decision.State != "denied" || decision.GrantID != "" || decision.Detail != want {
+		t.Fatalf("ApplyDecision = %+v; want it denied with no grant and the detail %q", decision, want)
+	}
+	if _, _, err := m.Values(ctx, *auto.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values of the withheld grant = %v; want it still ended", err)
 	}
 }

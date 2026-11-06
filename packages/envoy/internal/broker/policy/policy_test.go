@@ -145,7 +145,12 @@ func TestEvaluateTreatsAWithheldNameAsHumanTier(t *testing.T) {
 // with the reason requester-not-listed, to every session and pod the list does not name, and
 // decided by owner and tier as before for the ones it does. A session signed in as nobody and a
 // pod proving no service are on no list, so both are denied every listed secret, and a secret
-// carrying no list answers exactly as it did before the tag existed.
+// carrying no list answers exactly as it did before the tag existed. A person is matched only by
+// a person's entry and a service only by a service's: an operator whose login is a registered
+// service's name — which record.CanonicalLogin allows, since a record from before people were
+// named by email keeps its GitHub login — is on no list that names that service. (The mirror,
+// a pod whose service is equal to a person's entry, cannot happen: every person entry holds an
+// @ and no service name may.)
 func TestRequesters(t *testing.T) {
 	const (
 		sami   = "sami@theorem.dev"
@@ -178,27 +183,32 @@ func TestRequesters(t *testing.T) {
 		"the daemon's pod":                    {Service: daemon},
 		"another service's pod":               {Service: "other-service"},
 		"a pod with no person and no service": {},
+		"a person named like the daemon":      {Operator: daemon},
 	}
 	table := map[string]map[string]policy.Decision{
 		"GCLOUD_SAMI": {
 			"sami's session": approval(sami), "jason's session": notListed,
 			"aditya's session": notListed, "the daemon's pod": approval(sami),
 			"another service's pod": notListed, "a pod with no person and no service": notListed,
+			"a person named like the daemon": notListed,
 		},
 		"AZURE_ADMIN": {
 			"sami's session": approval(sami), "jason's session": approval(sami),
 			"aditya's session": notListed, "the daemon's pod": approval(sami),
 			"another service's pod": notListed, "a pod with no person and no service": notListed,
+			"a person named like the daemon": notListed,
 		},
 		"DEV_ADITYA": {
 			"sami's session": notListed, "jason's session": notListed,
 			"aditya's session": automatic, "the daemon's pod": notListed,
 			"another service's pod": notListed, "a pod with no person and no service": notListed,
+			"a person named like the daemon": notListed,
 		},
 		"SHARED_AGENT": {
 			"sami's session": automatic, "jason's session": automatic,
 			"aditya's session": automatic, "the daemon's pod": automatic,
 			"another service's pod": automatic, "a pod with no person and no service": automatic,
+			"a person named like the daemon": automatic,
 		},
 	}
 	for name, row := range table {

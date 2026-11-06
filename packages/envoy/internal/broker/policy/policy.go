@@ -215,13 +215,11 @@ var ErrRequestersEntry = errors.New("requesters names people by their lowercase 
 // since Evaluate compares it against record.CanonicalLogin of the session's operator; any other
 // entry is a service, and must be one of services, ALWAYS, so a nil or empty list refuses every
 // service entry, exactly as the owner tag already refuses a name the deployment does not
-// register (Loader.secret). That is a behaviour change: this function once read a nil list as
-// "check the shape alone", which left the loader accepting an unregistered name in a requesters
-// tag while refusing the same name in an owner tag whenever BROKER_SERVICES was unset.
-// ParseRequesterShapes is that shape-only check, under a name of its own, for the one caller
-// that holds no registered list. It answers the entries sorted, each once and joined by single
-// spaces, so a Secret holding them stays comparable, two spellings of one list are one policy,
-// and the value is one an AWS tag and a Secret Manager annotation both hold.
+// register (Loader.secret). ParseRequesterShapes is that shape-only check, under a name of its
+// own, for the one caller that holds no registered list. It answers the entries sorted, each
+// once and joined by single spaces, so a Secret holding them stays comparable, two spellings of
+// one list are one policy, and the value is one an AWS tag and a Secret Manager annotation both
+// hold.
 func ParseRequesters(raw string, services []string) (string, error) {
 	return parseRequesters(raw, services, true)
 }
@@ -456,14 +454,25 @@ func (secret Secret) requesterNames() []string {
 }
 
 // lists reports whether secret's requesters name r: the person whose session it is, or the
-// service of the pod it is. An empty Operator (a pod has no person) and an empty Service (a
-// session has no service) match nothing, never an entry.
+// service of the pod it is. Each sort is matched only by an entry of its own sort, which the @
+// tells apart (ParseRequesters makes every person entry hold one and every service entry hold
+// none): a login record.CanonicalLogin answers may be a GitHub login rather than an email, for
+// a record decided before people were named by email, and such a login has a service name's own
+// alphabet, so an operator named "legion-daemon" would otherwise be served every secret that
+// lists the legion-daemon service. An empty Operator (a pod has no person) and an empty Service
+// (a session has no service) match nothing, never an entry.
 func (secret Secret) lists(r Requester) bool {
-	listed := secret.requesterNames()
-	if operator := record.CanonicalLogin(r.Operator); operator != "" && slices.Contains(listed, operator) {
-		return true
+	operator := record.CanonicalLogin(r.Operator)
+	for _, entry := range secret.requesterNames() {
+		person := strings.Contains(entry, "@")
+		if person && operator != "" && entry == operator {
+			return true
+		}
+		if !person && r.Service != "" && entry == r.Service {
+			return true
+		}
 	}
-	return r.Service != "" && slices.Contains(listed, r.Service)
+	return false
 }
 
 // approver is who decides an approval request for secret: anyone signed in to Dispatch for a

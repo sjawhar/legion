@@ -306,9 +306,11 @@ changes them under the person's own cloud sign-in, both stores
 
 A `requesters` list is read before owner and tier. Where a secret carries one, a session whose
 person it does not name, and a pod whose service it does not name, is denied
-`requester-not-listed`, whatever the table below would have given it. A pod has no person and a
-session has no service, so each is matched only by an entry of its own sort. A secret with no
-list is every session's to ask for.
+`requester-not-listed`, whatever the table below would have given it. An entry holding an `@` is a
+person and is matched against the session's person alone; one holding none is a service and is
+matched against the service the broker verified alone. A pod has no person and a session has no
+service, so each is matched only by an entry of its own sort, and a person whose login reads like
+a service name matches no service entry. A secret with no list is every session's to ask for.
 
 Who gets it then follows from those two tags alone:
 
