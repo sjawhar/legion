@@ -880,7 +880,8 @@ test("a field the Go shape requires cannot be dropped", () => {
 // nobody has finished — a child held at `admitted` and a waiting root alike — by issue key, each
 // with the keys it waits on, among them keys the state's `issues` does not record. `blocked` is
 // required, so a daemon older than the plugin cannot leave it out, and `waiting` keeps its own
-// meaning beside it: the roots' waiting line.
+// meaning beside it: the admission line, which since contract 51 carries children as well as
+// roots.
 test("the state golden names what every blocked issue waits on", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
 
@@ -896,6 +897,46 @@ test("the state golden names what every blocked issue waits on", () => {
 
   const malformed = fixture("state.json") as { admission: { blocked: unknown[] } };
   malformed.admission.blocked = [{ issue: "LEGION-209" }];
+  expect(LegionStateResponse.safeParse(malformed).success).toBeFalse();
+});
+
+// Contract 51: the cap counts the issues at work, so `active` and `waiting` name issues of any
+// depth and say nothing about which trees run. `trees` says it instead — the root of every live
+// tree — and each issue's `tree` names its own root, so a child is told from a root. The computed
+// golden carries a child: LEGION-209 stands in LEGION-208's tree, and all three live trees are
+// named while one issue alone holds a slot. Neither key is required: a daemon at this contract
+// strips both from the state it serves a caller whose pod's plugin is older than 51, and from the
+// one it serves a caller whose pod's claims it cannot read at all, which may be a pod at this
+// contract (`api.stateFor`, `withoutTrees`). So a body without them parses, and a reader of it
+// learns nothing about which trees run rather than losing the whole state; what is refused is a
+// `tree` that is no issue key. A daemon older than this plugin is kept away by the boot gate and
+// `legion probe-image`, not by this schema.
+test("the state names the live trees and each issue's own tree", () => {
+  const state = LegionStateResponse.parse(fixture("state-controller-claim.json"));
+
+  expect(state.admission.active).toEqual(["LEGION-208"]);
+  expect(state.admission.trees).toEqual(["LEGION-208", "LEGION-210", "LEGION-211"]);
+  expect(state.issues["LEGION-209"]?.tree).toBe("LEGION-208");
+  expect(state.issues["LEGION-208"]?.tree).toBe("LEGION-208");
+
+  const stripped = fixture("state.json") as {
+    admission: Record<string, unknown>;
+    issues: Record<string, { tree?: unknown }>;
+  };
+  delete stripped.admission.trees;
+  for (const issue of Object.values(stripped.issues)) {
+    delete issue.tree;
+  }
+  const served = LegionStateResponse.safeParse(stripped);
+  expect(served.success).toBeTrue();
+  expect(served.data?.admission.trees).toBeUndefined();
+
+  const malformed = fixture("state.json") as { issues: Record<string, { tree?: unknown }> };
+  const issue = malformed.issues["LEGION-208"];
+  if (issue === undefined) {
+    throw new Error("state fixture lacks LEGION-208");
+  }
+  issue.tree = "not an issue key";
   expect(LegionStateResponse.safeParse(malformed).success).toBeFalse();
 });
 

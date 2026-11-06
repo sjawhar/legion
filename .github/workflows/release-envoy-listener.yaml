@@ -459,6 +459,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       skip: ${{ steps.version.outputs.skip }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -474,6 +475,32 @@ jobs:
         run: |
           # shellcheck disable=SC2086 # $LEGION_ENVOY_VERSION_ARGS is the argument list, split on purpose
           .github/scripts/release-push.sh version legion-envoy-v $LEGION_ENVOY_VERSION_ARGS >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/install-changie
+        if: steps.version.outputs.skip != 'true'
+      # This release's own changelog entries, which release_publish writes into the GitHub
+      # release's body. A fragment stays under packages/envoy/.changes/unreleased/ after the
+      # release that ships it, so fold-notes renders the ones this release's own commits first
+      # added, which are the ones its tag will hold. A release no fragment belongs to renders no
+      # file, and the `notes` line fold-notes prints says which of the two it was, since
+      # release_publish cannot look into the artifact before it downloads it.
+      - name: Render this release's changelog entries
+        id: notes
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          .github/scripts/release-push.sh fold-notes "$VERSION" \
+            "$RUNNER_TEMP/release-notes.md" packages/envoy legion-envoy-v >> "$GITHUB_OUTPUT"
+      # The entries, exactly as rendered, for release_publish; a release with none uploads
+      # nothing at all. The name must not start with `legion-envoy-`, as the image digests' must
+      # not (image_index above): release_publish downloads `pattern: legion-envoy-*` into the
+      # release's assets, and release-push.sh handed refuses anything there but the archives.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
+        with:
+          name: envoy-release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.version.outputs.skip != 'true'
         with:
@@ -846,14 +873,11 @@ jobs:
       - name: Tag release
         if: steps.confirm.outputs.release == 'true'
         env:
+          VERSION: ${{ needs.release_build.outputs.version }}
           TAG: ${{ steps.assets.outputs.tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
-            exit 0
-          fi
-          git tag "$TAG"
+          .github/scripts/release-push.sh tag "$VERSION" "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
       # Build provenance for the host binaries a mise pin installs, linux or darwin, which the
       # release below uploads exactly. `--repo` alone accepts an archive any workflow of this
@@ -870,6 +894,7 @@ jobs:
         with:
           subject-path: ${{ steps.assets.outputs.subjects }}
       - name: Create or update GitHub release
+        id: release
         if: steps.confirm.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -885,3 +910,23 @@ jobs:
           .github/scripts/release-push.sh release --upload-to-published \
             --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
             "$TAG" "$TAG" "${assets[@]}"
+      # The entries release_build rendered from this release's fragments, under the runner's
+      # temporary directory, outside the checkout.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: notes
+        if: steps.release.outcome == 'success' && needs.release_build.outputs.notes == 'true'
+        with:
+          name: envoy-release-notes
+          path: ${{ runner.temp }}/release-notes
+      # release_build's entries become the release body's one "## Changelog" section, below the
+      # fixed sentence above. release-section replaces a section that heading already holds, and
+      # says there why the write is a replace and not an append. The artifact holds the one file
+      # fold-notes wrote, under the name the build job gave it.
+      - name: Write the changelog into the release body
+        if: steps.notes.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.assets.outputs.tag }}
+        run: |
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/release-notes/release-notes.md"

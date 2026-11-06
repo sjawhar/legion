@@ -155,7 +155,7 @@ func TestAnAnsweredRootWaitsAheadOfEveryRootThatNeverRan(t *testing.T) {
 		waiting("LEGION-4", "D", nil, true),
 	}
 	var got []string
-	for _, issue := range Waiting(issues, nil) {
+	for _, issue := range WaitingIssues(Waiting(issues, nil, LineFacts{})) {
 		got = append(got, issue.Key)
 	}
 	want := []string{"LEGION-3", "LEGION-2", "LEGION-1"}
@@ -179,15 +179,15 @@ func TestARootWaitingOnAPersonKeepsTheAncestryHold(t *testing.T) {
 	held := Issue{Key: "LEGION-6", Tree: "LEGION-6", Project: "LEGION", Title: "LEGION-6", Phase: phase.Admitted, Generation: 1,
 		Status: "todo", Rank: "B", HandedOver: true, Parent: &parent, Ancestry: []string{parent, awaiting.Key}}
 	issues := []Issue{awaiting, held}
-	if _, live := LiveRoots(issues, nil)[awaiting.Key]; !live {
-		t.Fatalf("live roots = %v, want %s's tree live while it waits on a person", LiveRoots(issues, nil), awaiting.Key)
+	if _, live := LiveRoots(issues, LineFacts{})[awaiting.Key]; !live {
+		t.Fatalf("live roots = %v, want %s's tree live while it waits on a person", LiveRoots(issues, LineFacts{}), awaiting.Key)
 	}
-	if waiting := Waiting(issues, nil); len(waiting) != 0 {
+	if waiting := Waiting(issues, nil, LineFacts{}); len(waiting) != 0 {
 		t.Fatalf("waiting = %v, want %s held under the tree of %s", waiting, held.Key, awaiting.Key)
 	}
 	until := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
 	awaiting.LingerUntil = &until
-	if _, live := LiveRoots([]Issue{awaiting}, nil)[awaiting.Key]; live {
+	if _, live := LiveRoots([]Issue{awaiting}, LineFacts{})[awaiting.Key]; live {
 		t.Fatalf("a lingering root waiting on a person is live, want it not live, as TreeLive reads it")
 	}
 }

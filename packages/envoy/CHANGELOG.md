@@ -1,5 +1,198 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `legion-envoy-v*` tag.
+
+## [29.17.0] - 2026-11-06
+
+### Added
+
+- `agent-secrets register --session-id <id>` names the session the machine's helper registers. The
+  helper keeps that name across its own restart and a reboot of the box, and states it as the
+  enrollment's `session_id`, so a session a person runs on a machine keeps its grants when it
+  moves box, as a container enrolled with `agent-secrets enroll --helper --session-id` and a
+  Legion role's pod already do.
+
+- The `envoy-infra` `gcp:NatsHub` component's `listener` takes the settings its Envoy listener
+  checks broker tokens with: `agentSecretsUrl`, `agentSecretsAudience` and `publicUrl`, rendered
+  into the hub's cloud-config as `ENVOY_AGENT_SECRETS_URL`, `ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE`
+  and `ENVOY_PUBLIC_URL`. A hub that sets none renders what it rendered before; a hub that sets
+  some but not all is refused at preview, naming the input it is missing, since the listener
+  refuses a partial set when it boots.
+
+- `github.com/sjawhar/envoy/sessiontiming` is the one public door onto the generated Envoy
+  session-registration timings — `Heartbeat`, `LiveWindow`, `ClaimStale`, `CallTimeout`,
+  `CallRetryDelay` and `CallAttempts` — for a caller in another Go module, which Go's internal
+  rule bars from `internal/contracts`. The listener's own uses read `internal/contracts`
+  directly: `session.LiveWindow`, the window every reader of the session registry judges a
+  record's age against, and `session.ClaimStaleAfter` each read the declaration rather than a
+  literal of their own. No value changed.
+
+### Fixed
+
+- A grant now follows its session to a new box. A grant, the request it is still waiting on a
+  person for, and the names its operator withheld from it belong to a session name under one
+  principal — the person for a box of theirs or their sign-in, the Google account for a machine's
+  own session, the service account for a pod — and the next enrollment of that name under that
+  principal takes them, writing `enrollment.adopted` and one `grant.moved` row per grant to the
+  audit record. Before this, each of them was bound to the enrollment the box made, so a helper
+  restart, a rebuilt machine, a person's second sign-in or a replaced pod lost the grant a person
+  had approved and left an approval given after the move with nothing to grant.
+
+  Ending the box no longer ends what the session holds: an enrollment that names a session,
+  records the principal that session belongs to, and still holds a live grant or a pending
+  request is left dormant, proving nothing, and the new `BROKER_SESSION_CARRY_SECONDS` (43200,
+  12 hours, 0 to 86400; 0 turns the carry off) bounds how long it waits before the broker's sweep
+  revokes it. An enrollment that records no principal can be taken by no later one, so it ends as
+  every end did before the carry, its grants revoked and its pending requests cancelled — among
+  them every enrollment made before the broker recorded principals, which is every enrollment
+  live on the day this ships. An approval given while the box is gone now mints a grant too: the
+  broker hangs it off the row the carry is keeping for that session, and the session's next
+  enrollment takes it with the rest. A person's revoke — of the grant, of the machine login, of
+  the sign-in — stays terminal and takes it at once. A session name another principal holds is
+  refused `403 SESSION_HELD`, and another session on either box is still refused the grant.
+
+- A migration collision is refused with the remedy the set that refused it takes: the next number
+  for a set numbered 1 to N, such as the broker's, and a 14-digit UTC timestamp for a set whose
+  numbered series has closed, such as Dispatch's and the daemon's. The message told every caller
+  to use a timestamp, which the broker's own guard then rejected.
+
+## [29.16.0] - 2026-11-06
+
+### Changed
+
+- The comment delivery audit's two psql runs open one read-only transaction on the command line (`--single-transaction -q -c 'SET TRANSACTION READ ONLY'`) in place of a read-only setting made for the whole session, which a server that pools in transaction mode keeps on the backend after the connection goes back to the pool. The SQL files and the Go code that embeds them are unchanged.
+
+## [29.15.1] - 2026-11-05
+
+### Added
+
+- Every answer that the document socket's handler sends carries `X-Dispatch-Process: <host name>`,
+  the pod's name in production. That includes the `101` upgrade and the handler's `401`, `404` and
+  `503` answers, so a check that opens sockets through a load balancer can record which
+  `envoy-dispatch` process served each one. A host name the process cannot read, or one that holds
+  bytes a header cannot carry, sends no header. The `400` answers sent before that handler carry no
+  header: they refuse a room id or a query parameter that holds U+0000 or bytes that are not UTF-8.
+
+### Changed
+
+- Two people on one Dispatch document, each connected to a different `envoy-dispatch` process on
+  one Postgres, now see each other's edits live. Every durable change notifies `dispatch_doc_head`,
+  and `dispatch_doc_changed` for the earlier build, from the transaction that wrote it. Every other
+  process that holds a room of the document reads the rows its room lacks from `doc_updates` and
+  applies them as one batch. A room stays open while another process writes. The service closes a
+  room, and its browsers reconnect, only in these cases: its stored history is replaced (a rebuild,
+  a prune, a delete, or a compaction that folds rows the room has not taken in yet), its issue
+  closes or reopens, the room fails and its eviction closes it, or the process shuts down with an
+  editor connected. A browser's edit from a room that is behind is stored at the head, and a
+  settlement catches its room up under the document's lock and continues. Editors on two processes
+  who type in turn get one version per burst, and it names the last typist whichever process
+  settles it. Before, another process's write closed the room, and every browser in it
+  reconnected.
+
+  While a process's listener connection redials, its rooms do not catch up. The wait between
+  attempts doubles from 1 s to 30 s, plus up to half again, so one wait can last 45 s. Its reads
+  and appends stay correct meanwhile. During the roll that releases this, processes of the earlier
+  build still close their rooms that fall behind.
+- Cursors and presence cross processes. Each process relays its rooms' awareness on
+  `dispatch_doc_awareness`, at most once per 50 ms per room, and a flush carries every reader who
+  moved within that window, so readers moving at the same moment all reach the other process
+  rather than the last of them. A reader who opens a document second sees the first reader's
+  cursor at once, and a reader who leaves on one process leaves on the other. A room forgets a
+  client it hears nothing from for 30 s, so a cursor relayed from a process that stopped without
+  a word goes away. A document socket may hold at most four awareness clients at once. A browser
+  tab sends its own client first, and then echoes the room's other readers back on the same
+  socket, so the other three places hold echoes. The clients a frame names past the four are
+  dropped before the room applies it, and a dropped echo tells the room nothing it does not hold
+  already. So one tab claiming thousands of client ids neither grows a room's memory, nor shows
+  the document's other readers thousands of cursors, nor fans out into thousands of
+  notifications. A socket's clients go when it does, and a client that leaves gives its entry
+  back at once, so a reader who joins after such a frame is seen on every process at once. A
+  socket whose message names neither a document nor a message type, a three-byte message as much
+  as one that has said nothing by 512 bytes, is closed rather than read on. A room holds about
+  31 MB of its readers' states at most. Its own last-resort bound on client entries is 4,000,
+  derived from the sockets that fill it - every connection a process admits, each holding its
+  four clients, which is what another process's relayed clients passed too - so no reader is
+  ever refused a place in a room, on their own process or another. Processes of the earlier
+  build relay none, and show no other process's cursors.
+- Closing or reopening an issue changes the document rooms of every process of this build, the
+  patching one included, and reopening now does too. Migration `20261101181500`'s trigger notifies
+  `dispatch_issue_open_changed` when `closed_at` changes, whoever wrote it. Each process then closes
+  its rooms of the issue's documents, so their browsers reconnect read-only or editable to match. A
+  browser's append also reads the issue's state in its own transaction. An edit that the room took
+  before the close, or up to 2 s after the close committed, is stored even when its append reaches
+  the database after the close, and is settled when the issue reopens. An edit taken later is
+  refused. A close now stamps `closed_at` again as its last statement before it commits, so the
+  2 s count from the commit. An edit typed while the close runs is stored, however long the close
+  takes to withdraw the issue's asks. The stored `closed_at` is that much later than the one the
+  `issue.closed` event carries. Before, only the process that took the `PATCH` changed its rooms,
+  and only on a close.
+  During the roll that releases this, processes of the earlier build do not listen on the channel,
+  so they do not act on a close or reopen made through this build. Their open rooms of the issue's
+  documents keep the scope their browsers connected with. A document that the close or reopen
+  writes is the exception. A close writes the resolved state of the issue's open asks into the
+  blocks that show them, and a reopen writes them open again. That write moves the document's
+  head, so an earlier-build room of it closes as a room that falls behind, and its browsers
+  reconnect with the scope the issue now allows.
+- An ask block keeps its author when another process settles it, or when the process that saw the
+  edit stops first: the author is stored in `doc_ask_block_authors` (migration `20261101181501`) in
+  the transaction that makes the block durable. Before, a settlement on another process named its
+  own actor.
+- An agent's document write sees the edits a person on another process made before it. Before the
+  write forks, every other member process that holds the document's room stores its room's
+  updates, and an open write's fork follows the stored head. A
+  `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the people connected on this process and on every
+  member that answered, and the `200`'s `lost_ops` is judged on the document at the stored head.
+  The members are the processes whose listener connection is named
+  `dispatch-listener <process id>` in `pg_stat_activity`. A process asks them on
+  `dispatch_doc_query` and, for each question, waits 500 ms at most for their answers on
+  `dispatch_doc_answer`. A write asks up to three questions, so it can wait up to 1.5 s in all.
+  After each wait it continues, and logs a WARN that names the members that did not answer.
+- A document read is never older than the stored head, nor older than this process's room. A read
+  whose room is behind the head reads the stored document merged with the updates only that room
+  holds - a keystroke whose append is still in flight - and waits for no catch-up, so it answers
+  with both what another process has committed and what the room has already sent its browsers.
+  Before, a read on one process could return a room's text from before another process's write.
+- Rebuild, settlement resumption and the conditional-edit queue hold across processes. A rebuild
+  answers `409 DOCUMENT_LIVE` when this process holds a room of the document, or when another
+  member that answers within 500 ms holds one. Of two rebuilds of one document at once, one
+  answers `409 DOCUMENT_LIVE`. The settlement resumption runs once per minute across the
+  processes, under the lease `settlement-resumption`, not once per process. The cap of 32 queued
+  conditional edits of one document counts the queue of every member
+  (`doc_conditional_edit_queue`, migration `20261101181502`), so the 33rd answers
+  `429 EDIT_QUEUE_FULL` whichever process takes it. Each process first queues a document's
+  conditional edits in memory and admits them one at a time, and the admitted edits take turns. On
+  each process, at most three of a document's conditional edits hold a database connection at
+  once: the edit being admitted, for its short admission transaction, the edit whose turn it is,
+  for its write transaction, and the edit that has just left, which writes this process's count
+  after it hands the turn on. An edit that waits for its admission, or for its turn, holds none.
+  An agent's write to a document that no room holds on its process loads no room there. The
+  write's settlement loads one a settle delay later. One case remains: a room that retires between
+  the write's check for a room and its publish is loaded again by the publish, from a store that
+  holds the write.
+- Each `envoy-dispatch` process opens one more Postgres connection. The lease pool grows from 13
+  to 14 for the settlement resumption. A dedicated NOTIFY connection sends the document rooms'
+  cursors and their questions and answers to the other processes. A document edit's own
+  notifications go out in the transaction that writes it. The process's shared listener
+  connection, which already carried the background loops' wakes, now carries the document rooms'
+  room sync as well and is named `dispatch-listener <process id>`, replacing the stale-room
+  listener. The processes read that name in `pg_stat_activity` to know which processes are
+  members. One process holds up to 95 connections at its ceiling
+  (`store.ConnectionsPerProcess`), up from 94, and `infra/gcp`'s `dispatchConnectionsPerPod` is
+  95 to match.
+- Migrations `20261101181500`–`20261101181502` are additive, and each census answers `0`.
+  `20261101181500` adds a trigger on `issues`, which takes `SHARE ROW EXCLUSIVE` on `issues` for
+  milliseconds: a write to `issues` waits behind it, and a read does not. `20261101181501` creates
+  `doc_ask_block_authors` and `20261101181502` creates `doc_conditional_edit_queue`. Each takes
+  `ACCESS EXCLUSIVE` on its new table and `SHARE ROW EXCLUSIVE` on `artifacts` for its foreign key.
+  The earlier release runs over the new schema unchanged.
+- A document room a process holds is copied once for its reads rather than once per read. A read
+  of a room that has taken no edit yet - the room a settlement loads for an agent's write, or one
+  opened only to be read - copied the whole document under the room's lock and threw the copy
+  away; that copy now becomes the room's rendered copy, which every later read of the room walks
+  and the room's next edit moves, instead of a second document built beside it.
+- The Envoy listener and the held-port wrapper build on Go 1.27.3.
+
 ## [29.15.0] - 2026-11-05
 
 ### Added
