@@ -983,8 +983,10 @@ func (c Claim) ServingAssignment() string {
 // serve, and its testing verdict — pass or fail, which a check report also names — would close
 // the check with nobody having looked at production. The look, the run and the assignment are
 // one serving, not three. The cost is a look whose own turn starts after the daemon's wait for
-// it: its report is refused, and the look is retried at its bound (workflow.CheckLookBound, two
-// hours), which is a loud bounded retry in place of a silent false pass.
+// it: that turn counts as the agent's own, its report is refused, and the task is re-sent once
+// the turn ends (noTurn keeps the mark, sendPending sends it again), so the next turn confirms
+// it and reports. The look's own bound (workflow.CheckLookBound, two hours) is the backstop
+// under that, and a refusal the agent sees beats a silent false pass.
 func (c Claim) ServingCheck() CheckLook {
 	retired := c.ServingCheckLook
 	if c.Pending != nil && c.Pending.Phase != "" {
@@ -994,16 +996,16 @@ func (c Claim) ServingCheck() CheckLook {
 }
 
 // servedAnything is whether this claim's worker has taken any task at all — a run, an assignment
-// or a look — which is what older work means for the look alone (ServingCheck). It is read there
-// and by the retire that writes what a confirmed delivery leaves behind, which reads ServingCheck
-// itself (retirePending), so the two can never answer differently for one delivery.
+// or a look — which is what older work means for the look alone (ServingCheck). Only that
+// accessor reads it: the retire writes what a confirmed delivery leaves behind, and a confirmed
+// delivery is taken by serving's first rule, before any question of older work.
 func (c Claim) servedAnything() bool {
 	return c.ServingGeneration != 0 || c.ServingAssignmentID != "" || c.ServingCheckLook != (CheckLook{})
 }
 
 // deliveredRun, deliveredAssignment and deliveredCheckLook are what a delivery carries of each:
-// the three values serving picks between, named so the accessors read as one rule applied three
-// times rather than three rules.
+// the three values serving picks between, named so the three accessors read as one order of
+// sources with a guard of their own rather than three rules.
 func deliveredRun(d Delivery) uint64          { return d.Generation }
 func deliveredAssignment(d Delivery) string   { return d.Assignment }
 func deliveredCheckLook(d Delivery) CheckLook { return d.CheckLook }
@@ -1012,9 +1014,9 @@ func deliveredCheckLook(d Delivery) CheckLook { return d.CheckLook }
 // ServingAssignment, the production check look for ServingCheck — from the three sources all
 // three read, in this order. carried is what the pending delivery holds of it, and retired what
 // the claim was left serving (ServingGeneration, ServingAssignmentID, ServingCheckLook); the zero
-// value of any of them is a task, or a claim, that answers for none of them. The precedence lives
-// here once, so a later fix to it — the DeliveredAt fallback, say — cannot land on one of the
-// three and miss the others.
+// value of any of them is a task, or a claim, that answers for none of them. The order of the
+// three sources lives here once, and each caller supplies what counts as older work for the
+// field it is asking about (servedOlder, below).
 //
 //  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
 //     runs one turn at a time.

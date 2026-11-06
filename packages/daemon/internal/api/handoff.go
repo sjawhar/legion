@@ -137,13 +137,21 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// the phase path below: that path holds an implementer's and a merger's completion to a
 	// commit (MISSING_FIELD), which the plugin's done branch never sends, since it sends what a
 	// check report sends (pi-shared's legion-phase-ops.ts, completeHandoff). A late implementer
-	// or merger turn after the close lands here, and so does a look a restart of the daemon left
-	// unrecorded on its claim. Nothing of this call is recorded either way, so the answer is the
-	// whole of it, and it says what the agent does instead: the look's own task.
+	// or merger turn after the close lands here, an architect's on a done root does, and so does
+	// a look a restart of the daemon left unrecorded on its claim. Nothing of this call is
+	// recorded either way, so the answer is the whole of it, and it says who reports here and
+	// who has nothing to: the check names one role, and only a turn of that role's own look task
+	// reports on it.
 	if issue.Phase == phase.Done {
+		whose := "it has no open production check, so there is nothing here for any role to report"
+		if position.check != nil && position.check.Open() {
+			whose = fmt.Sprintf(
+				"its production check is the %s's, and only a turn of that role's own look task reports on it, naming the look and a verdict of pass, pending or fail; every other role has nothing to report here",
+				position.check.Role)
+		}
 		writeFailure(w, http.StatusConflict, "CHECK_LOOK_NOT_SERVED", fmt.Sprintf(
-			"%s is done: no phase of it is open, and this session works no look of its production check. This completion reports on nothing and recorded nothing. Report in the turn of a look's own task, which names the look and asks for a verdict of pass, pending or fail.",
-			grant.Issue))
+			"%s is done: no phase of it is open, and this session works no look of its production check. This completion reported on nothing and recorded nothing: %s.",
+			grant.Issue, whose))
 		return
 	}
 	if (grant.Role == claim.RoleImplementer || grant.Role == claim.RoleMerger) && !requireFailureFields(w, field{"commit", req.Commit}) {

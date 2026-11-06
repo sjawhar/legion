@@ -121,10 +121,10 @@ func mergedCloseBehindATestingTurn(t *testing.T) (*harness, *factRecorder, liveC
 	return h, facts, tester, machine
 }
 
-// theCheckIsUntouched is what every refusal of the phase path leaves behind, whichever refusal it
-// is: the refusal is written before the fact is applied, so no report of any kind reached the
-// workflow, no check event is recorded as processed, and the check still stands open at look 1
-// with the look open.
+// theCheckIsUntouched is what a refusal of a completion that works no look leaves behind,
+// whichever refusal it is: the refusal is written before the fact is applied, so no report of
+// any kind reached the workflow, no check event is recorded as processed, and the check still
+// stands open at look 1 with the look open.
 func theCheckIsUntouched(t *testing.T, h *harness, facts *factRecorder) {
 	t.Helper()
 	for _, fact := range facts.recorded() {
@@ -178,8 +178,10 @@ func TestATestingVerdictAfterTheMergedCloseIsNoReportOnTheProductionCheck(t *tes
 //
 // A look the claim has only had sent to it is no look it serves: read as one, this verdict would
 // close the production check as a pass with nobody having looked at production, which is the
-// whole of what the fallback for an unread task must not do. So the completion is the phase path's
-// again, refused with nothing recorded and the check left open at its look.
+// whole of what the fallback for an unread task must not do. So the completion reports on no
+// look, and a done issue runs no phase for it to complete either: it is refused
+// CHECK_LOOK_NOT_SERVED, before the phase path, with nothing recorded and the check left open at
+// its look.
 func TestATestingVerdictBehindAnUnreadLooksTaskIsNoReportOnTheProductionCheck(t *testing.T) {
 	h, facts, tester, machine := mergedCloseBehindATestingTurn(t)
 	ctx := context.Background()

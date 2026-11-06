@@ -498,8 +498,7 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // unconditional on the value, not a diff. Which value each takes is the claim's own accessors,
 // read here off the claim this delivery is still pending on, so what the claim is left serving
 // is by construction what ServingRun, ServingAssignment and ServingCheck answered while that
-// delivery was pending — including the look, whose fallback reads the run and the assignment
-// this write is about to replace (Claim.servedAnything).
+// delivery was pending.
 //
 // The claim goes with the delete, in the store's one transaction, and is durable there rather
 // than left for the claim's next write: the wait that follows can be hours long — a tester on CI,

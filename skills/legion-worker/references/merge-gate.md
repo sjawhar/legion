@@ -298,6 +298,9 @@ reviewing until you finish.
   refuses a report on an issue with no open check (`CHECK_NOT_OPEN`), on a look already ended
   (`CHECK_LOOK_NOT_OPEN`), or with no verdict of `pass`, `pending` or `fail`
   (`CHECK_VERDICT_REQUIRED`).
+  One refusal is about the turn rather than the report: a completion sent from a turn that is not
+  a look's own task is refused `CHECK_LOOK_NOT_SERVED` and records nothing, so report again in the
+  turn of the look's task.
 - **Each look does three things.** Do what the deployment instructions say to reach the deploy:
   when they name an agent or role for it, `envoy_publish` the merge commit to that role's topic
   with `expects_reply: none`, and await no reply. Read whether production carries the merge. Then

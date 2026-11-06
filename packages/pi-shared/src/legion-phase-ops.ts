@@ -521,10 +521,10 @@ async function completeHandoff(
   // `supervise.Claim.ServingCheck`), which the record does not show: a session working a look of
   // its issue's production check reports on that look, and every other session's completion is
   // its phase's, which the daemon refuses on a `done` issue whatever it carries
-  // (`CHECK_LOOK_NOT_SERVED`). So the two can
-  // disagree: a look's report from an issue back in the workflow is refused here as a phase
-  // completion, and a phase's completion that outlived the close is posted here as a report and
-  // refused by the daemon on the phase path.
+  // (`CHECK_LOOK_NOT_SERVED`). So the two can disagree: a look's report from an issue back in
+  // the workflow is refused here as a phase completion, and a phase's completion that outlived
+  // the close is posted here as a report and refused `CHECK_LOOK_NOT_SERVED`, before the phase
+  // path.
   // The report's own refusals apply while the record shows the check it is of: the state carries
   // that object only while the check is open. A refusal here posts nothing and mints nothing.
   const record = recordFrom(await daemon.state(), claim.issue);
