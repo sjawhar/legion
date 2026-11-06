@@ -11,6 +11,7 @@ import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, buildReferencePath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
 
@@ -27,6 +28,7 @@ function AskEventBody({
   event: AskEvent;
   onRendered?: () => void;
 }): ReactNode {
+  const source = textSourceOf("ask", event.payload.id);
   const { answer, question, options, resolution, created_at } = event.payload;
   const resolutionReason = resolution === undefined ? undefined : askResolutionReason(resolution);
   // A changed answer names the one it replaced; the first answer's event carries none. An event
@@ -37,7 +39,7 @@ function AskEventBody({
       <p className={`text-sm font-medium ${textPrimaryOnSurface}`}>
         {event.type === "ask.opened" ? "Ask opened:" : "Ask:"}
       </p>
-      <MarkdownBody markdown={question} onRendered={onRendered} />
+      <MarkdownBody markdown={question} onRendered={onRendered} source={source} />
       <AskOptionList options={options} selected={answer?.selected ?? []} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Opened <Timestamp at={created_at} />
@@ -49,7 +51,7 @@ function AskEventBody({
           </p>
           {answer.text === null || answer.text === "" ? null : (
             <div className="mt-2">
-              <MarkdownBody markdown={answer.text} onRendered={onRendered} />
+              <MarkdownBody markdown={answer.text} onRendered={onRendered} source={source} />
             </div>
           )}
           {previous === undefined ? null : (
@@ -71,7 +73,12 @@ function AskEventBody({
             <>
               {" "}
               -{" "}
-              <MarkdownBody markdown={resolutionReason} onRendered={onRendered} variant="inline" />
+              <MarkdownBody
+                markdown={resolutionReason}
+                onRendered={onRendered}
+                source={source}
+                variant="inline"
+              />
             </>
           )}{" "}
           <Timestamp at={resolution.at} />
@@ -131,7 +138,11 @@ export function EventBody({
     const whole = event.payload.body_truncated === true ? wholeItemPath(event) : undefined;
     return (
       <>
-        <MarkdownBody markdown={event.payload.body} onRendered={onRendered} />
+        <MarkdownBody
+          markdown={event.payload.body}
+          onRendered={onRendered}
+          source={textSourceOf(message ? "message" : "comment", event.payload.id)}
+        />
         {whole === undefined ? null : (
           <p className="mt-1 text-xs">
             <Link className={`dispatch-inline-link underline ${linkText}`} to={whole}>

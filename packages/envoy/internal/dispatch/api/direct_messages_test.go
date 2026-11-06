@@ -213,7 +213,7 @@ func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
 	if missing := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/5a660655-04ad-4ce0-8a9b-93dd03c412b7?session=s1", nil); missing.Code != http.StatusNotFound {
 		t.Fatalf("missing message: status=%d body=%s", missing.Code, missing.Body.String())
 	}
-	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab3?session=s1", nil); malformed.Code != http.StatusBadRequest ||
+	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab?session=s1", nil); malformed.Code != http.StatusBadRequest ||
 		!strings.Contains(malformed.Body.String(), `"code":"MESSAGE_ID_INPUT"`) {
 		t.Fatalf("malformed message id: status=%d body=%s", malformed.Code, malformed.Body.String())
 	}

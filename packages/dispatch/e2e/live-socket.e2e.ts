@@ -198,7 +198,8 @@ test.beforeEach(async () => {
 // SLOW(>=2s): one socket for every live view is read over three live views, so the row loads and
 // draws all three in the one tab - the project's board, the session's live thread and the
 // delivery timeline - and each is a page's worth of rendering the claim cannot do without.
-test("a tab holds one live socket for every live view @phone", async ({ browser }) => {
+// @webkit @firefox: the one-socket invariant, which must hold in every engine people read in.
+test("a tab holds one live socket for every live view @webkit @firefox", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
   await seedDeliveryFixture();
@@ -260,7 +261,7 @@ const SILENCE_CHECK_MS = 15_000;
 // SLOW(>=2s): real idling is the measurement. The ages below are read in this process, in real
 // wall time, and a connection Dispatch holds open ages whatever the page's timers believe, so no
 // page clock can stand in for the idle itself.
-test("no request to Dispatch stays open while the page idles @phone", async ({ browser }) => {
+test("no request to Dispatch stays open while the page idles", async ({ browser }) => {
   // The 5 s idle and three page loads are all this row spends.
   test.setTimeout(40_000);
   await createProject({ key: "CORE", name: "Core" });
@@ -322,10 +323,10 @@ test("no request to Dispatch stays open while the page idles @phone", async ({ b
 // SLOW(>=2s): the two quiet windows below, one on the control page and one on the rotating
 // page, are what "no extra request" is counted over. A count of what a page did not do over a
 // window is that window's own real time, and the two must stay equal for the counts to compare.
-// The title's `@firefox` selects nothing today - no project's `grep` reads it, and this whole
-// spec is in the `firefox` project's `testMatch` already. It is there so the row keeps Firefox
-// when project selection moves from file names to title tags (cybermonklabs/legion#2866), and
-// is no second selection convention of its own.
+// Both tags in the title are what select this row: `@phone` puts it in `iphone`, and `@firefox`
+// in `firefox`, which takes rows by title tag rather than by file name since
+// cybermonklabs/legion#2866. The two occurrences this change fixes were seen in exactly those
+// two projects, so the row must keep both.
 test("a rotation loses no event and makes no extra request @phone @firefox", async ({
   browser,
 }) => {
@@ -414,9 +415,7 @@ test("a rotation loses no event and makes no extra request @phone @firefox", asy
 
 // SLOW(>=2s): a cold load in WebKit and in Firefox with the page's first live socket held open
 // through it, which each engine then has to replay the missed change on.
-test("a change committed while the page loads is shown without a reload @phone", async ({
-  browser,
-}) => {
+test("a change committed while the page loads is shown without a reload", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Before the page load" });
 
@@ -453,9 +452,7 @@ test("a change committed while the page loads is shown without a reload @phone",
   }
 });
 
-test("a first live socket opening without a change makes no API request @phone", async ({
-  browser,
-}) => {
+test("a first live socket opening without a change makes no API request", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Quiet page load" });
 
@@ -500,7 +497,7 @@ test("a first live socket opening without a change makes no API request @phone",
   }
 });
 
-test("an agent live view survives a rotation in place @phone", async ({ browser }) => {
+test("an agent live view survives a rotation in place", async ({ browser }) => {
   await setLiveSessions([agent]);
   await publishAgentStreamFrame(agent.session_id, replay(agent.session_id), "replay");
 

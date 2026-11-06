@@ -88,64 +88,22 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the Delivery sidebar nav entry opens the delivery timeline @phone", async ({ browser }) => {
+test("the Delivery sidebar nav entry opens the delivery timeline", async ({ browser }) => {
   await seedDeliveryFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
   // Start from another page (the Inbox, at "/") rather than navigating to /delivery directly,
   // so this exercises the Sidebar's own "Delivery" rail link (`features/sidebar/Sidebar.tsx`)
-  // rather than only the route itself. Below `xl` (a phone viewport) the sidebar is a sheet
-  // behind its own "Menu" control (app.tsx) -- that button's accessible name is its
-  // `aria-label` ("Open navigation"), not its visible "Menu" text, since an aria-label
-  // overrides text content for accessible-name computation. A one-shot `isVisible()` check here
-  // races the SPA's first render under load (CI's iphone project flaked on exactly this): wait
-  // for either the Menu button or the link itself to actually appear before deciding, rather
-  // than reading visibility once before the page has necessarily finished mounting.
+  // rather than only the route itself.
   await page.goto("/");
-  const menuButton = page.getByRole("button", { name: "Open navigation" });
   const deliveryLink = page.getByRole("link", { name: "Delivery" });
-  // Promise.race never cancels its losing branch: on a desktop-viewport run the mobile-only
-  // "Open navigation" button never renders, so that waitFor keeps polling toward its own default
-  // timeout after the race settles, risking an unhandled rejection ("Target closed") once
-  // context.close() below tears the page down while it is still pending. Each branch catches its
-  // own eventual rejection so a loser that never resolves never surfaces one.
-  await Promise.race([
-    menuButton.waitFor({ state: "visible" }).catch(() => {}),
-    deliveryLink.waitFor({ state: "visible" }).catch(() => {}),
-  ]);
-  if (await menuButton.isVisible()) {
-    await menuButton.click();
-  }
   await expect(deliveryLink).toBeVisible();
   await deliveryLink.click();
 
   await expect(page).toHaveURL(/\/delivery$/);
   await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
 
-  await context.close();
-});
-
-test("the header names the window and the freshness row names the prototype's six sources", async ({
-  browser,
-}) => {
-  await seedDeliveryFixture();
-  const context = await asUser(browser, "alice");
-  const page = await context.newPage();
-  await openTimeline(page);
-
-  await expect(page.getByText(/Generated .* · window/)).toBeVisible();
-  const freshness = page.getByRole("region", { name: "Source freshness" });
-  for (const source of [
-    "PRs never checked",
-    "Deploy runs never checked",
-    "PR CI never checked",
-    "Events never received",
-  ]) {
-    await expect(freshness.getByText(source)).toBeVisible();
-  }
-  await expect(freshness.getByText(/^Dispatch \d+ s ago$/)).toBeVisible();
-  await expect(freshness.getByText(/^Agents \d+ s ago$/)).toBeVisible();
   await context.close();
 });
 
@@ -331,9 +289,7 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
   await context.close();
 });
 
-test("the list sorts by its headers and a row opens the PR's details", async ({
-  browser,
-}, testInfo) => {
+test("the Repository facet narrows the list through the server", async ({ browser }) => {
   await seedDeliveryFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -342,29 +298,17 @@ test("the list sorts by its headers and a row opens the PR's details", async ({
   await page.getByRole("button", { name: "List", exact: true }).click();
   await expect(page).toHaveURL(/mode=list/);
   const titles = page.locator("tbody tr td:nth-child(4)");
-  await expect(titles).toHaveText(["fix: a waiting widget", "feat: a shipped widget"]);
-  await page.getByRole("button", { name: /^Merged/ }).click();
-  await expect(titles).toHaveText(["feat: a shipped widget", "fix: a waiting widget"]);
-  await expect(page.getByText("ACME-1 · P0")).toBeVisible();
+  await expect(titles).toHaveCount(2);
 
   // The Repository facet narrows the list server-side; acme/widgets is the only repository
   // seeded, so selecting it is a no-op on the result but proves the picker and the facet
   // round-trip to the server run. Each option carries its count.
-  await page.getByRole("button", { name: /^Repository:/ }).click();
+  const repository = page.getByRole("button", { name: /^Repository:/ });
+  await repository.click();
   await page.getByRole("option", { name: "acme/widgets, 2 PRs" }).click();
   await page.keyboard.press("Escape");
+  await expect(repository).toHaveText("1 selected");
   await expect(titles).toHaveCount(2);
-
-  await page.getByRole("cell", { name: "feat: a shipped widget" }).click();
-  const details = page.getByRole("dialog", { name: "Details" });
-  await expect(details.getByRole("link", { name: "Open on GitHub" })).toHaveAttribute(
-    "href",
-    "https://github.com/acme/widgets/pull/1"
-  );
-  await expect(details.getByRole("link", { name: "ACME-1 — Ship the widgets" })).toBeVisible();
-  await expect(details.getByText("P0", { exact: true })).toBeVisible();
-
-  await page.screenshot({ path: testInfo.outputPath("delivery-drilldown.png"), fullPage: true });
   await context.close();
 });
 

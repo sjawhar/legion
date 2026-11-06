@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+    The Legion skills say what READY now does with a path under `.legion/`: a change whose every path is under it may sit above the reviewer's approved head, whatever GitHub says the change did to each path, and a rename with one name outside it is still refused. The worker skill no longer tells a role how to cure a push the one-time handoff import refused, and the controller reference reads an issue's handoffs with `dispatch handoff-read` rather than from its branch.
+time: 2026-11-05T22:47:31.957364173Z
+custom:
+    Issue: pr2830
