@@ -164,6 +164,7 @@ export type {
   IssueChild,
   IssueClaim,
   IssueClaimEventPayload,
+  IssueClaimLiveness,
   IssueComponents,
   IssueComponentsInput,
   IssueCoverage,

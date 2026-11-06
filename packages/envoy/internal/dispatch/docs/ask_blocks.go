@@ -464,16 +464,12 @@ type invalidAskBlock struct {
 	reason error
 }
 
-// validateEditedAskBlocks refuses an edit that leaves an ask unreadable - breaking its content
-// rule, or holding what settlement cannot read - when the edit wrote or changed it.
+// validateEditedAskBlocks refuses an edit that leaves an ask unreadable - holding what settlement
+// cannot read, breaking its content rule, or past the bound its wording shares - when the edit
+// wrote or changed it. It reads an ask as settlement reads it (readAskBlockStrictly), so the
+// refusal is the reason settlement would have flagged the block with.
 func validateEditedAskBlocks(before, after *pmdoc.Node) error {
-	return refuseChangedAsks(before, after, func(ask *pmdoc.Node) error {
-		if err := pmdoc.AskContentError(ask); err != nil {
-			return err
-		}
-		_, err := parseAskBlock(ask)
-		return err
-	}, nodeToken)
+	return refuseChangedAsks(before, after, readAskBlockStrictly, nodeToken)
 }
 
 // refuseChangedAsks is the first reason check gives against an ask in after that before does not
@@ -685,17 +681,36 @@ func askReadability(tree *pmdoc.Node, visit func(id string, reason error) bool) 
 }
 
 // readAskBlockStrictly is why node is unreadable as settlement reads it, nil when it is readable:
-// parseAskBlock, then the content rule the browser editor holds an ask to (pmdoc.AskContentError).
-// Settlement calls it on each ask its collector (collectAskBlocksForSettlement) reads. An ask
-// breaking the rule - which concurrent edits can leave, and the browser keeps - is unreadable even
-// where the parse reads it: the browser's card takes its question from its first child and its
-// options from its last, where the parse joins them all, so settlement marks it `invalid` and
-// leaves its row as it was.
+// parseAskBlock, the content rule the browser editor holds an ask to (pmdoc.AskContentError),
+// then the bound its question and options share (askWordingTooLong). It is the one reading of an
+// ask block, in one order: settlement calls it on each ask its collector
+// (collectAskBlocksForSettlement) reads, and every write of this package is held to it for each
+// ask the write wrote or changed (validateEditedAskBlocks, and the version path in mutation.go),
+// so a write is refused with the reason settlement would have flagged the block with, and a
+// document carries no ask settlement could not read.
+//
+// An ask breaking the rule - which concurrent edits can leave, and the browser keeps - is
+// unreadable even where the parse reads it: the browser's card takes its question from its first
+// child and its options from its last, where the parse joins them all, so settlement marks it
+// `invalid` and leaves its row as it was.
+//
+// The wording bound is read here for the same reason: a browser edit reaches a document through
+// the Yjs room and settlement, where no route's check runs, so without it a person could open an
+// ask whose wording every ask route refuses. Its row would then take no PATCH at all, an
+// urgency-only edit included, because the ask routes hold the merged ask to that bound
+// (api.validateAskWording). Settlement marks such a block `invalid` with a block.invalid event
+// naming the bound, and leaves its row as it was, until an edit shortens the wording. A decision
+// block opens an ask like any other, whose ask.answered event carries its wording, so a wording
+// that cannot be answered must not be stored.
 func readAskBlockStrictly(node *pmdoc.Node) error {
-	if _, err := parseAskBlock(node); err != nil {
+	block, err := parseAskBlock(node)
+	if err != nil {
 		return err
 	}
-	return pmdoc.AskContentError(node)
+	if err := pmdoc.AskContentError(node); err != nil {
+		return err
+	}
+	return askWordingTooLong(block)
 }
 
 // parseAskBlock is the ask settlement reads in node, or why it cannot be read: a block no

@@ -60,12 +60,12 @@ func ciReconciler(natsClient *bus.Client, database *store.Store, app *auth.AppCo
 		if !natsClient.Connected() {
 			return nil, errors.New("NATS is not connected, so the CI record writer cannot be bound yet")
 		}
-		// The client's own JetStream context, read under its lock as redeliver.OpenState's caller
-		// reads it: the client replaces the connection and the context together when it reconnects
-		// a closed connection, which reading the field here would race. Every pass binds through
-		// this, so a pass after such a reconnect writes through the connection the client now
-		// holds.
-		writer, err := cistore.OpenWriter(natsClient.JS(), logger)
+		// The client's own connection and JetStream context, both read under its lock as
+		// redeliver.OpenState's caller reads the context: the client replaces the connection and
+		// the context together when it reconnects a closed connection, which reading either field
+		// here would race. Every pass binds through this, so a pass after such a reconnect writes
+		// through the connection the client now holds.
+		writer, err := cistore.OpenWriter(natsClient.Connection(), natsClient.JS(), logger)
 		if err != nil {
 			return nil, err
 		}

@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -140,9 +141,11 @@ func TestAPublishToAnUnheldRoleIsKeptAndAnsweredWithItsReason(t *testing.T) {
 	}
 }
 
-// A claim whose holder is no longer registered has lapsed. The message is kept for the role's next
-// holder under that reason, and the lapsed claim is released exactly as it was before.
-func TestAPublishToALapsedClaimIsKeptAndTheClaimIsStillReleased(t *testing.T) {
+// A claim whose holder is no longer registered has lapsed, and this build keeps that claim: the
+// holder writes no new one, so a copy kept for it would wait for a claim that never comes
+// (roleKeepable, dispatch://INFRA-392). The publish is refused as it was before the kept lane,
+// naming the holder and its retained claim, and the role's kept lane stays empty.
+func TestAPublishToALapsedClaimKeepsNothingAndTheClaimStands(t *testing.T) {
 	d, client := keptRoleDeps(t)
 	const (
 		role   = "kept-lapsed"
@@ -152,18 +155,22 @@ func TestAPublishToALapsedClaimIsKeptAndTheClaimIsStillReleased(t *testing.T) {
 		t.Fatalf("claim %s for a session the store does not hold: %v", role, err)
 	}
 
-	recorder, answer := publishToRole(t, d, role,
+	recorder, _ := publishToRole(t, d, role,
 		`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"is the holder still there?"}`)
-	if recorder.Code != http.StatusAccepted {
-		t.Fatalf("publish to a lapsed claim: status %d, body %s; want 202", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("publish to a lapsed claim: status %d, body %s; want 404 with nothing kept", recorder.Code, recorder.Body.String())
 	}
-	if !answer.Kept || answer.KeptReason != "holder_lapsed" || answer.Holder != holder {
-		t.Fatalf("the answer is %+v, want kept with reason holder_lapsed naming %s", answer, holder)
+	var refusal roleHolderError
+	if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
 	}
-	waitForKeptRoleMessage(t, client, role, answer.EventID)
+	if refusal.Reason != roles.Lapsed || refusal.Holder != holder {
+		t.Fatalf("the refusal is %+v, want reason holder_lapsed naming %s", refusal, holder)
+	}
+	assertNothingKept(t, client, role)
 
-	if held, err := d.registry.RoleHolder(role); err != nil || held != "" {
-		t.Fatalf("the lapsed claim after the publish = %q, %v; want released", held, err)
+	if held, err := d.registry.RoleHolder(role); err != nil || held != holder {
+		t.Fatalf("the lapsed claim after the publish = %q, %v; want %s's, left for the role reaper", held, err, holder)
 	}
 }
 
@@ -394,11 +401,13 @@ func TestAKeptRoleMessageOlderThanTheKeepWindowIsDroppedAndTheCursorMovesPastIt(
 	}
 }
 
-// Both of the role lane's give-up branches - a role nobody claims and a claim whose holder is
-// gone - keep the message instead of reporting it lost: no delivery exception goes out. The kept
-// copy lies on a subject no consumer filter carries (bus.StreamSubjects), so the durable never
-// delivers it back and it is never counted received a second time.
-func TestTheRoleLanesGiveUpBranchesKeepTheMessageWithNoException(t *testing.T) {
+// The role lane's one keepable give-up - a role nobody claims - keeps the message instead of
+// reporting it lost: no delivery exception goes out. A lapsed holder keeps its claim in this
+// build, so nothing is kept for it and its branch stays the delivery_failed exception
+// (TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating). The kept copy lies on a subject no
+// consumer filter carries (bus.StreamSubjects), so the durable never delivers it back and it is
+// never counted received a second time.
+func TestTheRoleLaneKeepsAnUnclaimedRolesMessageWithNoException(t *testing.T) {
 	cases := []struct {
 		name string
 		role string
@@ -407,7 +416,6 @@ func TestTheRoleLanesGiveUpBranchesKeepTheMessageWithNoException(t *testing.T) {
 		holder string
 	}{
 		{name: "unclaimed role", role: "lane-kept-unclaimed"},
-		{name: "lapsed holder", role: "lane-kept-lapsed", holder: "ses_lane_kept_lapsed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -814,7 +822,7 @@ func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 	}
 
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "kept-under-claim-1")
-	if !keepRoleLaneMessage(cfg, role, "", item, roleHolderUnclaimed) {
+	if !keepRoleLaneMessage(cfg, role, "", item, roles.Unclaimed) {
 		t.Fatalf("keep the role message; the listener log says why:\n%s", harness.logs.String())
 	}
 	select {
