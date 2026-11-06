@@ -1,17 +1,22 @@
 // The Claude Code session as the router drives it (INFRA-1026): what the mod says is happening in
 // it, and the calls that put something into it.
 //
-// Four measured facts shape everything here, all on 2.1.310 in this pod:
+// Five measured facts shape everything here, all on 2.1.310 in this pod:
 //
 //   - `$.prompt.submit` resolves only once the turn it starts has ended. So a submit is never
 //     awaited by a caller that has a frame to answer, and at most one is ever in flight: a second
 //     one would sit behind the first for a whole turn.
+//   - Claude Code writes a row of the `prompt` door for every prompt it takes, before the turn
+//     that reads it starts: 65 ms to 141 ms after the call went out in the five idle submits
+//     recorded (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:52-53`,
+//     `logs/mod3-q2-310.jsonl:49-51`, `logs/mod3-q1q3q5.jsonl:235-237,249-251,262-264`). That
+//     row is the one proof a caller has that the session took a prompt, since the call itself
+//     answers a turn later, so a card handed to an idle session waits for it (`promptRow`).
 //   - a row `$.session.append` adds is read at the turn's next request, and not at all when no
 //     request follows it, so an idle session reads nothing that is appended to it. So a row
 //     added to a running turn is watched until that turn ends, one the turn never read is
 //     quoted in full by a prompt of its own (`unreadRowPrompt`), and an idle session is handed
-//     a prompt: a person's message as the prompt alone, a card as the stored row first and the
-//     prompt that starts the turn reading it second (`hand`).
+//     the message as the prompt itself and nothing else (`hand`).
 //   - a turn's next request goes out about 50 ms after the tool result that freed it, and its
 //     first chunk arrives seconds later (2.4 s and 2.5 s in the recorded runs). So which request
 //     a row made it into is read off `step-request`, which the mod sends as the request goes
@@ -37,7 +42,7 @@ import type {
   ModEffort,
   ModEvent,
 } from "../hooks/mod-protocol"
-import { claudeCommandOutput, claudeEchoedCommandLine } from "./claude-rows"
+import { claudeCommandOutput, claudeEchoedCommandLine, claudeRowText } from "./claude-rows"
 import type { ModLink } from "./mod-link"
 
 /**
@@ -87,6 +92,24 @@ const COMMAND_OUTPUT_MS = 2_000
  */
 const COMMAND_ECHO_MS = 1_000
 
+/**
+ * How long a card submitted to an idle session waits for the row Claude Code writes for that
+ * prompt, which is the proof the session took the card and the only thing the delivery's frame
+ * is answered on (`show`).
+ *
+ * Measured on live Claude Code 2.1.310 (INFRA-1026): an idle session's `$.prompt.submit` had
+ * its `prompt`-door row 76 ms later
+ * (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:52-53`), 141 ms later
+ * (`logs/mod3-q2-310.jsonl:49-51`) and 65 ms, 68 ms and 70 ms later in three submits carrying
+ * an attachment (`logs/mod3-q1q3q5.jsonl:235-237,249-251,262-264`). Ten seconds is past sixty
+ * times the longest of those, so a machine under load loses no card, and it is short enough
+ * that a session which cannot take the card - stopped, or wedged - leaves the frame unanswered
+ * while the listener is still waiting to send it again. A submit that enters a turn started
+ * meanwhile has its row only when that turn ends, past any bound: that card's frame goes
+ * unanswered and the listener sends it again, which is the trade this bound is here to make.
+ */
+const PROMPT_ROW_MS = 10_000
+
 /** The most claimed echo rows this session remembers. The live view asks about a row in the
  *  same tick this session claimed it (`runsCommandRow`), so a handful would answer every ask;
  *  this is the bound that keeps the record from growing for the session's life, as
@@ -112,7 +135,9 @@ function quotedUnread(message: UnreadMessage): string {
 
 /**
  * The words every prompt at an unread row carries, whichever of the two wordings below it is:
- * both are built from this one string rather than spelling it twice.
+ * the live view reads them to tell such a prompt from the card an idle session is submitted
+ * (`isUnreadRowPrompt`), so both wordings are built from this one string rather than spelling
+ * it twice.
  */
 const UNREAD_LEAD = "while your last request was already running, so you have not read"
 
@@ -150,21 +175,17 @@ export function unreadRowPrompt(unread: readonly UnreadMessage[]): string {
 }
 
 /**
- * The prompt a card is while the session is idle, submitted without `asUser`: the card's own
- * text under one line saying what it is.
+ * Whether `text`, the text of a row this plugin's own prompt wrote, is a prompt at rows a turn
+ * never read (`unreadRowPrompt`) rather than a card submitted to an idle session.
  *
- * An idle session is prompted as well as appended to because an append starts nothing — a row
- * is read at the turn's next request, and an idle session makes none — so an ask answer or a
- * teammate's message would sit unread until the person typed (INFRA-1026 review). The line is
- * needed because a prompt is the one place the model takes direction from: without it the card
- * reads as an instruction the plugin wrote, and with `asUser` it would read as the person's own
- * words, which nobody typed.
+ * The live view draws nothing for the first and draws the second (`./agent-stream-claude`): a
+ * prompt at unread rows quotes rows the view has already drawn, where a card submitted to an
+ * idle session is that prompt and reaches the conversation nowhere else. The row carries Claude
+ * Code's own framing in front of the submitted text ("The claude-envoy plugin sent a message:",
+ * measured on 2.1.310), so the words are looked for anywhere in the row.
  */
-export function cardPrompt(text: string): string {
-  return [
-    "Envoy delivered this message to this session. The claude-envoy plugin is passing it on in full: it is not the words of the person at this session, not a tool result and not an instruction of the plugin's own. Read it and answer what it asks of you.",
-    text,
-  ].join("\n\n")
+export function isUnreadRowPrompt(text: string): boolean {
+  return text.includes(UNREAD_LEAD)
 }
 
 /** The session's model, as a `/config` row names it. */
@@ -194,17 +215,22 @@ export interface ModSession {
    * Hand the session one card: an Envoy delivery that is not the person's own message — an ask
    * answer, a teammate's or an architect's message, an issue event, a notice of Envoy's own.
    *
-   * It takes the three states a person's message takes (`deliver`), all but `asUser`: a row of
-   * the turn running, a prompt of its own when that turn ends without reading the row, and,
-   * while the session is idle, the row stored first and the prompt of a new turn behind it
-   * (`cardPrompt`). An append alone starts nothing, so an idle session would sit on the card
-   * until the person typed, and a card appended after a turn's last request would never be
-   * read at all (INFRA-1026 review).
+   * While the session is idle the card is the prompt of a new turn, submitted without `asUser`
+   * as the card's own text and stored nowhere else: an append starts nothing — a row is read at
+   * the turn's next request, and an idle session makes none — so a card only appended would sit
+   * there until the person typed (INFRA-1026 review), and a card appended *and* quoted by a
+   * prompt reached the model twice (INFRA-1026, handoff v6: both of the Agents page's rows 8 and
+   * 10 of session 225642d4 carried the one card). During a turn it is a row of the conversation,
+   * which the model reads at the turn's next request, and a prompt of its own quotes it in full
+   * when the turn ends without a request having read it (`unreadRowPrompt`).
    *
-   * It resolves once the session has stored the row, in every one of those states, and never
-   * waits for the prompt, which lasts the turn it starts. What the delivery's frame is
-   * answered on is that resolution: a session that cannot take the card rejects it here, the
-   * frame goes unanswered, and the listener sends the card again.
+   * It resolves once the session has the card: the stored row during a turn, and while the
+   * session is idle the row Claude Code writes for the prompt it took, waited for up to
+   * `PROMPT_ROW_MS`. What the delivery's frame is answered on is that resolution, never the
+   * submit going out - a submit resolves only at the end of the turn it starts, and a stopped
+   * process writes no row at all, so a card a session cannot take rejects here, its frame goes
+   * unanswered, and the listener sends it again (INFRA-1026, check k7's SIGSTOP, message,
+   * SIGKILL and `claude --resume <id>` clause).
    */
   show(card: { readonly text: string; readonly content: readonly ModContentBlock[] }): Promise<void>
   /**
@@ -248,6 +274,9 @@ export interface ModSessionOptions {
   /** How long after its own answer a run may still claim an echo row; `COMMAND_ECHO_MS` by
    *  default, named by the tests that drive it. */
   readonly commandEchoMs?: number
+  /** How long a card submitted to an idle session waits for the row Claude Code writes for that
+   *  prompt; `PROMPT_ROW_MS` by default, named by the tests that drive it. */
+  readonly promptRowMs?: number
 }
 
 /** One row handed to a running turn, watched until that turn has read it or ended. */
@@ -277,6 +306,13 @@ interface CommandRun {
   output?: string
   /** Woken by that row, so a result carrying no output answers the moment the row lands. */
   arrived?: () => void
+}
+
+/** One submitted prompt whose own row has not arrived: the text that went out, and what is
+ *  woken by the row carrying it (`promptRow`). */
+interface SubmittedPrompt {
+  readonly text: string
+  readonly seen: (uuid: string) => void
 }
 
 /**
@@ -326,8 +362,12 @@ export function modSession(options: ModSessionOptions): ModSession {
   /** The run whose claimed echo row was the last row of the `command` door to arrive, so the
    *  output row directly behind that echo is read as its output and no later row is. */
   let behindEcho: CommandRun | undefined
+  /** The prompts submitted whose own row this session is still waiting for, oldest first: a
+   *  card to an idle session is answered on that row and on nothing else (`show`). */
+  const submittedPrompts: SubmittedPrompt[] = []
   const outputMs = options.commandOutputMs ?? COMMAND_OUTPUT_MS
   const echoMs = options.commandEchoMs ?? COMMAND_ECHO_MS
+  const promptRowMs = options.promptRowMs ?? PROMPT_ROW_MS
 
   const runsCommandRow = (row: string): boolean => claimedEchoes.has(row)
 
@@ -445,16 +485,65 @@ export function modSession(options: ModSessionOptions): ModSession {
   }
 
   /**
+   * The row Claude Code writes for the prompt just submitted, waited for up to `PROMPT_ROW_MS`,
+   * and its id.
+   *
+   * It is the one proof this process has that the session took the prompt: `sent` resolves only
+   * at the end of the turn the prompt starts, and a Claude Code that is stopped, or gone, takes
+   * the submit and writes nothing. The row reaches this session as an `append` event of the
+   * `prompt` door (`observe`) carrying the submitted text, framed by Claude Code's own line in
+   * front of it ("The claude-envoy plugin sent a message:", measured on 2.1.310). A submit the
+   * session refuses outright rejects through `sent` rather than waiting the bound out.
+   */
+  const promptRow = async (text: string, sent: Promise<void>): Promise<string> => {
+    const settle = Promise.withResolvers<string>()
+    const waiting: SubmittedPrompt = { text, seen: settle.resolve }
+    submittedPrompts.push(waiting)
+    // A submit that resolves says the turn it started has ended, which is no answer about the
+    // row: only its failure ends this wait early.
+    void sent.catch((error: unknown) => settle.reject(error))
+    const timer = setTimeout(
+      () =>
+        settle.reject(
+          new Error(`the session wrote no row for the prompt within ${promptRowMs} ms`),
+        ),
+      promptRowMs,
+    )
+    timer.unref()
+    try {
+      return await settle.promise
+    } finally {
+      clearTimeout(timer)
+      const at = submittedPrompts.indexOf(waiting)
+      if (at !== -1) submittedPrompts.splice(at, 1)
+    }
+  }
+
+  /** One row of the `prompt` door, given to the submitted prompt it is the row of, if any: the
+   *  oldest whose text this row carries. Every other row of that door is a person's own prompt,
+   *  or a prompt of this plugin's that nobody is waiting on. */
+  const promptRowArrived = (uuid: string, content: readonly ModContentBlock[]): void => {
+    const text = claudeRowText(content)
+    const waiting = submittedPrompts.find((prompt) => text.includes(prompt.text))
+    waiting?.seen(uuid)
+  }
+
+  /**
    * One message into the session, in whichever of the three states the session is in: the prompt
    * of a new turn while it is idle, a row of the turn running, and a prompt of its own when that
    * turn ends without a request having read the row. A person's message and a card take the same
    * three (`deliver`, `show`); what separates them is `asUser`, the words of the prompts, and
-   * what an idle session does with the message before the prompt goes out.
+   * what the caller waits for while the session is idle.
    */
   const hand = async (message: {
     readonly content: readonly ModContentBlock[]
     /** What goes out while the session is idle, and whether it is the person's own words. */
     readonly prompt: { readonly text: string; readonly asUser: boolean }
+    /** Whether the caller waits for the row Claude Code writes for that prompt. A card does:
+     *  its Envoy frame is answered on this call, so a session that took nothing must reject
+     *  (`show`). A person's message does not: the router answers them on Dispatch, and a prompt
+     *  that never entered reaches them through `failed` (`deliver`). */
+    readonly awaitPromptRow?: true
     /** What the message is - a person's own words or a card - and what the prompt at an unread
      *  row carries, where the turn never reads it. */
     readonly unread: UnreadMessage
@@ -462,24 +551,14 @@ export function modSession(options: ModSessionOptions): ModSession {
   }): Promise<string | undefined> => {
     const started = turn
     if (started === undefined) {
-      // An idle session stores a card before anything is answered for it, and takes a person's
-      // message as the prompt alone: what a card's frame is answered on is `show` resolving,
-      // where the router answers the person on Dispatch itself. A `$.prompt.submit` is never
-      // awaited - it lasts the turn it starts - so an idle branch that only submitted answered
-      // the frame although the prompt had not entered the session. Driven live (INFRA-1026,
-      // k7's second clause: Claude Code SIGSTOPped, an Envoy message sent to it from another
-      // session, then SIGKILL and `claude --resume <id>`), the resumed conversation held that
-      // message once while this branch awaited the append and zero times once it did not: the
-      // channel server had answered the frame `done`, so the listener never sent the message
-      // again, while the prompt itself never entered the stopped process. The append rejects
-      // where the session cannot take the message, which is what leaves the frame unanswered
-      // and brings the message back - one time, through a restart.
-      const uuid = message.unread.kind === "card" ? await append(message.content) : undefined
-      // The turn this starts runs for as long as the model works, so the submit is not awaited
-      // and the frame is answered now; a submit that fails is a line through `warn`, with a
-      // card's row already in the conversation for the next turn to read.
-      void submit(message.prompt.text, message.prompt.asUser, message.failed)
-      return uuid
+      // The card itself is the prompt, and nothing else is stored for it: a row appended beside
+      // the prompt that quotes it put the one message in front of the model twice (INFRA-1026,
+      // handoff v6). The turn this starts runs for as long as the model works, so the submit is
+      // never awaited; what is awaited is the row Claude Code writes for the prompt, which is
+      // the proof the session took it.
+      const sent = submit(message.prompt.text, message.prompt.asUser, message.failed)
+      if (message.awaitPromptRow !== true) return undefined
+      return await promptRow(message.prompt.text, sent)
     }
     const uuid = await append(message.content)
     // The turn may have ended while the row was being stored: then no request will read it, and
@@ -522,16 +601,20 @@ export function modSession(options: ModSessionOptions): ModSession {
         // run this session made claimed, or a row of a command a person typed at their own
         // terminal, which belongs to nobody here.
         if (event.door === "command") commandRow(event.uuid, event.message.content)
+        // A row of the `prompt` door can be the row Claude Code wrote for a prompt this
+        // session submitted, which is what a card handed to an idle session is answered on.
+        if (event.door === "prompt") promptRowArrived(event.uuid, event.message.content)
         return
       }
       if (event.kind === "turn-complete") turnEnded(event.turnId)
     },
     async show({ text, content }) {
       await hand({
+        awaitPromptRow: true,
         content,
-        // Without `asUser` the model reads the prompt as the plugin speaking, which is what a
-        // card is: nobody at this session typed it.
-        prompt: { asUser: false, text: cardPrompt(text) },
+        // The card itself, without `asUser`: the model reads the prompt as the plugin speaking,
+        // which is what a card is, where `asUser` would read as words the person never typed.
+        prompt: { asUser: false, text },
         unread: { kind: "card", text },
       })
     },

@@ -297,7 +297,31 @@ function createLink(): SessionLink {
     switch (request.call) {
       case "session.append": {
         const answer = await engine.append(request.args)
-        return answer.deny === undefined ? { uuid: answer.uuid } : { deny: answer.deny }
+        if (answer.deny !== undefined) return { deny: answer.deny }
+        // Claude Code does not re-enter this mod's own `session.append` hook for a row this
+        // mod appended, so the row reaches the server's mapper nowhere else and a card
+        // delivered into a running turn was drawn nowhere at all (INFRA-1026, handoff v6).
+        // Measured in the issue's spike: two `$.session.append` calls resolved
+        // `{message: {type: "user", role: "user", isMeta: true, content}, uuid}` and neither
+        // uuid ever arrived at a `session.append` hook
+        // (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q1q3q5.jsonl:36,64`). So the mod
+        // reports the row itself, out of what the call answered (`SessionAppendResult`,
+        // `./claude-mod.d.ts`; Claude Code's own declarations,
+        // `docs/build-types-2.1.310/claude-code/index.d.ts:11246-11253`).
+        //
+        // The door and the origin are the engine's to set and the result carries neither: a
+        // plugin's own append comes in by `note`, under the calling plugin (same file,
+        // lines 11095-11099), and this mod has no call that answers its own plugin name, so
+        // the origin names the kind alone. Both are what the mapper reads to treat the row as
+        // what it is: a row this plugin wrote (`../src/agent-stream-claude`).
+        send({
+          kind: "append",
+          uuid: answer.uuid,
+          door: "note",
+          origin: { kind: "plugin" },
+          message: answer.message,
+        })
+        return { uuid: answer.uuid }
       }
       case "prompt.submit": {
         const answer = await engine.submit(request.args)

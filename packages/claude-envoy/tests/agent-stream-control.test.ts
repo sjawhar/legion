@@ -122,6 +122,8 @@ interface Running {
   readonly mod: LinkHarness
   readonly runner: AgentStreamRunner
   readonly warnings: string[]
+  /** Every event the stream handed on, which is what the session behind it reads. */
+  readonly observed: ModEvent[]
   /** Publish one control message and answer it on `reply`, then let the pump run. */
   readonly control: (session: string, body: unknown, reply?: string) => Promise<void>
   /** The replay answered on `reply`, or undefined when nothing was. */
@@ -133,10 +135,12 @@ function running(): Running {
   const nats = new FakeNats()
   const mod = fakeLink()
   const warnings: string[] = []
+  const observed: ModEvent[] = []
   const runner = startAgentStream({
     connection: nats,
     followsSessionId: true,
     link: mod.link,
+    observe: (event) => void observed.push(event),
     sessionId: SESSION,
     warn: (text) => void warnings.push(text),
   })
@@ -157,6 +161,7 @@ function running(): Running {
         .map((message) => JSON.parse(new TextDecoder().decode(message.data)) as AgentStreamFrame),
     mod,
     nats,
+    observed,
     runner,
     warnings,
   }
@@ -295,4 +300,30 @@ test("a stopped runner answers nothing more", async () => {
   live.runner.stop()
   expect(live.nats.unsubscribed).toContain(agentStreamControlSubject(SESSION))
   expect(live.nats.subscriptions.size).toBe(0)
+})
+
+// The mod reports every row it appends itself, because Claude Code does not re-enter a mod's
+// own `session.append` hook for one (`../hooks/mod.ts`). A host that did fire that hook as well
+// would send the row twice: drawn twice it is one message the viewer reads as two, and read
+// twice by the session behind this stream it is one command row claimed twice
+// (`../src/mod-session`). The guard sits where every event passes, so both readers are behind
+// it.
+test("a row that arrives twice is read once", async () => {
+  const live = running()
+  await live.control(SESSION, watchRequest)
+  live.mod.push(prompt("row-1", "what is 391?"), prompt("row-1", "what is 391?"))
+  await settle()
+
+  await live.control(SESSION, replayRequest, "_INBOX.twice")
+  const conversation = (live.answered("_INBOX.twice")?.frames ?? []).filter(
+    (frame) => frame.kind === "message",
+  )
+  expect(conversation).toHaveLength(1)
+  expect(live.observed.filter((event) => event.kind === "append")).toHaveLength(1)
+
+  // A row of its own is still read: the guard knows one id from another.
+  live.mod.push(prompt("row-2", "and 392?"))
+  await settle()
+  expect(live.observed.filter((event) => event.kind === "append")).toHaveLength(2)
+  live.runner.stop()
 })

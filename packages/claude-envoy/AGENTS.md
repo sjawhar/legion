@@ -297,25 +297,41 @@ above says how to run it).
   (`unreadRowPrompt`). An appended row starts nothing, so a card appended to an idle session
   waits for the person to type and one appended after a turn's last request is never read at
   all. A person's message goes with `asUser`, so Claude Code frames it as their own words; a
-  card goes without it, under a line saying Envoy delivered it (`cardPrompt`), since nobody at
-  the session typed it.
-- Store a card before the frame that carried it is answered: while the session is idle `hand`
-  appends the row and only then submits the prompt, so `show` resolves on the append and
-  rejects where the session cannot take the message, which leaves the Envoy frame unanswered
-  and has the listener send the card again — one time, through a restart. A submit is never
-  awaited (it lasts the turn it starts), so a branch that only submitted said `done` although
-  the prompt had not entered the session: driven live (INFRA-1026, k7's second clause — Claude
-  Code SIGSTOPped, an Envoy message sent to it, then SIGKILL and `claude --resume <id>`), the
-  resumed conversation held that message once while the append was awaited and zero times once
-  it was not. A person's message keeps the prompt alone: the router answers them on Dispatch.
+  card goes without it, so Claude Code frames it as the plugin speaking, since nobody at the
+  session typed it.
+- Put a card in front of the model once. While the session is idle the card is the prompt
+  itself and nothing is stored for it — no `$.session.append`, and no second prompt quoting
+  one — since a row beside a prompt that quotes it is the same message twice (INFRA-1026,
+  handoff v6: rows 8 and 10 of session 225642d4 carried the one card, and two subtests of the
+  `envoy-session-stall` lane read it twice). A card that arrives during a turn keeps the row
+  and the unread-row prompt behind it.
+- Answer a card's Envoy frame on the row the session wrote, never on the submit going out: a
+  `$.prompt.submit` resolves only at the end of the turn it starts, and a stopped Claude Code
+  takes the call and writes nothing. `show` waits up to `PROMPT_ROW_MS` for the `prompt`-door
+  row carrying the submitted text (65–141 ms in the five idle submits recorded in the issue's
+  spike) and rejects without it, which leaves the frame unanswered and has the listener send
+  the card again — one time, through a restart. Driven live (INFRA-1026, k7's second clause —
+  Claude Code SIGSTOPped, an Envoy message sent to it, then SIGKILL and `claude --resume
+  <id>`), a branch that answered on the submit held that message zero times in the resumed
+  conversation. A person's message answers at once instead: the router answers them on
+  Dispatch, and a prompt that never entered reaches them through `failed`.
+- Report from the mod every row the mod itself appends: Claude Code does not re-enter a mod's
+  own `session.append` hook for such a row (measured in the issue's spike —
+  `logs/mod3-q1q3q5.jsonl:36,64`, two calls whose uuids no hook ever carried), so a card
+  delivered during a turn reached no mapper and the live view drew nothing for it. `hooks/mod.ts`
+  sends an `append` event built from what `$.session.append` answered (`{message, uuid}`), by
+  the `note` door under a `plugin` origin, and the server ignores an `append` event whose row
+  id it has already read (`AGENT_STREAM_SEEN_ROWS_MAX`, `src/agent-stream-runner.ts`) in case a
+  host fires the hook as well.
 - Draw a row Claude Code marks `isMeta` only where this plugin wrote it (`origin.kind`
-  `plugin`): the engine marks every row `$.session.append` writes, so a card — which is that
-  row and, during a turn, nothing else — is the one `isMeta` row the page must show, while a
-  terminal `/rename`'s `<system-reminder>` (`origin.kind` `engine`) stays model-facing XML
+  `plugin`): the engine marks every row `$.session.append` writes, so a card delivered during a
+  turn — which is that row and nothing else — is the one `isMeta` row the page must show, while
+  a terminal `/rename`'s `<system-reminder>` (`origin.kind` `engine`) stays model-facing XML
   under the person's name and is drawn nothing for, as the `<local-command-caveat>` row of a
-  run is by the bookkeeping rule of the `command` door. The live view draws nothing for a
-  prompt this plugin submitted without `asUser`: both such prompts quote rows it has already
-  drawn.
+  run is by the bookkeeping rule of the `command` door. Of the two prompts this plugin submits
+  without `asUser`, the card an idle session is handed is drawn, because it is the card, and
+  the prompt at unread rows is not, because it quotes rows the view has already drawn
+  (`isUnreadRowPrompt`).
 - Keep the mod's socket where only its own user can create anything: `resolveModSocketPath`
   (`hooks/mod-protocol.ts`) puts `claude-envoy/ce-<hash of the session id>.sock` under
   `XDG_RUNTIME_DIR`, else Claude Code's own configuration directory (`CLAUDE_CONFIG_DIR`, else

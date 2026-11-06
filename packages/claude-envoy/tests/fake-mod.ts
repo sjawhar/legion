@@ -41,6 +41,35 @@ export interface FakeMod {
 /** A row id for each `session.append`, so the server has something to record the row as. */
 let rows = 0
 
+/** A row id for each prompt Claude Code takes, which is a row of its own. */
+let prompts = 0
+
+/**
+ * The row Claude Code writes for a prompt a plugin submitted, as 2.1.310 writes it: by the
+ * `prompt` door, under the plugin's origin, carrying `asUser` where the submit did and Claude
+ * Code's own framing in front of the text where it did not
+ * (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:52-53`, a submit answered 49 ms
+ * after its row). The server waits for this row before it answers the Envoy frame a card came
+ * on (`show` in `../src/mod-session`), so a fake mod that never wrote one would be a session
+ * that took nothing.
+ */
+function promptRow(args: ModCallArguments["prompt.submit"]): ModEvent {
+  prompts += 1
+  const text =
+    args.asUser === true ? args.text : `The claude-envoy plugin sent a message:\n${args.text}`
+  return {
+    door: "prompt",
+    kind: "append",
+    message: { content: [{ text, type: "text" }], role: "user", type: "user" },
+    origin: {
+      kind: "plugin",
+      name: "claude-envoy",
+      ...(args.asUser === true ? { asUser: true } : {}),
+    },
+    uuid: `prompt-row-${prompts}`,
+  }
+}
+
 export async function startFakeMod(
   socketPath: string,
   options: {
@@ -73,7 +102,11 @@ export async function startFakeMod(
       }
       case "prompt.submit": {
         const own = answers["prompt.submit"]
-        return own === undefined ? { text: request.args.text } : await own(request.args)
+        const value = own === undefined ? { text: request.args.text } : await own(request.args)
+        // The row goes out before the call answers, as Claude Code writes it before the submit
+        // resolves; a prompt the session dropped writes none.
+        if (value.drop === undefined) await send(promptRow(request.args))
+        return value
       }
       case "command.run": {
         const own = answers["command.run"]

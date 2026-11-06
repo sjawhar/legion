@@ -28,6 +28,18 @@ const AGENT_STREAM_CALL_TIMEOUT_MS = 5_000
  *  iterator ended, which is what a dropped connection looks like from here. */
 const AGENT_STREAM_RESUBSCRIBE_MS = 1_000
 
+/**
+ * The most row ids this stream remembers having read, so a row that arrives twice is read once.
+ *
+ * The mod reports every row it appends itself, because Claude Code does not re-enter a mod's
+ * own `session.append` hook for one (`../hooks/mod.ts`); a host that does fire that hook as
+ * well would send the row twice, and the view would draw it twice and the session would read
+ * the same `command` row twice (`./mod-session`). The two copies are a moment apart, so a few
+ * hundred ids is past any window one could cross, and the record is bounded as the session's
+ * own are (`CLAIMED_ECHO_ROWS_MAX` there).
+ */
+const AGENT_STREAM_SEEN_ROWS_MAX = 512
+
 export interface AgentStreamOptions {
   /** The link to this session's Claude Code mod (`./mod-link`): its events are the conversation,
    *  and its `$` calls are what the header's two frames are built from. */
@@ -128,6 +140,22 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
   let commandsRefreshedOnWatchAt = Number.NEGATIVE_INFINITY
   /** Whether the mod has said anything at all, which is when its reads are first worth making. */
   let primed = false
+
+  /** The rows this stream has read, newest last and bounded by `AGENT_STREAM_SEEN_ROWS_MAX`:
+   *  what the duplicate guard below answers from. */
+  const seenRows = new Set<string>()
+
+  /** Whether this row has been read already, remembering it when it has not. Every event of the
+   *  link passes here, which is the one place both readers below are behind. */
+  const readTwice = (uuid: string): boolean => {
+    if (seenRows.has(uuid)) return true
+    seenRows.add(uuid)
+    if (seenRows.size > AGENT_STREAM_SEEN_ROWS_MAX) {
+      const oldest = seenRows.values().next().value
+      if (oldest !== undefined) seenRows.delete(oldest)
+    }
+    return false
+  }
 
   const framesSubject = (): string => agentStreamFramesSubject(session)
 
@@ -258,6 +286,9 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
         refreshSettings()
         refreshCommands()
       }
+      // A row that has been read already is read no second time, whoever sent it twice
+      // (`AGENT_STREAM_SEEN_ROWS_MAX`).
+      if (event.kind === "append" && readTwice(event.uuid)) continue
       if (event.kind === "model") model = event.model
       // Before the stream records it: an event can be the row a person's message turned out to
       // be, and that row is tagged with the message it is.

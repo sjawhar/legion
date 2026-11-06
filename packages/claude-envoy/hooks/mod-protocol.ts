@@ -423,7 +423,13 @@ export type ModEvent =
     }
   /** The turn ended. `stopReason` is `turn.complete`'s own `reason`. */
   | { readonly kind: "turn-complete"; readonly turnId: string; readonly stopReason: ModTurnReason }
-  /** One row of the conversation, as `session.append` handed it. */
+  /**
+   * One row of the conversation, as `session.append` handed it — or, for a row the mod itself
+   * appended, as `$.session.append` answered: Claude Code does not re-enter a mod's own
+   * `session.append` hook for such a row (measured, `./mod.ts`), so the mod reports it, by the
+   * `note` door and under a `plugin` origin with no name, which is what the engine gives a
+   * plugin's own append and all the call's answer leaves the mod to say.
+   */
   | {
       readonly kind: "append"
       readonly uuid: string

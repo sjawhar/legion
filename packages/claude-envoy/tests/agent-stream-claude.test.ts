@@ -35,7 +35,7 @@ import {
   claudeAgentStreamCommands,
   createClaudeAgentStream,
 } from "../src/agent-stream-claude"
-import { cardPrompt, modSession, unreadRowPrompt } from "../src/mod-session"
+import { modSession, unreadRowPrompt } from "../src/mod-session"
 
 const SESSION = "0c3b6f6e-0000-4000-8000-000000000001"
 const SUBJECT = agentStreamFramesSubject(SESSION)
@@ -315,22 +315,31 @@ test("a person's message shows as their own, and the prompt pointing at a row it
   expect(kept[0]?.dispatchMessageId).toBe("msg-7")
 })
 
-// An Envoy card reaches the conversation as the row `$.session.append` writes: by the `note`
-// door, with this plugin's origin and `isMeta: true`, both of which the engine sets on a row a
-// plugin appends (`SessionAppendArgs`, `../hooks/claude-mod.d.ts`). Measured on 2.1.310 in this
-// round's own run
+// An Envoy card reaches the conversation in one of two shapes, and the view draws each of them
+// once.
+//
+// During a turn it is the row `$.session.append` writes: by the `note` door, with this plugin's
+// origin and `isMeta: true`, both of which the engine sets on a row a plugin appends
+// (`SessionAppendArgs`, `../hooks/claude-mod.d.ts`), reported by the mod itself because Claude
+// Code does not re-enter a mod's own `session.append` hook for it (`../hooks/mod.ts`). Measured
+// on 2.1.310
 // (`/legion/scratch/tmp/t-term-uz/config/projects/-legion-scratch-tmp-t-term-uz-cwd/9bdfebc9-06e5-496a-ad93-06105d0af932.jsonl:167`,
-// the HAZEL card delivered while a turn ran). That row is all a card delivered during a turn
-// ever becomes - no prompt of its own carries it - so a view that drew nothing of an `isMeta`
-// row showed the model answering a message the viewer never saw (INFRA-1026 review). An idle
-// session stores the same row and is prompted at it, and the prompt is what draws nothing.
-test("a card this session appended shows, though Claude Code marks the row isMeta", () => {
+// the HAZEL card delivered while a turn ran). That row is all such a card ever becomes - no
+// prompt of its own carries it - so a view that drew nothing of an `isMeta` row showed the
+// model answering a message the viewer never saw (INFRA-1026 review).
+//
+// While the session is idle it is the prompt itself, submitted without `asUser` and stored
+// nowhere else (`../src/mod-session`, `show`), which reaches the view as a `prompt`-door row
+// under Claude Code's own framing. Drawn, because it is the card; the prompt at rows a turn
+// never read is the one such prompt that is not (`isUnreadRowPrompt`, the test above).
+test("a card shows in both states, appended during a turn and submitted while idle", () => {
   const live = harness()
-  const card = "Dispatch message from alice: the migration is approved."
+  const appended = "Dispatch message from alice: the migration is approved."
+  const submitted = "Dispatch message from bob: the rollback is done."
   live.feed(
-    appendRow("note", [{ text: card, type: "text" }], {
+    appendRow("note", [{ text: appended, type: "text" }], {
       message: {
-        content: [{ text: card, type: "text" }],
+        content: [{ text: appended, type: "text" }],
         isMeta: true,
         role: "user",
         type: "user",
@@ -340,15 +349,31 @@ test("a card this session appended shows, though Claude Code marks the row isMet
     }),
     appendRow(
       "prompt",
-      [{ text: `The claude-envoy plugin sent a message:\n${cardPrompt(card)}`, type: "text" }],
+      [{ text: `The claude-envoy plugin sent a message:\n${submitted}`, type: "text" }],
       { origin: { kind: "plugin", name: "claude-envoy" }, uuid: "row-card-prompt" },
+    ),
+    // The prompt at a row a turn never read quotes rows this view has already drawn, so it
+    // draws nothing, though it comes by the same door under the same origin.
+    appendRow(
+      "prompt",
+      [
+        {
+          text: `The claude-envoy plugin sent a message:\n${unreadRowPrompt([
+            { kind: "card", text: appended },
+          ])}`,
+          type: "text",
+        },
+      ],
+      { origin: { kind: "plugin", name: "claude-envoy" }, uuid: "row-unread-prompt" },
     ),
   )
 
   const kept = messages(live.replay())
-  expect(kept).toHaveLength(1)
-  expect(kept[0]?.role).toBe("user")
-  expect(kept.map(textOf)).toEqual([card])
+  expect(kept.every((message) => message.role === "user")).toBe(true)
+  expect(kept.map(textOf)).toEqual([
+    appended,
+    `The claude-envoy plugin sent a message:\n${submitted}`,
+  ])
 })
 
 test("a command row keeps the row's own role and a note row an assistant one", () => {

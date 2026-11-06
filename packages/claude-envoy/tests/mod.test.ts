@@ -61,6 +61,9 @@ const MODEL_WITH_EFFORT = "claude-opus-5-5"
  *  `thinking=None` while a pick of `low` was in force. */
 const MODEL_WITHOUT_EFFORT = "claude-haiku-4-5"
 
+/** The id Claude Code gives the row the append test writes. */
+const APPENDED_ROW = "11111111-1111-4111-8111-111111111111"
+
 let session: Session | undefined
 let scratch: string | undefined
 /** True once the tests are over: the mod's waits end at once from then on, so its poll loop spends
@@ -113,7 +116,13 @@ function engineOn(directory: string): EngineInterface {
       id: async () => SESSION_ID,
       version: async () => ({ version: MOD_MIN_CLAUDE_VERSION }),
       model: async () => MODEL_WITH_EFFORT,
-      append: () => unused("session.append"),
+      // What Claude Code answers a plugin's own append with, measured in the issue's spike on
+      // 2.1.310: the row as stored, which the engine marks `isMeta` and gives the user role,
+      // and its id (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q1q3q5.jsonl:36`).
+      append: async (args) => ({
+        message: { ...args.message, isMeta: true, role: "user" } as const,
+        uuid: APPENDED_ROW,
+      }),
     },
     prompt: { submit: () => unused("prompt.submit") },
     command: { list: () => unused("command.list"), run: () => unused("command.run") },
@@ -179,6 +188,16 @@ async function finishedStep(): Promise<Extract<ModEvent, { kind: "step" }>> {
     const next = await server.events.next()
     if (next.done === true) throw new Error("the link ended before the step was whole")
     if (next.value.kind === "step" && next.value.done) return next.value
+  }
+}
+
+/** The next row the mod reports, with everything sent before it passed over. */
+async function nextAppend(): Promise<Extract<ModEvent, { kind: "append" }>> {
+  const { server } = started()
+  for (;;) {
+    const next = await server.events.next()
+    if (next.done === true) throw new Error("the link ended before a row arrived")
+    if (next.value.kind === "append") return next.value
   }
 }
 
@@ -267,4 +286,30 @@ test("a step of a model with an effort of its own runs and reports the picked on
   expect(requested.effort).toBe("low")
   expect(sent.model).toBe(MODEL_WITH_EFFORT)
   expect(sent.effort).toBe("low")
+})
+
+// Claude Code does not re-enter a mod's own `session.append` hook for a row that mod appended:
+// measured in the issue's spike, where two `$.session.append` calls resolved with their rows
+// and neither uuid ever reached a hook
+// (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q1q3q5.jsonl:36,64`). So the row would reach
+// the live view's mapper nowhere at all, and a card delivered during a turn was drawn nowhere
+// (INFRA-1026, handoff v6). The mod reports it itself, out of what the call answered.
+test("the mod reports the row it appends itself, as the row this plugin wrote", async () => {
+  const { server } = started()
+  const content = [
+    { type: "text", text: "Dispatch message from alice: the migration is approved." },
+  ]
+
+  expect(await server.request("session.append", { message: { type: "user", content } })).toEqual({
+    uuid: APPENDED_ROW,
+  })
+
+  const row = await nextAppend()
+  expect(row.uuid).toBe(APPENDED_ROW)
+  // The door and the origin the engine gives a plugin's own append, which is what the mapper
+  // reads to draw the row rather than dropping it as a meta row of Claude Code's own.
+  expect(row.door).toBe("note")
+  expect(row.origin).toEqual({ kind: "plugin" })
+  // The row as the call answered it, `isMeta` and all.
+  expect(row.message).toEqual({ content, isMeta: true, role: "user", type: "user" })
 })
