@@ -636,12 +636,12 @@ Every series is read when the scrape comes, but the outbox lag, which one query 
 | `dispatch_events_committed_total` | Events this process has committed to the event log: every write that appends counts each event once it commits, so summed over the processes it grows as the `events` table does. |
 | `dispatch_http_in_flight`, `dispatch_http_queued` | Admission units held by admitted requests (a route that reads side by side holds two), and requests waiting for admission; label `class`: `read` or `write`. |
 | `dispatch_http_refused_total` | Requests refused `429 OVERLOADED`; labels `class` and `reason`: `queue_full` or `wait_exceeded`. |
-| `dispatch_http_lane_in_flight`, `dispatch_http_lane_queued`, `dispatch_http_lane_limit`, `dispatch_http_lane_refused_total` | The heavy read lanes (Admission, below): requests of the lane running now, waiting for a place in it (holding no admission unit), the places it has, and the requests it refused; label `lane` is `search`, `references`, `issue_artifacts` or `issue_list`, and `reason` on the refusals is `queue_full` or `wait_exceeded`. A lane queued with the classes idle is one route's statements holding the database, which is what the lanes bound. |
+| `dispatch_http_lane_in_flight`, `dispatch_http_lane_queued`, `dispatch_http_lane_limit`, `dispatch_http_lane_refused_total` | The heavy read lanes (Admission, below): requests of the lane running now, waiting for a place in it (holding no admission unit), the places it has, and the requests it refused; label `lane` is `search`, `references`, `issue_artifacts` or `issue_list`, and `reason` on the refusals is `queue_full` or `wait_exceeded`; a lane queued with the classes idle is one route's statements holding the database, which is what the lanes bound. |
 | `dispatch_http_admitted_units`, `dispatch_http_admitted_units_limit`, `dispatch_http_admitted_reserved_read_units` | Admission units held across both classes now, the combined cap over the two (40, below the 28 reads and 24 writes the class limits allow), and how many of the cap's units writes leave to the reads while a read waits for room (22); no labels. |
 | `dispatch_doc_writer_queued` | Writers waiting for a document's writer gate. |
 | `dispatch_settlements_running`, `dispatch_settlements_waiting` | Document settlements holding one of the settlement slots, and waiting for one. |
-| `dispatch_doc_rooms_resident`, `dispatch_doc_rooms_peerless`, `dispatch_doc_rooms_peerless_bytes`, `dispatch_doc_rooms_budget_closed_total` | Documents this process holds a live room for, loaded or loading; how many of those rooms have no browser connected; the heap those rooms are taken to hold, which the resident-room budget of 256 MiB bounds (`peerlessRoomHeapBudget`, estimated from the bytes each room's load decoded); and the rooms that budget has closed, least recently used first. `peerless_bytes` standing at the budget while the resident count falls is the budget holding against documents that have grown; the closed total rising steeply is a burst of writes to documents nobody is reading. |
-| `dispatch_doc_compactions_queued`, `dispatch_doc_compactions_deferred_total`, `dispatch_doc_compactions_forced_total`, `dispatch_doc_compactions_paced_total` | Documents the compaction queue holds now, the one in flight included; and the folds that waited for the request admission to ease, that the 45-second deferral bound let through while it was still pressing, and that the 100 ms gap between folds spaced on a busy server (Document compaction, below). `queued` high with `deferred` climbing and `forced` flat is compaction waiting its turn behind requests, as designed; `forced` climbing steadily means the requests never eased inside the bound. |
+| `dispatch_doc_rooms_resident`, `dispatch_doc_rooms_peerless`, `dispatch_doc_rooms_peerless_bytes`, `dispatch_doc_rooms_budget_closed_total` | Documents this process holds a live room for, loaded or loading; how many of those rooms have no browser connected; the heap those rooms are taken to hold, which the resident-room budget of 256 MiB bounds (`peerlessRoomHeapBudget`, estimated from the bytes each room's load decoded); and the rooms that budget has closed, least recently used first - `peerless_bytes` standing at the budget while the resident count falls is the budget holding against documents that have grown, and the closed total rising steeply is a burst of writes to documents nobody is reading. |
+| `dispatch_doc_compactions_queued`, `dispatch_doc_compactions_deferred_total`, `dispatch_doc_compactions_forced_total`, `dispatch_doc_compactions_paced_total` | Documents the compaction queue holds now, the one in flight included; and the folds that waited for the request admission to ease, that the 45-second deferral bound let through while it was still pressing, and that the 100 ms gap between folds spaced on a busy server (Document compaction, below) - `queued` high with `deferred` climbing and `forced` flat is compaction waiting its turn behind requests, as designed, and `forced` climbing steadily means the requests never eased inside the bound. |
 | `dispatch_log_dropped_total` | Log records dropped because the log writer fell behind; label `level`: `debug`, `info`, `warn` or `error`. |
 
 ## The live socket behind a proxy
@@ -1036,14 +1036,16 @@ A migration added from now on is named `<UTC timestamp>_<name>.up.sql`, the time
 The numbered versions are the sequence the set grew up with;
 every one of those files keeps the number it landed with, and no number is added again:
 the series closed at `0161_delivery_run_warnings.up.sql`, which `migrationid` records once for Dispatch, and a set holding a number above it is refused (`migrationid.Check`), so a branch that takes the next number fails on its own, before it merges.
-Two pull requests open at once used to take one number each and collide only when the first merged — nothing conflicts in git — while two timestamps taken a moment apart belong to their own authors.
+Two pull requests open at once used to take one number each and collide only when the first merged
+— nothing conflicts in git — while two timestamps taken a moment apart belong to their own authors.
 The version is the file name's leading digits read as a number, as before, so every timestamp orders after every number and timestamps order among themselves by time.
 A 14-digit version is past what an `integer` column holds, so `schema_migrations.version` is a `bigint`.
 A database created before the change keeps its `integer` column until a boot whose set holds a timestamped migration, which widens it once, in the same locked transaction that creates the table (`createVersionTable`):
 a boot with no timestamped migration leaves it alone, because the release before this change reads `max(version)` uncast and would fail that read once on every connection that prepared it while it still serves.
 So this release is rolled out before any release that carries a timestamped migration:
 a deployment that skips it costs the release it replaces one failed `/healthz` schema read on each connection that prepared the uncast read, which pgx then drops.
-`schema_version` in `/healthz` is still `max(version)`, the highest version applied — which is not proof that every version below it is applied, since a migration can merge below one a database already has.
+`schema_version` in `/healthz` is still `max(version)`, the highest version applied
+— which is not proof that every version below it is applied, since a migration can merge below one a database already has.
 The auto-deployer's rollback guard compares the whole set of recorded versions for that reason, rather than `max(version)` (`packages/envoy/deploy/README.md`, "Auto-deployer").
 
 A migration that merges below one a database has already applied still runs there, exactly once, at the next boot:
@@ -2435,8 +2437,10 @@ Each item below names a path with its method and identity, then its purpose.
 - `/metrics` (GET; none)
 
   The process's metrics in the Prometheus text format:
-  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `holder` (a role forward its holder's resolution held pending, with nothing sent), `unanswered` (NATS took the forward and the answer never came:
-  the role holder's receipt, or, for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
+  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `unanswered` (NATS took the forward and the answer never came:
+  the role holder's receipt, or, for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy) or `failed` (every other failure);
+  and `envoy_dispatch_outbox_role_forwards_held_total{holder_state}`, one count per role forward a holder's resolution held pending with nothing sent, `holder_state` being `unresponsive` (the holder is past the live window), `undated` (nothing dates the holder) or `unresolved` (the role claim or the holder's session could not be read).
+  A hold is a wait for that session to answer and no failure of the bus, so it is counted there and never under the publish failures an alert watches.
   It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it.
   Nothing scrapes it yet.
 
@@ -2504,7 +2508,8 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/agents` (GET; cookie, trusted header, or bearer)
 
   List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first, from Dispatch's copy of the listener's session list, at most 5 s old;
-  `503 ENVOY_UNAVAILABLE` when the listener cannot be reached, and for up to 5 s after a failed listener read without asking the listener again.
+  `503 ENVOY_REFILLING` with the listener's `Retry-After` (5 when it sends none) while the listener refuses its list as refilling (it cannot stand behind its copy of the sessions yet), and `503 ENVOY_UNAVAILABLE` when the listener cannot be reached, each for up to 5 s after that listener read without asking the listener again.
+  Neither is an empty list: a client reads neither as "no agents".
 
 - `/api/v1/agents/{session_id}/answers?since=&max_chars=` (GET; cookie, trusted header, or bearer)
 
@@ -2609,12 +2614,15 @@ Each item below names a path with its method and identity, then its purpose.
   `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`.
   `route_status` (`live`, `no_holder` or `unknown`;
   anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority;
-  `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer.
-  Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`.
+  `live` or `no_holder` is `503 ENVOY_REFILLING` with the listener's `Retry-After` while the listener refuses its list as refilling, and `503 ENVOY_UNAVAILABLE` when it does not answer.
+  Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `route_status_reason`, `updated_at`, `last_seq`, and `open_asks`.
   Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` against the process's one copy of the listener's `GET /v1/sessions`, stored in no table:
   that copy is at most 5 s old, one listener call refreshes it for every read that asks while it runs, and a listener that fails or does not answer within 2 s is asked again only after 5 s, every read in that window reading `unknown` at once.
   The status is `live` (a live session holds the role, or the session is live;
-  `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route.
+  `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener gave no list), or null with no route.
+  `route_status_reason` says why a route is `unknown`:
+  `refilling` (the listener refused its list as refilling, so the holder may well be running) or `unreachable` (the listener is not configured, did not answer in time, or failed otherwise); it is null with every other status.
+  A refilling list never makes a route `no_holder`.
 
 - `/api/v1/search?q=&project=&limit=&offset=` (GET; cookie, trusted header, or bearer)
 
@@ -3117,7 +3125,9 @@ Each item below names a path with its method and identity, then its purpose.
   any other file a `file` under its declared type), stored with `session_id` set, `issue_key` null, `project` `""` and `ref_key` `agent/<session_id>/<slug>`, addressed `dispatch://agent/<session_id>/artifact/<slug>`;
   it appends no event, since every event belongs to an issue, a document or a project.
   There is no list route: a conversation's pictures are reached through the references its messages carry, never enumerated.
-  A caller whose credential proves a session of its own — an access token the secrets broker issued, the one that does — uploads only into that session's conversation;
+  A caller whose credential proves a session of its own
+  — an access token the secrets broker issued, the one that does
+  — uploads only into that session's conversation;
   any other `session_id` is `403 SESSION_SCOPE`, naming the session the credential acts for and the session addressed.
   A person's cookie proves no session and uploads into the conversation it names.
   An agent's conversation holds files and images only, so a markdown document (JSON `content` or a `text/markdown` file) is `400 ARTIFACT_INPUT` ("an agent's conversation holds files and images;
@@ -3291,7 +3301,7 @@ The `dispatch` command waits out `Retry-After` and asks again, at most twice and
 
 | Status / code | Meaning |
 | --- | --- |
-| `429 OVERLOADED` | The server had no room for another read or write: its queue was full, or its wait in the queue (1 second for a read, 2 for a write) passed with no room, counted once over the whole request; nothing ran, so any method may be sent again after `Retry-After: 1`; a refused write's body is off the connection before the answer, read up to the route's body limit and within the bounds that body arrives under - before the wait where the server had no room for it to begin with, and drained and discarded before the answer otherwise - so a browser reads the 429 rather than a reset connection; a write whose body arrived to find no room left, and one that waited for a document's writer gate and then found none, are refused this way too, and `dispatch_http_refused_total` counts them. A heavy read route refused by its own lane (`search`, `references`, `issue_artifacts`, `issue_list`; Admission, above) is answered the same code, its message naming the lane rather than the class, and `dispatch_http_lane_refused_total` counts it. |
+| `429 OVERLOADED` | The server had no room for another read or write: its queue was full, or its wait in the queue (1 second for a read, 2 for a write) passed with no room, counted once over the whole request; nothing ran, so any method may be sent again after `Retry-After: 1`; a refused write's body is off the connection before the answer, read up to the route's body limit and within the bounds that body arrives under - before the wait where the server had no room for it to begin with, and drained and discarded before the answer otherwise - so a browser reads the 429 rather than a reset connection; a write whose body arrived to find no room left, and one that waited for a document's writer gate and then found none, are refused this way too, and `dispatch_http_refused_total` counts them; a heavy read route refused by its own lane (`search`, `references`, `issue_artifacts`, `issue_list`; Admission, above) is answered the same code, its message naming the lane rather than the class, and `dispatch_http_lane_refused_total` counts it. |
 | `429 EDIT_QUEUE_FULL` | 32 writes were already waiting for a document this write changes; every write to a live document waits for that document's writer gate, one write at a time, before its transaction opens: an edit, an upload, a rebuild, an anchored comment or ask, a reply that writes into its document, a comment edited, resolved, reopened, accepted or rejected, an ask answered, resolved or edited; nothing ran, so send it again after `Retry-After: 1`, which this answer carries without `Cache-Control: no-store`. |
 | `503 DATABASE_BUSY` | No database connection came free within its pool's bound (`store.ErrPoolBusy`); a read may be sent again after `Retry-After: 1`, while a write may have committed part of its work before the wait that failed it, so read what it wrote before sending it again; `dispatch_db_pool_acquire_timeouts_total` counts the waits. |
 | `503 REQUEST_TIMEOUT` | A read ran past its deadline, 20 seconds, or a file version download spent 5 minutes before its answer began; send it again after `Retry-After: 1`. |

@@ -327,16 +327,23 @@ itself.
 ## Metrics
 
 `GET /metrics` needs no credential either, so whoever reaches the server's HTTP port can read it.
-It answers in the Prometheus text format with one counter,
-`envoy_dispatch_outbox_publish_failures_total`: one count for each destination of an event
-publish that was not reached, labelled `reason`. `denied` is a publish NATS refused under the
-server's own grant, `refused` one NATS refuses however often it is retried, `holder` a role
-forward its holder's resolution held pending with nothing sent (a stale holder, a claim the store
-kept, a read that failed), `unanswered` a forward NATS took whose answer never came - the role
-holder's receipt - and `failed` any other failure. A holder whose entry an earlier listener
-stored with a port is counted on the stream's acknowledgement of the stored copy, until that
-entry lapses. A denied publish also logs `dispatch outbox: publish event` at ERROR, naming the
-subject.
+It answers in the Prometheus text format with two counters.
+`envoy_dispatch_outbox_publish_failures_total` counts each destination of an event publish that
+was not reached, labelled `reason`. `denied` is a publish NATS refused under the server's own
+grant, `refused` one NATS refuses however often it is retried, `unanswered` a forward NATS took
+whose answer never came - the role holder's receipt, or, for a holder whose entry an earlier
+listener stored with a port, the stream's acknowledgement of the stored copy - and `failed` any
+other failure. A denied publish
+also logs `dispatch outbox: publish event` at ERROR, naming the subject.
+
+`envoy_dispatch_outbox_role_forwards_held_total` counts a role-routed event the outbox held
+rather than sent, labelled `holder_state` with the state its holder was in: `unresponsive` for a
+holder that stopped answering, `undated` for one nothing dates, `unresolved` for a claim or
+session read that did not answer. A hold is a wait and not a failure - nothing was sent, the
+holder keeps its claim, and the event is retried until the session answers - so it is counted
+here rather than with the failures above, and its event's back-off is logged at INFO
+(`dispatch outbox: event waits for its role's holder`). An event that reaches the dead-letter
+threshold logs at ERROR however it was held.
 
 ## Behind a proxy
 

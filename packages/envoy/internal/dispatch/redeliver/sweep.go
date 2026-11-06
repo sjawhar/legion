@@ -108,10 +108,11 @@ type GitHub interface {
 	Redeliver(ctx context.Context, deliveryID int64) error
 }
 
-// OpenState opens the sweep's KV bucket, creating it on first use with replicas copies, the
-// deployment's ENVOY_NATS_REPLICAS, and raising a bucket found with fewer (bus.EnsureKeyValue).
-func OpenState(js nats.JetStreamContext, replicas int) (bus.KeyValue, error) {
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: replicas})
+// OpenState opens the sweep's KV bucket on conn, through js, creating it on first use with
+// replicas copies, the deployment's ENVOY_NATS_REPLICAS, and raising a bucket found with fewer
+// (bus.EnsureKeyValue).
+func OpenState(conn *nats.Conn, js nats.JetStreamContext, replicas int) (bus.KeyValue, error) {
+	kv, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: replicas})
 	if err != nil {
 		return bus.KeyValue{}, fmt.Errorf("open %s KV bucket: %w", bus.WebhookRedeliveryBucket, err)
 	}
