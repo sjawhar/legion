@@ -533,9 +533,15 @@ describe("Mermaid diagrams", () => {
   // before that task has written it, and draw the disclosure closed. That is measured, not
   // feared: the label row of `e2e/mermaid.e2e.ts` failed exactly that way once in 100 repeats
   // on Firefox at the head that recorded from `toggle` alone, the source hidden for the whole
-  // 15 s expect timeout after the reader's click. happy-dom runs the click's listeners before
-  // it flips the `details`, so the click's own record is written first here and this row holds
-  // from either listener; what a browser does between them is `e2e/mermaid.e2e.ts`'s to measure.
+  // 15 s expect timeout after the reader's click.
+  //
+  // The repaint has to run inside the click for this case to read the click's own record, which
+  // is why it is driven from a listener on the summary and the click is the DOM method rather
+  // than `fireEvent.click`: `fireEvent` runs inside `act()`, which holds a `rerender` until the
+  // whole dispatch is over. The module's listener was registered first, so it runs first, and
+  // happy-dom flips the `details` only once the click reaches it, so the repaint below reads
+  // what the click wrote and nothing else. Drop the `click` listener from `drawBlock` and this
+  // case alone fails, `Expected: true, Received: false`.
   test("a source the reader opens is open in a body painted anew inside their own click", async () => {
     await warmMarkdownRenderer();
     const diagram = fence("sequenceDiagram\n  Alice->>Bob: Same task");
@@ -543,8 +549,12 @@ describe("Mermaid diagrams", () => {
     try {
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
       const first = disclosureIn(figuresIn(view.container)[0]);
-      clickTheSummary(figuresIn(view.container)[0]);
-      view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${diagram}`} />);
+      const summary = first?.querySelector("summary");
+      if (summary == null) throw new Error("The drawn block has no Mermaid source summary.");
+      summary.addEventListener("click", () => {
+        view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${diagram}`} />);
+      });
+      summary.click();
       const repainted = disclosureIn(figuresIn(view.container)[0]);
       expect(repainted).not.toBe(first);
       expect(repainted?.open).toBe(true);

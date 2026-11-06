@@ -8,7 +8,7 @@
  * the renderer refuses) a status line naming the reason, then the original code block inside a
  * `Mermaid source` disclosure, closed the first time a diagram draws and open again on a later
  * paint of a source the reader opened, remembered under the same entry limit as the drawings and
- * closed again for a source the reader edited (a different source is a different key); a refusal
+ * closed again once its source changes (a different source is a different key); a refusal
  * draws open so the source is readable at once.
  *
  * A document's blocks draw here too, through the editor's drawer: `features/doc/editor.ts` gives
@@ -286,9 +286,10 @@ function drawBlock(pre: HTMLPreElement, drawn: MermaidDrawing, key: string): voi
     // between the click and that task - the live view painting a streaming turn anew, a decision
     // card arriving - reads the memory before the listener wrote it and draws the disclosure
     // closed. Measured, not feared: the label row of `e2e/mermaid.e2e.ts` failed that way once
-    // in 100 repeats on Firefox at this head, the source hidden for the whole 15 s expect
-    // timeout after the reader clicked `Mermaid source`. `toggle` stays beside it for the
-    // keyboard and for an opening the code makes, which no click reports.
+    // in 100 repeats on Firefox at the head that recorded from `toggle` alone, the source hidden
+    // for the whole 15 s expect timeout after the reader clicked `Mermaid source`. `toggle`
+    // stays beside it for the keyboard and for an opening the code makes, which no click
+    // reports.
     summary.addEventListener("click", () => remember(!details.open));
     details.addEventListener("toggle", () => remember(details.open));
   } else {
