@@ -291,13 +291,15 @@ function columnAlignments(view: EditorView): ColumnAlignment[][] {
  * the document the e2e row pasted into carried.
  *
  * Production seeds the room from the stored markdown with the document service's parser, which
- * leaves a `---` column with no alignment (parse.go) and writes no attribute for it into the
- * Y.Doc (update.go writes only the attributes a node holds). The editor's own parser reads `---`
- * as no alignment too, but `withMarksEditor` seeds through `prosemirrorToYXmlFragment`, which
- * drops a null attribute the same way - and reading the fragment back fills the gap with the
- * schema's default, `left` (@milkdown/preset-gfm's `cellAttributes`). So without this every
- * seeded column would arrive left-aligned, where the stored markdown the case compares against
- * aligns it nowhere, and a paste that reset a column to left would change nothing.
+ * leaves a `---` column with no alignment (parse.go) and writes it into the Y.Doc as `"none"`
+ * (`liveNulls`, update.go), which `treeAttrs` (read.go) reads back as no alignment. The editor's
+ * own parser reads `---` as no alignment too, but `withMarksEditor` seeds through
+ * `prosemirrorToYXmlFragment`, which drops a null attribute - and reading the fragment back fills
+ * the gap with the schema's default, `left` (@milkdown/preset-gfm's `cellAttributes`). So without
+ * this every seeded column would arrive left-aligned, where the stored markdown the case compares
+ * against aligns it nowhere, and a paste that reset a column to left would change nothing. This
+ * seeds `null` where production's editor holds `"none"`: the two serialize alike, and they differ
+ * only where a cell goes through the DOM, whose `setDOMAttr` writes a `null` as `left`.
  */
 function seedColumnAlignments(view: EditorView, spec: string): void {
   const tables = storedAlignments(spec);

@@ -675,11 +675,11 @@ test("a reader who scrolls after a block link lands is not pulled back once the 
   }
 });
 
-// The other call site of `refocusAfterDiagrams`: `VersionView.tsx:127` refocuses a highlighted
-// mark once a diagram above it has drawn, where the row above drives `ProofDocument`'s call. No
-// unit test holds a diagram's draw pending against a version view, and the deep-links row that
-// lands a past version's comment link opens a document with no diagram, so this row is the only
-// test of that refocus.
+// The version view's call site of `refocusAfterDiagrams`: `VersionView.tsx:127` refocuses a
+// highlighted mark once a diagram above it has drawn, where the row above drives
+// `ProofDocument`'s call. No unit test holds a diagram's draw pending against a version view, and
+// the deep-links row that lands a past version's comment link opens a document with no diagram,
+// so this row is the only test of that refocus.
 // SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
 // mark's landing to be worth proving; the worker draws it for real and no timer is waited on.
 test("a past version's highlighted mark lands on its block once a diagram above it draws", async ({
