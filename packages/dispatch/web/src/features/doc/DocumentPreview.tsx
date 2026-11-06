@@ -1,4 +1,4 @@
-import { type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { markdownClassName } from "../refs/markdown-engine";
 import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
@@ -11,6 +11,19 @@ import { BLOCK_ID_ATTRIBUTE } from "./scroll-block";
 /** The class the preview's own element carries, which `styles.css` skips the off-screen blocks
  *  of exactly as it skips the editor's (`content-visibility`). */
 const PREVIEW_CLASS = "dispatch-doc-preview";
+
+/**
+ * How long the document's own draw waits for the editor's build to begin before drawing the
+ * rest of itself, where the server drew the document's opening blocks into the page it sent.
+ *
+ * The wait is for a build that is already on its way: this element mounts in the commit that
+ * opens the document's socket, and the sync that begins the build landed 505 to 1,134 ms after
+ * that commit in every one of the six runs measured on this pod (`iphone` at 4x CPU
+ * throttling, both documents of `e2e/large-documents.ts`). Five seconds is four times the
+ * longest of those, and the only thing a reader loses by it is a draw that never reached them
+ * anyway (the comment on `DocumentPreview`).
+ */
+export const waitsForTheBuildMs = 5_000;
 
 /** The document's own draw inside `within`, while one is on the page: what the reader is
  *  reading before the editor exists, and what `ProofDocument` reads their place out of as it
@@ -119,10 +132,24 @@ export function takeTheBuiltBlocks(preview: HTMLElement, built: readonly string[
  * held before it (`useRenderedMarkdown`), which is the pass the reader is reading. A build that
  * fails to produce an editor hands this element its own job back (`ProofDocument`'s
  * `reportLoadFailure`): there is nothing to replace the draw, so it paints the whole document.
+ *
+ * Where the server drew the opening blocks it waits for that build before starting at all
+ * (`waitsForTheBuildMs`), because on such a page the pass it would start never reaches the
+ * reader. The element mounts in the same commit that opens the document's socket, and the sync
+ * that begins the build landed 0.5 to 1.1 s later in every run measured on this pod - `iphone`
+ * at 4x CPU throttling, both documents of `e2e/large-documents.ts` - while the whole document
+ * takes the parse worker about 16 s. So the pass was posted, never answered in time, and
+ * dropped at the build; what it did cost the reader was the page's own Markdown engine, built
+ * to make it: a second headless Proof editor, 294-546 ms of the main thread, in the second
+ * before the editor they are waiting for (dispatch://INFRA-341, R11). Waiting costs them
+ * nothing, since the pass they are waiting for would not have painted either. A page whose
+ * build never comes - a transport chunk that never arrives, a socket that never syncs - draws
+ * the whole document as it always did, that wait later.
  */
 export function DocumentPreview({
   address,
   building,
+  buildWaitMs = waitsForTheBuildMs,
   markdown,
 }: {
   /** The address this document is open at, which the server's own draw names: blocks drawn for
@@ -130,6 +157,11 @@ export function DocumentPreview({
   address: string;
   /** Whether the editor's build has begun, which is where this draw stops painting. */
   building: boolean;
+  /** How long this draw waits for that build before drawing the rest of itself, where the
+   *  server drew the document's opening blocks into the page it sent (`waitsForTheBuildMs`).
+   *  A row that proves what the wait ends in shortens it rather than waiting it out, as
+   *  `setParseDeadline` lets a row do for the parse queue's own deadline. */
+  buildWaitMs?: number;
   markdown: string;
 }): ReactNode {
   const root = useRef<HTMLDivElement>(null);
@@ -164,10 +196,25 @@ export function DocumentPreview({
    *  lands, and for a reader whose page carried the server's draw until the whole document
    *  replaces it - and the element then holds what it has rather than drawing anything. */
   const drawn = useRef<string | undefined>(serverDrewTheFirstScreen ? undefined : firstScreenful);
-  const source = !drawnOnce ? firstScreenful : building ? drawn.current : markdown;
+  /** Whether the wait for the editor's build is over, so this element draws the rest of the
+   *  document itself. Always over where the server drew nothing: there this element's own
+   *  passes are the only document the reader has. */
+  const [waitedForTheBuild, setWaitedForTheBuild] = useState(!serverDrewTheFirstScreen);
+  useEffect(() => {
+    if (waitedForTheBuild) {
+      return;
+    }
+    const timer = window.setTimeout(() => setWaitedForTheBuild(true), buildWaitMs);
+    return () => window.clearTimeout(timer);
+  }, [buildWaitMs, waitedForTheBuild]);
+  const source = !drawnOnce
+    ? firstScreenful
+    : building || !waitedForTheBuild
+      ? drawn.current
+      : markdown;
   /** Whether this element draws nothing for now and keeps what is in front of the reader: the
-   *  server's blocks, until the document's text has arrived and been parsed, and whatever it
-   *  holds from the task the editor's build begins in. */
+   *  server's blocks, until the document's text has arrived and been parsed, while the editor's
+   *  build is still expected, and whatever it holds from the task that build begins in. */
   const holding = source === undefined || source === "";
   // The document's own parse policies, which are this hook's defaults: a single newline inside a
   // paragraph is a space (hard-wrapped Markdown is one paragraph), and a line of raw HTML leaves

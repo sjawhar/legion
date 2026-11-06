@@ -123,12 +123,16 @@ describe("the document's own draw, where the server drew its opening blocks", ()
 
   // The reader has been reading these blocks since the page was parsed, which on a phone is
   // seconds before this element exists. The page adopts them: it parses no screenful of its own,
-  // and nothing goes off the screen while the whole document is still being parsed.
+  // and nothing goes off the screen while the whole document is still being parsed. The wait for
+  // the editor's build is shortened here rather than waited out; what it ends in is the row
+  // after this one.
   test("adopts them, and parses no first screenful of its own", async () => {
     pageCarryingADraw();
     const markdown = wholeDocument("A document the server drew the opening of");
 
-    const view = render(<DocumentPreview address={ADDRESS} building={false} markdown={markdown} />);
+    const view = render(
+      <DocumentPreview address={ADDRESS} building={false} buildWaitMs={1} markdown={markdown} />
+    );
     try {
       await waitFor(() => expect(worker.requests.length).toBe(1));
       // The only parse asked for is the whole document; the screenful the page would otherwise
@@ -145,6 +149,44 @@ describe("the document's own draw, where the server drew its opening blocks", ()
       await waitFor(() =>
         expect(preview(view.container).querySelectorAll("p").length).toBeGreaterThan(1)
       );
+    } finally {
+      view.unmount();
+    }
+  }, 20_000);
+
+  // And while that build is still on its way, nothing of this element's own is asked for at
+  // all: no parse, and so no Markdown engine built to make one. On a page the server drew into,
+  // the pass it would start is dropped at the build every time - the sync landed 0.5 to 1.1 s
+  // after this element mounted in every run measured, the parse worker answers the whole
+  // document about 16 s later - so the engine it costs is a second headless Proof editor built
+  // for a draw that never reaches the reader (dispatch://INFRA-341, R11).
+  test("ask for no parse of their own while the editor's build is still on its way", async () => {
+    pageCarryingADraw();
+    const markdown = wholeDocument("A document whose editor is on its way");
+
+    const view = render(
+      <DocumentPreview
+        address={ADDRESS}
+        building={false}
+        buildWaitMs={10_000}
+        markdown={markdown}
+      />
+    );
+    try {
+      // Long enough that a parse this element meant to ask for would have been posted.
+      const aMomentLater = Promise.withResolvers<void>();
+      setTimeout(aMomentLater.resolve, 200);
+      await act(() => aMomentLater.promise);
+
+      expect(worker.requests).toEqual([]);
+      expect(preview(view.container).textContent).toBe("Served");
+
+      // The build begins, and the element holds the blocks the reader is reading for good.
+      view.rerender(
+        <DocumentPreview address={ADDRESS} building buildWaitMs={10_000} markdown={markdown} />
+      );
+      expect(worker.requests).toEqual([]);
+      expect(preview(view.container).textContent).toBe("Served");
     } finally {
       view.unmount();
     }

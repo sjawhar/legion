@@ -1232,10 +1232,16 @@ test("a document's text is asked for before the entry chunk has arrived @phone",
 // the page's own thread, taken in front of the issue page's first render, which is the render
 // that carries the document's surface, its socket and its editor (dispatch://INFRA-341, R11).
 //
-// So on such a page the engine waits for the document's own text, which is the first thing that
-// needs it. This row holds that text back and reads the browser's own resource timing: a page
-// that warmed the engine asked for its chunk seconds before the text answered.
-test("a page the server drew a document into loads no Markdown engine before the document's text @phone", async ({
+// So the engine left the boot task, and then the surface stopped asking for it at all while an
+// editor is on its way (`DocumentPreview`'s `waitsForTheBuildMs`): on such a page the pass it
+// would build the engine for is dropped at the build every time - the sync landed 0.5 to 1.1 s
+// after the surface mounted in every run measured on this pod, and the parse worker answers the
+// whole document about 16 s later - so the engine was a second headless Proof editor, 294 to
+// 546 ms of the main thread, built for a draw that never reached the reader.
+//
+// This row reads the browser's own resource timing after the reader has an editor they can type
+// in: neither the engine's chunk nor the parse worker's was ever asked for.
+test("a page the server drew a document into builds no Markdown engine while its editor comes @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -1243,69 +1249,59 @@ test("a page the server drew a document into loads no Markdown engine before the
     "the engine's one reader here is the document's own preview, which is what a phone draws: " +
       "at a width that opens the margin, its cards draw Markdown of their own"
   );
-  test.setTimeout(180_000);
-  const { path } = await seedDocument("notes.md", shortDocument);
+  test.setTimeout(300_000);
+  // Plain prose, well over the parse worker's threshold and well over the first screen the
+  // server draws: nothing on this page but the document's own draw has any use for the engine,
+  // so a chunk asked for is that draw asking for it. A decision block would bring its own card
+  // and a diagram its own renderer, and neither is what this row is about.
+  const prose = `# The lease ledger\n\n${"The paragraph a reader meets. ".repeat(8)}\n\n`.concat(
+    Array.from({ length: 120 }, (_, index) => `## Section ${index}\n\nWhat it says.`).join("\n\n"),
+    "\n"
+  );
+  const { path } = await seedDocument("ledger.md", prose);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    // The document's text, held long enough that no order between it and the engine's chunk can
-    // be read as noise. Both routes, since the page reads the text by whichever its address
-    // named.
-    const textHeld = Promise.withResolvers<void>();
-    await page.route(
-      (url) => documentTextRoute.test(url.pathname),
-      async (route) => {
-        await textHeld.promise;
-        await route.continue();
-      }
-    );
     await page.goto(path, { waitUntil: "commit" });
 
-    // The page has drawn everything it can without the text: the issue's own header, which waits
-    // on the issue read alone. A page that warms the engine has asked for its chunk by now.
-    await expect(page.locator("[data-issue-header]")).toBeVisible({ timeout: 60_000 });
-    textHeld.resolve();
-
-    const firstBlock = page
-      .locator(
-        '[aria-label="Document text"] [data-block-id], [aria-label="Document editor"] [data-block-id]'
-      )
-      .first();
-    await expect(firstBlock).toBeVisible({ timeout: 60_000 });
-    await expect(firstBlock).toContainText("The lease ledger");
+    // The reader's own block: the editor's first, under a root that takes edits, which is what
+    // the wait is for. Until it is there, nothing says the engine was skipped rather than
+    // merely late.
+    await expect(
+      page.locator('.proof-editor[data-write-path="live"] [data-block-id]').first()
+    ).toBeVisible({ timeout: 180_000 });
 
     // What the browser itself timed. The engine's chunk is the headless editor's entry
     // (`@legion/proof-editor/headless`, `packages/proof-editor/src/lib-headless.ts`), which the
-    // build names after that module; nothing else on this page imports it.
-    const timed = await page.evaluate(() => {
+    // build names after that module, and the parse worker is the chunk the queue creates for a
+    // body over the threshold; nothing else on this page asks for either.
+    const asked = await page.evaluate(() => {
       const resources = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
-      const pathOf = (resource: PerformanceResourceTiming) => new URL(resource.name).pathname;
-      const text = /^\/api\/v1\/(issues\/[^/]+\/artifacts\/[^/]+|artifacts\/[^/]+)\/text$/;
+      const paths = resources.map((resource) => new URL(resource.name).pathname);
       return {
-        engineAskedMs: resources.find((resource) =>
-          /^\/assets\/lib-headless-[^/]*\.js$/.test(pathOf(resource))
-        )?.startTime,
-        textAnsweredMs: resources.find((resource) => text.test(pathOf(resource)))?.responseEnd,
+        engine: paths.filter((name) => /^\/assets\/lib-headless-[^/]*\.js$/.test(name)),
+        worker: paths.filter((name) => /^\/assets\/markdown-parse\.worker-[^/]*\.js$/.test(name)),
+        text: paths.filter((name) =>
+          /^\/api\/v1\/(issues\/[^/]+\/artifacts\/[^/]+|artifacts\/[^/]+)\/text$/.test(name)
+        ),
       };
     });
 
     expect(
-      timed.textAnsweredMs,
-      "the document's text was never read, so there is no moment to read the engine against"
-    ).toBeDefined();
+      asked.text.length,
+      "the document's text was never read, so this page never drew the document at all"
+    ).toBeGreaterThan(0);
     expect(
-      timed.engineAskedMs,
-      "the page drew this document without asking for the Markdown engine's chunk at all: " +
-        "either the chunk is no longer named after `lib-headless.ts`, or nothing draws the " +
-        "document's own text any more"
-    ).toBeDefined();
+      asked.engine,
+      "the page built its own Markdown engine while the editor was on its way: a second " +
+        "headless Proof editor for a draw the build replaces before it can paint " +
+        "(`DocumentPreview`'s `waitsForTheBuildMs`)"
+    ).toEqual([]);
     expect(
-      timed.engineAskedMs ?? 0,
-      "the Markdown engine was asked for before the document's text had even answered, so it " +
-        "was warmed ahead of the render rather than loaded by the surface that draws the " +
-        "document (`open-document-early.ts`, `DeploymentResilience.tsx`)"
-    ).toBeGreaterThan(timed.textAnsweredMs ?? Number.POSITIVE_INFINITY);
+      asked.worker,
+      "the page posted the whole document to the parse worker while the editor was on its way"
+    ).toEqual([]);
   } finally {
     await alice.close();
   }
