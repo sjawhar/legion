@@ -60,7 +60,7 @@ func TestDecidableIsTheDeploymentRowsInTableOrder(t *testing.T) {
 	}
 }
 
-// The live rows are what each session measures at its start, in the table's order.
+// The live rows are what each claimed session measures while it runs, in the table's order.
 func TestLiveIsTheLiveRowsInTableOrder(t *testing.T) {
 	if got, want := Live(), []Name{Subagents, WebSearch, MCP, RepositoryExtensions, DispatchEnvoyTools, GitHub}; !slices.Equal(got, want) {
 		t.Errorf("Live() = %v, want %v", got, want)

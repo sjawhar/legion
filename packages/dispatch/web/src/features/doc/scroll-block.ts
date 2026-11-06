@@ -1,4 +1,4 @@
-import { refocusAfterDiagrams } from "./refocus-after-diagrams";
+import { refocusWhenSettled } from "./refocus-when-settled";
 
 /** The attribute `@legion/proof-editor` stamps a block's id onto (`BLOCK_ID_DOM_ATTR`), written
  * out rather than imported: a value import from the editor library would pull it out of
@@ -29,11 +29,13 @@ let disposeRerun: (() => void) | undefined;
  * Scrolls `container` so the block with `blockId` sits at its top, and answers whether the
  * container held that block. A container that already shows it there is not moved.
  *
- * It runs again once the page's mermaid diagrams have drawn (`refocusAfterDiagrams`, the module
+ * It runs again once the page's mermaid diagrams have drawn (`refocusWhenSettled`, the module
  * the live document's focus re-runs through): a document's diagrams draw after the editor opened,
  * in Dispatch's Mermaid worker, and each one above the block pushes it down by the diagram's
  * height. The re-run reads the block afresh, so a node view redrawn in between is found again,
  * and it is dropped if the block has gone or the reader has pressed, scrolled, touched or typed.
+ * This column names no drawn root of its own: its scroll container keeps its size whatever its
+ * content does, so the diagrams are what it waits on.
  *
  * This is not `focusBlock` on the editor handle: that centres the block and pulses it, which is
  * what the document page wants of a link. A reading pane beside a list wants the block the reader
@@ -54,6 +56,6 @@ export function scrollBlockToTop(blockId: string, container: HTMLElement): boole
     scrollElementToTop(block, container);
   };
   scroll();
-  disposeRerun = refocusAfterDiagrams(scroll);
+  disposeRerun = refocusWhenSettled(scroll);
   return true;
 }

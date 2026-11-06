@@ -149,6 +149,7 @@ PUT /api/v1/projects/{key}/default-assignee any
 GET /api/v1/projects/{key}/related any
 POST /api/v1/projects/{key}/related any
 GET /api/v1/references any
+GET /api/v1/references/questions any
 GET /api/v1/related-checks any
 GET /api/v1/schema/blocks public
 GET /api/v1/search any

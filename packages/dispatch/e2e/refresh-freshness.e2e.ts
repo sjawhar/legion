@@ -114,7 +114,13 @@ test("reference: a title written while the reference's read is in flight shows a
     await page.clock.install();
     await openLive(page, `/issues/${holder.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    await expect(turns.getByRole("link", { exact: true, name: "Target v1" })).toBeVisible();
+    // INFRA-869's R4: "A `dispatch://` reference reads as its target's title ... an issue as
+    // its key and title", so the link reads the key and the title where it read the title
+    // alone before. What this test holds - a title written while the read is in flight shows
+    // once the page is left and returned to - is unchanged.
+    await expect(
+      turns.getByRole("link", { exact: true, name: `${target.key} Target v1` })
+    ).toBeVisible();
     // Past the first read's `MIN_REFETCH_INTERVAL_MS`, so the refresh v2 owes is fetched at once.
     await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS + 200);
 
@@ -135,7 +141,9 @@ test("reference: a title written while the reference's read is in flight shows a
     await page.clock.fastForward(1_500);
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`/issues/${holder.key}/conversation`));
-    await expect(turns.getByRole("link", { exact: true, name: "Target v3" })).toBeVisible(live);
+    await expect(
+      turns.getByRole("link", { exact: true, name: `${target.key} Target v3` })
+    ).toBeVisible(live);
   } finally {
     await alice.close();
   }
