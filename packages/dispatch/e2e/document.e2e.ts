@@ -266,7 +266,8 @@ test("a document's connection dot stays on the line with its version actions", a
 // the header card, and 320 px, where a version view's two buttons and the dot are.
 test("a document's connection dot stays beside its version actions on a narrow screen @phone", async ({
   browser,
-}) => {
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the row above makes the same check at 1280 px");
   await createProject({ key: "CORE", name: "Core" });
   await createProjectDocument("CORE", {
     content: "# Ask blocks design\n\nThe ask is a node.\n",
