@@ -1830,6 +1830,42 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_CI_RECONCILE_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.MaintenanceSweepInterval != 0 {
+				t.Errorf("DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL unset: MaintenanceSweepInterval = %v, want 0 (api.MaintenanceSweepInterval's minute)", boot.MaintenanceSweepInterval)
+			}
+			const quick = 2 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                      "1",
+				"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL": quick.String(),
+			})
+			if boot.MaintenanceSweepInterval != quick {
+				t.Errorf("DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL: MaintenanceSweepInterval = %v, want %v", boot.MaintenanceSweepInterval, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_PROCESS_HEARTBEAT": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.ProcessHeartbeat != 0 {
+				t.Errorf("DISPATCH_TEST_PROCESS_HEARTBEAT unset: ProcessHeartbeat = %v, want 0 (processes.HeartbeatInterval's five seconds)", boot.ProcessHeartbeat)
+			}
+			const quick = 500 * time.Millisecond
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":             "1",
+				"DISPATCH_TEST_PROCESS_HEARTBEAT": quick.String(),
+			})
+			if boot.ProcessHeartbeat != quick {
+				t.Errorf("DISPATCH_TEST_PROCESS_HEARTBEAT: ProcessHeartbeat = %v, want %v", boot.ProcessHeartbeat, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_PROCESS_HEARTBEAT": invalid},
+					fmt.Sprintf("DISPATCH_TEST_PROCESS_HEARTBEAT=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_PROCESS_HEARTBEAT": "500ms"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {
 				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=1: ListenerRosterUncached false")

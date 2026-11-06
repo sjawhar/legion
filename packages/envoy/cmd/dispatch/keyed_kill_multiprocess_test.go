@@ -14,12 +14,35 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
+
+// backDateKeyLease moves the lease the row under key holds back by, past the lease a repeat
+// judges it against (contracts.IdempotencyLease), and returns the moment it lapsed. Nothing
+// renews that lease - the process that took it is dead - so the minute it has left is wall clock
+// and nothing about the take-over, which is what the row is for; the webhook redelivery row moves
+// its claim's time the same way (backDateRedeliveryClaim).
+func backDateKeyLease(t *testing.T, database *store.Store, key string, by time.Duration) time.Time {
+	t.Helper()
+	tag, err := database.Pool.Exec(context.Background(), `
+		update request_keys set leased_at = leased_at - make_interval(secs => $2)
+		where idempotency_key = $1 and status is null and leased_at is not null
+	`, key, by.Seconds())
+	if err != nil {
+		t.Fatalf("back-date the lease of %s: %v", key, err)
+	}
+	if rows := tag.RowsAffected(); rows != 1 {
+		t.Fatalf("back-date the lease of %s: %d rows, want the one the dead process holds", key, rows)
+	}
+	return time.Now()
+}
 
 // INFRA-258. A process killed while it runs a keyed write leaves the write's key held under a lease
 // nothing renews any more. The other process answers a repeat under that key 409 KEY_IN_FLIGHT while
 // the lease lasts - the first run might still be alive - and, once the lease has lapsed with nothing
-// committed, takes the key over and makes the write, once; a repeat after that is its replay.
+// committed, takes the key over and makes the write, once; a repeat after that is its replay. The
+// lease is moved back past its end once the refusal under it has been read (backDateKeyLease),
+// never waited out.
 //
 // The slow-write test hook holds A's run after its key is claimed and before its handler writes,
 // which is where a process dies with nothing of the write committed; the kill is SIGKILL, so no
@@ -56,7 +79,6 @@ func TestAKeyedWriteAProcessDiedRunningIsTakenOverOnceItsLeaseLapses(t *testing.
 			t.Fatalf("process A never claimed the key:\n%s", pair.a.Output.String())
 		}
 	}
-	killed := time.Now()
 	if err := pair.a.Cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill process A: %v", err)
 	}
@@ -84,19 +106,21 @@ func TestAKeyedWriteAProcessDiedRunningIsTakenOverOnceItsLeaseLapses(t *testing.
 	if refusal.Code != contracts.IdempotencyKeyInFlight {
 		t.Fatalf("a repeat inside the dead run's lease: code %s, want %s", refusal.Code, contracts.IdempotencyKeyInFlight)
 	}
+	// The refusal under the live lease is read; what is left is the take-over, so the lease is
+	// moved past its end rather than waited out. Nothing renews it - process A is gone - so its
+	// remaining minute is wall clock alone.
+	lapsed := backDateKeyLease(t, pair.database, "killed-press", contracts.IdempotencyLease+time.Second)
 	for status == http.StatusConflict {
-		if time.Since(killed) > contracts.IdempotencyLease+30*time.Second {
-			t.Fatalf("process B never took the key over: still %d %s %v after the kill", status, answer, time.Since(killed))
+		if time.Since(lapsed) > 30*time.Second {
+			t.Fatalf("process B never took the key over: still %d %s %v after the dead run's lease lapsed",
+				status, answer, time.Since(lapsed))
 		}
-		time.Sleep(time.Second)
+		time.Sleep(200 * time.Millisecond)
 		status, answer, header = repeat()
 	}
 	if status != http.StatusCreated || header.Get(contracts.IdempotencyReplayedHeader) != "" {
 		t.Fatalf("the repeat once the lease lapsed: %d %s replayed=%q, want the write made by process B", status, answer,
 			header.Get(contracts.IdempotencyReplayedHeader))
-	}
-	if waited := time.Since(killed); waited < contracts.IdempotencyLease-5*time.Second {
-		t.Fatalf("process B took the key over %v after the kill, inside the dead run's %v lease", waited, contracts.IdempotencyLease)
 	}
 	if status, answer, header = repeat(); status != http.StatusCreated || header.Get(contracts.IdempotencyReplayedHeader) != "?1" {
 		t.Fatalf("a repeat after the takeover: %d %s, want the takeover's answer replayed", status, answer)
