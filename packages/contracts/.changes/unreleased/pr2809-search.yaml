@@ -1,0 +1,4 @@
+kind: Added
+body: |-
+  `SearchResponse` says how the search read the words it was given and what it narrowed by: `query` carries the operator forms the query used and whether it was broadened, and `filters` carries the project, status, author and date the search applied.
+  The generator renders the dispatch tool specs into Go, so a server can read each tool's own description and argument schema.
