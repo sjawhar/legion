@@ -64,3 +64,50 @@ func TestTheRoleClaimReaperGoesPastAClaimItCouldNotRead(t *testing.T) {
 		t.Fatalf("the line for the claim the pass left = %s; want it to name %s and the read's error", line, unreadable)
 	}
 }
+
+// The other half of the same contract, and the half the case above cannot reach: the release of
+// an expired claim fails, rather than its read. A read that fails leaves a claim whose holder
+// nothing knows, while a release that fails leaves one this pass has already found expired, so a
+// pass that ended here would leave every role listed after an expired holder's unswept - the
+// claims the backstop exists for. The pass reaps the rest, counts this one skipped, and names it
+// and its holder in a WARN of its own, since an operator reading a short count has no other way
+// to tell which claim stayed.
+func TestTheRoleClaimReaperGoesPastAClaimItCouldNotRelease(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const undeletable = "legion-architect"
+	const holder = "ses_gone"
+	roles := []string{"legion-controller", undeletable, "legion-reviewer", "legion-merger"}
+	raw := reg.roleKV.Legacy()
+	for _, role := range roles {
+		putRoleClaim(t, raw, role, holder)
+	}
+	// The delete fails the way a loaded bucket fails one key's, so nothing says the next pass
+	// cannot make it either.
+	refusal := errors.New("nats: the bus refused the delete")
+	countRoleBucketCalls(t, reg, &sweepRoleKeyValue{failDelete: map[string]error{undeletable: refusal}})
+
+	sweep, err := reg.ReapRoleClaims(func(string) bool { return false }, 0)
+	if err != nil {
+		t.Fatalf("a pass over a claim whose release fails: %v, want the pass to go on", err)
+	}
+	if want := (RoleClaimSweep{Reaped: len(roles) - 1, Skipped: 1}); sweep != want {
+		t.Fatalf("the pass = %+v, want %+v: every claim but %s reaped, and that one counted skipped", sweep, want, undeletable)
+	}
+	for _, role := range roles {
+		if role == undeletable {
+			continue
+		}
+		assertRoleHolder(t, reg, role, "")
+	}
+	if _, err := raw.Get(undeletable); err != nil {
+		t.Fatalf("%s's claim after the pass: %v, want it kept for the next one", undeletable, err)
+	}
+	line := logLine(t, logs, "role reaper skipped a claim it could not release")
+	if !strings.Contains(line, "role="+undeletable) || !strings.Contains(line, "holder_session_id="+holder) {
+		t.Fatalf("the line for the claim the pass left = %s; want it to name %s and its holder %s", line, undeletable, holder)
+	}
+}
