@@ -275,6 +275,7 @@ import {
   type Usage,
   type Walked,
 } from "./rules-check";
+import { renderSourcingNotice, sourcingLintArgs } from "./sourcing-lint";
 import {
   agentFacing,
   byteLength,
@@ -2980,7 +2981,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 
       if (closing) return givenUp(base.verdictMode, "shutdown");
       const { role, model } = resolved;
-      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
+      // A session routed off the gate's provider keeps its transcript there: nothing is rendered
+      // or sent. The test is exact equality of the provider string the session's primary model
+      // carries and the one the gate's role resolved to, so `anthropic` and a gateway that also
+      // serves Anthropic are two providers here — which is why most skips read `primary on
+      // anthropic` (3,722 of the 3,823 skipped entries in this machine's session files on
+      // 2026-11-05). It stays: the review's prompt carries the agent's whole transcript as data,
+      // and the rule that keeps that text on the provider it is already on is not the gate's to
+      // relax. The cost of it — a check that reaches no such session — is paid instead by the
+      // sourcing lint, which has no model and so no provider (`sourcing-lint.ts`), and which
+      // `handleCall` runs on this call after this return.
       if (ctx.model?.provider !== model.provider)
         return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
       // Raced from handler entry, so each render of this call counts against the runner's ceiling too.
@@ -3461,7 +3471,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       let revised: Input | undefined;
       // What the call's dry run printed and the digests of the files the gate read, which a
       // marker for the command it ran binds.
-      let dryRun: { args: Input; files: readonly FileDigest[] } | undefined;
+      // `review` is `args` with an upload's file text read into `content`: what the model judges,
+      // and what the sourcing lint must read. `args` alone is the command's own operands, so for
+      // `dispatch artifact --path report.md` it holds the path and none of the document.
+      let dryRun: { args: Input; review: Input; files: readonly FileDigest[] } | undefined;
       // OMP_ASKGATE when it is a mode; else this session's latest experiments entry, read per call
       // because one binding serves every session the process switches to.
       let mode: Mode = envMode ?? "block";
@@ -3552,7 +3565,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                   run.slow ? renderSlowDryRun(run.failure) : undefined
                 );
               else {
-                dryRun = { args: run.args, files: run.files };
+                dryRun = { args: run.args, review: run.review, files: run.files };
                 const { key, label } = breakerKey(scoped.tool, run.review);
                 base = {
                   ...base,
@@ -3628,6 +3641,26 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         rulesNotice = settleRules(decision.fields.ruleOutcome, ctx);
       } catch {
         // The rules notice is best effort too.
+      }
+      // The sourcing lint, the gate's one check with no model behind it. It runs on every gated
+      // call, whatever the decision above was and whoever the session's provider is: a session the
+      // model review skips ("skipped", 3,823 of 28,463 gate entries read from this machine's
+      // session files on 2026-11-05) still gets it, which is the point of having a check that
+      // needs no call. It reports and never refuses, so it changes no decision and no record.
+      //
+      // It reads what the write posts, not what the agent typed: `dryRun.review` for a `dispatch`
+      // command — the same arguments the model is shown, an upload's `--path` document read into
+      // `content` among them, since the raw input there is only a shell command naming a file —
+      // and the device's own arguments otherwise. Each field is read on its own
+      // (`sourcingLintArgs`), so a routing field's issue key never sources the body's prose.
+      // A call this gate refused gets no note: its text posted nowhere, and a note that says the
+      // write went out would contradict the refusal beside it.
+      let sourcingNotice: string | undefined;
+      try {
+        if (decision.result?.block !== true)
+          sourcingNotice = renderSourcingNotice(sourcingLintArgs(dryRun?.review ?? event.input));
+      } catch {
+        // Best effort, as the notices above are: a lint that throws never holds a write.
       }
       // A refused call runs nothing, so it keeps no command of the gate's: a rules refusal is the
       // agent's own command refused, whatever the charter's outcome was.
@@ -3707,22 +3740,32 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         notices.delete(event.toolCallId);
         return minted;
       }
-      if (minted?.additionalContext !== undefined)
-        decision.result = {
-          ...decision.result,
-          additionalContext: [decision.result?.additionalContext, minted.additionalContext]
-            .filter((note) => note !== undefined)
-            .join("\n"),
-        };
+      // The minted marker's note on the call's result.
+      //
+      // Assembled into a new object, never written back into `decision`: some decisions are
+      // shared constants of this binding (`noModelRole`), and a call's own context stored in one
+      // is handed to the next call that returns the same decision.
+      const additionalContext = [decision.result?.additionalContext, minted?.additionalContext]
+        .filter((note): note is string => note !== undefined)
+        .join("\n");
+      const result: ToolCallResult =
+        decision.result === undefined && additionalContext === ""
+          ? undefined
+          : { ...decision.result, ...(additionalContext === "" ? {} : { additionalContext }) };
       // The same note goes on the call's own result (`deliverNotice`), which every caller reads:
       // a call an eval cell made has no loop sink for `additionalContext`, and a note the agent
       // never sees reads like a gate that is working. The rules notice rides there too, on this
       // call alone, never on the session-start notices a later session would repeat.
-      const owed = [decision.result?.additionalContext, rulesNotice].filter(
+      //
+      // The sourcing lint's note rides this channel **only**. Every other note of the gate goes
+      // both ways on purpose and is one line; this one lists sentences, and a sender who reads
+      // its own flagged text twice in one turn learns to skip it. The call's own result is the
+      // channel that reaches every caller, the eval cell included, so it is the one it takes.
+      const owed = [result?.additionalContext, rulesNotice, sourcingNotice].filter(
         (note): note is string => note !== undefined
       );
       if (owed.length > 0) rememberNotice(event.toolCallId, owed.join("\n"));
-      return revised === undefined ? decision.result : { ...decision.result, input: revised };
+      return revised === undefined ? result : { ...result, input: revised };
     };
 
     pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {

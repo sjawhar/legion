@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+  AskGate hands back the sentences of a Dispatch write that assert a measurement — a count, a
+  ratio, a percentage, or a pass or failure a run reached — and name nothing a reader can check:
+  no path, sha, ref, backticked command, URL or dispatch key. The check is mechanical, costs no
+  model call, and refuses nothing, so it also runs for the sessions the charter review skips for
+  being on another provider (3,823 of 28,463 gate entries read from one machine's session files
+  on 2026-11-05). A sentence already marked as an inference, an estimate, a conditional or a plan
+  is left alone, as are questions, quotations, headings, code and table rows. It says nothing
+  about a claim that is sourced and wrong.
