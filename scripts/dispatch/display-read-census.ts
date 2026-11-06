@@ -967,23 +967,33 @@ export function classifyBatch(
   const readOnlyLines = jsonLines<EngineLine>(join(batch, "engine-readonly.jsonl"));
   const dumpLines = jsonLines<DumpLine>(join(batch, "go-dump.jsonl"));
   const classed: ClassedText[] = [];
-  for (const stored of places) {
-    const edit = editingLines.next().value;
-    const shown = readOnlyLines.next().value;
-    const go = dumpLines.next().value;
-    if (edit?.id !== stored.id || shown?.id !== stored.id || go?.id !== stored.id) {
-      throw new Error(`the readers do not follow the corpus at ${stored.id}`);
+  // The three readers are closed whatever happens, because a shard's directory is deleted the
+  // moment it is classed and a file a generator still holds open keeps its blocks: a generator
+  // driven with next() and never exhausted never runs its own finally, so twenty classed shards
+  // held sixteen gigabytes of deleted output open and filled this pod's disk.
+  try {
+    for (const stored of places) {
+      const edit = editingLines.next().value;
+      const shown = readOnlyLines.next().value;
+      const go = dumpLines.next().value;
+      if (edit?.id !== stored.id || shown?.id !== stored.id || go?.id !== stored.id) {
+        throw new Error(`the readers do not follow the corpus at ${stored.id}`);
+      }
+      const version = readingMode(stored.group) === "version";
+      const browser = engineReading(version ? edit.md : shown.md_readonly);
+      const tree = version ? go.display_version : go.display;
+      const reading: TextReading = {
+        go: tree ?? null,
+        browser: "error" in browser ? null : browser,
+        ...("error" in browser ? { browserError: browser.error } : {}),
+      };
+      visit?.(stored, reading);
+      classed.push({ ...stored, class: classify(reading) });
     }
-    const version = readingMode(stored.group) === "version";
-    const browser = engineReading(version ? edit.md : shown.md_readonly);
-    const tree = version ? go.display_version : go.display;
-    const reading: TextReading = {
-      go: tree ?? null,
-      browser: "error" in browser ? null : browser,
-      ...("error" in browser ? { browserError: browser.error } : {}),
-    };
-    visit?.(stored, reading);
-    classed.push({ ...stored, class: classify(reading) });
+  } finally {
+    editingLines.return(undefined);
+    readOnlyLines.return(undefined);
+    dumpLines.return(undefined);
   }
   return classed;
 }
