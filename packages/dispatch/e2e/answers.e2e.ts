@@ -33,13 +33,10 @@ function answerRows(page: Page): Locator {
 }
 
 /** The answered ask an item route selected on its document: the margin's decided card. */
-async function expectSelectedMarginAsk(page: Page, id: string, isPhone: boolean): Promise<void> {
+async function expectSelectedMarginAsk(page: Page, id: string): Promise<void> {
   const sheet = page.getByTestId("margin-sheet");
   const item = sheet.locator(`[data-margin-item="${id}"]`);
   await expect(item).toHaveAttribute("aria-current", "true");
-  if (isPhone && (await sheet.getAttribute("data-expanded")) !== "true") {
-    await sheet.getByRole("button", { name: "Open review panel" }).click();
-  }
   await expect(item).toBeInViewport();
 }
 
@@ -52,10 +49,9 @@ async function expectFocusedAskTurn(page: Page, id: string): Promise<void> {
 
 // SLOW(>=2s): Two people need two contexts: alice's answers page and bob's empty one are the same
 // claim from both sides, and each context pays its own sign-in and first load.
-test("the answers page lists a person's answers and replies, opens each ask, and changes an answer @phone", async ({
+test("the answers page lists a person's answers and replies, opens each ask, and changes an answer", async ({
   browser,
-}, testInfo) => {
-  const isPhone = testInfo.project.name === "iphone";
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const anchoredIssue = await createIssue({
     project: "CORE",
@@ -136,7 +132,7 @@ test("the answers page lists a person's answers and replies, opens each ask, and
     // Conversation turn.
     await rowOf(anchored.id).getByRole("link", { exact: true, name: "Open" }).click();
     await expect(page).toHaveURL(`/issues/${anchoredIssue.key}/spec?ask=${anchored.id}`);
-    await expectSelectedMarginAsk(page, anchored.id, isPhone);
+    await expectSelectedMarginAsk(page, anchored.id);
     for (const [id, issue] of [
       [changed.id, changedIssue],
       [replied.id, repliedIssue],

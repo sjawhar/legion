@@ -1,4 +1,3 @@
-import type { LegionCapabilityReportBody } from "@legion/contracts/legion-api";
 import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
 import {
   exportJjSessionAttribution,
@@ -52,8 +51,8 @@ export function attributionInputs(
  * registered. A Legion pane boots as its own Oh My Pi process and holds exactly one claim for its
  * whole lifetime, so the capability is plain closure state, set before `claims/ready`: the
  * daemon's task can arrive the moment ready answers, and the phase-stall hook reads the capability
- * when it does. The ready carries the session's capability report, measured from the
- * registration's answer on, so the daemon's `legion state` shows what this session can do.
+ * when it does. The ready carries no capability report: the session's capability rows are
+ * measured later, on its own interval.
  *
  * The transcript is recorded as the bootstrapped session before the registration; the jj
  * attribution (`exportJjSessionAttribution`) runs once it answered, before the capability is set.
@@ -64,13 +63,6 @@ export function createClaimSession(deps: {
   readonly persistedTranscript: (
     context: SessionContext
   ) => Promise<{ readonly sessionFile: string; readonly agentId: string }>;
-  /** Measures the six live capability rows for the claim's issue, against the task agents the
-   * registration says the role's prompts dispatch (`measureCapabilities` in
-   * `src/capability-report.ts`, behind the production host in `extensions/legion.ts`). */
-  readonly measureCapabilities: (
-    context: SessionContext,
-    input: { readonly issue: string; readonly promptAgents: readonly string[] }
-  ) => Promise<LegionCapabilityReportBody>;
   readonly exitProcess: (code: number) => never;
 }): ClaimSession {
   let capability: ClaimCapability | undefined;
@@ -93,11 +85,6 @@ export function createClaimSession(deps: {
         agentId,
         pluginContract: pkg.legion.daemonApiVersion,
       },
-      measure: (claim) =>
-        deps.measureCapabilities(context, {
-          issue: claim.issue,
-          promptAgents: claim.promptAgents,
-        }),
       afterRegister: async () => {
         const { sessionId, stateDir, ...pane } = attributionInputs(sessionFile, process.env);
         if (sessionId) await exportJjSessionAttribution(sessionId, stateDir, pane);

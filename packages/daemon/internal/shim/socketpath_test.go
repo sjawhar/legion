@@ -43,14 +43,16 @@ func roleTempDir(t *testing.T) string {
 // A role's TMPDIR is the issue's scratch on its volume since INFRA-31
 // (`/legion/scratch/tmp`, 19 bytes, which roleTempDir's 31-byte fixture deliberately overshoots),
 // where a role was told none before and every tool fell back to `/tmp` (4); Linux's sun_path
-// holds 107 bytes, and socketPath spells the whole test's name under TMPDIR, so the longest-named
-// test here lands past the limit and `net.Listen` answers `bind: invalid argument` before the
-// test does anything. Measured on 2026-10-20 in this issue's own pod, against a 31-byte TMPDIR:
-// `go test ./internal/shim/` failed 16 times that way, where `/tmp` passes. cmd/legion answers
-// the same break with a socket directory rooted at /tmp (socketDir, worker_shim_test.go), and
-// this package's socketPath now does the same (os.MkdirTemp("/tmp", "legion-shim"),
-// shim_test.go); this subtest is what keeps that from being reverted. The subtest carries the
-// name of the longest test that listens here, since what overflows is the test's own name.
+// holds 107 bytes, and a socket under t.TempDir() spells the whole test's name under TMPDIR, so
+// the longest-named test here lands past the limit and `net.Listen` answers `bind: invalid
+// argument` before the test does anything. Measured on 2026-10-20 in this issue's own pod,
+// against a 31-byte TMPDIR: `go test ./internal/shim/` failed 16 times that way, where a short
+// directory passes. This package and cmd/legion both answer that break with internal/testtmp,
+// which makes a directory of the test's own with room for the socket's path under it, placed by
+// TMPDIR and falling back to /tmp for that length alone (socketPath, shim_test.go;
+// testtmp.Socket, worker_shim_test.go); this subtest is what keeps that from being reverted. The
+// subtest carries the name of the longest test that listens here, since what overflows is the
+// test's own name.
 func TestASocketPathBindsWhereTMPDIRIsARoleContainersScratch(t *testing.T) {
 	t.Setenv("TMPDIR", roleTempDir(t))
 	t.Run("AdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon", func(t *testing.T) {

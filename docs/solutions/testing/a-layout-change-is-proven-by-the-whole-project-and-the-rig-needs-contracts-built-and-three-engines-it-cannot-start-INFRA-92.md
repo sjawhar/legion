@@ -29,6 +29,12 @@ it: what to run, what a pod cannot run at all, and what the run costs.
   (`packages/dispatch/AGENTS.md`, "Phone acceptance"), not every spec. A layout change is proven
   at phone width by the tagged tests that check it, so tag the row you add for the phone layout,
   confirm `--project=iphone --list` shows it, and still run `chromium` and `iphone` whole.
+  **Note 2026-11-06 (INFRA-1415):** the tag follows the assertion, not the branch. A row takes
+  `@phone` when the phone viewport can change what it asserts, and not when it only reaches the
+  same control by another route; where a row walks a data table and makes one narrow-screen
+  claim, that claim becomes a row of its own and takes the tag. `webkit` and `firefox` select
+  the same way, by `@webkit` and `@firefox`, each tagged row carrying a comment that names the
+  engine behaviour it exercises.
 - **A page assertion names a rendered box, not text.** `toHaveText` and `toHaveAttribute` both
   succeed on an element rendered at zero width, where nothing is painted and no hover can reach
   it. Assert `toBeVisible`, a `boundingBox()` width, and `assertWhole` (`e2e/unclipped.ts`) where

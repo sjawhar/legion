@@ -395,7 +395,6 @@ jobs:
               - 'packages/daemon/internal/ghconfig/*'
               - 'packages/daemon/internal/ghrepo/*'
               - 'packages/daemon/internal/githubrest/*'
-              - 'packages/daemon/internal/handoffimport/*'
               - 'packages/daemon/internal/intake/*'
               - 'packages/daemon/internal/launcher/*'
               - 'packages/daemon/internal/lookpath/*'
@@ -578,9 +577,10 @@ jobs:
               - *go_workspace
               - 'packages/daemon/**'
               - *daemon_envoy_deps
-            # The claude-envoy job, and the test job's verify-build step, which runs the same
-            # command (packages/claude-envoy/scripts/verify-build.sh), as release.yaml's
-            # claude_envoy_build does.
+            # The claude-envoy job, and two steps of the test job: its verify-build step, which
+            # runs the same command (packages/claude-envoy/scripts/verify-build.sh), as
+            # release.yaml's claude_envoy_build does, and its build-input-list step, which runs
+            # packages/claude-envoy/tests/build-inputs.test.ts.
             claude_envoy: &claude_envoy
               - '.github/workflows/ci.yaml'
               # .bun-version is also read by scripts/build.ts:23: the build depends on the Bun it
@@ -620,7 +620,9 @@ jobs:
               - *bun_install
               - *biome
               - *daemon_go_tests
-              # Its verify-build step builds and checks the Claude Code plugin as the release does.
+              # Two of its steps read this list: verify-build builds and checks the Claude Code
+              # plugin as the release does, and the build-input-list step runs
+              # packages/claude-envoy/tests/build-inputs.test.ts.
               - *claude_envoy
               # scripts/e2e/lib/held-port.test.ts:45 builds the real envoy-listener.
               - *listener_command
@@ -992,6 +994,7 @@ jobs:
               # internal/dispatch/text, so the natslive run compiles that package and the check
               # counts its testdata among what this job reads.
               - 'packages/envoy/internal/dispatch/text/testdata/**'
+              - 'packages/envoy/internal/fixtureenv/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               # The image pull before its tests, of the consts in testnats/nats.go and
@@ -1144,6 +1147,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/**'
+              - 'packages/envoy/internal/fixtureenv/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/pglisten/*'
@@ -1341,6 +1345,7 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/*'
+              - 'packages/envoy/agentloop/**'
               - 'packages/envoy/brokerclient/**'
               - 'packages/envoy/brokertest/**'
               - 'packages/envoy/cmd/**'
@@ -1483,11 +1488,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # A pull request's title, body and commit messages reach main's squash commit, the
-      # generated release notes and GitHub's pages, and its comments and reviews are public on its
-      # page, so this job checks them, and that the title is a conventional commit subject, at
-      # every push to a pull request that is not a draft and when a draft is marked ready, and
-      # posts the verdict on the head as pr-title, the check main's ruleset requires.
+      # A pull request's title becomes main's squash subject and shows in the generated release
+      # notes; its body, its branch name and each commit's message, author and committer stay
+      # public on its page, where its comments and reviews are public once posted. So this job
+      # checks them, and that the title is a conventional commit subject, at every push to a pull
+      # request that is not a draft and when a draft is marked ready, and posts the verdict on the
+      # head as pr-title, the check main's ruleset requires.
       # pr-title.yaml checks them and posts pr-title when the pull request is opened, reopened or
       # edited, a review is submitted or edited, or the merge queue runs its group. A push to main
       # or a merge-queue run of this workflow carries no pull request. These run first, so a failed
@@ -2043,11 +2049,12 @@ jobs:
       # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
       # deterministic under it.
       #
-      # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
-      # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
-      # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
-      # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
+      # The step carries a package deadline of its own, as the envoy race lanes do: under go
+      # test's ten-minute default, internal/daemon, by far the slowest of the four packages, took
+      # up to 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on
+      # main at job 125691048644 (run 41562777668). No single test dominates it: a local run timed
+      # 648 tests one after another, the slowest at 44 s. The 30 minutes leave it three times its
+      # slowest run.
       - name: Test the concurrent packages under the race detector
         run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
@@ -3166,6 +3173,11 @@ jobs:
       - name: Unit test envoy Go package
         run: |
           go list ./... | grep -Ev '/integration|/internal/dispatch/delivery($|/)|/internal/dispatch/store($|/)|/internal/bus$|/cmd/listener$|/internal/store$|/internal/session$|/internal/kvwatch($|/)|/internal/dispatch/api$|/internal/dispatch/docs$' | xargs go test -count=1 -timeout 20m
+        working-directory: packages/envoy
+      # agentloop's live proof makes a real model call, so it sits behind a build tag and CI
+      # never runs it. Vetting it keeps it compiling as the package changes.
+      - name: Vet agentloop's live proof (no model call)
+        run: go vet -tags modellive ./agentloop/
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and

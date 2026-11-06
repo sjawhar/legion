@@ -1,0 +1,17 @@
+kind: Added
+body: |-
+  A new `agentloop` package: the one model loop the Legion daemon and Dispatch's server both
+  import, and this module's only import of Grafana's AI SDK for Go. It is the engine and nothing
+  more. The caller hands it an endpoint, a model and what that model charges, the messages, the
+  tools the model may call, the bounds of the run and the JSON schema the last reply must be one
+  object of, and reads back that reply, every step and what the run cost; no base URL, no
+  credential and no header is read from the environment. `Run` makes one bounded run of a model
+  and the tools it calls, on `anthropic-messages`, `openai-responses`, `openai-chat` or
+  `azure-anthropic`, placing each provider's prompt cache marks by default, which a caller turns
+  off with `Request.NoCache`, and `Decide` makes one System One call and answers each question it
+  put with a typed decision. No binary of this module calls it yet, but every binary is rebuilt on what
+  the SDK's requires raise: `google.golang.org/grpc` 1.83.2 to 1.84.0, `google.golang.org/api`
+  0.290.0 to 0.301.0, `github.com/aws/aws-sdk-go-v2` 1.47.1 to 1.47.4,
+  `go.opentelemetry.io/otel` 1.44.0 to 1.47.0, `golang.org/x/net` 0.59.0 to 0.61.0 and
+  `golang.org/x/crypto` 0.57.0 to 0.58.0 among them, so the listener's and Dispatch's
+  third-party notices change with this release.
