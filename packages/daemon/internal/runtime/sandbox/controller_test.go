@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -263,13 +262,14 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 }
 
 // A controller launch mints the review App's GitHub credential as a workflow role's does
-// (writeLauncherSecrets): a credential source that refuses every mint fails the launch naming the
-// controller role, exactly as it would an issue pod's role.
-func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) {
-	credential := func(context.Context, claim.Role, ghrepo.Repository) (ghconfig.Bundle, error) {
+// (writeLauncherSecrets), from the controller's own function (Options.ControllerCredential): a
+// credential source that refuses every mint fails the launch naming the controller role, exactly
+// as a refusing GitHubCredential would an issue pod's role.
+func TestAControllerLaunchFailsWhenItsCredentialMintRefuses(t *testing.T) {
+	credential := func(context.Context, string) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 	}
-	g := newRig(t, nil, withOptions(func(o *Options) { o.GitHubCredential = credential }))
+	g := newRig(t, nil, withOptions(func(o *Options) { o.ControllerCredential = credential }))
 	spec := controllerSpec(t)
 	if err := failedLaunch(t, g, spec); err == nil || !strings.Contains(err.Error(), "write the github credential for "+string(claim.RoleController)) {
 		t.Fatalf("the controller's launch = %v, want the refusal naming its role", err)
@@ -286,11 +286,8 @@ func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) 
 // nothing to refresh and logs nothing.
 func TestAControllerWithNoOwnerRunsWithAnEmptyGhDirectory(t *testing.T) {
 	logs := &lockedLog{}
-	noOwner := func(context.Context, claim.Role, ghrepo.Repository) (ghconfig.Bundle, error) {
-		return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
-	}
 	options := withOptions(func(o *Options) {
-		o.GitHubCredential = noOwner
+		o.ControllerCredential = noOwnerControllerCredential
 		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	})
 	g := newRig(t, nil, options)

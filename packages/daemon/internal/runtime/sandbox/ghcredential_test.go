@@ -160,8 +160,8 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 				owner:  ghconfig.Render("ghs_"+app+"_"+*lease.Load(), app, staticCredentialExpiry),
 			}}, nil
 		}
-		// The controller's bundle comes from the function that answers by owner, over the same
-		// lease: its refresh asks for the owner its Secret records.
+		// The controller's bundle comes from the one function that answers by owner, over the same
+		// lease: its launch asks for no owner and its refresh for the one its Secret records.
 		o.ControllerCredential = func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
 			bundle, err := o.GitHubCredential(ctx, claim.RoleController, ghrepo.Repository{})
 			if err != nil || defaultOwner == "" {
@@ -220,12 +220,12 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 	}
 }
 
-// A controller's refresh asks for its bundle by the owner its Secret records
-// (Options.ControllerCredential), so a project that gains an owner sorting before that one still
-// refreshes it: the controller works no repository, and a bundle asked for by repository takes
-// its default from the first owner the project serves, which would be another owner than the one
-// the pod's GH_CONFIG_DIR was fixed at and so refused at every tick until something replaced the
-// pod, its tokens expiring within the hour.
+// A controller's bundle is asked for by owner at its launch and at every refresh
+// (Options.ControllerCredential), so a project that gains an owner sorting before the one its
+// Secret records still refreshes it: the controller works no repository, and a bundle asked for
+// by repository takes its default from the first owner the project serves, which would be
+// another owner than the one the pod's GH_CONFIG_DIR was fixed at and so refused at every tick
+// until something replaced the pod, its tokens expiring within the hour.
 func TestAControllerIsRefreshedForTheOwnerItsSecretRecords(t *testing.T) {
 	var gained atomic.Bool
 	logs := &lockedLog{}

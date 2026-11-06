@@ -479,10 +479,12 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // token source (the implement App's, minted for the repository's owner) and every tree role's gh
 // bundle (gitHubCredential, a directory for each owner of repos and for each repository the
 // pod's own owner serves beside the one it writes to), with the controller's own bundle beside it
-// (appauth.ControllerCredential), which a controller's refresh asks by the default owner its pod
-// was launched with, and the directory set those directories
-// are compared with (appauth.GitHubDirs), which the runtime reads a running pod's gh projection
-// against, with serving as the rule every provisioning token's repository is read through
+// (appauth.ControllerCredential), which a controller's launch and its refresh both ask by owner,
+// and the directory set those directories are compared with (appauth.GitHubDirs), whose owner
+// directories the runtime reads a running pod's gh projection against — a pod lacking an owner's
+// directory holds no token of that owner, where one lacking a `<owner>/<repo>` directory reads
+// that repository through its owner's and is left where it is (sandbox's movedGhDirs) — with
+// serving as the rule every provisioning token's repository is read through
 // (repositories.serving, the mapping's own, so a configured rename's mint follows the owner
 // whose installation holds the repository now), with the workflow's mapping as the repositories
 // its repository caches follow (mapped), with the store's own workspace bundles as what a
@@ -507,8 +509,8 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, repos func() []ghrepo
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
 			opts.Tokens = newImplementTokens(apps, serving, opts.Log)
-			opts.GitHubCredential = appauth.GitHubCredential(apps, repos, renames)
-			opts.ControllerCredential = appauth.ControllerCredential(apps, repos, renames)
+			opts.GitHubCredential = appauth.GitHubCredential(apps, repos, renames, opts.Log)
+			opts.ControllerCredential = appauth.ControllerCredential(apps, repos, renames, opts.Log)
 			opts.GitHubDirs = func(repo ghrepo.Repository) []string { return appauth.GitHubDirs(repos, renames, repo) }
 		}
 		rt, err := sandbox.New(ctx, rc, opts)

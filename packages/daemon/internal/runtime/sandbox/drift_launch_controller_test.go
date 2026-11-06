@@ -1,8 +1,6 @@
 package sandbox
 
 import (
-	"context"
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -11,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	ompsessions "github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -156,11 +153,8 @@ func TestAControllerPodWhoseGhVolumeLacksAServedOwnerIsReplacedByItsNextLaunch(t
 // runtime's making and stays unmoved, and the comparison stays one way: an owner the pod holds
 // that the daemon no longer serves is a stale directory and no reason to remake a pod.
 func TestAnOwnerlessControllerPodIsReplacedOnceItsProjectGainsAnOwner(t *testing.T) {
-	noOwner := func(context.Context, claim.Role, ghrepo.Repository) (ghconfig.Bundle, error) {
-		return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
-	}
 	g := newRig(t, nil, withOptions(func(o *Options) {
-		o.GitHubCredential = noOwner
+		o.ControllerCredential = noOwnerControllerCredential
 		o.GitHubDirs = func(ghrepo.Repository) []string { return nil }
 	}))
 	spec := controllerSpec(t)
@@ -172,7 +166,7 @@ func TestAnOwnerlessControllerPodIsReplacedOnceItsProjectGainsAnOwner(t *testing
 	}
 
 	r2 := secondRuntime(t, g, func(o *Options) {
-		o.GitHubCredential = staticCredential
+		o.ControllerCredential = staticControllerCredential
 		o.GitHubDirs = func(ghrepo.Repository) []string { return staticDirs }
 	})()
 	g.connectRunning(controllerToken, loc.Sandbox.Generation)
@@ -215,9 +209,7 @@ func TestAnOwnerlessControllerPodIsReplacedOnceItsProjectGainsAnOwner(t *testing
 // replace the pod it just made, for ever, since the replacement's gh directory is empty too.
 func TestAnOwnerlessControllerIsKeptWhileItsProjectStaysOwnerless(t *testing.T) {
 	ownerless := func(o *Options) {
-		o.GitHubCredential = func(context.Context, claim.Role, ghrepo.Repository) (ghconfig.Bundle, error) {
-			return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
-		}
+		o.ControllerCredential = noOwnerControllerCredential
 		o.GitHubDirs = func(ghrepo.Repository) []string { return nil }
 	}
 	g := newRig(t, nil, withOptions(ownerless))
@@ -261,35 +253,48 @@ func TestMovedGhDirsLeavesAPodItCannotJudgeAndOneAheadOfTheDaemon(t *testing.T) 
 	}
 }
 
-// The directories a pod created now would hold depend on the pod's own repository — the owner it
-// writes to holds one directory per other repository that owner serves — so movedGhDirs reads
-// that repository off the pod's workspace fetch (fetchRepository) rather than guessing it, and
-// asks for the owner-only set of a pod that fetches none, the controller's. A daemon that has
-// since gained a sibling repository of the pod's own owner moves the pod's gh address: only a
-// new pod projects the directory it holds the narrowed token in.
-func TestMovedGhDirsReadsThePodsOwnRepository(t *testing.T) {
-	var asked []string
-	served := func(repo ghrepo.Repository) []string {
-		asked = append(asked, repo.String())
-		if repo.IsZero() {
-			return staticDirs
+// A repository the mapping gains is no pod to replace; an owner it gains is. The directories a pod
+// created now would hold depend on the pod's own repository — the owner it writes to holds one
+// directory per other repository that owner serves — so movedGhDirs reads that repository off the
+// pod's workspace fetch (fetchRepository) rather than guessing it, and asks for the owner-only set
+// of a pod that fetches none, the controller's. It then compares owner directories alone: a pod
+// whose own owner has since gained a sibling repository keeps running, reading that repository
+// through its owner's directory until the issue's next pod projects a directory of its own for it,
+// where a pod lacking an owner's directory holds no token of that owner at all.
+func TestMovedGhDirsComparesTheOwnerDirectoriesOfThePodsOwnRepository(t *testing.T) {
+	t.Run("a repository of an owner the pod already holds", func(t *testing.T) {
+		var asked []string
+		withSibling := func(repo ghrepo.Repository) []string {
+			asked = append(asked, repo.String())
+			if repo.IsZero() {
+				return staticDirs
+			}
+			return append(slices.Clone(staticDirs), strings.ToLower(repo.Owner())+"/other")
 		}
-		return append(slices.Clone(staticDirs), strings.ToLower(repo.Owner())+"/other")
-	}
-	g := newRig(t, nil, withOptions(func(o *Options) { o.GitHubDirs = served }))
-	spec := rootSpec(t)
-	issue := g.spawn(spec)
-	controller := g.spawn(controllerSpec(t))
-	asked = nil
+		g := newRig(t, nil, withOptions(func(o *Options) { o.GitHubDirs = withSibling }))
+		spec := rootSpec(t)
+		issue := g.spawn(spec)
+		controller := g.spawn(controllerSpec(t))
+		asked = nil
 
-	moved, ok := g.r.movedGhDirs(g.pod(issue.Sandbox.Name), claim.RoleArchitect)
-	if !ok || !strings.Contains(moved.String(), "sjawhar/other") {
-		t.Errorf("the issue pod moved = %t, %q; want the sibling repository's directory named as lacking", ok, moved.String())
-	}
-	if _, ok := g.r.movedGhDirs(g.pod(controller.Sandbox.Name), claim.RoleController); ok {
-		t.Error("the controller's pod, which fetches no repository, moved though it holds every owner the daemon serves")
-	}
-	if want := []string{spec.Repository.String(), "/"}; !slices.Equal(asked, want) {
-		t.Errorf("the drift check asked for %q, want the issue pod's own repository and the controller's zero one %q", asked, want)
-	}
+		if moved, ok := g.r.movedGhDirs(g.pod(issue.Sandbox.Name), claim.RoleArchitect); ok {
+			t.Errorf("the issue pod moved %q, want it left where it is: the mapping gained a repository of an owner it holds, not an owner", moved.String())
+		}
+		if _, ok := g.r.movedGhDirs(g.pod(controller.Sandbox.Name), claim.RoleController); ok {
+			t.Error("the controller's pod, which fetches no repository, moved though it holds every owner the daemon serves")
+		}
+		if want := []string{spec.Repository.String(), "/"}; !slices.Equal(asked, want) {
+			t.Errorf("the drift check asked for %q, want the issue pod's own repository and the controller's zero one %q", asked, want)
+		}
+	})
+	t.Run("an owner the pod holds no directory of", func(t *testing.T) {
+		g := newRig(t, nil, withOptions(func(o *Options) {
+			o.GitHubDirs = func(ghrepo.Repository) []string { return servedDirs }
+		}))
+		issue := g.spawn(rootSpec(t))
+		moved, ok := g.r.movedGhDirs(g.pod(issue.Sandbox.Name), claim.RoleArchitect)
+		if !ok || !strings.Contains(moved.String(), addedOwner) {
+			t.Errorf("the issue pod moved = %t, %q; want the added owner's directory named as lacking", ok, moved.String())
+		}
+	})
 }

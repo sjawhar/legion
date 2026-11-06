@@ -43,8 +43,10 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 // runtime writes it under the agent's bundle root (LEGION_GH_OWNERS_DIR) and rewrites it from the
 // same function, asked for the same repository, as the leases near their expiry. A call that
 // names no repository writes to nothing: every directory is read-only and the first owner,
-// sorted, is the default, which is what the controller gets, acting as the review App
-// (appauth.AppRoleFor). A project with no GitHub owner at all to mint for is ErrNoGitHubOwner.
+// sorted, is the default, which is what a tmux tree pane whose claim the daemon records no
+// repository for gets. A controller's bundle is no call of this at all, at its launch as at its
+// refresh: it comes from ControllerCredential, which answers by owner. A project with no GitHub
+// owner at all to mint for is ErrNoGitHubOwner.
 type GitHubCredential func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error)
 
 // ControllerCredential is the daemon's one function a runtime calls for the project controller's

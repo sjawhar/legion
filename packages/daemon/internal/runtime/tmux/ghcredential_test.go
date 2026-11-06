@@ -682,7 +682,7 @@ func TestARefreshNeverGivesAReadOnlyPaneAWriteToken(t *testing.T) {
 		func() []ghrepo.Repository {
 			return []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
 		},
-		ghrepo.Renames{})
+		ghrepo.Renames{}, slog.Default())
 	f := newFakeServerRuntime(t, credential, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	spec := f.spec(t, claim.RoleImplementer)
 	spec.Repository, spec.DefaultBranch = ghrepo.Repository{}, ""

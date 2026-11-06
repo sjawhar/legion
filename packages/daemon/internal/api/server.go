@@ -8,9 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -118,14 +116,19 @@ type Options struct {
 	Tokens appauth.Tokens
 	// GitHubRepositories are the project's repositories as the daemon serves them
 	// (daemon's repositories.Accepted): the controller's gh bundle holds a read-only token per
-	// owner of them, each narrowed to that owner's repositories (appauth.ControllerCredential),
-	// and this server's own GitHub calls read their owners for whose installation holds a
-	// renamed repository now (serving).
+	// owner of them, each narrowed to that owner's repositories (appauth.ControllerCredential).
 	GitHubRepositories func() []ghrepo.Repository
 	// RepositoryRenames is the deployment's repository equivalence
 	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
 	// configured rename's two owners (appauth.ControllerCredential). The zero value configures none.
 	RepositoryRenames ghrepo.Renames
+	// Serving is the repository GitHub holds a recorded one under now, which every GitHub call
+	// this server makes is minted for and addressed to (serving): the daemon's one rule
+	// (daemon's repositories.serving, which the Sandbox runtime's own token source is handed
+	// too), so the mapping and the configured renames are read in one place and no caller here
+	// writes a second copy of it. Nil serves a recorded repository under its own name, which a
+	// test that configures no rename and a daemon with no GitHub Apps both want.
+	Serving func(recorded ghrepo.Repository) ghrepo.Repository
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -256,9 +259,13 @@ type server struct {
 	githubRepositories func() []ghrepo.Repository
 	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
 	// that says which owner's installation holds a repository recorded under the name a transfer
-	// moved it away from, which the controller's gh bundle reads (appauth.ControllerCredential) and
-	// serving reads for this server's own GitHub calls. The zero value configures none.
-	renames    ghrepo.Renames
+	// moved it away from, which the controller's gh bundle reads (appauth.ControllerCredential).
+	// The zero value configures none.
+	renames ghrepo.Renames
+	// serving is Options.Serving, the daemon's one rule for the repository GitHub holds a
+	// recorded one under now, never nil here: NewServer serves a recorded repository under its
+	// own name where the caller hands none.
+	serving    func(recorded ghrepo.Repository) ghrepo.Repository
 	githubAPI  string
 	mergeRules func(project string) config.MergeRules
 	grants     *credential.Grants
@@ -302,6 +309,10 @@ type server struct {
 // secret its registration was issued; and the operator's spawn surface, authenticated by the
 // operator bearer.
 func NewServer(bind string, port int, opts Options) *http.Server {
+	serving := opts.Serving
+	if serving == nil {
+		serving = func(recorded ghrepo.Repository) ghrepo.Repository { return recorded }
+	}
 	s := &server{
 		state:              opts.State,
 		stateTransactions:  opts.StateTransactions,
@@ -320,6 +331,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		tokens:             opts.Tokens,
 		githubRepositories: opts.GitHubRepositories,
 		renames:            opts.RepositoryRenames,
+		serving:            serving,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
@@ -422,29 +434,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
-}
-
-// serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
-// other name of its configured pair when the project's owners make that name's owner the one
-// whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
-// one rule, read here over the repositories this server already holds
-// (Options.GitHubRepositories) rather than written a second time.
-//
-// The repositories are read once per call, the first time a configured pair asks about an
-// owner, and compared without case as GitHub compares owners. A server built with no
-// repositories — a test's, a daemon with no GitHub Apps — owns none.
-func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
-	var repos []ghrepo.Repository
-	read := false
-	return s.renames.Serving(recorded, func(owner string) bool {
-		if !read {
-			if s.githubRepositories != nil {
-				repos = s.githubRepositories()
-			}
-			read = true
-		}
-		return slices.ContainsFunc(repos, func(r ghrepo.Repository) bool { return strings.EqualFold(r.Owner(), owner) })
-	})
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,

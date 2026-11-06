@@ -881,15 +881,25 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 // every role unable to reach GitHub. The one exception is the controller of a project with no
 // GitHub owner to mint for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it
 // runs with gh acting as nobody, as `legion controller start` does there, its bundle empty — no
-// directory, no default — and its gh directory an empty one (volumes). The controller's launch
-// names no repository of its own (its spec carries none), which is what makes its bundle
-// read-only throughout.
+// directory, no default — and its gh directory an empty one (volumes).
+//
+// The controller's bundle is asked for by owner (Options.ControllerCredential), the one function
+// a controller's bundle is made from here, by this launch and by the refresh of the pod it makes
+// (refreshGitHubCredential). The launch asks for no owner, which takes the first owner the
+// project serves, sorted, and records it as the pod's default; a controller works no repository,
+// so its every directory is read-only.
 func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]ghconfig.Bundle, error) {
 	l.gitHubDirs, l.gitHubDefault = nil, ""
 	bundles := make(map[claim.Role]ghconfig.Bundle, len(l.roles))
 	for i, role := range l.roles {
 		minting, cancel := call(ctx)
-		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository)
+		var bundle ghconfig.Bundle
+		var err error
+		if role == claim.RoleController {
+			bundle, err = r.controllerCredential(minting, "")
+		} else {
+			bundle, err = r.gitHubCredential(minting, role, l.spec.Repository)
+		}
 		cancel()
 		switch {
 		case role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):

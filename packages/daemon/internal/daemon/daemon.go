@@ -939,8 +939,8 @@ func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backen
 		opts := tmuxOptions(cfg, project, launchers, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
-			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, repos, cfg.RepositoryRenames), gh
-			opts.ControllerCredential = appauth.ControllerCredential(tokens, repos, cfg.RepositoryRenames)
+			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, repos, cfg.RepositoryRenames, log), gh
+			opts.ControllerCredential = appauth.ControllerCredential(tokens, repos, cfg.RepositoryRenames, log)
 			opts.ClaimRepository = claimRepository(st.ClaimIssue, repository)
 		}
 		rt, err := tmux.New(opts)
@@ -1800,6 +1800,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:             tokens,
 		GitHubRepositories: p.repositories.Accepted,
 		RepositoryRenames:  cfg.RepositoryRenames,
+		Serving:            p.repositories.serving,
 		GitHubAPI:          githubAPI,
 		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,

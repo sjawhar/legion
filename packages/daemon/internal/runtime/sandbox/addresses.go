@@ -380,26 +380,40 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 	return moved
 }
 
-// movedGhDirs is the gh directories the daemon serves now (r.gitHubDirs, appauth.GitHubDirs)
+// movedGhDirs is the owner directories the daemon serves now (r.gitHubDirs, appauth.GitHubDirs)
 // that role's gh volume of the pod projects none of; ok is whether it lacks any. That volume is
 // one Secret projection whose items are fixed when the pod is created (volumes), one pair of keys
 // per directory of the launch, while the role Secret those keys come from gains a directory's
 // pair the moment the daemon serves it (refreshGitHubCredentials). So a Secret that holds a new
-// directory's files reaches no pod made before it: the pod's /var/run/legion/gh has no directory
+// owner's files reaches no pod made before it: the pod's /var/run/legion/gh has no directory
 // of that name, every `gh` call of its roles that would read the token there runs
 // unauthenticated, and only a new pod projects it.
 //
-// The directories a pod created now would hold depend on the pod's own repository, since the
-// owner it writes to holds one directory per other repository that owner serves, so the pod's
-// repository is read from its workspace fetch (fetchRepository) and a pod that fetches none —
-// the controller's — is read against the owner-only set its launch was handed.
+// Owner directories alone are compared, on both sides (ghOwnerDirs). A bundle built now holds a
+// `<owner>/<repo>` directory for each other repository the pod's own owner serves, and a pod that
+// lacks one of those is not a pod to replace: a repository the mapping gains under another owner
+// is reached through that owner's directory, whose read lease the refresher re-mints over the
+// repositories the mapping serves now, and one it gains under the pod's own write owner is read
+// through that owner's directory too, whose lease names the pod's own repository alone and so
+// does not reach it, until the pod is replaced for a reason of its own and the issue's next pod
+// projects it. Were a repository directory read as an address, a repository added to the mapping
+// would replace every running pod of that owner at once, and a repository whose read lease GitHub
+// refuses — which appauth.GitHubDirs names, since it mints nothing and cannot know, and which no
+// bundle holds (appauth's mintBundle) — would replace them again at every evaluation, for ever.
+// An owner's own directory is the other case: a pod without it holds no token of that owner at
+// all.
+//
+// The pod's own repository is still read from its workspace fetch (fetchRepository), and a pod
+// that fetches none — the controller's — asked for with the zero Repository, since the owner
+// directories a bundle holds depend on it: among them is the owner the pod writes to, which is
+// the role's own and not the project's.
 //
 // The two pods without a Secret projection are not the same. One with no gh volume at all is no
 // pod of this runtime's making and stays unmoved: this runtime does not know what it holds. One
 // whose gh volume is an EmptyDir was launched with no directories at all (volumes: a Secret
 // projection with no items would project every key of the Secret, the launcher token among
 // them), so it holds the empty set — a controller whose project had no owner yet reads every
-// directory the daemon serves now as lacking, and the first owner its project gains remakes it.
+// owner the daemon serves now as lacking, and the first owner its project gains remakes it.
 // The comparison runs one way only: a directory the pod holds that the daemon no longer serves
 // costs the pod a stale directory and nothing more, and must never be worth remaking a pod and
 // deleting its disk for. The daemon's set comes sorted (Options.GitHubDirs), and the pod's is
@@ -419,8 +433,9 @@ func (r *Runtime) movedGhDirs(pod *corev1.Pod, role claim.Role) (movedAddress, b
 		}
 	}
 	slices.Sort(held)
+	held = ghOwnerDirs(held)
 	repo, _ := fetchRepository(pod)
-	served := r.gitHubDirs(repo)
+	served := ghOwnerDirs(r.gitHubDirs(repo))
 	lacking := slices.ContainsFunc(served, func(dir string) bool {
 		_, found := slices.BinarySearch(held, dir)
 		return !found
@@ -429,6 +444,19 @@ func (r *Runtime) movedGhDirs(pod *corev1.Pod, role claim.Role) (movedAddress, b
 		return movedAddress{}, false
 	}
 	return movedAddress{where: name, held: ghDirsName(held), handed: ghDirsName(served)}, true
+}
+
+// ghOwnerDirs is the owner directories of a gh directory set, in the order they come: the names
+// holding no slash, where a repository's directory is `<owner>/<repo>` (ghconfig.IsDirName). It
+// is what movedGhDirs compares, a repository directory a pod lacks being no address of its own.
+func ghOwnerDirs(dirs []string) []string {
+	owners := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if !strings.Contains(dir, "/") {
+			owners = append(owners, dir)
+		}
+	}
+	return owners
 }
 
 // ghDirsName names a set of gh directories as one string, each name in order; "(unset)" for none,

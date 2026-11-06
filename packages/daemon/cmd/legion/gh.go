@@ -290,7 +290,7 @@ func ghTargetOf(argv []string, env map[string]string, help func(path []string) (
 		return ghTarget{}, nil
 	case 1:
 		for owner := range sel.owners {
-			return ghTarget{owner: owner, repo: sel.onlyRepository(owner)}, nil
+			return ghTarget{owner: owner, repo: sel.onlyRepository()}, nil
 		}
 	}
 	var listed []string

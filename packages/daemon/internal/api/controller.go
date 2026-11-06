@@ -186,7 +186,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return
 	}
-	bundle, err := appauth.ControllerCredential(s.tokens, s.githubRepositories, s.renames)(r.Context(), req.Default)
+	bundle, err := appauth.ControllerCredential(s.tokens, s.githubRepositories, s.renames, s.log)(r.Context(), req.Default)
 	switch {
 	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")

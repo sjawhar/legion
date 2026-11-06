@@ -128,9 +128,9 @@ func staticReadToken(role claim.Role, owner string) string {
 }
 
 // staticCredential is the runtime's GitHubCredential in every test: a bundle of repo's owner —
-// sjawhar when repo is the zero Repository, the controller's launch — holding the role's App's
-// write token (appauth.AppRoleFor), and acme holding its read token, rendered as gh's files with
-// a fixed expiry; repo's owner is the bundle's default.
+// sjawhar when repo is the zero Repository, which is how staticControllerCredential builds the
+// controller's — holding the role's App's write token (appauth.AppRoleFor), and acme holding its
+// read token, rendered as gh's files with a fixed expiry; repo's owner is the bundle's default.
 func staticCredential(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 	app := string(appauth.AppRoleFor(role))
 	owner := strings.ToLower(repo.Owner())
@@ -145,8 +145,9 @@ func staticCredential(_ context.Context, role claim.Role, repo ghrepo.Repository
 
 // staticControllerCredential is the runtime's ControllerCredential in every test: the bundle
 // staticCredential renders for the controller, whose default is the owner it is asked for — the
-// one the pod's Secret records — and sjawhar, the first owner, when it is asked for none, as
-// appauth.ControllerCredential answers a launch.
+// one the pod's Secret records, which its refresh asks for — and sjawhar, the first owner, when
+// it is asked for none, which is what the controller's launch asks for, as
+// appauth.ControllerCredential answers one.
 func staticControllerCredential(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
 	bundle, err := staticCredential(ctx, claim.RoleController, ghrepo.Repository{})
 	if err != nil || defaultOwner == "" {
@@ -154,6 +155,15 @@ func staticControllerCredential(ctx context.Context, defaultOwner string) (ghcon
 	}
 	bundle.Default = strings.ToLower(defaultOwner)
 	return bundle, nil
+}
+
+// noOwnerControllerCredential is the ControllerCredential of a project with no GitHub owner to
+// mint for (runtime.ErrNoGitHubOwner: every mapped repository lacks an App): a controller's
+// launch then writes no gh files at all and its gh acts as nobody, its gh directory an empty one.
+// It is the controller's own function that refuses, the launch asking for no bundle of any role
+// (relaunch's gitHubBundles).
+func noOwnerControllerCredential(context.Context, string) (ghconfig.Bundle, error) {
+	return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
 }
 
 // staticDirs are the directories of every bundle staticCredential renders for the test specs,
@@ -173,17 +183,28 @@ var servedDirs = slices.Sorted(slices.Values(append(slices.Clone(staticDirs), ad
 
 // servingAddedOwner is a restarted daemon serving one owner more: GitHubDirs answers
 // servedDirs, and every bundle it renders holds addedOwner's read-only files beside the
-// directories staticCredential always renders, as the daemon's own two answers move together
-// (appauth.GitHubDirs and appauth.GitHubCredential read one mapping). A pod created before it
-// projects no directory for the new owner and never will (movedGhDirs).
+// directories staticCredential always renders, the controller's own among them (its launch and
+// its refresh both ask ControllerCredential), as the daemon's own answers move together
+// (appauth.GitHubDirs, appauth.GitHubCredential and appauth.ControllerCredential read one
+// mapping). A pod created before it projects no directory for the new owner and never will
+// (movedGhDirs).
 func servingAddedOwner(o *Options) {
 	o.GitHubDirs = func(ghrepo.Repository) []string { return servedDirs }
-	o.GitHubCredential = func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+	credential := func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 		bundle, err := staticCredential(ctx, role, repo)
 		if err != nil {
 			return bundle, err
 		}
 		bundle.Dirs[addedOwner] = ghconfig.Render(staticReadToken(role, addedOwner), string(appauth.AppRoleFor(role)), staticCredentialExpiry)
+		return bundle, nil
+	}
+	o.GitHubCredential = credential
+	o.ControllerCredential = func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+		bundle, err := credential(ctx, claim.RoleController, ghrepo.Repository{})
+		if err != nil || defaultOwner == "" {
+			return bundle, err
+		}
+		bundle.Default = strings.ToLower(defaultOwner)
 		return bundle, nil
 	}
 }

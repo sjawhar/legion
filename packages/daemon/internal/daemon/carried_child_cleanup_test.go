@@ -185,8 +185,8 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 			SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
 			Tools:        sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 			BootTimeout:  300 * time.Millisecond, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
-			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionRepos, ghrepo.Renames{}),
-			ControllerCredential: appauth.ControllerCredential(outboxTokens{}, legionRepos, ghrepo.Renames{}),
+			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionRepos, ghrepo.Renames{}, logger),
+			ControllerCredential: appauth.ControllerCredential(outboxTokens{}, legionRepos, ghrepo.Renames{}, logger),
 			GitHubDirs:           legionDirs, Conns: fake.NewConns(), Log: logger,
 			RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 		})

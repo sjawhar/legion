@@ -2737,6 +2737,9 @@ the copy holds a `.legion-config-home-complete` file once whole, and one without
 A git `core.fsmonitor` or a jj alias one role writes in its own `~/.config` so never runs in a sibling's git or jj;
 a jj setting it plants in the shared clone's `.jj/repo/config.toml`, or a git setting in the clone's `.git/config` other than the two the git pins below hold, does.
 A pod's gh projection names the directories of its creation, so an owner or a repository added to the project reaches the issue's next pod.
+An owner added to the project is also a reason to replace the pod: a pod projecting no directory of an owner the daemon serves holds no token of that owner at all, so the daemon opens an update round over it, and the pod that replaces it once its workers have pushed projects the new owner's directory.
+A repository added under an owner the pod already projects is not: the pod keeps running until something else replaces it.
+Until then it reads that repository through that owner's directory, whose token reaches the new repository where the owner is one the pod's roles only read, and names the pod's own repository alone — so reaches the new one not at all — where the owner is the one the role writes to.
 The issue's `-boot` Secret holds the provisioning token, projected into `workspace-fetch` alone.
 
 **Each role in namespaces of its own.**

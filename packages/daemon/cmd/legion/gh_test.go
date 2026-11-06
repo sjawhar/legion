@@ -626,10 +626,12 @@ func TestGhTargetOfRefusalsSayHowToNameTheRepository(t *testing.T) {
 // `legion gh` runs it with where the bundle holds one: a `<repository>` argument, -R, a pull
 // request's URL, OWNER/REPO#N where the leaf reads it, a search repo: qualifier, `gh api`'s
 // repos/<owner>/<repo>/… endpoint, GH_REPO and the working directory's remotes each name one.
-// They must all name the one repository: a command naming none, one naming two of the one owner,
-// and one where a selector named the owner alone — an `<owner>` argument, orgs/<owner>/ or
-// users/<owner>/, an owner:/org:/user: qualifier, a team, an owner option — name none, and the
-// command runs as the owner.
+// The name travels as the argument spells it, `Legion` and `widgets.git` included: the directory
+// lookup is the one place it is normalized (repositoryGHConfigDir). They must all name the one
+// repository: a command naming none, one naming two of the one owner, and one where a selector
+// named the owner alone — an `<owner>` argument, orgs/<owner>/ or users/<owner>/, an
+// owner:/org:/user: qualifier, a team, an owner option — name none, and the command runs as the
+// owner.
 func TestGhTargetOfNamesTheOneRepositoryEverySelectorNames(t *testing.T) {
 	remotes := func(listed ...ghRemote) func() ([]ghRemote, error) {
 		return func() ([]ghRemote, error) { return listed, nil }
@@ -644,19 +646,19 @@ func TestGhTargetOfNamesTheOneRepositoryEverySelectorNames(t *testing.T) {
 	}{
 		// One repository, named by each selector that names one.
 		{argv: []string{"pr", "view", "1", "-R", "sjawhar/legion"}, owner: "sjawhar", repo: "legion"},
-		{argv: []string{"--repo=sjawhar/Legion", "pr", "view", "1"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"--repo=sjawhar/Legion", "pr", "view", "1"}, owner: "sjawhar", repo: "Legion"},
 		{argv: []string{"repo", "clone", "sjawhar/legion"}, owner: "sjawhar", repo: "legion"},
 		{argv: []string{"repo", "clone", "github.com/sjawhar/legion"}, owner: "sjawhar", repo: "legion"},
 		{argv: []string{"pr", "view", "https://github.com/sjawhar/legion/pull/2/files"}, owner: "sjawhar", repo: "legion"},
 		{argv: []string{"agent-task", "view", "sjawhar/legion#1"}, owner: "sjawhar", repo: "legion"},
 		{argv: []string{"search", "issues", "repo:sjawhar/legion", "is:open"}, owner: "sjawhar", repo: "legion"},
 		{argv: []string{"api", "repos/sjawhar/legion/pulls/1/files"}, owner: "sjawhar", repo: "legion"},
-		{argv: []string{"api", "REPOS/sjawhar/Legion"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"api", "REPOS/sjawhar/Legion"}, owner: "sjawhar", repo: "Legion"},
 		{argv: []string{"api", "search/issues?q=repo:sjawhar/legion+is:open"}, owner: "sjawhar", repo: "legion"},
-		{argv: []string{"pr", "list"}, env: map[string]string{"GH_REPO": "sjawhar/Legion"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"pr", "list"}, env: map[string]string{"GH_REPO": "sjawhar/Legion"}, owner: "sjawhar", repo: "Legion"},
 		{argv: []string{"api", "repos/{owner}/{repo}/pulls"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar", repo: "legion"},
-		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone), owner: "acme", repo: "widgets"},
-		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "base"}), owner: "acme", repo: "widgets"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone), owner: "acme", repo: "widgets.git"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "base"}), owner: "acme", repo: "widgets.git"},
 		{argv: []string{"pr", "list"}, remotes: remotes(ghRemote{name: "origin", resolved: "acme/widgets"}), owner: "acme", repo: "widgets"},
 		// The same repository named twice is still the one: the leaf's own argument beside the
 		// working directory's remote, and an option's URL beside -R.

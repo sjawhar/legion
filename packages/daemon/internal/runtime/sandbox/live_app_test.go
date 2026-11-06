@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -44,7 +45,7 @@ func (t implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (str
 // directory a command names, not which App a role writes as; Stage 4b's daemon hands each role
 // its own.
 func (t implementTokens) Credential(ctx context.Context, _ claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
-	return appauth.GitHubCredential(t.apps, t.repositories, ghrepo.Renames{})(ctx, claim.RoleImplementer, repo)
+	return appauth.GitHubCredential(t.apps, t.repositories, ghrepo.Renames{}, slog.Default())(ctx, claim.RoleImplementer, repo)
 }
 
 // ControllerCredential is the harness's ControllerCredential (Options.ControllerCredential): the
@@ -52,7 +53,7 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, repo ghre
 // pod's refresh asks for the owner its Secret records. It mints as the implement App, the one App
 // the harness holds, where the daemon's own mints as the review App (implementApp).
 func (t implementTokens) ControllerCredential(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
-	return appauth.ControllerCredential(implementApp{t.apps}, t.repositories, ghrepo.Renames{})(ctx, defaultOwner)
+	return appauth.ControllerCredential(implementApp{t.apps}, t.repositories, ghrepo.Renames{}, slog.Default())(ctx, defaultOwner)
 }
 
 // implementApp mints every lease as the implement App, whichever App role asks for one: the

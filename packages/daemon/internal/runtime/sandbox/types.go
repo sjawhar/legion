@@ -240,11 +240,13 @@ type Options struct {
 	// (appauth.GitHubDirs), sorted: one per GitHub owner the daemon serves, lowercased and with
 	// every configured rename alias, and one more under the owner of repo for each other
 	// repository that owner serves. A running pod's projection is fixed at the directories of its
-	// creation (manifest's volumes), so a directory this answers that the pod's volume does not
-	// name is a pod whose gh lacks it (movedGhDirs); repo is the pod's own, read from its
-	// workspace fetch (fetchRepository), and the zero Repository for a pod that fetches none, the
-	// controller's. It is read on every drift evaluation, so it must be cheap and must mint
-	// nothing. Required: configure refuses nil as it refuses a nil GitHubCredential.
+	// creation (manifest's volumes), so an owner directory this answers that the pod's volume
+	// does not name is a pod whose gh lacks it (movedGhDirs); the `<owner>/<repo>` directories
+	// are no address a pod is replaced for, and movedGhDirs compares the owner directories of
+	// this set alone. repo is the pod's own, read from its workspace fetch (fetchRepository), and
+	// the zero Repository for a pod that fetches none, the controller's. It is read on every
+	// drift evaluation, so it must be cheap and must mint nothing. Required: configure refuses
+	// nil as it refuses a nil GitHubCredential.
 	GitHubDirs func(repo ghrepo.Repository) []string
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.

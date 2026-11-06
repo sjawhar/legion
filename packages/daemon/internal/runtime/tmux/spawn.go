@@ -543,14 +543,27 @@ type launchGitHubCredential struct {
 }
 
 // mintGitHubCredential mints spec's role its GitHub credential for the repository spec names,
-// the one its write token reaches. It writes nothing: a mint is a network call, made before the
-// launch lock, and the claim's directories are written only after the refusal
-// (writeGitHubCredential).
+// the one its write token reaches. The controller's is asked for by owner instead
+// (Options.ControllerCredential), the one function a controller's bundle is made from here, by
+// this launch and by the refresh of the pane it opens (refreshGitHubCredentials): it works no
+// repository, and the launch asks for no owner, which takes the first owner the project serves,
+// sorted, and is the default the tracked pane then records. A tree pane whose claim the daemon
+// records no repository for names none either, and gets a bundle that is read-only throughout,
+// its default the first owner (runtime.GitHubCredential).
+//
+// It writes nothing: a mint is a network call, made before the launch lock, and the claim's
+// directories are written only after the refusal (writeGitHubCredential).
 func (r *Runtime) mintGitHubCredential(ctx context.Context, spec runtime.SpawnSpec) (launchGitHubCredential, error) {
 	if r.gitHubCredential == nil {
 		return launchGitHubCredential{}, nil
 	}
-	bundle, err := r.gitHubCredential(ctx, spec.Role, spec.Repository)
+	var bundle ghconfig.Bundle
+	var err error
+	if spec.Role == claim.RoleController {
+		bundle, err = r.controllerCredential(ctx, "")
+	} else {
+		bundle, err = r.gitHubCredential(ctx, spec.Role, spec.Repository)
+	}
 	noOwner := spec.Role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner)
 	if err != nil && !noOwner {
 		return launchGitHubCredential{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
