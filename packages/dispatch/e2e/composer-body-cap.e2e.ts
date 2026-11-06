@@ -1,59 +1,69 @@
-import { ASK_QUESTION_MAX, DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { DISPATCH_BLOCK_UNITS } from "@legion/contracts/dispatch-tools";
 import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject } from "./api";
-import { bodyOf } from "./bodies";
+import { blockCapRefusal, bodyOf, paragraphsOf } from "./bodies";
 import { barAction, composer, openSpec, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// INFRA-45: the composer's own cap is DISPATCH_BODY_MAX, which is what the server, the agent
-// tools and `dispatch` now take; the ask composer keeps ASK_QUESTION_MAX, which this issue does
-// not move. Every body here is derived from those constants, so a cap that moves again moves
-// these rows with it.
+// INFRA-370: no composer carries a length of its own. A comment field takes a body of 40,000
+// characters whole, a question field takes a question of 2,001 characters whole, and a body the
+// server refuses - one paragraph past the bound it holds each block to - shows the server's own
+// refusal under the composer, with the draft kept.
 //
 // Each body goes in with `fill`, which Playwright inserts through the page's own editing pipeline
-// (one `Input.insertText`, the path a paste takes), not by assigning `value`: the textarea's
-// `maxLength` is applied to it and React's `onChange` runs on the result, exactly as for a reader
-// pasting a long body. Typing 32,000 characters key by key would take minutes and would exercise
-// no part of the component that this does not.
+// (one `Input.insertText`, the path a paste takes), not by assigning `value`: React's `onChange`
+// runs on the result, exactly as for a reader pasting a long body. Typing 40,000 characters key
+// by key would take minutes and would exercise no part of the component that this does not.
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the comment composer takes a whole body of the limit, and holds a longer one to it", async ({
+test("the comment composer takes a 40,000-character body, and shows the server's refusal of one long paragraph", async ({
   browser,
 }) => {
-  test.skip(test.info().project.name !== "chromium", "one browser proves the cap");
+  test.skip(test.info().project.name !== "chromium", "one browser proves the composer");
+  test.setTimeout(120_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Long comment" });
-  const whole = bodyOf(DISPATCH_BODY_MAX);
+  const whole = paragraphsOf(40_000);
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    const field = page.getByRole("form", { name: "Comment composer" }).getByLabel("Comment");
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
     await expect(field).toBeVisible();
 
-    // The composer's cap is DISPATCH_BODY_MAX: a body of exactly that many characters stays whole
-    // in the field. A composer still capped at 2,000 keeps 2,000 of them.
+    // No maxLength holds the field to anything: a body of 40,000 characters stays whole.
     await field.fill(whole);
     // One readback, not two: `fill` resolves once the page has taken the text, and this one
     // proves its length and its content together.
     expect(await field.inputValue()).toBe(whole);
 
-    // And the cap still holds: one character more than the limit is cut back to it.
-    await field.fill(bodyOf(DISPATCH_BODY_MAX + 1));
-    await expect.poll(async () => (await field.inputValue()).length).toBe(DISPATCH_BODY_MAX);
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(page.getByText(whole.slice(0, 40))).toBeVisible();
+
+    // One paragraph a character past the server's block bound: the composer sends it, and what
+    // the reader is shown is the server's refusal, naming the block and the bound.
+    const tooLong = bodyOf(DISPATCH_BLOCK_UNITS + 1);
+    const refusal = blockCapRefusal(DISPATCH_BLOCK_UNITS + 1);
+    await field.fill(tooLong);
+    await expect.poll(async () => (await field.inputValue()).length).toBe(tooLong.length);
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+
+    await expect(form.getByText(refusal)).toBeVisible();
+    await expect(field).toHaveValue(tooLong);
   } finally {
     await alice.close();
   }
 });
 
-test("an ask composer still stops at the question limit", async ({ browser }) => {
-  test.skip(test.info().project.name !== "chromium", "one browser proves the cap");
+test("the ask composer takes a question past the length it used to cut", async ({ browser }) => {
+  test.skip(test.info().project.name !== "chromium", "one browser proves the composer");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -70,16 +80,12 @@ test("an ask composer still stops at the question limit", async ({ browser }) =>
     const question = composer(page).getByLabel("Question");
     await expect(question).toBeVisible();
 
-    // A question is not a body: this composer caps at ASK_QUESTION_MAX, which INFRA-45 leaves
-    // where it was, so a body-sized question is cut back to the question limit.
-    await question.fill(bodyOf(DISPATCH_BODY_MAX));
-    await expect.poll(async () => (await question.inputValue()).length).toBe(ASK_QUESTION_MAX);
-
-    // The whole question limit, on the other hand, stays whole.
-    const wholeQuestion = bodyOf(ASK_QUESTION_MAX);
-    await question.fill(wholeQuestion);
-    await expect.poll(async () => (await question.inputValue()).length).toBe(ASK_QUESTION_MAX);
-    expect(await question.inputValue()).toBe(wholeQuestion);
+    // 2,001 characters: one more than the length this field used to cut a question to. Dispatch
+    // bounds a question and its options together, and this is far inside that bound.
+    const whole = bodyOf(2_001);
+    await question.fill(whole);
+    await expect.poll(async () => (await question.inputValue()).length).toBe(2_001);
+    expect(await question.inputValue()).toBe(whole);
   } finally {
     await alice.close();
   }

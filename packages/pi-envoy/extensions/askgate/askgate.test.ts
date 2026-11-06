@@ -932,8 +932,8 @@ describe("untrusted text (security)", () => {
     expect(context).toMatch(/… \[elided \d+ bytes\]/);
   });
   test("a revise reason holding a full-length rewritten question in non-ASCII text arrives whole", async () => {
-    // 2,000 UTF-16 units (ASK_QUESTION_MAX) of three-byte characters is 6,000 bytes, and the reason
-    // names its failure and quotes the words on top: the recommendation at its end must survive.
+    // 2,000 three-byte characters is 6,000 UTF-8 bytes, and the reason names its failure and
+    // quotes the words on top: the recommendation at its end must survive.
     const reason = `failure 13 (content): "Hi! I hope this finds you well." is a preamble. Send: ${"€".repeat(2_000)} I recommend A.`;
     const g = bind({ complete: reviseWith(reason) });
     const context = (await g.device("t1", "dispatch_comment", COMMENT))?.additionalContext ?? "";
@@ -3402,21 +3402,18 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       });
       await skipped.bash("s", ASK);
       // The halt is three of the gate's own deadlines in a row, so nothing else of the call may
-      // race that deadline. The real dry run is a process, and it races half of these 20 ms: on a
-      // busy machine it loses, and the call is an `error` rather than a `timeout`. This dry run
-      // answers at once, with what the stub's own prints, and the model call runs until the
-      // deadline aborts it, so the deadline is the only clock the outcome reads.
+      // race that deadline. A real `dispatch … --dry-run` is a Bun process, and the reads get
+      // READ_SHARE (half) of the deadline: on a busy machine the spawn loses that race, the call
+      // is an `error`, whose effect is `none`, and three of those never halt the gate. This dry
+      // run answers at once with what the stub would have printed, and the clock never moves, so
+      // the reads spend none of the deadline however busy the machine is. Nothing the outcome
+      // reads is measured against the wall clock: the review never answers (untilAborted), so the
+      // call's own stop is the only thing that can settle it.
       const halted = bind({
-        // The three calls that trip the breaker must time out in their review. A STUB row runs the
-        // real `dispatch … --dry-run` stub above, a Bun process, and the dry run gets READ_SHARE
-        // (half) of this deadline: at 20 ms that was 9 ms, and starting Bun took 16-60 ms
-        // (median 32) on an idle two-CPU box, so the call ended "error: dispatch ask --dry-run did
-        // not finish within 9 ms" instead of timing out in its review. Half of this covers that
-        // start many times over, and the review, which never answers (untilAborted), still times
-        // out on the rest.
-        env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "2000" },
+        env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "20" },
         cwd: work,
         complete: untilAborted,
+        now: () => 1_000_000,
         dryRun: async () => ({
           exitCode: 0,
           stdout: JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2),
@@ -3438,8 +3435,8 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "skipped" }],
         [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "halted" }],
       ]);
-      // Three calls wait out the review deadline above, so the row's own bound is the sum of them
-      // with room to spare, not bun test's 5 s default.
+      // The row's own bound is a hang guard, the file's convention: its work is three 20 ms
+      // deadlines, far below this.
     }, 30_000);
 
     test("a rebuttal binds the dry run's arguments, its flag gone from the argv", async () => {

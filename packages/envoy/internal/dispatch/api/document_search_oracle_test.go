@@ -2,7 +2,7 @@ package api
 
 import "fmt"
 
-// This file holds the five statements of R1 as main writes them, copied from the text this change
+// This file holds the statements of R1 as main writes them, copied from the text this change
 // replaces: their document arm reads each document's latest version through a lateral join over
 // artifact_versions and tests `v.search @@ q.tsq` there. They are the oracle of the equality
 // tests in document_search_test.go, which run each statement beside the package's own and
@@ -15,13 +15,39 @@ import "fmt"
 // under test changes with it, and the comparison then holds nothing. The cost is that an edit to
 // a part of these statements this change leaves alone has to be copied here too, which is what
 // the equality tests report when it is not.
+//
+// INFRA-370 is such an edit, and two of its three parts are copied here. Every keyword arm now
+// carries two more columns, window_id and covers; a keyword arm matched no window and has
+// nothing to put in them, so main's arms carry them as nulls, for the column shape alone. The
+// page names one output column more, the block a meaning hit matched, which the package computes
+// in a lateral over covers; what stands in its place here is a literal null, which is that
+// column's own value for every row this file's statements can produce, and is argued where it
+// is written.
+//
+// The third part could not be copied. Meaning search itself moved from one vector per item to
+// one per window of neighbouring blocks (migration 20261102233625), and this release's indexers
+// write the window kinds and delete the whole-text rows main's meaning arms read. Four of
+// mainSearchQueryMeaningBody's five arms therefore find nothing at all over this release's rows,
+// so a meaning statement built from it decides nothing: it would hold a working statement
+// against a blind one. The equality test's two meaning cases run against
+// searchQueryMeaningOverMainsDocumentArm and relatedMeaningQueryOverMainsDocumentArm below -
+// this release's own meaning body over main's keyword legs - whose one difference from the
+// statement each is the oracle of is the document arm, which is the question the oracle asks.
+// mainSearchQueryMeaningBody is kept for the timing harness, which measures it on a database at
+// the schema before this release, where it is still the text that ran.
 
 // mainSearchKeywordLegs is main's searchKeywordLegs: the five-kind keyword union whose document
 // arm this change moves to document_search. That arm is a named piece of its own
 // (mainDocumentKeywordLeg), the side the measurement holds this change's arm against.
+//
+// Each arm carries window_id and covers as nulls, which main's arms did not: INFRA-370 added the
+// two columns to every arm of both unions, a keyword arm has nothing to put in them, and these
+// legs are unioned with this release's meaning CTEs, which do carry them
+// (searchQueryMeaningOverMainsDocumentArm). Nothing reads either column out of a keyword row.
 func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
+         null::text as window_id, null::text[] as covers,
          i.title as issue_title, i.status as issue_status,
          null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at,
          i.key = q.own_key as own, ` + rank("i.search") + ` as r
@@ -30,6 +56,7 @@ func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
 ` + mainDocumentKeywordLeg(rank) + `
   union all
   select 'comment' as kind, 'keyword', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
+         null::text, null::text[],
          i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, c.created_at),
          false, ` + rank("c.search") + `
@@ -41,6 +68,7 @@ func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
   union all
   select 'ask' as kind, 'keyword', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
          coalesce(k.artifact_id, k.block_artifact_id, (case when pg_input_is_valid(k.anchor->>'artifact_id', 'uuid') then (k.anchor->>'artifact_id')::uuid end)), k.id::text, case when exists (select 1 from document_blocks d where d.artifact_id = k.block_artifact_id and d.block_id = k.block_id) then k.block_id end,
+         null::text, null::text[],
          i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
          false, ` + rank("k.search") + `
     from asks k
@@ -50,6 +78,7 @@ func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
    where k.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
   select 'message' as kind, 'keyword', m.issue_key, null::uuid, null::uuid, m.id::text, null::text,
+         null::text, null::text[],
          i.title, i.status, null::text, null::text, null::text, i.updated_at,
          false, ` + rank("m.search") + `
     from messages m join issues i on i.key = m.issue_key, q
@@ -62,6 +91,7 @@ func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
 // text carries no newline of its own at either end.
 func mainDocumentKeywordLeg(rank func(searchColumn string) string) string {
 	return `  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
+         null::text, null::text[],
          i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, v.created_at),
          false, ` + rank("v.search") + `
@@ -81,6 +111,16 @@ var mainSearchKeywordLegsSQL = mainSearchKeywordLegs(func(searchColumn string) s
 // mainSearchPageAndTailSQL is main's searchPageAndTailSQL, which this change leaves as it is: its
 // own lateral over artifact_versions reads the page's documents' markdown for the snippet, and
 // tests no tsquery.
+//
+// One output column is not main's. Where the package's page names the block a meaning hit
+// matched (hit.block_id, INFRA-370), this writes a literal null. The package computes that column
+// in a lateral over r.covers, and no row either body here hands this page carries any: a keyword
+// leg writes null for covers, and so do main's meaning arms, which know no windows. unnest of no
+// covers is no row, so the package's own lateral answers null for every one of those rows too.
+// The null written here is therefore that column's own value rather than a stand-in, and the
+// lateral's twenty-five lines are not copied into a place where they could only ever answer
+// null. The two statements whose rows can carry covers are this release's own meaning ones, and
+// they are held against this release's own page (searchQueryMeaningOverMainsDocumentArm).
 func mainSearchPageAndTailSQL(legsSource string) string {
 	return fmt.Sprintf(`page as (
   select l.*, f.score, array_position(array['issue', 'document', 'ask', 'comment', 'message'], l.kind) as kind_order
@@ -91,7 +131,7 @@ func mainSearchPageAndTailSQL(legsSource string) string {
 select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
        r.issue_key, r.issue_title, r.issue_status,
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
-       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.score::float8,
+       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, null::text, r.score::float8,
        ts_headline('english',
          search_text(case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
               then substr(txt.text, greatest(1, strpos(lower(txt.text), lower(q.term)) - 1500), 4000)
@@ -142,7 +182,16 @@ totals as (
 ` + mainSearchPageAndTailSQL("legs")
 }
 
-// mainSearchQueryMeaningBody is main's searchQueryMeaningBody.
+// mainSearchQueryMeaningBody is main's searchQueryMeaningBody. Its four non-issue arms read the
+// whole-text embedding kinds ('document', 'comment', 'ask', 'message'), which this release's
+// indexers no longer write and delete as each owner gains a window (migration 20261102233625),
+// so those four answer nothing at all over this release's rows. That is why the equality test
+// holds its two meaning statements against this release's meaning body over main's keyword legs
+// rather than against this text, and why this text is left here for the timing harness alone,
+// which measures it on a database at the schema before this release.
+//
+// Its meaning arms carry window_id and covers as nulls for the reason mainSearchKeywordLegs' arms
+// do: the keyword legs this body unions carry them, and a union's arms need one column shape.
 func mainSearchQueryMeaningBody(keywordLegs string) string {
 	return `meaning_issue_candidates as (
   select i.key as issue_key, i.key as id, i.title as issue_title, i.status as issue_status, i.updated_at,
@@ -155,6 +204,7 @@ func mainSearchQueryMeaningBody(keywordLegs string) string {
 ),
 meaning_issue as (
   select 'issue' as kind, 'meaning' as list, issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, id, null::text as block_id,
+         null::text as window_id, null::text[] as covers,
          issue_title, issue_status, null::text as owner_project, null::text as owner_slug, null::text as owner_name, updated_at,
          false as own, r
     from meaning_issue_candidates where r >= $10
@@ -174,6 +224,7 @@ meaning_document_candidates as (
 ),
 meaning_document as (
   select 'document' as kind, 'meaning' as list, issue_key, case when issue_key is null then id else null::uuid end, id, id::text, null::text,
+         null::text, null::text[],
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_document_candidates where r >= $10
@@ -193,6 +244,7 @@ meaning_comment_candidates as (
 ),
 meaning_comment as (
   select 'comment' as kind, 'meaning' as list, issue_key, artifact_id, coalesce(artifact_id, (anchor->>'artifact_id')::uuid), id::text, null::text,
+         null::text, null::text[],
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_comment_candidates where r >= $10
@@ -213,6 +265,7 @@ meaning_ask_candidates as (
 meaning_ask as (
   select 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
          coalesce(artifact_id, block_artifact_id, (case when pg_input_is_valid(anchor->>'artifact_id', 'uuid') then (anchor->>'artifact_id')::uuid end)), id::text, block_id,
+         null::text, null::text[],
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_ask_candidates where r >= $10
@@ -229,6 +282,7 @@ meaning_message_candidates as (
 ),
 meaning_message as (
   select 'message' as kind, 'meaning' as list, issue_key, null::uuid, null::uuid, id::text, null::text,
+         null::text, null::text[],
          issue_title, issue_status, null::text, null::text, null::text, updated_at,
          false, r
     from meaning_message_candidates where r >= $10
@@ -279,7 +333,10 @@ func mainRelatedCoordinationRank(searchColumn string) string {
 	return "((select sum(w.idf) from term_weights w where " + searchColumn + " @@ w.tq) + 0.001 * ts_rank_cd(" + searchColumn + ", q.tsq, 32))"
 }
 
-// The four whole statements of R1 that search's own two bodies make, as main makes them.
+// The whole statements of R1 the bodies above make. Main's two keyword statements are the oracle
+// of the equality test's keyword cases, as mainRelatedProbeSQL is of its probe case; the two
+// meaning oracles below them are this release's meaning body over main's keyword legs, for the
+// reason given at the top of this file.
 var (
 	mainSearchQuery        = mainSearchQOpener + mainSearchQueryBody(mainSearchKeywordLegsSQL)
 	mainSearchQueryMeaning = mainSearchQOpener + mainSearchQueryMeaningBody(mainSearchKeywordLegsSQL)
@@ -289,6 +346,18 @@ var (
 	mainRelatedDocumentKeywordLeg = mainDocumentKeywordLeg(mainRelatedCoordinationRank)
 	mainRelatedKeywordQuery       = mainRelatedQOpener + mainRelatedTermWeights(9) + mainSearchQueryBody(mainRelatedKeywordLegs)
 	mainRelatedMeaningQuery       = mainRelatedQOpener + mainRelatedTermWeights(12) + mainSearchQueryMeaningBody(mainRelatedKeywordLegs)
+
+	// searchQueryMeaningOverMainsDocumentArm and relatedMeaningQueryOverMainsDocumentArm are the
+	// package's own two meaning statements with main's keyword legs in place of this release's.
+	// Every other line of each - the opener, the five meaning CTEs, the fusion, the page and its
+	// hit lateral - is the package's own text, so the one thing that differs between either of
+	// these and the statement it is the oracle of is the document keyword arm. A change to
+	// searchDocumentKeywordLeg therefore moves one side and not the other, which is what an
+	// oracle is for; a change to the rest moves both, which main's frozen meaning copy would have
+	// caught and this does not. That is the price of a meaning body whose rows main's own text
+	// cannot see.
+	searchQueryMeaningOverMainsDocumentArm  = searchQOpener + searchQueryMeaningBody(mainSearchKeywordLegsSQL)
+	relatedMeaningQueryOverMainsDocumentArm = relatedQOpener + relatedTermWeights(12) + searchQueryMeaningBody(mainRelatedKeywordLegs)
 )
 
 // mainRelatedProbeSQL is main's relatedProbeSQL, the fifth statement of R1.
