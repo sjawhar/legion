@@ -173,29 +173,28 @@ func (m *Machine) waitsForProviderError(delivery string) bool {
 }
 
 // replaceable is whether a newer task takes this pending task's place rather than waiting behind
-// it (queue). Exactly two tasks answer true, and both are tasks the claim owes with nothing
-// working them and no wait of the claim's own that will ever end: the task the ladder's wait
-// stands for (waitsForProviderError), and the task an update round's question went before and
-// gave back, which arms no wait at all (gaveBack). R2 has a newer task replace either.
+// it (queue). One task answers true: the one the ladder's wait stands for
+// (waitsForProviderError), which the claim owes with nothing working it and with a wait that
+// the next provider error only makes longer. R2 has a newer task replace it.
 //
 // Every other pending task waits for its turn, the task a provider error took back on a claim
 // the operator stopped among them: the ladder's wait went with the claim's timers (letGo), and
 // the claim still owes that task, so the phase's restart task waits behind it until the turn
 // the retry's fresh session takes on it retires it (R3, scripts/e2e/provider-error-retry.sh
-// step 5). A task whose turn is running, or whose prompt is in flight, is work in flight and is
-// never replaced either.
+// step 5). An update round's question waits behind it too, and the round asks again at the
+// next tick (askForUpdate). A task whose turn is running, or whose prompt is in flight, is work
+// in flight and is never replaced either.
 //
-// Both marks end at the send they allow, so neither outlives it: the timer that fires the
-// ladder's wait is deleted before its action runs (machine.go's Handle), and the give-back's
-// mark is dropped by the send itself (startSend). Without that, the window between the prompt's
-// acknowledgement and its turn would answer true — the send is over (machine.go's fenceOutcome
-// clears it), the task is not confirmed yet, and the wait for its turn is armed — so a newer
-// task would take the place of a task already in the agent's hands: the given-back task's
-// agent_start would confirm the task that replaced it, and the turn's end would retire that one
-// unsent, with the outbox row that gave it already recorded as delivered.
+// The mark ends at the send it allows, so it does not outlive it: the timer that fires the
+// ladder's wait is deleted before its action runs (machine.go's Handle). Without that, the
+// window between the prompt's acknowledgement and its turn would answer true — the send is
+// over (machine.go's fenceOutcome clears it), the task is not confirmed yet, and the wait for
+// its turn is armed — so a newer task would take the place of a task already in the agent's
+// hands: that task's agent_start would confirm the task that replaced it, and the turn's end
+// would retire that one unsent, with the outbox row that gave it already recorded as delivered.
 func (m *Machine) replaceable(p *Delivery) bool {
 	if !p.ConfirmedAt.IsZero() || m.send != nil {
 		return false
 	}
-	return m.waitsForProviderError(p.ID) || m.gaveBack == p.ID
+	return m.waitsForProviderError(p.ID)
 }

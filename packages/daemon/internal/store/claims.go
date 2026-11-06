@@ -34,7 +34,7 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.plugin_contract, c.plugin_relaunch_for, c.delivered_rows,
 	c.update_round, c.update_reasons, c.update_opened_at, c.update_tasked_at, c.update_signalled_at,
 	c.update_head, c.update_told_at, c.update_answered_by_turn_end, c.update_reasked_for_push_check,
-	c.update_left_round, c.provider_error_run, c.owed_task,
+	c.update_left_round, c.provider_error_run,
 	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.out_of_memory,
 	d.kept_decisions, d.provider_error_retries, d.provider_error_note
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
@@ -116,19 +116,6 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 	if delivered == nil {
 		delivered = []int64{}
 	}
-	// The task an update round's question went before, as JSON, and null for a claim that owes
-	// none: the delivery is written whole, so it comes back the task it was taken (the claims
-	// migration 20261106120000, supervise's holdOwedTask). The column's keys are the json tags
-	// supervise.Delivery carries, not its Go field names, so a field renamed there goes on
-	// reading back the holds this wrote.
-	var owed []byte
-	if c.OwedTask != nil {
-		encoded, err := json.Marshal(c.OwedTask)
-		if err != nil {
-			return fmt.Errorf("put claim %s: encode the task it owes: %w", c.Token, err)
-		}
-		owed = encoded
-	}
 	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, tree_epoch,
 		session, session_file, locator, state, failure, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, last_start_row,
@@ -136,9 +123,9 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		plugin_contract, plugin_relaunch_for, delivered_rows,
 		update_round, update_reasons, update_opened_at, update_tasked_at, update_signalled_at,
 		update_head, update_told_at, update_answered_by_turn_end, update_reasked_for_push_check,
-		update_left_round, provider_error_run, owed_task)
+		update_left_round, provider_error_run)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
-		$27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)
+		$27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -165,7 +152,6 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		update_reasked_for_push_check = excluded.update_reasked_for_push_check,
 		update_left_round = excluded.update_left_round,
 		provider_error_run = excluded.provider_error_run,
-		owed_task = excluded.owed_task,
 		-- The four activity columns are no part of a claim's write: PutClaimActivity owns them,
 		-- and a machine's write carries whatever its in-memory claim last read, so a report the
 		-- session sent since would be erased by the next state it persists.
@@ -178,7 +164,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		c.PluginContract, c.PluginRelaunchFor, delivered,
 		c.UpdateRound, c.UpdateReasons, c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt,
 		c.UpdateHead, c.UpdateToldAt, c.UpdateAnsweredByTurnEnd, c.UpdateReaskedForPushCheck,
-		c.UpdateLeftRound, c.ProviderErrorRun, owed,
+		c.UpdateLeftRound, c.ProviderErrorRun,
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -439,7 +425,6 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		updateOpened, updateTasked  *time.Time
 		updateSignalled, updateTold *time.Time
 		kept                        []byte
-		owed                        []byte
 		retries                     *int64
 		note                        *string
 	)
@@ -450,7 +435,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		&c.PluginContract, &c.PluginRelaunchFor, &c.DeliveredRows,
 		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
 		&c.UpdateHead, &updateTold, &c.UpdateAnsweredByTurnEnd, &c.UpdateReaskedForPushCheck,
-		&c.UpdateLeftRound, &c.ProviderErrorRun, &owed,
+		&c.UpdateLeftRound, &c.ProviderErrorRun,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &outOfMemory,
 		&kept, &retries, &note)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -476,13 +461,6 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			return supervise.Claim{}, fmt.Errorf("read claim %s: %w", token, err)
 		}
 		c.Locator = &loc
-	}
-	if owed != nil {
-		var held supervise.Delivery
-		if err := json.Unmarshal(owed, &held); err != nil {
-			return supervise.Claim{}, fmt.Errorf("read claim %s: decode the task it owes: %w", token, err)
-		}
-		c.OwedTask = &held
 	}
 	if enrollmentID != nil && enrollmentIC != nil {
 		c.Enrollment = &supervise.Enrollment{ID: *enrollmentID, Incarnation: *enrollmentIC}

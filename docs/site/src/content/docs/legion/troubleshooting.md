@@ -412,8 +412,11 @@ fallback chain, so the next prompt goes to another model
 a 429, a 408, a 401, a 403, a 5xx and an error the provider answered no status for are sent again
 too: a credential error is the fleet's rather than this claim's work, so it climbs the ladder like
 any other and the controller's notice at six is what tells a person. A newer
-task for that claim replaces the one the error took back and is sent at once, and an update
-round's question goes before it, so neither waits out a ladder that reaches ten minutes a step.
+task for that claim replaces the one the error took back and is sent at once, so it does not wait
+out a ladder that reaches ten minutes a step. An update round's question waits behind the owed
+task, as any other task does: the question needs a turn of the worker's own, and that turn would
+fail the way the task's did, so the pod's round waits until a turn of the owed task ends with no
+provider error.
 
 **One provider error does hold the issue**, for its architect: one whose HTTP status is a client
 error, 400 to 499, that is none of 401, 403, 408 and 429. A malformed request is

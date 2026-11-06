@@ -147,7 +147,9 @@ type memStore struct {
 	claims     map[claim.Token]Claim
 	deliveries map[claim.Token]Delivery
 	puts       []Claim
-	failures   map[string]error
+	// writes is each write and retirement of a pending delivery, in order (deliveryLog).
+	writes   []string
+	failures map[string]error
 	// onPut, when set, runs on every PutClaim before it is recorded.
 	onPut func(Claim)
 }
@@ -192,6 +194,7 @@ func (s *memStore) PutDelivery(_ context.Context, token claim.Token, d Delivery)
 		return fmt.Errorf("put delivery %s: no claim %s", d.ID, token)
 	}
 	s.deliveries[token] = d
+	s.writes = append(s.writes, "put "+d.ID)
 	return nil
 }
 
@@ -232,6 +235,7 @@ func (s *memStore) RetireDelivery(ctx context.Context, c Claim, deliveryID strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.deliveries, c.Token)
+	s.writes = append(s.writes, "retire "+deliveryID)
 	return nil
 }
 
@@ -257,6 +261,17 @@ func (s *memStore) delivery(token claim.Token) (Delivery, bool) {
 	defer s.mu.Unlock()
 	d, ok := s.deliveries[token]
 	return d, ok
+}
+
+// deliveryLog is every write and retirement of a pending delivery, in order, as "put <id>" and
+// "retire <id>". A case reads it to see how a delivery ended: the real store releases what a
+// delivery holds of a person's decisions in the delete alone (its releaseKeptDecisions), so a
+// row overwritten in place by the next delivery leaves those rows held by an id that is gone,
+// and a write under an id after its retirement is that fault.
+func (s *memStore) deliveryLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.writes...)
 }
 
 func (s *memStore) history() []Claim {

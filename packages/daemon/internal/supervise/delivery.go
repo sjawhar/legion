@@ -41,31 +41,25 @@ import (
 // the task text is the workflow's to write. A delivery of no phase — an operator's own, an
 // architect's — is never dropped for the phase its issue reaches, and a suspension does not take
 // it either: it waits the suspension out and goes on the resume (settle).
-//
-// Every field carries a json tag, as runtime.Locator's do, because the whole delivery is stored
-// as JSON in one place: claims.owed_task, the task an update round's question went before
-// (store/claims.go's putClaim). The tags are that column's shape, so a field renamed here still
-// reads back the holds already written, which a shape keyed by Go field names would silently
-// zero.
 type Delivery struct {
-	ID   string `json:"id"`
-	Task string `json:"task"`
+	ID   string
+	Task string
 	// Generation is the issue generation this task belongs to, from the start row that queued it.
 	// A start delivers to whatever process the claim already has — a live worker is not
 	// relaunched — so the pane's own environment names the run it was launched for, which may be
 	// an earlier one. The work a worker reports is the task it was given, and this is that task's
 	// run. Zero for a task of no run: an operator's own, an architect's.
-	Generation uint64 `json:"generation"`
+	Generation uint64
 	// Assignment is the assignment this task is of, from the start row that queued it: the token
 	// the workflow minted when the issue's phase handed this role a task, which stands on the
 	// role's phases row too. It is what tells one phase entry from the next within a run, so a
 	// turn that outlived its phase cannot complete the phase's next entry (api/handoff.go,
 	// HANDOFF_STALE_ASSIGNMENT). Empty for a task of no assignment: an operator's own, a resume,
 	// a production check's look, and every task queued before the daemon was upgraded to mint one.
-	Assignment  string      `json:"assignment"`
-	Phase       phase.Phase `json:"phase"`
-	QueuedAt    time.Time   `json:"queuedAt"`
-	DeliveredAt time.Time   `json:"deliveredAt"`
+	Assignment  string
+	Phase       phase.Phase
+	QueuedAt    time.Time
+	DeliveredAt time.Time
 	// MarkedBy is the delivery id the marking prompt carried: the prompt whose acknowledgement set
 	// DeliveredAt, the read mark. A late refusal is judged against the prompt it names: one naming
 	// MarkedBy says the prompt that marked the task never ran, so the mark goes (markUnread), whatever
@@ -74,16 +68,16 @@ type Delivery struct {
 	// task, so no ordering of sends, acknowledgements, refusals, reconnects and restarts has to be
 	// reasoned about: only markRead and clearReadMark write it, each together with DeliveredAt. A task
 	// that was replaced may still be named by a refusal, which then has nothing to clear.
-	MarkedBy    string    `json:"markedBy"`
-	ConfirmedAt time.Time `json:"confirmedAt"`
+	MarkedBy    string
+	ConfirmedAt time.Time
 	// Interrupted says a turn of the task was running when its process died (interrupted), so the
 	// task is sent behind interruptedTask from then on (message). The task text stays as the
 	// workflow wrote it.
-	Interrupted bool `json:"interrupted"`
+	Interrupted bool
 	// OutOfMemory says the end that cut a turn of this task off was its pod running out of memory
 	// (runtime.Observation.OutOfMemory), so the task is sent behind outOfMemoryTask as well as
 	// behind interruptedTask from then on (message). The task text stays as the workflow wrote it.
-	OutOfMemory bool `json:"outOfMemory"`
+	OutOfMemory bool
 	// Kept is what the task names of the decisions a person made while nobody in the root's tree
 	// could hear them, as the row that queued the task recorded them (record.KeptDecisions, encoded
 	// JSON). It is opaque here — this package knows nothing of the record — and is carried and
@@ -92,20 +86,20 @@ type Delivery struct {
 	// ConfirmedAt tells them, and the write that retires it leaves them kept for whichever tree
 	// owes them. It is rewritten, with the task text, by the send-time narrowing of what the task
 	// still names of this claim's tree (Deps.RootTask). Empty for a task that names none.
-	Kept []byte `json:"kept"`
+	Kept []byte
 	// ProviderErrorRetries is how many times this task has been sent again after a turn of it
 	// ended in a provider error, from 0 (promptResulted's providerErrored). It is what the wait
 	// before the next send is a function of (promptRetryDelay), so a daemon restarted in the
 	// middle of a ladder goes on climbing it rather than starting again at the first step. It is
 	// the task's own count, not the claim's: a new task starts at 0.
-	ProviderErrorRetries int `json:"providerErrorRetries"`
+	ProviderErrorRetries int
 	// ProviderErrorNote is the sentence such a task is sent behind, as Interrupted sends one
 	// behind interruptedTask: what ended the previous turn, and that the daemon is sending the
 	// task again. It is built from structured fields alone — the HTTP status the provider
 	// answered, else nothing more than "a provider error" — because a refusal's own explanation is
 	// itself refused when it is sent back (dispatch://INFRA-956/artifact/cause-evidence-md), so
 	// no provider text reaches a prompt. Empty for a task no provider error has taken back.
-	ProviderErrorNote string `json:"providerErrorNote"`
+	ProviderErrorNote string
 }
 
 // StillWorked says whether a claim in state will still work this task as the task of generation's
@@ -174,34 +168,32 @@ func pendingID(p *Delivery) string {
 // next run, retrying on its backoff, is what releases it, and the refusal that start is answered
 // with is over once the architect's turn on the held task has ended and the delivery retired.
 //
-// One pending task is not refused: the task a provider error took back, while nothing works it
-// (replaceable) — the one the ladder's wait stands for, and the one an update round's question
-// went before and gave back, which arms no wait at all. The next step of the ladder can be ten
+// One pending task is not refused: the task a provider error took back, while the ladder's wait
+// stands for it and nothing works it (replaceable). The next step of the ladder can be ten
 // minutes away and a run of errors has no end of its own, so a refusal would keep every newer
-// task of the claim — an update round's question among them — behind a task the claim owes for
-// as long as the provider keeps failing (dispatch://INFRA-956 R2: a newer task replaces the owed
-// one, and an update round's question goes before it).
+// task of the claim behind a task the claim owes for as long as the provider keeps failing
+// (dispatch://INFRA-956 R2: a newer task replaces the owed one). The newer task takes its
+// place: it is work for this claim, queued since, and R2 has the newer of the two go.
 //
-// The two leave the owed task differently, because they ask different things of the worker. A
-// newer task takes its place: it is work for this claim, queued since, and R2 has the newer of
-// the two go. An update round's question is not work at all — it asks this worker to push what
-// it has and wait for its process to be replaced — so the task it interrupts is still owed when
-// the round is over, and the question takes the claim's one delivery slot with that task held on
-// the claim itself behind it (holdOwedTask), to be queued again when the question's delivery
-// ends (giveBackOwedTask). Retiring it there instead would lose it: the outbox row that gave it
-// is recorded on the claim (Claim.DeliveredRows), so no retry of that row gives it again, and
-// the claim would stand with work owed and nothing pending once its pod was replaced, which is
-// the failure this issue exists to remove.
+// An update round's question is refused behind that task like any other, and the round asks
+// again at the next tick (askForUpdate). It costs the round the wait: the pod is replaced only
+// once a turn of the owed task ends with no provider error, which is the turn that frees the
+// slot. The question needs a model turn of its own, which the provider that is failing this
+// claim's turns would fail in the same way, so going first would buy the round nothing in the
+// outage that holds it up (dispatch://INFRA-956, the round-7 review).
 //
-// Either way the slot is emptied as any other drop empties it: the wait ends with the task
-// (dropPending), and the question a restart armed for that task is answered in the same step
-// (answerAskFirstAfterDrop), so the task queued behind it is never taken for the running turn's.
+// The replaced task's row ends as any other retirement ends it (retirePending), before the
+// newer task's row is written: the delete releases what that task held of a person's decisions
+// for whichever tree is owed them (the claim store's RetireDelivery and releaseKeptDecisions),
+// where a row overwritten in place would leave them held by a delivery id that is gone, or move
+// them to a task whose text never named them. The wait ends with the task, and the question a
+// restart armed for that task is answered in the same step (answerAskFirstAfterDrop), so the
+// task queued behind it is never taken for the running turn's.
 //
 // What the ladder counted belongs to the delivery it counted for, and goes with it: the attempt
 // count and the sentence the next prompt would have carried are the delivery's own fields
 // (ProviderErrorRetries, ProviderErrorNote), so the task that replaces it starts its own ladder
-// at the first step, and the task a question went before keeps its own and goes on from where it
-// stood. The claim's run of provider-error turns is the claim's and stays
+// at the first step. The claim's run of provider-error turns is the claim's and stays
 // (Claim.ProviderErrorRun): the provider failed this claim's turns whichever task they worked,
 // and only a turn that ends with no error puts that run back to zero.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
@@ -211,22 +203,21 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 		if (id != "" && pending.ID == id && pending.Task == task) || delivered {
 			return nil
 		}
-		if !m.replaceable(pending) {
+		// An update round's question is no newer task of the claim's: it asks this worker to
+		// push its work for a pod replacement, and the turn it needs is one the provider
+		// failing this claim's turns would fail the same way. So it waits behind the owed task
+		// as it waits behind any other, whichever round asked it.
+		_, asksUpdateRound := updateRoundOf(id)
+		if asksUpdateRound || !m.replaceable(pending) {
 			if err := m.sendPending(ctx); err != nil {
 				return err
 			}
 			return &RefusedError{State: m.claim.State, Request: "deliver", Err: ErrDeliveryPending}
 		}
-		if of, asks := updateRoundOf(id); asks && of == m.claim.UpdateRound {
-			if err := m.holdOwedTask(ctx); err != nil {
-				return err
-			}
-		} else {
-			m.log.Info("supervise: a newer task replaces the one a provider error took back",
-				"owed", pending.ID, "attempt", pending.ProviderErrorRetries, "delivery", id)
-			if err := m.retirePending(ctx); err != nil {
-				return err
-			}
+		m.log.Info("supervise: a newer task replaces the one a provider error took back",
+			"owed", pending.ID, "attempt", pending.ProviderErrorRetries, "delivery", id)
+		if err := m.retirePending(ctx); err != nil {
+			return err
 		}
 		if err := m.answerAskFirstAfterDrop(ctx); err != nil {
 			return err
@@ -312,10 +303,9 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		return nil
 	}
 	// The ladder's wait a provider error arms is the delivery's own, so it is fenced on the id
-	// the arming recorded (waitsForProviderError): a newer task replaces the one the wait is
-	// for, and an update round's question goes before it (queue), so each is a task no wait is
-	// armed for and each goes at once — and so is the owed task when it comes back, which is how
-	// it goes as soon as the claim's state allows rather than waiting a ladder step out again.
+	// the arming recorded (waitsForProviderError): the newer task that takes the place of the
+	// one the wait is for (queue) is a task no wait names, so it goes at once rather than
+	// waiting out a ladder step that was counted against the task it replaced.
 	if m.waitsForProviderError(p.ID) {
 		return nil
 	}
@@ -547,10 +537,8 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 
 // retirePending drops the pending delivery, and is the one place a delivery ends: settle calls
 // it for a delivery whose life is over, sendPending for a task the issue's phase has left
-// behind, and endRoundHold for the question of a round a dead claim will never answer. The
-// claim keeps its state — the task is stale, not the agent. It is also where a task an update
-// round's question went before comes back (giveBackOwedTask), because the slot that task waits
-// for is the slot this frees.
+// behind, dropUpdateTask for the ask of a round the claim has left, and queue for the task a
+// newer one replaces. The claim keeps its state — the task is stale, not the agent.
 //
 // A confirmed task of a run leaves the run behind it, and its assignment with it: the worker goes
 // on working it in whatever turn comes next — one an Envoy notice starts, with no delivery of its
@@ -569,22 +557,9 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // that wait, rebuilds the machine from the store, where a run left unwritten would refuse the
 // completion the worker's next turn reports.
 func (m *Machine) retirePending(ctx context.Context) error {
-	if err := m.dropPending(ctx); err != nil {
-		return err
-	}
-	return m.giveBackOwedTask(ctx)
-}
-
-// dropPending is that retirement's write, and nothing else: the step holdOwedTask shares with
-// retirePending, since a hold is this same write with the task kept on the claim it is written
-// with. Only retirePending and holdOwedTask call it, so every end of a delivery still goes
-// through one of the two.
-func (m *Machine) dropPending(ctx context.Context) error {
 	p := m.claim.Pending
-	// The ladder's wait is this task's, so it ends with it (providererror.go), and so does the
-	// mark that stands for that wait on a task the hold gave back (replaceable).
+	// The ladder's wait is this task's, so it ends with it (providererror.go).
 	m.disarm(TimerPromptRetry)
-	m.gaveBack = ""
 	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() {
 		retired.ServingGeneration = serving(p, deliveredRun, retired.ServingGeneration)
@@ -597,123 +572,6 @@ func (m *Machine) dropPending(ctx context.Context) error {
 	}
 	m.claim, m.unsaved = retired, false
 	return nil
-}
-
-// holdOwedTask takes the task a provider error left owed off the claim's one delivery slot and
-// onto the claim itself (Claim.OwedTask), for an update round's question that is about to take
-// that slot (queue). The task is not over: the round asks this worker to push its work and wait
-// for its process to be replaced, and the words it reads say the daemon holds its next task
-// until that process runs again (UpdateTask), so the task goes to it when the question's
-// delivery ends.
-//
-// The store sees the hold as the retirement it is for that delivery — the row goes, and what the
-// task names of a person's decisions is left KEPT for the write that queues it again to take
-// back (the claim store's RetireDelivery and putDelivery) — so nothing of the store's own holds
-// a delivery it does not have, and the claim still has the one pending delivery the store allows
-// it. Two things the retirement does are the hold's as well: the ladder's wait ends with the
-// task, which is what frees the question to go at once, and the deaths charged against the task
-// go with the delivery that carried them.
-//
-// The hold is written on the claim, in the transaction that retires that delivery
-// (RetireDelivery writes both), because the task is lost if it is not: the outbox row that gave
-// it is recorded on the claim (Claim.DeliveredRows), so nothing gives it again, and INFRA's own
-// rollout replaces the daemon's pod while pod-update rounds run. A daemon restarted while the
-// question is pending reads the hold off the claim with the question and gives the task back
-// when the question's delivery ends, as the daemon that wrote it would have.
-func (m *Machine) holdOwedTask(ctx context.Context) error {
-	owed := *m.claim.Pending
-	m.log.Info("supervise: an update round's question goes before the task a provider error took back; the task stays owed",
-		"owed", owed.ID, "attempt", owed.ProviderErrorRetries, "round", m.claim.UpdateRound)
-	m.claim.OwedTask = &owed
-	if err := m.dropPending(ctx); err != nil {
-		// The write the hold rides on is the one that frees the slot, so a refused write leaves
-		// the task pending and nothing held: a hold kept here would queue a second copy of a task
-		// the claim still has.
-		m.claim.OwedTask = nil
-		return err
-	}
-	return nil
-}
-
-// giveBackOwedTask queues the task an update round's question went before, once the delivery
-// that question was ends (retirePending) and for a claim restored holding one with no delivery
-// at all (settle). The task is written exactly as the hold took it — its id, its read mark, and
-// what the ladder had counted against it — so the next provider error on it goes on up the
-// ladder rather than starting a new one, and no wait is armed for it: it goes at the first send
-// the claim's state allows (sendPending). For a worker that answered the round, that is the
-// round's end, which releases every task the round holds (openRoundHoldsTask, leaveRound); for
-// one whose turn ended without an answer, the end of that turn. Should the issue have left the
-// task's phase meanwhile, the send drops it there, as it drops any other task of a phase that is
-// over.
-//
-// The claim and the delivery are written in the store's one transaction, as the hold was: the
-// task is the claim's pending delivery and the claim holds it owed no longer, and a daemon that
-// crashed between two writes would read back a claim that owes a task it already has.
-//
-// The task is the claim's in memory before the write, as every other decision the machine makes
-// of a delivery is: a write the store refuses leaves it unsaved and the next decision writes it
-// again (saved, settle), where a hold kept across that failure would wait for a delivery to end
-// that no longer exists.
-func (m *Machine) giveBackOwedTask(ctx context.Context) error {
-	owed := m.claim.OwedTask
-	if owed == nil {
-		return nil
-	}
-	m.claim.OwedTask, m.claim.Pending, m.gaveBack = nil, owed, owed.ID
-	m.log.Info("supervise: the update round's question is over; the task it went before is the claim's again",
-		"delivery", owed.ID, "attempt", owed.ProviderErrorRetries, "round", m.claim.UpdateRound)
-	return m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *owed))
-}
-
-// endRoundHold ends the hold an update round's question put on a task, for a claim whose life is
-// over (retire, fail). Two things go with that life, and the hold is the reason for both.
-//
-// The question is retired, whether or not its turn ran: a round that is over is cleared from the
-// claim (clearUpdate), so nothing of this claim will ever answer it, and a question left pending
-// is the first thing the retry's session is handed — a worker asked to push its work for a pod
-// replacement that has already happened. settle retires a question whose turn ran, for a claim
-// that is no longer working; this is what retires one the worker never read.
-//
-// The task behind it goes where the retry will look for it:
-//
-//   - a claim whose retry restarts no phase gets it back as its pending delivery
-//     (giveBackOwedTask, which retirePending runs on the slot the question frees): that retry
-//     relaunches this same claim and sends what the claim kept (table.go's retry), and nothing
-//     else ever gives the task again, since the outbox row that gave it is recorded on the
-//     claim (Claim.DeliveredRows). An architect's claim is the case this exists for;
-//   - a phase worker's retry is applied to its issue's phase instead (api/operator.go's
-//     retryClaim), and the restart of that phase queues the phase's own task, which supersedes
-//     this one, so the held task is dropped before the slot is freed (dropOwedTask).
-//
-// The caller makes this its last step before its own write, with the claim already in the state
-// it is ending in, so the retirement and the give-back carry that state rather than the one the
-// claim is leaving.
-func (m *Machine) endRoundHold(ctx context.Context) error {
-	if m.claim.OwedTask == nil {
-		return nil
-	}
-	if m.claim.phaseWorker() {
-		m.dropOwedTask()
-	}
-	if m.claim.Pending == nil {
-		// A claim restored between the hold's write and the give-back's owes the task with no
-		// delivery at all (settle), so there is no question to retire.
-		return m.giveBackOwedTask(ctx)
-	}
-	return m.retirePending(ctx)
-}
-
-// dropOwedTask lets go of a held task for good: the claim's life is over and its phase's restart
-// queues the phase's own task again, which supersedes the held one (endRoundHold). It is not
-// letGo's to do — a round that ends by replacing the claim's pod lets the process go and the
-// claim goes on, owing the task the question went before, which is the whole point of the hold.
-func (m *Machine) dropOwedTask() {
-	if m.claim.OwedTask == nil {
-		return
-	}
-	m.log.Warn("supervise: the claim's life is over; the task an update round's question went before is dropped",
-		"owed", m.claim.OwedTask.ID, "attempt", m.claim.OwedTask.ProviderErrorRetries)
-	m.claim.OwedTask = nil
 }
 
 // saved records the outcome of a write of the pending delivery that memory changed first, since
@@ -747,15 +605,9 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) (streaming, 
 }
 
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine.
-//
-// The task is in the agent's hands from here, so the mark that let a newer task take its place
-// goes with the send (Machine.gaveBack, replaceable). The mark stands for a task nothing works,
-// and this send works it: the window between the prompt's acknowledgement and the turn it
-// starts holds no send of the machine's own, and a task replaced there would be confirmed by
-// the turn the task it replaced started.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
-	m.send, m.helloDuringSend, m.gaveBack = &sending{id: d.ID, generation: generation}, false, ""
+	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
 	if seq := conn.Sequence(); seq > m.sentThrough {
 		m.sentThrough = seq
 	}
@@ -843,15 +695,10 @@ func (m *Machine) confirm(ctx context.Context) error {
 // — the daemon released an idle pod, not the phase, and the role's next wake resumes this session
 // in that phase with the task it kept. SuspendSource.RetiresPhaseTask is the one statement of
 // which sources end the phase. A task of no phase is likewise not the workflow's to end.
-//
-// A claim with no pending delivery and a task held owed is one whose slot is free already: the
-// write that gave the task back did not land, or the daemon went down between the two writes
-// (giveBackOwedTask). It is given back here, since settle runs around every decision and is
-// what a restored claim meets first.
 func (m *Machine) settle(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil {
-		return m.giveBackOwedTask(ctx)
+		return nil
 	}
 	if m.unsaved {
 		if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
