@@ -154,12 +154,7 @@ def at_docs(step):
 CONTRACTS_SRC = "packages/contracts/src/**"
 ENVOY_CLIENT_SRC = "packages/envoy-client/src/**"
 BROKER_CLIENT_SRC = "packages/broker-client/src/**"
-# The shared test fixtures every other Bun package's tests import. The envoy_session_stall filter
-# names them too, with no comment of its own there: that job's `Stall test of pi-envoy` step runs
-# packages/pi-envoy/extensions/envoy.test.ts, whose :70 imports @legion/test-fixtures/environment
-# and whose :351 restoreEnvironment holds the stall rows' own timing variables, and those rows are
-# skipped in the pi-envoy job (describe.skipIf(!envoyStackEnabled), :19715), so this is the only
-# job that runs them: without this read a change to the fixture's restore selects no job that does.
+# The shared test fixtures every other Bun package's tests import.
 TEST_FIXTURES_SRC = "packages/test-fixtures/src/**"
 
 # What packages/claude-envoy/scripts/verify-build.sh and the claude-envoy job's other steps read:

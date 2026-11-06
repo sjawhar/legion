@@ -1315,6 +1315,7 @@ jobs:
               - 'packages/claude-envoy/**'
               - 'packages/pi-shared/**'
               - 'packages/contracts/**'
+              # The `Stall test of pi-envoy` step's envoy.test.ts imports @legion/test-fixtures/environment.
               - 'packages/test-fixtures/src/**'
             # Every file packages/daemon/docker/worker.Dockerfile builds from, for the worker-image
             # job (.github/workflows/worker-image.yaml, which the build reads too): the root
