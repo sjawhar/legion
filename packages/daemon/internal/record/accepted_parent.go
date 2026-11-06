@@ -77,11 +77,11 @@ func byKey(members []Issue) map[string]Issue {
 // issue still holds every ancestor that has not been accepted, because the hold is what the
 // exclusion is read from.
 //
-// The close this exclusion allows does not strand the issue it excluded: the linger of the
-// closed tree hands every member the daemon held under an accepted ancestor to Legion as a root
-// of its own (workflow's unfinishedHandOvers), exactly as it hands over a never-started child a
-// blocker holds, so the work a person asked for runs once the ancestor that held it has closed,
-// which is what the architect's notice says it does. This is the one recorded departure from
+// The close this exclusion allows does not strand the issue it excluded: the expiry of the
+// closed tree's linger hands every member that is in the workflow and never started to Legion
+// as a root of its own (workflow's unfinishedHandOvers), whatever held it there, so the work a
+// person asked for runs once the ancestor that held it has closed, which is what the
+// architect's notice says it does. This is the one recorded departure from
 // the spec of dispatch://INFRA-980, decided by that tree's architect
 // (dispatch://INFRA-980/comment/d642164a-31d2-4d6c-ae5e-4da5dd0b9104).
 func OpenBeneath(issue Issue, members []Issue) []string {

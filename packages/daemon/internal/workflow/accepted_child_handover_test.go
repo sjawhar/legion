@@ -68,14 +68,15 @@ func TestTheChildHeldUnderAnAcceptedRootIsHandedOverWhenTheRootCloses(t *testing
 // request at all: an architect's tree is signed off, and a person marks the root done on the
 // Dispatch dashboard while it stands in retro. The linger read the merge, so the held child was
 // skipped and stood todo at admitted in a closed tree for ever, though its architect had been
-// told it starts once the root has closed. The hold is what the hand-over is decided from, and
-// the root's own acceptance is marked as its linger begins, while its phase still says it
-// (record.Issue.AcceptedAtClose).
+// told it starts once the root has closed. The expiry reads the child's own state instead — in
+// the workflow and never started — which is the same answer whatever phase its root was closed
+// from and whatever the close wrote over (unfinishedHandOvers).
 //
 // A root whose worker died in retro is accepted too: it stands held from retro, its reviewed
 // head is the one the architect signed off, and the same child is held beneath it
-// (record.Accepted). Read by the phase alone, such a root was not accepted: it marked nothing,
-// handed nobody over, and left the child todo at admitted in the closed tree.
+// (record.Accepted). Read by the root's phase, such a root was not accepted, and the child
+// stayed todo at admitted in the closed tree; read by the child's own state, both roots hand it
+// over.
 func TestTheChildHeldUnderAnAcceptedRootIsHandedOverWhenAPersonClosesItByHand(t *testing.T) {
 	for _, standing := range []record.Issue{
 		{Phase: phase.Retro},

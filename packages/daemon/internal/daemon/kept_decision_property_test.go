@@ -1531,7 +1531,7 @@ func keptCount(kept *record.KeptDecisions) int {
 
 // handOverEnabled is whether the root's linger has this member to hand over: it still stands in
 // the root's tree, in the workflow, and the root lingers after its close, which is where the
-// linger's expiry hands a member that is still working to Legion (workflow's settleUnfinished).
+// linger's expiry hands a member that is still working to Legion (workflow's unfinishedHandOvers).
 func (r *keptRun) handOverEnabled(member *keptTree) bool {
 	return !member.handed && r.root.issue.Lingers() && !record.OutOfWorkflow(member.issue.Status)
 }

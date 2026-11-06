@@ -62,21 +62,12 @@ func InWorkflow(issue Issue) bool {
 	return issue.Standing().InWorkflow(OutOfWorkflow)
 }
 
-// AcceptedPhases are the phases an issue stands in after its own reviewed head was accepted and
-// before it has closed: its retro, its merge, and its wait for that merge. Work entering the
-// workflow beneath an issue in one of them would let that issue merge first, which is the one
-// thing a parent must not do (dispatch://INFRA-980, "Children first"), so the daemon refuses to
-// let it in (api's CHILD_UNDER_ACCEPTED_PARENT) and holds at admitted an issue a person moves to
-// todo there (AcceptedAncestor, read by Waiting). Nothing reads the list directly: Accepted is
-// the predicate every one of those rules asks, so a held issue is read alike by all of them.
-var AcceptedPhases = []phase.Phase{phase.Retro, phase.Merging, phase.AwaitingMerge}
-
 // StandsIn says whether issue stands in one of phases, counting a hold from one of them as
-// standing there: a worker that dies leaves its issue at phase.Held with Hold.From naming the
-// phase it was working (workflow's workerDied), and the work has reached exactly where it had
-// before. It is the one shape every question about where an issue stands is written over —
-// Accepted here, and the workflow's own awaitsMerge, which asks it of one phase — so no two of
-// those questions read a held issue differently.
+// standing there: a worker whose claim fails leaves its issue at phase.Held with Hold.From
+// naming the phase it was working (workflow's claimFailed), and the work has reached exactly
+// where it had before. It is the one shape every question about where an issue stands is
+// written over — Accepted here, and the workflow's own awaitsMerge, its close of a merged
+// issue and its open review round — so no two of those questions read a held issue differently.
 func StandsIn(issue Issue, phases ...phase.Phase) bool {
 	at := issue.Phase
 	if at == phase.Held && issue.Hold != nil {
@@ -86,17 +77,23 @@ func StandsIn(issue Issue, phases ...phase.Phase) bool {
 }
 
 // Accepted says whether the daemon has already accepted issue's own reviewed head and the issue
-// has not closed: it stands in one of AcceptedPhases, or is held from one of them (StandsIn).
-// The reviewed head of a root whose worker died in retro, merging or awaiting_merge is accepted
-// still, so the hold must not let work in beneath it: the line held no issue under such a root,
-// the two doors let one in, and the close of a root held from retro handed over nobody.
+// has not closed: it stands in its retro, its merge or its wait for that merge, or is held from
+// one of them (StandsIn). Work entering the workflow beneath an issue in one of those phases
+// would let that issue merge first, which is the one thing a parent must not do
+// (dispatch://INFRA-980, "Children first"). The reviewed head of a root whose worker died in
+// retro, merging or awaiting_merge is accepted still, so the hold must not let work in beneath
+// it: the line held no issue under such a root, the two doors let one in, and the close of a
+// root held from retro handed over nobody.
 //
-// It is the one predicate the three rules of the acceptance order call — the waiting line's hold
-// (HeldUnderAccepted), the doors' refusal (AcceptedAncestorIn) and the hand-over a closing root
-// makes of what that hold stopped (workflow's beginLinger) — so none of them can count a root as
+// The three phases are named here and nowhere else, so that no rule of the acceptance order can
+// read a list of its own: one that did is what let a child held from retro through. Every one
+// of those rules asks this predicate instead, through the nearest accepted ancestor
+// (AcceptedAncestor): the waiting line's hold (HeldUnderAccepted), the doors' refusal (api's
+// CHILD_UNDER_ACCEPTED_PARENT, AcceptedAncestorIn) and the wait a merged issue's close keeps
+// (OpenBeneath, which leaves out what that hold stopped) — so none of them can count a root as
 // accepted that another counts as still at work.
 func Accepted(issue Issue) bool {
-	return StandsIn(issue, AcceptedPhases...)
+	return StandsIn(issue, phase.Retro, phase.Merging, phase.AwaitingMerge)
 }
 
 // Ancestors is every issue above issue inside its own tree, nearest first and the tree's own
@@ -174,8 +171,9 @@ func chainOf(byKey, above map[string]Issue) map[string]Issue {
 // A done ancestor holds nothing itself — its merge has happened, so there is no order left to
 // keep. The hold and the acceptance rules answer alike, which is what keeps them from
 // deadlocking: OpenBeneath leaves out the issues this hold has stopped, so an issue the line
-// holds is an issue the ancestor's own close does not wait for, and the linger of the tree that
-// held it hands it over as a root of its own (workflow's unfinishedHandOvers).
+// holds is an issue the ancestor's own close does not wait for, and the expiry of the linger of
+// the tree that held it hands it over as a root of its own, as it hands over every member that
+// never started (workflow's unfinishedHandOvers).
 func AcceptedAncestor(issue Issue, byKey map[string]Issue) string {
 	for _, above := range Ancestors(issue, byKey) {
 		if Accepted(above) {
@@ -188,10 +186,12 @@ func AcceptedAncestor(issue Issue, byKey map[string]Issue) string {
 // HeldUnderAccepted says whether the daemon is itself holding issue where it stands because an
 // ancestor of it has already been accepted (AcceptedAncestor): it stands at phase.Admitted, so
 // nothing of it has started, and the line will offer it no slot until that ancestor closes
-// (Waiting). It is one rule with two readers that must agree exactly. OpenBeneath leaves such an
-// issue out, so the ancestor's own acceptance and close are not deadlocked by the issue its hold
-// stopped; the linger of a closed root hands it to Legion as a root of its own
-// (workflow's unfinishedHandOvers), so the hold never outlives the ancestor that caused it.
+// (Waiting). It is one rule with two readers that must agree exactly: OpenBeneath leaves such an
+// issue out too, so the ancestor's own acceptance and close are not deadlocked by the issue its
+// hold stopped. The hold never outlives the ancestor that caused it — the close of that ancestor
+// starts the issue, and the expiry of a closed root's linger hands it to Legion as a root of its
+// own (workflow's unfinishedHandOvers) — but neither of those reads this rule: the expiry hands
+// over every member that is in the workflow and never started, whatever held it.
 func HeldUnderAccepted(issue Issue, byKey map[string]Issue) bool {
 	return issue.Phase == phase.Admitted && AcceptedAncestor(issue, byKey) != ""
 }

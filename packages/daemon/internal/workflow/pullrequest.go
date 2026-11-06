@@ -349,12 +349,13 @@ func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record
 // member of a tree that already lingers must still close at its merge, which suspends nothing
 // further and is the one thing that still moves there.
 func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) ([]string, error) {
-	if issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge {
-		issue.Phase, issue.Hold = phase.AwaitingMerge, nil
-	}
-	if issue.Phase != phase.AwaitingMerge {
+	// An issue held from awaiting_merge is awaiting its merge still (awaitsMerge, the one
+	// predicate written over that wait), and the close goes on from the phase itself, so every
+	// row below reads one shape.
+	if !awaitsMerge(issue) {
 		return nil, nil
 	}
+	issue.Phase, issue.Hold = phase.AwaitingMerge, nil
 	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
 		return nil, err

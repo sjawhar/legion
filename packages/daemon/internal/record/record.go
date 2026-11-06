@@ -80,16 +80,6 @@ type Issue struct {
 	// on. So no issue is exempt from the blocker check unless the run it is exempt for is the run it
 	// arrived with. Nothing else writes it.
 	TakenBack bool
-	// AcceptedAtClose is whether this root's own reviewed head had been accepted when its tree's
-	// linger began (Accepted, or a merged pull request for the root a merge closed): the one fact
-	// the linger's expiry cannot read for itself, because the close writes the root's phase as
-	// done before it (workflow's beginLinger, which is the only writer). The expiry hands every
-	// member the daemon was holding at admitted under an accepted ancestor to Legion as a root of
-	// its own, and the root is the ancestor whose phase that read has lost
-	// (workflow's unfinishedHandOvers); an ancestor below the root keeps its phase through the
-	// linger, so it needs no mark. Meaningless on a child, and on a root that does not linger: the
-	// next close writes it again, true or false, from the phase the root is leaving.
-	AcceptedAtClose bool
 	// DispatchStatus is the status Dispatch showed at the newest event or boot listing applied to the
 	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole
 	// issue, so only an event whose status differs from it writes a status.

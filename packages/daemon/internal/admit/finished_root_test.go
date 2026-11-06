@@ -43,12 +43,13 @@ const (
 // with its own architect, as the label and the todo do when a person sets them. Before, the child
 // stayed suspended, unlabelled and with no architect, and nothing ran it again (LEGION-624). Every
 // phase carries into the new generation: re-planning a merged child or withdrawing a READY would
-// lose completed work. A child that is finished or parked stays with the tree, and so does one
-// still at admitted that nothing holds there. This root is in awaiting_merge, a phase the daemon
-// has already accepted, so the child at admitted beneath it is one the daemon itself holds
-// (record.AcceptedAncestor), and its architect was told it starts once this root closes: the
-// linger hands it over too, whether the close followed the merge or a person made it by hand
-// (the workflow's unfinishedHandOvers, which reads the acceptance the close marked on the root).
+// lose completed work. A child that is finished or parked stays with the tree: what a person
+// took out of the workflow is what a closed tree keeps. The child still at admitted is handed
+// over with the rest — its tree closed and it never started, so nothing would start it where it
+// stands — and this one was the daemon's own to hold besides, since the root stands in
+// awaiting_merge, a phase the daemon has already accepted (record.AcceptedAncestor), and its
+// architect was told it starts once this root closes. The linger keeps that promise whether the
+// close followed the merge or a person made it by hand (the workflow's unfinishedHandOvers).
 // The close itself hands nothing over, so a root that comes back inside its linger resumes its
 // children where they stood and hands none over. The close here is a person's — parked, then
 // closed — where a merged root's close waits for the rest of its tree instead (the workflow's

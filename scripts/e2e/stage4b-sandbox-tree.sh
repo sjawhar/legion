@@ -4743,7 +4743,7 @@ begin children-first-acceptance
 # later). The root in accepting holds no slot of its own, so the two children beside tree 3 keep
 # the run within admission_cap 4 and within the pods preflight sized the pool for. And an issue
 # may not enter a tree whose root is already accepted: from retro onwards the daemon holds such a
-# child at admitted and starts nothing for it (CHILD_UNDER_ACCEPTED_PARENT, record.AcceptedPhases),
+# child at admitted and starts nothing for it (CHILD_UNDER_ACCEPTED_PARENT, record.Accepted),
 # so accepting is the last moment of tree 1's run at which a child of it still runs.
 child3=$(new_child "Stage 4b proof tree 1 child 3: in the workflow while its root waits to be accepted ($work)" "$tree1") ||
   fail "Dispatch could not create tree 1's third child"

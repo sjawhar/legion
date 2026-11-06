@@ -189,16 +189,7 @@ func TestASecondBootOnTheSameStoreLeavesEverySlotStartAndPlaceAsItWas(t *testing
 // issueSlotsMigration is the migration that gives an issue its own slot, the first schema change
 // of this release (dispatch://INFRA-980). A store migrated to the version below it carries the
 // schema of a dump taken before the release.
-//
-// acceptedAtCloseMigration is the one later migration of this release the fixture applies with
-// them. It only widens the issues row — the mark workflow's beginLinger writes, which no test
-// here reads and which backfills nothing — and today's record code writes that column on every
-// issue, so a fixture without it cannot seed a pre-release record at all. Every migration whose
-// backfill these tests watch is still left for Store.Migrate.
-const (
-	issueSlotsMigration      = 20261103183833
-	acceptedAtCloseMigration = 20261106001435
-)
+const issueSlotsMigration = 20261103183833
 
 // preReleaseStore is a database of this test's own migrated to the release before this one:
 // every embedded migration below issueSlotsMigration, applied as Store.Migrate applies them —
@@ -243,7 +234,7 @@ func preReleaseStore(t *testing.T) *store.Store {
 		}
 	}
 	for _, migration := range all {
-		if migration.Version < issueSlotsMigration || migration.Version == acceptedAtCloseMigration {
+		if migration.Version < issueSlotsMigration {
 			apply(migration)
 		}
 	}

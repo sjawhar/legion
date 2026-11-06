@@ -335,9 +335,12 @@ func TestTheGateOpeningStartsAnAdmittedRootWhateverItsLinksSay(t *testing.T) {
 // A child still waiting on an unfinished issue when its tree finishes is handed to Legion as a
 // root of its own, though it never started under its tree's design: its blockers outlive the
 // tree, and leaving it admitted inside a closed tree would park it for good. Its sibling, also
-// admitted but waiting on nothing, is left exactly where every admitted member was left before:
-// the tree's design gate, not a blocker, held it, and making a root of it would spend an
-// admission slot on work its tree's design never opened.
+// admitted but waiting on nothing, goes with it: the expiry decides by the member's own state —
+// in the workflow and never started — and not by what held it there (unfinishedHandOvers),
+// because nothing would start either of them where they stand. The sibling was waiting for a
+// slot its tree will never offer again, which the cap leaves an ordinary member doing now that
+// it counts issues rather than trees; left behind it would stand todo at admitted in a closed
+// tree for good.
 func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 	pool := migratedPool(t)
 	until := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
@@ -355,21 +358,23 @@ func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 		t.Fatalf("ApplyFact the linger's expiry: %v", err)
 	}
 
-	if got := handoverFences(t, pool); len(got) != 1 || got[0] != "LEGION-209" {
-		t.Fatalf("hand-over fences = %v, want the blocked child's alone", got)
+	if got := handoverFences(t, pool); len(got) != 2 || got[0] != "LEGION-209" || got[1] != "LEGION-210" {
+		t.Fatalf("hand-over fences = %v, want both admitted children's: neither would ever start where it stands", got)
 	}
-	// The hand-over's one Dispatch write puts the child todo under the fence of this linger, as
+	// Each hand-over's one Dispatch write puts the child todo under the fence of this linger, as
 	// the outbox's drop guard and intake.Handover read it.
-	var writes int
-	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'dispatch_status' and issue = 'LEGION-209'
-		and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'handOver' = 'true'
-		and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '4'`).Scan(&writes); err != nil || writes != 1 {
-		t.Fatalf("the blocked child's hand-over writes = %d, %v; want one fenced on LEGION-208's linger 4", writes, err)
+	for _, child := range []string{"LEGION-209", "LEGION-210"} {
+		var writes int
+		if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'dispatch_status' and issue = $1
+			and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'handOver' = 'true'
+			and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '4'`, child).Scan(&writes); err != nil || writes != 1 {
+			t.Fatalf("%s's hand-over writes = %d, %v; want one fenced on LEGION-208's linger 4", child, writes, err)
+		}
 	}
 	var others int
 	if err := pool.QueryRow(t.Context(),
-		`select count(*) from outbox where kind = 'dispatch_status' and issue <> 'LEGION-209'`).Scan(&others); err != nil || others != 0 {
-		t.Fatalf("status writes for another member = %d, %v; want none, the unblocked admitted child left as it was", others, err)
+		`select count(*) from outbox where kind = 'dispatch_status' and issue not in ('LEGION-209', 'LEGION-210')`).Scan(&others); err != nil || others != 0 {
+		t.Fatalf("status writes for another member = %d, %v; want none: the tree holds nobody else in the workflow", others, err)
 	}
 }
 

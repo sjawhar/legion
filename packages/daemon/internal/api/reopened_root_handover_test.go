@@ -76,8 +76,8 @@ func heldChildHarness(t *testing.T) (*harness, []intake.Handler, *statusRecorder
 // rerun_child writes in the new run — found the cancelled row and was read as a hand-over event
 // of the closed tree arriving late (the workflow's rejectStaleHandover): the route answered 200,
 // the child stayed parked, and a write putting Dispatch back to backlog was queued. Nothing is
-// written at the linger's start now, and the hand-over is decided at its end from the hold and
-// the acceptance the close marked (the workflow's unfinishedHandOvers).
+// written at the linger's start now, and the hand-over is decided at its end from the member's
+// own state (the workflow's unfinishedHandOvers).
 func TestARerunUnderAReopenedRootIsNotTakenForAStaleHandOver(t *testing.T) {
 	h, handlers, _, logs := heldChildHarness(t)
 	ctx := context.Background()
