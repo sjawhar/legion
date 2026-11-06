@@ -95,8 +95,10 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); err != nil {
 				// A grant whose frozen source is not the one the name is served from now (its kind
 				// was changed or removed) ends for good: setting the kind back serves the same
-				// source again, and the grant must not come back with it.
-				if errors.Is(err, errSourceMoved) {
+				// source again, and the grant must not come back with it. So does one whose
+				// requesters tag no longer lists this session: listing the person again must not
+				// revive a grant made while they were off the list.
+				if errors.Is(err, errSourceMoved) || errors.Is(err, errRequesterNotListed) {
 					return nil, nil, m.endGrant(ctx, grantID, err)
 				}
 				return nil, nil, err
@@ -203,6 +205,12 @@ func noLongerServed(name string) error {
 // its grant froze, which ends the grant for good (errSourceMoved).
 func sourceMoved(name string) error {
 	return fmt.Errorf("%w: %w: %s is now served from another source than this grant's", ErrGrantNotLive, errSourceMoved, name)
+}
+
+// requesterNotListed is the refusal of a granted name whose requesters tag no longer names the
+// session's person or its pod's service, which ends the grant for good (errRequesterNotListed).
+func requesterNotListed(name string) error {
+	return fmt.Errorf("%w: %w: %s no longer lists this requester", ErrGrantNotLive, errRequesterNotListed, name)
 }
 
 // GrantEndedActor is what a grant the broker itself ended at release records as having ended it,
@@ -324,7 +332,9 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 // stores, or, on AWS, the secret was replaced by another of the same name, which gets a new ARN;
 // a Secret Manager source is the resource name, which a recreated secret keeps) is not live
 // either: the frozen source no longer names the secret the policy decides about, so the session
-// asks again.
+// asks again. A name whose requesters tag no longer lists this requester is not live either, and
+// ends the grant for good (errRequesterNotListed): that list is who may ask for the secret at
+// all, so a grant made before it dropped them must not go on releasing while they are off it.
 func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {
@@ -337,6 +347,8 @@ func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy
 		return sourceMoved(name)
 	}
 	switch {
+	case d.Outcome == policy.Deny && d.Reason == policy.ReasonRequesterNotListed:
+		return requesterNotListed(name)
 	case d.Outcome == policy.Deny:
 		return fmt.Errorf("%w: the current policy no longer allows %s", ErrGrantNotLive, name)
 	case d.Outcome != policy.Approval:
@@ -353,6 +365,12 @@ func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy
 // froze: a kind changed or removed, a secret replaced on AWS, the broker moved between stores.
 // Values ends such a grant for good (endGrant).
 var errSourceMoved = errors.New("source moved")
+
+// errRequesterNotListed is stillAllowed's refusal of a granted name the secret's requesters tag
+// no longer lists this requester on: the list was narrowed after the grant was made. Values and
+// reuseLiveGrant end such a grant for good (endGrant), so putting the person back on the list
+// never brings back a grant they held while they were off it; they ask again instead.
+var errRequesterNotListed = errors.New("requester not listed")
 
 // Get reads one request by id. Its Approver is the approver column of its credential-request
 // record, the column PendingForApprover lists the record by, so the request names exactly the
@@ -516,31 +534,34 @@ type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// matchingRequest runs query (whose rows are a request id and that request's secret names, with
-// $1 bound to enrollmentID and $2 to lifetime, the lifetime the request must have asked for) and
-// answers the first request whose names are exactly sorted, or "" when none is. Names are compared
+// matchingRequest runs query (whose rows are a request id, that request's own live grant's id and
+// that request's secret names, with $1 bound to enrollmentID and $2 to lifetime, the lifetime the
+// request must have asked for) and answers the first request whose names are exactly sorted with
+// the grant its row named, or "" for both when none is. Names are compared
 // as sets of whole strings, never as one joined string, so a name containing a separator cannot
-// pass for two names.
+// pass for two names. The grant's id is read beside the request's rather than looked up again
+// because reuseLiveGrant ends exactly the grant this row matched when the policy no longer allows
+// it.
 // Which column $1 is compared against is the query's own; every query here names the requests
 // row's own enrollment_id, the column an adoption rewrites.
-func matchingRequest(ctx context.Context, q querier, query, enrollmentID string, lifetime *int, sorted []string) (string, error) {
+func matchingRequest(ctx context.Context, q querier, query, enrollmentID string, lifetime *int, sorted []string) (requestID, grantID string, _ error) {
 	rows, err := q.Query(ctx, query, enrollmentID, lifetime)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
+		var id, grant string
 		var names []string
-		if err := rows.Scan(&id, &names); err != nil {
-			return "", err
+		if err := rows.Scan(&id, &grant, &names); err != nil {
+			return "", "", err
 		}
 		sort.Strings(names)
 		if slices.Equal(names, sorted) {
-			return id, nil
+			return id, grant, nil
 		}
 	}
-	return "", rows.Err()
+	return "", "", rows.Err()
 }
 
 // writtenBeforeMigration13 is the SQL predicate that request alias was written before migration
@@ -569,19 +590,22 @@ func writtenBeforeMigration13(alias string) string {
 // makes). A caller that already holds a live grant for these exact names never re-asks a human
 // who already approved it, a policy tightened since then is never bypassed by reuse, and neither
 // is a chain that no longer verifies.
+// A grant whose secret no longer lists this requester is not merely passed over: it is ended for
+// good here, as Values ends it (errRequesterNotListed), and Create goes on to write the denied
+// request that tells the session why.
 // No live grant holds a withheld name nobody approved: the withhold ended each one (withhold).
 // The lookup reads the requests row's own enrollment_id, which an adoption rewrites, so a session
 // that enrolled on another box gets back the grant that moved with it instead of asking a person
 // a second time for names it already holds
 // (TestTheMovedSessionAsksAgainAndGetsTheSameGrantBack).
 func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, lifetime *int, set *policy.Set) (Request, bool, error) {
-	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
+	id, grantID, err := matchingRequest(ctx, m.Store.Pool, `select r.id, g.id::text, array_agg(s.name) from requests r
 		join request_secrets s on s.request_id=r.id
 		join grants g on g.request_id=r.id
 		where r.enrollment_id=$1 and (
 			r.lifetime_seconds is not distinct from $2 or ($2::int is null and `+writtenBeforeMigration13("r")+`)
 		) and r.state='granted' and g.revoked_at is null and `+grantUnexpired("g")+`
-		group by r.id`, enr.ID, lifetime, sortedCopy(names))
+		group by r.id, g.id`, enr.ID, lifetime, sortedCopy(names))
 	if err != nil || id == "" {
 		return Request{}, false, err
 	}
@@ -599,9 +623,19 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 			return Request{}, false, err
 		}
 		for _, g := range granted {
-			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); errors.Is(err, ErrGrantNotLive) {
+			err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester)
+			switch {
+			case errors.Is(err, errRequesterNotListed):
+				// The list dropped this requester while the grant was live: end it here as Values
+				// does, rather than leave it live and unrevoked, and answer no reusable grant so
+				// Create goes on to write the denied request the session reads its reason off.
+				if ended := m.endGrant(ctx, grantID, err); !errors.Is(ended, ErrGrantNotLive) {
+					return Request{}, false, ended
+				}
 				return Request{}, false, nil
-			} else if err != nil {
+			case errors.Is(err, ErrGrantNotLive):
+				return Request{}, false, nil
+			case err != nil:
 				return Request{}, false, err
 			}
 		}
@@ -756,7 +790,9 @@ type RecordDecision struct {
 	Login string
 	// Detail is what the decision records beside its event, empty when it records nothing. An
 	// agent_secret approval carries one exactly when ApplyDecision recorded the request denied
-	// rather than granted, because its requesting enrollment was no longer live.
+	// rather than granted: because its requesting enrollment was no longer live, or because the
+	// secret's requesters tag no longer listed the session, which the broker denies in the
+	// approver's place (requests.PolicyDeniedActor).
 	Detail string
 }
 

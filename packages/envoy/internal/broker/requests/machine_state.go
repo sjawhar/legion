@@ -34,6 +34,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -153,6 +154,12 @@ type Decision struct {
 	RequestID string
 	State     string
 	GrantID   string
+	// Detail is what the decision recorded beside the request's new state, empty when it
+	// recorded none. An approval ends denied with one of two: the requesting enrollment was no
+	// longer live, or the secret's requesters tag no longer lists the session
+	// ("<NAME>: requester-not-listed"). The approval page answers the approver with it, so the
+	// person who pressed approve reads why the broker denied it instead.
+	Detail string
 }
 
 // Minter makes one release of a kind secret from its stored value and the policy's facts about it
@@ -373,9 +380,10 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	r := newRequest{
 		id: uuid.NewString(), enrollmentID: enrollmentID, reason: obj.Reason, state: e.state,
 		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: lifetime, decisions: e.decisions,
+		requester: requester, denials: e.denials,
 	}
 	if e.state != "pending" {
-		req := Request{ID: r.id, State: r.state, Secrets: r.decisions, LifetimeSeconds: r.lifetime}
+		req := Request{ID: r.id, State: r.state, Secrets: r.decisions, LifetimeSeconds: r.lifetime, Detail: nullable(r.decisionDetail())}
 		if err := m.insertRequest(ctx, tx, r); err != nil {
 			return Request{}, err
 		}
@@ -481,12 +489,21 @@ func formatGrantDuration(duration time.Duration) string {
 }
 
 // evaluation is one pass of the policy over a request's names. approver is set when a name needs
-// approval, and then names the one approver every such name has.
+// approval, and then names the one approver every such name has. denials are the denied names
+// the policy named a reason for, in the request's own name order: the request row records them
+// as its decision_detail (newRequest.decisionDetail), so a refused session is told which secret
+// refused it and why instead of only that something did.
 type evaluation struct {
 	decisions []SecretDecision
+	denials   []denial
 	state     string // granted, denied or pending
 	approver  string
 }
+
+// denial is one denied name of a request and the rule behind the deny (policy.Decision.Reason).
+// A deny the policy cannot name a reason for makes no denial at all, since there is nothing to
+// tell the session beyond the refusal itself.
+type denial struct{ name, reason string }
 
 // evaluate is the policy's answer for each of names to requester.
 func evaluate(set *policy.Set, names []string, requester policy.Requester) (evaluation, error) {
@@ -500,6 +517,9 @@ func evaluate(set *policy.Set, names []string, requester policy.Requester) (eval
 		switch {
 		case d.Outcome == policy.Deny:
 			denied = true
+			if d.Reason != "" {
+				e.denials = append(e.denials, denial{name: name, reason: d.Reason})
+			}
 		case d.Outcome == policy.Approval:
 			if e.approver != "" && e.approver != d.Approver {
 				return evaluation{}, ErrMixedApprovers
@@ -523,6 +543,13 @@ type newRequest struct {
 	id, enrollmentID, reason, state, approver, rulesVersion, sessionID, recordID string
 	lifetime                                                                     *int
 	decisions                                                                    []SecretDecision
+	// denials are the denied names the policy named a reason for (evaluation.denials), which
+	// decisionDetail turns into the row's decision_detail.
+	denials []denial
+	// requester is the session as the policy saw it when this very request was decided
+	// (Machine.requester), so the request.created audit row names the person and the service the
+	// decision was made under rather than whoever a second read would answer later.
+	requester policy.Requester
 	// pendingExpiresAt is set only when state == "pending"; it is also the credential-request
 	// record's own ExpiresAt, computed once so the two never drift a few microseconds apart.
 	pendingExpiresAt time.Time
@@ -536,6 +563,42 @@ func (r newRequest) names() []string {
 	return names
 }
 
+// decisionDetail is the row's decision_detail, which Create also answers as the request's own
+// Detail: for a denied request, each denied name the policy named a reason for as
+// "<NAME>: <reason>", several joined with "; " in the request's own name order, and the fixed
+// text of every deny the policy cannot name when it named none, so such a refusal reads as it
+// always has. Every other state records none: only a denial has something to explain.
+func (r newRequest) decisionDetail() string {
+	if r.state != "denied" {
+		return ""
+	}
+	if len(r.denials) == 0 {
+		return "policy denies at least one requested secret"
+	}
+	parts := make([]string, len(r.denials))
+	for i, d := range r.denials {
+		parts[i] = d.name + ": " + d.reason
+	}
+	return strings.Join(parts, "; ")
+}
+
+// auditDetail is the request.created audit row's detail: the request's state, the names it asked
+// for, and who asked — person for the operator whose session it is, service for the one its pod
+// or machine proved (newRequest.requester, the very requester the request was decided under). A
+// key whose value is empty is left out rather than written as "", since the grant-log route reads
+// service off this row and a request no service made should answer nothing there rather than an
+// empty service name.
+func (r newRequest) auditDetail() auditDetail {
+	detail := auditDetail{"state": r.state, "secrets": r.names()}
+	if r.requester.Operator != "" {
+		detail["person"] = r.requester.Operator
+	}
+	if r.requester.Service != "" {
+		detail["service"] = r.requester.Service
+	}
+	return detail
+}
+
 // insertRequest writes the request row, its per-secret decisions, and its request.created audit
 // row. A pending row's record_id is filled in by createPending in the same transaction.
 func (m *Machine) insertRequest(ctx context.Context, tx pgx.Tx, r newRequest) error {
@@ -544,10 +607,7 @@ func (m *Machine) insertRequest(ctx context.Context, tx pgx.Tx, r newRequest) er
 		t := r.pendingExpiresAt
 		pendingExpires = &t
 	}
-	detail := ""
-	if r.state == "denied" {
-		detail = "policy denies at least one requested secret"
-	}
+	detail := r.decisionDetail()
 	if _, err := tx.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at, session_id, record_id, decided_at, decision_detail)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, case when $4 in ('granted','denied') then now() end, $11)`,
 		r.id, r.enrollmentID, r.reason, r.state, nullable(r.approver), r.rulesVersion, r.lifetime, pendingExpires, nullable(r.sessionID), nullable(r.recordID), nullable(detail)); err != nil {
@@ -558,8 +618,7 @@ func (m *Machine) insertRequest(ctx context.Context, tx pgx.Tx, r newRequest) er
 			return err
 		}
 	}
-	return audit(ctx, tx, "request.created", r.enrollmentID, r.id, nil, "session:"+r.enrollmentID,
-		auditDetail{"state": r.state, "secrets": r.names()})
+	return audit(ctx, tx, "request.created", r.enrollmentID, r.id, nil, "session:"+r.enrollmentID, r.auditDetail())
 }
 
 // createPending writes, in Create's transaction, a pending request and its credential-request
@@ -670,7 +729,11 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 // (record.ErrNotApprover) whatever the record's state, and an approval by any login the current
 // policy would not have approve one of the request's names (currentPolicyAdmits). A denial
 // releases nothing, so the record's approver may still deny a request an owner change left them
-// unable to approve. It re-verifies the embedded request object, and writes the event (naming
+// unable to approve. An approval of a name the current policy denies because the secret's
+// requesters tag no longer lists the session is neither refused nor granted: nobody could
+// approve it back, so the request is recorded denied by the broker itself (PolicyDeniedActor)
+// with that reason as its detail, and the event still names the person who pressed approve.
+// It re-verifies the embedded request object, and writes the event (naming
 // that login), the request transition and the audit row in one transaction. For its approver, a
 // record that expired undecided — expired by the sweeper, or past its pending_expires_at before
 // the sweeper got to it — is ErrExpired, and any other non-pending record ErrTerminal: a
@@ -825,12 +888,16 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 		}
 		lifetime = defaultLifetime(m.Policy.Get(), names, nil)
 	}
+	// denied is set when the current policy denies one of the names because the secret's
+	// requesters tag no longer lists this session: the approval is recorded as the request's own
+	// denial below rather than refused, since no login could approve such a name.
+	var denied *policyDenial
 	if approve {
 		requester, err := m.requester(ctx, tx, enr)
 		if err != nil {
 			return Decision{}, false, err
 		}
-		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login, lifetime); err != nil {
+		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login, lifetime); err != nil && !errors.As(err, &denied) {
 			return Decision{}, false, err
 		}
 	}
@@ -850,6 +917,9 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 
 	event, by := "denied", record.HumanActor(login)
 	next, detail := "denied", ""
+	// decidedBy is what the requests row records as having decided it: the deciding login,
+	// except where the policy rather than that person made the answer (PolicyDeniedActor).
+	decidedBy := login
 	if approve {
 		event = "approved"
 		if mayGrant {
@@ -858,9 +928,13 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 			detail = "the requesting enrollment is no longer live"
 		}
 	}
+	if denied != nil {
+		event, by, next = "denied", PolicyDeniedActor, "denied"
+		detail, decidedBy = denied.Error(), PolicyDeniedActor
+	}
 	if _, err := tx.Exec(ctx, `update requests set state=$2, decided_at=now(), decided_by=$3, decision_detail=$4,
 		lifetime_seconds = case when $2 = 'granted' then $5::int else lifetime_seconds end where id=$1 and state='pending'`,
-		requestID, next, login, nullable(detail), lifetime); err != nil {
+		requestID, next, decidedBy, nullable(detail), lifetime); err != nil {
 		return Decision{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, actor, detail) values ($1,$2,$3,$4,$5)`,
@@ -877,8 +951,25 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 	if err := audit(ctx, tx, "request."+next, enr.ID, requestID, nullable(grantID), by, auditDetail{"detail": detail, "record_id": recordID}); err != nil {
 		return Decision{}, false, err
 	}
-	return Decision{RequestID: requestID, State: next, GrantID: grantID}, false, tx.Commit(ctx)
+	return Decision{RequestID: requestID, State: next, GrantID: grantID, Detail: detail}, false, tx.Commit(ctx)
 }
+
+// policyDenial is currentPolicyAdmits' answer for a name the current policy denies because the
+// secret's requesters tag no longer lists this session's person or its pod's service. It is
+// deliberately not a record.ErrNotApprover: no login could approve such a name, so leaving the
+// card pending would wait on a person who can do nothing with it. applyDecisionAttempt records
+// the approval as the request's denial instead, and its message is that denial's detail.
+type policyDenial struct{ name string }
+
+func (e *policyDenial) Error() string {
+	return e.name + ": " + policy.ReasonRequesterNotListed
+}
+
+// PolicyDeniedActor is what a request the policy denied under an approval records as having
+// decided it: requests.decided_by, the denied event's actor and the request.denied audit row's
+// actor alike, since the policy and not the person deciding made that answer. The event keeps
+// the approver's own login beside it, so the trail still names who pressed approve.
+const PolicyDeniedActor = "broker:policy"
 
 // currentPolicyAdmits refuses login an approval of request requestID when the current policy wants
 // one of its names approved by someone else (record.MayDecide), since a change of owner since the
@@ -891,7 +982,10 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 // secret), whoever the record waits on. A denial releases nothing, so ApplyDecision does
 // not ask. A name the current policy grants at once, denies or no longer serves names no
 // approver, so it leaves the approval to the record's approver; Values refuses a grant of the last
-// two at its first read. A withheld name the policy denies or no longer serves is refused instead:
+// two at its first read. The one deny it answers for is a name the requesters tag no longer lists
+// this session for (*policyDenial): no owner change could put it back in the session's reach, so
+// ApplyDecision records the request denied rather than leaving a card no one can answer.
+// A withheld name the policy denies or no longer serves is refused instead:
 // only its owner may approve it for the session, and no owner can be read while it is out of the
 // policy, nor approves it while a service owns it (the one way the policy denies a withheld name).
 // Admitted, such an approval would release the name once it returns with the tags it had, since
@@ -918,6 +1012,9 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 		}
 		if d.Outcome == policy.Deny && slices.Contains(requester.Withheld, g.name) {
 			return fmt.Errorf("%w: %s is withheld from this session and the current policy denies it, so no one may approve it now", record.ErrNotApprover, g.name)
+		}
+		if d.Outcome == policy.Deny && d.Reason == policy.ReasonRequesterNotListed {
+			return &policyDenial{name: g.name}
 		}
 		if d.Outcome == policy.Approval && !record.MayDecide(record.KindAgentSecret, d.Approver, "", login) {
 			return fmt.Errorf("%w: the current policy has %s approve %s", record.ErrNotApprover, d.Approver, g.name)
