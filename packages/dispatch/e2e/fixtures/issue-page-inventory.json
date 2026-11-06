@@ -1,7 +1,7 @@
 {
-  "commit": "11f73ee874ce7306df918ef8d568afaec93ff362",
-  "recordedAtHead": "892b3d979338bca844dbe5927b3571cbd85ee03b",
-  "recordedAt": "2026-11-05T10:30:22.851Z",
+  "commit": "7567aeb606f309f40d4145f3d6a49c19fd452558",
+  "recordedAtHead": "7567aeb606f309f40d4145f3d6a49c19fd452558",
+  "recordedAt": "2026-11-06T12:24:29.090Z",
   "open-1440": [
     {
       "name": "1 references on block",
@@ -2558,5 +2558,30 @@
       "role": "textbox"
     }
   ],
-  "renames": {}
+  "renames": {
+    "tab \"Verification\"": "tab \"Checks\" | menuitem \"Checks\"",
+    "tab \"Children\"": "button \"Children\"",
+    "tab \"Conversation\"": "region \"Conversation\"",
+    "tab \"Activity\"": "region \"Activity\"",
+    "tab \"Artifacts (7)\"": "button \"Files and documents\"",
+    "button \"Upload\"": "menuitem \"Upload\"",
+    "button \"Upload artifact\"": "button \"Upload a file\"",
+    "searchbox \"Filter artifacts\"": "searchbox \"Filter\"",
+    "link \"Download version 1\"": "link \"Download 1\"",
+    "link \"Download version 2\"": "link \"Download 2\"",
+    "link \"Block r1\"": "link \"Every property of the issue that carries a value is visible …\"",
+    "link \"Block r2\"": "link \"Requirement 2 of the redesign stands on a row of its own.\"",
+    "link \"Block r3\"": "link \"Requirement 3 of the redesign stands on a row of its own.\"",
+    "link \"Block r4\"": "link \"Requirement 4 of the redesign stands on a row of its own.\"",
+    "link \"Block r5\"": "link \"Requirement 5 of the redesign stands on a row of its own.\"",
+    "link \"The ask it answers\"": "link \"Which addresses must the new page still answer?\"",
+    "region \"Open questions\"": "region \"Decisions\"",
+    "region \"Waiting for your review\"": "region \"Decisions\"",
+    "region \"Your decisions\"": "region \"Decisions\"",
+    "region \"Replaced\"": "region \"Decisions\"",
+    "tab \"Spec\"": "tab \"Spec\" | menuitem \"Spec\"",
+    "tab \"Plan\"": "tab \"Plan\" | menuitem \"Plan\"",
+    "tab \"Decisions\"": "tab \"Decisions\" | menuitem \"Decisions\"",
+    "tab \"Tree\"": "tab \"Tree\" | menuitem \"Tree\""
+  }
 }

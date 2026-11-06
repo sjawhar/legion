@@ -136,7 +136,7 @@ import {
 import { assertInventoryCarried, type InventoryEntry } from "./page-inventory";
 import { resetDatabase } from "./seed";
 import { watchApiRequests } from "./traffic";
-import { assertPageFits, assertWhole } from "./unclipped";
+import { assertPageFits, assertWhole, assertWholeAcross } from "./unclipped";
 import { asUser } from "./users";
 
 /**
@@ -191,16 +191,18 @@ async function phase<T>(
 }
 
 /** Fails unless the redesigned page is on screen, so every assertion after it reads the new page
- *  and not whatever else answered the address. */
+ *  and not whatever else answered the address. Both readings are web-first, so a check made
+ *  straight after a reload waits for the page's own chunk and its reads instead of racing them:
+ *  the shell paints the frame from the address before the page is mounted (`page-frame.tsx`). */
 async function expectIssuePageDrawn(page: Page): Promise<void> {
-  expect(
-    await issuePage(page).count(),
+  await expect(
+    issuePage(page),
     "the page draws no [data-issue-page] root, so this is not the redesigned issue page"
-  ).toBe(1);
-  expect(
-    await tree(page).count(),
+  ).toHaveCount(1);
+  await expect(
+    tree(page),
     'the page draws no role="tree" named "Issue tree" inside [data-issue-page]'
-  ).toBe(1);
+  ).toHaveCount(1);
 }
 
 /** The slug of the issue's own spec, which is how its blocks are addressed. */
@@ -1214,6 +1216,14 @@ test("the Checks preset is readable @phone", async ({ browser }) => {
 
 // c-plain-words.
 test("the page draws no internal word where a name belongs @phone", async ({ browser }) => {
+  // The check reads the page's chrome in ten views and in all 56 node bodies of the seeded
+  // issue: about 11,700 readings, each read against five patterns and the declared list. One
+  // `expect` per reading was 70,000 calls at about 4 ms each - 281 s of assertion beside 20 s
+  // of page work - so each view gathers every offender it finds and names them in one
+  // assertion, which reads the same strength and says more: a view that draws three internal
+  // words names all three rather than the first. The row still carries a deadline of its own,
+  // because ten navigations and 56 bodies outlast the 30 s default on their own.
+  test.setTimeout(600_000);
   await phase(browser, seedWholeIssue, async (page, seeded) => {
     // An identifier, a fragment, a slug, and the schema and enumeration tokens the check names.
     const banned = [
@@ -1228,15 +1238,22 @@ test("the page draws no internal word where a name belongs @phone", async ({ bro
     const readChrome = async (where: string) => {
       const texts = await chromeTexts(page);
       expect(texts.length, `${where} marks none of its own words as the page's`).toBeGreaterThan(0);
+      const offenders: string[] = [];
       for (const text of texts) {
         for (const pattern of banned) {
-          expect(text, `${where} draws "${text}", which holds ${pattern}`).not.toMatch(pattern);
+          if (pattern.test(text)) offenders.push(`"${text}" holds ${pattern}`);
         }
-        expect(
-          wordsIn(text).filter((word) => !DECLARED_WORDS.includes(word)),
-          `${where} draws words the page does not declare, in "${text}"`
-        ).toEqual([]);
+        const undeclared = wordsIn(text).filter((word) => !DECLARED_WORDS.includes(word));
+        if (undeclared.length > 0) {
+          offenders.push(
+            `"${text}" draws ${JSON.stringify(undeclared)}, which the page declares nowhere`
+          );
+        }
       }
+      expect(
+        offenders,
+        `${where} draws internal words where a name belongs: ${offenders.join("; ")}`
+      ).toEqual([]);
       // The attribute is what decides what this test covers, so it is asserted too: text the page
       // divides into neither its own words nor an author's would never be read above.
       expect(
@@ -1280,10 +1297,13 @@ test("documents are nodes and nothing is a file list", async ({ browser }) => {
     await expectIssuePageDrawn(page);
     const cited = nodeRow(page, seeded.documents.cited).first();
     await cited.focus();
-    expect(
-      (await rowBody(cited).innerText()).replace(/\s+/g, " "),
-      "the cited document's node does not open its own text"
-    ).toContain("The measurements behind the first requirement.");
+    // The read is the node's own, made when the body opens: the page reads no document's text
+    // before a reader opens it (R20, c-requests), so the body says so until the read lands.
+    await expect
+      .poll(async () => (await rowBody(cited).innerText()).replace(/\s+/g, " "), {
+        message: "the cited document's node does not open its own text",
+      })
+      .toContain("The measurements behind the first requirement.");
 
     // What nothing cites is in the node menu, marked as cited by nothing, and so is the upload.
     expect(
@@ -1357,7 +1377,10 @@ test("the page never scrolls in two dimensions @phone", async ({ browser }) => {
       ).toBeGreaterThan(0);
       await expectIssuePageDrawn(page);
       await assertWhole(presetRow(page));
-      if ((await marginSlot(page).count()) === 1) await assertWhole(marginSlot(page));
+      // The panel holds the properties, the focused node's facts and the whole conversation, so
+      // it is taller than the screen and scrolls down by design; R17 bans two dimensions, not
+      // one, so the panel is read for a sideways clip and a clamped line (`e2e/unclipped.ts`).
+      if ((await marginSlot(page).count()) === 1) await assertWholeAcross(marginSlot(page));
       for (const row of walked) {
         await assertWhole(row);
       }
@@ -1403,16 +1426,84 @@ test("the new page carries every element of the old one @phone", async ({ browse
 
   await phase(browser, seedWholeIssue, async (page, seeded) => {
     // The inventory first: what the old page offered is this check's own subject, and the page
-    // root below it says whether the page carrying it is the redesigned one.
+    // root below it says whether the page carrying it is the redesigned one. The fixture is the
+    // merge of the old page's eight tab panels, one view at a time, so the new page is read the
+    // same way: its five presets and the two addresses beside them, the conversation and the
+    // activity (R3, R12). Three more views are the page's own, because what they hold sits
+    // behind a control rather than behind an address: the node menu, where a document no block
+    // cites lives (R16); the identity block's actions menu, where Close and the parent editor
+    // live (R11); and each document's own node, whose body is what a document opens (R2).
+    const views = (width: number) => [
+      ...PRESET_ORDER.map((preset) => async () => {
+        await gotoIssue(page, presetAddress(seeded.key, preset));
+      }),
+      async () => {
+        await gotoIssue(page, `/issues/${seeded.key}/conversation`);
+      },
+      async () => {
+        await gotoIssue(page, `/issues/${seeded.key}/activity`);
+      },
+      async () => {
+        await gotoIssue(page, `/issues/${seeded.key}`);
+        await nodeMenuButton(page).click();
+        await expect(openMenu(page)).toHaveCount(1);
+      },
+      async () => {
+        await gotoIssue(page, `/issues/${seeded.key}`);
+        await offered(page, "button", CONTROL_LABELS.issue_actions).click();
+      },
+      // The preset row below 1280 px is one chooser rather than a row of tabs, the children
+      // section opens closed below `md` (`useChildrenSection.ts`), and the panel is a sheet a
+      // reader opens below the width the margin keeps a column at (R12): each is a view of the
+      // page at that width, and at a width where it is already open it is the page as it
+      // stands and adds nothing.
+      async () => {
+        await gotoIssue(page, `/issues/${seeded.key}`);
+        if ((await presetChooser(page).count()) === 1) await presetChooser(page).click();
+      },
+      async () => {
+        await gotoIssue(page, `/issues/${seeded.key}`);
+        const disclosure = childrenDisclosure(page);
+        if ((await disclosure.getAttribute("aria-expanded")) === "false") await disclosure.click();
+      },
+      async () => {
+        await gotoIssue(page, `/issues/${seeded.key}`);
+        const sheet = page.getByRole("button", { name: /review panel/i });
+        if ((await sheet.count()) > 0) await sheet.first().click();
+      },
+      // One view per row of the tree, because a tree opens one body at a time and a node's own
+      // text, its facts and its controls are in that body (R2). The seeded issue draws fewer
+      // rows than this at either width, and a view whose row is not there reads the tree as it
+      // stands and adds nothing.
+      ...Array.from({ length: 24 }, (_unused, index) => async () => {
+        await gotoIssue(page, `/issues/${seeded.key}`);
+        const rows = nodeRows(page);
+        if ((await rows.count()) > index) await rows.nth(index).focus();
+      }),
+      // Below 1025 px the tree is zoomed (R17), and the issue's own address draws the spec's
+      // branch alone: a reader reaches a decision, a check or a plan task through the preset
+      // that draws it, and the walk reaches them the same way. At a width that draws the whole
+      // tree the views above already open every row, so these are walked only where they are
+      // the way in.
+      ...(width > 1024
+        ? []
+        : PRESET_ORDER.flatMap((preset) =>
+            Array.from({ length: 8 }, (_unused, index) => async () => {
+              await gotoIssue(page, presetAddress(seeded.key, preset));
+              const rows = nodeRows(page);
+              if ((await rows.count()) > index) await rows.nth(index).focus();
+            })
+          )),
+    ];
     for (const [state, size] of [
       ["open-1440", DESKTOP],
       ["open-390", PHONE],
     ] as const) {
       await page.setViewportSize({ height: size.height, width: size.width });
-      await gotoIssue(page, `/issues/${seeded.key}`);
       await assertInventoryCarried(page, fixture[state], {
         renames: fixture.renames,
         state: `${state}, recorded at ${fixture.commit}`,
+        views: views(size.width),
       });
     }
     await patchIssue(seeded.key, { status: "done" });
@@ -1421,12 +1512,13 @@ test("the new page carries every element of the old one @phone", async ({ browse
       ["closed-390", PHONE],
     ] as const) {
       await page.setViewportSize({ height: size.height, width: size.width });
-      await gotoIssue(page, `/issues/${seeded.key}`);
       await assertInventoryCarried(page, fixture[state], {
         renames: fixture.renames,
         state: `${state}, recorded at ${fixture.commit}`,
+        views: views(size.width),
       });
     }
+    await gotoIssue(page, `/issues/${seeded.key}`);
     await expectIssuePageDrawn(page);
 
     // Each recorded name that writes today still writes: the write is made through the page and
@@ -1621,16 +1713,20 @@ test("every address of the old page still resolves", async ({ browser }) => {
       "/artifacts/<slug> opens no node for that document"
     ).toBeGreaterThan(0);
 
-    for (const [kind, id] of [
-      ["asks", seeded.openQuestion.askId],
-      ["comments", seeded.comments.anchored],
-      ["messages", seeded.messages.root],
+    // An ask the server indexed from a document's `ask` block *is* that block's node
+    // (`e2e/issue-page.ts`), which is what the `?ask=` reading below asserts too: no row of the
+    // tree carries the ask's own uuid, so each address names the node it opens.
+    for (const [kind, id, node] of [
+      ["asks", seeded.openQuestion.askId, blockNodeId(specSlug, OPEN_QUESTION_BLOCK_ID)],
+      ["comments", seeded.comments.anchored, seeded.comments.anchored],
+      ["messages", seeded.messages.root, seeded.messages.root],
     ] as const) {
       await gotoIssue(page, `/issues/${seeded.key}/${kind}/${id}`);
       await expectIssuePageDrawn(page);
-      expect(await nodeRow(page, id).count(), `/${kind}/<id> opens no node for it`).toBeGreaterThan(
-        0
-      );
+      expect(
+        await nodeRow(page, node).count(),
+        `/${kind}/<id> opens no node for it`
+      ).toBeGreaterThan(0);
     }
 
     // The queries, each doing what it does today.
@@ -1701,10 +1797,19 @@ test("the first load stays inside its request budget", async ({ browser }) => {
       `the page read /api/v1/references ${perPointer} times, one for each pointer: ${byRoute}`
     ).toBe(0);
 
-    // No read of the text of a document the page does not show.
+    // No read of the text of a document the page does not show. `GET /artifacts/{id}/text` is
+    // that read and the only one: `GET /artifacts/{id}/blocks` answers `ArtifactBlock`s, which
+    // carry a block's id, type, byte offsets, token, reference counts, attributes and a table's
+    // cells and no prose at all (`packages/contracts/src/dispatch-api.ts`, `ArtifactBlock`), so
+    // it is not a text read and naming it here would ban the one listing the tree is built from.
+    // The spec is the one document the page does show on this address: the head draws its
+    // summary's three sentences on every preset (R5, c-three-things), so its text is read.
     expect(
       traffic.requests
-        .filter((request) => /\/text(\?|$)|\/blocks(\?|$)/.test(request.path))
+        .filter(
+          (request) =>
+            /\/text(\?|$)/.test(request.path) && !request.path.includes(seeded.specArtifactId)
+        )
         .map((request) => request.path),
       "the first load read the stored text of a document it does not show"
     ).toEqual([]);

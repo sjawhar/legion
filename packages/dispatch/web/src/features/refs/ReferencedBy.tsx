@@ -10,6 +10,7 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { authorText, PROPERTY_LABELS, pageChrome } from "../issue/page-structure";
 import { blockFragment, isBlockItemKind } from "./block-reference";
 import { referenceTriggerProps } from "./RefPreview";
 import { referencesQuery } from "./reference-target";
@@ -185,8 +186,10 @@ export function ReferencedByToggle({
     return (
       <span
         className={`inline-flex min-h-11 shrink-0 items-center px-2 py-1 text-sm ${textMutedOnSurface}`}
+        {...pageChrome}
       >
-        Referenced by (0)
+        {PROPERTY_LABELS.referenced_by}
+        <span {...authorText}>{" (0)"}</span>
       </span>
     );
   }
@@ -198,8 +201,10 @@ export function ReferencedByToggle({
       className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium ${linkText} ${linkHoverText}`}
       onClick={onToggle}
       type="button"
+      {...pageChrome}
     >
-      {count === undefined ? "Referenced by" : `Referenced by (${count})`}
+      {PROPERTY_LABELS.referenced_by}
+      {count === undefined ? null : <span {...authorText}>{` (${count})`}</span>}
     </button>
   );
 }

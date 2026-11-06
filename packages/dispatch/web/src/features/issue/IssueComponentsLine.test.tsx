@@ -175,7 +175,10 @@ test("IssueComponentsLine lists an explicit set as chips, marks retired ids, and
     view.q.getByText("web");
     // The chip reads "retired: <id>" and carries no tooltip: the issue page's panel draws none
     // (dispatch://INFRA-1196 R21, `components/tooltips.tsx`).
-    const retired = view.q.getByText("retired: legacy-ui");
+    const retired = view.q.getByText(
+      (_text, element) => element?.textContent === "retired: legacy-ui",
+      { selector: "span[data-page-chrome]" }
+    );
     expect(retired.getAttribute("title")).toBeNull();
     const ancestor = view.q.getByRole("link", { name: "CORE-1" }) as HTMLAnchorElement;
     expect(ancestor.getAttribute("href")).toBe("/issues/CORE-1");

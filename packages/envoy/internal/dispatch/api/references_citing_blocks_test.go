@@ -108,3 +108,78 @@ func TestTheReferencesETagCoversTheBlocksCitingAMember(t *testing.T) {
 			cited, atOneBlock, atAnother)
 	}
 }
+
+// createIssueDocument uploads one document to an issue and answers it.
+func createIssueDocument(t *testing.T, handler http.Handler, issueKey, name, content string) model.Artifact {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/artifacts", map[string]any{
+		"name": name, "content": content,
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue document %q: status=%d body=%s", name, response.Code, response.Body.String())
+	}
+	return decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, response).Artifact
+}
+
+// ?own= decides whether the issue's own documents are members. Absent, the read answers what
+// the issue reaches outside itself, which is the answer every caller before the parameter got;
+// with 1 it answers the issue's own documents too, each with the blocks of its citer, which is
+// what a reader drawing a document under the block citing it needs and what spares it a read of
+// every document's stored text. Any other value is refused rather than read as one of the two.
+func TestIssueReferencesAnswerTheIssuesOwnDocumentsOnlyWhenAsked(t *testing.T) {
+	handler, _ := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	outside := createProjectDocument(t, handler, "CORE", "Outside notes", "# Outside notes\n")
+	cited := createIssueDocument(t, handler, issue.Key, "Cited notes", "# Cited notes\n")
+	citer := createIssueDocument(t, handler, issue.Key, "Citing notes",
+		"# Citing notes\n\nThe measurements are in dispatch://"+issue.Key+"/artifact/cited-notes\n")
+	createReferenceAPIComment(t, handler, issue.Key, "See dispatch://CORE/artifact/outside-notes")
+
+	narrow := issueReferencesRequest(t, handler, issue.Key, "")
+	if narrow.Code != http.StatusOK {
+		t.Fatalf("read the issue's references: status=%d body=%s", narrow.Code, narrow.Body.String())
+	}
+	answered := decodeBody[model.IssueReferences](t, narrow)
+	if len(answered.Members) != 1 || answered.Members[0].Artifact.ID != outside.ID {
+		t.Fatalf("the read without ?own answered %#v, want the one document outside the issue", answered.Members)
+	}
+
+	wide := issueReferencesQueryRequest(t, handler, issue.Key, "own=1", "")
+	if wide.Code != http.StatusOK {
+		t.Fatalf("read the issue's references with ?own=1: status=%d body=%s", wide.Code, wide.Body.String())
+	}
+	members := map[string]model.ReferenceMember{}
+	for _, member := range decodeBody[model.IssueReferences](t, wide).Members {
+		members[member.Artifact.ID] = member
+	}
+	if len(members) != 2 {
+		t.Fatalf("the read with ?own=1 answered %#v, want the outside document and the issue's own cited one", members)
+	}
+	own, found := members[cited.ID]
+	if !found {
+		t.Fatalf("the read with ?own=1 answered %#v, naming no member for the issue's own cited document", members)
+	}
+	if own.Via != (model.ReferenceVia{Kind: "artifact", ID: citer.ID}) {
+		t.Fatalf("the cited document's via = %#v, want the issue's own citing document", own.Via)
+	}
+	if want := paragraphBlockIDs(t, handler, citer.ID); !slices.Equal(own.ViaBlocks, want) {
+		t.Errorf("the cited document's via_blocks = %v, want the citing paragraph %v", own.ViaBlocks, want)
+	}
+	if narrow.Header().Get("ETag") == wide.Header().Get("ETag") {
+		t.Errorf("the narrow and the wide answer share the ETag %q, so a client asking for one would be told 304 for the other", wide.Header().Get("ETag"))
+	}
+
+	for _, value := range []string{"2", "true", "yes"} {
+		refused := issueReferencesQueryRequest(t, handler, issue.Key, "own="+value, "")
+		if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"INVALID_QUERY"`) {
+			t.Errorf("?own=%s: status=%d body=%s, want 400 INVALID_QUERY", value, refused.Code, refused.Body.String())
+		}
+	}
+	twice := issueReferencesQueryRequest(t, handler, issue.Key, "own=1&own=1", "")
+	if twice.Code != http.StatusBadRequest {
+		t.Errorf("?own given twice: status=%d body=%s, want 400", twice.Code, twice.Body.String())
+	}
+}

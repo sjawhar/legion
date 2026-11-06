@@ -129,8 +129,18 @@ function entryKey(entry: InventoryEntry): string {
   return `${entry.role}\u0000${entry.name}`;
 }
 
+/** How an entry is written where a person reads it: in a failure, and as both halves of the
+ *  fixture's rename table, so a rename is pasted straight from the failure that named it. */
 function describe(entry: InventoryEntry): string {
   return `${entry.role} "${entry.name}"`;
+}
+
+/** The entry `described` names, read back from the form `describe` writes. A value that is not
+ *  that form names no entry, and the caller fails rather than quietly looking for nothing. */
+function entryOf(described: string): InventoryEntry | undefined {
+  const opened = described.indexOf(' "');
+  if (opened <= 0 || !described.endsWith('"')) return undefined;
+  return { name: described.slice(opened + 2, -1), role: described.slice(0, opened) };
 }
 
 /**
@@ -197,12 +207,30 @@ async function measured(snapshot: Promise<unknown>): Promise<MeasuredEntry[]> {
 }
 
 export interface CarriedOptions {
-  /** The fixture's rename table: a recorded name mapped to the name the page gives that same
-   *  control now. A renamed entry is looked for under its new name alone, so a rename is not
-   *  reported as a loss. */
+  /**
+   * The fixture's rename table: each recorded entry, written as the `role "name"` a failure
+   * prints it as, mapped to the entry the page offers in its place, in the same form. One form
+   * serves a name that changed and a role that changed with it - `tab "Children"` became
+   * `button "Children"` when the tabs became presets - and a rename is pasted straight from
+   * the failure that named it. Where the page offers a different entry at a different width -
+   * the preset row is a row of tabs on a desktop and one menu on a phone - the value names
+   * each of them, joined by ` | `, and the entry is carried while any one of them is there. A
+   * renamed entry is looked for as the entries it maps to and nothing else, so a rename is not
+   * reported as a loss; a value that is not that form fails the check rather than quietly
+   * matching nothing.
+   */
   readonly renames: Readonly<Record<string, string>>;
   /** Which recorded state this is (`open-1440`), named in every failure. */
   readonly state: string;
+  /**
+   * The page's own views, each a call that puts the page in one of them. The recording is the
+   * merge of the views the old page had - its eight tab panels, one at a time, because a page
+   * renders one and hides the rest (`record-page-inventory.e2e.ts`) - so the page it is read
+   * against is merged the same way, or a page that still offers everything would be read as
+   * having lost whatever its first view does not show. Each view is read in turn and the
+   * readings merged, and every one of them passes `assertPageFits` on its own.
+   */
+  readonly views: readonly (() => Promise<void>)[];
 }
 
 /**
@@ -219,32 +247,59 @@ export async function assertInventoryCarried(
   recorded: readonly InventoryEntry[],
   options: CarriedOptions
 ): Promise<void> {
-  await assertPageFits(page);
-  const wanted = mergeInventory(
-    recorded.map((entry) => ({
-      name: options.renames[entry.name] ?? entry.name,
-      role: entry.role,
-    }))
-  );
-  const present = new Map<string, MeasuredEntry[]>();
-  for (const entry of await settled(() => measured(page.ariaSnapshotJSON({ boxes: true })))) {
-    const key = entryKey(entry);
-    present.set(key, [...(present.get(key) ?? []), entry]);
+  // One row per recorded entry, each naming every entry that carries it: itself, or whatever
+  // the rename table says stands in its place.
+  const seen = new Set<string>();
+  const wanted: { carried: InventoryEntry[]; described: string; instances: MeasuredEntry[] }[] = [];
+  for (const entry of recorded) {
+    const described = describe(entry);
+    if (seen.has(described)) continue;
+    seen.add(described);
+    const renamed = options.renames[described];
+    const carried =
+      renamed === undefined ? [entry] : renamed.split(" | ").map((one) => entryOf(one));
+    expect(
+      carried.every((one) => one !== undefined),
+      `${options.state}: the rename of ${described} reads ${JSON.stringify(renamed)}, which is no \`role "name"\``
+    ).toBe(true);
+    wanted.push({
+      carried: carried.filter((one): one is InventoryEntry => one !== undefined),
+      described,
+      instances: [],
+    });
   }
-  const lost = wanted.filter((entry) => !present.has(entryKey(entry))).map(describe);
+  const present = new Map<string, MeasuredEntry[]>();
+  for (const view of options.views) {
+    await view();
+    await assertPageFits(page);
+    for (const entry of await settled(() => measured(page.ariaSnapshotJSON({ boxes: true })))) {
+      const key = entryKey(entry);
+      present.set(key, [...(present.get(key) ?? []), entry]);
+    }
+  }
+  for (const one of wanted) {
+    one.instances = one.carried.flatMap((entry) => present.get(entryKey(entry)) ?? []);
+  }
+  const lost = wanted.filter((one) => one.instances.length === 0).map((one) => one.described);
   expect(lost, `${options.state} no longer offers: ${lost.join(", ")}`).toEqual([]);
 
   const viewport = await page.evaluate(() => document.documentElement.clientWidth);
   const sideways = wanted
-    .filter((entry) => {
-      const instances = present.get(entryKey(entry)) ?? [];
-      const placed = instances.filter((instance) => instance.box !== undefined);
+    .filter((one) => {
+      // A control a page hides from sight and keeps for the keyboard - the shell's "Skip to
+      // content", which is `sr-only` until it is focused - is a 1 by 1 clipped box wherever it
+      // sits. It is reached by Tab and not by scrolling, so its box says nothing about
+      // scrolling sideways and the rule passes over it.
+      const placed = one.instances.filter(
+        (instance) =>
+          instance.box !== undefined && instance.box.width > 1 && instance.box.height > 1
+      );
       return (
         placed.length > 0 &&
         placed.every(({ box }) => box !== undefined && (box.x < 0 || box.x + box.width > viewport))
       );
     })
-    .map(describe);
+    .map((one) => one.described);
   expect(
     sideways,
     `${options.state} reaches these only by scrolling sideways in a ${viewport}px viewport: ${sideways.join(", ")}`

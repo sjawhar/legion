@@ -1,4 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { PRESET_NAMES, PRESET_ORDER } from "../web/src/features/issue/page-words";
 import { setLiveSessions } from "./agents";
 import {
   createArtifactAsk,
@@ -350,6 +351,54 @@ test("a project document has no horizontal overflow, 44px controls, and a Commen
       await expect(page.getByRole("tab", { name: "Comments" })).toBeVisible();
       await expect(page.getByRole("tab", { name: "Pinned" })).toHaveCount(0);
     }
+  } finally {
+    await alice.close();
+  }
+});
+
+// The skeleton the shell draws while the issue page's own chunk loads is the issue page for a
+// moment, and a phone sees it: it has to fit the screen the page it stands in for fits
+// (dispatch://INFRA-1196 R17), and it has to name the presets that page has rather than tabs
+// the redesign dropped (R3), or a retired name flashes on screen at every cold load.
+test("the issue page's skeleton fits a phone and names its presets @phone", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue(
+    { project: "CORE", title: "A skeleton stands in for this page" },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 844, width: 390 });
+    // The route's own chunk, held until the skeleton has been read: it is the only thing
+    // between the address and the page, so holding it is what makes the fallback readable at
+    // all. The navigation is not awaited while it is held, and is let go at the end.
+    const held = Promise.withResolvers<void>();
+    await page.route("**/assets/IssuePage-*.js", async (route) => {
+      await held.promise;
+      await route.continue();
+    });
+    const arrival = page.goto(`/issues/${issue.key}`).catch(() => undefined);
+    const presets = page.locator('[aria-busy="true"] [role="tablist"]');
+    await expect(presets).toBeVisible();
+    const layout = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(
+      layout.scroll,
+      `the skeleton made the page ${layout.scroll}px wide in a ${layout.client}px viewport`
+    ).toBeLessThanOrEqual(layout.client);
+    expect(
+      (await presets.innerText())
+        .split("\n")
+        .map((word) => word.trim())
+        .filter((word) => word !== ""),
+      "the skeleton names tabs the page no longer has"
+    ).toEqual(PRESET_ORDER.map((preset) => PRESET_NAMES[preset]));
+    held.resolve();
+    await arrival;
   } finally {
     await alice.close();
   }

@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 
 import { useTooltips } from "../../components/tooltips";
+import { authorText } from "../issue/page-structure";
 
 const relativeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
@@ -83,10 +84,19 @@ export function Timestamp({ at, className, exact = false }: TimestampProps): Rea
 
   const date = new Date(at);
   if (Number.isNaN(date.getTime())) {
-    return <time className={className}>{at}</time>;
+    return (
+      <time className={className} {...authorText}>
+        {at}
+      </time>
+    );
   }
   return (
-    <time className={className} dateTime={at} title={tooltips ? date.toLocaleString() : undefined}>
+    <time
+      className={className}
+      dateTime={at}
+      title={tooltips ? date.toLocaleString() : undefined}
+      {...authorText}
+    >
       {relativeTimeLabel(date, Date.now())}
       {exact
         ? ` (${date.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })})`

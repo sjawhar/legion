@@ -5,6 +5,8 @@ import { ApiError, api } from "../../api/client";
 import type { ExternalLink } from "../../api/types";
 import { safeExternalHref } from "../../lib/external-href";
 import { badgeLow, linkHoverText, linkText, textMutedOnSurface } from "../../theme/classes";
+import { authorText, pageChrome } from "./page-structure";
+import { CONTROL_LABELS } from "./page-words";
 
 interface GitHubReference {
   head?: { sha?: string };
@@ -149,9 +151,11 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   // rather than a cut one with the rest on hover.
   if (href === null) {
     return (
-      <span className={`inline-block text-sm ${textMutedOnSurface}`}>
-        <span className="break-all">{link.url}</span>
-        <span className="ml-1">(unsafe external link)</span>
+      <span className={`inline-block text-sm ${textMutedOnSurface}`} {...pageChrome}>
+        <span className="break-all" {...authorText}>
+          {link.url}
+        </span>
+        <span className="ml-1">({CONTROL_LABELS.external_link_unsafe})</span>
       </span>
     );
   }
@@ -160,6 +164,7 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       <a
         className={`inline-block max-w-full break-all text-sm underline ${linkText} ${linkHoverText}`}
         href={href}
+        {...authorText}
       >
         {link.url}
       </a>
@@ -185,16 +190,21 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       className={`inline-flex max-w-full flex-wrap items-center gap-2 text-sm underline ${linkText} ${linkHoverText}`}
       href={href}
     >
-      <span className="shrink-0 font-medium">{number}</span>
-      <span className="min-w-0 break-all">
+      <span className="shrink-0 font-medium" {...authorText}>
+        {number}
+      </span>
+      <span className="min-w-0 break-all" {...authorText}>
         {reference === undefined ? repository : reference.title}
       </span>
       {unavailable ? (
-        <span className="shrink-0">(GitHub details are unavailable for this repository)</span>
+        <span className="shrink-0" {...pageChrome}>
+          ({CONTROL_LABELS.github_unavailable})
+        </span>
       ) : null}
       {state === undefined ? null : (
         <span
           className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}
+          {...authorText}
         >
           {state}
         </span>
@@ -202,8 +212,9 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       {isPullRequest && !checks.isError && checks.data !== undefined ? (
         <span
           className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}
+          {...pageChrome}
         >
-          checks: {checks.data}
+          {CONTROL_LABELS.github_checks}: <span {...authorText}>{checks.data}</span>
         </span>
       ) : null}
     </a>

@@ -1,8 +1,15 @@
 import { type ReactNode, useLayoutEffect, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
+import { useMarkdownHeadline } from "./markdown-engine";
+import { useKnownReferenceName } from "./reference-names";
 import { referenceSpans } from "./reference-spans";
-import { useReferencePath, useReferenceTarget } from "./reference-target";
+import {
+  blockReferenceOf,
+  TITLE_HEADLINE_MAX,
+  useReferencePath,
+  useReferenceTarget,
+} from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -43,7 +50,16 @@ export function RefLink({
   anchor?: HTMLElement;
   route: DispatchReferenceRoute;
 }): ReactNode {
-  const { picture, title } = useReferenceTarget(route, { text: false });
+  // A link to a block shows the block's own words. Where the page has already read them in one
+  // batched request, the link takes its name from there and makes no read of its own
+  // (`reference-names.tsx`, dispatch://INFRA-1196 R20); anywhere else it reads its target as it
+  // always has, and every other kind of reference is unchanged, because an artifact's own read
+  // also answers the picture the link draws beside its title.
+  const known = useKnownReferenceName(blockReferenceOf(route));
+  const { picture, title } = useReferenceTarget(known === undefined ? route : undefined, {
+    text: false,
+  });
+  const headline = useMarkdownHeadline(known, TITLE_HEADLINE_MAX);
   const path = useReferencePath(route);
   useLayoutEffect(() => {
     if (anchor instanceof HTMLAnchorElement) {
@@ -66,7 +82,7 @@ export function RefLink({
           />{" "}
         </>
       )}
-      {title ?? shortForm(route)}
+      {headline?.text ?? title ?? shortForm(route)}
     </>
   );
 }

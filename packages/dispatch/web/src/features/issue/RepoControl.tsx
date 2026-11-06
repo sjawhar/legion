@@ -5,6 +5,8 @@ import { api, apiErrorMessage } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
 import { badgeLow, badgePrimary, textSecondaryOnSurface } from "../../theme/classes";
 import { badgeSelectBadge, badgeSelectOverlay, badgeSelectRailWrapper } from "./badge-select";
+import { authorText, PROPERTY_LABELS, pageChrome } from "./page-structure";
+import { CONTROL_LABELS } from "./page-words";
 import { useIssueRepo } from "./useIssueRepo";
 
 /**
@@ -66,12 +68,17 @@ export function RepoControl({
   // shows a value its options lack.
   const options = repo === null || mapped.includes(repo) ? mapped : [repo, ...mapped];
   const tone = repo === null ? badgeLow : badgePrimary;
+  // The description the select is named by: the repository itself is the issue's value, and
+  // the words around it are the page's own (dispatch://INFRA-1196 R21).
   const description =
-    resolvedRepo === null
-      ? "No repository"
-      : repo === null
-        ? `${resolvedRepo}, inherited or the project's default`
-        : resolvedRepo;
+    resolvedRepo === null ? (
+      CONTROL_LABELS.no_repository
+    ) : (
+      <>
+        <span {...authorText}>{resolvedRepo}</span>
+        {repo === null ? `, ${CONTROL_LABELS.repository_inherited}` : null}
+      </>
+    );
   // Nothing resolved and no list to pick from: the failure is all there is to show.
   const picker =
     resolvedRepo === null && mappings.isError ? null : (
@@ -81,8 +88,9 @@ export function RepoControl({
         <span
           aria-hidden="true"
           className={`${badgeSelectBadge} font-mono ${tone.bg} ${tone.text}`}
+          {...(resolvedRepo === null ? pageChrome : authorText)}
         >
-          {resolvedRepo ?? "No repository"}
+          {resolvedRepo ?? CONTROL_LABELS.no_repository}
         </span>
         <select
           aria-describedby={descriptionId}
@@ -110,14 +118,16 @@ export function RepoControl({
             </option>
           ))}
         </select>
-        <span className="sr-only" id={descriptionId}>
+        <span className="sr-only" id={descriptionId} {...pageChrome}>
           {description}
         </span>
       </span>
     );
   return (
     <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-      <span className="font-medium">Repository:</span>
+      <span className="font-medium" {...pageChrome}>
+        {PROPERTY_LABELS.repository}:
+      </span>
       {picker}
       {loadFailure}
       {write.failed ? (

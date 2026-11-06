@@ -478,7 +478,7 @@ func TestClosureFollowsArtifactLinksToDepthEightAndReportsTruncation(t *testing.
 		t.Fatalf("commit fixture: %v", err)
 	}
 
-	got, truncated, err := Closure(ctx, database.Pool, "CORE-1")
+	got, truncated, err := Closure(ctx, database.Pool, "CORE-1", false)
 	if err != nil {
 		t.Fatalf("read closure: %v", err)
 	}

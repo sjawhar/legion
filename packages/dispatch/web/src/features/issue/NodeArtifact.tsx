@@ -11,7 +11,9 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { artifactVersionUrl, versionsNewestFirst } from "../artifacts/ArtifactHeader";
+import { CopyRefButton } from "../refs/CopyRefButton";
 import { pictureClassName } from "../refs/DispatchPicture";
+import { documentRoute } from "../refs/routes";
 import { authorText, pageChrome } from "./page-structure";
 import { CONTROL_LABELS, EMPTY_STATE_LINES } from "./page-words";
 
@@ -68,6 +70,9 @@ export function NodeArtifact({ artifact }: { artifact: Artifact }): ReactNode {
         >
           {CONTROL_LABELS.versions}
         </button>
+        {/* The node's own reference, copied from the node itself: a document is a node here
+            and nowhere else, so this is where it keeps the copy control it had (R18). */}
+        <CopyRefButton route={documentRoute(artifact)} tabbable={false} />
       </p>
       {showVersions ? (
         <ul className="flex min-w-0 flex-wrap gap-2">

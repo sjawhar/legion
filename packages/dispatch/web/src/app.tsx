@@ -14,6 +14,7 @@ import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
+import { PRESET_NAMES, PRESET_ORDER } from "./features/issue/page-words";
 import { MarginColumn } from "./features/margin/MarginColumn";
 import { MarginProvider } from "./features/margin/margin-context";
 import { MarginSlotProvider } from "./features/margin/margin-slot";
@@ -21,6 +22,7 @@ import { DEFAULT_MARGIN_WIDTH } from "./features/margin/margin-width";
 import { AgentRegistryPoller } from "./features/refs/agent-registry";
 import { TextAskCard } from "./features/refs/markdown-cards";
 import { RefPreviewHost } from "./features/refs/RefPreview";
+import { ReferenceNamesProvider } from "./features/refs/reference-names";
 import {
   AGENT_ARTIFACT_PATH,
   AGENT_LIVE_PATH,
@@ -181,13 +183,22 @@ function IssuePageFallback(): ReactNode {
           />
         </h1>
       </header>
-      <div className={`mb-4 flex gap-2 border-b ${borderDefault}`} role="tablist">
-        {["Spec", "Conversation", "Children", "Artifacts", "Activity"].map((label) => (
+      {/* `min-w-0`, so the row may be narrower than the names it holds: without it the row's
+          min-content width is the page's own at every width, and a 390 px phone draws the
+          whole issue page 465 px wide for as long as the chunk takes to arrive
+          (dispatch://INFRA-1196 R17, `e2e/phone.e2e.ts`). The names are the page's five
+          presets, so the skeleton and the page it stands in for say the same thing and no
+          retired tab name flashes on screen (R3). */}
+      <div
+        className={`mb-4 flex min-w-0 gap-2 overflow-hidden border-b ${borderDefault}`}
+        role="tablist"
+      >
+        {PRESET_ORDER.map((preset) => (
           <span
-            className={`animate-pulse rounded px-3 py-2 text-sm ${textTransparent} ${skeletonBg}`}
-            key={label}
+            className={`animate-pulse truncate rounded px-3 py-2 text-sm ${textTransparent} ${skeletonBg}`}
+            key={preset}
           >
-            {label}
+            {PRESET_NAMES[preset]}
           </span>
         ))}
       </div>
@@ -660,222 +671,226 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 
   return (
     <MarginProvider>
-      <MarginSlotProvider>
-        <div
-          className={`${fillsViewport ? "flex h-screen flex-col supports-[height:100dvh]:h-dvh xl:flex-row" : "xl:flex"} ${canvasText}`}
-          data-testid="app-shell"
-        >
-          <a
-            className={`sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:px-4 focus:py-2 ${railFocusOverlayBg} ${railFocusOverlayText}`}
-            href="#main-content"
+      <ReferenceNamesProvider>
+        <MarginSlotProvider>
+          <div
+            className={`${fillsViewport ? "flex h-screen flex-col supports-[height:100dvh]:h-dvh xl:flex-row" : "xl:flex"} ${canvasText}`}
+            data-testid="app-shell"
           >
-            Skip to content
-          </a>
-          {/* The shell's status corner: the pending-writes indicator above the connection pill.
+            <a
+              className={`sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:px-4 focus:py-2 ${railFocusOverlayBg} ${railFocusOverlayText}`}
+              href="#main-content"
+            >
+              Skip to content
+            </a>
+            {/* The shell's status corner: the pending-writes indicator above the connection pill.
             Above the highest composer fixed at the foot of the screen (`--foot-composer-inset`,
             `useFootInset`), so neither sits over its controls; otherwise just above the phone's
             bottom bar. Only what it shows takes the pointer. A socket Dispatch refuses carries no
             status the page can read, so nothing in the pill is terminal: once reconnecting has
             gone on for two minutes it offers a reload, and the page keeps trying underneath. */}
-          <div className="pointer-events-none fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col items-end gap-2 xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] *:pointer-events-auto">
-            <PendingWritesIndicator />
-            {connection === "stuck" ? (
-              <p
-                aria-live="polite"
-                className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
-                data-testid="connection-pill"
-              >
-                Live updates are not reaching this page
-                <button
-                  className="underline"
-                  onClick={() => window.location.reload()}
-                  type="button"
+            <div className="pointer-events-none fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col items-end gap-2 xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] *:pointer-events-auto">
+              <PendingWritesIndicator />
+              {connection === "stuck" ? (
+                <p
+                  aria-live="polite"
+                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
+                  data-testid="connection-pill"
                 >
-                  Reload
-                </button>
-              </p>
-            ) : connection === "reconnecting" ? (
-              <p
-                aria-live="polite"
-                className={`rounded-full border px-3 py-1 text-xs font-medium shadow-lg ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
-                data-testid="connection-pill"
-              >
-                Reconnecting…
-              </p>
-            ) : null}
-          </div>
-          {isCompactViewport ? (
-            <header
-              className={`flex items-center justify-between border-b px-3 ${railBorder} ${railBg} ${railText}`}
-            >
-              {/* The title never shrinks and no count breaks its own words: the counts that do not
-                fit beside the title wrap onto a second row of the bar, with Menu on the right. */}
-              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                <Link className="shrink-0 text-lg font-semibold" to="/">
-                  Dispatch
-                </Link>
-                {/* Everywhere but the Inbox page, the same badge also opens the Inbox drawer. */}
-                {routeIsInbox(location.pathname) ? (
-                  needsYouBadge
-                ) : (
+                  Live updates are not reaching this page
                   <button
-                    aria-label={
-                      needsYouCount === 0 ? "Open inbox" : `Open inbox, needs you ${needsYouCount}`
-                    }
-                    className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${
-                      needsYouCount === 0
-                        ? railHoverBg
-                        : `${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`
-                    }`}
-                    onClick={() => setInboxDrawerOpen(true)}
+                    className="underline"
+                    onClick={() => window.location.reload()}
                     type="button"
                   >
-                    {needsYouCount === 0 ? "Inbox" : `Needs you ${needsYouCount}`}
+                    Reload
                   </button>
-                )}
-                {unreadReplies === 0 ? null : (
-                  <Link
-                    className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
-                    to="/agents"
-                  >
-                    {unreadRepliesLabel(unreadReplies)}
-                  </Link>
-                )}
-                {unreadThreads === 0 ? null : (
-                  <Link
-                    className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
-                    to={REPLIES_PATH}
-                  >
-                    Replies {unreadThreads}
-                  </Link>
-                )}
-              </div>
-              <button
-                aria-expanded={navigationOpen}
-                aria-label="Open navigation"
-                className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${railHoverBg}`}
-                onClick={() => setNavigationOpen(true)}
-                type="button"
+                </p>
+              ) : connection === "reconnecting" ? (
+                <p
+                  aria-live="polite"
+                  className={`rounded-full border px-3 py-1 text-xs font-medium shadow-lg ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
+                  data-testid="connection-pill"
+                >
+                  Reconnecting…
+                </p>
+              ) : null}
+            </div>
+            {isCompactViewport ? (
+              <header
+                className={`flex items-center justify-between border-b px-3 ${railBorder} ${railBg} ${railText}`}
               >
-                Menu
-              </button>
-            </header>
-          ) : null}
-          {isCompactViewport && navigationOpen ? (
-            <>
-              <div
-                aria-hidden="true"
-                className={`fixed inset-0 z-20 ${backdrop50}`}
-                onClick={() => setNavigationOpen(false)}
-              />
+                {/* The title never shrinks and no count breaks its own words: the counts that do not
+                fit beside the title wrap onto a second row of the bar, with Menu on the right. */}
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  <Link className="shrink-0 text-lg font-semibold" to="/">
+                    Dispatch
+                  </Link>
+                  {/* Everywhere but the Inbox page, the same badge also opens the Inbox drawer. */}
+                  {routeIsInbox(location.pathname) ? (
+                    needsYouBadge
+                  ) : (
+                    <button
+                      aria-label={
+                        needsYouCount === 0
+                          ? "Open inbox"
+                          : `Open inbox, needs you ${needsYouCount}`
+                      }
+                      className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${
+                        needsYouCount === 0
+                          ? railHoverBg
+                          : `${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`
+                      }`}
+                      onClick={() => setInboxDrawerOpen(true)}
+                      type="button"
+                    >
+                      {needsYouCount === 0 ? "Inbox" : `Needs you ${needsYouCount}`}
+                    </button>
+                  )}
+                  {unreadReplies === 0 ? null : (
+                    <Link
+                      className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+                      to="/agents"
+                    >
+                      {unreadRepliesLabel(unreadReplies)}
+                    </Link>
+                  )}
+                  {unreadThreads === 0 ? null : (
+                    <Link
+                      className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+                      to={REPLIES_PATH}
+                    >
+                      Replies {unreadThreads}
+                    </Link>
+                  )}
+                </div>
+                <button
+                  aria-expanded={navigationOpen}
+                  aria-label="Open navigation"
+                  className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${railHoverBg}`}
+                  onClick={() => setNavigationOpen(true)}
+                  type="button"
+                >
+                  Menu
+                </button>
+              </header>
+            ) : null}
+            {isCompactViewport && navigationOpen ? (
+              <>
+                <div
+                  aria-hidden="true"
+                  className={`fixed inset-0 z-20 ${backdrop50}`}
+                  onClick={() => setNavigationOpen(false)}
+                />
+                <aside
+                  aria-label="Navigation"
+                  aria-modal="true"
+                  className={`fixed inset-y-0 left-0 z-30 flex w-80 max-w-[calc(100vw-2rem)] flex-col overflow-y-auto border-b p-5 shadow-2xl ${railBorder} ${railBg} ${railText}`}
+                  ref={drawer.containerRef}
+                  role="dialog"
+                >
+                  {navigation}
+                </aside>
+              </>
+            ) : null}
+            {isCompactViewport ? null : sidebarHidden ? (
+              <aside
+                aria-label="Collapsed sidebar"
+                className={`fixed inset-y-0 left-0 z-10 flex w-14 justify-center border-r p-2 ${railBorder} ${railBg} ${railText}`}
+                data-testid="sidebar-rail"
+              >
+                <button
+                  aria-label="Show sidebar"
+                  className={`min-h-11 min-w-11 rounded-lg text-sm font-medium ${railHoverBg}`}
+                  onClick={() => setSidebarHidden(false)}
+                  type="button"
+                >
+                  <span aria-hidden="true">›</span>
+                </button>
+              </aside>
+            ) : (
+              // The sidebar is first in the document and as tall as the viewport, so left to itself
+              // Chromium's scroll anchoring picks it as the anchor node - and since it never moves,
+              // nothing is ever compensated. Excluding it makes the browser anchor inside <main>, so
+              // content growing above the reader (a card's thread loading, Markdown rendering) no
+              // longer shifts what they are looking at.
               <aside
                 aria-label="Navigation"
-                aria-modal="true"
-                className={`fixed inset-y-0 left-0 z-30 flex w-80 max-w-[calc(100vw-2rem)] flex-col overflow-y-auto border-b p-5 shadow-2xl ${railBorder} ${railBg} ${railText}`}
-                ref={drawer.containerRef}
-                role="dialog"
+                className={`relative order-1 w-80 max-w-none border-r [overflow-anchor:none] ${railBorder} ${railBg} ${railText}`}
               >
-                {navigation}
-              </aside>
-            </>
-          ) : null}
-          {isCompactViewport ? null : sidebarHidden ? (
-            <aside
-              aria-label="Collapsed sidebar"
-              className={`fixed inset-y-0 left-0 z-10 flex w-14 justify-center border-r p-2 ${railBorder} ${railBg} ${railText}`}
-              data-testid="sidebar-rail"
-            >
-              <button
-                aria-label="Show sidebar"
-                className={`min-h-11 min-w-11 rounded-lg text-sm font-medium ${railHoverBg}`}
-                onClick={() => setSidebarHidden(false)}
-                type="button"
-              >
-                <span aria-hidden="true">›</span>
-              </button>
-            </aside>
-          ) : (
-            // The sidebar is first in the document and as tall as the viewport, so left to itself
-            // Chromium's scroll anchoring picks it as the anchor node - and since it never moves,
-            // nothing is ever compensated. Excluding it makes the browser anchor inside <main>, so
-            // content growing above the reader (a card's thread loading, Markdown rendering) no
-            // longer shifts what they are looking at.
-            <aside
-              aria-label="Navigation"
-              className={`relative order-1 w-80 max-w-none border-r [overflow-anchor:none] ${railBorder} ${railBg} ${railText}`}
-            >
-              {/* The aside stretches to the page's height, so the navigation is a viewport-tall
+                {/* The aside stretches to the page's height, so the navigation is a viewport-tall
                 column that sticks inside it: on a long issue the links stay reachable, and the
                 identity footer sits at the bottom of the screen rather than the bottom of the
                 document. */}
-              <div className="sticky top-0 flex h-dvh flex-col overflow-y-auto p-5">
-                {navigation}
-              </div>
-            </aside>
-          )}
-          {/* The frame a page marks as its own: the column it renders into and the margin beside
+                <div className="sticky top-0 flex h-dvh flex-col overflow-y-auto p-5">
+                  {navigation}
+                </div>
+              </aside>
+            )}
+            {/* The frame a page marks as its own: the column it renders into and the margin beside
             it, which read as one page however the shell mounts them (`features/shell/page-frame.tsx`).
             It takes <main>'s place in the shell's row, so the sidebar, the compact header and
             the status corner stay outside whatever a page marks. */}
-          <PageFrameProvider>
-            {(frameAttributes) => (
-              <div className="flex min-h-0 min-w-0 flex-1 xl:order-2" {...frameAttributes}>
-                {/* 16 px of padding on a phone, 24 px from `sm`: 48 px of a 390 px screen is an
+            <PageFrameProvider>
+              {(frameAttributes) => (
+                <div className="flex min-h-0 min-w-0 flex-1 xl:order-2" {...frameAttributes}>
+                  {/* 16 px of padding on a phone, 24 px from `sm`: 48 px of a 390 px screen is an
                     eighth of its width, and the lines it costs are lines of the issue page's
                     head that the first open question needs (dispatch://INFRA-1196 R6). */}
-                <main
-                  className={`min-w-0 flex-1 p-4 outline-none sm:p-6 ${fillsViewport ? "flex min-h-0 flex-col" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
-                  data-shell-layout={fullWidth ? "full-width" : "standard"}
-                  data-testid="main-content"
-                  id="main-content"
-                  ref={mainRef}
-                  tabIndex={-1}
-                >
-                  <ErrorBoundary region="this page" resetKey={location.pathname}>
-                    <Suspense fallback={<IssuePageFallback />}>
-                      <Routes>
-                        <Route element={<InboxPage />} path="/" />
-                        <Route element={<AnswersPage />} path={ANSWERS_PATH} />
-                        <Route element={<RepliesPage />} path={REPLIES_PATH} />
-                        <Route element={<AgentsPage />} path="/agents" />
-                        <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
-                        <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
-                        <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
-                        <Route element={<AgentArtifactPage />} path={AGENT_ARTIFACT_PATH} />
-                        <Route element={<IssuePage />} path="/issues/:key/*" />
-                        <Route element={<ProjectPage />} path="/projects/:key" />
-                        <Route element={<ProjectPage />} path="/projects/:key/architecture" />
-                        <Route element={<ProjectPage />} path="/projects/:key/issues" />
-                        <Route element={<ProjectPage />} path="/projects/:key/documents" />
-                        <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
-                        <Route element={<InboxPage />} path="/credentials/*" />
-                        <Route element={<MachineLoginRoute />} path="/credentials/machine" />
-                        <Route element={<SettingsPage />} path="/settings" />
-                        <Route element={<DeliveryPage />} path="/delivery" />
-                        <Route element={<PipelinePage />} path="/pipeline" />
-                        <Route element={<NotFoundPage />} path="*" />
-                      </Routes>
-                    </Suspense>
+                  <main
+                    className={`min-w-0 flex-1 p-4 outline-none sm:p-6 ${fillsViewport ? "flex min-h-0 flex-col" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
+                    data-shell-layout={fullWidth ? "full-width" : "standard"}
+                    data-testid="main-content"
+                    id="main-content"
+                    ref={mainRef}
+                    tabIndex={-1}
+                  >
+                    <ErrorBoundary region="this page" resetKey={location.pathname}>
+                      <Suspense fallback={<IssuePageFallback />}>
+                        <Routes>
+                          <Route element={<InboxPage />} path="/" />
+                          <Route element={<AnswersPage />} path={ANSWERS_PATH} />
+                          <Route element={<RepliesPage />} path={REPLIES_PATH} />
+                          <Route element={<AgentsPage />} path="/agents" />
+                          <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
+                          <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
+                          <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
+                          <Route element={<AgentArtifactPage />} path={AGENT_ARTIFACT_PATH} />
+                          <Route element={<IssuePage />} path="/issues/:key/*" />
+                          <Route element={<ProjectPage />} path="/projects/:key" />
+                          <Route element={<ProjectPage />} path="/projects/:key/architecture" />
+                          <Route element={<ProjectPage />} path="/projects/:key/issues" />
+                          <Route element={<ProjectPage />} path="/projects/:key/documents" />
+                          <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
+                          <Route element={<InboxPage />} path="/credentials/*" />
+                          <Route element={<MachineLoginRoute />} path="/credentials/machine" />
+                          <Route element={<SettingsPage />} path="/settings" />
+                          <Route element={<DeliveryPage />} path="/delivery" />
+                          <Route element={<PipelinePage />} path="/pipeline" />
+                          <Route element={<NotFoundPage />} path="*" />
+                        </Routes>
+                      </Suspense>
+                    </ErrorBoundary>
+                  </main>
+                  <ErrorBoundary region="the margin" resetKey={location.pathname}>
+                    <MarginColumn
+                      collapsed={marginHidden}
+                      onCollapsedChange={setMarginHidden}
+                      onWidthChange={setMarginWidth}
+                      width={marginWidth}
+                    />
                   </ErrorBoundary>
-                </main>
-                <ErrorBoundary region="the margin" resetKey={location.pathname}>
-                  <MarginColumn
-                    collapsed={marginHidden}
-                    onCollapsedChange={setMarginHidden}
-                    onWidthChange={setMarginWidth}
-                    width={marginWidth}
-                  />
-                </ErrorBoundary>
-              </div>
-            )}
-          </PageFrameProvider>
-          <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
-          <InboxDrawer onClose={() => setInboxDrawerOpen(false)} open={inboxDrawerOpen} />
-          <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
-          {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
-          <RefPreviewHost />
-        </div>
-      </MarginSlotProvider>
+                </div>
+              )}
+            </PageFrameProvider>
+            <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
+            <InboxDrawer onClose={() => setInboxDrawerOpen(false)} open={inboxDrawerOpen} />
+            <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
+            {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
+            <RefPreviewHost />
+          </div>
+        </MarginSlotProvider>
+      </ReferenceNamesProvider>
     </MarginProvider>
   );
 }

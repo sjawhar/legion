@@ -45,10 +45,12 @@ const (
 )
 
 // citesTheMember is true of a block link row r that cites the member of the lateral's outer row
-// m: a link to the document itself, or to one of its blocks, the two targets that reach a
-// document (documentOfTarget). The member is in the closure already, so this is not the walk's
-// own test again — it is which of the via's blocks hold the citation the walk followed.
-const citesTheMember = `r.to_kind in ('artifact', 'block') and ` + documentOfTarget + ` = m.ref_key`
+// m as a document: a link to the document itself, and never one to a block of it, which cites
+// that block and not the document it stands in. The walk reaches a member either way
+// (documentOfTarget), and this is the narrower question ViaBlocks answers — which blocks a
+// reader may draw the document under — so a document reached only through a link to one of its
+// blocks is named by no block at all.
+const citesTheMember = `r.to_kind = 'artifact' and r.to_id = m.ref_key`
 
 // citingBlocks is the lateral that names the blocks of a member's via holding its citation, one
 // arm per kind of via: a document's blocks are in block_refs, an item's in its own block
@@ -89,6 +91,10 @@ func buildCitingBlocks() string {
 // instead would multiply its rows by them. The via's id is cast once, for the lateral's arms to
 // key their tables by: every via kind — ask, comment, message, artifact — is identified by the
 // uuid of its row, so the cast is of a uuid in every case.
+//
+// $2 says whether the issue's own documents are members too. One statement serves both answers,
+// rather than two texts whose plans a reader would have to compare: the walk is the same, and
+// only the last select's filter reads the flag.
 var closureQuery = `
 		with recursive closure as (
 			select ` + documentOfTarget + ` as ref_key, 1 as depth, r.from_kind as via_kind, r.from_id as via_id
@@ -118,7 +124,7 @@ var closureQuery = `
 			select distinct on (c.ref_key) c.ref_key, c.depth, c.via_kind, c.via_id, c.via_id::uuid as via_uuid
 			from closure c
 			join artifacts a on a.ref_key = c.ref_key
-			where a.issue_key is distinct from $1
+			where $2 or a.issue_key is distinct from $1
 			order by c.ref_key, c.depth, c.via_kind, c.via_id
 		) m
 		` + citingBlocks + `
@@ -134,8 +140,14 @@ var closureQuery = `
 // the same rule: the member's via is the ask, at the depth the ask's own link has. A reference to
 // an item block, as one to its item, reaches no document. Each member names the blocks of its
 // via that cite it (ViaBlocks), so a reader can put the document under the block citing it.
-func Closure(ctx context.Context, q Queryer, issueKey string) ([]Member, bool, error) {
-	rows, err := q.Query(ctx, closureQuery, issueKey)
+//
+// own says whether the issue's own documents are members as well. The walk always reads them -
+// a document of the issue is how most of the closure is reached - and `own` decides only
+// whether they are answered: false is the long-standing answer, the artifacts an issue reaches
+// *outside* itself, and true adds its own, which is what a reader placing each document under
+// the block citing it needs (`GET /issues/{key}/references?own=1`).
+func Closure(ctx context.Context, q Queryer, issueKey string, own bool) ([]Member, bool, error) {
+	rows, err := q.Query(ctx, closureQuery, issueKey, own)
 	if err != nil {
 		return nil, false, err
 	}

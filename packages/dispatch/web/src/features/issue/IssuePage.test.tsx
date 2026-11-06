@@ -858,7 +858,14 @@ for (const fixture of [
     try {
       await screen.findByText("Merge native Dispatch");
       expect(screen.getByText("merged")).toBeDefined();
-      expect(await screen.findByText(`checks: ${fixture.checks}`)).toBeDefined();
+      // The chip is the page's word and GitHub's own count beside it, each marked as what it
+      // is (dispatch://INFRA-1196 R21), so the chip is read whole rather than as one text node.
+      expect(
+        await screen.findByText(
+          (_text, element) => element?.textContent === `checks: ${fixture.checks}`,
+          { selector: "span[data-page-chrome]" }
+        )
+      ).toBeDefined();
     } finally {
       view.unmount();
       githubRest.mockRestore();
@@ -1714,7 +1721,9 @@ test("IssuePage updates whose turn when a human clarification is latest", async 
   const view = renderIssuePage("/issues/CORE-1", undefined, undefined, queryClient);
 
   try {
-    expect(await screen.findByText("Waiting on you (1)")).not.toBeNull();
+    // The marker's words are the page's and the count beside them is the issue's, each marked
+    // as what it is (dispatch://INFRA-1196 R21), so the marker is read whole.
+    expect((await screen.findByTestId("issue-whose-turn")).textContent).toBe("Waiting on you (1)");
     queryClient.setQueryData<IssueDetails>(["issue", "CORE-1"], {
       ...waitingIssue,
       open_asks: [
@@ -1728,7 +1737,9 @@ test("IssuePage updates whose turn when a human clarification is latest", async 
         },
       ],
     });
-    expect(await screen.findByText("Waiting on agents (1)")).not.toBeNull();
+    expect((await screen.findByTestId("issue-whose-turn")).textContent).toBe(
+      "Waiting on agents (1)"
+    );
   } finally {
     view.unmount();
     restore();

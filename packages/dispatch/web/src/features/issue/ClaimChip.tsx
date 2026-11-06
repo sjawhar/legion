@@ -6,6 +6,8 @@ import { pillClassName } from "../../components/Pill";
 import { AgentName } from "../refs/AgentName";
 import { type AgentRegistry, useAgentRegistry } from "../refs/agent-registry";
 import { Timestamp } from "../refs/Timestamp";
+import { PROPERTY_LABELS, pageChrome } from "./page-structure";
+import { CONTROL_LABELS } from "./page-words";
 
 /**
  * Whether a claim's session has lapsed: the registry's latest read succeeded and does not list
@@ -70,9 +72,11 @@ export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
       data-testid="issue-claim"
       style={{ flexShrink: 1 }}
     >
-      <span className="shrink-0">Claimed by</span>
+      <span className="shrink-0" {...pageChrome}>
+        {PROPERTY_LABELS.claim}
+      </span>
       <AgentName actor={claim.actor} className="min-w-0 truncate" inline />
-      <span aria-hidden="true" className="shrink-0">
+      <span aria-hidden="true" className="shrink-0" {...pageChrome}>
         ·
       </span>
       {/* The instant itself, in words rather than in a tooltip: how long a session has held
@@ -81,11 +85,11 @@ export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
       <Timestamp at={claim.at} className="shrink-0" exact />
       {lapsed ? (
         <>
-          <span aria-hidden="true" className="shrink-0">
+          <span aria-hidden="true" className="shrink-0" {...pageChrome}>
             ·
           </span>
-          <span className="shrink-0" data-testid="issue-claim-lapsed">
-            not running
+          <span className="shrink-0" data-testid="issue-claim-lapsed" {...pageChrome}>
+            {CONTROL_LABELS.not_running}
           </span>
         </>
       ) : null}

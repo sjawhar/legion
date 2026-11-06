@@ -2300,14 +2300,19 @@ export interface ReferenceMember {
   readonly depth: number;
   /** The document, comment, message or ask the member was reached through. */
   readonly via: ReferenceVia;
-  /** The ids of `via`'s blocks that cite the member, sorted, so a reader can put the document
-   *  under the block citing it; `null` when no block cites it — a structural edge, an
-   *  attachment, or an item citing it from its body rather than from one of its blocks. */
+  /** The ids of `via`'s blocks that cite the member **as a document**, sorted, so a reader can
+   *  put the document under the block citing it; `null` when no block does — a structural edge,
+   *  an attachment, an item citing it from its body rather than from one of its blocks, or a
+   *  via that reaches it only through a link to one of its blocks, which cites that block. */
   readonly via_blocks: string[] | null;
 }
 
 // IssueReferences is the answer of GET /api/v1/issues/{key}/references. With `?versions=latest`
-// each member's `artifact.versions` holds only its latest version.
+// each member's `artifact.versions` holds only its latest version. With `?own=1` the issue's
+// own documents are members too, each with the blocks citing it, which is what a reader drawing
+// a document under the block that cites it needs; absent or `?own=0` answers only the artifacts
+// the issue reaches outside itself, which is the long-standing answer, and any other value is
+// refused with 400 INVALID_QUERY rather than read as one of the two.
 export interface IssueReferences {
   readonly members: ReferenceMember[];
   readonly truncated: boolean;

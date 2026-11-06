@@ -14,7 +14,22 @@ import { expect, type Locator, type Page } from "@playwright/test";
  * the clamped element (approval.e2e.ts's long-question `<p>`, whose only child is its text node).
  */
 export async function assertWhole(locator: Locator): Promise<void> {
-  const clips = await locator.evaluate((element) => {
+  await assertUnclipped(locator, true);
+}
+
+/**
+ * The same walk for a box that is meant to scroll down: the issue page's right-hand panel holds
+ * the properties, the focused node's facts and the whole conversation, so it is taller than the
+ * screen and scrolls vertically by design (`features/margin/MarginSheet.tsx`'s `overflow-y-auto`
+ * on a `h-dvh` rail). R17 bans scrolling in *two* dimensions, never in one, so this reading
+ * drops the vertical half and keeps the rest: a sideways clip and a clamped line still fail.
+ */
+export async function assertWholeAcross(locator: Locator): Promise<void> {
+  await assertUnclipped(locator, false);
+}
+
+async function assertUnclipped(locator: Locator, down: boolean): Promise<void> {
+  const clips = await locator.evaluate((element, readsDown) => {
     const found: string[] = [];
     let deepest: Node = element;
     while (deepest.firstChild !== null) {
@@ -30,7 +45,7 @@ export async function assertWhole(locator: Locator): Promise<void> {
         found.push(`${node.tagName}: line clamp ${style.webkitLineClamp}, ${style.textOverflow}`);
       }
       if (
-        (style.overflowY !== "visible" && node.scrollHeight > node.clientHeight + 1) ||
+        (readsDown && style.overflowY !== "visible" && node.scrollHeight > node.clientHeight + 1) ||
         (style.overflowX !== "visible" && node.scrollWidth > node.clientWidth + 1)
       ) {
         found.push(
@@ -39,7 +54,7 @@ export async function assertWhole(locator: Locator): Promise<void> {
       }
     }
     return found;
-  });
+  }, down);
   expect(clips, clips.join(", ")).toEqual([]);
 }
 

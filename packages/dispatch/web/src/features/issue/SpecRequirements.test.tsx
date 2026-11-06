@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { IssueCoverage } from "../../api/types";
+import { GAP_WORDS } from "./page-words";
 import { SpecRequirements } from "./SpecRequirements";
 
 function requirement(
@@ -70,12 +71,13 @@ test("an uncovered requirement is flagged with what it lacks and a covered one i
   expect(covered.getAttribute("data-covered")).toBe("true");
   expect(within(covered).queryByTestId("spec-requirement-gap")).toBeNull();
   expect(uncovered.getAttribute("data-covered")).toBe("false");
-  // The server's own words for the gap, with the block id it names stripped.
+  // The page's own words for each gap, never the server's `<block id> has no check`, which
+  // names a block by its id (dispatch://INFRA-1196 R21, `page-words.ts`).
   expect(
     within(uncovered)
       .getAllByTestId("spec-requirement-gap")
       .map((flag) => flag.textContent)
-  ).toEqual(["has no check", "has no plan task"]);
+  ).toEqual([GAP_WORDS.no_check, GAP_WORDS.no_plan_task]);
 });
 
 // A requirement with a check but no plan task is no gap until the issue has a plan document.

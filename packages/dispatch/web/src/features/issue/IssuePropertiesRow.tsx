@@ -19,7 +19,7 @@ import type { IssueField } from "./IssueFieldForms";
 import { IssueLabels } from "./IssueLabels";
 import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
-import { PROPERTY_LABELS, pageChrome } from "./page-structure";
+import { authorText, PROPERTY_LABELS, pageChrome } from "./page-structure";
 import type { IssueHeaderWrites } from "./useIssueHeaderWrites";
 import type { IssuePriorityWrite } from "./useIssuePriority";
 
@@ -53,12 +53,17 @@ export function IssuePropertiesRow({
   // turn it is, so the marker stays off rather than shown wrong.
   const knowsWhoseTurn = openAsks.every((ask) => ask.waiting_on !== undefined);
   const waitingForHuman = waitingOnHuman(openAsks);
+  // The marker's words are the page's own; the count beside them is the issue's data, so it is
+  // drawn as a value rather than as a word the page declares.
   const whoseTurn =
     openAsks.length === 0 || !knowsWhoseTurn
       ? null
       : waitingForHuman.length > 0
-        ? `${PROPERTY_LABELS.waiting_on_you} (${waitingForHuman.length})`
-        : `${PROPERTY_LABELS.waiting_on_agents} (${openAsks.length - waitingForHuman.length})`;
+        ? { count: waitingForHuman.length, label: PROPERTY_LABELS.waiting_on_you }
+        : {
+            count: openAsks.length - waitingForHuman.length,
+            label: PROPERTY_LABELS.waiting_on_agents,
+          };
   const approvalRequestOpen = openAsks.some((ask) => ask.kind === "approval");
   const showApprovalActions =
     documentArtifact?.approval !== undefined &&
@@ -130,7 +135,7 @@ export function IssuePropertiesRow({
           data-testid="issue-whose-turn"
           {...pageChrome}
         >
-          {whoseTurn}
+          {whoseTurn.label} (<span {...authorText}>{whoseTurn.count}</span>)
         </span>
       )}
     </div>

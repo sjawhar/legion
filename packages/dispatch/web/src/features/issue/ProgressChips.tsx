@@ -4,11 +4,14 @@ import type { IssueProgress, ProgressCount } from "../../api/types";
 import { pillClassName } from "../../components/Pill";
 import { useTooltips } from "../../components/tooltips";
 import { progressBarFill, surfaceMutedStrongBg, textSecondaryOnSurface } from "../../theme/classes";
+import { authorText, pageChrome } from "./page-structure";
+import { PROGRESS_NOUNS } from "./page-words";
 
-/** The noun a count is written with: `1/1 task`, `3/7 tasks`, `0/1 child`, `2/5 children`. */
+/** The noun a count is written with: `1/1 task`, `3/7 tasks`, `0/1 child`, `2/5 children`. The
+ *  words are the page's own, so they are declared where every other word of it is. */
 function countNoun(total: number, noun: "tasks" | "children"): string {
-  if (total === 1) return noun === "tasks" ? "task" : "child";
-  return noun;
+  if (noun === "tasks") return total === 1 ? PROGRESS_NOUNS.task : PROGRESS_NOUNS.tasks;
+  return total === 1 ? PROGRESS_NOUNS.child : PROGRESS_NOUNS.children;
 }
 
 /** What a count means, for the chip's `title`: plain text, since a title renders no markdown.
@@ -70,7 +73,10 @@ export function ProgressChips({
                 style={{ width: `${count.total === 0 ? 0 : (100 * count.done) / count.total}%` }}
               />
             </span>
-            <span className="whitespace-nowrap">{`${count.done}/${count.total} ${countNoun(count.total, noun)}`}</span>
+            <span className="whitespace-nowrap" {...pageChrome}>
+              <span {...authorText}>{`${count.done}/${count.total}`}</span>{" "}
+              {countNoun(count.total, noun)}
+            </span>
           </span>
         ) : (
           <span
@@ -78,8 +84,10 @@ export function ProgressChips({
             data-testid={`issue-progress-${noun}`}
             key={noun}
             title={tooltips ? countTitle(count, noun) : undefined}
+            {...pageChrome}
           >
-            {`${count.done}/${count.total} ${countNoun(count.total, noun)}`}
+            <span {...authorText}>{`${count.done}/${count.total}`}</span>{" "}
+            {countNoun(count.total, noun)}
           </span>
         )
       )}

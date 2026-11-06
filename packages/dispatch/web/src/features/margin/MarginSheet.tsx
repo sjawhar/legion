@@ -15,6 +15,7 @@ import {
 } from "../../theme/classes";
 import type { ComposerKind } from "../conversation/composer-model";
 import type { SaveCommentEdit } from "../conversation/send-request";
+import { authorText } from "../issue/page-structure";
 import {
   COMPACT_VIEWPORT_QUERY,
   PHONE_VIEWPORT_QUERY,
@@ -252,7 +253,10 @@ export function MarginSheet({
               }}
               type="button"
             >
-              <span>Review ({openAskCount})</span>
+              {/* The margin's own name and count, in the margin's words: a page that wraps the
+                  sheet declares its own vocabulary and marks the rest as text it did not write
+                  (`features/issue/page-structure.ts`). */}
+              <span {...authorText}>Review ({openAskCount})</span>
             </button>
           </>
         ) : null}

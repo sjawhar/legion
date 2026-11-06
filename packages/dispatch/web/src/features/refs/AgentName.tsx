@@ -18,6 +18,7 @@ import {
   offlineDotBorder,
   unknownDotBorder,
 } from "../../theme/classes";
+import { authorText } from "../issue/page-structure";
 import { askResolutionBadge, askResolutionReason } from "./actor";
 import { type AgentRegistry, type AgentState, useAgentRegistry } from "./agent-registry";
 import { AGENT_LIVE_PATH } from "./routes";
@@ -223,12 +224,15 @@ function SessionAgentName({
   // long title with no space breaks mid-word; a host's `truncate` (nowrap) still ellipsizes.
   // The short form `session:<8>…` does not tell sessions apart (ids minted in the same minute
   // share it), so an agent named by it carries its full id as its tooltip.
+  // An agent's name, and the person it acted for, are the names they were given, not words the
+  // issue page declares (`features/issue/page-structure.ts`), so the span carries that mark.
   return (
     <span
       className={className === undefined ? AGENT_SPAN_CLASS : `${AGENT_SPAN_CLASS} ${className}`}
       data-agent-name={sessionId}
       data-agent-state={state}
       title={tooltips && name === shortSessionId(sessionId) ? sessionId : undefined}
+      {...authorText}
     >
       <AgentStateMark lastSeen={registry.lastSeen(sessionId)} state={state} />
       {named}

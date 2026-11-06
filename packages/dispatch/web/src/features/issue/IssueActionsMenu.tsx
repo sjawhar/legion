@@ -59,7 +59,9 @@ export function IssueActionsMenu({ actions }: { actions: readonly IssueAction[] 
         onClick={() => setOpen((shown) => !shown)}
         type="button"
       >
-        <span aria-hidden="true">⋯</span>
+        <span aria-hidden="true" {...pageChrome}>
+          ⋯
+        </span>
       </button>
       {open ? (
         <div

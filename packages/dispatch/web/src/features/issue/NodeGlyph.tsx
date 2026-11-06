@@ -37,6 +37,10 @@ const GLYPH_PATHS: Readonly<Record<string, string>> = {
   "check-older": "M8 2 a6 6 0 1 0 0.01 0 Z M8 5 v3 l2 2",
   "check-passed": "M2 9 l4 4 l8 -10",
   "check-unmarked": "M8 2 a6 6 0 1 0 0.01 0 Z M5 8 h6",
+  /** A decision's three states. */
+  "decision-replaced": "M2 11 h12 M4 4 l8 4 l-8 4 Z",
+  "decision-waiting-review": "M1 8 a7 4 0 0 0 14 0 a7 4 0 0 0 -14 0 Z M8 6 v4",
+  "decision-yours": "M8 2 a3 3 0 1 0 0.01 0 Z M2 15 a6 6 0 0 1 12 0",
 };
 
 /** One shape, by its token: `svg[data-glyph]` with the accessible name the token carries. */

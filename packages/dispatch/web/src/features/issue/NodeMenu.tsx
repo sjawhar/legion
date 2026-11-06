@@ -16,6 +16,7 @@ import {
   CLOSED_ISSUE_UPLOAD_REFUSAL,
   useArtifactUpload,
 } from "../artifacts/ArtifactUpload";
+import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildReferencePath, documentRoute } from "../refs/routes";
 import { authorText, pageChrome } from "./page-structure";
 import { CONTROL_LABELS } from "./page-words";
@@ -72,19 +73,24 @@ export function NodeMenu({
       {open ? (
         <div className={MENU_CLASS} role="menu" tabIndex={-1}>
           {artifacts.map((artifact) => (
-            <button
-              className={MENU_ITEM_CLASS}
-              key={artifact.slug}
-              onClick={() => {
-                onClose();
-                navigate(buildReferencePath(documentRoute(artifact)));
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <span {...authorText}>{artifact.name}</span>{" "}
-              <span {...pageChrome}>{CONTROL_LABELS.nothing_cites_it}</span>
-            </button>
+            // The item and the artifact's own copy control, side by side: a document the menu
+            // lists is reachable here and nowhere else, so this is where it keeps the copy
+            // control every other node of the page has (R18, c-nothing-lost).
+            <div className="flex min-w-0 items-center gap-1" key={artifact.slug}>
+              <button
+                className={`min-w-0 flex-1 ${MENU_ITEM_CLASS}`}
+                onClick={() => {
+                  onClose();
+                  navigate(buildReferencePath(documentRoute(artifact)));
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <span {...authorText}>{artifact.name}</span>{" "}
+                <span {...pageChrome}>{CONTROL_LABELS.nothing_cites_it}</span>
+              </button>
+              <CopyRefButton route={documentRoute(artifact)} />
+            </div>
           ))}
           <button
             className={MENU_ITEM_CLASS}

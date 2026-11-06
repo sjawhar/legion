@@ -6,7 +6,7 @@ import { badgePrimary, linkHoverText, linkText, textMutedOnSurface } from "../..
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { type IssueAction, IssueActionsMenu } from "./IssueActionsMenu";
-import { authorText } from "./page-structure";
+import { authorText, pageChrome } from "./page-structure";
 
 /**
  * Row one of the identity block: where the issue sits, what it is called, and what a reader does
@@ -40,7 +40,9 @@ export function IssueIdentityRow({
           >
             {parent}
           </Link>
-          <span aria-hidden="true">›</span>
+          <span aria-hidden="true" {...pageChrome}>
+            ›
+          </span>
         </span>
       )}
       <p

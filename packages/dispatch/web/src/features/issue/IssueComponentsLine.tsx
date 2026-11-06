@@ -16,7 +16,8 @@ import {
 } from "../../theme/classes";
 import { ComponentPicker } from "../architecture/ComponentPicker";
 import { buildIssuePath } from "../refs/routes";
-import { authorText } from "./page-structure";
+import { authorText, PROPERTY_LABELS, pageChrome } from "./page-structure";
+import { CONTROL_LABELS } from "./page-words";
 import { useIssueComponents } from "./useIssueComponents";
 
 /**
@@ -54,11 +55,12 @@ export function IssueComponentsLine({
   const write = useIssueComponents(issue);
   const inheritedFrom =
     components.inherited_from === null ? null : (
-      <span className={`shrink-0 text-xs ${textMutedOnSurface}`}>
-        inherited from{" "}
+      <span className={`shrink-0 text-xs ${textMutedOnSurface}`} {...pageChrome}>
+        {CONTROL_LABELS.components_inherited_from}{" "}
         <Link
           className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
           to={buildIssuePath({ key: components.inherited_from, kind: "issue" })}
+          {...authorText}
         >
           {components.inherited_from}
         </Link>
@@ -69,11 +71,17 @@ export function IssueComponentsLine({
       className={`flex min-w-0 flex-wrap items-center gap-2 text-sm ${textSecondaryOnSurface}`}
       data-testid="issue-components"
     >
-      <span className="font-medium">Components:</span>
+      <span className="font-medium" {...pageChrome}>
+        {PROPERTY_LABELS.components}:
+      </span>
       {components.mode === "inherit" ? (
-        <span className={textMutedOnSurface}>Not attached</span>
+        <span className={textMutedOnSurface} {...pageChrome}>
+          {CONTROL_LABELS.components_not_attached}
+        </span>
       ) : components.mode === "none" ? (
-        <span className={textMutedOnSurface}>None — {components.reason}</span>
+        <span className={textMutedOnSurface} {...pageChrome}>
+          {CONTROL_LABELS.components_none} — <span {...authorText}>{components.reason}</span>
+        </span>
       ) : (
         <>
           {components.ids.map((id) => (
@@ -91,8 +99,9 @@ export function IssueComponentsLine({
               key={id}
               // No `title`: the chip reads "retired: <id>", which is the whole of it
               // (dispatch://INFRA-1196 R21).
+              {...pageChrome}
             >
-              retired: {id}
+              {CONTROL_LABELS.components_retired}: <span {...authorText}>{id}</span>
             </span>
           ))}
         </>
@@ -115,13 +124,15 @@ export function IssueComponentsLine({
           }
           triggerAriaLabel={`Edit components of ${issue.key}`}
         >
-          {components.mode === "explicit" && components.inherited_from === null
-            ? "+"
-            : "Set components"}
+          <span {...pageChrome}>
+            {components.mode === "explicit" && components.inherited_from === null
+              ? "+"
+              : CONTROL_LABELS.components_set}
+          </span>
         </ComponentPicker>
       )}
       {write.error === null ? null : (
-        <span className={`shrink-0 text-xs ${dangerText}`} role="alert">
+        <span className={`shrink-0 text-xs ${dangerText}`} role="alert" {...authorText}>
           {write.error}
         </span>
       )}

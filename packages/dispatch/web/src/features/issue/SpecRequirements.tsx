@@ -15,6 +15,14 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { BlockReferences } from "../refs/ReferencedBy";
+import { authorText, pageChrome } from "./page-structure";
+import {
+  CONTROL_LABELS,
+  coverageGapKind,
+  EMPTY_STATE_LINES,
+  GAP_WORDS,
+  READING_LINES,
+} from "./page-words";
 
 function Requirement({ requirement }: { requirement: RequirementCoverage }): ReactNode {
   // What the server says this requirement lacks, in the server's own words. The server decides
@@ -28,14 +36,17 @@ function Requirement({ requirement }: { requirement: RequirementCoverage }): Rea
       data-testid="spec-requirement"
     >
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className={textPrimaryOnSurface}>{requirement.text}</span>
+        <span className={textPrimaryOnSurface} {...authorText}>
+          {requirement.text}
+        </span>
         {gaps.map((gap) => (
           <span
             className={`${pillShapeClassName} ${surfaceMutedBg} ${inlineWarningText}`}
             data-testid="spec-requirement-gap"
             key={gap}
+            {...pageChrome}
           >
-            {gap}
+            {GAP_WORDS[coverageGapKind(gap)]}
           </span>
         ))}
       </div>
@@ -55,30 +66,32 @@ export function SpecRequirements({ issueKey }: { issueKey: string }): ReactNode 
 
   if (coverage.isPending) {
     return (
-      <p className={textMutedOnCanvas} data-testid="spec-requirements-loading">
-        Loading requirements…
+      <p className={textMutedOnCanvas} data-testid="spec-requirements-loading" {...pageChrome}>
+        {READING_LINES.coverage_loading}
       </p>
     );
   }
   if (coverage.isError) {
     return (
-      <p className={dangerText} data-testid="spec-requirements-error">
-        Could not load the requirement coverage.
+      <p className={dangerText} data-testid="spec-requirements-error" {...pageChrome}>
+        {READING_LINES.coverage_failed}
       </p>
     );
   }
   if (coverage.data.requirements.length === 0) {
     return (
-      <div data-testid="spec-no-requirements">
-        <EmptyState label="Requirements empty state" message="This spec marks no requirements." />
+      <div data-testid="spec-no-requirements" {...pageChrome}>
+        <EmptyState label="Requirements empty state" message={EMPTY_STATE_LINES.spec_marks_none} />
       </div>
     );
   }
 
   return (
     <section className="space-y-2" data-testid="spec-requirements">
-      <h2 className={`text-sm font-semibold ${textMutedOnSurface}`}>Requirements</h2>
-      <ul aria-label="Requirements" className="space-y-3">
+      <h2 className={`text-sm font-semibold ${textMutedOnSurface}`} {...pageChrome}>
+        {CONTROL_LABELS.requirements}
+      </h2>
+      <ul aria-label={CONTROL_LABELS.requirements} className="space-y-3">
         {coverage.data.requirements.map((requirement) => (
           <Requirement key={requirement.block_id} requirement={requirement} />
         ))}

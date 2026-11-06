@@ -131,7 +131,7 @@ export function IssueMarginPanel({
             {...pageChrome}
           >
             <span>{PROPERTY_LABELS.subscribers}:</span>
-            <span>{subscribers.rows.length}</span>
+            <span {...authorText}>{subscribers.rows.length}</span>
           </button>
           {subscribersOpen ? (
             <SubscribedAgents
@@ -173,12 +173,20 @@ export function IssueMarginPanel({
           ) : null}
         </PropertySection>
         <FocusedNodeFacts node={focused} />
-        {conversation}
+        {/* The margin's own cards, which the margin draws for every page it is beside and this
+            panel only wraps (`features/margin/margin-slot.tsx`): the issue's asks, comments,
+            messages and decisions, in the margin's words and the authors' own, and not the
+            page's declared vocabulary (dispatch://INFRA-1196 R21, `page-structure.ts`). */}
+        <div className="contents" {...authorText}>
+          {conversation}
+        </div>
         {/* Under the margin's own content, not above it: the margin places a landed card at a
           `top` it measures from the content above it, and a section inserted over that content
           moves the anchor it measured against. */}
         <ConversationStates onPick={onConversationState} state={conversationState} />
-        {conversationList}
+        <div className="contents" {...authorText}>
+          {conversationList}
+        </div>
       </div>
     </NoTooltips>
   );

@@ -35,6 +35,8 @@ import {
   nodeTypeName,
   PRESET_NAMES,
   PRESET_ORDER,
+  PROGRESS_NOUNS,
+  READING_LINES,
   RESULT_CURRENCY_WORDS,
   RESULT_VERDICT_WORDS,
   WAITING_LINES,
@@ -96,6 +98,8 @@ const WORD_SOURCES: readonly unknown[] = [
   KEY_REPORTS,
   GAP_LINES,
   GAP_WORDS,
+  PROGRESS_NOUNS,
+  READING_LINES,
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
   RESULT_VERDICT_WORDS,
@@ -148,9 +152,9 @@ test("every block type the schema declares has a name, and one it does not still
   expect(nodeTypeName("gantt_chart")).toBe("gantt chart");
 });
 
-test("a type the model gives no state has no state words, and the ask and the check have theirs", () => {
+test("a type the model gives no state has no state words, and the ask, the check and the decision have theirs", () => {
   for (const type of NODE_TYPES) {
-    if (type === "ask" || type === "check") {
+    if (type === "ask" || type === "check" || type === "decision") {
       continue;
     }
     expect(nodeStateWords(type)).toBeUndefined();
@@ -164,8 +168,15 @@ test("a type the model gives no state has no state words, and the ask and the ch
     "passed",
     "unmarked",
   ]);
+  // The three the old Decisions tab grouped by, which a decision's row now says in a word.
+  expect(Object.keys(NODE_STATE_WORDS.decision).sort()).toEqual([
+    "replaced",
+    "waiting_review",
+    "yours",
+  ]);
   expect(nodeStateWord("check", "no-result")).toBe("No result");
   expect(nodeStateWord("ask", "answered")).toBe("Answered");
+  expect(nodeStateWord("decision", "waiting_review")).toBe("Waiting for your review");
   expect(nodeStateWord("check", "retired")).toBeUndefined();
 });
 
@@ -175,11 +186,13 @@ test("no two types share a glyph token, and no two states of one surface share o
 
   const askTokens = Object.values(GLYPH_TOKENS.states.ask);
   const checkTokens = Object.values(GLYPH_TOKENS.states.check);
+  const decisionTokens = Object.values(GLYPH_TOKENS.states.decision);
   expect(new Set(askTokens).size).toBe(askTokens.length);
   expect(new Set(checkTokens).size).toBe(checkTokens.length);
+  expect(new Set(decisionTokens).size).toBe(decisionTokens.length);
   expect(checkTokens.length).toBe(5);
 
-  const everyToken = [...typeTokens, ...askTokens, ...checkTokens];
+  const everyToken = [...typeTokens, ...askTokens, ...checkTokens, ...decisionTokens];
   expect(new Set(everyToken).size).toBe(everyToken.length);
 });
 
@@ -188,12 +201,14 @@ test("every glyph token has an accessible name", () => {
     ...NODE_TYPES.map((type) => GLYPH_TOKENS.types[type]),
     ...Object.values(GLYPH_TOKENS.states.ask),
     ...Object.values(GLYPH_TOKENS.states.check),
+    ...Object.values(GLYPH_TOKENS.states.decision),
   ];
   for (const token of tokens) {
     expect(GLYPH_NAMES[token]).toMatch(/\S/);
   }
   expect(Object.keys(GLYPH_NAMES).sort()).toEqual([...tokens].sort());
   expect(GLYPH_NAMES["check-passed"]).toBe("Passed check");
+  expect(GLYPH_NAMES["decision-waiting-review"]).toBe("Waiting for your review decision");
   expect(GLYPH_NAMES["plan-task"]).toBe("plan task");
 });
 

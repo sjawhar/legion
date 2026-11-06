@@ -1,10 +1,16 @@
 import { parseBlockPointerValue } from "@legion/contracts";
 
-import type { Actor, Ask } from "../../api/types";
+import type { Actor, ArtifactBlock, Ask, Decision } from "../../api/types";
 import { buildDispatchReference, parseNodeReference } from "../refs/routes";
 import { checkFacts, resultFacts } from "./check-facts";
 import type { IssueTreeReads, NodeChip, NodeCounts, NodeFact } from "./issue-tree";
-import { type GapKind, NODE_TYPES, type NodeType } from "./page-words";
+import {
+  coverageGapKind,
+  type DecisionState,
+  type GapKind,
+  NODE_TYPES,
+  type NodeType,
+} from "./page-words";
 
 /**
  * One draft node per read of the issue page, for `buildIssueTree` to place
@@ -146,58 +152,58 @@ interface Citation {
 
 /**
  * Which block of which document cites each artifact of the issue, by the cited artifact's slug:
- * the first block, in document order, whose own text holds that artifact's `dispatch://`
- * address and not an address of one of its blocks, which names the block and not the document.
+ * the first of the citing blocks in document order, because a document cited twice is drawn
+ * once, under the first block that names it.
  *
- * The citation is read from the documents' own text rather than from `via_blocks`, because
- * `GET /issues/{key}/references` answers the closure of artifacts *outside* the issue
- * (`packages/envoy/internal/dispatch/refs/closure.go`'s
- * `where a.issue_key is distinct from $1`, read 2026-11-06), so it never names a document of
- * this issue that this issue's own spec cites - which is the citation the page draws. Both
- * reads this needs, each document's blocks and each document's text, the page already makes.
+ * The citation is the server's: `GET /issues/{key}/references?own=1` answers each document the
+ * issue reaches, its own included, with the blocks of its citer (`via_blocks`,
+ * `packages/envoy/internal/dispatch/refs/closure.go`). Reading it here rather than scanning
+ * each document's markdown is what keeps the first load from reading the stored text of a
+ * document the reader has not opened (dispatch://INFRA-1196 R20).
  *
- * A block's `from` and `to` are byte offsets into the stored markdown, as the server slices it,
- * so the cut is made over the encoded bytes: a document holding anything outside ASCII puts
- * every later block's byte offset past its JavaScript string index.
+ * A member whose via is not a document of this issue, or whose citer the page holds no blocks
+ * for, places nothing: the citation is drawn as a node under a block, and there is no block to
+ * draw it under.
  */
 function citations(reads: IssueTreeReads, context: TreeContext): Map<string, Citation> {
   const found = new Map<string, Citation>();
-  const texts = new Map((reads.texts ?? []).map((text) => [text.artifactId, text.markdown]));
-  if (texts.size === 0) return found;
-  const addresses = reads.issue.artifacts.map((artifact) => ({
-    slug: artifact.slug,
-    written: [
-      buildDispatchReference({ key: context.key, kind: "artifact", slug: artifact.slug }),
-      ...(artifact.primary ? [buildDispatchReference({ key: context.key, kind: "spec" })] : []),
-    ],
-  }));
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  for (const document of reads.documents ?? []) {
-    const slug = context.slugOf(document.artifactId);
-    const markdown = texts.get(document.artifactId);
-    if (slug === undefined || markdown === undefined) continue;
-    const bytes = encoder.encode(markdown);
-    for (const block of document.blocks) {
-      const text = decoder.decode(bytes.slice(block.from, block.to));
-      for (const address of addresses) {
-        if (address.slug === slug || found.has(address.slug)) continue;
-        if (!address.written.some((written) => namesTheDocument(text, written))) continue;
-        found.set(address.slug, { document: slug, id: blockNodeId(slug, block.id) });
-      }
-    }
+  const listings = new Map<string, readonly ArtifactBlock[]>(
+    (reads.documents ?? []).map((document) => [document.artifactId, document.blocks])
+  );
+  const ownSlugs = new Set(reads.issue.artifacts.map((artifact) => artifact.slug));
+  for (const member of reads.references?.members ?? []) {
+    const slug = member.artifact.slug;
+    if (!ownSlugs.has(slug) || found.has(slug)) continue;
+    if (member.via.kind !== "artifact") continue;
+    const document = context.slugOf(member.via.id);
+    const cites = member.via_blocks ?? [];
+    if (document === undefined || cites.length === 0 || document === slug) continue;
+    const id = citingRow(listings.get(member.via.id), cites);
+    if (id === undefined) continue;
+    found.set(slug, { document, id: blockNodeId(document, id) });
   }
   return found;
 }
 
-/** Whether `text` names the document `written` addresses rather than one of its blocks: a
- *  `#` after the address names a block of that document, which cites the block and not the
- *  document it stands in. */
-function namesTheDocument(text: string, written: string): boolean {
-  for (let at = text.indexOf(written); at !== -1; at = text.indexOf(written, at + 1)) {
-    if (text[at + written.length] !== "#") return true;
-  }
-  return false;
+/**
+ * Which block of `blocks` the citation is drawn on. The server names the block its index holds
+ * the link in, which is the innermost one - the paragraph inside a `requirement`, not the
+ * requirement - and the tree draws a row for the listed block that holds that paragraph. So the
+ * row is the first listed block, in document order, whose byte span covers a citing block's,
+ * which is the outermost of them; a listing the page has not read yet, or one holding none of
+ * the citing blocks, falls back to the first id the server named.
+ */
+function citingRow(
+  blocks: readonly ArtifactBlock[] | undefined,
+  cites: readonly string[]
+): string | undefined {
+  if (blocks === undefined) return cites[0];
+  const cited = blocks.filter((block) => cites.includes(block.id));
+  if (cited.length === 0) return cites[0];
+  const holder = blocks.find((block) =>
+    cited.some((inner) => block.from <= inner.from && inner.to <= block.to)
+  );
+  return holder?.id ?? cites[0];
 }
 
 /**
@@ -438,10 +444,31 @@ function addDecisions(
     draft.reference = decision.ref;
     draft.replaced = decision.replaced;
     draft.text = decision.text;
+    // How the decision stands with the reader, drawn as this node's own state word and shape
+    // the way every other state is (R21). It is what the old Decisions tab's four sections
+    // told a reader by grouping, and the one a reader looks for - what waits for their review
+    // - wins where a decision would be in two (`NODE_STATE_WORDS.decision`).
+    draft.state = decisionState(decision);
     // What waits for the reader: its node is where Keep and Change are drawn, and the one the
     // Decisions preset opens on (R7, `DecisionActions.tsx`).
     draft.waiting = decision.waiting_review;
   });
+}
+
+/**
+ * How a decision stands with the reader, in the three states the page draws
+ * (`NODE_STATE_WORDS.decision`). The reading is the one the old Decisions tab grouped by, in
+ * the order a reader reads it: what waits for their review first, because that is what they
+ * come to the preset for; then a decision replaced by a later one; then one that is theirs - a
+ * person's own, or an agent's they kept. A decision in none of the three is an agent's that
+ * nobody has reviewed and nothing replaced, which stood in no section of that tab, so it is in
+ * no state here and the row draws none.
+ */
+function decisionState(decision: Decision): DecisionState | undefined {
+  if (decision.waiting_review) return "waiting_review";
+  if (decision.replaced) return "replaced";
+  if (decision.kind === "person" || decision.kept !== null) return "yours";
+  return undefined;
 }
 
 /**
@@ -493,7 +520,7 @@ function requirementGaps(
   const gaps: GapKind[] = [];
   if (origin === undefined) gaps.push("no_origin");
   for (const gap of coverage) {
-    gaps.push(gap.endsWith("has no check") ? "no_check" : "no_plan_task");
+    gaps.push(coverageGapKind(gap));
   }
   if (origin !== undefined && shaped > 0) gaps.push("shaped_disagreement");
   return gaps;

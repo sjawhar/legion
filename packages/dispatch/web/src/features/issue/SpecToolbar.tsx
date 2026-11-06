@@ -13,6 +13,8 @@ import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import type { DispatchReferenceRoute } from "../refs/routes";
+import { pageChrome } from "./page-structure";
+import { CONTROL_LABELS } from "./page-words";
 
 /** The toolbar's button: a 44 px tap target through tablet widths, 32 px from `md`. */
 const toolbarButton = `min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`;
@@ -59,19 +61,22 @@ export function SpecToolbar({
         ))}
       </select>
       <button
-        aria-label="Name version"
+        aria-label={CONTROL_LABELS.name_version}
         className={`${toolbarButton} ${secondaryButtonDisabledText}`}
         disabled={isClosed || toolbar.isNamingVersion}
         onClick={toolbar.requestNamedVersion}
         type="button"
+        {...pageChrome}
       >
-        Name
+        {CONTROL_LABELS.name}
       </button>
       <ConnectionDot connection={toolbar.connection} pending={toolbar.pending} />
       <CopyRefButton route={reference} />
       {version === undefined ? (
         <>
           <button
+            // The name the old page's inventory recorded for this control, which says what the
+            // link addresses; the word it draws is the page's own (`page-words.ts`).
             aria-label="Copy link to block"
             className={`${toolbarButton} ${secondaryButtonDisabledText}`}
             onClick={() => {
@@ -81,21 +86,28 @@ export function SpecToolbar({
               );
             }}
             type="button"
+            {...pageChrome}
           >
-            Copy link
+            {CONTROL_LABELS.copy_link}
           </button>
           {copyFeedback === undefined ? null : (
             <span
               className={`text-xs font-medium ${copyFeedback === "copied" ? successText : dangerText}`}
               role="status"
+              {...pageChrome}
             >
-              {copyFeedback === "copied" ? "Copied" : "Copy failed - select the text"}
+              {copyFeedback === "copied" ? CONTROL_LABELS.copied : CONTROL_LABELS.copy_failed_hint}
             </span>
           )}
         </>
       ) : (
-        <button className={toolbarButton} onClick={() => onShowDiffChange(!showDiff)} type="button">
-          {showDiff ? "Show version" : "Diff vs current"}
+        <button
+          className={toolbarButton}
+          onClick={() => onShowDiffChange(!showDiff)}
+          type="button"
+          {...pageChrome}
+        >
+          {showDiff ? CONTROL_LABELS.show_version : CONTROL_LABELS.diff_vs_current}
         </button>
       )}
     </div>

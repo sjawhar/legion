@@ -1,6 +1,8 @@
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 
+import { AUTHOR_TEXT_ATTRIBUTE } from "./page-structure";
+
 /**
  * Where each document the issue page has open is drawn (dispatch://INFRA-1196 R2, R16,
  * `dispatch://INFRA-1196/artifact/plan-md#b-t17`).
@@ -77,6 +79,10 @@ function createStageBoard(): StageBoard {
       if (held !== undefined) return held;
       const made = document.createElement("div");
       made.className = "flex min-w-0 flex-col";
+      // Whatever is drawn on a stage is one document as its author wrote it - its blocks, their
+      // attributes and the words inside them - and never the page's own vocabulary, wherever
+      // the stage is placed (dispatch://INFRA-1196 R21, `page-structure.ts`).
+      made.setAttribute(AUTHOR_TEXT_ATTRIBUTE, "");
       elements.set(artifactId, made);
       return made;
     },

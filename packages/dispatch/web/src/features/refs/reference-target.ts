@@ -72,7 +72,7 @@ export interface ReferenceTarget {
 
 /** How much of a target's own text becomes a reference link's title: an ask's question, a
  *  comment's body. Long enough to recognise, short enough for a link inside a sentence. */
-const TITLE_HEADLINE_MAX = 60;
+export const TITLE_HEADLINE_MAX = 60;
 
 /** What a reference to an issue, or to one of its documents, shows: the issue's title and status
  *  and each document's name, kind, latest version and whether it is the spec
@@ -184,7 +184,7 @@ export function summarySpec(
 
 /** The block a route names, as the reference its graph read is keyed by; undefined for a route
  *  that names no block. */
-function blockReferenceOf(route: DispatchReferenceRoute | undefined): string | undefined {
+export function blockReferenceOf(route: DispatchReferenceRoute | undefined): string | undefined {
   return route !== undefined && "block" in route && route.block !== undefined
     ? buildDispatchReference(route)
     : undefined;

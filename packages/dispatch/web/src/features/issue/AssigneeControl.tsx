@@ -5,6 +5,8 @@ import { usersQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { badgeLow, badgePrimary } from "../../theme/classes";
 import { badgeSelectBadge, badgeSelectOverlay, badgeSelectWrapper } from "./badge-select";
+import { authorText, pageChrome } from "./page-structure";
+import { CONTROL_LABELS } from "./page-words";
 import { useIssueAssignee } from "./useIssueAssignee";
 
 /**
@@ -42,8 +44,12 @@ export function AssigneeControl({
   return (
     <>
       <span className={`${badgeSelectWrapper} ${disabled ? "opacity-50" : ""}`}>
-        <span aria-hidden="true" className={`${badgeSelectBadge} ${tone.bg} ${tone.text}`}>
-          {assignee ?? "Unassigned"}
+        <span
+          aria-hidden="true"
+          className={`${badgeSelectBadge} ${tone.bg} ${tone.text}`}
+          {...(assignee === null ? pageChrome : authorText)}
+        >
+          {assignee ?? CONTROL_LABELS.unassigned}
         </span>
         <select
           aria-label={`Assignee of ${issueKey}`}

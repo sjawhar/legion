@@ -93,7 +93,8 @@ interface PageInventoryFixture {
   readonly "open-390": readonly InventoryEntry[];
   readonly "closed-1440": readonly InventoryEntry[];
   readonly "closed-390": readonly InventoryEntry[];
-  /** Filled by the redesign: a recorded name mapped to the name the new page gives it. */
+  /** Filled by the redesign: each recorded entry, as the `role "name"` a failure prints, mapped
+   *  to the entry the new page offers in its place, in the same form (`page-inventory.ts`). */
   readonly renames: Readonly<Record<string, string>>;
 }
 

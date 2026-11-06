@@ -17,20 +17,24 @@ export function CopyRefButton({
   className,
   primary,
   route,
+  tabbable,
 }: {
   className?: string;
   primary?: { label: string; value: string };
   route: DispatchReferenceRoute;
+  /** Whether Tab reaches it; a control inside a tree's row does not (`CopyButton`). */
+  tabbable?: boolean;
 }): ReactNode {
   const reference = buildDispatchReference(route);
   return (
     <span className="contents" data-copy-ref="">
       {primary === undefined ? (
-        <CopyButton className={className} value={reference} what="reference" />
+        <CopyButton className={className} tabbable={tabbable} value={reference} what="reference" />
       ) : (
         <CopyButton
           className={className}
           label={`Copy ${primary.label} · ${MODIFIER}-click copies the reference`}
+          tabbable={tabbable}
           value={(event) => (event.metaKey || event.ctrlKey ? reference : primary.value)}
           what="reference"
         />

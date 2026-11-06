@@ -116,8 +116,10 @@ test("a task that serves and needs nothing says so", async () => {
   };
 
   const task = within(await screen.findByTestId("plan-task"));
-  expect(task.getByTestId("plan-task-serves").textContent).toBe("Servesnone");
-  expect(task.getByTestId("plan-task-needs").textContent).toBe("Needsnone");
+  // The labels are the block attributes' own, as the tree's node facts draw them
+  // (`features/issue/page-words.ts`), so they read lowercase.
+  expect(task.getByTestId("plan-task-serves").textContent).toBe("servesnone");
+  expect(task.getByTestId("plan-task-needs").textContent).toBe("needsnone");
 });
 
 // A plan is approved by its plan review, never by a person, and the chip beside it says so.

@@ -428,11 +428,39 @@ func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, 
 	return nil
 }
 
+// ownRequested reads ?own of an issue references request: 1 answers the issue's own documents
+// as members too, 0 or absent answers only what the issue reaches outside itself, and anything
+// else - a repeat of the parameter among them - is refused rather than read by its first value,
+// so a caller that meant to widen the read is never quietly given the narrow answer.
+func ownRequested(r *http.Request) (bool, error) {
+	values, present := r.URL.Query()["own"]
+	if !present {
+		return false, nil
+	}
+	if len(values) == 1 {
+		switch values[0] {
+		case "1":
+			return true, nil
+		case "", "0":
+			return false, nil
+		}
+	}
+	return false, errorf(http.StatusBadRequest, "INVALID_QUERY", "own must be given once, as 0 or 1")
+}
+
 // getIssueReferences answers an issue's reference closure. ?versions=latest leaves each member's
 // artifact.versions holding only its latest version, under its own ETag; absent, empty or all is
-// the full answer. A repeated versions is refused rather than read by its first value.
+// the full answer. ?own=1 answers the issue's own documents as members too, each with the blocks
+// citing it, which is what a reader drawing a document under the block that cites it needs;
+// absent or 0 is the long-standing answer, the artifacts the issue reaches outside itself. A
+// repeated versions or own is refused rather than read by its first value.
 func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	own, err := ownRequested(r)
+	if err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
 	versionsValues := r.URL.Query()["versions"]
@@ -451,12 +479,12 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	issue, err := s.loadIssue(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
-	if err != nil {
-		s.writeHandlerError(w, err)
+	issue, loadErr := s.loadIssue(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
+	if loadErr != nil {
+		s.writeHandlerError(w, loadErr)
 		return
 	}
-	closure, truncated, err := refs.Closure(r.Context(), s.deps.Store.Pool, issue.Key)
+	closure, truncated, err := refs.Closure(r.Context(), s.deps.Store.Pool, issue.Key, own)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

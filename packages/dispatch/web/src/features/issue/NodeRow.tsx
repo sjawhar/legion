@@ -1,13 +1,18 @@
 import { type ReactNode, useLayoutEffect, useRef } from "react";
+import { Link } from "react-router-dom";
+
 import type { Artifact } from "../../api/types";
 import {
   borderDefault,
   borderTransparent,
+  linkHoverText,
+  linkText,
   quoteAccentBorder,
   surfaceMutedHoverBg,
   textMutedOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { buildReferencePath, parseNodeReference } from "../refs/routes";
 import { DecisionActions } from "./DecisionActions";
 import { STAGE_IN_ROW, useDocumentStage } from "./document-stage";
 import { bringOnScreen } from "./identity-block";
@@ -109,10 +114,18 @@ export function NodeRow({
 
   // The focused row is brought inside the viewport and clear of the sticky identity block
   // after every move, by the one rule the whole page places a target with (R9,
-  // `identity-block.ts`).
+  // `identity-block.ts`), and again whenever the row grows under it: a document's node reads
+  // its own text when the body opens, because the page reads no document's text before a
+  // reader opens it (R20), so the row the focus lands on is short for as long as that read
+  // takes and the text would otherwise push its foot off the screen.
   useLayoutEffect(() => {
     const element = row.current;
-    if (focused && element !== null) bringOnScreen(element);
+    if (!focused || element === null) return;
+    bringOnScreen(element);
+    if (typeof ResizeObserver === "undefined") return;
+    const grown = new ResizeObserver(() => bringOnScreen(element));
+    grown.observe(element);
+    return () => grown.disconnect();
   }, [focused]);
 
   return (
@@ -241,6 +254,28 @@ function Twisty({ expanded, onToggle }: { expanded?: boolean; onToggle: () => vo
  * document apart. A target nothing answers to now says so instead of naming nothing.
  */
 function Chip({ chip, label }: { chip: NodeChip; label?: string }): ReactNode {
+  const route = chip.gone ? undefined : parseNodeReference(chip.ref);
+  // The target's own words, as the link a reader follows to it: a chip names a node the page
+  // may not be drawing, and the old page's decision cards reached each one by its words (R18,
+  // c-nothing-lost). A target nothing answers to now, or a reference the grammar cannot read,
+  // is text: there is nowhere to go.
+  const named =
+    chip.name === "" ? null : route === undefined ? (
+      <span {...authorText}>{`${chip.name} `}</span>
+    ) : (
+      <>
+        {/* Out of the tab order, as every other control inside a row is: the tree is one tab
+            stop and its own keys move inside it (R9, `useTreeKeymap.ts`). */}
+        <Link
+          className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
+          tabIndex={-1}
+          to={buildReferencePath(route)}
+          {...authorText}
+        >
+          {chip.name}
+        </Link>{" "}
+      </>
+    );
   return (
     <span
       className={`rounded border px-1 text-xs ${borderDefault} ${textMutedOnCanvas}`}
@@ -248,11 +283,7 @@ function Chip({ chip, label }: { chip: NodeChip; label?: string }): ReactNode {
     >
       {label === undefined ? null : <span {...pageChrome}>{label} </span>}
       {chip.stale === true ? <span {...pageChrome}>{CONTROL_LABELS.target_stale} </span> : null}
-      {chip.gone ? (
-        <span {...pageChrome}>{CONTROL_LABELS.target_gone} </span>
-      ) : (
-        <span {...authorText}>{chip.name === "" ? "" : `${chip.name} `}</span>
-      )}
+      {chip.gone ? <span {...pageChrome}>{CONTROL_LABELS.target_gone} </span> : named}
       <span className="break-all" {...authorText}>
         {chip.ref}
       </span>

@@ -124,9 +124,9 @@ func insertDocumentBlock(t *testing.T, tx pgx.Tx, artifactID, blockID, nodeID st
 // main's oracle carry, in the order the statement gave them, which is how the two statements'
 // answers are compared here. The closure answers a fifth column main's did not — the blocks of
 // the member's via that cite it — which is read through Closure itself, whose members carry it.
-func closureStatementRows(t *testing.T, database *store.Store, statement, issueKey string) []closureRow {
+func closureStatementRows(t *testing.T, database *store.Store, statement string, args ...any) []closureRow {
 	t.Helper()
-	rows, err := database.Pool.Query(context.Background(), statement, issueKey)
+	rows, err := database.Pool.Query(context.Background(), statement, args...)
 	if err != nil {
 		t.Fatalf("run the closure statement: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestTheClosureAnswersWhatMainsStatementDid(t *testing.T) {
 	if len(want) < 9 {
 		t.Fatalf("main's closure answered %d rows, too few for the comparison to decide anything: %v", len(want), want)
 	}
-	if got := closureStatementRows(t, fixture.database, closureQuery, "CORE-1"); !reflect.DeepEqual(got, want) {
+	if got := closureStatementRows(t, fixture.database, closureQuery, "CORE-1", false); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the closure answered\n%v\nwant main's rows\n%v", got, want)
 	}
 
@@ -184,7 +184,7 @@ func TestTheClosureAnswersWhatMainsStatementDid(t *testing.T) {
 	if !wantTruncated {
 		t.Fatal("main's closure reached no ninth hop, so the fixture decides nothing about truncation")
 	}
-	members, truncated, err := Closure(context.Background(), fixture.database.Pool, "CORE-1")
+	members, truncated, err := Closure(context.Background(), fixture.database.Pool, "CORE-1", false)
 	if err != nil {
 		t.Fatalf("read the closure: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestTheClosureProbesDocumentBlocksThroughItsNodeIndex(t *testing.T) {
 		t.Fatalf("set local enable_seqscan = off: %v", err)
 	}
 	var raw []byte
-	if err := tx.QueryRow(ctx, "explain (format json) "+closureQuery, "CORE-1").Scan(&raw); err != nil {
+	if err := tx.QueryRow(ctx, "explain (format json) "+closureQuery, "CORE-1", false).Scan(&raw); err != nil {
 		t.Fatalf("explain the closure: %v", err)
 	}
 	plan := explaintest.OnePlan(t, raw)

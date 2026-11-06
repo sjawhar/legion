@@ -9,12 +9,11 @@ import {
   referenceTargetsQuery,
 } from "../../api/queries";
 import type { IssueDetails } from "../../api/types";
-import { liveTextQueryOptions } from "../doc/ProofDocument";
 import { issueDecisionsQuery } from "../doc/spec-marks";
+import { usePublishReferenceNames } from "../refs/reference-names";
 import {
   buildIssueTree,
   type DocumentBlocks,
-  type DocumentText,
   type IssueTreeReads,
   type TreeNode,
   treeReferences,
@@ -26,12 +25,14 @@ import {
  * server and the page makes no request per node.
  *
  * The reads are the issue's own (handed in, because the page already has it), the coverage, the
- * decisions, the results, the references, the issue's asks, and the blocks of each document -
- * ids, types and attributes, never text, which is how a `serves` edge is held without reading a
- * document the reader has not opened. Every one of them is a key another surface of this issue
- * already reads, so opening the Conversation or the Decisions panel after the tree finds them
- * answered rather than fetching again. The conversation's comments and messages are nodes of
- * this tree too, and a child issue's check reads them (`tree-drafts.ts`, `treeDrafts`).
+ * decisions, the results, the references (`?own=1`, which names the blocks citing each document
+ * of the issue), the issue's asks, and the blocks of each document - ids, types and attributes,
+ * never text, which is how a `serves` edge is held without reading a document the reader has
+ * not opened (R20). Every one of them is a key another surface of this issue already reads, so
+ * opening the Conversation or the Decisions panel after the tree finds them answered rather
+ * than fetching again. The conversation's comments and messages are nodes of this tree too, and
+ * a child issue's check reads them (`tree-drafts.ts`, `treeDrafts`). A document's own text is
+ * read by the node that opens it and by nothing else (`NodeArtifact.tsx`).
  *
  * The names come last and all at once: the tree is built, every address it holds is read in one
  * batched request (`referenceTargetsQuery`), and the tree is built again with the names in it.
@@ -43,9 +44,12 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
   const coverage = useQuery(issueCoverageQuery(key));
   const decisions = useQuery(issueDecisionsQuery(key, true));
   const results = useQuery(issueResultsQuery(key));
+  // `?own=1`, so the closure answers the issue's own documents too, each with the blocks of
+  // its citer: that is how a document is drawn under the block citing it (`tree-drafts.ts`'s
+  // `citations`) without reading any document's stored text, which R20 forbids on a first load.
   const references = useQuery({
-    queryKey: ["issue", key, "references"],
-    queryFn: () => api.getIssueReferences(key),
+    queryKey: ["issue", key, "references", "own"],
+    queryFn: () => api.getIssueReferences(key, { own: true }),
   });
   const asks = useQuery({
     queryKey: ["asks", key],
@@ -75,19 +79,6 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
       })),
     queries: documentIds.map((id) => artifactBlocksQuery(id)),
   });
-  // A document of the issue is a node of this tree, and a node's body opens its own text
-  // (`NodeArtifact.tsx`), as well as holding the citations that place the documents it names
-  // (`tree-drafts.ts`'s `citations`): the page holds the text of each one under the key the
-  // editor's own admission read already uses, one read per document and never one per node.
-  const texts = useQueries({
-    combine: (answers): DocumentText[] =>
-      answers.flatMap((answer, index) => {
-        const markdown = answer.data?.markdown;
-        const artifactId = documentIds[index];
-        return markdown === undefined || artifactId === undefined ? [] : [{ artifactId, markdown }];
-      }),
-    queries: documentIds.map((id) => liveTextQueryOptions(id)),
-  });
   // One value, so the model is given the reads and nothing else.
   const reads = useMemo<IssueTreeReads>(
     () => ({
@@ -100,7 +91,6 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
       messages: messages.data,
       references: references.data,
       results: results.data,
-      texts,
     }),
     [
       asks.data,
@@ -112,13 +102,25 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
       messages.data,
       references.data,
       results.data,
-      texts,
     ]
   );
   const unnamed = useMemo(() => buildIssueTree(reads), [reads]);
   const refs = useMemo(() => treeReferences(unnamed), [unnamed]);
   const targets = useQuery(referenceTargetsQuery(refs));
   const named = targets.data?.targets;
+  // The same answer every link of this page would otherwise read one pointer at a time: a
+  // block's own words, which a link in a document, in a decision's card or in a comment's
+  // preview shows (`features/refs/reference-names.tsx`, R20).
+  const names = useMemo(
+    () =>
+      new Map(
+        (named ?? [])
+          .filter((target) => !target.gone && target.name !== null)
+          .map((target) => [target.ref, target.name ?? ""])
+      ),
+    [named]
+  );
+  usePublishReferenceNames(names);
   return useMemo(
     () => (named === undefined ? unnamed : buildIssueTree({ ...reads, targets: named })),
     [named, reads, unnamed]

@@ -29,7 +29,13 @@ export function freeze<T>(value: T): T {
 /** The attribute every element carries whose visible text is the page's own vocabulary. */
 export const PAGE_CHROME_ATTRIBUTE = "data-page-chrome";
 
-/** The attribute every element carries whose visible text came from a person or an agent. */
+/**
+ * The attribute every element carries whose visible text is not the page's own vocabulary: what
+ * a person or an agent wrote - a title, a name, a node's own text, a value - and what another
+ * surface the page hosts draws in its own words, such as a document's rendered body on its
+ * stage (`document-stage.tsx`) or the margin's own cards inside the panel (`IssueMargin.tsx`).
+ * The page declares the words it says itself, and marks the rest as text it did not author.
+ */
 export const AUTHOR_TEXT_ATTRIBUTE = "data-author-text";
 
 /** The mark an element wears whose text is the page's own vocabulary: `<span {...pageChrome}>`,
@@ -38,7 +44,7 @@ export const pageChrome: Readonly<Record<string, string>> = freeze({
   [PAGE_CHROME_ATTRIBUTE]: "",
 });
 
-/** The same, for text a person or an agent wrote. */
+/** The same, for text the page did not author (`AUTHOR_TEXT_ATTRIBUTE`). */
 export const authorText: Readonly<Record<string, string>> = freeze({
   [AUTHOR_TEXT_ATTRIBUTE]: "",
 });

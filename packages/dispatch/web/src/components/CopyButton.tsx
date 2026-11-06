@@ -18,12 +18,16 @@ export function CopyButton({
   children,
   className,
   label,
+  tabbable = true,
   value,
   what,
 }: {
   children?: ReactNode;
   className?: string;
   label?: string;
+  /** Whether Tab reaches it. A control inside a tree's row is out of the tab order, because
+   *  the tree is one tab stop and its own keys move inside it (`features/issue/NodeRow.tsx`). */
+  tabbable?: boolean;
   value: string | ((event: MouseEvent<HTMLButtonElement>) => string);
   what: string;
 }): ReactNode {
@@ -41,6 +45,7 @@ export function CopyButton({
         aria-label={name}
         className={`inline-flex min-h-11 shrink-0 items-center rounded-lg md:min-h-8 ${shape} ${linkText} ${linkHoverText} ${className ?? ""}`}
         onClick={(event) => copy(typeof value === "string" ? value : value(event))}
+        tabIndex={tabbable ? undefined : -1}
         title={tooltips ? name : undefined}
         type="button"
       >

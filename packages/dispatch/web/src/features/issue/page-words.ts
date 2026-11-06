@@ -81,6 +81,15 @@ export type NodeType = keyof typeof NODE_TYPE_NAMES;
  * The ask's three states are the `state` choices of the `ask` block (`blocks.json`). The
  * check's five are `checkState`'s (`features/issue/tree-drafts.ts`), and the page
  * must tell all five apart, so each keeps a word of its own.
+ *
+ * A decision's three are how the old Decisions tab grouped them, which is what a reader used
+ * to find the ones waiting on them: `waiting_review` is what waits for the reader's review,
+ * `yours` is a decision a person made or an agent's one the reader kept
+ * (`kind === "person" || kept !== null`, and not replaced), and `replaced` is one a later
+ * decision replaced (`decisions.go`, `DecisionsPanel.tsx` at
+ * 7567aeb606f309f40d4145f3d6a49c19fd452558). A decision in none of the three - an agent's that
+ * nobody has reviewed and nothing replaced - stood in no section of that tab either, and draws
+ * no state here.
  */
 export const NODE_STATE_WORDS = freeze({
   ask: {
@@ -95,6 +104,11 @@ export const NODE_STATE_WORDS = freeze({
     passed: "Passed",
     unmarked: "Unmarked",
   },
+  decision: {
+    replaced: "Replaced",
+    waiting_review: "Waiting for your review",
+    yours: "Yours",
+  },
 } as const);
 
 /** How an ask stands, by the `state` the server writes into its block. */
@@ -102,6 +116,9 @@ export type AskState = keyof typeof NODE_STATE_WORDS.ask;
 
 /** How a check stands, from the newest result recorded against it. */
 export type CheckState = keyof typeof NODE_STATE_WORDS.check;
+
+/** How a decision stands with the reader, from the decisions read. */
+export type DecisionState = keyof typeof NODE_STATE_WORDS.decision;
 
 /** Every node kind, in one list, for a caller that walks them all. */
 export const NODE_TYPES: readonly NodeType[] = freeze(keysOf(NODE_TYPE_NAMES));
@@ -223,6 +240,9 @@ export const EMPTY_STATE_LINES = freeze({
   folded_branch: "This branch holds nothing.",
   plan: "This issue has no plan tasks yet.",
   spec: "This issue has no requirements yet.",
+  /** What the requirements panel says of a spec that marks none, which is not the same as an
+   *  issue with no spec at all. */
+  spec_marks_none: "This spec marks no requirements.",
   spec_summary: "This spec has no summary.",
   tree: "This issue holds nothing yet.",
 } as const);
@@ -263,6 +283,32 @@ export const GAP_WORDS = freeze({
   no_summary_author: "No author",
   shaped_disagreement: "Two origins",
 } as const satisfies Record<GapKind, string>);
+
+/**
+ * Which gap one line of the coverage read names. The server writes `<block id> has no check`
+ * and `<block id> has no plan task` (`RequirementCoverage.gaps`), which name a block by its id;
+ * every surface of the page reads the line through this and draws `GAP_WORDS` or `GAP_LINES`
+ * instead, so no identifier and no server phrasing is drawn where a name belongs (R21).
+ */
+export function coverageGapKind(line: string): GapKind {
+  return line.endsWith("has no check") ? "no_check" : "no_plan_task";
+}
+
+/** The noun a progress count is written with: `1/1 task`, `3/7 tasks`, `0/1 child`,
+ *  `2/5 children`. The count itself is the issue's own and carries `AUTHOR_TEXT_ATTRIBUTE`. */
+export const PROGRESS_NOUNS = freeze({
+  child: "child",
+  children: "children",
+  task: "task",
+  tasks: "tasks",
+} as const);
+
+/** What a panel says while a read of its own is out, and when that read failed. Neither is an
+ *  empty state - the place may hold plenty - so neither belongs in `EMPTY_STATE_LINES`. */
+export const READING_LINES = freeze({
+  coverage_failed: "Could not load the requirement coverage.",
+  coverage_loading: "Loading requirements…",
+} as const);
 
 /**
  * Each `when` value of a check block as words (R15). The values are the `when` choices of the
@@ -341,6 +387,17 @@ export const CONTROL_LABELS = freeze({
   children_done: "Children done",
   /** Closes the issue, from the identity block's one actions control (R11). */
   close_issue: "Close issue",
+  /** What the components line says of an issue whose components come from an ancestor. */
+  components_inherited_from: "inherited from",
+  /** What it says of an issue the project's component tree reaches no component for, before
+   *  the reason the server gives for that. */
+  components_none: "None",
+  /** What it says of an issue attached to no component at all. */
+  components_not_attached: "Not attached",
+  /** What it says of a component id the project's tree no longer holds, before that id. */
+  components_retired: "retired",
+  /** The control that attaches an issue with no components of its own to some. */
+  components_set: "Set components",
   /** The heading of the conversation inside the one right-hand panel (R12). */
   conversation: "Conversation",
   /** The word that control carries, beside the command it copies. */
@@ -350,6 +407,12 @@ export const CONTROL_LABELS = freeze({
   /** What it says once the command is on the clipboard, and when the browser refused it. */
   copied: "Copied",
   copy_failed: "Copy failed",
+  /** Why a copy the browser refused can still be made: the toolbar says what to do instead. */
+  copy_failed_hint: "Copy failed - select the text",
+  /** Copies the address of the block the caret is in, in the open document's toolbar (R16). */
+  copy_link: "Copy link",
+  /** Draws a pinned version of the open document against the document as it stands (R16). */
+  diff_vs_current: "Diff vs current",
   /** The one row a branch below the three drawn levels folds to, which opens it in place: the
    *  count before it is the branch's own and carries `AUTHOR_TEXT_ATTRIBUTE` (R1). */
   deeper_nodes: "nodes deeper in this branch",
@@ -357,12 +420,19 @@ export const CONTROL_LABELS = freeze({
   download: "Download",
   /** Gives an issue that has a parent a different one (R11, row one). */
   edit_parent: "Edit parent issue",
+  /** What an external link says of an address the browser will not open. */
+  external_link_unsafe: "unsafe external link",
   /** The box that narrows the preset to the rows whose words hold what is typed (R3). */
   filter: "Filter",
   /** Closes a branch of the tree (R1). */
   fold: "Fold",
   /** What a folded branch says it holds, after the count of the nodes under it (R1). */
   folded_nodes: "nodes folded",
+  /** How many checks a pull request has, before the count GitHub gives. */
+  github_checks: "checks",
+  /** What an external link says when Dispatch holds no token for its repository: the line is
+   *  drawn beside the link rather than kept in a tooltip (R21). */
+  github_unavailable: "GitHub details are unavailable for this repository",
   /** The head's first row: where the plan says how the issue gets done (R5). */
   how_it_gets_done: "How it gets done",
   /** The one control row one keeps the actions behind: close, reopen and setting the parent.
@@ -376,14 +446,22 @@ export const CONTROL_LABELS = freeze({
   keep_open: "Keep open",
   /** Lets a node kept open close again (R2). */
   let_close: "Let it close",
+  /** The word the name-a-version control shows; `name_version` is its accessible name (R16). */
+  name: "Name",
   /** Gives the open document's current text a version of its own (R16). */
   name_version: "Name version",
   /** Moves to the next open question that waits on the reader (R6). */
   next_question: "Next open question",
+  /** What the repository control says while neither the issue nor its project names one. */
+  no_repository: "No repository",
   /** What the route control says while the issue has none to show. */
   no_route: "No route",
+  /** What one side of a plan task's pointers says while it names nothing (R4). */
+  none: "none",
   /** Marks a document or an artifact in the node menu that no block cites (R16). */
   nothing_cites_it: "Cited by nothing",
+  /** What the claim says of a holder the agent registry no longer lists (R11, row four). */
+  not_running: "not running",
   /** The node menu beside the presets, holding what no block cites and the upload (R16). */
   other_nodes: "Files and documents",
   /** The row of five queries over the one tree, as a reader of it hears it named (R3). */
@@ -394,6 +472,11 @@ export const CONTROL_LABELS = freeze({
   reopen_issue: "Reopen issue",
   /** What reopening does, as the control's own words rather than a tooltip (R11). */
   reopen_into_backlog: "Reopen into Backlog",
+  /** Why the repository shown may not be the issue's own, said beside the control rather than
+   *  in a tooltip (R11, R21). */
+  repository_inherited: "inherited or the project's default",
+  /** The heading of the requirements the spec marks, under the document itself (R14). */
+  requirements: "Requirements",
   /** Each editor's save, naming the field it writes. */
   save_blocked_by: "Save blocked by",
   save_parent: "Save parent",
@@ -405,6 +488,7 @@ export const CONTROL_LABELS = freeze({
    *  these says the thing is done. */
   saving_close: "Closing…",
   saving_field: "Saving…",
+  saving_labels: "Saving labels…",
   saving_release: "Releasing…",
   saving_reopen: "Reopening…",
   /** How many checks serve a requirement, which the coverage read counts without naming them
@@ -414,6 +498,8 @@ export const CONTROL_LABELS = freeze({
   serving_plan_tasks: "Plan tasks serving it",
   /** Gives an issue with no parent one (R11, row one). */
   set_parent: "Set parent issue",
+  /** Ends that comparison and draws the pinned version itself (R16). */
+  show_version: "Show version",
   /** The whole subtree done of total, labelled beside the direct count (R10). */
   subtree_done: "Whole tree done",
   /** What a chip says of a target nothing answers to now (`ReferenceTarget.gone`). */
@@ -423,6 +509,8 @@ export const CONTROL_LABELS = freeze({
   target_stale: "Out of date",
   /** The body of the page, as a reader of the tree hears it named (R1). */
   tree: "Issue tree",
+  /** What the assignee control says while nobody answers the issue's asks (R11). */
+  unassigned: "Unassigned",
   /** Opens a branch of the tree (R1). */
   unfold: "Unfold",
   /** Adds an artifact from the node menu (R16). */
@@ -533,6 +621,11 @@ export const GLYPH_TOKENS = freeze({
       passed: "check-passed",
       unmarked: "check-unmarked",
     },
+    decision: {
+      replaced: "decision-replaced",
+      waiting_review: "decision-waiting-review",
+      yours: "decision-yours",
+    },
   },
   types: {
     ask: "ask",
@@ -554,21 +647,26 @@ export const GLYPH_TOKENS = freeze({
   readonly states: {
     readonly ask: Record<AskState, string>;
     readonly check: Record<CheckState, string>;
+    readonly decision: Record<DecisionState, string>;
   };
   readonly types: Record<NodeType, string>;
 });
+
+/** Every type whose state the page draws, which is every key of `NODE_STATE_WORDS`. */
+const STATE_TYPES = freeze(keysOf(NODE_STATE_WORDS));
 
 function glyphNames(): Readonly<Record<string, string>> {
   const names: Record<string, string> = {};
   for (const type of NODE_TYPES) {
     names[GLYPH_TOKENS.types[type]] = NODE_TYPE_NAMES[type];
   }
-  for (const state of keysOf(NODE_STATE_WORDS.ask)) {
-    names[GLYPH_TOKENS.states.ask[state]] = `${NODE_STATE_WORDS.ask[state]} ${NODE_TYPE_NAMES.ask}`;
-  }
-  for (const state of keysOf(NODE_STATE_WORDS.check)) {
-    names[GLYPH_TOKENS.states.check[state]] =
-      `${NODE_STATE_WORDS.check[state]} ${NODE_TYPE_NAMES.check}`;
+  for (const type of STATE_TYPES) {
+    const words: Readonly<Record<string, string>> = NODE_STATE_WORDS[type];
+    const tokens: Readonly<Record<string, string>> = GLYPH_TOKENS.states[type];
+    for (const state of Object.keys(words)) {
+      const token = tokens[state];
+      if (token !== undefined) names[token] = `${words[state]} ${NODE_TYPE_NAMES[type]}`;
+    }
   }
   return names;
 }
@@ -615,6 +713,8 @@ const WORD_SOURCES: readonly unknown[] = [
   KEY_REPORTS,
   GAP_LINES,
   GAP_WORDS,
+  PROGRESS_NOUNS,
+  READING_LINES,
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
   RESULT_VERDICT_WORDS,

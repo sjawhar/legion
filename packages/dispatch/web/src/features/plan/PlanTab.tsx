@@ -7,6 +7,8 @@ import type { Artifact, ArtifactBlock } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { card, dangerText, textMutedOnCanvas, textMutedOnSurface } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
+import { authorText, pageChrome } from "../issue/page-structure";
+import { BLOCK_ATTRIBUTE_LABELS, CONTROL_LABELS } from "../issue/page-words";
 import { withBlock } from "../refs/block-reference";
 import { BlockReferences } from "../refs/ReferencedBy";
 import { ReferenceLink } from "../refs/ReferenceLink";
@@ -24,7 +26,12 @@ function pointers(block: ArtifactBlock, name: string): readonly string[] {
  *  reference's short form until then; a pointer that names nothing shows as the text it is. */
 function BlockLink({ reference }: { reference: string }): ReactNode {
   const { title } = useReferenceTarget(parseNodeReference(reference), { text: false });
-  return <ReferenceLink label={title} reference={reference} />;
+  // The block's own words, which are its author's and not the page's vocabulary.
+  return (
+    <span {...authorText}>
+      <ReferenceLink label={title} reference={reference} />
+    </span>
+  );
 }
 
 /** One side of a task's pointers: the requirements it serves, or the tasks it needs. */
@@ -39,9 +46,13 @@ function Pointers({
 }): ReactNode {
   return (
     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1" data-testid={testId}>
-      <span className={`text-xs font-medium ${textMutedOnSurface}`}>{label}</span>
+      <span className={`text-xs font-medium ${textMutedOnSurface}`} {...pageChrome}>
+        {label}
+      </span>
       {references.length === 0 ? (
-        <span className={`text-sm ${textMutedOnSurface}`}>none</span>
+        <span className={`text-sm ${textMutedOnSurface}`} {...pageChrome}>
+          {CONTROL_LABELS.none}
+        </span>
       ) : (
         references.map((reference) => <BlockLink key={reference} reference={reference} />)
       )}
@@ -54,8 +65,16 @@ function Task({ task }: { task: PlanTask }): ReactNode {
   return (
     <li className={`space-y-2 rounded-lg p-3 ${card}`} data-testid="plan-task">
       <BlockLink reference={task.reference} />
-      <Pointers label="Serves" references={task.serves} testId="plan-task-serves" />
-      <Pointers label="Needs" references={task.needs} testId="plan-task-needs" />
+      <Pointers
+        label={BLOCK_ATTRIBUTE_LABELS.serves}
+        references={task.serves}
+        testId="plan-task-serves"
+      />
+      <Pointers
+        label={BLOCK_ATTRIBUTE_LABELS.needs}
+        references={task.needs}
+        testId="plan-task-needs"
+      />
       <BlockReferences reference={task.reference} />
     </li>
   );
