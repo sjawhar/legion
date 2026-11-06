@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Turn a set of measured cases into descriptors this repository can carry.
 
-usage: build_cases.py --corpus $TMPDIR/<dir> --cases <cases.json> \\
-         --out cases.json --side $TMPDIR/<dir>/side-text.json
+usage: build_cases.py --corpus $TMPDIR/<dir> --cases <cases.json> --out cases.json
 
 A case the baseline measured is a query and the item that answers it. The query is Dispatch's own
 text, so this repository holds no case's text: for each case the output names the item the text
@@ -11,8 +10,9 @@ comes from, the version, the character range, and the SHA-256 of the text that r
 has moved, so a case always runs the words it was measured with or does not run at all.
 
 A case whose query is nobody's text - a reworded title, written to ask search the same question
-in other words - has no range to name. Those go to the side file, keyed by their hash, and the
-descriptor says `side`: a run of them needs that file beside the repository.
+in other words - cannot be described at all: it has no item, no range and no hash to re-extract,
+and committing the paraphrase itself would put Dispatch's own content in a public repository,
+since a reworded title still names an issue's subject. Such a case is counted and left out.
 """
 
 import argparse
@@ -29,7 +29,6 @@ def main():
     parser.add_argument("--corpus", required=True)
     parser.add_argument("--cases", required=True, help="the measured cases, each with its query")
     parser.add_argument("--out", required=True, help="the descriptors, safe to commit")
-    parser.add_argument("--side", required=True, help="the queries no item holds, under $TMPDIR")
     arguments = parser.parse_args()
 
     documents = {row["artifact_id"]: row for row in read_jsonl(arguments.corpus, "documents.jsonl")}
@@ -37,10 +36,10 @@ def main():
     with open(arguments.cases) as handle:
         cases = json.load(handle)
 
-    descriptors, side, outcomes = [], {}, Counter()
+    descriptors, outcomes = [], Counter()
     unexpressed = []
     for case in cases:
-        descriptor, outcome = describe(case, documents, asks, side)
+        descriptor, outcome = describe(case, documents, asks)
         outcomes[outcome] += 1
         if descriptor is None:
             unexpressed.append((case["case_id"], outcome))
@@ -52,18 +51,15 @@ def main():
         # reads this file too.
         json.dump(descriptors, handle, indent=2)
         handle.write("\n")
-    with open(arguments.side, "w") as handle:
-        json.dump(side, handle)
 
     print(f"{len(descriptors)}/{len(cases)} cases described -> {arguments.out}")
     for outcome, count in sorted(outcomes.items()):
         print(f"  {outcome}: {count}")
-    print(f"  side-file queries: {len(side)}")
     if unexpressed:
         print("  not described: " + ", ".join(f"{case_id} ({why})" for case_id, why in unexpressed[:20]), file=sys.stderr)
 
 
-def describe(case, documents, asks, side):
+def describe(case, documents, asks):
     """One case as a descriptor, with the word for what became of it."""
     common = {
         "case_id": case["case_id"],
@@ -100,9 +96,10 @@ def describe(case, documents, asks, side):
             return None, "question no longer yields the query"
         common["source"] = {"kind": "ask", "ask_id": ask["id"], "offset": 0, "length": length}
         return common, "described from an ask"
-    side[common["sha256"]] = case["query"]
-    common["source"] = {"kind": "side"}
-    return common, "side file: the query is nobody's text"
+    # Kind 2, a reworded title: a paraphrase is written text no document holds, so there is no
+    # item to name, no range to read back and nothing to re-extract, and the paraphrase itself
+    # names an issue's subject, which this public repository may not carry.
+    return None, "a reworded title is nobody's text: not measurable here"
 
 
 def find_document_span(markdown, query):

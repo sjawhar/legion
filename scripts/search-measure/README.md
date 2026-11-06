@@ -37,7 +37,9 @@ Every script reads the server it harvests from through its read API, with `GET` 
 
 - `case_text.py` holds the one rule for reading a range back, so the hash a descriptor carries is the hash of what the runner will send.
 
-- A case whose query is nobody's text — a title someone reworded to ask search the same question in other words — has no range to name, and its query goes to a side file under `$TMPDIR`, keyed by its hash.
+- A case whose query is nobody's text — a title someone reworded to ask search the same question in other words — cannot be described at all, and `build_cases.py` counts it and leaves it out.
+That is kind 2 of the three kinds the baseline measured, and it is not measured here: a paraphrase is written text no document holds, so it names no item, has no character range and leaves nothing to re-extract and hash, while the paraphrase itself names an issue's subject, which this public repository may not carry.
+The 121 kind-2 cases were committed as descriptors once and refused on every run, each with `no side file holds this query`; they are gone from `cases.json`, and what this measurement reports is kind 1 and kind 3.
 
 `run_search.py` runs the cases against a search route and writes one JSONL row per case.
 
@@ -47,9 +49,24 @@ Every script reads the server it harvests from through its read API, with `GET` 
 
 - `--workers 1`, one request at a time, is the latency measurement; more workers measure recall faster and say nothing about latency.
 
-`analyze.py` turns those rows into recall at 1, 3, 10 and 20, MRR and "absent from the page", per case kind and over the kinds together, each beside the baseline the hybrid route measured on the same cases.
+`analyze.py` is both the table a person reads and the check a later run has to pass.
+
+- It prints recall at 1, 3, 10 and 20, MRR and "absent from the page", per case kind and over the kinds together, each beside the baseline the hybrid route measured on the same cases, and the run's latency.
 
 - It also counts, for a sentence from an issue's own spec, how often the issue's document comes back while the issue does not, which is the defect this measurement was made for.
+
+- Then it asserts the floors, printing every rate with the n it was computed over, and exits non-zero naming each floor the run missed and by how much.
+The floors are: kind 1 — R@1 at least 84%, R@3 at least 90%, R@20 at least 94%, absent from the top 50 at most 5%, and the document-without-the-issue defect exactly 0% at every depth; kind 3 — R@3 at least 84% and R@1 at least 80%.
+
+- The one thing to know about those floors: they are the numbers this tree measured, rounded to the whole point towards the bound, and nobody's target.
+The run they were read off passes them by construction.
+What makes them a check is the run after a change: a floor missed there is a regression, where without them the same regression prints as one more row of a table nobody diffed.
+
+- The floors are aggregate, so a change that broadened every query could still clear them; `TestSearchBroadensOnlyTheQueryNoItemAnswers`, in `packages/envoy/internal/dispatch/api/`, pins that behaviour directly.
+
+- A run that measured too few cases of a kind is void: `analyze.py` says so and exits non-zero instead of reading as a pass.
+The minimum is nine tenths of the committed descriptors of that kind — 250 of the 278 kind-1 cases, 391 of the 435 kind-3 ones.
+A run refuses a case whose text has moved since the descriptors were built, and a few such refusals are normal (the run of 2026-11-05 refused one); a run that measured a handful measured a broken fixture, a half-loaded corpus or a server that stopped answering, and a handful of cases may never read as a pass.
 
 `serial120.json` is the 120 case ids of the latency sample, so a latency run is the same sample every time.
 
@@ -77,14 +94,16 @@ Build the cases once against the corpus, then run them:
 
 ```bash
 python3 scripts/search-measure/build_cases.py --corpus "$TMPDIR/corpus" \
-  --cases "$TMPDIR/cases_all.json" --out scripts/search-measure/cases.json \
-  --side "$TMPDIR/corpus/side-text.json"
+  --cases "$TMPDIR/cases_all.json" --out scripts/search-measure/cases.json
 python3 scripts/search-measure/run_search.py --cases scripts/search-measure/cases.json \
   --fixture-dsn "postgres://…/searchfix" --url http://127.0.0.1:8799 --token fixture-token \
-  --side "$TMPDIR/corpus/side-text.json" --only scripts/search-measure/serial120.json \
+  --workers 8 --out "$TMPDIR/out-all.jsonl"
+python3 scripts/search-measure/run_search.py --cases scripts/search-measure/cases.json \
+  --fixture-dsn "postgres://…/searchfix" --url http://127.0.0.1:8799 --token fixture-token \
+  --only scripts/search-measure/serial120.json \
   --workers 1 --out "$TMPDIR/out-serial.jsonl"
 python3 scripts/search-measure/analyze.py "$TMPDIR/out-all.jsonl" --serial "$TMPDIR/out-serial.jsonl"
 ```
 
-`cases.json` is the descriptor set as it was built against a harvest of 2026-11-05.
+`cases.json` is the descriptor set as it was built against a harvest of 2026-11-05: 278 kind-1 descriptors and 435 kind-3 ones.
 A case whose sentence its document no longer holds is refused by the runner and counted, which is how a later harvest says what has moved under it.

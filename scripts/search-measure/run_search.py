@@ -33,7 +33,6 @@ def main():
     parser.add_argument("--token", default="", help="bearer; else DISPATCH_TOKEN_FILE's contents")
     parser.add_argument("--out", required=True)
     parser.add_argument("--only", default="", help="a JSON list of case ids to run")
-    parser.add_argument("--side", default="", help="the side file build_cases.py wrote")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--limit", type=int, default=50, help="results per page; a rank past it is absent")
     parser.add_argument("--first-words", type=int, default=0,
@@ -50,12 +49,8 @@ def main():
         with open(arguments.only) as handle:
             wanted = set(json.load(handle))
         cases = [case for case in cases if case["case_id"] in wanted]
-    side = {}
-    if arguments.side:
-        with open(arguments.side) as handle:
-            side = json.load(handle)
 
-    queries, refused = resolve(cases, arguments.fixture_dsn, side)
+    queries, refused = resolve(cases, arguments.fixture_dsn)
     print(f"{len(queries)} cases resolved, {len(refused)} refused", file=sys.stderr)
     for case_id, why in refused[:10]:
         print(f"  refused {case_id}: {why}", file=sys.stderr)
@@ -94,7 +89,7 @@ def main():
     print(f"{written[0]} runs -> {arguments.out}", file=sys.stderr)
 
 
-def resolve(cases, dsn, side):
+def resolve(cases, dsn):
     """Every case's query, read from the fixture and checked against its hash."""
     documents = {}
     wanted_documents = sorted({
@@ -131,10 +126,8 @@ def resolve(cases, dsn, side):
                 continue
             query = extract_ask_span(question, source["offset"], source["length"])
         else:
-            query = side.get(case["sha256"])
-            if query is None:
-                refused.append((case["case_id"], "no side file holds this query"))
-                continue
+            refused.append((case["case_id"], f"no rule reads a {source['kind']} source"))
+            continue
         if digest(query) != case["sha256"]:
             refused.append((case["case_id"], "the text has moved since the descriptor was built"))
             continue
