@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A deployment chooses whether Legion checks production after a merge, and who works the check: `projects.<KEY>.production_check` takes `off` or `tester` and is `tester` by default. The `legion` tool''s `handoff_complete` takes `wake_at`, an RFC 3339 time a `pending` report on any look but the check''s last must carry: the daemon suspends the role until then, keeps its session and releases the issue''s pod. It refuses a report from a role that is not the check''s (`CHECK_ROLE_MISMATCH`), a `pending` with no time (`CHECK_WAKE_REQUIRED`) and a time where no look follows (`CHECK_WAKE_UNEXPECTED`). The daemon reads no deployment''s production workflows any more, and the daemon API contract is 50. One operator step at this release: the daemon no longer creates the durable consumer of `notifications.dispatch.server.started` and cannot delete the one already on the stream, so remove it with `nats consumer rm <stream> legion-go-<project>-dispatch-server`.'
+time: 2026-11-06T05:35:03.351510633Z
+custom:
+    Issue: pr2855
