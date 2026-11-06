@@ -397,6 +397,30 @@ func TestATamperedObjectIsNotDeliveredWholeForARange(t *testing.T) {
 	}
 }
 
+// A partial range is the one answer built from the object read into memory, and that read is
+// held to the row's hash as the streamed ones are: the object whose bytes are no longer the
+// row's is refused outright, with none of them in the answer, since nothing has gone out by the
+// time the check fails.
+func TestATamperedObjectIsRefusedForAPartialRange(t *testing.T) {
+	original := bytes.Repeat([]byte("o"), 300_000)
+	replaced := append(bytes.Repeat([]byte("o"), 299_999), 'x')
+	store := tampered{Store: filestest.NewMemory(), sha: files.SHA256(original), bytes: replaced}
+	handler, _, _ := newTestServer(t, testServerOptions{files: store})
+	issue := fileIssue(t, handler)
+	response := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.bin"}, "shot.bin", "application/octet-stream", original, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
+	}
+	version := decodeBody[uploaded](t, response)
+	served := fileVersionRequest(t, handler, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", map[string]string{"Range": "bytes=4-11"})
+	if served.Code != http.StatusInternalServerError || responseCode(t, served) != "FILE_MISSING" {
+		t.Fatalf("GET bytes=4-11 of a tampered object: status=%d body=%s, want 500 FILE_MISSING", served.Code, served.Body.String())
+	}
+	if bytes.Contains(served.Body.Bytes(), []byte("oooo")) {
+		t.Errorf("the refusal carried the object's bytes: %q", served.Body.String())
+	}
+}
+
 // A browser that kept a stored version's bytes sends their entity tag back and is told they
 // have not changed, with no body and nothing read from the store; a tag that is not this
 // version's is answered the whole file. The tag is read as net/http reads it, so it is found in

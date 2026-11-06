@@ -399,7 +399,8 @@ The Go tests start one (`internal/tests3`, SeaweedFS in a container, since MinIO
 
 ## Recording the size of the pictures already stored
 
-A picture uploaded since INFRA-760 records its own width and height, read from its header where the upload already holds the bytes, so every place that draws it reserves its box and the text below it stops moving as the bytes arrive.
+A picture uploaded since INFRA-760 records the width and height a browser draws it at, read from its header where the upload already holds the bytes, so every place that draws it reserves its box and the text below it stops moving as the bytes arrive.
+The pair is the drawn one, not the stored one: a photograph whose Exif Orientation lays it on its side is drawn turned, so its two numbers are exchanged (`files/orientation.go`, which names the formats a browser turns and the measurement behind each).
 The pictures stored before that record neither until `backfill-dimensions` reads them, oldest first and one row at a time:
 it reads each row's bytes, from the row while it still holds them and from the bucket once `backfill-files` has moved them, reads the header with the decode the upload path uses (`files.PictureDimensions`, the one declaration of it), and writes the pair in one statement that writes only a row still missing it.
 A row it cannot read (bytes the bucket does not hold, a header that does not decode) is printed as `FAILED version <id>` and passed over, so one bad row holds up no other;

@@ -174,6 +174,16 @@ func ReadAll(ctx context.Context, store Store, sha string) ([]byte, error) {
 		return nil, err
 	}
 	defer object.Body.Close()
+	return ReadObject(object)
+}
+
+// ReadObject reads an open object's body whole, into one slice of its own length. The body is
+// taken in the 32 KiB steps VerifyingReader reads the store's body in, never in one call as
+// long as the object: that reader holds what it has read until it has more than the caller
+// takes, so a slice as long as the object would make it hold a second copy of the whole thing
+// before handing the first byte over. The caller closes the body; the hash is checked by the
+// read, as it is for every Get.
+func ReadObject(object *Object) ([]byte, error) {
 	body := make([]byte, 0, object.Size)
 	buffer := make([]byte, 32<<10)
 	for {

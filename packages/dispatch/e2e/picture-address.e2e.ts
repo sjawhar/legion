@@ -151,11 +151,23 @@ test("a video's own address plays the video and hands the reader no download", a
     await sendTo(page, video.address, downloads);
 
     // The browser's own video document: one player, which read the file's duration off the
-    // bytes it was served.
-    const player = page.locator("video");
-    await expect(player).toHaveCount(1);
+    // bytes it was served. Both readings go through the page rather than through a locator.
+    // Every locator call first waits out a navigation the frame still has in flight
+    // (`Page._performWaitForNavigationCheck`, playwright-core 1.64.1), and WebKit's media
+    // document leaves one in flight for good: the player it builds holds the document's own
+    // address open, so the navigation never finishes and the locator never runs - it answered
+    // `undefined` rather than a count. `page.evaluate` runs that check for no one and reads
+    // the document the navigation committed, which is the document this row is about. A
+    // picture document finishes its navigation, so the rows above read it with locators.
     await expect
-      .poll(() => player.evaluate((element: HTMLVideoElement) => element.duration))
+      .poll(() => page.evaluate(() => document.querySelectorAll("video").length), {
+        message: "the browser drew no player at the video's own address",
+      })
+      .toBe(1);
+    await expect
+      .poll(() => page.evaluate(() => document.querySelector("video")?.duration ?? 0), {
+        message: "the player read no duration off the bytes it was served",
+      })
       .toBeGreaterThan(0);
   } finally {
     await alice.close();

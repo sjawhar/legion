@@ -17,9 +17,10 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-// PictureDimensions is a picture's own width and height in pixels, read from the header of the
-// bytes the caller already holds, so the read costs no second copy of the file. An upload asks
-// this of an image alone, so a video, a document and every other file record neither.
+// PictureDimensions is a picture's own width and height in pixels as a browser draws them, read
+// from the header of the bytes the caller already holds, so the read costs no second copy of the
+// file. An upload asks this of an image alone, so a video, a document and every other file
+// record neither.
 //
 // The pair is recorded together or not at all: a header that does not decode, or that claims no
 // area, answers nil for both and the upload is stored and served exactly as it was before
@@ -27,15 +28,23 @@ import (
 // registry's own answer, from the bytes' magic, through the blank imports at the head of this
 // file; each reads the header alone and decodes no pixel.
 //
+// The pair is the drawn one, not the stored one: where a picture's bytes carry an Exif
+// Orientation the browsers turn the picture by, the two numbers are exchanged (turnsDimensions,
+// which names the formats that are turned and the measurement behind each).
+//
 // This is the one declaration of the decode: the upload path (api.uploadArtifact) and the pass
 // that fills the versions stored before it (BackfillDimensions) read a size the same way, so no
 // version is ever recorded under two answers.
 func PictureDimensions(content []byte) (width, height *int) {
-	config, _, err := image.DecodeConfig(bytes.NewReader(content))
+	config, format, err := image.DecodeConfig(bytes.NewReader(content))
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
 		return nil, nil
 	}
-	return &config.Width, &config.Height
+	drawnWidth, drawnHeight := config.Width, config.Height
+	if turnsDimensions(format, content) {
+		drawnWidth, drawnHeight = drawnHeight, drawnWidth
+	}
+	return &drawnWidth, &drawnHeight
 }
 
 // dimensionsLock is the advisory lock one pass of BackfillDimensions holds for its run, so two

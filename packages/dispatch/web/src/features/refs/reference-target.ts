@@ -8,7 +8,6 @@ import {
   type QueryStatus,
   queryOptions,
   useQuery,
-  useQueryClient,
 } from "@tanstack/react-query";
 
 import { ApiError, api, artifactVersionPath } from "../../api/client";
@@ -70,7 +69,7 @@ const refetchFailedOnFocus = (query: { readonly state: { readonly status: QueryS
  *  box before the bytes arrive; they are present together or not at all, and absent for a video,
  *  for a picture whose version has no recorded size, and for a reference pinned below the
  *  artifact's latest version, whose shape the summary does not answer for. Every surface that
- *  draws a reference's media - the hook's `picture`, `usePinnedMedia`, `watchPicturePath` for
+ *  draws a reference's media - the hook's `picture`, `pinnedMedia`, `watchPicturePath` for
  *  the document editors - uses this one shape, so they all answer the same question. */
 export interface ReferenceMedia {
   readonly kind: "picture" | "video";
@@ -647,50 +646,20 @@ export function watchPicturePath(
   return () => {};
 }
 
-/** What a reference pinned to a version draws: the bytes route it names, at once, with no read
- *  and no subscription of its own - a picture pinned by a document's source draws as it always
- *  has, never a link while something is in flight. The summary already in the query cache, where
- *  a link, a card or another picture on the page has read it, answers as it answers the hook
- *  (`referenceMedia`), so a pinned video answers `video` and a picture pinned at the artifact's
- *  latest version carries that version's shape; where it answers nothing - the cache holds no
- *  summary, or the one it holds names a document or another file - the pinned address is drawn
- *  as a picture with no size, which is what a pinned reference drew before either was known.
- *  Undefined for a reference that pins no version, whose media is the hook's `picture`. */
-export function usePinnedMedia(
-  route: DispatchReferenceRoute | undefined
-): ReferenceMedia | undefined {
-  const queryClient = useQueryClient();
+/** What a reference pinned to a version draws while nothing is known of it but the reference
+ *  itself: the bytes route it names, as a picture, at once, with no read and no subscription of
+ *  its own - a picture pinned by a document's source draws as it always has, never a link while
+ *  something is in flight. Its type is not in the reference, so a pinned video reads as a
+ *  picture here; the summary is what tells the two apart, and every caller prefers what the
+ *  summary answers (`useReferenceTarget`'s `picture`, which is read from the same cache in the
+ *  same render) and falls back to this. Undefined for a reference that pins no version, whose
+ *  media is that hook's `picture` alone. */
+export function pinnedMedia(route: DispatchReferenceRoute | undefined): ReferenceMedia | undefined {
   const named = route === undefined ? undefined : referencedArtifact(route);
-  if (route === undefined || named?.version === undefined) {
+  if (named?.version === undefined) {
     return undefined;
   }
-  const cached = referenceMedia(named, cachedReferenceArtifact(queryClient, route));
-  const src = artifactVersionPath(named.owner, named.slug, named.version);
-  return cached ?? { kind: "picture", src };
-}
-
-/** The summary of the document a reference names, as the query cache already holds it: undefined
- *  where nothing on the page has read it, since this asks the cache and starts no read. */
-function cachedReferenceArtifact(
-  queryClient: QueryClient,
-  route: DispatchReferenceRoute
-): ReferenceArtifact | undefined {
-  switch (route.kind) {
-    case "document":
-      return queryClient.getQueryData(documentSummaryQuery(route.project, route.slug).queryKey);
-    case "agent-artifact": {
-      const artifact = queryClient.getQueryData(
-        agentArtifactQuery(route.session, route.slug).queryKey
-      );
-      return artifact === undefined ? undefined : agentReferenceArtifact(artifact);
-    }
-    case "artifact":
-      return queryClient
-        .getQueryData(issueSummaryQuery(route.key).queryKey)
-        ?.documents.find((candidate) => candidate.slug === route.slug);
-    default:
-      return undefined;
-  }
+  return { kind: "picture", src: artifactVersionPath(named.owner, named.slug, named.version) };
 }
 
 /** Whether a reference's path waits on its issue: a block of an issue's spec pinned to a version

@@ -171,11 +171,12 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 	ranged := r.Header.Get("Range")
 	if ranged != "" && !wholeObjectRange(r, ranged, object.Size) {
 		// A part of the file is answered from the whole of it: the store hands out one stream
-		// from the object's start, and the reader that checks the hash must see all of it
-		// (files.ReadAll reads an object this way too). The object is at most
-		// files.MaxObjectSize, which the store's own writes are held to, so the read is bounded.
-		whole := make([]byte, object.Size)
-		if _, err := io.ReadFull(object.Body, whole); err != nil {
+		// from the object's start, and the reader that checks the hash must see all of it.
+		// files.ReadObject takes it in that reader's own steps, so the object is held once and
+		// not twice; it is at most files.MaxObjectSize, which the store's own writes are held
+		// to, so the read is bounded.
+		whole, err := files.ReadObject(object)
+		if err != nil {
 			if r.Context().Err() != nil {
 				return // The client went away; nothing to tell it.
 			}
@@ -214,12 +215,14 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 }
 
 // wholeObjectRange reports whether r asks for the whole of a size-byte object in one range and
-// on no condition: `bytes=0-` or `bytes=0-<size-1>`, which is how a player opens a file it may
-// seek in (`<video preload="metadata">` asks for `bytes=0-` in Chrome and `bytes=0-1` in
-// Safari, and a seek asks for the rest of the file from somewhere). Those are streamed, so the
-// opening of a 25 MiB video costs no 25 MiB buffer; every other range, and any range carrying a
-// condition, is http.ServeContent's, which reads the conditions and answers 416 for a range
-// past the end. An empty object is its too, since a range over no bytes overlaps nothing.
+// on no condition: `bytes=0-` or `bytes=0-<size-1>`, which is how Chrome opens a file it may
+// seek in (`<video preload="metadata">`). Those two are streamed, so that opening costs no
+// buffer at all. Every other range, and any range carrying a condition, is http.ServeContent's,
+// which reads the conditions and answers 416 for a range past the end; it is handed a reader it
+// can seek in, so those requests read the object into memory first. They are not rare:
+// Safari's own opening probe is `bytes=0-1`, and a seek in any engine is `bytes=N-`. Each costs
+// one copy of the object for the one request, at most files.MaxObjectSize. An empty object is
+// http.ServeContent's too, since a range over no bytes overlaps nothing.
 func wholeObjectRange(r *http.Request, header string, size int64) bool {
 	if size <= 0 {
 		return false
@@ -293,10 +296,11 @@ func scanETag(header string) (etag, remain string) {
 }
 
 // fileDisposition is a version download's Content-Disposition: inline for a content type a
-// browser draws where the reader is (contracts.InlineContentTypes, which the dashboard reads
-// too), attachment for every other one, with the artifact's own name as the filename either way,
-// so a saved file keeps the name Dispatch shows. The stored type is matched without its
-// parameters, since `image/png; charset=binary` is the same picture as `image/png`.
+// browser draws where the reader is (contracts.InlineContentTypes, generated from
+// INLINE_CONTENT_TYPES in packages/contracts, whose one reader this is), attachment for every
+// other one, with the artifact's own name as the filename either way, so a saved file keeps the
+// name Dispatch shows. The stored type is matched without its parameters, since
+// `image/png; charset=binary` is the same picture as `image/png`.
 //
 // The name is given twice, as RFC 6266 says: `filename`, which every client reads and only ASCII
 // can express, and `filename*`, RFC 8187's encoding of the whole name, which every browser since

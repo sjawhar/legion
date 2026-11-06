@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 import { ArtifactMedia } from "./ArtifactMedia";
 import { RefLink } from "./RefLink";
-import { usePinnedMedia, useReferencePath, useReferenceTarget } from "./reference-target";
+import { pinnedMedia, useReferencePath, useReferenceTarget } from "./reference-target";
 import { type DispatchReferenceRoute, parseNodeReference, referencedArtifact } from "./routes";
 
 /** A picture's placeholder in a rendered body, holding the `DispatchPicture` a portal renders
@@ -73,13 +73,13 @@ export function DispatchPicture({
   // The summary read behind every reference answers both forms: for a version-less source the
   // latest version's address, for a pinned one the address the source itself names with the
   // type the summary carries, which is what tells a pinned video from a pinned picture. The
-  // pinned read is what draws before it lands - the version is in the reference, so a picture
-  // never waits on a read to appear - and what draws where the summary cannot be read at all.
+  // reference's own pinned address is what draws before that read lands - the version is in
+  // the reference, so a picture never waits on a read to appear - and what draws where the
+  // summary cannot be read at all.
   const target = useReferenceTarget(named === undefined ? undefined : route, {
     text: false,
   }).picture;
-  const pinned = usePinnedMedia(route);
-  const media = target ?? pinned;
+  const media = target ?? pinnedMedia(route);
   // Where the artifact's page is, for the caption a player is drawn with: the address this
   // reference opens, which is the one the serializer already wrote onto the placeholder.
   const path = useReferencePath(route);

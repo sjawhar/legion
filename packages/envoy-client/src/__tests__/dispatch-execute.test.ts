@@ -9846,7 +9846,7 @@ describe("executeDispatchTool", () => {
     [
       "an issue's picture",
       { issue: "DSP-42", name: "shot.png", path: "shot.png" },
-      { id: "artifact-42", issue_key: "DSP-42", name: "shot.png", slug: "shot-png" },
+      { id: "artifact-42", issue_key: "DSP-42", kind: "image", name: "shot.png", slug: "shot-png" },
       { number: 3, mime: "image/png" },
       "Uploaded shot.png as version 3 (artifact slug shot-png; dispatch://DSP-42/artifact/shot-png)",
       "![shot.png](dispatch://DSP-42/artifact/shot-png@v3)",
@@ -9854,7 +9854,14 @@ describe("executeDispatchTool", () => {
     [
       "a project's video, its stored type read without its parameters",
       { project: "CORE", name: "demo.mp4", path: "shot.png" },
-      { id: "artifact-43", issue_key: null, project: "CORE", name: "demo.mp4", slug: "demo-mp4" },
+      {
+        id: "artifact-43",
+        issue_key: null,
+        kind: "file",
+        name: "demo.mp4",
+        project: "CORE",
+        slug: "demo-mp4",
+      },
       { number: 1, mime: 'video/mp4; codecs="avc1.42E01E"' },
       "Uploaded demo.mp4 as version 1 (artifact slug demo-mp4; dispatch://CORE/artifact/demo-mp4)",
       "![demo.mp4](dispatch://CORE/artifact/demo-mp4@v1)",
@@ -9881,33 +9888,53 @@ describe("executeDispatchTool", () => {
     }
   });
 
-  test("writes no drawing line for an upload a browser does not draw where it is read", async () => {
+  // The kind is the server's own read of the bytes, and it is what the web app draws from: a
+  // `file` upload carries the type its uploader declared, so bytes declared `image/png` that
+  // the server did not read as a picture draw as a link card there, and the line that would
+  // draw them is written for neither.
+  test.each([
+    [
+      "a file no browser draws",
+      "report.pdf",
+      {
+        id: "artifact-44",
+        issue_key: "DSP-42",
+        kind: "file",
+        name: "report.pdf",
+        slug: "report-pdf",
+      },
+      { number: 1, mime: "application/pdf" },
+      "Uploaded report.pdf as version 1 (artifact slug report-pdf; dispatch://DSP-42/artifact/report-pdf)",
+    ],
+    [
+      "bytes declared image/png the server read as no picture",
+      "not-a-picture.png",
+      {
+        id: "artifact-45",
+        issue_key: "DSP-42",
+        kind: "file",
+        name: "not-a-picture.png",
+        slug: "not-a-picture-png",
+      },
+      { number: 1, mime: "image/png" },
+      "Uploaded not-a-picture.png as version 1 (artifact slug not-a-picture-png; dispatch://DSP-42/artifact/not-a-picture-png)",
+    ],
+  ])("writes no drawing line for %s", async (_name, file, artifact, version, first) => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));
-    writeFileSync(path.join(cwd, "report.pdf"), "%PDF-1.7\n");
+    writeFileSync(path.join(cwd, file), "whatever its name says");
     try {
       const result = await executeDispatchTool({
         tool: "dispatch_artifact",
-        args: { issue: "DSP-42", name: "report.pdf", path: "report.pdf" },
+        args: { issue: "DSP-42", name: file, path: file },
         cwd,
         host: "omp",
         config,
         env: {},
         exec: repoExec("owner/repo"),
-        fetchImpl: (async () =>
-          response({
-            artifact: {
-              id: "artifact-44",
-              issue_key: "DSP-42",
-              name: "report.pdf",
-              slug: "report-pdf",
-            },
-            version: { number: 1, mime: "application/pdf" },
-          })) as unknown as typeof fetch,
+        fetchImpl: (async () => response({ artifact, version })) as unknown as typeof fetch,
       });
 
-      expect(result.text).toBe(
-        "Uploaded report.pdf as version 1 (artifact slug report-pdf; dispatch://DSP-42/artifact/report-pdf)"
-      );
+      expect(result.text).toBe(first);
       expect(result.details).not.toHaveProperty("picture");
     } finally {
       rmSync(cwd, { recursive: true, force: true });

@@ -52,12 +52,12 @@ function dispatchHrefOf(anchor: Element): string | null {
 }
 
 /** Whether a click is the plain primary click that opens a reference inside the app. A modifier
- * click (open in new tab/window), a click of another button, and a drag-selection that happens
- * to end on the link should reach the browser's and the editor's own handling, not be stolen;
- * and so should a click something nearer the target has already answered — the picture's
- * fallback link answers its own click (`picture-view.ts`), and the article sees that same click
- * again as it bubbles. The button and the modifier keys are the one test a picture's own click
- * is held to (`isPlainClick`).
+ * click and a middle click open a new tab instead (`opensNewTab`), and a drag-selection that
+ * happens to end on the link should reach the browser's and the editor's own handling, not be
+ * stolen; and so should a click something nearer the target has already answered — the
+ * picture's fallback link answers its own click (`picture-view.ts`), and the article sees that
+ * same click again as it bubbles. The button and the modifier keys are the one test a picture's
+ * own click is held to (`isPlainClick`).
  */
 export function opensReference(event: ReferenceClick): boolean {
   if (event.defaultPrevented || !isPlainClick(event)) {
@@ -65,6 +65,30 @@ export function opensReference(event: ReferenceClick): boolean {
   }
   const selection = window.getSelection();
   return selection === null || selection.isCollapsed;
+}
+
+/** Whether a click is one of those the browser opens a link's target in a new tab or window
+ * with: the middle click, which it raises as `auxclick` alone, and the primary click held with
+ * a modifier. On a link that carries a real address those are the browser's own and are left to
+ * it; on a document's own link mark, whose address the serializer emptied, the browser would
+ * open the page the reader is on, so the handler opens the target itself. A click of the
+ * secondary button is not one of these: its menu is drawn before any click event reaches the
+ * page. */
+function opensNewTab(event: ReferenceClick): boolean {
+  if (event.defaultPrevented) {
+    return false;
+  }
+  return event.button === 1 || (event.button === 0 && !isPlainClick(event));
+}
+
+/** Whether the browser can follow the anchor itself: it carries an address the browser
+ * understands. A document's own link mark carries none - the serializer empties the href and
+ * keeps the target in `data-dispatch-href` - and a hand-written `dispatch://` href names a
+ * scheme no browser can fetch; a picture's fallback link carries the SPA path the reference
+ * opens (`picture-view.ts`), so a new-tab click on that one stays the browser's own. */
+function followsItsOwnHref(anchor: Element): boolean {
+  const href = anchor.getAttribute("href") ?? "";
+  return href !== "" && !href.startsWith("dispatch://");
 }
 
 /** Opens a reference on the page that holds it, inside the app. */
@@ -82,32 +106,59 @@ export function openReference(
   navigate(buildReferencePath(route));
 }
 
+/** Opens a reference in a new tab, for the middle or modified click the browser cannot answer
+ * itself. `noopener`: the tab holds this same app and needs nothing of the page it was opened
+ * from. A block of a spec pinned to a version waits for the slug only its issue names, as
+ * `openReference` waits before it navigates; the click's activation outlives that read, so the
+ * tab still opens. */
+function openReferenceInNewTab(route: DispatchReferenceRoute, queryClient: QueryClient): void {
+  if (needsSpecSlug(route)) {
+    void fetchReferencePath(queryClient, route).then((path) => {
+      window.open(path, "_blank", "noopener");
+    });
+    return;
+  }
+  window.open(buildReferencePath(route), "_blank", "noopener");
+}
+
 /** The `click` and `auxclick` handler of a document's article, the live editor's
- * (`ProofDocument.tsx`) and a past version's (`VersionView.tsx`) alike: a plain click on a
- * `dispatch://` link opens its target inside the app, instead of falling to the editor library's
- * own link plugin, whose href the serializer emptied, and reloading the page. It takes what it
- * needs — the event, the query client, `navigate` — as arguments, because the picture's fallback
- * link opens a reference through `openReference` from plain DOM, where no hook can be read.
+ * (`ProofDocument.tsx`) and a past version's (`VersionView.tsx`) alike: it answers the clicks
+ * the browser splits between those two events. A plain click on a `dispatch://` link opens its
+ * target inside the app, instead of falling to the editor library's own link plugin, whose href
+ * the serializer emptied, and reloading the page. A middle click - which raises `auxclick`
+ * alone - and a modified click open that same target in a new tab, because the emptied href
+ * would otherwise open the page the reader is already on; a link that carries a real address,
+ * the picture's fallback link, is left to the browser, whose own meaning for those clicks is
+ * already the right one.
  *
- * Both events, because a middle click raises `auxclick` alone: that click is not a plain one, so
- * it keeps the browser's own meaning and opens the link's real href in a new tab. */
+ * It takes what it needs - the event, the query client, `navigate` - as arguments, because the
+ * picture's fallback link opens a reference through `openReference` from plain DOM, where no
+ * hook can be read. */
 export function handleReferenceClick(
   event: ReferenceClick,
   queryClient: QueryClient,
   navigate: NavigateToReference
 ): void {
-  if (!opensReference(event)) {
+  const inApp = opensReference(event);
+  if (!inApp && !opensNewTab(event)) {
     return;
   }
   const target = event.target instanceof Element ? event.target : null;
   const anchor = target?.closest<HTMLAnchorElement>("a") ?? null;
+  if (anchor === null) {
+    return;
+  }
   // The link's target is a node its author named, and opening it is a read, so it is read
   // as a node's reference, whatever the length of its name.
-  const href = anchor === null ? null : dispatchHrefOf(anchor);
+  const href = dispatchHrefOf(anchor);
   const route = href === null ? undefined : parseNodeReference(href);
-  if (route === undefined) {
+  if (route === undefined || (!inApp && followsItsOwnHref(anchor))) {
     return;
   }
   event.preventDefault();
-  openReference(route, queryClient, navigate);
+  if (inApp) {
+    openReference(route, queryClient, navigate);
+    return;
+  }
+  openReferenceInNewTab(route, queryClient);
 }

@@ -3,8 +3,10 @@ package files_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/jpeg"
 	"image/png"
@@ -238,5 +240,126 @@ func TestBackfillDimensionsIsRefusedWhileAPassHoldsTheLock(t *testing.T) {
 	holder.Release()
 	if report, err := files.BackfillDimensions(ctx, database.Pool, memory, &strings.Builder{}); err != nil || report.Done != 1 {
 		t.Fatalf("BackfillDimensions once the lock is released: %+v, %v", report, err)
+	}
+}
+
+// exifBlock is a TIFF block holding the Orientation tag alone, in the byte order its first two
+// bytes name: "II" little-endian, "MM" big-endian, both of which a camera writes. It is the
+// block a JPEG's APP1 Exif segment, a PNG's eXIf chunk and a WebP's EXIF chunk each carry.
+func exifBlock(mark string, orientation uint16) []byte {
+	order := binary.AppendByteOrder(binary.LittleEndian)
+	if mark == "MM" {
+		order = binary.BigEndian
+	}
+	block := order.AppendUint16([]byte(mark), 42)  // the TIFF magic
+	block = order.AppendUint32(block, 8)           // the first directory, right after this
+	block = order.AppendUint16(block, 1)           // one entry in it
+	block = order.AppendUint16(block, 0x0112)      // Orientation
+	block = order.AppendUint16(block, 3)           // of type SHORT
+	block = order.AppendUint32(block, 1)           // one of them
+	block = order.AppendUint16(block, orientation) // the value itself, which fits in the entry
+	block = order.AppendUint16(block, 0)           // the rest of the entry's four value bytes
+	return order.AppendUint32(block, 0)            // no directory after this one
+}
+
+// jpegWithOrientation is a JPEG carrying its Exif where a camera puts it: an APP1 segment, right
+// after the start of the picture, opening with the Exif header and then the TIFF block.
+func jpegWithOrientation(t *testing.T, width, height int, mark string, orientation uint16) []byte {
+	t.Helper()
+	encoded := encodedJPEG(t, width, height)
+	body := append([]byte("Exif\x00\x00"), exifBlock(mark, orientation)...)
+	segment := append([]byte{0xff, 0xe1, byte((len(body) + 2) >> 8), byte(len(body) + 2)}, body...)
+	return append(append(append([]byte{}, encoded[:2]...), segment...), encoded[2:]...)
+}
+
+// pngWithOrientation is a PNG carrying an eXIf chunk, before its image data or after it: a
+// browser reads the first and passes over the second, which is why the two are distinguished.
+func pngWithOrientation(t *testing.T, width, height int, orientation uint16, beforeImageData bool) []byte {
+	t.Helper()
+	encoded := encodedPNG(t, width, height)
+	at := len(encoded) - 12 // just before IEND, which is the last chunk and twelve bytes long
+	if beforeImageData {
+		at = firstIDAT(t, encoded)
+	}
+	return append(append(append([]byte{}, encoded[:at]...), pngChunk("eXIf", exifBlock("II", orientation))...), encoded[at:]...)
+}
+
+// firstIDAT is where a PNG's image data begins: a length, a type, the data and a CRC from the
+// signature on, until the type is IDAT.
+func firstIDAT(t *testing.T, encoded []byte) int {
+	t.Helper()
+	for at := 8; at+8 <= len(encoded); at += 12 + int(binary.BigEndian.Uint32(encoded[at:])) {
+		if string(encoded[at+4:at+8]) == "IDAT" {
+			return at
+		}
+	}
+	t.Fatal("the encoded PNG holds no image data")
+	return 0
+}
+
+func pngChunk(kind string, data []byte) []byte {
+	chunk := binary.BigEndian.AppendUint32(nil, uint32(len(data)))
+	chunk = append(append(chunk, kind...), data...)
+	return binary.BigEndian.AppendUint32(chunk, crc32.ChecksumIEEE(append([]byte(kind), data...)))
+}
+
+// webpWithOrientation is an extended WebP: the VP8X header a file needs before it may carry
+// anything but a frame, with the Exif flag set and the canvas named, the lossless frame itself,
+// and the EXIF chunk. The frame is the five-byte VP8L header the api rows build - the 0x2f
+// signature, 14 bits of width-1, 14 bits of height-1, an alpha bit and a three-bit version,
+// least significant bit first - since no decoder here reads a pixel.
+func webpWithOrientation(width, height int, orientation uint16) []byte {
+	frame := uint32(width-1) | uint32(height-1)<<14 | 1<<28
+	vp8x := []byte{
+		0x08, 0, 0, 0, // the Exif flag, then the three reserved bytes
+		byte(width - 1), byte((width - 1) >> 8), byte((width - 1) >> 16),
+		byte(height - 1), byte((height - 1) >> 8), byte((height - 1) >> 16),
+	}
+	body := append([]byte("WEBP"), riffChunk("VP8X", vp8x)...)
+	body = append(body, riffChunk("VP8L", []byte{0x2f, byte(frame), byte(frame >> 8), byte(frame >> 16), byte(frame >> 24)})...)
+	body = append(body, riffChunk("EXIF", exifBlock("II", orientation))...)
+	return append(binary.LittleEndian.AppendUint32([]byte("RIFF"), uint32(len(body))), body...)
+}
+
+func riffChunk(kind string, data []byte) []byte {
+	chunk := append(binary.LittleEndian.AppendUint32([]byte(kind), uint32(len(data))), data...)
+	if len(data)%2 == 1 {
+		chunk = append(chunk, 0) // a chunk is padded to an even length
+	}
+	return chunk
+}
+
+// The pair recorded is the one a browser draws, not the one the bytes store: a photograph whose
+// Exif Orientation lays it on its side is drawn turned, so its two numbers are exchanged. Which
+// formats are turned was measured, and orientation.go says what and where; a format no engine
+// turns, and a chunk no engine reads, leave the stored pair alone.
+func TestPictureDimensionsRecordsThePairABrowserDraws(t *testing.T) {
+	for _, row := range []struct {
+		name  string
+		bytes []byte
+		want  string
+	}{
+		{"a JPEG carrying no Exif", encodedJPEG(t, 40, 20), "40x20"},
+		{"a JPEG left upright by its Exif", jpegWithOrientation(t, 40, 20, "II", 1), "40x20"},
+		{"a JPEG turned half round, which exchanges nothing", jpegWithOrientation(t, 40, 20, "II", 3), "40x20"},
+		{"a phone photograph, Orientation 6", jpegWithOrientation(t, 40, 20, "II", 6), "20x40"},
+		{"the other quarter turn, Orientation 8", jpegWithOrientation(t, 40, 20, "II", 8), "20x40"},
+		{"an Exif written the other way round, MM", jpegWithOrientation(t, 40, 20, "MM", 6), "20x40"},
+		{"an Orientation no reader draws by", jpegWithOrientation(t, 40, 20, "II", 9), "40x20"},
+		{"a PNG carrying no eXIf", encodedPNG(t, 40, 20), "40x20"},
+		{"a PNG whose eXIf stands before its image data", pngWithOrientation(t, 40, 20, 6, true), "20x40"},
+		{"a PNG whose eXIf stands after it, which no engine reads", pngWithOrientation(t, 40, 20, 6, false), "40x20"},
+		{"a WebP with an EXIF chunk, which no engine turns by", webpWithOrientation(40, 20, 6), "40x20"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			width, height := files.PictureDimensions(row.bytes)
+			got := "none"
+			if width != nil && height != nil {
+				got = fmt.Sprintf("%dx%d", *width, *height)
+			}
+			if got != row.want {
+				t.Errorf("PictureDimensions of %s records %s, want %s", row.name, got, row.want)
+			}
+		})
 	}
 }

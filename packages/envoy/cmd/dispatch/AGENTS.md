@@ -275,9 +275,11 @@ bucket that refuses an upload without `ifGenerationMatch=0` or the body's CRC32C
 `envoy-dispatch backfill-files [--verify-only | --restore]` moves the rows uploaded before the
 bucket, checks them, or writes them back (the rollback); the README's "Moving uploaded files to
 the bucket" has its rules and the task role's grant. `envoy-dispatch backfill-dimensions` fills
-the width and height of every picture version stored before Dispatch read a size, from the row
-while it still holds its bytes and from the bucket once `backfill-files` has moved them, with
-the one decode the upload path reads too (`files.PictureDimensions`, `files/dimensions.go`); it
+the width and height every picture version stored before Dispatch read a size is drawn at, from
+the row while it still holds its bytes and from the bucket once `backfill-files` has moved them,
+with the one decode the upload path reads too (`files.PictureDimensions`, `files/dimensions.go`,
+which exchanges the pair for a picture whose Exif Orientation a browser turns it by:
+`files/orientation.go` names the formats that are turned and the measurement behind each); it
 refuses to run without the bucket, holds an advisory lock of its own so `backfill-files` neither
 waits on it nor blocks it, writes only a row still missing the pair, and the README's "Recording
 the size of the pictures already stored" has its rules. `/healthz` reports the bucket as `files`
@@ -303,11 +305,12 @@ holds everything the artifact routes do differently for a conversation.
 `serveFileVersion` serves every file and image version, whoever owns it, with
 `Cache-Control: private, max-age=31536000, immutable`; a document version carries none.
 Its answer names the file (`fileDisposition`): `Content-Disposition: inline` for a type a browser draws where the reader is, `attachment` for every other one, with the artifact's own name both as RFC 6266's `filename` and as RFC 8187's `filename*`, so a picture or a video opened at its own address is drawn there and every other file is saved under the name Dispatch shows.
-The inline types are `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `video/mp4` and `video/webm` (`contracts.InlineContentTypes`, generated from `INLINE_CONTENT_TYPES` in `packages/contracts`, so the dashboard decides what it draws from the same list), matched without the stored type's parameters, since `image/png; charset=binary` is the same picture as `image/png`.
+The inline types are `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `video/mp4` and `video/webm` (`contracts.InlineContentTypes`, generated from `INLINE_CONTENT_TYPES` in `packages/contracts`, whose one reader this is: what an upload's answer hands the agent is decided by the artifact's own kind and the stored video type, never by this set), matched without the stored type's parameters, since `image/png; charset=binary` is the same picture as `image/png`.
 The entity tag is the bytes' sha256 in quotes, the one form `net/http` reads back from `If-Range` and `If-None-Match`, and `Accept-Ranges: bytes` is on every answer, since a player decides from the first answer it gets whether it may seek.
 Row bytes are answered by `http.ServeContent`, which writes the length and the status itself and answers the range, the `206`, the `Content-Range`, the `416` and the conditional reads.
-Store bytes are streamed and hash-checked for the whole of a file, so one is never held in memory for a reader who asked for all of it: with no `Range`, as they always were, and for a range that names the whole object on no condition (`bytes=0-` or `bytes=0-<size-1>`, what a player's opening probe asks for; `wholeObjectRange`), answered `206` with the same `Content-Range` and the same length `http.ServeContent` would write.
-Only a genuinely partial range of store bytes is read into memory first, since the store hands out one stream from the object's start; and a store request with no `Range` whose `If-None-Match` holds the version's tag is `304` with the headers and no body (`etagMatches`, which reads that header's list form, its `W/` tags and its `*` as `net/http`'s own unexported matcher does).
+Store bytes are streamed and hash-checked for the whole of a file, so one is never held in memory for a reader who asked for all of it: with no `Range`, as they always were, and for a range that names the whole object on no condition (`bytes=0-` or `bytes=0-<size-1>`, which is what Chrome's opening probe asks for; `wholeObjectRange`), answered `206` with the same `Content-Range` and the same length `http.ServeContent` would write.
+Every other range of store bytes is read into memory first, since the store hands out one stream from the object's start and `http.ServeContent` needs a reader it can seek in: that is Safari's opening probe (`bytes=0-1`) and every engine's seek (`bytes=N-`), each costing one copy of the object, at most `files.MaxObjectSize`, for the one request (`files.ReadObject`, which takes the body in the steps its verifying reader reads it in, so the object is held once and not twice).
+A store request with no `Range` whose `If-None-Match` holds the version's tag is `304` with the headers and no body (`etagMatches`, which reads that header's list form, its `W/` tags and its `*` as `net/http`'s own unexported matcher does).
 
 Every owner's upload reads its kind from its bytes (`artifactKind`): a `text/markdown` upload is
 a document, and any other is an `image` only when `http.DetectContentType` reads its bytes as a

@@ -961,8 +961,8 @@ export function ProofDocument({
         className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
-        // A middle click raises `auxclick` alone, so the handler hears both events; it leaves
-        // that one to the browser, which opens the link's own address in a new tab.
+        // A middle click raises `auxclick` alone, so the handler hears both events: a plain
+        // click opens the link's target in the app, a middle or modified click in a new tab.
         onAuxClick={(event) => handleReferenceClick(event, queryClient, navigate)}
         onClick={(event) => handleReferenceClick(event, queryClient, navigate)}
       >

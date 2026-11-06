@@ -53,9 +53,9 @@ export function RefLink({
   const { picture, title } = useReferenceTarget(route, { text: false });
   const path = useReferencePath(route);
   // A video standing alone in its block is a player. The summary says which references are
-  // videos, and this component reads it through the hook, which subscribes to the very query a
-  // pinned reference's media would be read out of the cache from (`usePinnedMedia`), so
-  // whenever that summary is there `picture` already answers `video`.
+  // videos, and this component reads it through the hook, which is the one read of it any
+  // surface makes: a reference's own address names no type, so nothing but that summary tells
+  // a video from a picture (`pinnedMedia`).
   const player = alone === true && picture?.kind === "video" ? picture.src : undefined;
   useLayoutEffect(() => {
     if (anchor instanceof HTMLAnchorElement) {

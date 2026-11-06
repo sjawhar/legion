@@ -115,26 +115,36 @@ function surfacePictures(clicked: HTMLImageElement): HTMLImageElement[] {
 
 /** One picture of the set: the address the browser drew it from, its alt text, which the viewer
  *  gives its own `<img>` and so is the picture's accessible name there, and its size, which
- *  PhotoSwipe requires. The size comes from the record the page already holds, the `width` and
- *  `height` the drawing places write from the version's own recorded pair (`drawnBox`), so the
- *  viewer measures no page. A picture drawn without them - a version stored before Dispatch
- *  read a size, a reference pinned below the artifact's latest version - reports its own size
- *  once the browser has drawn it; one below the fold that lazy loading has not drawn reports 0
- *  with neither, and is sized when the reader steps to it (`sizeOnStep`). */
+ *  PhotoSwipe requires. The size is the picture's own, as the browser decoded it
+ *  (`decodedBox`): that is the shape the viewer must draw, since PhotoSwipe sets the slide's
+ *  box in pixels and fits no picture inside it. A picture the browser has not drawn yet - one
+ *  below the fold that lazy loading has left alone - has none, and falls back to the pair the
+ *  page wrote from the version's record (`recordedBox`), so the viewer measures no page; with
+ *  neither - a version stored before Dispatch read a size, a reference pinned below the
+ *  artifact's latest version - it is sized when the reader steps to it (`sizeOnStep`). */
 function pictureData(picture: HTMLImageElement): SlideData {
-  const box = drawnBox(picture);
+  const box = decodedBox(picture) ?? recordedBox(picture);
   return {
     alt: picture.alt,
-    height: box?.height ?? (picture.naturalHeight || undefined),
+    height: box?.height,
     src: picture.currentSrc || picture.src,
-    width: box?.width ?? (picture.naturalWidth || undefined),
+    width: box?.width,
   };
 }
 
-/** The size the page wrote on the drawn picture: both attributes or neither, since one of the
- *  two names no shape. A picture with no `width` and `height` answers undefined, as every
- *  picture did before a version recorded its size. */
-function drawnBox(picture: HTMLImageElement): { width: number; height: number } | undefined {
+/** The size the browser decoded the picture at, once it has one: the turned size, which a
+ *  recorded pair read before the orientation was can disagree with. Undefined until the bytes
+ *  are in. */
+function decodedBox(picture: HTMLImageElement): { width: number; height: number } | undefined {
+  return picture.complete && picture.naturalWidth > 0
+    ? { height: picture.naturalHeight, width: picture.naturalWidth }
+    : undefined;
+}
+
+/** The size the page wrote on the picture: both attributes or neither, since one of the two
+ *  names no shape. A picture with no `width` and `height` answers undefined, as every picture
+ *  did before a version recorded its size. */
+function recordedBox(picture: HTMLImageElement): { width: number; height: number } | undefined {
   const width = Number(picture.getAttribute("width"));
   const height = Number(picture.getAttribute("height"));
   return width > 0 && height > 0 ? { height, width } : undefined;

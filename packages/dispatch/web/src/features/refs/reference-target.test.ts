@@ -17,9 +17,9 @@ import {
   documentSummaryQuery,
   issueSummaryQuery,
   messageQuery,
+  pinnedMedia,
   prefetchReference,
   type ReferenceMedia,
-  usePinnedMedia,
   useReferenceTarget,
   watchPicturePath,
 } from "./reference-target";
@@ -446,14 +446,9 @@ test("watchPicturePath answers undefined at once for a reference to no artifact"
   expect(reported).toEqual([undefined]);
 });
 
-test("a pinned reference draws from the address it names, as a video only where the cache says so", () => {
+test("a pinned reference draws from the address it names, with no read of its own", () => {
   const spies = spyReads();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const pinnedMedia = (route: DispatchReferenceRoute) =>
-    renderHook(() => usePinnedMedia(route), {
-      wrapper: ({ children }: { children: ReactNode }) =>
-        createElement(QueryClientProvider, { client: queryClient }, children),
-    });
   const clip: DispatchReferenceRoute = {
     key: "CORE-1",
     kind: "artifact",
@@ -461,54 +456,18 @@ test("a pinned reference draws from the address it names, as a video only where 
     version: 2,
   };
 
-  // Nothing read yet: the pinned address draws at once, as a picture, which is what a pinned
-  // reference drew before a type was known.
-  const cold = pinnedMedia(clip);
-  expect(cold.result.current).toEqual({
+  // The pinned address draws at once, as a picture: the reference names a version, never a
+  // type, and the summary is what turns the drawn picture into a player once it is read.
+  expect(pinnedMedia(clip)).toEqual({
     kind: "picture",
     src: "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/2",
   });
-  cold.unmount();
 
-  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, {
-    documents: [
-      {
-        height: null,
-        id: "clip",
-        kind: "file",
-        latest_version: 3,
-        mime: "video/mp4",
-        name: "clip.mp4",
-        primary: false,
-        slug: "clip-mp4",
-        width: null,
-      },
-    ],
-    key: "CORE-1",
-    project: "CORE",
-    status: "in_progress",
-    title: "Core one",
-  } satisfies IssueReferenceSummary);
-  // The summary a link on the page already read says it is a video; the pinned version, not the
-  // latest, is still the address.
-  const warm = pinnedMedia(clip);
-  expect(warm.result.current).toEqual({
-    kind: "video",
-    src: "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/2",
-  });
-  warm.unmount();
-
-  // A reference that pins no version has no pinned media; and no read was started for either.
-  const live = pinnedMedia({ key: "CORE-1", kind: "artifact", slug: "clip-mp4" });
-  expect(live.result.current).toBeUndefined();
-  live.unmount();
+  // A reference that pins no version has no pinned media; and neither answer read anything:
+  // no summary was fetched, and the cache holds no query at all.
+  expect(pinnedMedia({ key: "CORE-1", kind: "artifact", slug: "clip-mp4" })).toBeUndefined();
   expect(spies.getIssueSummary).not.toHaveBeenCalled();
-  expect(
-    queryClient
-      .getQueryCache()
-      .find({ queryKey: issueSummaryQuery("CORE-1").queryKey })
-      ?.getObserversCount()
-  ).toBe(0);
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
 });
 
 /** CORE-1's summary holding one picture at `latest`, with the shape its summary recorded. */
@@ -538,6 +497,15 @@ function picturedSummary(
   };
 }
 
+/** What `useReferenceTarget` draws for route, rendered against `queryClient`: the summary read
+ *  every surface answers a reference's media from. */
+function targetPicture(queryClient: QueryClient, route: DispatchReferenceRoute) {
+  return renderHook(() => useReferenceTarget(route, { text: false }).picture, {
+    wrapper: ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children),
+  });
+}
+
 test("a reference at the latest version carries the shape the summary recorded, and one below it carries none", () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, picturedSummary(3, 1600, 900));
@@ -555,16 +523,13 @@ test("a reference at the latest version carries the shape the summary recorded, 
     },
   ]);
 
-  const pinnedMedia = (version: number) =>
-    renderHook(
-      () => usePinnedMedia({ key: "CORE-1", kind: "artifact", slug: "shot-png", version }),
-      {
-        wrapper: ({ children }: { children: ReactNode }) =>
-          createElement(QueryClientProvider, { client: queryClient }, children),
-      }
-    );
   // Pinned at the latest: the same shape, from the summary the page already read.
-  const atLatest = pinnedMedia(3);
+  const atLatest = targetPicture(queryClient, {
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "shot-png",
+    version: 3,
+  });
   expect(atLatest.result.current).toEqual({
     height: 900,
     kind: "picture",
@@ -574,7 +539,12 @@ test("a reference at the latest version carries the shape the summary recorded, 
   atLatest.unmount();
   // Pinned below the latest: no shape at all, because a later upload may have another one and
   // the summary answers for the latest alone.
-  const below = pinnedMedia(2);
+  const below = targetPicture(queryClient, {
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "shot-png",
+    version: 2,
+  });
   expect(below.result.current).toEqual({
     kind: "picture",
     src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2",
@@ -592,13 +562,12 @@ test("a version with no recorded shape carries none, by either reference form", 
   expect(reported).toEqual([
     { kind: "picture", src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1" },
   ]);
-  const pinned = renderHook(
-    () => usePinnedMedia({ key: "CORE-1", kind: "artifact", slug: "shot-png", version: 1 }),
-    {
-      wrapper: ({ children }: { children: ReactNode }) =>
-        createElement(QueryClientProvider, { client: queryClient }, children),
-    }
-  );
+  const pinned = targetPicture(queryClient, {
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "shot-png",
+    version: 1,
+  });
   expect(pinned.result.current).toEqual({
     kind: "picture",
     src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1",

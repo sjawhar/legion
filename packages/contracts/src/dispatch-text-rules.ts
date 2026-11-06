@@ -85,51 +85,24 @@ export function storedMediaType(mime: string | null | undefined): string | undef
   return mime === null || mime === undefined ? undefined : mime.split(";")[0]?.trim();
 }
 
-/** The picture types a model is shown and the server stores as `kind: image`: what their bytes
- *  say, never a name or a header. Everything else, an SVG included, is a file. */
-export type PictureType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/**
+ * The picture types a model is shown and the server stores as `kind: image`: what their bytes
+ * say, never a name or a header. Everything else, an SVG included, is a file.
+ */
+export const PICTURE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
 
-const PICTURE_TYPES: Readonly<Record<string, true>> = {
-  "image/png": true,
-  "image/jpeg": true,
-  "image/gif": true,
-  "image/webp": true,
-};
+export type PictureType = (typeof PICTURE_TYPES)[number];
+
+const pictureTypes: ReadonlySet<string> = new Set(PICTURE_TYPES);
 
 /** Whether a stated MIME type (no parameters) is one of the picture types. */
 export function isPictureType(mime: string): mime is PictureType {
-  return PICTURE_TYPES[mime] === true;
+  return pictureTypes.has(mime);
 }
 
 /**
- * The content types a browser draws where it is read, rather than handing the reader a download:
- * the four picture types and the two video containers every browser Dispatch supports plays. A
- * request for an upload of one of these is answered `Content-Disposition: inline`, and a
- * reference to one is drawn in the page instead of a link. Go's twin is
- * `contracts.InlineContentTypes`, generated from this list.
- */
-export const INLINE_CONTENT_TYPES = [
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "video/mp4",
-  "video/webm",
-] as const;
-
-export type InlineContentType = (typeof INLINE_CONTENT_TYPES)[number];
-
-const inlineContentTypes: ReadonlySet<string> = new Set(INLINE_CONTENT_TYPES);
-
-/** Whether a stated MIME type (no parameters) is one a browser draws inline. */
-export function isInlineContentType(mime: string): mime is InlineContentType {
-  return inlineContentTypes.has(mime);
-}
-
-/**
- * The inline content types a browser plays rather than shows: what a renderer asks for, since it
- * draws a video in a player with controls and a picture in an image. Every one of them is an
- * INLINE_CONTENT_TYPES member; what is inline and not a video is a picture.
+ * The content types a browser plays rather than shows: what a renderer asks for, since it draws a
+ * video in a player with controls and a picture in an image.
  */
 export const VIDEO_CONTENT_TYPES = ["video/mp4", "video/webm"] as const;
 
@@ -141,3 +114,15 @@ const videoContentTypes: ReadonlySet<string> = new Set(VIDEO_CONTENT_TYPES);
 export function isVideoContentType(mime: string): mime is VideoContentType {
   return videoContentTypes.has(mime);
 }
+
+/**
+ * The content types a browser draws where it is read, rather than handing the reader a download:
+ * the picture types and the video containers above, joined rather than typed again so the three
+ * lists cannot drift. The list has one reader: a request for an upload of one of these is
+ * answered `Content-Disposition: inline` by the server (`contracts.InlineContentTypes`,
+ * generated from this list). Whether an upload's answer hands the agent the markdown line that
+ * draws it is not read off this list: the Envoy client decides it from the artifact's own kind
+ * and, for a video, the stored type (`dispatch-execute.ts`). What is inline and not a video is
+ * a picture.
+ */
+export const INLINE_CONTENT_TYPES = [...PICTURE_TYPES, ...VIDEO_CONTENT_TYPES] as const;

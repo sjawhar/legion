@@ -32,6 +32,12 @@ import { asUser } from "./users";
  * away after the upload and that the page never drew, which is the state every picture stored
  * before the filling pass is in.
  *
+ * One last row drives a photograph a browser turns: its bytes store a landscape picture and
+ * its Exif Orientation says the camera lay on its side, so the pair the upload records is the
+ * upright one (`files.PictureDimensions`), the box the page reserves is upright too, and the
+ * full-size view, which takes its shape off the picture the browser decoded, opens it upright
+ * rather than squashed into the pair the bytes store.
+ *
  * Both widths the check asks for are the two projects this file runs in: `chromium`'s 1280x720
  * window and `iphone`'s 390x844 one, which is why every row carries `@phone`.
  *
@@ -111,6 +117,79 @@ function writePng(width: number, height: number): Buffer {
 
 const PICTURE_PNG = writePng(PICTURE.width, PICTURE.height);
 
+/** The photograph's own shape, the way round its bytes store it, and the way round a browser
+ *  draws it, which its Exif Orientation exchanges. The upload records the second of the two
+ *  (`files.PictureDimensions`), since that is the box a page must reserve. */
+const PHOTOGRAPH_STORED = { height: 480, width: 640 };
+const PHOTOGRAPH = { height: PHOTOGRAPH_STORED.width, width: PHOTOGRAPH_STORED.height };
+
+/** One JPEG segment: `0xff`, its marker, the two-byte length that counts itself, and its body. */
+function jpegSegment(marker: number, body: Buffer): Buffer {
+  const head = Buffer.alloc(4);
+  head[0] = 0xff;
+  head[1] = marker;
+  head.writeUInt16BE(body.length + 2, 2);
+  return Buffer.concat([head, body]);
+}
+
+/** The APP1 segment a camera writes: the Exif header, then a TIFF block holding the Orientation
+ *  tag alone - the byte order, the TIFF magic, where the first directory stands, one entry in
+ *  it, and no directory after. A SHORT fits the entry's own four value bytes, so the block holds
+ *  nothing beyond the entry. */
+function exifOrientation(orientation: number): Buffer {
+  const block = Buffer.alloc(26);
+  block.write("II", 0, "ascii");
+  block.writeUInt16LE(42, 2);
+  block.writeUInt32LE(8, 4);
+  block.writeUInt16LE(1, 8);
+  block.writeUInt16LE(0x0112, 10);
+  block.writeUInt16LE(3, 12);
+  block.writeUInt32LE(1, 14);
+  block.writeUInt16LE(orientation, 18);
+  return Buffer.concat([Buffer.from("Exif\u0000\u0000", "latin1"), block]);
+}
+
+/** A grey baseline JPEG of `width` x `height` whose Exif says `orientation`, written byte by
+ *  byte as the PNG above is, so the suite stores no file and the server and the browser each
+ *  read a real picture. Every block holds one coefficient and that coefficient is zero, so the
+ *  scan is the same two bits - no difference from the block before, and nothing after it - once
+ *  per eight-by-eight block, and each of the two Huffman tables holds the one symbol one of
+ *  those bits names. */
+function writeJpeg(width: number, height: number, orientation: number): Buffer {
+  // A table: its kind and number, how many codes it holds of each length from one to sixteen,
+  // and then the symbols. One code, one bit long, for the one symbol the scan uses.
+  const huffman = (kind: number) =>
+    Buffer.concat([Buffer.from([kind, 1]), Buffer.alloc(15), Buffer.from([0])]);
+  const blocks = Math.ceil(width / 8) * Math.ceil(height / 8);
+  const scan = Buffer.alloc(Math.ceil(blocks / 4));
+  // A scan ends on the ones that fill its last byte.
+  scan[scan.length - 1] = (1 << (scan.length * 8 - blocks * 2)) - 1;
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8]),
+    jpegSegment(0xe1, exifOrientation(orientation)),
+    // The JFIF header, which is what lets Go's decoder answer the shape off the frame below
+    // rather than reading the whole scan first (`image/jpeg`'s `decode`, `configOnly`).
+    jpegSegment(0xe0, Buffer.from([0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0])),
+    // The quantization table, whose numbers this picture never uses: its one coefficient is 0.
+    jpegSegment(0xdb, Buffer.concat([Buffer.from([0]), Buffer.alloc(64, 16)])),
+    // The frame: eight bits a sample, the shape, and one component, which makes the picture
+    // grey, sampled one to one and read against the table above.
+    jpegSegment(
+      0xc0,
+      Buffer.from([8, height >> 8, height & 0xff, width >> 8, width & 0xff, 1, 1, 0x11, 0])
+    ),
+    jpegSegment(0xc4, huffman(0x00)),
+    jpegSegment(0xc4, huffman(0x10)),
+    // The scan itself: the one component, read against both tables above, over the whole
+    // spectrum.
+    jpegSegment(0xda, Buffer.from([1, 1, 0x00, 0, 63, 0])),
+    scan,
+    Buffer.from([0xff, 0xd9]),
+  ]);
+}
+
+const PHOTOGRAPH_JPEG = writeJpeg(PHOTOGRAPH_STORED.width, PHOTOGRAPH_STORED.height, 6);
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -125,17 +204,18 @@ interface Uploaded {
   src: string;
 }
 
-/** Uploads the fixture to `issueKey` under `name`, through the route a pasted picture takes, and
+/** Uploads a fixture to `issueKey` under `name`, through the route a pasted picture takes, and
  *  answers the two reference forms and the address they both draw from. */
 async function uploadPicture(
   page: Page,
   issueKey: string,
   name: string,
-  version = 1
+  version = 1,
+  file: { bytes: Buffer; mimeType: string } = { bytes: PICTURE_PNG, mimeType: "image/png" }
 ): Promise<Uploaded> {
   const answer = await page.request.post(`/api/v1/issues/${issueKey}/artifacts`, {
     headers: { Origin: dashboardOrigin },
-    multipart: { file: { buffer: PICTURE_PNG, mimeType: "image/png", name }, name },
+    multipart: { file: { buffer: file.bytes, mimeType: file.mimeType, name }, name },
   });
   expect(answer.status(), await answer.text()).toBeLessThan(300);
   const { artifact } = (await answer.json()) as ArtifactUploadResponse;
@@ -309,15 +389,16 @@ function fullSize(page: Page): Locator {
   return page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Close" }) });
 }
 
-/** The box the view fits the fixture into: the window, and never larger than the picture's own
- *  pixels. */
-function windowFit(page: Page): { height: number; width: number } {
+/** The box the view fits a fixture into: the window, and never larger than the picture's own
+ *  pixels. The shape is the one the browser draws, which for a picture its Exif turns is not
+ *  the one its bytes store. */
+function windowFit(page: Page, shape = PICTURE): { height: number; width: number } {
   const size = page.viewportSize();
   if (size === null) {
     throw new Error("the page has no window size");
   }
-  const scale = Math.min(1, size.width / PICTURE.width, size.height / PICTURE.height);
-  return { height: PICTURE.height * scale, width: PICTURE.width * scale };
+  const scale = Math.min(1, size.width / shape.width, size.height / shape.height);
+  return { height: shape.height * scale, width: shape.width * scale };
 }
 
 test("a document in the editor holds its place while a picture at the latest version and one with no version load @phone", async ({
@@ -704,6 +785,73 @@ test("a picture whose recorded size is gone and that the page never drew opens a
     expect(
       Math.abs(box.height - fit.height),
       "the view drew the picture at another height"
+    ).toBeLessThanOrEqual(STILL);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a photograph its Exif turns reserves the upright box and opens full-size upright @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "A photograph on its side" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const photograph = await uploadPicture(page, issue.key, "photo.jpg", 1, {
+      bytes: PHOTOGRAPH_JPEG,
+      mimeType: "image/jpeg",
+    });
+    const comment = await createComment(
+      issue.key,
+      {
+        body: ["The photograph:", `![pinned](${photograph.pinned})`, "Below the photograph."].join(
+          "\n\n"
+        ),
+      },
+      agentSession
+    );
+
+    const held = await holdBytes(page, photograph.src);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const body = openedBody(turn);
+    const drawn = body.getByRole("img", { name: "pinned" });
+    await expectHeld(drawn);
+    // The box the page reserved is the way round the browser draws the photograph. The
+    // landscape pair its bytes store would reserve a box of another shape altogether, and the
+    // text below it would move once the upright picture landed.
+    await expect(drawn).toHaveAttribute("width", String(PHOTOGRAPH.width));
+    await expect(drawn).toHaveAttribute("height", String(PHOTOGRAPH.height));
+    const above = body.getByText("The photograph:");
+    const below = body.getByText("Below the photograph.");
+    const span = await settledSpan(page, above, below);
+
+    held.release();
+    await expect
+      .poll(() => naturalWidthOf(drawn), { message: "the released bytes were never drawn" })
+      .toBe(PHOTOGRAPH.width);
+    expect(
+      Math.abs((await settledSpan(page, above, below)) - span),
+      "the text below the photograph moved as its bytes arrived"
+    ).toBeLessThanOrEqual(STILL);
+
+    // The view takes the shape off the picture the browser decoded, so it opens the photograph
+    // upright at the window's fit rather than squashed into the pair its bytes store.
+    await drawn.click();
+    const shown = fullSize(page).getByRole("img", { name: "pinned" });
+    await expect(shown).toHaveCount(1);
+    const fit = windowFit(page, PHOTOGRAPH);
+    await expect
+      .poll(async () => Math.round((await boxOf(shown)).width), {
+        message: "the full-size view never reached the shape the browser draws",
+      })
+      .toBe(Math.round(fit.width));
+    expect(
+      Math.abs((await boxOf(shown)).height - fit.height),
+      "the view opened the photograph at another height"
     ).toBeLessThanOrEqual(STILL);
   } finally {
     await alice.close();

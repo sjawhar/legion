@@ -321,8 +321,10 @@ const DispatchSignInRequired = "SIGN_IN_REQUIRED"
 // InlineContentTypes are the content types a browser draws where the reader is, rather than
 // handing the reader a download: a stored type in this set is served Content-Disposition: inline,
 // every other one attachment. Membership is one lookup: _, inline := InlineContentTypes[mime].
-// Generated from INLINE_CONTENT_TYPES in packages/contracts, which the dashboard renderer reads
-// too, so what the server serves inline and what a page draws in place cannot drift apart.
+// Generated from INLINE_CONTENT_TYPES in packages/contracts, whose one reader this is, so the
+// types the server serves inline and the one list of the types a browser draws cannot drift
+// apart. What an upload's answer hands an agent is decided elsewhere, by the artifact's own
+// kind and the stored video type, never by this set.
 var InlineContentTypes = map[string]struct{}{
 	"image/png":  {},
 	"image/jpeg": {},

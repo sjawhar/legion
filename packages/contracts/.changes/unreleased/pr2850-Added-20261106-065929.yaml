@@ -1,5 +1,5 @@
 kind: Added
-body: Dispatch's shared rules name the content types a browser draws where it is read - PNG, JPEG, GIF, WebP, MP4 and WebM - and which of them are videos, so the server and the dashboard decide alike what is drawn in the page and what is handed over as a download. An artifact version carries the width and height of the picture it stores, and a reference summary's documents carry their latest version's content type and size.
+body: Dispatch's shared rules name the content types a browser draws where it is read - PNG, JPEG, GIF, WebP, MP4 and WebM - and which of them are videos, so the server's download headers and the agent client's upload answer are taken from the one list and the dashboard tells a video from a picture by the same rule. An artifact version carries the width and height a browser draws its picture at, turned where an Exif Orientation turns the picture, and a reference summary's documents carry their latest version's content type and size.
 time: 2026-11-06T06:59:29.282205087Z
 custom:
     Issue: pr2850

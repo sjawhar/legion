@@ -235,7 +235,8 @@ const parallelProjects = [
   // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
   // select dispatch, offline document recovery owns browser storage, a click on a link
   // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
-  // link), a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
+  // link) and its own rule for the tab a middle click or a modified click may open, a body's
+  // Mermaid diagram draws through the engine's SVG parser, shadow DOM and
   // the ELK layout running in it, and a long body's formatting arrives from a Web Worker whose
   // chunk, deadline and late paint the engine schedules its own way - in `heavy-streamed-turn`
   // here, and in `heavy-bodies` in `firefox-alone` below. Those specs, the whole

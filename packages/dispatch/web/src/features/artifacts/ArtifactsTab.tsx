@@ -21,7 +21,6 @@ import { ApprovalChip } from "../doc/ApprovalChip";
 import { AgentName } from "../refs/AgentName";
 import { ArtifactMedia } from "../refs/ArtifactMedia";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { isStoredVideo } from "../refs/reference-target";
 import {
   buildIssuePath,
   buildProjectPath,
@@ -170,14 +169,17 @@ function ArtifactRow({
 }): ReactNode {
   const versions = versionsNewestFirst(artifact.versions);
   const latestVersion = versions[0];
-  // The row's 40 px square, for an image artifact whose latest version is a picture. A video
-  // keeps a text row: a frame of it is a decode this app does not do. A version the browser
-  // refuses drops the square and leaves the row's own link to the artifact, never a broken
-  // glyph (`ArtifactMedia`). The square takes no `width` and `height` of its own: its class
-  // fixes its box, so the version's recorded pair would reserve nothing the row does not
-  // already hold.
+  // The row's 40 px square, for an image artifact. Its latest version is a picture whatever
+  // was uploaded over it: an artifact is an image only where the server read one of the four
+  // picture types out of the bytes, and an upload whose own kind differs from its artifact's
+  // is refused, so a video is always an artifact of another kind and keeps a text row - a
+  // frame of it is a decode this app does not do. A version the browser refuses drops the
+  // square and leaves the row's own link to the artifact, never a broken glyph
+  // (`ArtifactMedia`). The square takes no `width` and `height` of its own: its class fixes
+  // its box, so the version's recorded pair would reserve nothing the row does not already
+  // hold.
   const thumbnail =
-    latestVersion === undefined || artifact.kind !== "image" || isStoredVideo(latestVersion.mime)
+    latestVersion === undefined || artifact.kind !== "image"
       ? undefined
       : {
           name: `${artifact.name} version ${latestVersion.number}`,

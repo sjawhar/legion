@@ -61,7 +61,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   encodeBlockId,
-  isInlineContentType,
+  isVideoContentType,
   itemFromSearch,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
@@ -5162,12 +5162,17 @@ export async function executeDispatchTool(
       });
       // An upload a browser draws where it is read (a picture or a video) is written as the
       // markdown line that draws it, pinned to the version just made, so the caller pastes the
-      // upload into a body instead of building the address by hand. The type is the stored one,
-      // parameters stripped, never the file's name. The first line keeps its shape: the skill
-      // scenarios' scorer reads `Uploaded <name> as version <n>` off it.
+      // upload into a body instead of building the address by hand. What a browser draws is
+      // the artifact's own kind, which the server reads from the bytes, never the type an
+      // uploader declared: a `file` upload carries the declared type, and bytes the server did
+      // not read as a picture draw as a link card wherever they are read (`referenceMedia` in
+      // the web app). A video is the other drawn thing, and no artifact kind names it, so it
+      // is read from the stored type, parameters stripped. The first line keeps its shape: the
+      // skill scenarios' scorer reads `Uploaded <name> as version <n>` off it.
       const storedType = storedMediaType(result.version.mime);
       const shownLine =
-        storedType !== undefined && isInlineContentType(storedType)
+        result.artifact.kind === "image" ||
+        (storedType !== undefined && isVideoContentType(storedType))
           ? pictureLine(result.artifact.name, `${artifactRef}@v${result.version.number}`)
           : undefined;
       return {

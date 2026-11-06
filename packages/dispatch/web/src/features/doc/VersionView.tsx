@@ -1,6 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
@@ -57,10 +56,11 @@ export function VersionView({
   });
   const userQuery = useQuery(whoAmIQuery());
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  // What the editor's picture links navigate with, which never changes as this page's own
-  // `navigate` does (`useStableNavigate`).
-  const navigateFromEditor = useStableNavigate();
+  // What this view navigates with, the article's links and the editor's picture links alike:
+  // one that never changes as React Router's own does on every location change
+  // (`useStableNavigate`), since the editor is built in an effect that must rebuild for no
+  // navigation.
+  const navigate = useStableNavigate();
   const markdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
@@ -114,7 +114,7 @@ export function VersionView({
         onAskBlockHosts: setAskBlockHosts,
         // What a picture's fallback link opens its artifact with, since the node view is plain
         // DOM: this page's own navigation and its query client.
-        navigate: navigateFromEditor,
+        navigate,
         queryClient,
         readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
@@ -166,7 +166,7 @@ export function VersionView({
     createEditor,
     highlighted,
     markdown,
-    navigateFromEditor,
+    navigate,
     queryClient,
     userQuery.data,
   ]);
@@ -201,8 +201,8 @@ export function VersionView({
         aria-label="Document"
         className="dispatch-doc"
         data-read-only="true"
-        // A middle click raises `auxclick` alone, so the handler hears both events; it leaves
-        // that one to the browser, which opens the link's own address in a new tab.
+        // A middle click raises `auxclick` alone, so the handler hears both events: a plain
+        // click opens the link's target in the app, a middle or modified click in a new tab.
         onAuxClick={(event) => handleReferenceClick(event, queryClient, navigate)}
         onClick={(event) => handleReferenceClick(event, queryClient, navigate)}
       >
