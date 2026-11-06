@@ -9,9 +9,10 @@ architect's acceptance, in `accepting` → retro → the merger's READY → the 
 issue → the implementer's production check, after the close. Every handoff is a record on the
 Dispatch issue, never a commit, so the head that merges carries none. Retro commits nothing
 (*Retro*, below), so the approved head is the head that merges. READY still lets a commit that
-changes only `docs/solutions/` stand, and a file under `.legion/` that GitHub's compare lists as
-removed, the commit `legion handoffs import` makes to remove the directory where handoffs lived
-before they moved to Dispatch. A conflict-forced merge goes back to the reviewer for a
+changes only `docs/solutions/` stand, and a change whose every path is under `.legion/`, where
+handoffs lived before they moved to the Dispatch issue and which nothing writes or reads now, so
+nobody reviews a path there, whatever GitHub's compare says the change did to it.
+A conflict-forced merge goes back to the reviewer for a
 confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
 `skill://legion-worker/references/conflicts-and-rewrites.md`), unless READY refused it, and any
 other change to the head voids it.
@@ -110,8 +111,8 @@ other change to the head voids it.
   `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
   it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
   below), and that read is no new round. A round after a READY refusal is the one exception. Its
-  approval needs the tester's results to be current at the head, or at an ancestor with only files
-  under `.legion/` removed since. So there you fix no prose yourself, and you name each prose
+  approval needs the tester's results to be current at the head, or at an ancestor with only paths
+  under `.legion/` changed since. So there you fix no prose yourself, and you name each prose
   finding in a `REQUEST_CHANGES`.
 
 A reviewer's phase ends with its completion, not with its review. Every round records a handoff
@@ -162,7 +163,7 @@ reviewing until you finish.
   `dispatch comment` on the issue for the skill librarian, brings the PR body up to date and
   completes (`skill://legion-retro` gives the steps), so the approved head is the head READY
   names. Anything above the approved
-  head voids the approval, except the handoff import's removal of `.legion/` files and a commit
+  head voids the approval, except a change whose every path is under `.legion/` and a commit
   that changes only `docs/solutions/`, which READY still lets through: READY is refused
   `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send
   the head back to review instead of completing, the move's reason naming the refusal's code and

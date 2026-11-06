@@ -239,7 +239,8 @@ function recordRun(name: string, files: Record<string, string>) {
 }
 // Followed the rule: drove the CLI, recorded its own test record, then completed naming it.
 recordRun("tester-proof-rec-1", {});
-// Completed naming a record another session wrote (the import's, under the daemon's session).
+// Completed naming a record another session wrote (one carried from before handoffs moved to the
+// Dispatch issue, under the daemon's session).
 recordRun("tester-proof-rec-2", {
   "handoffs.json": handoffs(testRecord({ author: "legion-daemon:lweval" })),
 });

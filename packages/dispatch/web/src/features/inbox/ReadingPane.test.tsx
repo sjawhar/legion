@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, type Mock, spyOn, test } from "bun:test";
 import type { ChangeDecorations } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -6,6 +6,7 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { ApiError, api } from "../../api/client";
 import type { Artifact, AskSnooze, InboxRow, IssueDetails, Version } from "../../api/types";
 import { CHANGED_BLOCK_CLASS, changeMarksAgainst } from "../doc/change-marks";
@@ -630,6 +631,9 @@ test("a document the editor is refused admission to leaves the column on the car
 });
 
 test("a selection changed twice inside the settle opens the second document alone", async () => {
+  // On the fake clock from the first render, so the settle of the first selection is a timer this
+  // test moves the clock past rather than a wait of its own.
+  jest.useFakeTimers();
   const { opened, rerender, runtime, view } = renderPane({
     ask: decisionAsk({ id: "ask-1" }),
     seed: (client) => {
@@ -649,9 +653,10 @@ test("a selection changed twice inside the settle opens the second document alon
     await waitFor(() => expect(opened).toEqual(["artifact-2"]));
     await waitFor(() => expect(runtime.connections).toHaveLength(1));
     // Long past the settle, the first selection has still opened nothing.
-    await Bun.sleep(SETTLE_MS * 2);
+    await tick(SETTLE_MS * 2);
     expect(opened).toEqual(["artifact-2"]);
   } finally {
+    realClock();
     view.unmount();
   }
 });

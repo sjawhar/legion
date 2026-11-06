@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strconv"
 	"testing"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus/bustest"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/config"
+	"github.com/sjawhar/envoy/internal/fixtureenv"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -24,12 +24,12 @@ func listenerSettings(t *testing.T, urls string, values map[string]string) confi
 	t.Setenv("ENVOY_MACHINE_ID", "replicas-test")
 	t.Setenv("NATS_URLS", urls)
 	for _, name := range []string{bus.ReplicasEnvVar, bus.StreamMaxBytesEnvVar} {
-		// t.Setenv restores the variable after the test; Unsetenv then leaves it unset for this one.
-		t.Setenv(name, "")
 		if value, ok := values[name]; ok {
 			t.Setenv(name, value)
-		} else if err := os.Unsetenv(name); err != nil {
-			t.Fatalf("unset %s: %v", name, err)
+		} else {
+			// fixtureenv.Unset leaves the variable unset for this test and has Go put the value
+			// the process held back after it.
+			fixtureenv.Unset(t, name)
 		}
 	}
 	cfg, err := config.Load(9020)

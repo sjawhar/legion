@@ -33,7 +33,7 @@ After every push that answers a review, and before you complete, answer and reso
 
 ## Forward merges
 
-For the unchanged-diff fingerprint and the forward-merge procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`, then push the merge as the daemon part below says — it is a genuine fast-forward, never the procedure for rewritten commits, and a code push like any other. A push refused because the handoff import's commit moved `legion/<issue>@origin` is cured the same way: fetch, merge forward with `legion/<issue>@origin`, push, as the daemon part below says, and never a rewrite.
+For the unchanged-diff fingerprint and the forward-merge procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`, then push the merge as the daemon part below says — it is a genuine fast-forward, never the procedure for rewritten commits, and a code push like any other.
 
 ## Workspace restrictions
 

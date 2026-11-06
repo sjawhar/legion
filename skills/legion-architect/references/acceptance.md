@@ -102,7 +102,8 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 4. The merger quotes what sits above the approved head
    (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in READY and sends the READY packet
    with its completion. The daemon refuses a head carrying anything above the approved head but a
-   commit that changes only `docs/solutions/` and the handoff import's removal of `.legion/` files
+   commit that changes only `docs/solutions/` and a change whose every path is under `.legion/`,
+   which nothing writes or reads now, so nobody reviews one
    (`READY_UNREVIEWED_CHANGE`). It
    posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the
    Dispatch issue, publishes it to the project's merge queue role when one is set, and submits the
@@ -127,7 +128,7 @@ from `accepting` you send an issue back only to `implementing` or `testing`.
 ## A conflicting head
 
 What returns the tree to review is a changed diff: a commit above the approved head that touches
-anything outside `docs/solutions/`, other than the handoff import's removal of `.legion/` files, or
+anything outside `docs/solutions/`, other than a change whose every path is under `.legion/`, or
 a conflict-resolution merge whose fingerprint (the unchanged-diff check,
 `skill://legion-worker/references/conflicts-and-rewrites.md`) differs from the approved head's.
 A merge forced by a GitHub-reported conflict whose fingerprint is unchanged does
