@@ -211,7 +211,7 @@ func assertRoleBucketCalls(t *testing.T, handle *sweepRoleKeyValue, held []strin
 // behind is the leak the deregistration exists to prevent.
 func assertBucketKeptOnlyTheOtherClaims(t *testing.T, reg *Registry, released []string) {
 	t.Helper()
-	keys, err := reg.roleKeys()
+	keys, err := reg.roleKeysUntil(context.Background())
 	if err != nil {
 		t.Fatalf("list the role bucket's keys after the deregistration: %v", err)
 	}
@@ -424,18 +424,18 @@ func TestTheDeregistrationSweepsFallbackGoesPastAClaimItCannotReadAndFailsOnOneI
 		// operator reading it has no other way to tell the role apart from the thousands the
 		// scan did read. Both fields are read off that one line, because the fallback's own INFO
 		// line carries the session too and a check over the whole log would take it for this one.
-		line := logLine(t, logs, "role registry left a claim it could not read to the role reaper while releasing a session's claims")
+		line := logLine(t, logs, "role registry could not read a claim while releasing a session's claims; the claim stays in the bucket, unreleased by this deregistration")
 		if !strings.Contains(line, "role="+unreadable) || !strings.Contains(line, "session_id="+session) {
 			t.Fatalf("the sweep's line for the unread claim = %s; want it to name the claim %s and the session %s", line, unreadable, session)
 		}
-		// And the claim it could not read is still there for the role reaper, which is what the
-		// line says it was left to.
-		keys, err := reg.roleKeys()
+		// And the claim it could not read is still in the bucket, which is what the line says:
+		// this deregistration released it no more than it read it.
+		keys, err := reg.roleKeysUntil(context.Background())
 		if err != nil {
 			t.Fatalf("list the role bucket's keys: %v", err)
 		}
 		if !slices.Contains(keys, unreadable) {
-			t.Fatalf("the claim the sweep could not read is gone from the bucket; it was left to the role reaper")
+			t.Fatalf("the claim the sweep could not read is gone from the bucket; the line says it stays there")
 		}
 		if len(keys) != smallRoleClaims-len(held) {
 			t.Fatalf("the bucket holds %d claims, want the %d other sessions' with both of %s's released", len(keys), smallRoleClaims-len(held), session)

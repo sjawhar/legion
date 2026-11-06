@@ -54,7 +54,7 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 	if reaped, err := registry.Reap(func(sessionID string) (bool, error) { return isAlive(sessionID), nil }, 0); err != nil || reaped != 2 {
 		t.Fatalf("reap = %d, %v; want both earlier sessions' interests", reaped, err)
 	}
-	if _, err := registry.ReapRoleClaims(isAlive, 0); err != nil {
+	if _, err := registry.ReapRoleClaims(context.Background(), isAlive, 0); err != nil {
 		t.Fatalf("reap role claims: %v", err)
 	}
 	for bucket, want := range map[natsgo.KeyValue][]string{rawInterests: {"ses_live", rawOnlySession}, rawRoles: {"reviewer", rawOnlyRole}} {
@@ -176,7 +176,7 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 
 	t.Run("the role reaper skips a claim it cannot read or delete", func(t *testing.T) {
 		registry, _, rawRoles := open(t, claim("bad:role", "ses_gone"), claim("reviewer", "ses_live"), claim("planner", "ses_gone"))
-		if sweep, err := registry.ReapRoleClaims(isAlive, 0); err != nil || sweep.Reaped != 1 {
+		if sweep, err := registry.ReapRoleClaims(context.Background(), isAlive, 0); err != nil || sweep.Reaped != 1 {
 			t.Fatalf("reap role claims = %+v, %v; want planner's, skipping bad:role", sweep, err)
 		}
 		if got, want := keys(t, rawRoles), []string{"bad:role", "reviewer"}; !slices.Equal(got, want) {

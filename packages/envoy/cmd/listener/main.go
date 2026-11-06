@@ -163,9 +163,9 @@ const defaultSessionReapInterval = time.Minute
 // sooner than the fixed pass this change replaces, which is the opposite of what this change is
 // for; the raise of that maximum age past the gone horizon is dispatch://INFRA-887's, and it
 // cannot land first. The grace a restored claim gets is measured from the listener's own start
-// against the live window (store.Registry.ReleaseExpiredRoleClaim), not counted in passes, so
-// the period does not move it; what the period decides is how long after a holder is gone its
-// role is free.
+// against the live window (store.Registry.releaseReadExpiredRoleClaim, which the reaper's pass
+// hands the claim it read), not counted in passes, so the period does not move it; what the
+// period decides is how long after a holder is gone its role is free.
 const defaultRoleClaimReapInterval = 5 * time.Minute
 
 // warnIgnoredEnv writes one WARN naming an environment variable this listener no longer reads,

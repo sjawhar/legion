@@ -214,7 +214,7 @@ func TestLookupsAndAReaperPassLeaveAStalledHoldersRoleClaimExactlyAsItWas(t *tes
 
 	live, _ := d.sessions.Windows()
 	logger := logging.New("test")
-	sweep, err := d.registry.ReapRoleClaims(func(sessionID string) bool {
+	sweep, err := d.registry.ReapRoleClaims(context.Background(), func(sessionID string) bool {
 		return roleHolderMayBeLive(logger, d.sessions, sessionID)
 	}, live)
 	if err != nil || sweep.Reaped != 0 {

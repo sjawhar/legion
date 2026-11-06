@@ -147,27 +147,37 @@ type RoleClaimSweep struct {
 // again, so it is deleted too; one it cannot delete either (a key outside the
 // alphabet) is skipped, and the sweep goes on.
 //
+// The listing (roleKeysUntil), every claim read and every release wait no longer than ctx, which
+// is the reaper loop's own context (StartRoleClaimReaper): the listener ends that context and
+// then drains the bus, so every call a pass has left to make after that fails at once.
+//
 // One role's failed read, failed delete or failed release costs that one role: it is logged in a
 // line of its own, counted in Skipped, and the pass goes on. This reaper is the backstop for the
 // claim a deregistration left standing - the one its role claim view had not been delivered when
 // the session left, which releaseAllRoleClaims leaves here - and a pass that ends at the first
 // transient failure is no backstop at the role count that made the view miss the claim: one
 // refused read leaves every role listed after it unswept until the next interval, and a failure
-// that lasts leaves them unswept for as long as it does. Listing the bucket (roleKeys) is the one
-// failure that still ends the pass, because a pass over part of the bucket is not the pass over
-// every role its counts would claim it was.
+// that lasts leaves them unswept for as long as it does.
+//
+// Two failures still end the pass. Listing the bucket, because a pass over part of the bucket is
+// not the pass over every role its counts would claim it was. And any failure that is not
+// bus.ErrRefused once ctx has ended, because every call the pass has left would fail the same
+// way: it returns the counts it had reached and ctx's error, and StartRoleClaimReaper writes
+// that in one line, where a pass that went on would write a WARN for each of the thousands of
+// roles behind this one - what a shutdown, or a bus outage under a deadline, would otherwise cost.
+// releaseAllRoleClaimsByScan ends its scan on an ended context for this reason too.
 //
 // An expired claim costs two bucket calls, the read here and the conditional delete: the release
 // is handed the claim this pass read (releaseReadExpiredRoleClaim) rather than reading it again,
 // because a pass runs over the whole bucket on every interval.
-func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (RoleClaimSweep, error) {
-	roles, err := r.roleKeys()
+func (r *Registry) ReapRoleClaims(ctx context.Context, isAlive func(string) bool, sessionTTL time.Duration) (RoleClaimSweep, error) {
+	roles, err := r.roleKeysUntil(ctx)
 	if err != nil {
 		return RoleClaimSweep{}, err
 	}
 	var sweep RoleClaimSweep
 	for _, role := range roles {
-		claim, err := r.RoleClaim(context.Background(), role)
+		claim, err := r.RoleClaim(ctx, role)
 		if errors.Is(err, bus.ErrRefused) {
 			switch err := r.roles().Delete(role); {
 			case err == nil:
@@ -182,6 +192,9 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 			continue
 		}
 		if err != nil {
+			if ended := ctx.Err(); ended != nil {
+				return sweep, ended
+			}
 			r.logger().Warn("role reaper skipped a claim it could not read", slog.String("role", role), slog.String("error", err.Error()))
 			sweep.Skipped++
 			continue
@@ -189,8 +202,11 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 		if claim.HolderSessionID == "" || isAlive(claim.HolderSessionID) {
 			continue
 		}
-		release, err := r.releaseReadExpiredRoleClaim(context.Background(), role, claim.HolderSessionID, claim, sessionTTL)
+		release, err := r.releaseReadExpiredRoleClaim(ctx, role, claim.HolderSessionID, claim, sessionTTL)
 		if err != nil {
+			if ended := ctx.Err(); ended != nil {
+				return sweep, ended
+			}
 			r.logger().Warn("role reaper skipped a claim it could not release", slog.String("role", role), slog.String("holder_session_id", claim.HolderSessionID), slog.String("error", err.Error()))
 			sweep.Skipped++
 			continue
@@ -230,11 +246,21 @@ func (r *Registry) StartReaper(ctx context.Context, live func(sessionID string) 
 // that once ended it with an ERROR: a sweep that read nothing it swept - every role failed, the
 // backstop doing nothing at all - is otherwise an INFO line every interval and nothing above it
 // anywhere.
+//
+// The pass is given this loop's own ctx, so a pass still running when the listener ends it stops
+// at its next failed call rather than writing a WARN for every role left (ReapRoleClaims). Its
+// failure line carries reaped and skipped beside the error, because a pass cut short that way
+// has already done work, and a line that named only the error would read as a pass that did
+// nothing.
 func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string) bool, interval, sessionTTL time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
-		sweep, err := r.ReapRoleClaims(isAlive, sessionTTL)
+		sweep, err := r.ReapRoleClaims(ctx, isAlive, sessionTTL)
 		if err != nil {
-			r.logger().Error("role claim reaper cycle failed", slog.String("error", err.Error()))
+			r.logger().Error("role claim reaper cycle failed",
+				slog.String("error", err.Error()),
+				slog.Int("reaped", sweep.Reaped),
+				slog.Int("skipped", sweep.Skipped),
+			)
 			return
 		}
 		cycle := r.logger().Info
