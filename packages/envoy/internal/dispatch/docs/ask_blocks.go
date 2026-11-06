@@ -698,9 +698,10 @@ func askReadability(tree *pmdoc.Node, visit func(id string, reason error) bool) 
 // then the bound its question and options share (askWordingTooLong). It is the one reading of an
 // ask block, in one order: settlement calls it on each ask its collector
 // (collectAskBlocksForSettlement) reads, and every write of this package is held to it for each
-// ask the write wrote or changed (validateEditedAskBlocks, and the version path in mutation.go),
-// so a write is refused with the reason settlement would have flagged the block with, and a
-// document carries no ask settlement could not read.
+// ask the write wrote or changed (validateEditedAskBlocks; the version path in mutation.go holds
+// its asks to readWrittenAskBlockStrictly, the same reading with the content rule for markdown
+// written in whole), so a write is refused with the reason settlement would have flagged the
+// block with, and a document carries no ask settlement could not read.
 //
 // An ask breaking the rule - which concurrent edits can leave, and the browser keeps - is
 // unreadable even where the parse reads it: the browser's card takes its question from its first
@@ -721,6 +722,23 @@ func readAskBlockStrictly(node *pmdoc.Node) error {
 		return err
 	}
 	if err := pmdoc.AskContentError(node); err != nil {
+		return err
+	}
+	return askWordingTooLong(block)
+}
+
+// readWrittenAskBlockStrictly is readAskBlockStrictly for an ask that markdown written in whole
+// carries: the same parse and the same wording bound, with the content rule written markdown is
+// held to (pmdoc.AskWrittenContentError), so an ask written with its options and no question is
+// refused at that door as well, which the tree rule no longer catches once both parsers read the
+// empty paragraph the schema fills in ahead of the options. That rule is read first, since it
+// names what the author wrote wrongly, where the parse would name the empty question alone.
+func readWrittenAskBlockStrictly(node *pmdoc.Node) error {
+	if err := pmdoc.AskWrittenContentError(node); err != nil {
+		return err
+	}
+	block, err := parseAskBlock(node)
+	if err != nil {
 		return err
 	}
 	return askWordingTooLong(block)
