@@ -239,17 +239,17 @@ func flatPayload(fields map[string]json.RawMessage) (map[string]string, error) {
 //
 // One subject rather than the set this once carried -- the wildcard pull-request subject
 // notifications.github.*.*.pr.* beside one notifications.github.<owner>.<repo>.workflow.<file>.>
-// per configured workflow file, through FilterSubjects -- because nats-server 2.10.29 does not
-// hand that set's workflow messages over. Measured on one stream holding five pull-request and
-// twelve workflow-run messages (TestWhichFilterShapeDeliversAWorkflowSubject): a durable carrying
-// the set reports all of them in NumPending, then delivers the five pull requests and none of the
-// runs, by pull fetch or push subscription alike. Each filter alone delivers its own messages,
-// and so do two workflow filters together, or a concrete pull-request subject beside the
-// workflow filter; only the wildcard pull-request filter beside it withholds the workflow
-// messages, in either order. A withheld message is silent -- the consumer reports it pending and
-// never errors -- so this takes the one shape that delivers everything and filters in the
-// handler. It also means the filter no longer depends on the settings row, so a settings change
-// needs no rebind.
+// per configured workflow file, through FilterSubjects -- because nats-server 2.10.29, the server
+// these tests ran before v2.15.1, does not hand that set's workflow messages over. Measured there
+// on one stream holding five pull-request and twelve workflow-run messages
+// (TestWhichFilterShapeDeliversAWorkflowSubject): a durable carrying the set reported all of them
+// in NumPending, then delivered the five pull requests and none of the runs, by pull fetch or push
+// subscription alike, in either order, while each filter alone delivered its own messages. A
+// withheld message was silent -- the consumer reported it pending and never errored -- which is
+// why the durable an earlier release left recorded no workflow run. v2.15.1 hands that set's
+// workflow messages over, as the same test now measures, so the one subject is no longer the only
+// shape that works; it stays because it is the simplest, and because the filter then does not
+// depend on the settings row, so a settings change needs no rebind.
 const githubIntakeSubject = "notifications.github.>"
 
 // intakeMessageTimeout bounds how long one envelope's own handling may take -- its GitHub calls
