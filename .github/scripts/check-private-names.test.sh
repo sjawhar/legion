@@ -729,6 +729,65 @@ run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
   "$(printf 'fix(ci): read the head commit the event names\n\nThe guard reads a `skip-checks: true` line of the last block only, so a\nmessage that names it in prose keeps every run it would have had.\n\nOmp-Session: 01K9ZR4T5V6W7X8Y9Z0A1B2C3D\n')"
 check "a head commit naming the trailer in prose is no workflow-skip" "$(is "$status" 0)"
 
+# The rule that picks the head commit's refusal out of a message, block by block: GitHub reads a
+# `skip-checks` trailer in the last block alone, and only two empty lines below the rest, so a
+# read of the whole message would refuse the three that follow. Each keeps to neutral text, since
+# the last case of this file reads the whole log.
+echo "case: a trailer in a block of the head commit message that is not its last"
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
+  "$(printf 'fix: keep the order\n\n\nskip-checks: true\n\n\nA closing paragraph of the body.\n')"
+check "a trailer in an earlier block of the head commit message passes" "$(is "$status" 0)"
+
+echo "case: a last block of the head commit message one empty line below the rest"
+# GitHub's rule is two empty lines; one leaves the line a body line, which starts every run.
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
+  "$(printf 'fix: keep the order\n\nA line of body.\n\nskip-checks: true\n')"
+check "a trailer one empty line below the rest of the head commit message passes" "$(is "$status" 0)"
+
+echo "case: a last-block line of the head commit message that starts with the trailer and goes on"
+# The rest of the line is the trailer's value, and GitHub starts the runs for every value but true.
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
+  "$(printf 'fix: keep the order\n\nA line of body.\n\n\nskip-checks: true was dropped from the recipe\n')"
+check "a trailer line of the head commit message that goes on passes" "$(is "$status" 0)"
+
+echo "case: the head commit on the compare answer's second page"
+# GitHub lists a compare range oldest first, so a long range puts the head on a later page; the
+# script reads every page as one range and picks the head out of it by its sha.
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order [skip ci]"
+first_page_commit=$(pr_commit "fix: an earlier commit of the range" first-page-sha)
+jq -c --argjson first "$first_page_commit" '{total_commits: 2, commits: [$first]}' "$work/compare" \
+  > "$work/compare.next"
+jq -c '{total_commits: 2, commits: .commits}' "$work/compare" >> "$work/compare.next"
+mv "$work/compare.next" "$work/compare"
+run_pr_text
+check "the head commit on the answer's second page, holding a bracket instruction, is refused" \
+  "$(is "$status" 1)"
+check "that refusal names the sha the event gave" \
+  "$(contains "$out" '^::error::the head commit event-head-sha holds \[skip ci\], which stops')"
+
+echo "case: a compare range that lists no commit at the sha the event names"
+# What a pull request whose head is its base's own commit answers. Nothing is refused for a head
+# message that was never read, and the guard still scans every commit the range does list.
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq -c '.commits = [.commits[0] | .sha = "range-only-sha"]' "$work/compare" > "$work/compare.next"
+mv "$work/compare.next" "$work/compare"
+run_pr_text
+check "a range listing no commit at that sha passes" "$(is "$status" 0)"
+check "the log says the range lists no commit there" \
+  "$(contains "$out" '^the compare range lists no commit at event-head-sha, so no head commit message is read')"
+
+echo "case: a head commit message whose lines end with a carriage return"
+# A CRLF message leaves the carriage return on the line the trailer read matched, and an ::error::
+# line carrying one mid-text ends there on a runner: the half that says what to push would land on
+# a plain log line instead of the annotation.
+cr=$'\r'
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
+  "$(printf 'fix: keep the order\r\n\r\n\r\nskip-checks: true\r\n')"
+check "a CRLF head commit message whose last block holds that trailer is refused" "$(is "$status" 1)"
+check "that refusal reads whole, end to end" \
+  "$(contains "$out" '^::error::the head commit event-head-sha holds skip-checks: true, which stops GitHub.s workflows, so no run of this pull request reports\. Push one more commit whose message holds no such text: it becomes the head, and no commit has to be rewritten\.$')"
+check "no carriage return reaches the log" "$(is "$(contains "$out" "$cr")" false)"
+
 echo "case: a pull request's issue comments, reviews and review comments, public on its page"
 clean_pr() { write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"; }
 clean_pr

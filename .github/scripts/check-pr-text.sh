@@ -172,6 +172,12 @@ if [ "$head_entries" -eq 0 ]; then
 else
   head_marker=$(grep -oiE "$skip_markers" "$head_message" | head -n 1 || true)
   if [ -z "$head_marker" ]; then head_marker=$(skip_checks_trailer "$head_message"); fi
+  # The trailer regex allows trailing whitespace, and a CRLF message leaves the line's carriage
+  # return on the marker ($(…) strips the newline, not the return before it). A carriage return
+  # inside an ::error:: line ends the annotation there, so the rest of the refusal — the commit to
+  # push — would land on a plain log line. Strip it; an empty marker stays empty and refuses
+  # nothing.
+  head_marker=${head_marker%"${head_marker##*[![:space:]]}"}
   if [ -n "$head_marker" ]; then
     echo "::error::the head commit $head holds $head_marker, which stops GitHub's workflows, so no run of this pull request reports. Push one more commit whose message holds no such text: it becomes the head, and no commit has to be rewritten."
     own_status=1
