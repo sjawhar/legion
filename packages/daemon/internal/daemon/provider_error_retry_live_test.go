@@ -16,7 +16,8 @@
 // and stream, as they do in production.
 //
 // What stands in is the model endpoint and nothing else. Three HTTP stand-ins of the test's own
-// answer the panes' provider requests:
+// answer the panes' provider requests, over the stand-in and the overlay writers this proof
+// shares with the compaction proof (live_agent_proof_test.go):
 //
 //   - overloaded: every request 529, with `retry-after: 3600`. The header is over the Oh My Pi
 //     client's `maxRetryDelayMs` cap (60 s), which declines the retry and surfaces the original
@@ -161,7 +162,7 @@ type providerErrorLive struct {
 	// ladder, refused and failing are the three issues, each in the phase its one worker works.
 	ladder, refused, failing string
 	// stands is each stand-in by its provider name.
-	stands map[string]*modelStandin
+	stands map[string]*providerStandin
 	// ladderTask is the task step 1 gave the planner, which the ladder keeps on the claim and the
 	// operator's retry in step 5 sends to the fresh session.
 	ladderTask string
@@ -197,7 +198,7 @@ func newProviderErrorLive(t *testing.T) *providerErrorLive {
 		liveAgentProof: liveAgentProof{liveProof: proof, omp: omp},
 		built:          &built{}, clock: &ladderClock{},
 		ladder: proof.cfg.Project + "-1", refused: proof.cfg.Project + "-2", failing: proof.cfg.Project + "-3",
-		stands: map[string]*modelStandin{},
+		stands: map[string]*providerStandin{},
 	}
 	version, err := exec.Command(omp, "--version").Output()
 	if err != nil {
@@ -213,7 +214,7 @@ func newProviderErrorLive(t *testing.T) *providerErrorLive {
 	profile := "legion-provider-error-" + strings.ToLower(r.cfg.Project)
 	installProofPlugins(t, root, work, home, profile, omp)
 	for _, name := range []string{overloadedProvider, filteredProvider, malformedProvider} {
-		r.stands[name] = newModelStandin(t, name)
+		r.stands[name] = newProviderStandin(t, name)
 	}
 	r.writeOmpProfile(home, profile)
 	overlays := r.writeOverlays(work)
@@ -933,7 +934,8 @@ func (r *providerErrorLive) writeOmpProfile(home, profile string) {
 // writeOverlays writes the Oh My Pi overlays each pane is told through PI_CONFIG_FILES: the
 // operator's own, shared by every pane, which turns `retry.enabled` off so the host walks no
 // fallback chain and every failed turn reaches the daemon; and one per claim naming the single
-// model that claim's stand-in serves, so each claim's chain has no fallback below it.
+// model that claim's stand-in serves (writeRoleOverlay), so each claim's chain has no fallback
+// below it.
 func (r *providerErrorLive) writeOverlays(work string) map[claim.Token][]string {
 	t := r.t
 	t.Helper()
@@ -945,27 +947,11 @@ func (r *providerErrorLive) writeOverlays(work string) map[claim.Token][]string 
 	writeProofFile(t, operator, "# The operator's pane overlay (runtime.tmux.pi_config_files).\nretry:\n  enabled: false\n")
 	overlays := map[claim.Token][]string{}
 	for _, seeded := range r.issues() {
-		model := standinModel(seeded.provider)
-		var body strings.Builder
-		body.WriteString("# The role's own pane overlay (role_config_files): one model, so its chain has no fallback.\nmodelRoles:\n")
-		for _, role := range []string{"default", "smol", "slow", "vision", "plan", "commit", "tiny", "task", "advisor", "review", "oracle", "deep"} {
-			fmt.Fprintf(&body, "  %s: %s\n", role, model)
-		}
 		path := filepath.Join(dir, string(seeded.role)+".yml")
-		writeProofFile(t, path, body.String())
+		writeRoleOverlay(t, path, standinModel(seeded.provider))
 		overlays[r.token(seeded.key, seeded.role)] = []string{operator, path}
 	}
 	return overlays
-}
-
-// standinModel is the one model a stand-in serves, as a selector.
-func standinModel(provider string) string { return provider + "/" + provider + "-model" }
-
-func writeProofFile(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
 }
 
 // newPaneListener is the Envoy listener a pane is told through ENVOY_URL, and answers the URL of
@@ -1009,59 +995,31 @@ func newPaneListener(t *testing.T) string {
 
 // ---- the model stand-ins -------------------------------------------------------------------------
 
-// modelStandin is one provider endpoint of the test's own: it answers every model request the way
-// its name says, and records each one so a step can count the requests a task reached it in.
-type modelStandin struct {
-	t    *testing.T
-	name string
-	url  string
-	// answer, when set, is what this stand-in does with a model request instead of the behaviour
-	// its name names. The compaction proof's stand-ins (claim_compaction_live_test.go) differ by
-	// what each does to a compaction's summary request rather than by provider, so each carries
-	// its own answer; this proof's three carry none and are their names.
-	answer func(w http.ResponseWriter, req *http.Request, body string)
-
-	mu       sync.Mutex
-	requests []string
+// providerStandin is one provider endpoint of this proof's own: it answers every model request
+// the way its provider name says, over the stand-in both proofs share (live_agent_proof_test.go),
+// which records each request so a step can count the ones a task reached it in.
+type providerStandin struct {
+	*modelStandin
 }
 
-func newModelStandin(t *testing.T, name string) *modelStandin {
+func newProviderStandin(t *testing.T, name string) *providerStandin {
 	t.Helper()
-	s := &modelStandin{t: t, name: name}
-	server := httptest.NewServer(s)
-	t.Cleanup(server.Close)
-	s.url = server.URL
+	s := &providerStandin{modelStandin: &modelStandin{name: name}}
+	s.serve(t, s)
 	return s
 }
 
-func (s *modelStandin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"data":[]}`)
-		return
-	}
-	body, _ := io.ReadAll(req.Body)
-	s.mu.Lock()
-	s.requests = append(s.requests, string(body))
-	s.mu.Unlock()
-	if s.answer != nil {
-		s.answer(w, req, string(body))
+func (s *providerStandin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if _, ok := s.take(w, req); !ok {
 		return
 	}
 	switch s.name {
 	case overloadedProvider:
-		// `retry-after` over the client's own 60 s cap declines the retry and surfaces the 529
-		// untouched, so one of the daemon's sends is one request here.
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Retry-After", "3600")
-		w.WriteHeader(529)
-		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+		writeOverloaded(w)
 	case malformedProvider:
 		// No word of this body is one Oh My Pi reads as transient, so the turn error is reported
 		// `retryable: false` with status 400.
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, `{"type":"invalid_request_error","message":"messages: unexpected role"}`)
+		writeInvalidRequest(w, `{"type":"invalid_request_error","message":"messages: unexpected role"}`)
 	case filteredProvider:
 		s.streamContentFilter(w)
 	}
@@ -1069,7 +1027,7 @@ func (s *modelStandin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 // streamContentFilter answers one OpenAI chat completion: two chunks of text, then a chunk whose
 // `finish_reason` is `content_filter`, which is what a provider's own filter leaves behind.
-func (s *modelStandin) streamContentFilter(w http.ResponseWriter) {
+func (s *providerStandin) streamContentFilter(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
@@ -1080,7 +1038,7 @@ func (s *modelStandin) streamContentFilter(w http.ResponseWriter) {
 		}
 		fmt.Fprintf(w, "data: {\"id\":\"filtered\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,"+
 			"\"choices\":[{\"index\":0,\"delta\":{%s},\"finish_reason\":%s}]}\n\n",
-			filteredProvider+"-model", delta, reason)
+			filteredProvider+standinModelID, delta, reason)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -1092,27 +1050,6 @@ func (s *modelStandin) streamContentFilter(w http.ResponseWriter) {
 	if flusher != nil {
 		flusher.Flush()
 	}
-}
-
-// count is how many model requests the stand-in has answered.
-func (s *modelStandin) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.requests)
-}
-
-// requestsHolding is how many of them carried marker, which is how many of them are a turn of the
-// task rather than one of Oh My Pi's own side requests.
-func (s *modelStandin) requestsHolding(marker string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	held := 0
-	for _, body := range s.requests {
-		if strings.Contains(body, marker) {
-			held++
-		}
-	}
-	return held
 }
 
 // ---- the daemon's clock and its log ----------------------------------------------------------------

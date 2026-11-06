@@ -9,8 +9,9 @@
 //
 // It is a sibling of provider_error_retry_live_test.go and shares its machinery: the local
 // runtime that starts a pane with no tmux (localruntime_live_test.go), liveAgentProof's reads of
-// a claim and of the daemon's own log, the recording log handler, the model stand-in, the run's
-// own database and the two plugins packed from this checkout. What it proves is the other half of
+// a claim and of the daemon's own log, the recording log handler, the model stand-in and the
+// overlay writers both proofs hold (live_agent_proof_test.go), the run's own database and the
+// two plugins packed from this checkout. What it proves is the other half of
 // R3, so it is a script of its own rather than more steps of that one: the two runs would
 // otherwise share a wall clock, and this one starts four panes and waits out a compaction the
 // endpoint holds for over half a minute.
@@ -98,11 +99,10 @@ const compactNamesFreshSession = "fresh_session (`legion claims retry --fresh-se
 // The four panes, by the provider name each one's stand-in is given in the run's models.yml. Each
 // is one pane's endpoint; the behaviour differs by what a step sets on it, not by the name.
 const (
-	ladderPaneProvider    = "ladderpane"
-	noticePaneProvider    = "noticepane"
-	rootPaneProvider      = "rootpane"
-	refusingPaneProvider  = "refusingpane"
-	compactStandinModelID = "-model"
+	ladderPaneProvider   = "ladderpane"
+	noticePaneProvider   = "noticepane"
+	rootPaneProvider     = "rootpane"
+	refusingPaneProvider = "refusingpane"
 )
 
 // claimCompactionLive is one run of the proof: the booted daemon, the four panes it drives, and
@@ -410,7 +410,7 @@ func (r *claimCompactionLive) overlaysAreTheDeployments() {
 
 	// Every model role of the claim's own overlay names one selector, so that is the model the
 	// pane's session runs on; the profile's roster carries each pane's.
-	selector := compactPaneModel(pane.provider)
+	selector := standinModel(pane.provider)
 	listed := r.paneModels(token)
 	served := slices.IndexFunc(listed, func(model paneModel) bool { return model.Selector == selector })
 	if served < 0 {
@@ -452,7 +452,7 @@ func (r *claimCompactionLive) operatorCompactsAPhaseWorker() {
 
 	from := r.daemon.count()
 	compacted := r.legionClaims("compact", "--claim", string(token))
-	if compacted != "compacted; the owed task was sent again" {
+	if compacted != "compacted; whatever task the claim owed has gone again" {
 		t.Fatalf("`legion claims compact` printed %q, want the line a compacted session prints", compacted)
 	}
 	r.note("`legion claims compact --claim %s` printed %q", token, compacted)
@@ -662,7 +662,7 @@ func (r *claimCompactionLive) heldSummaryOutlastsTheTimeout() {
 	if run.err != nil {
 		t.Fatalf("the held compaction failed after %s: %v\n%s", waited.Round(time.Second), run.err, run.out)
 	}
-	if run.out != "compacted; the owed task was sent again" {
+	if run.out != "compacted; whatever task the claim owed has gone again" {
 		t.Fatalf("the held compaction printed %q, want the line a compacted session prints", run.out)
 	}
 	r.awaitLogFrom("the daemon's record that the operator asked", from, time.Minute, func(record loggedRecord) bool {
@@ -1268,8 +1268,8 @@ func (r *claimCompactionLive) writeOmpProfile() {
 		// at once rather than after the host's own round of retries.
 		fmt.Fprintf(&models, "  %s:\n    baseUrl: %s\n    api: anthropic-messages\n    apiKey: a-literal-key-no-endpoint-checks\n"+
 			"    models:\n      - id: %s\n        name: %s\n        input: [text, image]\n        contextWindow: 200000\n        maxTokens: 8192\n",
-			seeded.provider, stand.url, seeded.provider+compactStandinModelID, seeded.provider)
-		fmt.Fprintf(&enabled, "  - %s\n", compactPaneModel(seeded.provider))
+			seeded.provider, stand.url, seeded.provider+standinModelID, seeded.provider)
+		fmt.Fprintf(&enabled, "  - %s\n", standinModel(seeded.provider))
 	}
 	writeProofFile(t, filepath.Join(agent, "models.yml"), models.String())
 	writeProofFile(t, filepath.Join(agent, "config.yml"),
@@ -1295,8 +1295,8 @@ func (r *claimCompactionLive) writeOmpProfile() {
 //
 // `compaction.methodOrder` is deliberately absent, so each pane runs Oh My Pi's own default,
 // which puts the image-based `snapcompact` above every summary method. The claim's own overlay
-// names the single model its stand-in serves for every model role, so no role of the session
-// reaches a model this run does not answer for.
+// names the single model its stand-in serves for every model role (writeRoleOverlay), so no role
+// of the session reaches a model this run does not answer for.
 func (r *claimCompactionLive) writeOverlays(work string) map[claim.Token][]string {
 	t := r.t
 	t.Helper()
@@ -1310,22 +1310,11 @@ func (r *claimCompactionLive) writeOverlays(work string) map[claim.Token][]strin
 			"retry:\n  enabled: false\ncompaction:\n  keepRecentTokens: %d\n", compactKeepRecentTokens))
 	overlays := map[claim.Token][]string{}
 	for _, seeded := range r.seededPanes() {
-		model := compactPaneModel(seeded.provider)
-		var body strings.Builder
-		body.WriteString("# The role's own pane overlay (role_config_files): one model, so its chain has no fallback.\nmodelRoles:\n")
-		for _, role := range []string{"default", "smol", "slow", "vision", "plan", "commit", "tiny", "task", "advisor", "review", "oracle", "deep"} {
-			fmt.Fprintf(&body, "  %s: %s\n", role, model)
-		}
 		path := filepath.Join(dir, string(seeded.role)+".yml")
-		writeProofFile(t, path, body.String())
+		writeRoleOverlay(t, path, standinModel(seeded.provider))
 		overlays[r.token(seeded.issue, seeded.role)] = []string{operator, path}
 	}
 	return overlays
-}
-
-// compactPaneModel is the one model a pane's stand-in serves, as a selector.
-func compactPaneModel(provider string) string {
-	return provider + "/" + provider + compactStandinModelID
 }
 
 // ---- the pane stand-ins ------------------------------------------------------------------------------
@@ -1360,9 +1349,10 @@ const (
 	summaryRefuses
 )
 
-// paneStandin is one pane's provider endpoint: a modelStandin whose answer this proof writes, so
-// a turn's request and a compaction's summary request are answered apart. A step sets each
-// behaviour before it drives the claim, and the two counts are what a step reads back.
+// paneStandin is one pane's provider endpoint: it answers a turn's request and a compaction's
+// summary request apart, over the stand-in both proofs share (live_agent_proof_test.go), which
+// records each request. A step sets each behaviour before it drives the claim, and the two
+// counts of its own are what a step reads back.
 type paneStandin struct {
 	*modelStandin
 
@@ -1377,12 +1367,16 @@ type paneStandin struct {
 
 func newPaneStandin(t *testing.T, name string) *paneStandin {
 	t.Helper()
-	s := &paneStandin{modelStandin: newModelStandin(t, name)}
-	s.modelStandin.answer = s.answer
+	s := &paneStandin{modelStandin: &modelStandin{name: name}}
+	s.serve(t, s)
 	return s
 }
 
-func (s *paneStandin) answer(w http.ResponseWriter, req *http.Request, body string) {
+func (s *paneStandin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	body, ok := s.take(w, req)
+	if !ok {
+		return
+	}
 	// Only a Messages request is a turn or a summary. Oh My Pi asks the same base for a token
 	// count of its own, which is neither, and is answered a count rather than counted here.
 	if !strings.HasSuffix(req.URL.Path, "/v1/messages") {
@@ -1399,7 +1393,7 @@ func (s *paneStandin) answer(w http.ResponseWriter, req *http.Request, body stri
 		case summaryHolds:
 			time.Sleep(held)
 		case summaryRefuses:
-			refuseRequest(w, "the summarizer refuses this request")
+			writeInvalidRequest(w, anthropicRefusal("the summarizer refuses this request"))
 			return
 		case summaryAnswers:
 		}
@@ -1418,15 +1412,9 @@ func (s *paneStandin) answer(w http.ResponseWriter, req *http.Request, body stri
 	s.mu.Unlock()
 	switch mode {
 	case turnErrors:
-		// A `retry-after` over the client's own 60 s cap declines the retry and surfaces the 529
-		// untouched (@oh-my-pi/pi-ai src/providers/anthropic-client.ts), so one of the daemon's
-		// sends is one request here and the turn ends without a round of the host's own retries.
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Retry-After", "3600")
-		w.WriteHeader(529)
-		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+		writeOverloaded(w)
 	case turnFails:
-		refuseRequest(w, "messages: unexpected role")
+		writeInvalidRequest(w, anthropicRefusal("messages: unexpected role"))
 	case turnHolds:
 		if release != nil {
 			<-release
@@ -1508,16 +1496,6 @@ func isSideQuestion(body string) bool {
 	return strings.Contains(string(request.Messages[len(request.Messages)-1]), "<btw>")
 }
 
-// refuseRequest answers one model request 400 with an `invalid_request_error` body: no word of it
-// is one Oh My Pi reads as transient, so it is reported as a client error and retried by nobody.
-// A 5xx is retried instead, by the summarizer until the daemon's own ten-minute bound runs out,
-// which is why a refused summary here is a client error.
-func refuseRequest(w http.ResponseWriter, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	fmt.Fprintf(w, `{"type":"error","error":{"type":"invalid_request_error","message":%q}}`, message)
-}
-
 // streamAnthropicText answers one Anthropic Messages request with a single text block, in the
 // events the plugins' own pane harness scripts (packages/pi-shared/test/omp-harness.ts:383-448,
 // `messageStream`).
@@ -1533,7 +1511,7 @@ func streamAnthropicText(w http.ResponseWriter, provider, text string) {
 	}
 	event("message_start", fmt.Sprintf(`{"type":"message_start","message":{"id":"answered","type":"message","role":"assistant",`+
 		`"model":%q,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1000,"output_tokens":1}}}`,
-		provider+compactStandinModelID))
+		provider+standinModelID))
 	event("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
 	event("content_block_delta", fmt.Sprintf(
 		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, text))
