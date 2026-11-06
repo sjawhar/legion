@@ -75,11 +75,12 @@ type reclaimCopy struct {
 // So the record can misplace a row, either way. A row numbered below bootRow that went out after it
 // reached the current process, but is read as the replaced one's: its acceptance does not start the
 // healing clock, and a failed-forward report about it neither stops the clock nor relaunches. A
-// refusal of it does stop the clock, since a refusal is about the role now (noteReclaimFailed). A row
-// numbered at or above bootRow that went out before it reached the replaced process, but is read as
-// the current one's: a failed-forward report about it stops the clock and can relaunch the pane. On a
-// tombstone, a row numbered in [bootRow, healEnd] that goes out after the heal is read as sent inside
-// the clock, so its failure reopens the incident with its count instead of starting a new one.
+// refusal of it does stop the clock, since a refusal says the role was unheld at a moment after the
+// row was noted (noteReclaimFailed). A row numbered at or above bootRow that went out before it
+// reached the replaced process, but is read as the current one's: a failed-forward report about it
+// stops the clock and can relaunch the pane. On a tombstone, a row numbered in [bootRow, healEnd]
+// that goes out after the heal is read as sent inside the clock, so its failure reopens the incident
+// with its count instead of starting a new one.
 //
 //   - count, nextAt and gaveUp are the incident's attempts, its own backoff, and the give-up.
 //   - relaunched says a relaunch of this record has started; bootRow is the first row published to
@@ -504,7 +505,10 @@ func (r *outbox) noteReclaimDelivered(token claim.Token, row int64) {
 
 // noteReclaimFailed records that the listener refused row, published to token's architect, for want
 // of a holder (the publish lane's ErrNoHolder). The refusal comes back inside its own publish call, so
-// it says the role is unheld now, whichever row it is: on an open incident it stops the healing clock,
+// it says the role was unheld at a moment after this row was noted -- not that the role is unheld now,
+// since a relaunch can take the role between that moment and the refusal's return, and the clock it
+// clears may have been started by a later row. That is the invariant the rest of this reasoning uses,
+// and it holds whichever row the refusal is for: on an open incident it stops the healing clock,
 // for a row numbered below bootRow too (one that went out of id order, reclaimTry), where a
 // failed-forward report, which is about the process a copy went to, would change nothing. Otherwise
 // the row is read as noteReclaimFailedLocked reads it: on a tombstone, a row in [bootRow, healEnd]
@@ -518,6 +522,13 @@ func (r *outbox) noteReclaimDelivered(token claim.Token, row int64) {
 // fence keeps the architect's higher rows behind it), so its acceptance is the evidence the clock
 // waits for. Raising failedRow here kept that retry from starting the clock, so an incident healed on
 // the held row never ended, and separate resets added up to the give-up.
+//
+// One case this leaves open, deliberately. For a refused row below bootRow, that row's own retry
+// cannot restart the clock: noteReclaimDelivered takes only rows at or above bootRow. So if the role
+// comes back with no relaunch -- a heartbeat re-assert after a listener reset -- the incident stays
+// open until some newer notice is accepted, and a real loss arriving first continues the old count,
+// which can bring the give-up forward. The limit still holds; only its arithmetic is pessimistic
+// here.
 func (r *outbox) noteReclaimFailed(token claim.Token, row int64) {
 	r.reclaimMu.Lock()
 	defer r.reclaimMu.Unlock()
