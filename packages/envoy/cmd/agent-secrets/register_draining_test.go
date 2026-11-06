@@ -47,7 +47,7 @@ func drainingHelper(t *testing.T, drains int32) (string, *atomic.Int32) {
 // register retries it and registers with the restarted helper rather than giving up at once.
 func TestRegisterRetriesADrainingHelper(t *testing.T) {
 	sock, calls := drainingHelper(t, 2)
-	resp, err := registerWithPatience(sock, 5, 0)
+	resp, err := registerWithPatience(sock, 5, "", 0)
 	if err != nil || !resp.OK || resp.State != "enrolled" || calls.Load() != 3 {
 		t.Fatalf("register against a helper draining twice = %+v, %v after %d calls; want enrolled on the third", resp, err, calls.Load())
 	}
@@ -59,7 +59,7 @@ func TestRegisterRetriesADrainingHelper(t *testing.T) {
 func TestRegisterStopsRetryingDrainingAtItsWait(t *testing.T) {
 	sock, _ := drainingHelper(t, 1<<30)
 	start := time.Now()
-	_, err := registerWithPatience(sock, 1, 0)
+	_, err := registerWithPatience(sock, 1, "", 0)
 	elapsed := time.Since(start)
 	if err == nil || !strings.Contains(err.Error(), helper.CodeDraining) || elapsed < time.Second || elapsed > 30*time.Second {
 		t.Fatalf("register against a helper that stays draining = %v after %s; want DRAINING once its 1 s wait passed", err, elapsed)

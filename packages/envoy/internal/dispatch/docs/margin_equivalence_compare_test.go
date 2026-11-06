@@ -250,18 +250,11 @@ func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, fl
 	side.classes.mu.Unlock()
 	tagged := 0
 	for _, class := range recorded {
-		origin := fmt.Sprintf("%T", class.origin)
-		switch published := class.origin.(type) {
-		case *liveWriteOrigin:
-			origin = "a published write"
-			if published.marginOnly {
-				tagged++
-			}
-		case string:
-			origin = published
+		if class.marginOnly {
+			tagged++
 		}
 		observed.Classes = append(observed.Classes, fmt.Sprintf("%s: recorded=%t contentChanged=%t durable=%t credited=%t",
-			origin, class.found, class.class.contentChanged, class.class.durable, class.class.credit != nil))
+			class.origin, class.found, class.contentChanged, class.durable, class.credited))
 	}
 	switch {
 	case side.margin && flowErr == nil && tagged != r.marginWrites:

@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redirects"
 )
 
 // The route and api-version AzureClient posts to, held here alone because INFRA-399's live probe
@@ -64,7 +66,8 @@ type AzureConfig struct {
 	APIKey string
 	// Tokens is the keyless form of credential, each token sent as a bearer.
 	Tokens TokenSource
-	// HTTPClient replaces http.DefaultClient; a test injects one.
+	// HTTPClient replaces http.DefaultClient; a test injects one. It is never mutated: the
+	// client this one calls on is a copy of it that refuses redirects (redirects.Refused).
 	HTTPClient *http.Client
 }
 
@@ -103,7 +106,7 @@ func NewAzure(cfg AzureConfig) (*AzureClient, error) {
 	if (cfg.APIKey == "") == (cfg.Tokens == nil) {
 		return nil, errors.New("embed: azure needs exactly one credential: an API key or a token source")
 	}
-	client := cmp.Or(cfg.HTTPClient, http.DefaultClient)
+	client := redirects.Refused(cmp.Or(cfg.HTTPClient, http.DefaultClient))
 	target := *endpoint
 	target.Path = strings.TrimRight(endpoint.Path, "/") + azureEmbeddingsRoute
 	target.RawPath = ""

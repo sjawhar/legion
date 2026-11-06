@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the
@@ -48,16 +49,14 @@ func buildAgentSecrets(t *testing.T) string {
 	return binary
 }
 
-// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
-// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+// shortTempDir is a directory of the test's own, removed when the test ends, with room under it
+// for the longest path these tests put there: the default helper socket a test's XDG_RUNTIME_DIR
+// holds, agent-secrets/helper.sock (hostmode_test.go). TMPDIR places it, and the helper falls
+// back to /tmp for that length alone, where t.TempDir()'s path carries the whole of the test's
+// name and passes the 107 bytes a unix socket path holds (docs/testing.md).
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ast")
-	if err != nil {
-		t.Fatalf("make a temporary directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, filepath.Join("agent-secrets", "helper.sock"))
 }
 
 // brokerCounters records how many times fakeBroker served each route, so a test can assert on

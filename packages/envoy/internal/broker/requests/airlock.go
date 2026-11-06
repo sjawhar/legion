@@ -1,7 +1,7 @@
 // packages/envoy/internal/broker/requests/airlock.go
 // airlock.go is the placeholder side of the airlock: the strings a release hands a session in
 // place of a secret the rules file names, the table those strings live in
-// (airlock_placeholders, migration 0028), the shape each kind of secret is released in once its
+// (airlock_placeholders, migration 0029), the shape each kind of secret is released in once its
 // values are taken out of it, and the two reads the broker's proxy port makes — one per
 // connection (AirlockConnection) and one per grant per pod (AirlockValues). The proxy itself,
 // which decides and rewrites each request, is internal/broker/airlock.
