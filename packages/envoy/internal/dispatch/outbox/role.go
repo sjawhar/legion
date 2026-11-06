@@ -49,11 +49,12 @@ var errNoRoleReaders = errors.New("the outbox has no role-claim or session reade
 // holder is the claim's holder whenever it is known, so the destination's key is the holder's agent
 // subject (destination.key) even while it stays pending; a keep carries none, since it reaches no
 // session. streamAck is a holder whose session entry records a port, which only a listener of an
-// earlier release stored and which lapses with the entry. mentionKeys is the comment's failed
-// mentions by session (destination.mentionKeys), which a keep stores on the copy it keeps so that
-// whoever forwards it to the role's next holder keys it by that holder's own mention
-// (keep, contracts.Envelope.MentionDedupeKeys); every other forward knows its holder already and
-// carries none.
+// earlier release stored and which lapses with the entry. settledKeys is the comment's settled
+// mentions by session, a delivered mention's included (destination.settledKeys), which a keep
+// stores on the copy it keeps so that whoever forwards it to the role's next holder keys it by
+// that holder's own mention (keep, contracts.Envelope.MentionDedupeKeys); mentionKeys is the
+// failed ones alone, which is what the key a keep is stored under is chosen from
+// (roleFallbackKey). Every other forward knows its holder already and carries neither.
 type roleForward struct {
 	holder      string
 	keptFor     string
@@ -61,6 +62,7 @@ type roleForward struct {
 	skip        string
 	err         error
 	mentionKeys map[string]string
+	settledKeys map[string]string
 }
 
 // roleResolution is one role's holder as a batch resolved it.
@@ -90,8 +92,9 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 
 // resolveRoleHolders resolves the holder of every role a batch's events route to and have not
 // reached yet, once per role and every role at once, within ctx (resolveRole), and gives each
-// such role destination its forward (forwardOf), the comment's failed mentions, which a keep
-// carries on the copy it keeps (roleForward.mentionKeys), and the dedupe key its copy carries,
+// such role destination its forward (forwardOf), the comment's settled mentions, which a keep
+// carries on the copy it keeps (roleForward.settledKeys), the failed ones a keep's own key is
+// chosen from (roleForward.mentionKeys), and the dedupe key its copy carries,
 // which the holder the forward names decides (roleFallbackKey). Events that are not due are
 // resolved too: their unreached role destinations hold later events back from the holder's agent
 // subject.
@@ -132,8 +135,9 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 			if result, ok := resolved[dest.role]; ok {
 				dest.forward = forwardOf(dest.role, event.item, result.resolution, result.err, now)
 				dest.forward.mentionKeys = dest.mentionKeys
+				dest.forward.settledKeys = dest.settledKeys
 				if dest.dedupeKey == "" {
-					dest.dedupeKey = roleFallbackKey(dest.mentionKeys, dest.forward)
+					dest.dedupeKey = roleFallbackKey(dest.mentionKeys, dest.settledKeys, dest.forward)
 				}
 			}
 		}
@@ -141,46 +145,55 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 }
 
 // roleFallbackKey is the dedupe key a role route's copy of a new comment carries in place of the
-// event's own (destination.dedupeKey): the key the failed mention of the session that copy
-// reaches went under, "" where the comment has no failed mention of it, which leaves the copy on
-// the event's key. keys is the comment's failed mentions by session, which only a role route
-// carries (destination.mentionKeys, mentionDeliveries.fallbackKeys), and is empty for every
-// other event.
+// event's own (destination.dedupeKey): the key the settled mention of the session that copy
+// reaches went under, "" where the comment has no settled mention of it, which leaves the copy
+// on the event's key. settled is the comment's settled mentions by session, a delivered
+// mention's key among them, and keys its failed ones alone; only a role route carries either
+// (destination.settledKeys, destination.mentionKeys, mentionDeliveries.settledKeys,
+// mentionDeliveries.fallbackKeys), and both are empty for every other event.
 //
 // It is the rule a session route's copy follows (destinations.addSession), applied to the
 // session the role resolved to rather than to the one a route names: a mention's send can land
 // and its attempt still fail - a receipt timeout, whose message the listener had already
 // published - so the holder's host has the comment under that key already, and a copy keyed by
-// the event would be a second one. contracts.RoleForwardDedupeKey carries the holder's own agent
-// send key as it is and prefixes every other, so the host that claimed it drops this copy and
-// the session is shown the comment once, while a holder no mention of it reached is shown the
-// copy under a prefixed key, which is right (roleForward.forward).
+// the event would be a second one. A mention that was delivered outright is the same case once
+// the role has changed hands: the route is published because the mention that suppressed it is
+// of some other session, and a holder whose own mention of this comment landed - one that
+// claimed the role between the comment's write and this publish among them - would be shown
+// the comment a second time under the event's prefixed key, which is why the holder's key is
+// read from the settled mentions rather than the failed ones. contracts.RoleForwardDedupeKey
+// carries the holder's own agent send key as it is and prefixes every other, so the host that
+// claimed it drops this copy and the session is shown the comment once, while a holder no
+// mention of it reached is shown the copy under a prefixed key, which is right
+// (roleForward.forward).
 //
 // A copy kept for a role no live holder can take (roleForward.keptFor) has no holder to choose
 // by, and the same defect is one step later: the session that claims the role next is forwarded
 // the stored key, by the lane's drain or by the handover behind the keep, and both apply that
 // same rule (walkKeptRole in cmd/listener/role_keep.go, handOverKept), so a copy stored under
-// the event's key shows the comment twice to a later holder whose own mention failed. One stored
-// key is not safe for every other holder, as this doc said when it was the whole of the choice:
-// a second session the comment mentions claimed its own mention's key at its host, and the key
-// naming the first one is a key that host never saw, so it is shown the comment again - which is
-// what the comment's every mentioned session's key riding the kept copy closes
+// the event's key shows the comment twice to a later holder whose own mention of it settled.
+// One stored key is not safe for every other holder, as this doc said when it was the whole of
+// the choice: a second session the comment mentions claimed its own mention's key at its host,
+// and the key naming the first one is a key that host never saw, so it is shown the comment
+// again - which is what the comment's every settled mention riding the kept copy closes
 // (contracts.Envelope.MentionDedupeKeys, roleForward.keep). What the stored key decides is
 // therefore only what a holder that map does not name is forwarded - a session no mention of
-// this comment reached, which takes the copy under a prefixed key whatever the stored key is,
-// and is shown the comment, which is right. It is the lowest session's failed mention, the way
-// fallbackKeys itself picks one key per session, and stays that: it is the key the keep is
+// this comment settled for, which takes the copy under a prefixed key whatever the stored key
+// is, and is shown the comment, which is right. It is the lowest session's failed mention, the
+// way fallbackKeys itself picks one key per session, and stays that: it is the key the keep is
 // stored under (bus.KeptMsgID), the key a lane's copy is recognised by (keptCopyLeadsTheLane)
 // and the key the listener's drain records an attempt under, so every reader of the lane names
-// this copy the same way.
-func roleFallbackKey(keys map[string]string, forward *roleForward) string {
-	if forward == nil || len(keys) == 0 {
+// this copy the same way. A comment with no failed mention at all therefore keeps the event's
+// own key on the copy it stores, while the map on it still keys each mentioned session's own
+// forward.
+func roleFallbackKey(keys, settled map[string]string, forward *roleForward) string {
+	if forward == nil {
 		return ""
 	}
 	if forward.holder != "" {
-		return keys[forward.holder]
+		return settled[forward.holder]
 	}
-	if forward.keptFor == "" {
+	if forward.keptFor == "" || len(keys) == 0 {
 		return ""
 	}
 	lowest := ""
@@ -302,11 +315,11 @@ func (f *roleForward) send(ctx context.Context, deps Deps, sender bus.Sender, it
 // prefix and the original's key for every key but the holder's own agent send key, which is
 // carried as it is, so a copy of a comment keyed by the failed mention of the holder itself is
 // dropped at that host rather than shown a second time. A copy kept for a role nobody held
-// carries every mentioned session's key, which is how the handover behind the keep and the
-// listener's drain each key it by the holder it reaches (keep,
-// contracts.Envelope.MentionDedupeKeys). The listener's two forwarders of a role message ask the
-// same rule (cmd/listener/role_lane.go, roleForward.forwarded), so the copies of one message
-// forwarded by either carry one key and one MsgId.
+// carries every mentioned session's settled key, a delivered mention's among them, which is how
+// the handover behind the keep and the listener's drain each key it by the holder it reaches
+// (keep, contracts.Envelope.MentionDedupeKeys). The listener's two forwarders of a role message
+// ask the same rule (cmd/listener/role_lane.go, roleForward.forwarded), so the copies of one
+// message forwarded by either carry one key and one MsgId.
 //
 // It goes to the holder's agent subject with a Request under the forward's MsgId
 // (bus.ForwardMsgID of that key and the subject), so the stream, which captures agent subjects,
@@ -331,12 +344,13 @@ func (f *roleForward) forward(sender bus.Sender, item contracts.Envelope) <-chan
 // the listener kept a copy of it too. The envelope is stored with its topic the role's and its
 // dedupe key the original's, which is what the listener's own keep stores and what the drain's
 // forward to the next holder reads (keepRoleMessage, walkKeptRole), and with the comment's
-// failed mentions by session on it (contracts.Envelope.MentionDedupeKeys, mentionKeys), which
+// settled mentions by session on it (contracts.Envelope.MentionDedupeKeys, settledKeys), which
 // the holder that claims the role next is keyed by wherever the copy reaches it from: that
 // holder is unknown here, and one stored key would show the comment a second time to every
-// mentioned session but the one it names. The stream's acknowledgement is the answer:
-// acknowledged, the route is reached; anything else leaves the item pending for the outbox's own
-// retry, which the MsgId makes idempotent at the stream.
+// mentioned session but the one it names - a session whose mention was delivered among them,
+// whose host claimed that mention's key and no other. The stream's acknowledgement is the
+// answer: acknowledged, the route is reached; anything else leaves the item pending for the
+// outbox's own retry, which the MsgId makes idempotent at the stream.
 //
 // Acknowledged, the copy is handed to a holder that claimed the role while the keep was in
 // flight, before that answer is given (handOverKept), so the route's own answer stays the keep's
@@ -348,7 +362,7 @@ func (f *roleForward) forward(sender bus.Sender, item contracts.Envelope) <-chan
 // keptHandovers).
 func (f *roleForward) keep(ctx context.Context, deps Deps, sender bus.Sender, item contracts.Envelope, handed *keptHandovers) <-chan error {
 	keptAt := time.Now()
-	item.MentionDedupeKeys = f.mentionKeys
+	item.MentionDedupeKeys = f.settledKeys
 	stored := sender.PublishStoredAsync(bus.KeptRoleSubject(f.keptFor), item, bus.KeptMsgID(item.DedupeKey, f.keptFor))
 	answer := make(chan error, 1)
 	go func() {

@@ -462,8 +462,10 @@ func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string) (
 // recorded on that mention, whether an attempt was sent, is past the lease a send is waited out
 // for (model.MentionResumedSQL), is live (model.MentionLiveSQL), is abandoned
 // (model.MentionAbandonedSQL), and whether any attempt of it failed or is abandoned
-// (mentionDeliveries.fallbackKeys). What mode those attempts went in does not matter: every
-// attempt of one mention sends under the mention's own key (model.CommentMentionIdempotencyKey),
+// (mentionDeliveries.fallbackKeys; that flag and the sent one together say whether the group has
+// settled at all, which is what mentionDeliveries.settledKeys holds a key for). What mode those
+// attempts went in does not matter: every attempt of one mention sends under the mention's own
+// key (model.CommentMentionIdempotencyKey),
 // so the mode comes from comment_mentions - one row per (comment, target), which is what makes
 // min() of it that row's mode - and never from the attempts themselves. Every attempt is opened
 // under that row (claimCommentDeliveryAttempt in internal/dispatch/api), so the join drops none.
@@ -492,12 +494,34 @@ const mentionFallbackHoldsQuery = `
 	where comment_id = any($1::text[]::uuid[])
 `
 
-// fallbackChoice is which of one comment's failed attempts names the dedupe key each of its keys'
-// copies carries: for each session the lowest of the targets whose attempt of it failed, and for
-// each target the lowest of the sessions whose attempt of it failed.
+// fallbackChoice is which of one comment's attempts names the dedupe key each of its keys'
+// copies carries: for each session the lowest of the targets whose attempt of it failed, for
+// each target the lowest of the sessions whose attempt of it failed, and for each session the
+// settled mention whose key its settled map holds (settledMention,
+// mentionDeliveries.settledKeys).
 type fallbackChoice struct {
 	targetOf  map[string]string
 	sessionOf map[string]string
+	settledOf map[string]settledMention
+}
+
+// settledMention is the mention of one session whose key that session's settled key is taken
+// from: the target it was sent under, and whether an attempt of it delivered the comment.
+type settledMention struct {
+	target    string
+	delivered bool
+}
+
+// beats reports whether this mention names the session's settled key in place of current. A
+// mention that delivered wins over one that only failed: its key is the one that session's host
+// claimed when the send landed, while the key of a mention that never landed is one no host has
+// claimed. Of two mentions of one kind the lowest target wins, the way fallbackKeys picks among
+// a session's failed targets, so one reading of a comment names one key per session.
+func (m settledMention) beats(current settledMention) bool {
+	if m.delivered != current.delivered {
+		return m.delivered
+	}
+	return m.target < current.target
 }
 
 // loadMentionDeliveries reads what the mentions of every comment in ids did and which of their
@@ -533,21 +557,29 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 			state := mentionStateOf(sent, resending, sending, abandoned)
 			if sessionID != nil {
 				deliveries.sessions.record(*sessionID, state)
-				if failedSend {
+				if sent || failedSend {
 					pick, ok := chosen[commentID]
 					if !ok {
-						pick = &fallbackChoice{targetOf: map[string]string{}, sessionOf: map[string]string{}}
+						pick = &fallbackChoice{targetOf: map[string]string{}, sessionOf: map[string]string{},
+							settledOf: map[string]settledMention{}}
 						chosen[commentID] = pick
 					}
 					key := contracts.AgentSendDedupeKey(
 						*sessionID, model.CommentMentionIdempotencyKey(commentID, target, mode))
-					if lowest, ok := pick.targetOf[*sessionID]; !ok || target < lowest {
-						pick.targetOf[*sessionID] = target
-						deliveries.fallbackKeys[*sessionID] = key
+					settled := settledMention{target: target, delivered: sent}
+					if current, ok := pick.settledOf[*sessionID]; !ok || settled.beats(current) {
+						pick.settledOf[*sessionID] = settled
+						deliveries.settledKeys[*sessionID] = key
 					}
-					if lowest, ok := pick.sessionOf[target]; !ok || *sessionID < lowest {
-						pick.sessionOf[target] = *sessionID
-						deliveries.targetFallbackKeys[target] = key
+					if failedSend {
+						if lowest, ok := pick.targetOf[*sessionID]; !ok || target < lowest {
+							pick.targetOf[*sessionID] = target
+							deliveries.fallbackKeys[*sessionID] = key
+						}
+						if lowest, ok := pick.sessionOf[target]; !ok || *sessionID < lowest {
+							pick.sessionOf[target] = *sessionID
+							deliveries.targetFallbackKeys[target] = key
+						}
 					}
 				}
 			}

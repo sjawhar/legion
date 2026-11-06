@@ -30,8 +30,11 @@ export const EnvelopeSchema = z.object({
   /**
    * `mention_dedupe_keys` holds, per mentioned session id, the dedupe key that session's own
    * send of this comment went under - the key `agent.<session>.<comment>:<target>:<the mention's
-   * mode>` its host claimed when the mention's send landed - for every session of the comment
-   * whose mention attempt then failed.
+   * mode>` its host claims when the mention's send lands - for every session of the comment
+   * whose mention has settled: one the mention delivered to as well as one whose every attempt
+   * then failed. A mention still in flight is left out, its key being one no host has claimed
+   * yet: a copy carrying it would claim that key in the mention's place, and the mention's own
+   * send would then be dropped at the host.
    *
    * Dispatch's outbox writes it, on a copy it keeps on a role's kept lane, and only there; both
    * forwarders of that lane read it - the handover behind the keep and the drain that hands the

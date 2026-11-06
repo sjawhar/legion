@@ -250,11 +250,16 @@ func readRows(ctx context.Context, deps Deps, inFlight []string) (pending []pend
 // subject itself. dedupeKey is the dedupe key this copy carries in place of the event's own
 // (envelope), "" for every destination that carries the event's: the copy of a new comment sent
 // to a session whose mention failed sets it, to that mention's send's key
-// (destinations.addSession), and so does a role route's copy of such a comment, once the holder
-// it reaches is known (resolveRoleHolders, roleFallbackKey). mentionKeys is what that choice is
-// made from: the dedupe keys of the failed mentions of the comment the event is of, by session
-// (mentionDeliveries.fallbackKeys), carried by a role route alone and nil for every other
-// destination and every other event.
+// (destinations.addSession), and so does a role route's copy of a comment the holder it reaches
+// is mentioned in, to that holder's own settled mention, once the holder is known
+// (resolveRoleHolders, roleFallbackKey). mentionKeys is what that choice was
+// made from before a delivered mention counted in it: the dedupe keys of the failed mentions of
+// the comment the event is of, by session (mentionDeliveries.fallbackKeys), carried by a role
+// route alone and nil for every other destination and every other event. settledKeys is carried
+// beside it, by a role route alone as well: the dedupe key of every mentioned session's own
+// settled mention, a delivered one included (mentionDeliveries.settledKeys), which is what the
+// holder's own key is chosen from and what a copy kept for a role no live holder can take
+// carries for whoever forwards it on (roleForward.keep).
 type destination struct {
 	subject     string
 	label       string
@@ -262,6 +267,7 @@ type destination struct {
 	role        string
 	dedupeKey   string
 	mentionKeys map[string]string
+	settledKeys map[string]string
 	forward     *roleForward
 }
 

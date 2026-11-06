@@ -53,6 +53,27 @@ type mentionDeliveries struct {
 	// that lands, and a copy shown beside another target's landed mention leaves the session no
 	// more copies than had every one of its mentions landed.
 	fallbackKeys map[string]string
+	// settledKeys is keyed like sessions, and holds for each session a mention of which has
+	// settled - one of its attempts sent, or every one of them failed or abandoned - the dedupe
+	// key that mention's send went under (contracts.AgentSendDedupeKey of
+	// model.CommentMentionIdempotencyKey), the key its host claimed when a send of the mention
+	// landed and the key the session's own copy carries when none did (fallbackKeys). It is
+	// written by loadMentionDeliveries, carried by a role route alone (destination.settledKeys),
+	// and read where the session a role copy reaches is keyed by its own mention of this
+	// comment: the forward to a live holder (roleFallbackKey) and the copy kept for a role no
+	// live holder can take, which carries the whole map for whoever forwards it to the holder
+	// that claims the role next (roleForward.keep, contracts.Envelope.MentionDedupeKeys).
+	//
+	// Only a settled mention is named. A mention still in flight, and one the comment names that
+	// no attempt was recorded for, is left out: a copy carrying its key would claim that key at
+	// the host, and the mention's own send, which goes under that same key, would then be
+	// dropped and its mode - a steer among them - lost with it.
+	//
+	// A session mentioned under several targets keys by a delivered mention of it, the lowest
+	// such target, and by the lowest failed target only when no mention of it delivered: the key
+	// of a mention that never landed is one that host never claimed, so a copy carrying it would
+	// be shown beside the mention it stands for (settledMention.beats).
+	settledKeys map[string]string
 	// targetFallbackKeys is keyed like targets, and holds for each target with a failed or
 	// abandoned attempt that names a session the dedupe key of that target's mention (of the
 	// lowest session, should its attempts name several), which a fallback copy keyed by that
@@ -70,6 +91,7 @@ func newMentionDeliveries() mentionDeliveries {
 		sessions:           mentionOutcomes{kind: sessionMentions, states: map[string]mentionState{}},
 		targets:            mentionOutcomes{kind: targetMentions, states: map[string]mentionState{}},
 		fallbackKeys:       map[string]string{},
+		settledKeys:        map[string]string{},
 		targetFallbackKeys: map[string]string{},
 		held:               map[string]struct{}{},
 	}
