@@ -350,13 +350,15 @@ func TestARebuildFromTheLatestVersionRestoresItWhateverItWeighs(t *testing.T) {
 
 // storeLatestVersion makes markdown the latest saved version of artifactID, as a build that wrote
 // it stored it, and returns a service whose next load of the document's history does not decode,
-// the one state a rebuild repairs.
+// the one state a rebuild repairs. The service is shut down when the test ends.
 func storeLatestVersion(t *testing.T, database *store.Store, artifactID, markdown string) *Service {
 	t.Helper()
 	if _, err := database.Pool.Exec(context.Background(), `update artifact_versions set markdown = $2 where artifact_id = $1`, artifactID, markdown); err != nil {
 		t.Fatalf("store the latest version: %v", err)
 	}
-	return New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	service := New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	return service
 }
 
 // A rebuild from the latest saved version reads markdown the request did not send. A version that
