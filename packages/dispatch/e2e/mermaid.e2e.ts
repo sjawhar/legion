@@ -105,13 +105,23 @@ async function openCommentThread(
 ): Promise<Locator> {
   const turn = conversationTurns(page).locator(`:scope > li[data-turn="comment:${rootId}"]`);
   await expect(turn).toContainText(lead);
-  await turn.getByRole("button", { exact: true, name: "Expand thread" }).click();
+  const expand = turn.getByRole("button", { exact: true, name: "Expand thread" });
+  const opened =
+    testInfo.project.name === "iphone"
+      ? page.getByRole("dialog", { name: "Thread" })
+      : turn.getByRole("button", { exact: true, name: "Collapse thread" });
+  // Retried for the reason the reader's click on `Mermaid source` is below: the page moves
+  // while the turn's diagrams draw, so a click can land on whatever slid under the pointer and
+  // the thread never opens. Measured here on firefox, where the expand click was lost and the
+  // row waited out its budget for a `Collapse thread` that never appeared. The expand button is
+  // gone once the thread is open, so the retry clicks only while it is still there.
+  await expect(async () => {
+    if (await expand.isVisible()) await expand.click();
+    await expect(opened).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 5_000 });
   if (testInfo.project.name === "iphone") {
-    const thread = page.getByRole("dialog", { name: "Thread" });
-    await expect(thread).toBeVisible();
-    return thread.locator(`li[data-turn="comment:${rootId}"]`);
+    return opened.locator(`li[data-turn="comment:${rootId}"]`);
   }
-  await expect(turn.getByRole("button", { exact: true, name: "Collapse thread" })).toBeVisible();
   return turn;
 }
 
