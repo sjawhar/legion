@@ -83,20 +83,21 @@ func TestGuardTakesOutWhatAPodSetsAndKeepsTheTestsInputs(t *testing.T) {
 	}
 }
 
-// The three session names this package takes out are the ones Oh My Pi reads to place a session,
-// read here from the constants the rest of the daemon builds on, so that a rename reaching those
-// constants and not this package fails here rather than silently leaving a test free to open the
-// deployment's store. Guard, RequireGuarded and Isolated all read one predicate, so Isolated's
-// slice holds for the three of them. internal/runtime/paneenv_test.go pins its own list the same
-// way, for the same reason.
-func TestTheSessionNamesAreTheOnesOhMyPiReads(t *testing.T) {
+// The three names this package takes out are the names that place a session — the two Oh My Pi
+// reads, OMP_SESSION_STORAGE and OMP_SESSION_SQL_DSN_FILE, and OMP_SESSION_SQL_DSN, the projected
+// file's own name, which carries the same URL by value — read here from the constants the rest of
+// the daemon builds on, so that a rename reaching those constants and not this package fails here
+// rather than silently leaving a test free to open the deployment's store. Guard, RequireGuarded
+// and Isolated all read one predicate, so Isolated's slice holds for the three of them.
+// internal/runtime/paneenv_test.go pins its own list the same way, for the same reason.
+func TestTheSessionNamesArePinnedToTheirConstants(t *testing.T) {
 	for _, name := range []string{ompsessions.StorageVariable, ompsessions.DSNFileVariable, ompsessions.DSNFileName} {
 		t.Setenv(name, "a store no test may open")
 		if slices.ContainsFunc(fixtureenv.Isolated(t.TempDir()), func(entry string) bool {
 			key, _, _ := strings.Cut(entry, "=")
 			return key == name
 		}) {
-			t.Errorf("Isolated holds %s, the name Oh My Pi reads to place a session", name)
+			t.Errorf("Isolated holds %s, one of the names that place a session", name)
 		}
 	}
 }

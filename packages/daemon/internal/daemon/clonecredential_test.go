@@ -55,17 +55,13 @@ func TestTmuxBootRewritesEveryOlderClonesCredentialHelper(t *testing.T) {
 	// github.com one to ~/.gitconfig). Neither the global nor the system file may reach the test,
 	// and each reader is shut out of them by the measure that fits it. The fix-up runs its git
 	// through workspace.execRunner.Run, which builds that child's environment out of this
-	// process's own, so the three t.Setenv lines below are the measure for it. Nor may the
-	// environment's own scope reach it, the GIT_CONFIG_COUNT block: a Legion issue pod sets it
-	// to credential.https://github.com.helper twice, the empty reset and `legion git-credential`,
-	// so a test that shuts out only the files reads four values of that key where the clone's file
-	// holds two. GIT_CONFIG_COUNT=0 has git read none of the pairs, in this process and in every
-	// child built from it. The test's own git helper and its `git init` below read nothing of
-	// this process's environment: each carries fixtureenv.Isolated, which shuts out the files and
-	// the environment block alike.
+	// process's own, so the two t.Setenv lines below are the measure for it. That child needs no
+	// measure against the environment's own scope: the runner drops the pod's GIT_CONFIG_* block
+	// itself (withoutGitConfigPairs, internal/workspace/config.go:256 and :577-581). The test's
+	// own git helper and its `git init` below read nothing of this process's environment: each
+	// carries fixtureenv.Isolated, which shuts out the files and the environment block alike.
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
-	t.Setenv("GIT_CONFIG_COUNT", "0")
 	cfg := config.Config{Project: "WIDGETS", StateDir: t.TempDir(), Runtime: config.Runtime{Name: "tmux"}}
 	tools := map[string]string{"git": realGit}
 	var logs bytes.Buffer

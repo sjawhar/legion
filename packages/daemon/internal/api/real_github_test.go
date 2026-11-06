@@ -532,23 +532,24 @@ func writeRealGhFiles(t *testing.T, token string) string {
 // realCLIEnvironment is a pane's environment as far as gh and git read it, built on
 // fixtureenv.Isolated of home so that nothing this test process was handed — a pod's workspace,
 // its GIT_CONFIG_* block, its credential helper, its token or its home's configuration — reaches
-// the real git and gh the proof runs: the real gh's directory first on PATH, so git's `gh auth
-// git-credential` helper is that gh, the gh files configDir holds as GH_CONFIG_DIR, and GH_TOKEN,
-// GITHUB_TOKEN and GH_HOST empty so nothing inherited outranks the files. GIT_ALLOW_PROTOCOL=https
-// comes last of all because Isolated appends GIT_ALLOW_PROTOCOL=file and a child takes the last
-// value of a key: this proof clones over https from real GitHub, which file would refuse.
+// the real git and gh the proof runs. Isolated drops every GH_* and GITHUB_* name, so the gh
+// files configDir holds are the only credential left, and the two entries after it are what the
+// proof adds: the real gh's directory first on PATH, so git's `gh auth git-credential` helper is
+// that gh, and GH_CONFIG_DIR itself. GIT_ALLOW_PROTOCOL=https comes last of all because Isolated
+// appends GIT_ALLOW_PROTOCOL=file and a child takes the last value of a key: this proof clones
+// over https from real GitHub, which file would refuse.
 func realCLIEnvironment(gh, configDir, home string) []string {
 	return append(fixtureenv.Isolated(home),
 		"PATH="+filepath.Dir(gh)+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GH_CONFIG_DIR="+configDir, "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST=",
+		"GH_CONFIG_DIR="+configDir,
 		"GIT_ALLOW_PROTOCOL=https")
 }
 
 // TestTheRealGitHubProofEnvironmentIsGuarded holds realCLIEnvironment to handing the real git and
 // gh none of the pod's own reach. It plants a pod's variables with t.Setenv, which is after
 // TestMain's guard already ran, and that is what makes it bite: an environment built from
-// os.Environ() — what this function did before — carries whatever the process holds at the call,
-// so only a variable planted after the guard tells the two apart. It is ungated, so CI and a pod
+// os.Environ() carries whatever the process holds at the call, so only a variable planted after
+// the guard tells such an environment from one built for the test. It is ungated, so CI and a pod
 // both run it, and it names a gh path of its own rather than realGh's, since the environment is
 // all it proves and no gh need be on the machine.
 func TestTheRealGitHubProofEnvironmentIsGuarded(t *testing.T) {
@@ -568,9 +569,7 @@ func TestTheRealGitHubProofEnvironmentIsGuarded(t *testing.T) {
 	configDir, home := t.TempDir(), t.TempDir()
 	environment := realCLIEnvironment(gh, configDir, home)
 
-	// GH_TOKEN, GITHUB_TOKEN and GH_HOST are in the environment, empty, which is how the files
-	// under GH_CONFIG_DIR outrank anything a gh would otherwise read; what must be absent is the
-	// planted values, not those names.
+	// Every name the pod planted must be gone from the slice, values and all.
 	for _, entry := range environment {
 		key, value, _ := strings.Cut(entry, "=")
 		if want, pod := planted[key]; pod && value == want {

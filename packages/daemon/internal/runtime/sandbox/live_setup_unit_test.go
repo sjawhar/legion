@@ -893,11 +893,12 @@ func (r *setupRig) git(args ...string) {
 	// test process happens to have.
 	command.Dir = r.root
 	// The command carries an environment of its own because a test may plant a git variable with
-	// t.Setenv long after this package's TestMain guard has run: setupRig.poisons plants GIT_DIR and
-	// GIT_COMMON_DIR naming the repository it forges. GIT_DIR outranks the directory a command runs
-	// in, so a command with no Env of its own would write into that repository rather than into the
-	// rig's own (TestFixtureCommandsIgnoreAPlantedRepository). The home is the rig's, so every
-	// fixture of one rig reads one git and jj configuration.
+	// t.Setenv long after this package's TestMain guard has run:
+	// TestLiveSetupIgnoresTheRoleEnvironmentGitVariables plants the maps setupRig.poisons returns,
+	// GIT_DIR and GIT_COMMON_DIR naming the repository the rig forges among them. GIT_DIR outranks
+	// the directory a command runs in, so a command with no Env of its own would write into that
+	// repository rather than into the rig's own (TestFixtureCommandsIgnoreAPlantedRepository). The
+	// home is the rig's, so every fixture of one rig reads one git and jj configuration.
 	command.Env = fixtureenv.Isolated(r.home)
 	if output, err := command.CombinedOutput(); err != nil {
 		r.t.Fatalf("git %q: %v: %s", args, err, output)

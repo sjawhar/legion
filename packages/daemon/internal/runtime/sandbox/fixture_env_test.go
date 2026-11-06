@@ -14,13 +14,16 @@ import (
 // This package's TestMain takes every variable that names another repository, remote or credential
 // out of the test process (fixtureenv.Guard), and TestTheTestProcessIsGuarded holds that. Neither
 // covers the one way a fixture command can still be moved onto another repository: a test that
-// plants a variable back with t.Setenv, which runs long after the guard. setupRig.poisons does
-// exactly that, with GIT_DIR and GIT_COMMON_DIR, to prove the setup script under test ignores the
-// role's environment, and GIT_DIR outranks the directory a command runs in. Measured, with no Env
-// on setupRig.git, the rig's own git wrote a credential.helper value and a ref into a repository
-// that was not its own while the package's guard assertion stayed green: the defect this test
-// holds closed. So the test plants the variables that reach furthest and then drives the rig's two
-// writing shapes, a `git init` and a `git -C <clone> config`, past the plant.
+// plants a variable back with t.Setenv, which runs long after the guard.
+// TestLiveSetupIgnoresTheRoleEnvironmentGitVariables does exactly that, planting the maps
+// setupRig.poisons returns, GIT_DIR and GIT_COMMON_DIR among them, to prove the setup script
+// under test ignores the role's environment, and GIT_DIR outranks the directory a command runs
+// in. The spec's own run, with no Env on setupRig.git, had the rig's git write a credential.helper
+// value and a ref into a repository that was not its own while the package's guard assertion
+// stayed green: the defect this test holds closed. So the test plants the variables that reach
+// furthest and then drives the rig's two writing shapes, a `git init` and a
+// `git -C <clone> config`, past the plant; measured with git 2.47.3, those two write the value
+// and no ref.
 func TestFixtureCommandsIgnoreAPlantedRepository(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {
