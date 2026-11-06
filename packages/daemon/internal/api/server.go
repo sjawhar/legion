@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -102,7 +103,7 @@ type Options struct {
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
-	// (logFailure, logReadFailure), since the stop is what cut it short. Nil is never.
+	// (logFailure, logRequestFailure), since the stop is what cut it short. Nil is never.
 	Stopping context.Context
 	// Drained is done once the daemon's stop has drained the API, or the drain ran out, and ends
 	// every decision a route asked of a machine (decision). A decision in flight at the stop's
@@ -505,12 +506,14 @@ func (s *server) logFailure(msg string, args ...any) {
 	s.log.Error(msg, args...)
 }
 
-// logReadFailure logs at Error the failure of a call a route made on the request's own context,
-// or at Info when nobody is left to act on it: the client that asked for it went away, so every
-// call under its context fails with that cancellation, or the daemon's own stop cut the call
-// short, which is what logFailure reports.
-func (s *server) logReadFailure(r *http.Request, msg string, args ...any) {
-	if r.Context().Err() != nil {
+// logRequestFailure logs at Error the failure of a call a route made on the request's own context,
+// or at Info when nobody is left to act on it: the client that asked for it went away and the call
+// failed with that cancellation, or the daemon's own stop cut the call short, which is what
+// logFailure reports. A failure of its own - a refused connection, an exhausted pool - stays at
+// Error even once the client has gone, since it is an operator's to act on whoever was waiting.
+func (s *server) logRequestFailure(r *http.Request, err error, msg string, args ...any) {
+	args = append(args, "error", err)
+	if r.Context().Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		s.log.Info(msg, args...)
 		return
 	}
@@ -545,7 +548,7 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
 	})
 	if err != nil {
-		s.logReadFailure(r, "api: begin state transaction failed", "error", err)
+		s.logRequestFailure(r, err, "api: begin state transaction failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
@@ -553,12 +556,12 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 
 	state, err := s.state.State(r.Context(), tx)
 	if err != nil {
-		s.logReadFailure(r, "api: state source failed", "error", err)
+		s.logRequestFailure(r, err, "api: state source failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.logReadFailure(r, "api: commit state transaction failed", "error", err)
+		s.logRequestFailure(r, err, "api: commit state transaction failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}

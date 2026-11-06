@@ -82,7 +82,7 @@ func (s *server) grant(w http.ResponseWriter, r *http.Request) {
 func (s *server) claimGrant(w http.ResponseWriter, r *http.Request, req GrantRequest) {
 	machine, authenticated, err := s.claimForGrant(r.Context(), req.SessionID, req.Secret, req.Tree, req.Issue)
 	if err != nil {
-		s.logReadFailure(r, "api: list claims to mint grant", "error", err)
+		s.logRequestFailure(r, err, "api: list claims to mint grant")
 		writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
 		return
 	}
@@ -241,7 +241,7 @@ func (s *server) appLease(w http.ResponseWriter, r *http.Request, role appauth.A
 	}
 	lease, err := s.tokens.Token(r.Context(), role, owner)
 	if err != nil {
-		s.logReadFailure(r, "api: mint GitHub App token", "role", logRole, "owner", owner, "error", err)
+		s.logRequestFailure(r, err, "api: mint GitHub App token", "role", logRole, "owner", owner)
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
 		return appauth.Lease{}, false
 	}

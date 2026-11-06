@@ -4,30 +4,57 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
-func TestLogReadFailureLogsInfoWhenNobodyIsLeftToActOnIt(t *testing.T) {
+func TestLogRequestFailureLogsInfoWhenNobodyIsLeftToActOnIt(t *testing.T) {
 	for _, c := range []struct {
 		name          string
+		err           error
 		cancelRequest bool
 		beginStop     bool
 		wantLevel     string
 	}{
-		{name: "a request whose client went away, on a running daemon", cancelRequest: true, wantLevel: "INFO"},
-		{name: "a live request on a daemon whose stop has begun", beginStop: true, wantLevel: "INFO"},
-		{name: "a live request on a running daemon", wantLevel: "ERROR"},
+		{
+			name:          "a request whose client went away, whose call failed with that cancellation, on a running daemon",
+			err:           context.Canceled,
+			cancelRequest: true,
+			wantLevel:     "INFO",
+		},
+		{
+			name:          "a request whose client's deadline passed, whose call failed with it, on a running daemon",
+			err:           context.DeadlineExceeded,
+			cancelRequest: true,
+			wantLevel:     "INFO",
+		},
+		{
+			name:          "a request whose client went away, whose call failed of its own, on a running daemon",
+			err:           errors.New("connection refused"),
+			cancelRequest: true,
+			wantLevel:     "ERROR",
+		},
+		{
+			name:      "a live request on a daemon whose stop has begun",
+			err:       errors.New("connection refused"),
+			beginStop: true,
+			wantLevel: "INFO",
+		},
+		{
+			name:      "a live request on a running daemon",
+			err:       errors.New("connection refused"),
+			wantLevel: "ERROR",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var logged bytes.Buffer
 			stopping, beginStop := context.WithCancel(context.Background())
+			defer beginStop()
 			if c.beginStop {
 				beginStop()
-			} else {
-				defer beginStop()
 			}
 			testServer := &server{
 				log:      slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})),
@@ -35,14 +62,13 @@ func TestLogReadFailureLogsInfoWhenNobodyIsLeftToActOnIt(t *testing.T) {
 			}
 			request := httptest.NewRequest(http.MethodGet, "/legion/v1/operator/claims", nil)
 			requestContext, hangUp := context.WithCancel(request.Context())
+			defer hangUp()
 			if c.cancelRequest {
 				hangUp()
-			} else {
-				defer hangUp()
 			}
 			request = request.WithContext(requestContext)
 
-			testServer.logReadFailure(request, "api: read the claims", "error", "connection refused")
+			testServer.logRequestFailure(request, c.err, "api: read the claims")
 
 			var record struct {
 				Level   string `json:"level"`
@@ -58,8 +84,8 @@ func TestLogReadFailureLogsInfoWhenNobodyIsLeftToActOnIt(t *testing.T) {
 			if record.Message != "api: read the claims" {
 				t.Errorf("message = %q, want %q", record.Message, "api: read the claims")
 			}
-			if record.Error != "connection refused" {
-				t.Errorf("error attribute = %q, want %q", record.Error, "connection refused")
+			if record.Error != c.err.Error() {
+				t.Errorf("error attribute = %q, want %q", record.Error, c.err.Error())
 			}
 		})
 	}
