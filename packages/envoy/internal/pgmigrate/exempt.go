@@ -15,7 +15,7 @@ import (
 // reads no row of a table, so the time it holds its lock does not grow with the table:
 //
 //   - create function (or procedure, with or without or replace), in plpgsql or sql only
-//     (functionIsCatalogOnly): creating one writes pg_proc and has the language's validator check
+//     (catalogOnlyFunction): creating one writes pg_proc and has the language's validator check
 //     the body, which for plpgsql parses it and for sql analyzes its queries, taking at most
 //     ACCESS SHARE on the tables they name and reading none of their rows. A function in any other
 //     language is not exempt: creating a C function loads its library, which can run any code;
@@ -43,20 +43,16 @@ import (
 // same argument for it; a kind that can scan or rewrite (create index, alter table, a DO block,
 // any DML) never belongs here.
 var catalogOnlyStatements = map[string]func(node json.RawMessage) string{
-	"CreateFunctionStmt": func(node json.RawMessage) string {
-		if functionIsCatalogOnly(node) {
-			return "create function"
-		}
-		return ""
-	},
-	"CreateTrigStmt":  func(json.RawMessage) string { return "create trigger" },
-	"DropStmt":        catalogOnlyDrop,
-	"VariableSetStmt": func(json.RawMessage) string { return "set" },
+	"CreateFunctionStmt": catalogOnlyFunction,
+	"CreateTrigStmt":     func(json.RawMessage) string { return "create trigger" },
+	"DropStmt":           catalogOnlyDrop,
+	"VariableSetStmt":    func(json.RawMessage) string { return "set" },
 }
 
-// functionIsCatalogOnly reports whether a create function's parse node names plpgsql or sql as its
-// language, or names none and has an SQL-standard body (begin atomic, return), which is sql.
-func functionIsCatalogOnly(node json.RawMessage) bool {
+// catalogOnlyFunction names a create function's kind, "create function", when its parse node
+// names plpgsql or sql as its language, or names none and has an SQL-standard body (begin
+// atomic, return), which is sql; "" for any other language and for a node it cannot read.
+func catalogOnlyFunction(node json.RawMessage) string {
 	var function struct {
 		Options []struct {
 			DefElem *struct {
@@ -71,31 +67,31 @@ func functionIsCatalogOnly(node json.RawMessage) bool {
 		SQLBody json.RawMessage `json:"sql_body"`
 	}
 	if err := json.Unmarshal(node, &function); err != nil {
-		return false
+		return ""
 	}
 	language := ""
 	for _, option := range function.Options {
 		if option.DefElem != nil && option.DefElem.Defname == "language" {
 			if option.DefElem.Arg.String == nil {
-				return false
+				return ""
 			}
 			language = strings.ToLower(option.DefElem.Arg.String.Sval)
 		}
 	}
 	switch language {
 	case "plpgsql", "sql":
-		return true
+		return "create function"
 	case "":
-		return len(function.SQLBody) > 0
+		if len(function.SQLBody) > 0 {
+			return "create function"
+		}
 	}
-	return false
+	return ""
 }
 
 // catalogOnlyDrop names a drop's kind as the report names it, "drop trigger" or "drop function",
 // and answers "" for a drop of anything else (a table, an index, a view, a schema, a procedure),
-// for a drop with cascade, and for a node it cannot read. What a cascade drops besides the object
-// the statement names is not in the statement, so the census cannot read which objects it
-// reaches, and the exemption is an argument about the statement the census can read.
+// for a drop with cascade, and for a node it cannot read. catalogOnlyStatements argues both.
 func catalogOnlyDrop(node json.RawMessage) string {
 	var drop struct {
 		RemoveType string `json:"removeType"`
@@ -114,10 +110,9 @@ func catalogOnlyDrop(node json.RawMessage) string {
 }
 
 // tableSizeExemption says why migration sql is exempt from CensusTableLimit: the kinds of its
-// statements, as the report names them ("create function and create trigger"), when
-// catalogOnlyStatements holds the parse node of every one of its statements and its function
-// names a kind for each; "" when the map holds no function for a node or one names no kind for
-// the statement, when the migration holds no statement, or when it does not parse.
+// statements, as the report names them ("create function and create trigger"), when every one of
+// its statements is a catalogOnlyStatements kind; "" when any statement is not one of those
+// kinds, when the migration holds no statement, or when it does not parse.
 //
 // The statements are read by Postgres's own parser, libpg_query (Postgres 17's scan.l and
 // gram.y), run as WebAssembly in pure Go by github.com/wasilibs/go-pgquery, so the reading is the
@@ -150,8 +145,9 @@ func tableSizeExemption(sql string) (exemption string) {
 			return ""
 		}
 		for node, body := range statement.Stmt {
-			catalogOnly, ok := catalogOnlyStatements[node]
-			if !ok {
+			// A node the map does not hold reads as the nil function, which names no kind.
+			catalogOnly := catalogOnlyStatements[node]
+			if catalogOnly == nil {
 				return ""
 			}
 			kind := catalogOnly(body)
@@ -166,10 +162,13 @@ func tableSizeExemption(sql string) (exemption string) {
 	return strings.Join(kinds, " and ")
 }
 
-// ddlEventTriggersQuery names, sorted and comma-separated, the enabled event triggers that run when
-// a create function, create procedure, create trigger, drop function or drop trigger runs; "" when
-// there are none. A drop fires sql_drop as well as ddl_command_start and ddl_command_end, so an
-// event trigger on that event would run code of its own on a drop the exemption covers.
+// ddlEventTriggersQuery names, sorted and comma-separated, every enabled event trigger on
+// ddl_command_start, ddl_command_end or sql_drop whose tags are unset or name one of the five
+// commands catalogOnlyStatements admits; "" when there are none. A drop fires sql_drop as well
+// as the two ddl_command_ events, so an event trigger on sql_drop would run code of its own on a
+// drop the exemption covers. Census reads this once for the whole database rather than per
+// migration, so an enabled trigger on sql_drop takes the exemption from every migration, one
+// holding no drop included: the reading that refuses, not the one that applies.
 const ddlEventTriggersQuery = `
 	select coalesce(string_agg(evtname, ', ' order by evtname), '')
 	from pg_event_trigger
