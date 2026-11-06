@@ -357,9 +357,11 @@ func pushRemoteBranch(t *testing.T, remote, branch, file string) string {
 	runSetup(t, scratch, "git", "clone", "--quiet", remote, "other")
 	other := filepath.Join(scratch, "other")
 	// The probe is a git child like any other here, so it names the clone it reads as its own
-	// working directory as well as with -C.
+	// working directory as well as with -C, and takes the package's fixture environment, the
+	// home every other fixture and the code under test read.
 	probe := exec.Command("git", "-C", other, "rev-parse", "--verify", "--quiet", "origin/"+branch)
 	probe.Dir = other
+	probe.Env = setupEnvironment()
 	if probe.Run() == nil {
 		runSetup(t, other, "git", "checkout", "--quiet", branch)
 	} else {

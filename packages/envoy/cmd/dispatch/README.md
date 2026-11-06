@@ -125,6 +125,13 @@ Each item below names a variable, then its purpose.
   Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below).
   A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries.
 
+- `DISPATCH_ANSWERER`, `DISPATCH_AZURE_CHAT_*`, `DISPATCH_CHAT_*`, and the same `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID` and `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`
+
+  Where the server generates text: `azure` is a chat deployment of an Azure AI Foundry resource, reached with the shared Azure sign-in; `endpoint` is any OpenAI-shaped chat completions service, reached with the bearer token `DISPATCH_CHAT_TOKEN_FILE` names, which is read on every call.
+  Unset, no model is configured, and the server starts and says so.
+  The sign-in is the embedder's too, read by whichever of the two is `azure`, so a deployment may embed on Bedrock and answer on Azure; it is refused only where neither is.
+  `DISPATCH_AZURE_CHAT_SCOPE` is configuration because one Azure AI Foundry resource serves two inference families: the models inference endpoint (`/models`, an `api-version`, scope `https://cognitiveservices.azure.com/.default`) and the Azure OpenAI endpoint (`/openai/v1`, no `api-version`, scope `https://ai.azure.com/.default`), and which of the two a deployment serves is named by that deployment.
+
 - `DISPATCH_MAX_LIVE_ROOMS`, `DISPATCH_MAX_DOC_CONNECTIONS`
 
   Each process's own caps on the document rooms it holds in memory and the browser connections to them, so two processes of one deployment hold up to twice each;
@@ -1097,10 +1104,10 @@ A process that finds it held tries again
   The pass compares a `tester` or `architect` check run's `app.id` against `DISPATCH_REVIEWER_APP_ID`, and with that variable unset records no verdict check at all.
   Its tick records its period in `duty_passes`, so one process serves each period however many run, and `DISPATCH_TEST_CI_RECONCILE_INTERVAL` replaces the 5 minutes for an end-to-end test.
 
-- The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
+- The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours, ends and clears the answer runs the going routes leave behind (Answering a question, below), and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
   its pass records its period in `duty_passes` like the timers above, so the other process's tick inside a period already served skips.
   No notification replaces this timer, which is why it is the one piece of maintenance that stayed one:
-  a key passes its window by the clock alone, and a delivery is owed because the process holding it died, which commits nothing to announce.
+  a key passes its window by the clock alone, an answer run passes its own by the clock too, and a delivery is owed because the process holding it died, which commits nothing to announce.
   It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
 
 Outside these classes, the document compaction sweep (lease `document-compaction`) runs every hour from a tick at start whether or not NATS is configured, the outbox's publish scan is woken, never periodic (`outbox.Run`), the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay and the events outbox) keep their own connections and keep-alive pings.
@@ -1910,10 +1917,13 @@ It refuses:
 
 - a table a migration names above 1 GiB (`pgmigrate.CensusTableLimit`, table, indexes and TOAST), whose rows it then does not count:
   a migration that locks a table that size needs another shape (`CONCURRENTLY`, batches).
-  A migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, a `create trigger`, or a `set` or `reset` of a run-time parameter, as Postgres's own parser reads them (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt:
+  A migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, a `create trigger`, a `drop trigger` or a `drop function` with `restrict`, which is the default, or a `set` or `reset` of a run-time parameter, as Postgres's own parser reads them (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt:
   each does its work in the catalog or in the session's settings and reads no row of the table, so the time it holds its lock does not grow with the table, and a migration that bounds its own lock wait with `set local lock_timeout` keeps the exemption its other statements earn.
   A function in another language is not exempt, since creating a C function loads its library, which can run any code;
-  and no migration is exempt while an enabled event trigger runs on `create function`, `create procedure` or `create trigger`, since it runs code of its own, and the size refusal then names it.
+  a drop with `cascade` is not exempt either, since what it drops besides the object it names is not in the statement the census reads, and neither is a drop of anything else (a table, an index, a view, a schema, a procedure);
+  and no migration is exempt while an enabled event trigger on `ddl_command_start`, `ddl_command_end` or `sql_drop`, which every drop fires, carries no command tags or tags naming `CREATE FUNCTION`, `CREATE PROCEDURE`, `CREATE TRIGGER`, `DROP FUNCTION` or `DROP TRIGGER`, since it runs code of its own, and the size refusal then names it.
+  A trigger whose tags name none of those commands counts for nothing, one tagged `DROP TABLE` among them.
+  The census reads those event triggers once for the whole database, so an enabled one that counts takes the exemption from every migration, a migration holding no drop included, which is the side that refuses rather than the side that applies.
   The report still prints the table's size beside the limit and says why the migration is exempt, and its lock holders refuse it as they refuse any other.
   A trigger named only in a comment, a string literal or a function body exempts nothing, and one statement of any other kind beside it ends the exemption;
 
@@ -2256,6 +2266,27 @@ The sweep is woken by event commits and judges a suggestion once the events that
 a pending suggestion nothing writes to costs it nothing.
 A ranking or latency change is measured on a restored copy of the production corpus:
 `packages/envoy/scripts/corpus-copy.sh` restores one, `search-smoke.sh` prints what a searcher sees for a list of queries from any build, and `search-latency-compare.sh` runs `TestSearchLatencyOnCorpus` from a base checkout and this one alternately and gates on the difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of the corpus").
+
+## Answering a question
+
+Where the server generates text is one setting, `DISPATCH_ANSWERER` (Required configuration, above), and `GET /api/v1/going/capability` answers `{"model_configured": <bool>}` and nothing else, so any caller Dispatch admits learns whether a deployment can answer without learning its endpoint, its deployment name or its credential.
+
+`POST /api/v1/going/requests` takes a question and the project to ask it of, records the run and answers `201` with it; the answer itself arrives on `GET /api/v1/going/requests/{id}/stream` as server-sent events, each frame carrying `id:` its sequence, `event:` its name (`text`, `item`, `cut`, `changed`, `none`, `end`, `error`) and `data:` that frame's own JSON (`packages/contracts/src/going.ts` declares the vocabulary once, for this server and for the page that reads it).
+The two are separate requests because the server wraps every `POST` in its idempotency layer and that layer holds a whole answer rather than streaming it (Keyed writes, below), and because a deployment of more than one pod spreads two requests across pods:
+the run's frames are rows of `going_events`, so any pod serves any reader, and a reader that drops resumes with `Last-Event-ID` after the last sequence it saw.
+A repeat of the `POST` under one `Idempotency-Key` answers the first run's id, and its stream replays the same stored frames.
+A run belongs to the credential that asked it, which the stream compares its reader with, so the `POST` refuses a credential that names nobody — the deployment's shared token, which resolves as `{}` — with `403 GOING_ASKER_NAMES_NOBODY` and records nothing: no reader of such a run could ever be served it.
+
+What the model is given is what the caller may already read: the hits of the server's own search of that project, and each hit's own stored text, at most 2,000 runes a hit and 30,000 in one run, after which a hit is still named to the model with no body and stays something the answer may cite.
+The model may search twice more through one tool, the server supplying the project, the limit and the offset so it cannot widen the search, and a fourth search is refused back to the model.
+The citation rule is the server's and not the model's: a text frame carries plain text alone, every ASCII punctuation byte of it escaped, which closes markdown's own constructs, and every word a renderer would link on its own — a `www.` host, a scheme's `://`, a `mailto:` or `xmpp:`, an address — dropped from the answer whole, since a renderer decodes an escape before it looks for such a link; so an answer's links are its `item` frames and nothing else — a link to something the model was given raises `item` once for that thing, every other link and every image is counted in `changed`, and either way no byte of the target reaches the reader, who is written the link's own visible text unless that text joins a word a renderer would link on its own, which is dropped whole as every such word is.
+An answer is cut at 120 words with `cut`, one the model wrote no text for at all ends `none`, and either way `end` closes the stream.
+
+A run has 30 seconds, and that window belongs to the record: `going_requests.ends_at` is written by the `POST`, never held as a timer in the process running the answer.
+A pod that dies mid-run therefore stores no terminal frame, and the next reader on any pod ends the stream itself with `error` `ANSWER_DID_NOT_ARRIVE`, as the maintenance sweep does for a run nobody reads (Background loops, above), which also deletes a run an hour old.
+At that moment the running answer, a reader and the sweep may each try to end one run, so the table settles which of them does rather than whichever is first:
+`going_events` carries a partial unique index over the run for a terminal frame name, every terminal write is an insert that does nothing on a conflict, and the writer that loses reads the stored frame and reports that one.
+So a reader sees exactly one ending, never two and never none.
 
 ## Keyed writes
 

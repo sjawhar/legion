@@ -521,8 +521,9 @@ export function installedMarketplace(bundlePath: string): string | undefined {
 }
 
 /**
- * The version a plugin install path names (`…/plugins/cache/<marketplace>/<plugin>/<version>/…`,
- * the marketplace commit's first 12 characters for this plugin), or undefined for any other path.
+ * The version a plugin install path names (`…/plugins/cache/<marketplace>/<plugin>/<version>/`,
+ * the published npm version for this plugin, whose marketplace entry is an `npm` source), or
+ * undefined for any other path.
  */
 export function installedPluginVersion(bundlePath: string): string | undefined {
   return pluginCacheSegments(bundlePath)?.[2]

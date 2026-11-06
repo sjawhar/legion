@@ -655,7 +655,7 @@ func TestARevokeRacingTheLaunchersOwnRevokeEndsTheSessionOnce(t *testing.T) {
 	if _, err := tx.Exec(ctx, `select 1 from enrollments where id=$1 for update`, enr.ID); err != nil {
 		t.Fatalf("lock the enrollment: %v", err)
 	}
-	if _, _, err := endEnrollment(ctx, tx, enr.ID.String(), record.LauncherActor(cred.ID.String()), "enrollment.revoked", "revoked by its launcher"); err != nil {
+	if _, err := endEnrollment(ctx, tx, enr.ID.String(), record.LauncherActor(cred.ID.String()), "enrollment.revoked", "revoked by its launcher", endMayCarry); err != nil {
 		t.Fatalf("end the enrollment as its launcher: %v", err)
 	}
 	done := make(chan error, 1)
