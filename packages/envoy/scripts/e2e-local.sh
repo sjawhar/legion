@@ -36,8 +36,10 @@ an unknown session and a send whose bus is gone are refused, prove the kept
 lane — a role message nobody holds is kept and answered 202 and reaches the
 session that claims the role next exactly once, carrying kept_at, while a role
 whose holder's claim has lapsed keeps nothing and is refused 404 and a role a
-live session holds still answers 200 — and write raw and rendered acceptance
-evidence to
+live session holds still answers 200 — prove what a clean stop comes to: a
+session that registers again with no resume point is offered the stored
+message it already took, which only a client's own ledger drops — and write
+raw and rendered acceptance evidence to
 packages/envoy/out/e2e/. NATS is a server of this checkout's own build
 (internal/testnats/cmd/natsd), so no container runtime is needed.
 EOF
@@ -76,13 +78,25 @@ readonly session_id
 absent_session_id="ses_e2e_local_absent"
 readonly absent_session_id
 
+# The no-cursor window's own session (the window below the assertions): an id of its own, so its
+# registration, its clean stop and the message it is offered twice are no part of any count this
+# run pins for ses_e2e_local.
+nocursor_session_id="ses_e2e_local_nocursor"
+readonly nocursor_session_id
+
 readonly envelopes_file="${out_dir}/envelopes.jsonl"
 readonly session_frames_file="${out_dir}/session-frames.jsonl"
+# The session's resume ledger: the stream the frames came from and the sequence of the last frame
+# the stand-in answered done, rewritten after each one. A shipped plugin persists exactly this and
+# sends it with every registration (packages/envoy-client/src/consumer-delivery.ts, the resume of
+# ConsumerDeliverySnapshotSchema), so the relaunch below sends it too.
+readonly session_cursor_file="${out_dir}/session-cursor.json"
 readonly rendered_ts_file="${out_dir}/rendered-ts.txt"
 readonly direct_response_file="${out_dir}/direct-send-response.json"
 readonly registry_session_response_file="${out_dir}/registry-session-response.json"
 readonly registry_missing_response_file="${out_dir}/registry-missing-response.json"
 readonly subscribe_response_file="${out_dir}/subscribe-response.json"
+readonly subscribe_relaunch_response_file="${out_dir}/subscribe-relaunch-response.json"
 readonly unwired_response_file="${out_dir}/unwired-subscribe-response.json"
 readonly port_registration_response_file="${out_dir}/port-registration-response.json"
 readonly unheld_role_response_file="${out_dir}/unheld-role-response.json"
@@ -109,17 +123,33 @@ readonly bus_down_headers_file="${out_dir}/bus-down-send-headers.txt"
 readonly bus_down_result_file="${out_dir}/bus-down-send-result.txt"
 readonly bus_down_client_file="${out_dir}/bus-down-client-error.json"
 
+# The no-cursor window's own evidence: the frames its session takes, the resume point its stand-in
+# keeps and the window never sends, and the answers to its registration, its send, its clean stop
+# and the relaunch that carries no resume.
+readonly nocursor_frames_file="${out_dir}/nocursor-session-frames.jsonl"
+readonly nocursor_cursor_file="${out_dir}/nocursor-session-cursor.json"
+readonly nocursor_subscribe_response_file="${out_dir}/nocursor-subscribe-response.json"
+readonly nocursor_send_response_file="${out_dir}/nocursor-send-response.json"
+readonly nocursor_registry_response_file="${out_dir}/nocursor-registry-response.json"
+readonly nocursor_relaunch_response_file="${out_dir}/nocursor-relaunch-response.json"
+readonly nocursor_session_log_file="${out_dir}/nocursor-session.log"
+readonly nocursor_ready_fifo="${out_dir}/nocursor-session-ready.fifo"
+
 listener_pid=""
 session_pid=""
 subscriber_pid=""
 nats_pid=""
+# The stand-in start_session_standin started last, which its caller copies into a name of its own
+# once that stand-in is ready; cleanup kills both, since a TERM between the two leaves only this.
+standin_pid=""
+nocursor_session_pid=""
 
 # cleanup stops what this run started and exits with rc, the status the trap that ran it passes:
 # the script's own for EXIT, and the conventional 128 plus the signal's number for INT and TERM, so
 # a run that was interrupted never reports success: inside a signal's trap, $? is the status of the
 # last command that finished, usually 0, not the signal's.
 #
-# It ends every job of this shell, not only the four recorded pids: each server is started with
+# It ends every job of this shell, not only the pids it records: each server is started with
 # `… &` and its pid recorded on the next command, and a trap runs between commands, so a signal
 # delivered in that gap leaves a child unrecorded. An unrecorded child holds the inherited lock
 # descriptor (below) for as long as it lives, which left out/e2e locked after a run stopped with
@@ -128,13 +158,13 @@ cleanup() {
   local rc=$1
   trap - EXIT INT TERM
   set +e
-  for pid in $(jobs -p) "$subscriber_pid" "$session_pid" "$listener_pid" "$nats_pid"; do
+  for pid in $(jobs -p) "$subscriber_pid" "$standin_pid" "$nocursor_session_pid" "$session_pid" "$listener_pid" "$nats_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
     fi
   done
-  rm -rf "$session_ready_fifo" "$subscriber_ready_fifo" "$nats_store_dir"
+  rm -rf "$session_ready_fifo" "$subscriber_ready_fifo" "$nocursor_ready_fifo" "$nats_store_dir"
   exit "$rc"
 }
 
@@ -163,17 +193,21 @@ trap 'cleanup "$?"' EXIT
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 
-rm -f "$envelopes_file" "$session_frames_file" "$rendered_ts_file" \
-  "$direct_response_file" "$subscribe_response_file" "$unwired_response_file" "$port_registration_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
+rm -f "$envelopes_file" "$session_frames_file" "$session_cursor_file" "${session_cursor_file}.tmp" "$rendered_ts_file" \
+  "$direct_response_file" "$subscribe_response_file" "$subscribe_relaunch_response_file" "$unwired_response_file" "$port_registration_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
   "$lapsed_role_claim_response_file" "$lapsed_registry_response_file" "$lapsed_role_response_file" "$lapsed_role_reclaim_response_file" \
   "$keep_false_role_response_file" \
   "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
   "$registry_session_response_file" "$registry_missing_response_file" \
+  "$nocursor_frames_file" "$nocursor_cursor_file" "${nocursor_cursor_file}.tmp" \
+  "$nocursor_subscribe_response_file" "$nocursor_send_response_file" "$nocursor_registry_response_file" \
+  "$nocursor_relaunch_response_file" "$nocursor_session_log_file" "$nocursor_ready_fifo" \
   "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \
   "$listener_binary" "$nats_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
 rm -rf "$nats_store_dir"
 : >"$envelopes_file"
 : >"$session_frames_file"
+: >"$nocursor_frames_file"
 # Every log file is created before the process that writes it, so a wait that reads one cannot
 # race the redirect that creates it: wait_for_listener's jq and wait_for_nats's grep would
 # otherwise read a file that is not there yet — jq exits non-zero on it, which under set -e ends
@@ -183,7 +217,8 @@ rm -rf "$nats_store_dir"
 : >"$listener_log_file"
 : >"$session_log_file"
 : >"$subscriber_log_file"
-mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
+: >"$nocursor_session_log_file"
+mkfifo "$session_ready_fifo" "$subscriber_ready_fifo" "$nocursor_ready_fifo"
 
 printf 'building listener and NATS server\n'
 (
@@ -315,49 +350,79 @@ wait_for_health
 # (bus.DeliverSubjectPrefix; packages/envoy-client/src/consumer-delivery.ts and
 # packages/envoy/loadtest/relay.go are the two clients this follows). Each frame is answered
 # `received` at once, its data — the stored envelope — is appended to the frames file, and it is
-# answered `done`, which is what acks the message and moves the resume point.
+# answered `done`, which is what acks the message and moves the resume point. That point — the
+# frame's stream id and its stream sequence — is written to the cursor file, as a plugin writes it
+# to its persisted snapshot, so a registration this script sends after the session's consumer is
+# gone resumes where this one stopped.
 #
 # The stand-in holds that NATS connection, and nothing else: no session answers a receipt for a
 # role forward any more, so neither it nor the capture subscriber below replies to one.
-(
-  cd "$repo_root"
-  exec env E2E_NATS_URL="$nats_url" E2E_SESSION_FRAMES_FILE="$session_frames_file" \
-    E2E_SESSION_ID="$session_id" bun -e '
-    import { appendFileSync } from "node:fs";
-    import { connect, StringCodec } from "nats";
+#
+# start_session_standin starts one stand-in for standin_session_id, waits until it holds that
+# subscription, and sets standin_pid to the process it started. The run starts two of them: its
+# own session, and the no-cursor window's below, each with a frames file and a cursor file of its
+# own, so neither session's frames are ever counted as the other's.
+start_session_standin() {
+  local standin_session_id=$1
+  local frames_file=$2
+  local cursor_file=$3
+  local ready_fifo=$4
+  local log_file=$5
+  local ready
+  (
+    cd "$repo_root"
+    exec env E2E_NATS_URL="$nats_url" E2E_SESSION_FRAMES_FILE="$frames_file" \
+      E2E_SESSION_CURSOR_FILE="$cursor_file" \
+      E2E_SESSION_ID="$standin_session_id" bun -e '
+      import { appendFileSync, renameSync, writeFileSync } from "node:fs";
+      import { connect, StringCodec } from "nats";
 
-    const url = process.env.E2E_NATS_URL;
-    const output = process.env.E2E_SESSION_FRAMES_FILE;
-    const sessionID = process.env.E2E_SESSION_ID;
-    if ([url, output, sessionID].some((value) => value === undefined)) {
-      throw new Error("session stand-in configuration is invalid");
-    }
-    const codec = StringCodec();
-    const connection = await connect({ servers: url, name: "envoy-e2e-session" });
-    const frames = connection.subscribe(`notifications.envoy.deliver.${sessionID}`);
-    // Every relay frame carries these; Envoy-Gap is left out because it marks only the first
-    // frame after a retention gap, which a run that creates its own stream never has.
-    const headers = ["Envoy-Subject", "Envoy-Stream-Seq", "Envoy-Stream-Id", "Envoy-Delivered", "Envoy-Stored-At"];
-    await connection.flush();
-    process.stdout.write("ready\n");
-    for await (const message of frames) {
-      if (!message.reply) throw new Error("a relay frame carries no reply subject");
-      for (const header of headers) {
-        if (!message.headers?.get(header)) throw new Error(`a relay frame carries no ${header} header`);
+      const url = process.env.E2E_NATS_URL;
+      const output = process.env.E2E_SESSION_FRAMES_FILE;
+      const cursorFile = process.env.E2E_SESSION_CURSOR_FILE;
+      const sessionID = process.env.E2E_SESSION_ID;
+      if ([url, output, cursorFile, sessionID].some((value) => value === undefined)) {
+        throw new Error("session stand-in configuration is invalid");
       }
-      message.respond(codec.encode("received"));
-      appendFileSync(output, `${codec.decode(message.data)}\n`);
-      message.respond(codec.encode("done"));
-    }
-  ' >"$session_ready_fifo" 2>"$session_log_file"
-) &
-session_pid=$!
+      const codec = StringCodec();
+      const connection = await connect({ servers: url, name: `envoy-e2e-session-${sessionID}` });
+      const frames = connection.subscribe(`notifications.envoy.deliver.${sessionID}`);
+      // Every relay frame carries these; Envoy-Gap is left out because it marks only the first
+      // frame after a retention gap, which a run that creates its own stream never has.
+      const headers = ["Envoy-Subject", "Envoy-Stream-Seq", "Envoy-Stream-Id", "Envoy-Delivered", "Envoy-Stored-At"];
+      await connection.flush();
+      process.stdout.write("ready\n");
+      for await (const message of frames) {
+        if (!message.reply) throw new Error("a relay frame carries no reply subject");
+        for (const header of headers) {
+          if (!message.headers?.get(header)) throw new Error(`a relay frame carries no ${header} header`);
+        }
+        message.respond(codec.encode("received"));
+        appendFileSync(output, `${codec.decode(message.data)}\n`);
+        message.respond(codec.encode("done"));
+        // The resume point the ack just moved, held as the plugin holds it: the stream the frame
+        // names and the sequence it carries. It is written whole and renamed over the cursor file,
+        // so the script reading it between frames never reads half a point.
+        const point = {
+          stream_id: message.headers.get("Envoy-Stream-Id"),
+          seq: Number(message.headers.get("Envoy-Stream-Seq")),
+        };
+        writeFileSync(`${cursorFile}.tmp`, `${JSON.stringify(point)}\n`);
+        renameSync(`${cursorFile}.tmp`, cursorFile);
+      }
+    ' >"$ready_fifo" 2>"$log_file"
+  ) &
+  standin_pid=$!
+  if ! IFS= read -r -t 10 ready <"$ready_fifo" || [[ "$ready" != "ready" ]]; then
+    printf 'ERR: the session consumer stand-in for %s did not become ready.\n' "$standin_session_id" >&2
+    cat "$log_file" >&2
+    exit 3
+  fi
+}
 
-if ! IFS= read -r -t 10 session_ready <"$session_ready_fifo" || [[ "$session_ready" != "ready" ]]; then
-  printf 'ERR: the session consumer stand-in did not become ready.\n' >&2
-  cat "$session_log_file" >&2
-  exit 3
-fi
+start_session_standin "$session_id" "$session_frames_file" "$session_cursor_file" \
+  "$session_ready_fifo" "$session_log_file"
+session_pid=$standin_pid
 
 (
   cd "$repo_root"
@@ -506,20 +571,22 @@ wait_for_topic_count() {
   return 1
 }
 
-# wait_for_consumer_frame_count returns once the session has taken at least expected frames of its
-# consumer: one line of the frames file per frame it answered done.
+# wait_for_consumer_frame_count returns once a session has taken at least expected frames of its
+# consumer: one line of its frames file per frame it answered done. The file is the run's own
+# session's unless one is named, as the no-cursor window below names its own.
 wait_for_consumer_frame_count() {
   local expected=$1
+  local frames_file=${2:-$session_frames_file}
   local deadline=$((SECONDS + 20))
   local count
   while ((SECONDS < deadline)); do
-    count="$(wc -l <"$session_frames_file")"
+    count="$(wc -l <"$frames_file")"
     if ((count >= expected)); then
       return 0
     fi
     sleep 0.25
   done
-  printf 'ERR: expected %s consumer frames at the session within 20 seconds.\n' "$expected" >&2
+  printf 'ERR: expected %s consumer frames in %s within 20 seconds.\n' "$expected" "$frames_file" >&2
   return 1
 }
 
@@ -694,24 +761,29 @@ wait_for_kept_delivery() {
   printf '%s: kept message %s reached the session exactly once, carrying kept_at\n' "$window" "$event_id"
 }
 
-# wait_for_unregistered returns once the listener reports the session's registration gone.
+# wait_for_unregistered returns once the listener reports a session's registration gone, into
+# response_file; both default to the run's own session and the lapsed window's evidence file, and
+# the no-cursor window below names its own.
 # The registry read and the publish route's first resolution of a role's holder read a session the
 # same way (liveSessionEntry, through a cache the delete evicts), so this is the point from which
-# a claim that names that session is a lapsed one rather than a live holder.
+# a claim that names that session is a lapsed one rather than a live holder, and the point from
+# which a clean stop has taken the session's consumer with its record.
 wait_for_unregistered() {
+  local unregistered_session_id=${1:-$session_id}
+  local response_file=${2:-$lapsed_registry_response_file}
   local deadline=$((SECONDS + 20))
   local status=""
   while ((SECONDS < deadline)); do
-    status="$(curl -sS -o "$lapsed_registry_response_file" -w '%{http_code}' \
-      "${listener_url}/v1/registry/${session_id}")"
+    status="$(curl -sS -o "$response_file" -w '%{http_code}' \
+      "${listener_url}/v1/registry/${unregistered_session_id}")"
     if [[ "$status" == 404 ]]; then
       return 0
     fi
     sleep 0.25
   done
   printf 'ERR: the listener still answered HTTP %s for the deleted registration of %s after 20 seconds.\n' \
-    "$status" "$session_id" >&2
-  cat "$lapsed_registry_response_file" >&2
+    "$status" "$unregistered_session_id" >&2
+  cat "$response_file" >&2
   return 1
 }
 
@@ -803,6 +875,12 @@ jq -e --arg session_id "$session_id" '.session_id == $session_id' "$lapsed_role_
   printf 'ERR: the session did not claim the role whose claim is about to lapse.\n' >&2
   exit 1
 }
+# Three frames were stored for this session before the window opens - the direct message and both
+# reviewer-role forwards - and the cursor the relaunch below resumes from names the last of them,
+# so the delete waits until every one has reached the session. The delete takes the session's
+# consumer away with its record, so a frame still in flight to that consumer would otherwise move
+# the cursor after the registration had read it.
+wait_for_consumer_frame_count 3
 curl -fsS -X DELETE "${listener_url}/v1/sessions/${session_id}" >/dev/null
 wait_for_unregistered
 lapsed_status="$(curl -sS -o "$lapsed_role_response_file" -w '%{http_code}' \
@@ -819,10 +897,39 @@ if [[ "$lapsed_status" != 404 ]] || ! jq -e --arg session_id "$session_id" \
 fi
 printf 'lapsed-claim window: the publish was refused 404 holder_lapsed, the claim stands and nothing was kept\n'
 
-# The session registers again, with the registration it first made, and claims the role again:
-# its own claim never left it, so the claim answers as the same session's.
+# The session registers again, with the registration it first made and its own resume point, and
+# claims the role again: its own claim never left it, so the claim answers as the same session's.
+#
+# The resume point is the cursor the stand-in keeps (session_cursor_file): the stream the frames
+# it took came from, and the sequence of the last one it answered done. A real session sends the
+# same two fields from its plugin's ledger on every registration. They matter here because the
+# delete above removed the session's consumer with its record: this registration creates a new
+# one, which the listener starts at seq + 1 when resume names the stream it still relays
+# (sessionDelivery.consumerFor). Without the resume - or with one naming another stream, which is
+# no position at all - the new consumer would start at the first message the stream holds on the
+# session's agent subject, the direct message, and the rig would take that message and both role
+# forwards a second time while taking no GitHub event twice. A relaunched session reads none of
+# them again, and neither does this one.
+[[ -s "$session_cursor_file" ]] || {
+  printf 'ERR: the session took frames but left no resume point in %s, so its relaunch has no cursor to send.\n' \
+    "$session_cursor_file" >&2
+  exit 1
+}
+relaunch_subscribe_body="$(jq -c --slurpfile resume "$session_cursor_file" \
+  '.delivery.resume = $resume[0]' <<<"$subscribe_body")"
+readonly relaunch_subscribe_body
 curl -fsS -X POST -H 'Content-Type: application/json' \
-  "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >/dev/null
+  "${listener_url}/v1/interests/subscribe" -d "$relaunch_subscribe_body" >"$subscribe_relaunch_response_file"
+# The answer names the stream the listener relays. A resume naming another one is given no
+# position, so a mismatch here is the replay the counts below would otherwise report as a routing
+# fault.
+jq -e --slurpfile resume "$session_cursor_file" \
+  '.delivery.mode == "consumer" and .delivery.stream_id == $resume[0].stream_id' \
+  "$subscribe_relaunch_response_file" >/dev/null || {
+  printf 'ERR: the relaunched registration was not answered a consumer on the stream its resume point names.\n' >&2
+  cat "$session_cursor_file" "$subscribe_relaunch_response_file" >&2
+  exit 1
+}
 curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/roles/set" \
   -d "{\"session_id\":\"${session_id}\",\"role\":\"${lapsed_role}\"}" >"$lapsed_role_reclaim_response_file"
@@ -1045,6 +1152,102 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
 
     console.log("PASS: topic set, structured payloads, checks settlement, and what renderInbound shows a session match the local acceptance contract");
   '
+
+# The no-cursor window, beside the relaunch above and after every assertion above has been made:
+# what a clean stop plus a registration carrying no resume point comes to. It runs on a session of
+# its own, which follows no topic of its own, so nothing it registers, is sent or takes is part
+# of a count this run pins for ses_e2e_local.
+#
+# A clean stop deletes the session's consumer with the record it belongs to (deleteSessionConsumer,
+# on the DELETE /v1/sessions route), so the registration that follows is given a new consumer, and
+# that registration sends no resume. The listener then holds no position for the session: the new
+# consumer starts at the first message the stream still holds on that session's own agent subject
+# (bus.SessionConsumers.Ensure; consumerFor honours a resume only when it names the stream the
+# listener relays and carries a seq). The session is offered the message it has already taken.
+#
+# That repeat is correct rather than a defect: the stream holds that copy for this session alone,
+# on its own agent subject, and nothing has acknowledged it for the new consumer, since the ack
+# floor of the old one went with the clean stop. What makes a real session read it once is the
+# ledger its client keeps — ConsumerDeliverySnapshotSchema in
+# packages/envoy-client/src/consumer-delivery.ts, whose resumePoint() produces the cursor the
+# relaunch above sends. The stand-in here writes that same point to a cursor file of its own and
+# this window sends none of it, so its two registrations differ from a relaunch that continues in
+# the one field a ledger fills: delivery.resume.
+printf 'opening the no-cursor window on %s\n' "$nocursor_session_id"
+start_session_standin "$nocursor_session_id" "$nocursor_frames_file" "$nocursor_cursor_file" \
+  "$nocursor_ready_fifo" "$nocursor_session_log_file"
+nocursor_session_pid=$standin_pid
+
+# The window's own epoch: a plugin mints one per NATS connection, and the stand-in above holds a
+# connection of its own. The body is built once and sent twice, so the registration after the
+# clean stop differs from the one before it in nothing at all.
+nocursor_delivery_request="$(jq -nc --arg epoch "e2e-local-nocursor-$$" '{consumer:true,epoch:$epoch}')"
+readonly nocursor_delivery_request
+nocursor_subscribe_body="$(jq -nc \
+  --arg session_id "$nocursor_session_id" \
+  --arg dir "/tmp/envoy-e2e-local-nocursor" \
+  --arg title "Envoy local acceptance, no ledger" \
+  --argjson delivery "$nocursor_delivery_request" \
+  '{session_id:$session_id,dir:$dir,title:$title,topics:[],driving:true,self_subscribed:true,delivery:$delivery}')"
+readonly nocursor_subscribe_body
+jq -e '.delivery | has("resume") | not' <<<"$nocursor_subscribe_body" >/dev/null || {
+  printf 'ERR: the no-cursor registration carries a resume point, and this window exists to send none.\n' >&2
+  exit 1
+}
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/interests/subscribe" -d "$nocursor_subscribe_body" >"$nocursor_subscribe_response_file"
+jq -e --arg session_id "$nocursor_session_id" \
+  '.delivery.mode == "consumer" and .delivery.subject == ("notifications.envoy.deliver." + $session_id)' \
+  "$nocursor_subscribe_response_file" >/dev/null || {
+  printf 'ERR: the no-cursor registration of %s was not answered the session consumer it asked for.\n' "$nocursor_session_id" >&2
+  cat "$nocursor_subscribe_response_file" >&2
+  exit 1
+}
+
+nocursor_message="No-cursor window summary."
+readonly nocursor_message
+nocursor_send_body="$(jq -nc \
+  --arg session_id "$nocursor_session_id" \
+  --arg message "$nocursor_message" \
+  '{source:"agent",source_session:"octocat",target_session:$session_id,message:$message}')"
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/send" -d "$nocursor_send_body" >"$nocursor_send_response_file"
+wait_for_consumer_frame_count 1 "$nocursor_frames_file"
+printf 'no-cursor window: %s took the message as one frame of its own consumer and answered done\n' "$nocursor_session_id"
+
+# The clean stop, which is how most sessions end: the registration goes, and the session's
+# consumer, with the ack floor that records what this session has taken, goes with it.
+curl -fsS -X DELETE "${listener_url}/v1/sessions/${nocursor_session_id}" >/dev/null
+wait_for_unregistered "$nocursor_session_id" "$nocursor_registry_response_file"
+printf 'no-cursor window: the clean stop removed the registration of %s\n' "$nocursor_session_id"
+
+# The relaunch sends that same body again, which carries no delivery.resume: this session kept no
+# ledger to take one from.
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/interests/subscribe" -d "$nocursor_subscribe_body" >"$nocursor_relaunch_response_file"
+jq -e '.delivery.mode == "consumer"' "$nocursor_relaunch_response_file" >/dev/null || {
+  printf 'ERR: the no-cursor relaunch of %s was not answered a consumer delivery.\n' "$nocursor_session_id" >&2
+  cat "$nocursor_relaunch_response_file" >&2
+  exit 1
+}
+if ! wait_for_consumer_frame_count 2 "$nocursor_frames_file"; then
+  printf 'ERR: %s holds %s frames after a registration carrying no resume, not the two this window pins: the message it had already taken was not offered again. A clean stop deletes the session consumer with the record, so the registration that follows is given a new consumer, which starts at the first message the stream still holds on that session agent subject and offers it a second time; the ledger in packages/envoy-client/src/consumer-delivery.ts is what drops that second copy for a real session, never the listener. A consumer that outlived the clean stop reads exactly this way.\n' \
+    "$nocursor_session_id" "$(wc -l <"$nocursor_frames_file")" >&2
+  exit 1
+fi
+jq -es --arg session_id "$nocursor_session_id" --arg message "$nocursor_message" '
+  length == 2
+  and (map(select(.topic == ("notifications.agent." + $session_id) and .payload_summary == $message)) | length) == 2
+  and .[0] == .[1]
+' "$nocursor_frames_file" >/dev/null || {
+  printf 'ERR: the no-cursor window took frames that are not two deliveries of one message to %s; the clean stop and the registration that follows it must hand this session the same stored message twice.\n' "$nocursor_session_id" >&2
+  cat "$nocursor_frames_file" >&2
+  exit 1
+}
+printf 'no-cursor window frames by topic:\n'
+jq -r '.topic' "$nocursor_frames_file" | sort | uniq -c
+printf 'no-cursor window: %s was offered event %s twice, once before the clean stop and once after the registration that carried no resume; the clean stop took its consumer, and a client that keeps no ledger reads the stored message a second time\n' \
+  "$nocursor_session_id" "$(jq -rs '.[0].event_id' "$nocursor_frames_file")"
 
 # Last of all, because it ends this rig's NATS and every step above needs the bus. A send the bus
 # cannot serve has to be refused by name inside the sender's own attempt, rather than left to the
