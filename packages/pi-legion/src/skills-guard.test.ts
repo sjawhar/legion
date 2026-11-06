@@ -484,3 +484,32 @@ test("every prompt and agent that may write says to make its own scratch and del
     ]
   );
 });
+
+// dispatch://INFRA-924's rule, beside dispatch://INFRA-332's eight above: a retro learning cites
+// a file and a symbol, or text quoted from it, read at the head the pull request commits, never a
+// line number the next edit above it moves.
+test("a retro learning cites a symbol or quoted text at the committed head, never a line number", () => {
+  const learnings = collapsed(path.join(staged, "legion-retro", "references", "learnings.md"));
+  expect(learnings).toContain(
+    "**The evidence** below the rule: the file and symbol, or text quoted from the file, read at the head you commit, and what went wrong before the rule."
+  );
+  expect(learnings).toContain(
+    "Never a line number: the next edit above it moves it. Where the head no longer shows what your sentence says, quote the text and name the commit you read it at."
+  );
+  expect(learnings).toContain(
+    "Evidence: <file and symbol, or text quoted from it, of this pull request, and what went wrong>."
+  );
+  countedOncePerFile(
+    "Drop a point that cites no file, symbol, quoted text or commit of this pull request",
+    ["skills/legion-retro/references/learnings.md", "skills/legion-retro/SKILL.md"]
+  );
+  // The two files this change touches, named rather than swept: six other staged skills carry
+  // these strings in finding formats the specification scopes out (dispatch://INFRA-924).
+  const retired = ["file, line or commit", "file:line", "file and line"];
+  const carried = ["references/learnings.md", "SKILL.md"].flatMap((file) =>
+    retired
+      .filter((text) => collapsed(path.join(staged, "legion-retro", file)).includes(text))
+      .map((text) => `${file}: ${text}`)
+  );
+  expect(carried).toEqual([]);
+});
