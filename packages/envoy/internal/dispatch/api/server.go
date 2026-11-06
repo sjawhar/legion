@@ -320,8 +320,11 @@ type server struct {
 	// shutdown for it (detached). Register sets it from its lifetime parameter and refuses a nil one, since nothing would
 	// ever end the work it bounds; a test passes its own t.Context(). A server a test builds
 	// directly has none unless the test sets it (directServer sets context.Background()).
-	lifetime        context.Context
-	routeIndex      []routeIndexEntry
+	lifetime   context.Context
+	routeIndex []routeIndexEntry
+	// going is the action catalogue GET /api/v1/going/catalogue serves, built from the table
+	// this server mounts (going_catalogue.go).
+	going           GoingCatalogue
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 	// suggestionTimeout overrides the allowance the related-item check runs under; zero, which
 	// every server the deployment builds leaves it, means relatedCheckAllowance. Only tests set it
@@ -601,6 +604,14 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		// (routeScopes).
 		panic("api.Register: the route table's scope map names a route the table does not mount: " + strings.Join(unmounted, "; "))
 	}
+	going, err := buildGoingCatalogue(routes)
+	if err != nil {
+		// An action an agent may propose that the catalogue cannot describe is a route added
+		// without a request type of its own, or a relation named in neither edge family, so the
+		// table is refused rather than mounted (going_catalogue.go).
+		panic("api.Register: the route table holds a row the going catalogue cannot hold: " + err.Error())
+	}
+	s.going = going
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {
