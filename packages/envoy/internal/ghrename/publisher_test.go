@@ -82,7 +82,7 @@ func testEnvelope(topic string) contracts.Envelope {
 		InReplyTo:      "evt_01HQ8YYYYYYYYYYYYYYYYYYYYY",
 		Supersedes:     "evt_01HQ8XXXXXXXXXXXXXXXXXXXXX",
 		Urgency:        "normal",
-		ExpectsReply:   "no",
+		ExpectsReply:   contracts.ExpectsReplyOptional,
 	}
 }
 

@@ -2394,14 +2394,15 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 // expects_reply is false | "optional" | "required" on the wire, so a body carrying the JSON
 // literal false reaches the envelope rather than failing the decode that read the field as a
 // string. A plugin build old enough to write the string "none" means the same thing and is still
-// taken. The envelope's own field is a string until the contract is regenerated, so both forms of
-// no-reply reach it as none.
+// taken. Both forms of no-reply reach the envelope as contracts.ExpectsReplyNone, which the
+// response writes back as the literal false.
 func TestMessageHandlersReadExpectsReplyAsFalseOrTheOldNone(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	for _, tc := range []struct {
-		name, path, body, want string
+		name, path, body string
+		want             contracts.ExpectsReply
 	}{
 		{
 			name: "publish false",

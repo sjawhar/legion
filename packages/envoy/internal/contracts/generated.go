@@ -28,7 +28,7 @@ type Envelope struct {
 	InReplyTo      string          `json:"in_reply_to,omitempty"`
 	Supersedes     string          `json:"supersedes,omitempty"`
 	Urgency        string          `json:"urgency,omitempty"`
-	ExpectsReply   string          `json:"expects_reply,omitempty"`
+	ExpectsReply   ExpectsReply    `json:"expects_reply,omitempty"`
 }
 
 type EnvelopeSender struct {
@@ -82,12 +82,8 @@ func (e Envelope) Validate() error {
 			return fmt.Errorf("urgency must be one of: low, med, high, blocking")
 		}
 	}
-	if e.ExpectsReply != "" {
-		switch e.ExpectsReply {
-		case "none", "optional", "required":
-		default:
-			return fmt.Errorf("expects_reply must be one of: none, optional, required")
-		}
+	if err := e.ExpectsReply.Validate(); err != nil {
+		return err
 	}
 	if e.Sender != nil {
 		if strings.TrimSpace(e.Sender.SessionID) == "" {

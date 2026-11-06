@@ -90,9 +90,9 @@ func (s *server) sendResolvedDelivery(
 	if target.SessionID == nil {
 		return nil, false, "no live session"
 	}
-	expectsReply := "optional"
+	expectsReply := contracts.ExpectsReplyOptional
 	if target.Delivery == "btw" {
-		expectsReply = "required"
+		expectsReply = contracts.ExpectsReplyRequired
 	}
 	send, err := s.deps.Envoy.Send(ctx, dispatchenvoy.SendInput{
 		TargetSession:  *target.SessionID,

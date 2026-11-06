@@ -51,8 +51,8 @@
       "enum": ["low", "med", "high", "blocking"]
     },
     "expects_reply": {
-      "type": "string",
-      "enum": ["none", "optional", "required"]
+      "enum": [false, "optional", "required"],
+      "x-go-type": "ExpectsReply"
     }
   },
   "additionalProperties": false

@@ -409,7 +409,7 @@ func messageEnvelope(body messageBody, topic, dedupeKey string) contracts.Envelo
 		InReplyTo:      optionalString(body.InReplyTo),
 		Supersedes:     optionalString(body.Supersedes),
 		Urgency:        optionalString(body.Urgency),
-		ExpectsReply:   string(bodyExpectsReply(body)),
+		ExpectsReply:   bodyExpectsReply(body),
 	}
 }
 

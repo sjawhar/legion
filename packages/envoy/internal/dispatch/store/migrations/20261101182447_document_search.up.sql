@@ -22,8 +22,8 @@
 -- No delete path, and no trigger for one. Every reader of this table joins artifacts on
 -- a.kind = 'doc', so a row for a document that no longer exists cannot surface, and no production
 -- code path deletes an artifact or an artifact_version - the only deletes of either in the tree
--- are in tests. STRATEGY.md says to build no protection against a failure nobody has seen, so the
--- release that first deletes a document is the release that adds the delete path.
+-- are in tests. A failure nobody has seen earns no protection here, so the release that first
+-- deletes a document is the release that adds the delete path.
 create table document_search (
   artifact_id uuid primary key,
   number integer not null,
