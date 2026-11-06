@@ -405,12 +405,6 @@ trap 'kill "$sampler" 2>/dev/null || true' EXIT
 RACE_DOCS_SCRIPT = json_stream_script(
     "go test -json -race -count=1 -timeout 60m -p 2 -parallel 2 ./internal/dispatch/docs/",
     "race-docs.json", prelude=RACE_DOCS_SAMPLER)
-# TEMPORARY, envoy-go's INFRA-1260 proof step: two go test calls, so not the simple form. It
-# leaves this table with the step (dispatch://INFRA-1260).
-PROOF_1260_STEP = "Twenty runs each of the two tests INFRA-1260 names"
-PROOF_1260_SCRIPT = """\
-go test -count=20 -run '^TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone$' ./internal/dispatch/embedqueue/
-go test -count=20 -run '^TestAnUploadHoldsNoIssueLockWhileTheStoreWrites$' ./internal/dispatch/api/"""
 # TEMPORARY, envoy-go's INFRA-1075 request-profile step: three go test calls around a Postgres of
 # its own, so not the simple form. It leaves this table with the step (dispatch://INFRA-1075).
 PACK_STEP = "Pack envoy binaries"
@@ -724,11 +718,6 @@ GATES = [
         ]),
         pinned_step("envoy-go", INTEGRATION_STEP, ENVOY, INTEGRATION_SCRIPT, [
             (ENVOY, ["./internal/integration/"], "go test ./internal/integration/", {}),
-        ]),
-        # TEMPORARY with the step it pins (dispatch://INFRA-1260).
-        pinned_step("envoy-go", PROOF_1260_STEP, ENVOY, PROOF_1260_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/embedqueue/"], "go test -run … ./internal/dispatch/embedqueue/", {}),
-            (ENVOY, ["./internal/dispatch/api/"], "go test -run … ./internal/dispatch/api/", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
         pinned_step("envoy-go", PACK_STEP, ENVOY, PACK_SCRIPT, [

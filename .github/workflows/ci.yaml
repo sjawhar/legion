@@ -2788,11 +2788,7 @@ jobs:
     # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
     # step's own 20 minutes, which is 21; after the unit step's measured 35 minutes, natslive's
     # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
-    #
-    # 60 rather than 48 TEMPORARILY, for the INFRA-1260 proof step at the end of this job, whose
-    # two ten-minute package deadlines take the bound to 58. It goes back to 60's own arithmetic
-    # with that step (dispatch://INFRA-1260).
-    timeout-minutes: 60
+    timeout-minutes: 48
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3020,17 +3016,6 @@ jobs:
             jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
           fi
           exit $s
-        working-directory: packages/envoy
-      # TEMPORARY, the INFRA-1260 proof step: one CI run has to show these two tests holding under
-      # repetition on the non-durable service, each twenty times against its own package. It is
-      # last among this job's test steps on purpose, so the per-step times the pull request
-      # reports are measured without it, and it comes out before the final pair of runs
-      # (dispatch://INFRA-1260). Each call takes go test's default ten-minute package deadline,
-      # which the job's own limit of 60 minutes covers: 48 for the steps above it, 58 with these.
-      - name: Twenty runs each of the two tests INFRA-1260 names
-        run: |
-          go test -count=20 -run '^TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone$' ./internal/dispatch/embedqueue/
-          go test -count=20 -run '^TestAnUploadHoldsNoIssueLockWhileTheStoreWrites$' ./internal/dispatch/api/
         working-directory: packages/envoy
       # Always, because a red attempt's times are the ones a reader needs, and one artifact per
       # attempt because a run's artifacts are listed per run, not per attempt, and a download by
