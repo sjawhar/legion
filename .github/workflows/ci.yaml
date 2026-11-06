@@ -2055,11 +2055,12 @@ jobs:
       # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
       # deterministic under it.
       #
-      # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
-      # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
-      # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
-      # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
+      # The step carries a package deadline of its own, as the envoy race lanes do: under go
+      # test's ten-minute default, internal/daemon, by far the slowest of the four packages, took
+      # up to 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on
+      # main at job 125691048644 (run 41562777668). No single test dominates it: a local run timed
+      # 648 tests one after another, the slowest at 44 s. The 30 minutes leave it three times its
+      # slowest run.
       - name: Test the concurrent packages under the race detector
         run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
