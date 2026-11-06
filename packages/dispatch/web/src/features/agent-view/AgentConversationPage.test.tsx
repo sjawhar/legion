@@ -351,7 +351,7 @@ test("the live view retries a read mark that failed to save", async () => {
   });
 
   await waitFor(() => expect(agentsLink().textContent).toContain("New replies 2"));
-  await waitFor(() => expect(agentsLink().textContent).toBe("Agents"), { timeout: 4000 });
+  await waitFor(() => expect(agentsLink().textContent).toBe("Agents"));
 });
 
 // A session's stored conversation holds every message sent to it: the viewer's direct messages,

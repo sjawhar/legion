@@ -73,9 +73,7 @@ test("lists each related item as a link named by its owner, with where an ask st
     search: "meaning_and_keywords",
   }));
   try {
-    await screen.findByText("Related items (searched by meaning and keywords):", undefined, {
-      timeout: 2000,
-    });
+    await screen.findByText("Related items (searched by meaning and keywords):");
     const links = screen.getAllByRole("link");
     expect(links).toHaveLength(3);
 
@@ -107,11 +105,7 @@ test("a search that found nothing and a check that was never made read different
   let foundNothing: string | null;
   try {
     foundNothing = (
-      await screen.findByText(
-        "Related-item check searched (keywords only) and found nothing.",
-        undefined,
-        { timeout: 2000 }
-      )
+      await screen.findByText("Related-item check searched (keywords only) and found nothing.")
     ).textContent;
   } finally {
     searched.unmount();
@@ -124,9 +118,7 @@ test("a search that found nothing and a check that was never made read different
     search_query: "broadcast send order",
   }));
   try {
-    const sentence = await screen.findByText(/No related-item check was made/, undefined, {
-      timeout: 2000,
-    });
+    const sentence = await screen.findByText(/No related-item check was made/);
     expect(sentence.textContent).toBe(
       "No related-item check was made: the search timed out. Search Dispatch for “broadcast send order” before you rely on this being new."
     );
@@ -144,9 +136,7 @@ test("a past decision is named with its link and who answered it", async () => {
     search: "keywords_only",
   }));
   try {
-    await screen.findByText("A past decision may already answer this:", undefined, {
-      timeout: 2000,
-    });
+    await screen.findByText("A past decision may already answer this:");
     // The decision's own list item holds who answered it, so a screen reader's item for the
     // decision names the decision and its answer together.
     const item = screen.getByRole("listitem");
@@ -166,7 +156,7 @@ test("a failed check says so and offers Retry", async () => {
     throw new Error("network down");
   });
   try {
-    await screen.findByText("Could not check for related items.", undefined, { timeout: 2000 });
+    await screen.findByText("Could not check for related items.");
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     view.unmount();

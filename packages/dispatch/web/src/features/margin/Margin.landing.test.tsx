@@ -693,6 +693,13 @@ test("a relayout's own scroll that lands after a long task leaves the hold alone
     placement.setAttribute("style", "position: absolute; top: 700px;");
     // The observer's callback is a microtask: it has seen the relayout before the long task.
     await Promise.resolve();
+    // A real long task, which no fake clock can model: what this row needs is that no rendering
+    // update runs between the relayout and the scroll, and a synchronous loop is the only way to
+    // hold one off. The span stays at 500 ms, and no measurement can shorten it: the file passed
+    // at 300, 200, 100, 50 and 25 ms as well (INFRA-1505), because `useCardHold` counts rendering
+    // frames rather than milliseconds, so a loop of any length blocks the same frames. A shorter
+    // span would therefore read as sized by evidence while holding off less, and would stop
+    // defeating a window a later implementation measured in real time.
     const busyUntil = performance.now() + 500;
     while (performance.now() < busyUntil) {
       // The long task: no rendering update runs until it ends.

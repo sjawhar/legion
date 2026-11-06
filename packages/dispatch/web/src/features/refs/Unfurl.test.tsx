@@ -491,6 +491,11 @@ test(`Unfurl reads ${DISPATCH_BLOCK_UNITS}-character bodies of repeated schemes 
     for (const view of views) {
       expect(view.container.querySelector("section")).toBeNull();
     }
+    // A wall-clock budget, not one of the machine-sensitive waits this package's defaults now
+    // cover (`web/src/__tests__/setup.ts`): the regression it guards, catastrophic backtracking,
+    // costs minutes rather than milliseconds. This row reads 0.03 s idle and 0.16 s loaded on a
+    // 2-core pod, and 2000 ms is 12 times that slowest loaded reading, so no loaded pod can fail
+    // it by being slow.
     expect(performance.now() - start).toBeLessThan(2000);
   } finally {
     for (const view of views) {
@@ -532,6 +537,10 @@ test("Unfurl reads a GitHub link trailed by a long closing run in one pass", () 
   );
 
   try {
+    // The same wall-clock budget as the repeated-schemes row above, and for the same reason: it
+    // guards a regression that costs minutes, not a wait a slow machine can lose. This row reads
+    // 0.01 s idle and 0.07 s loaded on a 2-core pod, against the 0.16 s loaded of the slowest
+    // row the 2000 ms is 12 times.
     expect(performance.now() - start).toBeLessThan(2000);
     expect(view.container.querySelector("section")).toBeNull();
     expect(githubRest).not.toHaveBeenCalled();

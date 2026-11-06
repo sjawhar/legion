@@ -34,15 +34,24 @@ GlobalRegistrator.register();
 // Bun's per-test deadline, whose default is 5000 ms, and Testing Library's `asyncUtilTimeout`,
 // whose default is 1000 ms, are the two defaults a 2-core Legion issue pod cannot meet. Both are
 // set once here so that no test file carries a budget of its own.
-// TODO(INFRA-1505): provisional, sized by measurement before the push
-jest.setTimeout(60_000);
+// Bun's default per-test deadline is 5000 ms. The lane test of
+// `e2e/__tests__/harness-lanes.test.ts` ("the Playwright config refuses a --workers that is not
+// the lane count") fails at it on a 2-core pod, where it reads 4.45 s idle and 6.55 s loaded.
+// The suite's slowest test, `row-configurations.test.ts`'s "no row runs twice in one
+// configuration", reads 13.83 s loaded. 30 s is the round number above twice that reading, and it
+// is kept as small as that rule allows, because every hung test costs the whole budget on CI as
+// well as in a pod.
+jest.setTimeout(30_000);
 
 // Testing Library reads the document as it loads, so it must load after
 // `GlobalRegistrator.register()` above and a static import would be hoisted past that call.
 // `configure` comes from `@testing-library/react`, which forwards it to the
 // `@testing-library/dom` copy every `waitFor` reads (`@testing-library/react@16.3.3`
 // dist/config.js) and which is the only one of the two this manifest resolves.
-// TODO(INFRA-1505): provisional, sized by measurement before the push
+// Testing Library's default `asyncUtilTimeout` is 1000 ms. 10 s is above every per-call budget
+// this tree keeps but one, and a third of the per-test deadline, so a wait that runs out reports
+// as the wait that failed and names what it waited for, rather than as a bare test timeout. The
+// slowest test of a loaded run that drives no subprocess reads 5.80 s whole.
 const { configure } = await import("@testing-library/react");
 configure({ asyncUtilTimeout: 10_000 });
 

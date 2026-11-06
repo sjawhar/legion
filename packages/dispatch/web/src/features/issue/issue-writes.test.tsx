@@ -1005,11 +1005,11 @@ test("a board move then a header status change land in press order after an outa
     await act(async () => {
       await moved;
     });
-    await waitFor(() => expect(landed).toHaveLength(2), { timeout: 4_000 });
+    await waitFor(() => expect(landed).toHaveLength(2));
     expect(landed).toEqual(["board move to in_progress", "backlog"]);
   } finally {
     board.unmount();
     unmount();
     restore();
   }
-}, 10_000);
+});

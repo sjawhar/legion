@@ -196,7 +196,7 @@ test("a sign-in from another tab drops every write of the person before, stops i
     for (const spy of spies) spy.mockRestore();
     window.matchMedia = originalMatchMedia;
   }
-}, 15_000);
+});
 
 // W32. A session that lapses keeps the person's own writes: whoami answers 401 and the page shows
 // the sign-in page, every write stops trying and nothing more goes out, but both writes - one out,
@@ -298,7 +298,7 @@ test("a lapsed session keeps every write, and the same person's sign-in resumes 
     for (const spy of spies) spy.mockRestore();
     window.matchMedia = originalMatchMedia;
   }
-}, 15_000);
+});
 
 // (b) Signing out discards the person's own writes, so it asks first while any is unsent, naming
 // each: Cancel keeps them signed in with every write as it was. Confirmed, and once Dispatch has
@@ -402,7 +402,7 @@ test("signing out asks first, then drops every write here and tells every other 
     for (const spy of spies) spy.mockRestore();
     window.matchMedia = originalMatchMedia;
   }
-}, 15_000);
+});
 
 // (b) The person signed out in another tab of this browser: this tab drops every write they pressed
 // - out or refused - and stops trying it, so no tab holds a write whose kept file another tab let
@@ -466,7 +466,7 @@ test("a sign-out in another tab drops that person's writes here", async () => {
     for (const spy of spies) spy.mockRestore();
     window.matchMedia = originalMatchMedia;
   }
-}, 15_000);
+});
 
 // INFRA-292's precondition. The event feed's first subscription resumes from the sign-in check's
 // `event_head`, which is sound only while every read the page makes, and its socket, wait for that

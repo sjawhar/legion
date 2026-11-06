@@ -39,6 +39,12 @@ test.each([
 ] as const)("a reference trailed by %s is read in one pass", (_name, body, refs) => {
   const start = performance.now();
   const cited = composerReferences(body, origin).map((item) => item.reference);
+  // A wall-clock budget, not one of the machine-sensitive waits this package's defaults now
+  // cover (`web/src/__tests__/setup.ts`): the regression it guards, catastrophic backtracking,
+  // costs minutes rather than milliseconds. These four rows read 0.08 s, 0.06 s, 0.04 s and
+  // 0.00 s idle on a 2-core pod, and 0.14 s, 0.13 s, 0.10 s and 0.00 s loaded; 2000 ms is 12
+  // times the slowest loaded reading of this change's measurements, so no loaded pod can fail
+  // it by being slow.
   expect(performance.now() - start).toBeLessThan(2000);
   expect(cited).toEqual([...refs]);
 });
