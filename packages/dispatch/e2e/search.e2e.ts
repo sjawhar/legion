@@ -381,7 +381,11 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     // Scoped to the palette: inbox rows carry a priority <select> whose options share the role.
     const dialog = page.getByRole("dialog", { name: "Search" });
     const options = dialog.getByRole("option");
-    await expect(options).toHaveCount(3);
+    // Four rows, not the three this corpus answered before an issue's keyword vector carried
+    // its primary document's text: the document, the comment, the ask, and the issue the
+    // document belongs to, which that change makes a hit for its own spec's words.
+    await expect(options).toHaveCount(4);
+    await expect(dialog.getByRole("option", { name: /^issue / })).toHaveCount(1);
     await expect(dialog.getByRole("option", { name: /^ask / })).toContainText(
       "Chose On the chart table"
     );
