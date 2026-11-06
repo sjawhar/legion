@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"os"
 	"slices"
-	"strings"
 	"sync"
 
 	anthropicopt "github.com/anthropics/anthropic-sdk-go/option"
@@ -22,7 +20,9 @@ import (
 	"github.com/grafana/ai-sdk/providers/openai"
 	openaicompatible "github.com/grafana/ai-sdk/providers/openai-compatible"
 	"github.com/grafana/ai-sdk/schema"
+	openaisdk "github.com/openai/openai-go/v3"
 	openaiopt "github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 // placeholderKey is the key each vendor client is built with; the run's transport puts the
@@ -64,7 +64,7 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	}
 
 	r := &run{
-		req: req, kind: kind, transport: transport,
+		req: req, kind: kind,
 		indexes: make(map[string]int, len(req.Tools)), next: req.FirstToolIndex + 1,
 	}
 	opts := []aisdk.StreamOption{
@@ -75,6 +75,9 @@ func Run(ctx context.Context, req Request) (Result, error) {
 		aisdk.WithMaxRetries(0),
 		aisdk.WithPrepareStep(r.prepareStep),
 		aisdk.OnStepFinish(r.stepFinished),
+	}
+	if readsRawChunks(kind) {
+		opts = append(opts, aisdk.WithIncludeRawChunks())
 	}
 	if req.System != "" {
 		opts = append(opts, aisdk.WithSystem(req.System))
@@ -155,14 +158,15 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 			anthropicopt.WithHTTPClient(client), anthropicopt.WithMaxRetries(0), anthropicopt.WithBaseURL(endpoint.BaseURL)))
 		return model, anthropicOptions(req.Model.Effort), nil
 	case OpenAIResponses:
-		// The base URL and the key are not all openai-go's client takes from the
-		// environment: an organization, a project and whatever headers
-		// OPENAI_CUSTOM_HEADERS names would ride to the endpoint the caller named. The
-		// first two are overridden; these are taken off again.
-		options := append([]openaiopt.RequestOption{
-			openaiopt.WithHTTPClient(client), openaiopt.WithMaxRetries(0), openaiopt.WithBaseURL(endpoint.BaseURL),
-		}, withoutEnvironmentHeaders()...)
-		model := openai.NewResponses(placeholderKey, req.Model.ID, openai.WithRequestOptions(options...))
+		// openai-go's own client reads a base URL, a key, an organization, a project and
+		// whatever headers OPENAI_CUSTOM_HEADERS names from the environment, and puts
+		// them on every call it makes. Its Responses service reads none of them: it is
+		// built from these options alone, so nothing the run sends comes from the
+		// environment and no header has to be taken off again.
+		service := responses.NewResponseService(
+			openaiopt.WithHTTPClient(client), openaiopt.WithMaxRetries(0),
+			openaiopt.WithBaseURL(endpoint.BaseURL), openaiopt.WithAPIKey(placeholderKey))
+		model := openai.NewResponsesWithClient(openaisdk.Client{Responses: service}, req.Model.ID)
 		return model, openaiOptions(req.Model.Effort), nil
 	case OpenAIChat:
 		// The run's own transport puts the token on every request and adds the
@@ -205,24 +209,6 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 	}
 }
 
-// withoutEnvironmentHeaders takes off the headers openai-go's client puts on every request from
-// the environment: the organization and the project it reads from OPENAI_ORG_ID and
-// OPENAI_PROJECT_ID, and every header OPENAI_CUSTOM_HEADERS names, which that client reads as
-// one "name: value" a line. They are deleted after the client's own defaults are applied and
-// before the call is made, so nothing this package sends comes from the environment.
-func withoutEnvironmentHeaders() []openaiopt.RequestOption {
-	options := []openaiopt.RequestOption{
-		openaiopt.WithHeaderDel("OpenAI-Organization"),
-		openaiopt.WithHeaderDel("OpenAI-Project"),
-	}
-	for _, line := range strings.Split(os.Getenv("OPENAI_CUSTOM_HEADERS"), "\n") {
-		if colon := strings.Index(line, ":"); colon >= 0 {
-			options = append(options, openaiopt.WithHeaderDel(strings.TrimSpace(line[:colon])))
-		}
-	}
-	return options
-}
-
 // finalOutput is Request.Final as the SDK's output: the last reply is validated against the
 // schema and read back as the object itself. A schema the SDK refuses is a request the loop
 // cannot run.
@@ -240,9 +226,16 @@ func finalOutput(final json.RawMessage) (aisdk.Output, error) {
 
 // run is one Run's state across its model calls.
 type run struct {
-	req       Request
-	kind      Kind
-	transport *modelTransport
+	req  Request
+	kind Kind
+	// calls are the raw provider chunks of each model call the run started, in order, and
+	// hold as much of them as the protocol reads back. Only drain writes them, part by
+	// part as the stream carries them, and only finish reads them, once drain has
+	// returned: the two run one after the other in the calling goroutine, so the mutex
+	// below does not cover them. A step's chunks go on the stream before that step's
+	// OnStepFinish is called, but drain need not have read them by then, which is why
+	// stepFinished reads none of this.
+	calls []rawCall
 	// cancel ends the run's own context, which is how a callback's error stops the run.
 	cancel context.CancelFunc
 
@@ -267,9 +260,28 @@ type run struct {
 	next      int
 }
 
+// readsRawChunks is whether a protocol's reply is read back out of the provider's own chunks,
+// which the run then asks the stream for: openai-responses for each call's output items,
+// openai-chat for a refusal. No other protocol says anything there that the SDK's own parts do
+// not carry.
+func readsRawChunks(kind Kind) bool {
+	return kind == OpenAIResponses || kind == OpenAIChat
+}
+
+// rawCall is what one model call's raw provider chunks held of what its protocol reads back:
+// the output items an openai-responses stream reported done, each byte for byte as the event
+// carried it, and the refusal an openai-chat stream carried, pieced together as the model wrote
+// it.
+type rawCall struct {
+	items   []json.RawMessage
+	refusal []byte
+}
+
 // drain reads both of the run's streams to their end, which the SDK needs for the run to finish
 // at all: the Final object's snapshots in a goroutine, the stream's own parts here. Each is read
-// to the end whether or not the caller takes it, and after a callback has failed.
+// to the end whether or not the caller takes it, and after a callback has failed. The parts a
+// protocol reads its reply back out of are kept as they go by, because the stream is the only
+// place they are said.
 func (r *run) drain(stream *aisdk.StreamTextResult) {
 	partials := make(chan struct{})
 	go func() {
@@ -284,15 +296,60 @@ func (r *run) drain(stream *aisdk.StreamTextResult) {
 		}
 	}()
 	for part := range stream.FullStream() {
-		delta, ok := part.(aisdk.StreamTextDelta)
-		if !ok || r.req.OnText == nil || r.failure() != nil {
-			continue
-		}
-		if err := r.req.OnText(delta.Text); err != nil {
-			r.fail(err)
+		switch part := part.(type) {
+		case aisdk.StreamStartStep:
+			r.calls = append(r.calls, rawCall{})
+		case aisdk.StreamRaw:
+			r.readRaw(part.RawValue)
+		case aisdk.StreamTextDelta:
+			if r.req.OnText == nil || r.failure() != nil {
+				continue
+			}
+			if err := r.req.OnText(part.Text); err != nil {
+				r.fail(err)
+			}
 		}
 	}
 	<-partials
+}
+
+// readRaw reads one raw provider chunk of the model call the stream is in into that call's own
+// chunks: an openai-responses event that reported an output item done carries that item, and an
+// openai-chat chunk carries a piece of a refusal, in the choice's streamed delta or on the whole
+// message a gateway answers a stream request with. A chunk the provider could not read back as
+// JSON arrives empty, and holds nothing either way.
+func (r *run) readRaw(raw json.RawMessage) {
+	if len(r.calls) == 0 || len(raw) == 0 {
+		return
+	}
+	call := &r.calls[len(r.calls)-1]
+	switch r.kind {
+	case OpenAIResponses:
+		var event struct {
+			Type string          `json:"type"`
+			Item json.RawMessage `json:"item"`
+		}
+		if json.Unmarshal(raw, &event) == nil && event.Type == "response.output_item.done" {
+			call.items = append(call.items, event.Item)
+		}
+	case OpenAIChat:
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Refusal string `json:"refusal"`
+				} `json:"delta"`
+				Message struct {
+					Refusal string `json:"refusal"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(raw, &chunk) != nil {
+			return
+		}
+		for _, choice := range chunk.Choices {
+			call.refusal = append(append(call.refusal, choice.Delta.Refusal...), choice.Message.Refusal...)
+		}
+	}
 }
 
 // fail keeps the first error a callback returned and ends the run; failure is that error.
@@ -375,35 +432,33 @@ func (r *run) result() Result {
 
 // finish reads the last model call into result: its output items, the refusal the call may have
 // ended on, the fault it ended on, and the object the reply was required to be when the request
-// asked for one.
+// asked for one. It is the only reader of the raw chunks drain kept, and runs once drain has
+// returned, so every chunk of every call is in by now.
 func (r *run) finish(result *Result, stream *aisdk.StreamTextResult) {
 	r.mu.Lock()
 	reason := r.reason
 	r.mu.Unlock()
+	if readsRawChunks(r.kind) && len(r.calls) < len(result.Steps) {
+		// A step whose chunks never came is a step that cannot be given its own, which
+		// is an error rather than a guess.
+		result.Fault, result.Detail = FaultProviderError,
+			fmt.Sprintf("%d model calls finished but %d sent their chunks", len(result.Steps), len(r.calls))
+		return
+	}
 	switch r.kind {
 	case OpenAIResponses:
-		items, err := r.transport.outputItems(len(result.Steps))
-		if err != nil {
-			result.Fault, result.Detail = FaultProviderError, err.Error()
-			return
-		}
 		for i := range result.Steps {
-			result.Steps[i].Native = items[i]
+			result.Steps[i].Native = r.calls[i].items
 		}
-		if refused(items[len(items)-1]) {
+		if refused(r.calls[len(result.Steps)-1].items) {
 			result.Fault, result.Detail = FaultRefusal, "the last reply is a refusal"
 			return
 		}
 	case OpenAIChat:
-		// Chat Completions says a refusal in the reply's body alone: it stops for
+		// Chat Completions says a refusal in the reply's chunks alone: it stops for
 		// "stop" with no content, which is otherwise an empty answer or, where the
 		// request asked for a Final object, a malformed one.
-		refusal, err := r.transport.refusal(len(result.Steps))
-		if err != nil {
-			result.Fault, result.Detail = FaultProviderError, err.Error()
-			return
-		}
-		if refusal != "" {
+		if refusal := r.calls[len(result.Steps)-1].refusal; len(refusal) > 0 {
 			result.Fault, result.Detail = FaultRefusal, fmt.Sprintf("the last reply is a refusal: %.500q", refusal)
 			return
 		}

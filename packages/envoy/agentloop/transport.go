@@ -1,48 +1,25 @@
 package agentloop
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"iter"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
-	"sync"
 	"time"
 )
 
 // modelTransport carries every model call of a run. It puts the endpoint's token, read again for
-// the attempt, on each request; adds the endpoint's own query parameters to it; makes the run's
-// one retry, on a 429, a 5xx or a transport error, within the run's time; and, on the protocols
-// that read them back, keeps the response bodies they read, so an OpenAI Responses turn's output
-// items can be appended byte for byte as the API sent them and a Chat Completions refusal can be
-// read out of the stream that carried it.
+// the attempt, on each request; adds the endpoint's own query parameters to it; and makes the
+// run's one retry, on a 429, a 5xx or a transport error, within the run's time.
 type modelTransport struct {
 	base  http.RoundTripper
 	kind  Kind
 	token func(context.Context) (string, error)
 	query url.Values
-
-	mu sync.Mutex
-	// responses are the response bodies kept, in the order they were returned, and hold
-	// only what the protocol reads back. openai-responses keeps one per model call, because
-	// outputItems reads each step's own native items out of its own call's body;
-	// openai-chat keeps one, the newest, because refusal reads the last call's body alone,
-	// so an earlier call's is dropped as the next one arrives rather than held for the life
-	// of the run. Every other kind keeps none, and reads none.
-	responses []*bytes.Buffer
-}
-
-// keepsResponses is whether a protocol's responses are read back out of their bodies, and so
-// have to be kept as they are read.
-func keepsResponses(kind Kind) bool {
-	return kind == OpenAIResponses || kind == OpenAIChat
 }
 
 // newModelTransport is the transport one Run or one Decide makes its model calls through, over
@@ -122,17 +99,6 @@ func (t *modelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, err
 		}
-		if keepsResponses(t.kind) && resp.StatusCode/100 == 2 {
-			kept := &bytes.Buffer{}
-			t.mu.Lock()
-			if t.kind == OpenAIChat {
-				// Only the newest is ever read, so the one before it goes.
-				t.responses = t.responses[:0]
-			}
-			t.responses = append(t.responses, kept)
-			t.mu.Unlock()
-			resp.Body = &keptBody{ReadCloser: resp.Body, kept: kept, mu: &t.mu}
-		}
 		return resp, nil
 	}
 }
@@ -160,136 +126,4 @@ func waitable(ctx context.Context, wait time.Duration) bool {
 	}
 	deadline, ok := ctx.Deadline()
 	return !ok || time.Until(deadline) > wait
-}
-
-// keptBody is a response body that keeps what is read of it.
-type keptBody struct {
-	io.ReadCloser
-	kept *bytes.Buffer
-	mu   *sync.Mutex
-}
-
-func (b *keptBody) Read(p []byte) (int, error) {
-	n, err := b.ReadCloser.Read(p)
-	b.mu.Lock()
-	b.kept.Write(p[:n])
-	b.mu.Unlock()
-	return n, err
-}
-
-// outputItems are the output items of each of the first calls OpenAI Responses calls, in order,
-// each byte for byte as its stream's response.output_item.done event carried it. It is the
-// reader openai-responses keeps every call's body for, so a run with fewer bodies than calls is
-// a run whose steps cannot all be given their own, which is an error rather than a guess.
-func (t *modelTransport) outputItems(calls int) ([][]json.RawMessage, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if len(t.responses) < calls {
-		return nil, fmt.Errorf("%d model calls finished but %d responses were kept", calls, len(t.responses))
-	}
-	items := make([][]json.RawMessage, calls)
-	for i := range calls {
-		var err error
-		if items[i], err = streamItems(t.responses[i].Bytes()); err != nil {
-			return nil, fmt.Errorf("model call %d's stream: %w", i+1, err)
-		}
-	}
-	return items, nil
-}
-
-// refusal is the refusal the last of the run's Chat Completions calls carried, or the empty
-// string where it carried none. It reads the newest body, which is the only one openai-chat
-// keeps.
-func (t *modelTransport) refusal(calls int) (string, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if calls <= 0 || len(t.responses) == 0 {
-		return "", fmt.Errorf("%d model calls finished but no response body was kept", calls)
-	}
-	return chatRefusal(t.responses[len(t.responses)-1].Bytes()), nil
-}
-
-// chatRefusal is the refusal a Chat Completions response carries, or the empty string where it
-// carries none: the choice's streamed delta.refusal, pieced together as the model wrote it, or
-// the whole message.refusal a gateway answers a stream request with, read from the events of a
-// stream or, for a response that is no stream at all, from the body itself. A refusal stops the
-// reply for "stop" with no content, so the body is the only place it is said at all.
-func chatRefusal(body []byte) string {
-	var refusal strings.Builder
-	read := func(data []byte) {
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Refusal string `json:"refusal"`
-				} `json:"delta"`
-				Message struct {
-					Refusal string `json:"refusal"`
-				} `json:"message"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal(data, &chunk) != nil {
-			return
-		}
-		for _, choice := range chunk.Choices {
-			refusal.WriteString(choice.Delta.Refusal)
-			refusal.WriteString(choice.Message.Refusal)
-		}
-	}
-	streamed := false
-	for data := range sseEvents(body) {
-		streamed = true
-		read(data)
-	}
-	if !streamed {
-		read(body)
-	}
-	return refusal.String()
-}
-
-// streamItems are the items of a Responses stream's response.output_item.done events.
-func streamItems(stream []byte) ([]json.RawMessage, error) {
-	var items []json.RawMessage
-	for data := range sseEvents(stream) {
-		if data[0] != '{' {
-			continue
-		}
-		var e struct {
-			Type string          `json:"type"`
-			Item json.RawMessage `json:"item"`
-		}
-		if err := json.Unmarshal(data, &e); err != nil {
-			return nil, err
-		}
-		if e.Type == "response.output_item.done" {
-			items = append(items, append(json.RawMessage(nil), e.Item...))
-		}
-	}
-	return items, nil
-}
-
-// sseEvents are the data of each event of an SSE stream, in order, each event's data lines
-// joined by the newlines between them; an event that carried no data line at all is left out, as
-// is a last event no blank line ended, which is one the stream was cut in. The bytes an event is
-// given as hold only until the next one, so whatever is read out of them is copied.
-func sseEvents(stream []byte) iter.Seq[[]byte] {
-	return func(yield func([]byte) bool) {
-		var data bytes.Buffer
-		scanner := bufio.NewScanner(bytes.NewReader(stream))
-		scanner.Buffer(make([]byte, 0, 64*1024), len(stream)+1)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			switch {
-			case len(line) == 0:
-				if data.Len() > 0 && !yield(data.Bytes()) {
-					return
-				}
-				data.Reset()
-			case bytes.HasPrefix(line, []byte("data:")):
-				if data.Len() > 0 {
-					data.WriteByte('\n')
-				}
-				data.Write(bytes.TrimPrefix(bytes.TrimPrefix(line, []byte("data:")), []byte(" ")))
-			}
-		}
-	}
 }

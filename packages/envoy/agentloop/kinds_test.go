@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"math"
 	"math/rand/v2"
 	"net/url"
@@ -515,94 +514,4 @@ func toolResultText(block map[string]any) string {
 		return strings.Join(texts, "\n")
 	}
 	return ""
-}
-
-// A run keeps only the response bodies its own protocol reads back, for as long as it reads
-// them: over two model calls, openai-responses keeps one body per call, because each step's
-// native output items are read out of that step's own body, and openai-chat keeps one, the
-// newest, because the only thing read back is the last call's refusal. Every other protocol
-// keeps none.
-func TestOnlyTheBodiesAProtocolReadsBackAreKept(t *testing.T) {
-	t.Parallel()
-	for _, c := range []struct {
-		name    string
-		kind    Kind
-		replies []reply
-		kept    int
-		// read is what the protocol's own reader makes of what was kept.
-		read func(*testing.T, *modelTransport)
-	}{
-		{
-			name: "openai-responses keeps one body per call",
-			kind: OpenAIResponses,
-			replies: []reply{
-				openaiStream(openaiUsage{Output: 1}, "", openaiMessage("msg_1", "The note says plum.")),
-				openaiStream(openaiUsage{Output: 1}, "", openaiMessage("msg_2", "It still says plum.")),
-			},
-			kept: 2,
-			read: func(t *testing.T, transport *modelTransport) {
-				items, err := transport.outputItems(2)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for i, want := range []string{"msg_1", "msg_2"} {
-					if len(items[i]) != 1 || !strings.Contains(string(items[i][0]), want) {
-						t.Errorf("call %d's output items are %s, want its own call's %s", i+1, items[i], want)
-					}
-				}
-			},
-		},
-		{
-			name: "openai-chat keeps the newest body alone",
-			kind: OpenAIChat,
-			replies: []reply{
-				chatStream("stop", chatUsage{Prompt: 1, Completion: 1}, "The note says plum."),
-				chatRefusalStream("I will not do that.", false),
-			},
-			kept: 1,
-			read: func(t *testing.T, transport *modelTransport) {
-				refusal, err := transport.refusal(2)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if refusal != "I will not do that." {
-					t.Errorf("the refusal read back is %q, want the last call's", refusal)
-				}
-			},
-		},
-		{
-			name: "anthropic-messages keeps none",
-			kind: AnthropicMessages,
-			replies: []reply{
-				anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText("The note says plum.")),
-				anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText("It still says plum.")),
-			},
-		},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			s := newStandIn(t, c.replies...)
-			transport := newModelTransport(Endpoint{
-				Kind: c.kind, BaseURL: s.server.URL,
-				Token: func(context.Context) (string, error) { return "a-token", nil },
-			})
-			client := transport.client()
-			for i := range c.replies {
-				resp, err := client.Get(s.server.URL)
-				if err != nil {
-					t.Fatalf("call %d: %v", i+1, err)
-				}
-				if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-					t.Fatalf("call %d's body: %v", i+1, err)
-				}
-				_ = resp.Body.Close()
-			}
-			if n := len(transport.responses); n != c.kept {
-				t.Errorf("%d bodies were kept over %d model calls, want %d", n, len(c.replies), c.kept)
-			}
-			if c.read != nil {
-				c.read(t, transport)
-			}
-		})
-	}
 }

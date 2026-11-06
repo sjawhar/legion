@@ -652,6 +652,28 @@ func TestTheEndpointComesFromTheRequestAndNeverTheEnvironment(t *testing.T) {
 	}
 }
 
+// A header the environment names is never put on the call, so a header the call needs is never
+// taken off it either: OPENAI_CUSTOM_HEADERS naming Content-Type and Accept leaves the
+// openai-responses request carrying both, because the package builds openai-go's Responses
+// service itself rather than its client, and that service reads no environment at all.
+func TestAnEnvironmentHeaderNamingTheCallsOwnHeadersLeavesThemOnTheCall(t *testing.T) {
+	t.Setenv("OPENAI_CUSTOM_HEADERS", "Content-Type: application/json\nAccept: application/json")
+	s := newStandIn(t, openaiStream(openaiUsage{Input: 1, Output: 1}, "", openaiMessage("msg_1", "It says plum.")))
+	result, err := Run(context.Background(), newFixture(t, s, OpenAIResponses, 1).req)
+	if err != nil || result.Fault != "" {
+		t.Fatalf("the OpenAI run: %+v, %v", result, err)
+	}
+	got := s.requests()
+	if len(got) != 1 {
+		t.Fatalf("%d model calls, want 1", len(got))
+	}
+	for _, name := range []string{"Content-Type", "Accept"} {
+		if value := got[0].header.Get(name); value != "application/json" {
+			t.Errorf("the call's %s is %q, want application/json: the environment takes no header off a call", name, value)
+		}
+	}
+}
+
 // Every model call carries the token as the endpoint reads it at that call, so a token rotated
 // between two calls reaches the second.
 func TestTheTokenIsReadAgainForEveryModelCall(t *testing.T) {

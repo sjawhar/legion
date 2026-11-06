@@ -36,6 +36,14 @@
 // only while Bounds.Time is left. A stream that breaks after its first byte is FaultProviderError
 // and is never retried, so a caller's OnText never sees the same text twice.
 //
+// # The provider's own chunks
+//
+// Step.Native is the output items an openai-responses call sent, each byte for byte as its
+// stream carried it, and a Chat Completions refusal is what an openai-chat call says in place of
+// a reply. Both are read off the SDK's stream of raw provider chunks, which the run asks for on
+// those two protocols and no other. The HTTP transport keeps no response body of its own: it is
+// the token, the endpoint's query parameters and the retry, and nothing else.
+//
 // # Cache marks
 //
 // The package places them, when Request.CacheHistory is set, where the provider wants them:
