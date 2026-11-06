@@ -314,13 +314,14 @@ func recallPick(ctx context.Context, srv *server, project, text, title, exclude 
 	return srv.pickRelatedTerms(ctx, srv.deps.Store.Pool, project, text, title, relatedExclusion{issueKey: exclude}, probeUnknownTerms)
 }
 
-// recallNewSearch runs the check's keyword query (relatedKeywordQuery) over the picked terms;
-// nothing when no term was picked.
+// recallNewSearch runs the check's keyword statement (relatedKeywordQuery) over the picked
+// terms, leaving nothing out, since the rank of every item is what is measured; nothing when no
+// term was picked.
 func recallNewSearch(ctx context.Context, srv *server, project string, picked relatedTerms) ([]model.SearchResult, error) {
 	if picked.NoLexemes || len(picked.Terms) == 0 {
 		return nil, nil
 	}
-	response, err := srv.relatedSearch(ctx, srv.deps.Store.Pool, relatedKeywordQuery, project, picked)
+	response, err := srv.relatedSearch(ctx, srv.deps.Store.Pool, relatedKeywordStatement, project, picked, nil)
 	return response.Results, err
 }
 

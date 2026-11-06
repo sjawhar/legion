@@ -498,3 +498,43 @@ func TestRelatedRouteExcludeIssuesLeavesEveryNamedIssueOut(t *testing.T) {
 		}
 	}
 }
+
+// An exclusion leaves its issues out of the search's window, not out of its answer: enough
+// excluded issues to fill the window (suggestionSearchDepth rows), each matching more of the
+// query's words than the one keeper that also matches, and the check still lists the keeper.
+// Dropped after the page instead, those issues take every place in the window and the check
+// answers none while the match it exists to find sits below it - which is what the list is for,
+// a read that leaves out an issue and its subtree (INFRA-1160).
+func TestRelatedRouteExcludedIssuesLeaveTheSearchWindowNotJustItsResults(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "RWIN")
+	// The keeper is filed first, so it is the oldest of the issues that tie on anything, and it
+	// holds one of the query's rare words where each excluded issue holds two: every excluded
+	// issue outranks it by idf-weighted coordination (relatedCoordinationRank), whatever the
+	// snippet density of either adds.
+	const keeperWord = "zymurgy"
+	keeper := createSearchIssue(t, handler, "RWIN", "Ledger totals in "+keeperWord, "")
+	words := []string{keeperWord}
+	excluded := make([]string, 0, suggestionSearchDepth+1)
+	for index := range suggestionSearchDepth + 1 {
+		first, second := fmt.Sprintf("quo%cvex", 'a'+index), fmt.Sprintf("pli%czor", 'a'+index)
+		words = append(words, first, second)
+		excluded = append(excluded, createSearchIssue(t, handler, "RWIN",
+			fmt.Sprintf("Ledger totals in %s and %s", first, second), ""))
+	}
+	refreshTermStats(t, database, "RWIN")
+	before := relatedWrites(t, database)
+
+	params := url.Values{"title": {"Ledger totals in " + strings.Join(words, " ")}}
+	if owners := relatedOwners(getRelated(t, handler, "RWIN", params)); slices.Contains(owners, keeper) {
+		t.Fatalf("related owners without an exclusion = %v, want %s below the window the %d excluded issues fill",
+			owners, keeper, len(excluded))
+	}
+	params["exclude_issues"] = excluded
+	suggestions := getRelated(t, handler, "RWIN", params)
+	if suggestions.Outcome != "found" || !slices.Equal(relatedOwners(suggestions), []string{keeper}) {
+		t.Fatalf("suggestions = %+v, want %s alone, found: the excluded issues leave the window rather than its results",
+			suggestions, keeper)
+	}
+	expectNothingWritten(t, database, before)
+}
