@@ -13,6 +13,9 @@ Envoy delivers external events and messages between sessions. Delivery is at-lea
 
 - Take the target id from the delivery's `reply_with`, or from `envoy_sessions` (filter by `machine`, `dir` or `title`). Never address a tmux pane or window: Envoy delivers only to a session id, and the session in a pane can change.
 
+- Address a session by its full id; an 8-character prefix is a display label, not an address.
+  Prefixes collide across live sessions, so resolve a prefix only against a full session listing (`envoy_sessions`, or `envoy ps --json`) and refuse it when it matches more than one, because a send that resolves to the wrong session succeeds silently.
+
 - Absence from `envoy_sessions` is not evidence a session is gone: the host that shows a tool's result can cut a long one to a partial list.
   Look the session up directly, or use `envoy_role_get(role=...)` for a role, and read its `state` for whether it is live (see 'Whether a session is live').
 
