@@ -8,6 +8,8 @@ import {
   createMessage,
   createProject,
   getComment,
+  getIssue,
+  getMyState,
   patchIssue,
   resolveComment,
 } from "./api";
@@ -27,6 +29,10 @@ const session = {
 /** Every fact these rows poll for lands in milliseconds: Playwright's default 100/250/500/1000
  *  ladder would first see it a quarter-second late. */
 const PROBE = { intervals: [50, 50, 100, 200, 500] };
+
+/** The reader's dwell before the Conversation's read mark is written: `DWELL_MS`,
+ *  `web/src/features/shell/useDwell.ts`, which exports nothing a spec can import. */
+const DWELL_MS = 1_000;
 
 /** Spends the live socket's reconnect delay - a draw the attempt count grows
  *  (`web/src/api/live-socket.ts`) - on the page's own clock, until the pill is gone. */
@@ -900,6 +906,68 @@ test("on a phone, Jump to latest stays off a thread opened over the Conversation
     await leaveThread(page);
     await scrollToOldest(page);
     await expect(jump).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+// A thread opened full-screen covers the Conversation, and the reader cannot see the list the
+// issue's read mark is written from: while the thread is open that mark is never written, however
+// long the newest turn sits behind the thread, and Back gives the dwell back, so no issue is left
+// unread for good. The mark is nothing the Conversation draws, so the row reads it where it is
+// kept - the reader's own state on the server, `GET /api/v1/me/state` - and watches the page's
+// writes of it.
+test("on a phone, a thread open over the Conversation holds the issue's read mark until Back @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Read mark under a thread" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  await createMessage(issue.key, { body: "Newest turn" }, session);
+  // Nothing here has been read, so both cards carry `New` and a dwell on the newest one - the
+  // only card the mark watches - would read the issue through its head.
+  const head = (await getIssue(issue.key)).last_seq;
+  const mark = async () => (await getMyState())[issue.key]?.last_read_seq ?? 0;
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    // The dwell is a page timer, so the page's own clock spends it rather than the run: until it
+    // is spent the thread opens over a dwell still counting, as a reader's Expand thread within
+    // the first second does.
+    await page.clock.install();
+    const marks: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+      ) {
+        marks.push(request.postData() ?? "");
+      }
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    await expect(turns.getByText("New", { exact: true })).toHaveCount(2);
+
+    await openThread(page, earlier.id);
+    // Several dwells' worth of the page's clock behind the thread, and then two round trips: the
+    // page's own, which answers only once a `PUT` the dwell started had left the page, and the
+    // read of the mark itself.
+    await page.clock.runFor(DWELL_MS * 3);
+    await page.evaluate(() => fetch("/api/v1/me/state").then(({ status }) => status));
+    expect(await mark()).toBe(0);
+    expect(marks).toEqual([]);
+
+    // The list is the reader's again on Back, and the dwell marks the issue read through its
+    // head, as it would have had no thread ever opened.
+    await leaveThread(page);
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(DWELL_MS);
+        return mark();
+      }, PROBE)
+      .toBe(head);
   } finally {
     await alice.close();
   }

@@ -1120,6 +1120,14 @@ export function ConversationTab({
   // it, kept across a reload and never shown; one Dispatch refuses is sent again once the stored
   // mark changes. It names its issue, so an answer that lands after the reader moved on is put
   // where it belongs.
+  // A thread opened full-screen on a phone covers the list and renders it `inert` and
+  // `aria-hidden` (below), so the reader cannot see the conversation the dwell is reading, while
+  // the observer behind the thread still counts the newest card as on screen. Hence the dwell
+  // waits for Back, and one already counting when the thread opens is cancelled rather than
+  // completed: `useDwell` drops its timers as `enabled` goes false. Marking the issue read from
+  // behind the thread would also move `lastReadSeq` under the reader, and that value is in the
+  // `unreadBoundary` key above, so the read re-entering `isPending` unmounts every card's `New`
+  // and reflows the list by a row - under whatever tap the reader is making in the thread.
   const newestId = conversations[0]?.id;
   const [readThrough, setReadThrough] = useState<{
     readonly issueKey: string;
@@ -1127,7 +1135,7 @@ export function ConversationTab({
   }>();
   const read = readThrough?.issueKey === issueKey ? readThrough : undefined;
   const registerNewest = useDwell({
-    enabled: visible && newestId !== undefined && headSeq > 0,
+    enabled: visible && phoneThread === undefined && newestId !== undefined && headSeq > 0,
     onDwell: () => setReadThrough({ issueKey, seq: headSeq }),
     resetKey: `${issueKey} ${newestId ?? ""} ${headSeq}`,
     shouldDwell: () => headSeq > Math.max(lastReadSeq, read?.seq ?? 0),
