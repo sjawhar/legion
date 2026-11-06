@@ -92,7 +92,11 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 51's admission cap over the
+number is the one `DaemonAPIVersion` declares, last bumped by contract 52's pane issue key
+(`LEGION_ISSUE_TRAILER`, the issue the pane stamps into its commits when
+`projects.<KEY>.commit_issue_trailer_repos` names the repository it works; each runtime sets the
+name itself and owns it, and this entry's claim boot reads that variable and never `LEGION_ISSUE`),
+after contract 51's admission cap over the
 issues at work (`admission.active` and `admission.waiting` on `GET /legion/v1/state` name issues
 rather than trees, `admission.trees` is the root of every live tree, and each issue record carries
 its `tree`; a strict reader before 51 refuses a state carrying either new key, so a caller from a
