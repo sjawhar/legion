@@ -25,10 +25,12 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/refe
 
 ## Workspace restrictions
 
-Do not make unrelated history. A review round pushes nothing at all: your handoff is a record on
-the Dispatch issue, never a commit, and a text finding is the inline thread the implementer closes
-in retro, so you make no commit of your own and never `jj describe` or `jj split` the working-copy
-commit you found at the turn's start.
+Do not make unrelated history. A review round pushes nothing at all: your handoff is a record
+on the Dispatch issue, never a commit, and a text finding is the inline thread the implementer
+closes in retro, so you make no commit of your own and never `jj describe` or `jj split` the
+working-copy commit you found at the turn's start. Since you push nothing, the empty commit that
+carries a pull request onto a pushed commit is never yours to make either; you report a head that
+is not the implementer's commit to the architect.
 
 ## Final review gate
 
