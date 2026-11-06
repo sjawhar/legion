@@ -1,9 +1,10 @@
 package githubapp
 
-// commits.go holds the reads a recorded check result's currency turns on inside this package:
-// whether a commit sits on a branch, a repository's default branch, and the conditional reads of
-// an open pull request's head a background pass fills Envoy's listener records in from (its check
-// runs, its check suites, the repository's open pull requests and the repository's own identity).
+// commits.go holds this package's reads about one repository's commits: whether the repository
+// holds a commit at all, and the reads a recorded check result's currency turns on — whether a
+// commit sits on a branch, a repository's default branch, and the conditional reads of an open
+// pull request's head a background pass fills Envoy's listener records in from (its check runs,
+// its check suites, the repository's open pull requests and the repository's own identity).
 // Each answers "Dispatch cannot see this repository" through CheckRepositoryResponse, the one
 // rule that says what unreadable means — delivery's own read of the pull requests GitHub names
 // for a commit (github_prs.go, through readGitHubPage's bounded retry) classifies its answer by
@@ -118,6 +119,36 @@ func (c *Client) CommitOnBranch(ctx context.Context, token, owner, repo, branch,
 		return false, fmt.Errorf("decode the comparison of %s/%s %s...%s: %w", owner, repo, branch, sha, err)
 	}
 	return comparison.Status == "behind" || comparison.Status == "identical", nil
+}
+
+// HasCommit answers whether the repository holds sha
+// (`GET /repos/{owner}/{repo}/commits/{sha}`), read for its status alone. Measured against
+// GitHub on 2026-11-05: that path answers 200 for a commit a repository the caller can read
+// holds, 422 No commit found for SHA for one it does not, and 404 Not Found for a repository
+// the caller cannot see. That 422-versus-404 split is the whole mechanism of this read: a
+// (false, nil) answer comes of the 422 and of nothing else, and it is the only proof of
+// absence Dispatch has.
+//
+// Every other answer is the error, which says that Dispatch cannot tell rather than that the
+// commit is missing: the 403 and the 404 CheckRepositoryResponse makes ErrRepositoryUnreadable
+// of, a rate limit, a 5xx, a transport failure, and a nil client as ErrNoAppKey, the way
+// CommitOnBranch answers it. The 404 is unusable on its own either way — it is GitHub's answer
+// for an unreadable repository and, as CommitOnBranch's comment records, for a commit a
+// readable repository does not have.
+//
+// The body is read for nothing, so the read asks GitHub for as little as it will send: a commit
+// object carries its whole diff, and `per_page=1` is the one page of it the commit's own
+// pagination allows.
+func (c *Client) HasCommit(ctx context.Context, token, owner, repo, sha string) (bool, error) {
+	if c == nil {
+		return false, ErrNoAppKey
+	}
+	path := repoPath(owner, repo) + "/commits/" + url.PathEscape(sha) + "?per_page=1"
+	_, status, err := c.readRepositoryJSON(ctx, token, path, owner+"/"+repo, http.StatusUnprocessableEntity)
+	if err != nil {
+		return false, err
+	}
+	return status != http.StatusUnprocessableEntity, nil
 }
 
 // DefaultBranch is the name of the repository's default branch (`GET /repos/{owner}/{repo}`,

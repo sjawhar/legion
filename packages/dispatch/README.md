@@ -340,6 +340,10 @@ document together. Its inputs are `DISPATCH_URL`, the bearer, `PROJECT`, and two
   `SKIP: review …: DEV_SIGNIN_LOGIN is unset; POST /api/v1/artifacts/{id}/reviews needs a person's …`
   line and every other section runs.
 
+One rule governs every result the script records, beside the refusals above.
+A result at a 40-character commit the repository of the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and that `owner/repo`.
+Only GitHub's `422 No commit found for SHA` refuses, so the script's own results are stored as before: its fake GitHub serves no commits route, and a repository Dispatch cannot read, which is what that bare `404` says, never refuses.
+
 It writes four issues in `PROJECT` — a root with a spec, a Verification document and a plan, a
 child of it, a sibling in another tree and one more whose spec and Verification document are
 approved together — and closes every one of them, also when a check fails, which withdraws any

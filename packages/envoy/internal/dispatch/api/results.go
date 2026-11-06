@@ -126,6 +126,14 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Asked here for the reason the resolve above is asked here: it is a GitHub round trip, and
+	// the comment over that resolve records what a slow read under the two issue row locks costs.
+	// Nothing is written before it, so a refusal leaves no row and no event behind.
+	if err := s.refuseUnknownCommit(r.Context(), pool, check.IssueKey, input.Commit); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -749,6 +757,56 @@ func scanCheckResult(row pgx.Row) (model.CheckResult, error) {
 		return model.CheckResult{}, fmt.Errorf("decode a result's actor: %w", err)
 	}
 	return result, nil
+}
+
+// refuseUnknownCommit refuses a result at a commit the repository of the check's issue
+// definitely does not hold: 400 RESULT_COMMIT_UNKNOWN, naming the commit and that `owner/repo`.
+// It runs before the transaction opens, so a refused result leaves no check_results row and no
+// result.recorded event behind. Dispatch stored a result at a mistyped commit no repository
+// held once, and a reader could not tell it from the real head, since both print as twelve
+// characters.
+//
+// The repository is the check's issue's, not the recording issue's: readThroughPullRequests and
+// the currency reader both resolve check_issue_key, and a refusal keyed on the recording issue
+// would disagree with the currency mark about which repository the commit belongs to.
+//
+// It fails open on everything but GitHub's 422, the one answer that proves absence
+// (delivery.RepositoryHoldsCommit), so no GitHub hiccup can block the one write a closed issue
+// takes, the production check's after-merge result — whose merge commit is on the default
+// branch and answers 200 anyway:
+//
+//	GitHub holds the commit (200)                  store
+//	GitHub holds no such commit (422)              refuse, 400 RESULT_COMMIT_UNKNOWN
+//	no App key, or no GitHub client at all         store
+//	the check's issue resolves to no repository    store
+//	a repository the App cannot read (403, 404)    store
+//	a rate limit, a timeout, a 5xx, a transport failure   store
+//	a malformed repository name                    store
+//	a failed read of Dispatch's own rows           store
+func (s *server) refuseUnknownCommit(ctx context.Context, q queryer, checkIssueKey, sha string) error {
+	if s.deps.GitHub == nil {
+		return nil
+	}
+	repo, err := refs.IssueRepository(ctx, q, checkIssueKey)
+	if err != nil {
+		slog.Warn("dispatch: resolve the repository of a recorded result's check",
+			"issue", checkIssueKey, "error", err)
+		return nil
+	}
+	if repo == nil {
+		return nil
+	}
+	held, err := delivery.RepositoryHoldsCommit(ctx, s.deps.GitHub, *repo, sha)
+	if err != nil {
+		slog.Info("dispatch: GitHub could not say whether a recorded result's commit is held",
+			"repo", *repo, "commit", sha, "error", err)
+		return nil
+	}
+	if held {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "RESULT_COMMIT_UNKNOWN",
+		"%s holds no commit %s: record the result once the commit is pushed", *repo, sha)
 }
 
 // readThroughPullRequests teaches Dispatch the pull requests GitHub names for a result's commit
