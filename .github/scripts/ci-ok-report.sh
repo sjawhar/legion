@@ -11,11 +11,18 @@
 # (114301219205) rather than in CI's own (114301219822), and on #2847, where it landed in PR
 # Title's suite and the merge queue refused to enqueue with `Required status check "ci-ok" is
 # expected` while that ci-ok was green. A job's own check run is in its run's own suite by
-# construction, so the verdict is a job now. A job of its own costs little waiting: over the 25
-# most recent completed pull_request runs of ci.yaml, each run's longest wait from a job's
-# creation to its start was a median of 8 seconds, a p90 of 337 and at most 411 (the jobs route's
-# created_at to started_at), and over 151 merge-group runs on 2026-11-05 and 06 the median was
-# 1.2 minutes.
+# construction, so the verdict is a job now. What that job costs is a wait nobody had measured
+# rightly. An earlier figure here - a median of 8 seconds over the 25 newest completed
+# pull_request runs - measured each run's longest wait among jobs that are all created with the
+# run and queue together, which answers another question: a job gated on every other job is
+# created then too but cannot start until the last of them ends, which is when the pool is
+# busiest with the next wave. The one measurement of the right thing is the probe of 2026-11-06
+# for dispatch://INFRA-1066's k27, whose ci-ok job was created at 10:16:21Z with every other job
+# of its run already finished and had not started 30 minutes later, the account's queue holding a
+# dozen runs of other trees. The verdict is kept here all the same, because one that lands late
+# is right while one filed in another workflow's suite blocks the head until a person re-runs it;
+# the issue's own k7 and k23 measure after the merge whether that wait matters, and this change
+# exists to take load off the pool it waits in.
 #
 # What this early post buys is the one thing that job cannot: the ci-ok job waits for every job of
 # the run, so on a merge-group run a failure has already lost it would post the failing verdict

@@ -93,10 +93,17 @@ request #2860 at 57182d42, where CI's `ci-ok` landed in the suite of "Rebuild Cl
 plugin" (114301219205) rather than CI's own (114301219822), and on #2847, where it landed in PR
 Title's suite and the merge queue refused to enqueue with `Required status check "ci-ok" is
 expected` while that `ci-ok` was green. A job's own check run is in its run's own suite by
-construction. The runner it waits for costs little: over the 25 most recent completed
-`pull_request` runs of `ci.yaml`, each run's longest wait from a job's creation to its start was
-a median of 8 seconds, a p90 of 337 and at most 411 (the jobs route's `created_at` to
-`started_at`), and over 151 merge-group runs on 2026-11-05 and 06 the median was 1.2 minutes.
+construction. The runner it waits for is this shape's cost, and the figure first written here
+measured the wrong thing: a median of 8 seconds over the 25 newest completed `pull_request` runs
+is each run's longest wait among jobs that are created with the run and queue together.
+A job gated on every other job is created then too, but starts only once the last of them ends,
+which is when the pool is busiest with the next wave of runs.
+The one reading of the trailing job's own wait is the probe of 2026-11-06 for
+dispatch://INFRA-1066's k27: its `ci-ok` job was created at 10:16:21Z with every other job of
+the run already finished, and had not started 30 minutes later, with a dozen runs of other
+branches in the account's queue.
+The verdict stays a job regardless, because a late verdict is right while a verdict filed in
+another workflow's suite blocks the head until a person re-runs it.
 
 Two things still run outside that job. The `ci-ok-report` step every other job ends with posts
 the failing `ci-ok` of a merge-group run that job's own result decides — its failure or its

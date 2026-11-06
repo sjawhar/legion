@@ -4052,10 +4052,16 @@ jobs:
   # where the rollup read the required ci-ok under another workflow and the queue refused to
   # enqueue with `Required status check "ci-ok" is expected` while that ci-ok was green.
   #
-  # A job of its own waits for a runner, and that wait is small: over the 25 most recent completed
-  # pull_request runs of this file, each run's longest wait from a job's creation to its start was
-  # a median of 8 seconds, a p90 of 337 and at most 411, and over 151 merge-group runs on
-  # 2026-11-05 and 06 the median was 1.2 minutes. What this job cannot do, and the ci-ok-report
+  # A job of its own waits for a runner, and that wait is the cost of this shape. The figure once
+  # written here - a median of 8 seconds over the 25 newest completed pull_request runs - measured
+  # each run's longest wait among jobs that are created with the run and queue together, which is
+  # another question: this job is created then too but starts only once the last of its 32 needs
+  # has ended, when the pool is busiest with the next wave. The one reading of the right thing is
+  # the probe of 2026-11-06 for dispatch://INFRA-1066's k27, whose ci-ok job was created at
+  # 10:16:21Z with every other job of its run finished and had not started 30 minutes later. It is
+  # kept because a late verdict is right and one in another workflow's suite blocks the head until
+  # a person re-runs it; k7 and k23 of that issue measure after the merge whether the wait
+  # matters. What this job cannot do, and the ci-ok-report
   # step every other job ends with still does, is post the failing ci-ok of a merge-group run one
   # job's result has already decided: this job waits for every job of the run, and a group that
   # can no longer merge should leave the queue at the first failure rather than at the last job's
