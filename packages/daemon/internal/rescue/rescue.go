@@ -307,7 +307,7 @@ func check(ctx context.Context, req Request, dir string, used, seen map[string]b
 	}
 	// The workspace itself, then every worktree of the repository no check has taken yet, with the
 	// clone's own working tree left out of the walk. That tree is no agent's workspace: every role
-	// of the issue works in a workspace of its own. A pod's shared clone now holds no working tree
+	// of the issue works in a workspace of its own. A pod's shared clone holds no working tree
 	// at all — workspace.feedClone clones it with `git clone --no-checkout` and then clears its
 	// sparse patterns and abandons jj's first snapshot — while its git HEAD still names the
 	// default branch's commit and its index still names every file of it, so a walk that took it

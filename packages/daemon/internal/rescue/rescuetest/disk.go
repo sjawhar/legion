@@ -67,7 +67,7 @@ func New(t testing.TB, issue string, before ...func(d *Disk)) *Disk {
 }
 
 // NewWithoutCloneTree is a disk whose clone holds no working tree, as an issue pod's clone does
-// now (workspace.feedClone): a `git clone --no-checkout` of the feed, made jj's with `jj git init
+// (workspace.feedClone): a `git clone --no-checkout` of the feed, made jj's with `jj git init
 // --colocate`, its sparse patterns cleared and the snapshot that init took abandoned. What that
 // leaves is a clone directory holding nothing but .git and .jj, while its git HEAD still names the
 // default branch's commit and its index still names every file of it. The clone here is made from

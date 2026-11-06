@@ -1177,15 +1177,16 @@ func skillsEnvironment() []corev1.EnvVar {
 // CheckoutTimeout. It is how much longer than the boot timeout a launch may wait for its pod's
 // launcher, counted from when it first sees one of the pod's init containers running
 // (awaitRoleLauncher). The fetch started no later than that, the shared clone after the fetch
-// ended and the checkout after the clone, so all three end inside the bound, each failing on its
-// own, naming why, when it runs out.
+// ended and the checkout after the clone, so the three end inside the bound, each failing on its
+// own, naming why, when it runs out, while the commands between them take the moments they do.
 //
 // The sum counts no term for the commands that keep CommandTimeout, and never has: workspace-
 // init's dozen other commands, local work that waits on no other pod, and the skills clone of
 // skills-fetch, which runs between the fetch and workspace-init and is one shallow transfer under
-// that same five minutes (cmd/legion's workspace-init skills, workspace.CloneSkills). Each of
-// those has at least the boot timeout, which the wait re-arms for as long as an init container of
-// the pod is running. A test shortens the sum (provisionBound).
+// that same five minutes (cmd/legion's workspace-init skills, workspace.CloneSkills). What covers
+// them is the boot timeout past the sum, so the sum is no worst case: when the fetch and the clone
+// each run their whole bound, whatever those commands take comes out of the checkout's hour and
+// that boot timeout. A test shortens the sum (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
 	return r.provisionBound
 }
