@@ -149,8 +149,9 @@ type RoleClaimSweep struct {
 //
 // The listing (roleKeysUntil), every claim read and every release wait no longer than ctx, which
 // is the reaper loop's own context (StartRoleClaimReaper): the listener's shutdown ends that
-// context and then waits for this loop to return before it drains the bus, so every call a pass
-// has left to make fails on the ended context alone, against a bus that is still answering.
+// context and then waits for this loop to return, up to its shared 10 s shutdown bound, before it
+// drains the bus, so a pass that returns inside that bound fails each call it has left on the
+// ended context alone, against a bus that is still answering.
 //
 // One role's failed read, failed delete or failed release costs that one role: it is logged in a
 // line of its own, counted in Skipped, and the pass goes on. This reaper is the backstop for the

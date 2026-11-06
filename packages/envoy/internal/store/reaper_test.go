@@ -191,9 +191,9 @@ func failRoleClaimReadsAndEndTheContext(t *testing.T, reg *Registry, end func())
 // line its loop logs for it carries those counts. That line is INFO rather than ERROR: the
 // context that ended is the loop's own, which the listener ends to shut down, and a SIGTERM is
 // an ordered shutdown rather than a failure - the rule cmd/listener/shutdown_test.go holds over
-// every other line of that path, and the one it cannot hold over this one, since a pass starts
-// only every five minutes. Both halves are held here: the pass's answer, and the single line
-// StartRoleClaimReaper writes for it.
+// every other line of that path, and the one it cannot hold over this one, since nothing there
+// puts a pass in flight at the moment of the signal. Both halves are held here: the pass's
+// answer, and the single line StartRoleClaimReaper writes for it.
 func TestTheRoleClaimReaperEndsThePassWhenItsContextEnds(t *testing.T) {
 	logs := captureRegistryLogs(t)
 	conn, cleanup := connectNATS(t)
