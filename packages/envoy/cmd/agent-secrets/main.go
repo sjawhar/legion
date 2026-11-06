@@ -24,7 +24,7 @@
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
 //	agent-secrets login
-//	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
+//	agent-secrets register [--wait SECONDS] [--session-id ID] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
 //	agent-secrets renew [--pod-token-file FILE]
 //	agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]
@@ -133,8 +133,8 @@ var commands = []command{
 		"End a grant as its operator or approver, under this machine's login, as Dispatch's Live\ngrants page does. Ending an automatic grant also makes its session ask before it gets those\nsecrets again."},
 	{"login", "agent-secrets login",
 		"Sign in on this machine as yourself: print the code to type in at Google, then record the\nsign-in at the secrets broker, which binds it to a box key this machine makes. Every session\nof yours on this machine then acts as you. A second person signs in beside you, and\nAGENT_SECRETS_PERSON then says which of you a session acts for."},
-	{"register", "agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]",
-		"Register this process with agent-secrets-helper as a machine session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session."},
+	{"register", "agent-secrets register [--wait SECONDS] [--session-id ID] [--exec -- COMMAND [ARGS...]]",
+		"Register this process with agent-secrets-helper as a machine session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session. With --session-id, the\nsession keeps one broker identity — and the requests and grants bound to it — across a restart\nof the helper or of the machine, rather than enrolling afresh as a new pid; run it again with\nthe id from inside a session that could not name one at launch."},
 	{"identity", "agent-secrets identity",
 		"Exit 0 when this process has a broker identity and 1 when it does not, asking the broker\nnothing."},
 	{"--version", "agent-secrets --version",

@@ -257,7 +257,7 @@ func TestXidWindowSettlementVersionWrite(t *testing.T) {
 	t.Logf("xid fixture: document of %d bytes with 20 open anchored asks", len(spec))
 
 	report := tracer.Measure(t, database.Pool, func() {
-		service.settleRoomWithin(storetest.MarkXid(context.Background()), artifactID, generation)
+		service.settleRoomWithin(storetest.MarkXid(context.Background()), artifactID, generation, false)
 	})
 	if after := latestVersionNumber(t, service, artifactID); after != before+1 {
 		t.Fatalf("XID RIG PROBLEM (not a finding about the code): settlement left the document at version %d, want %d", after, before+1)

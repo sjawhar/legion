@@ -232,7 +232,7 @@ func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
 	}
 	sess := r.srv.Registry.Get(os.Getpid())
 	v := &proof.Verifier{Skew: time.Minute,
-		Lookup: func(context.Context, string) (string, bool, error) { return sess.Thumbprint, true, nil },
+		Lookup: func(context.Context, string) (string, bool, error) { return sess.identity().Thumbprint, true, nil },
 		Replay: func(context.Context, string, time.Time) (bool, error) { return true, nil }}
 	if sub, err := v.Verify(context.Background(), signed.Proof, "POST", url, time.Now()); err != nil || sub.EnrollmentID != resp.EnrollmentID {
 		t.Fatalf("the proof must verify with the session key for its enrollment: %q %v", sub.EnrollmentID, err)
@@ -294,8 +294,8 @@ func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
 		t.Fatalf("the request object must verify with record.VerifyRequestObject: %v", err)
 	}
 	sess := r.srv.Registry.Get(os.Getpid())
-	if ro.Thumbprint != sess.Thumbprint {
-		t.Fatalf("iss must be the calling session's own key thumbprint: got %q, want %q", ro.Thumbprint, sess.Thumbprint)
+	if ro.Thumbprint != sess.identity().Thumbprint {
+		t.Fatalf("iss must be the calling session's own key thumbprint: got %q, want %q", ro.Thumbprint, sess.identity().Thumbprint)
 	}
 	if len(ro.Details) != 1 || ro.Details[0].Type != "agent_secret" || ro.Details[0].Identifier != "DEEL_API_KEY" || ro.Reason != "deel sync for ACME-1" {
 		t.Fatalf("claims: %+v", ro.Details)
@@ -436,11 +436,11 @@ func TestRenewRunsAndARefusedRenewReenrolls(t *testing.T) {
 	// helper enrolls again and gets a new enrollment for the same runtime_id.
 	r.fake.mu.Lock()
 	delete(r.fake.enrolled, reg.EnrollmentID)
-	delete(r.fake.byTP, r.srv.Registry.Get(os.Getpid()).Thumbprint)
+	delete(r.fake.byTP, r.srv.Registry.Get(os.Getpid()).identity().Thumbprint)
 	r.fake.mu.Unlock()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if id := r.srv.Registry.Get(os.Getpid()).EnrollmentID(); id != "" && id != reg.EnrollmentID {
+		if id := r.srv.Registry.Get(os.Getpid()).identity().EnrollmentID; id != "" && id != reg.EnrollmentID {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -455,7 +455,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	r.callerPID.Store(int64(child.Process.Pid))
 	first := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	oldSess := r.srv.Registry.Get(child.Process.Pid)
-	oldTP := oldSess.Thumbprint
+	oldTP := oldSess.identity().Thumbprint
 	// register()'s WaitSeconds only waits on sess.ready, which enrollLoop's setEnrolled closes
 	// BEFORE the s.save() a few lines later in the same goroutine — so the call above returning
 	// does not mean the enrolled record has actually reached disk yet. Wait for it explicitly:
@@ -518,7 +518,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled")
 	}
-	if sess.Thumbprint == oldTP || sess.EnrollmentID() == first.EnrollmentID || sess.RuntimeID != first.RuntimeID {
+	if sess.identity().Thumbprint == oldTP || sess.identity().EnrollmentID == first.EnrollmentID || sess.RuntimeID() != first.RuntimeID {
 		t.Fatalf("recovery uses a fresh key and a new enrollment for the same runtime_id: %+v", sess.Info())
 	}
 	// The recovered session's own goroutine revokes the old enrollment before its first enroll
@@ -575,8 +575,8 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 // alone, keyed on the recovered session's brand-new thumbprint, cannot). fakeBroker's
 // revokeFirstDelay holds the old row "live" for a window so a concurrent (buggy) enroll would
 // hit that conflict if one were ever attempted; the fixed enrollLoop revokes synchronously
-// before its first Broker.Enroll call, so no enroll is ever attempted during that window and
-// conflicts stays zero however long the delay runs.
+// before its first Broker.EnrollIdentity call, so no enroll is ever attempted during that window
+// and conflicts stays zero however long the delay runs.
 func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
@@ -672,16 +672,15 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 // this: enrollLoop's revoke-before-enroll guard calls revokeLapsed synchronously, and
 // revokeLapsed retries indefinitely with backoff — so if the re-pinned session ends
 // (Registry.Remove, exactly what retire/unregister would do) while that revoke is genuinely stuck
-// retrying against a failing broker, the prior id would be abandoned: retire's own revoke only
-// ever touches sess.EnrollmentID(), still empty at this point since this session never reached its
-// first successful Enroll, and once Registry.Remove drops the record a later restart's Recover has
-// no way to find the prior id either. revokeLapsed therefore hands the id to the same bounded,
-// independent s.revoke used elsewhere whenever it gives up because the session ended rather than
-// because ctx was canceled. fakeBroker's revokeFailFirst answers every revoke with a 503 (an
-// unreachable broker, not merely a slow one) until the session has ended and its own retry loop
-// has stopped, so revokeLapsed is genuinely retrying when the session ends, however long the test
-// takes to get there: no assertion here has to land inside a real backoff window. Only then is the
-// fault cleared, so only the handed-off revoke can land the prior id.
+// retrying against a failing broker, the prior id would be abandoned: Registry.Remove is the
+// registry step alone and revokes nothing, and once it drops the record a later restart's Recover
+// has no way to find the prior id either. revokeLapsed therefore hands the id to the same
+// bounded, independent s.revoke used elsewhere whenever it gives up because the session ended
+// rather than because ctx was canceled. fakeBroker's revokeFailFirst answers every revoke with a
+// 503 (an unreachable broker, not merely a slow one) until the session has ended and its own
+// retry loop has stopped, so revokeLapsed is genuinely retrying when the session ends, however
+// long the test takes to get there: no assertion here has to land inside a real backoff window.
+// Only then is the fault cleared, so only the handed-off revoke can land the prior id.
 func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
@@ -753,7 +752,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if id := sess.EnrollmentID(); id != "" {
+	if id := sess.identity().EnrollmentID; id != "" {
 		t.Fatalf("the re-pinned session must not have reached its own first enroll yet: %q", id)
 	}
 	r.fake.mu.Lock()
@@ -800,8 +799,8 @@ func TestRecoverDropsDeadRecords(t *testing.T) {
 	dead := exec.Command("true")
 	_ = dead.Run()
 	reg := NewRegistry(state)
-	sess, _ := newSession(dead.ProcessState.Pid(), 1, "testhost:dead", nil)
-	sess.setEnrolled("enr-dead")
+	sess, _ := newSession(dead.ProcessState.Pid(), 1, "testhost:dead", "", nil, nil)
+	sess.setEnrolledAt("enr-dead", sess.identity().Generation)
 	reg.Add(sess)
 	if err := reg.Save(); err != nil {
 		t.Fatal(err)
@@ -857,7 +856,7 @@ func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var newID string
 	for time.Now().Before(deadline) {
-		if id := r.srv.Registry.Get(os.Getpid()).EnrollmentID(); id != "" && id != reg.EnrollmentID {
+		if id := r.srv.Registry.Get(os.Getpid()).identity().EnrollmentID; id != "" && id != reg.EnrollmentID {
 			newID = id
 			break
 		}
@@ -902,7 +901,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := r.srv.register(context.Background(), peer, os.Getpid(), 0)
+	resp := r.srv.register(context.Background(), peer, os.Getpid(), "", 0)
 	if resp.OK || resp.Code != CodeUnidentified {
 		t.Fatalf("a peer no longer matching the pid the ancestry walk resolved must be refused, not handed the root session: %+v", resp)
 	}
@@ -919,7 +918,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedBeforeAdopting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := r.srv.register(context.Background(), peer, victim.Process.Pid, 0)
+	resp := r.srv.register(context.Background(), peer, victim.Process.Pid, "", 0)
 	if resp.OK || resp.Code != CodeUnidentified {
 		t.Fatalf("a peer no longer matching an unclaimed pid must be refused, not adopted: %+v", resp)
 	}

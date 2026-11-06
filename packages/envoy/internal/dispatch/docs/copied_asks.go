@@ -167,10 +167,11 @@ const projectCopiesLock = `select pg_advisory_xact_lock($1, hashtext($2))`
 
 // copiedAsksLockNamespace is the first key of every copy lock ("COPY"). The two-key form is taken
 // with a namespace of its own by each family of locks that uses it: the copy locks, the owner
-// locks (store.LockOwner, "OWNR"), duty's leases (duty.leaseNamespace, "LOOP") and the test hooks
-// (the api package's testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), and
-// with the hashtext of a name by the issue-dependency, repository-mapping and delivery
-// session-group locks; no two of those first keys are equal.
+// locks (store.LockOwner, "OWNR"), duty's leases (duty.leaseNamespace, "LOOP"), a conditional
+// edit's admission (conditionalEditQueueLockNamespace) and the test hooks (the api package's
+// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), and with the hashtext of
+// a name by the issue-dependency, repository-mapping and delivery session-group locks; no two of
+// those first keys are equal.
 const copiedAsksLockNamespace int32 = 0x434F5059
 
 // lockProjectCopies serialises, for a project document, its project's copy bookkeeping: a
@@ -191,9 +192,11 @@ const copiedAsksLockNamespace int32 = 0x434F5059
 // name hashes to. Within the two-key space only the copy locks take copiedAsksLockNamespace: the
 // server's other namespaces of it are the owner locks' (store's ownerLockNamespace), which every
 // writer of an owner's rows takes, internal/dispatch/duty's (duty.leaseNamespace), under which a
-// background loop holds the lease that keeps one process at a time running its periodic pass, and
-// the test hooks' (the api package's testHookLockNamespace, under DISPATCH_TEST_HOOKS alone),
-// under which each process marks itself as one a hook call must reach, so a copy lock cannot
+// background loop holds the lease that keeps one process at a time running its periodic pass, the
+// test hooks' (the api package's testHookLockNamespace, under DISPATCH_TEST_HOOKS alone), under
+// which each process marks itself as one a hook call must reach, a conditional edit's admission's
+// (conditionalEditQueueLockNamespace) and the issue dependencies' (api's
+// lockProjectIssueDependencies, hashtext('dispatch-issue-dependencies')), so a copy lock cannot
 // collide with any of those. hashtext is 32 bits wide, so two projects can still share the second
 // key. They then take turns on their copy bookkeeping and on nothing else, and cannot deadlock: a
 // holder takes the copy lock before any doc_settlements_pending row and before any event append

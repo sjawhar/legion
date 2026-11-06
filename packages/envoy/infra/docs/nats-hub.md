@@ -51,7 +51,7 @@ and `instanceGroup`, the group's name.
 | `tailnetDnsName` | unset | The tailnet's DNS name, one label under `ts.net` (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ts\.net$`), such as `example-tailnet.ts.net`. Required for a hub with a `listener`, since the hub renders the address that listener answers on, `<h>.<tailnetDnsName>`, from it into the listener's `ENVOY_ALLOWED_HOSTS`; a hub without a listener may leave it unset. A plain value the program knows when it runs, never another resource's output. |
 | `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one, which has no firewall rule but the hub's. The VM has an external address and takes the network's rules for all its instances, so on a network whose firewall admits SSH from anywhere, as the default network's `default-allow-ssh` does, its sshd is reachable from the internet: see [The VM's external address](#the-vms-external-address). May come from another resource or stack. |
 | `subnetwork` | unset | The VM's subnetwork, for a network with custom subnetworks: one in `zone`'s region. Only with `network`. May come from another resource or stack. |
-| `listener` | unset | The hub's own Envoy listener: `image`, the listener's image pinned as the images above are; `seedSecret`, the id of a Secret Manager secret in the hub's project holding its NATS user's seed; `nkey`, that seed's public key; and `allowedHosts`, any further address a client dials this hub by, beyond the hub's own `<h>.<tailnetDnsName>`, which it always serves. Each `allowedHosts` entry is a plain host name or IP address, rendered as written into the listener's `ENVOY_ALLOWED_HOSTS`. See [The hub's listener](#the-hubs-listener). |
+| `listener` | unset | The hub's own Envoy listener: `image`, the listener's image pinned as the images above are; `seedSecret`, the id of a Secret Manager secret in the hub's project holding its NATS user's seed; `nkey`, that seed's public key; `allowedHosts`, any further address a client dials this hub by, beyond the hub's own `<h>.<tailnetDnsName>`, which it always serves; and the listener's broker check, `agentSecretsUrl`, `agentSecretsAudience` and `publicUrl`, set together or not at all. Each `allowedHosts` entry is a plain host name or IP address, rendered as written into the listener's `ENVOY_ALLOWED_HOSTS`. See [The hub's listener](#the-hubs-listener) and [The listener's broker check](#the-listeners-broker-check). |
 | `sessionUser` | unset | `name` and `nkey`, the NATS user a client presenting no credential becomes, granted `SessionPermissions`. See [The hub's users](#the-hubs-users). |
 
 Only `tailnetAuthKey`, `network` and `subnetwork` may come from another resource's output. Every
@@ -64,7 +64,8 @@ The hub refuses these before it registers anything, with an error naming the inp
   whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in the
   hub's own name or an input it carries into the user data, a child or a refusal: `hostname`,
   `tailnetDnsName`, a tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId`,
-  `listenerMachineId` or `dispatchMachineId`, or the listener's `image`, `seedSecret` or one of its `allowedHosts`. The
+  `listenerMachineId` or `dispatchMachineId`, or the listener's `image`, `seedSecret`,
+  `agentSecretsUrl`, `agentSecretsAudience`, `publicUrl` or one of its `allowedHosts`. The
   error names the input by its path and never its value, as
   `users[0].machineId: an nkey user seed, which is never an input of the hub (not echoed)`, and a
   seed in the hub's own name as `envoy-infra:gcp:NatsHub: the component's name holds an nkey seed
@@ -108,6 +109,16 @@ The hub refuses these before it registers anything, with an error naming the inp
   anything registers; the plugin additionally refuses an entry that is empty or carries
   surrounding whitespace, which the listener would have trimmed and served, since the entry is
   rendered into a comma-joined `docker run` argument where a space would split it;
+- a `listener` broker check that sets one or two of `agentSecretsUrl`, `agentSecretsAudience` and
+  `publicUrl` and not all three, naming the input left out and the one that asks for it, as
+  `listener.publicUrl is required when listener.agentSecretsUrl is set: …`. The listener reads
+  the three as one set and refuses a partial one when it boots, so the hub refuses it while
+  Pulumi previews, rather than deploying a VM whose listener will not start;
+- a value of that broker check carrying whitespace or a control character, as
+  `listener.agentSecretsUrl holds whitespace or a control character, which
+  ENVOY_AGENT_SECRETS_URL cannot carry (not echoed)`: each is rendered as one `docker run`
+  argument, which a space would split, and the listener trims what it reads, so a value that is
+  whitespace alone is no value at all there;
 - a `sessionUser` whose `nkey` is empty;
 - a missing provider (see [Providers](../README.md#providers)).
 
@@ -274,6 +285,32 @@ secret and writes the seed with `envoy-infra seed generate`, whose printed key i
 (see [Making a seed](../README.md#making-a-seed)). The seed reaches the listener's environment as
 `NATS_NKEY_SEED` through `docker run --env-file`, which Docker reads as root, since the listener's
 image runs as an unprivileged user.
+
+### The listener's broker check
+
+`listener.agentSecretsUrl`, `listener.agentSecretsAudience` and `listener.publicUrl` are what
+this listener needs to check a caller's broker access token, and the hub renders each, as
+written, into the listener's `docker run` command: `ENVOY_AGENT_SECRETS_URL`,
+`ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE` and `ENVOY_PUBLIC_URL`, in that order, after the variables
+above.
+
+- `agentSecretsUrl` is the secrets broker, the origin whose introspection route the listener asks
+  about each token it is presented.
+- `agentSecretsAudience` is the audience this VM's own Google identity token is minted for, read
+  from the metadata server at call time: it is the identity each introspection presents, which is
+  how the broker knows which service is asking. This hub is a VM, so it is the VM's answer; the
+  projected Kubernetes token a listener in a pod presents instead is no input here, since the
+  listener refuses that file beside an audience.
+- `publicUrl` is the origin a caller reaches this listener's `/v1` at, such as
+  `http://<h>.<tailnetDnsName>:9020`. A DPoP proof's target URI is checked against it and the
+  request's path, never against a forwarded header, so a caller behind a proxy cannot choose the
+  URL its proof names.
+
+The listener reads the three as one set: with none of them it takes no broker token at all, and
+with any of them it requires all three. So the hub takes them the same way and refuses a partial
+set while Pulumi previews, naming the input left out. A hub that sets none of the three renders
+the cloud-config it rendered before these inputs existed, byte for byte, so they replaced no
+running hub's VM.
 
 ## What the hub's VM runs
 

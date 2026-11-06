@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // issueUpdatedNow is the value every write that stamps an issue's updated_at itself sets it to:
@@ -567,22 +568,43 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// The advice read before the first write describes after: its status, labels and parent.
+	if closing {
+		// The close's last statement before its commit stamps closed_at again, at the moment it
+		// runs (clock_timestamp()), over the start of the transaction (now()) the update above
+		// wrote. It is queued last, so the write phase runs it after the asks' withdrawal, their
+		// document writes and every event queued above. The document append gate takes a
+		// browser's update the room observed no later than closeMargin after closed_at as one
+		// made while the issue was open (docs.closeMargin), and the asks' withdrawal holds each
+		// document it writes locked until this commit, a flush to every process and the waits on
+		// other writers included: a keystroke that waited on that lock reaches the gate only
+		// after the commit, and was made while the issue was still open however long the
+		// transaction ran. The second write of closed_at fires migration 20261101181500's trigger
+		// again, whose notification Postgres folds into the first (same channel, same payload,
+		// one transaction). The events appended above carry the first stamp; the response carries
+		// this one, the stored value, which the statement's own callback reads as the batch runs.
+		if err := ledger.Queue(func(b *store.WriteBatch) error {
+			b.Queue("", `
+				update issues set closed_at = clock_timestamp() where key = $1 and closed_at is not null returning closed_at
+			`, key).QueryRow(func(row pgx.Row) error { return row.Scan(&after.ClosedAt) })
+			return nil
+		}); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	after.LastSeq = issueLastSeq(key, appended)
-	if (before.ClosedAt == nil) != (after.ClosedAt == nil) {
-		// The refresh runs after the commit, so a client that hangs up now must not stop it:
-		// rooms that never got the closed flag keep taking edits until they are reloaded.
-		// Dropping only the cancellation keeps the context's transaction mark, which is what
-		// lets the pool refuse a refresh run while a transaction is still open.
-		s.deps.Docs.SetIssueClosed(outlivingTheClient(r), key, after.ClosedAt != nil)
-	}
+	// A change of closed_at reaches the document rooms of every process, this one's included, from
+	// the commit itself: migration 20261101181500's trigger notifies, and each process closes its
+	// rooms of the issue's documents so their browsers reconnect with the scope the issue now
+	// allows.
 	s.publish(appendedEvents(appended...)...)
 	if closing {
-		// The rooms are closed now, so no browser of this process writes another ask block
-		// into them; the sweep catches the ones written since the close forked each document.
+		// The commit's notification closes the issue's rooms on every process; the sweep catches
+		// the ask blocks written since the close forked each document (sweepClosedIssueAsks).
 		// It runs after the publish so every event reaches subscribers in commit order.
 		s.sweepClosedIssueAsks(outlivingTheClient(r), key, withdrawn, actor)
 	}
