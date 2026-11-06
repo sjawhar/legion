@@ -541,7 +541,10 @@ function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
   // something other than a string names neither session nor process: it records nothing this
   // process can read, so it is no claim record at all.
   if ("session_id" in entry.data && typeof entry.data.session_id !== "string") return false;
-  return !("client_instance_id" in entry.data && typeof entry.data.client_instance_id !== "string");
+  if ("client_instance_id" in entry.data && typeof entry.data.client_instance_id !== "string") {
+    return false;
+  }
+  return true;
 }
 
 function resolveSkillsDirectory(): string {
@@ -3002,14 +3005,8 @@ export default function envoyExtension(pi: PiApi): void {
 
   // The newest role claim entry on `branch`, whatever process wrote it: the last one wins, since
   // a claim followed by a release is no claim.
-  const transcriptRoleRecord = (branch: readonly unknown[]): RoleClaimEntry["data"] | undefined => {
-    let record: RoleClaimEntry["data"] | undefined;
-    for (const entry of branch) {
-      if (!isRoleClaimEntry(entry)) continue;
-      record = entry.data;
-    }
-    return record;
-  };
+  const transcriptRoleRecord = (branch: readonly unknown[]): RoleClaimEntry["data"] | undefined =>
+    branch.findLast(isRoleClaimEntry)?.data;
 
   // What that record asks of this process: the role it claims, `null` for a release, and
   // `undefined` where this process acts on no record at all.

@@ -54,10 +54,11 @@ func newRoleClaimProcessRig(t *testing.T, sessionID string) *roleClaimProcessRig
 // it. An empty instance is a request that states none: a client predating the field, whose claim
 // is weighed by the standing claim's renewal alone.
 func (r *roleClaimProcessRig) claim(sessionID, role, instance string) *httptest.ResponseRecorder {
-	body := fmt.Sprintf(`{"session_id":%q,"role":%q,"soft":true}`, sessionID, role)
+	instanceField := ""
 	if instance != "" {
-		body = fmt.Sprintf(`{"session_id":%q,"role":%q,"soft":true,"client_instance_id":%q}`, sessionID, role, instance)
+		instanceField = fmt.Sprintf(`,"client_instance_id":%q`, instance)
 	}
+	body := fmt.Sprintf(`{"session_id":%q,"role":%q,"soft":true%s}`, sessionID, role, instanceField)
 	recorder := httptest.NewRecorder()
 	r.set.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(body)))
 	return recorder

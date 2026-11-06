@@ -1607,7 +1607,7 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 				// CLAIM and not on the session record, which names whichever process
 				// registered the id last.
 				switch {
-				case claim.ClientInstanceID != "" && claim.ClientInstanceID == claimantInstanceID:
+				case claim.HeldByProcess(claimantInstanceID):
 					// The claim names this very process: the holder is the claimant.
 					supersedable = append(supersedable, holder)
 				case !store.RoleClaimRenewedWithin(claim, time.Now(), d.sessionLiveWindow):

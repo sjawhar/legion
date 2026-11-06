@@ -1116,6 +1116,19 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 
   /**
+   * Writes `file` as this session's role record, naming this process as its writer, so a second
+   * `claude` reading the same state directory — one that resumed this session id — tells its own
+   * record from this one's. The destination is the caller's, because `restoreRole` resolves it
+   * before it removes the predecessor's file while the record's `session_id` is read after.
+   */
+  const writeRoleRecord = (file: string, role: string): Promise<void> =>
+    writePersistedRole(file, {
+      session_id: identity.id,
+      role,
+      client_instance_id: options.clientInstanceID,
+    })
+
+  /**
    * Take back the role persisted for `previousSessionID` (this id on `--resume`,
    * the pre-`/clear` id on a handoff) with a soft claim naming that predecessor. The listener
    * grants such a claim only when that predecessor has no live registry entry, when its entry
@@ -1158,11 +1171,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     heldRole = persisted.role
     const currentFile = roleStateFile(options.stateDirectory, identity.id)
     if (previousFile !== currentFile) await rm(previousFile, { force: true })
-    await writePersistedRole(currentFile, {
-      session_id: identity.id,
-      role: persisted.role,
-      client_instance_id: options.clientInstanceID,
-    })
+    await writeRoleRecord(currentFile, persisted.role)
   }
 
   let regained: RoleRegainHook | undefined
@@ -1685,13 +1694,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     },
     async rememberRole(role) {
       heldRole = role
-      // The record names this process, so a second one reading the same state directory — a
-      // `claude` that resumed this session id — tells its own record from this one's.
-      await writePersistedRole(roleStateFile(options.stateDirectory, identity.id), {
-        session_id: identity.id,
-        role,
-        client_instance_id: options.clientInstanceID,
-      })
+      await writeRoleRecord(roleStateFile(options.stateDirectory, identity.id), role)
     },
     async shutdown() {
       if (shuttingDown) return

@@ -63,6 +63,20 @@ func (c RoleClaim) LastAnsweredAt() int64 {
 	return c.ClaimedAt
 }
 
+// HeldByProcess reports whether instance names the very process this claim records as the
+// holder's. It is the one strict test of a claim against a process, which every decision that
+// weighs the two reads through: the release (RoleReleaseAuthority.frees), a claim of a role held
+// under the claimant's own session id (POST /v1/roles/set), and the renewal
+// (Registry.renewRoleClaim, which also writes where the claim names no process at all).
+//
+// An absent id on either side names no process, so it matches nothing: a claim an earlier build
+// wrote names none, and a caller that states none says nothing about which process it is. That
+// is the opposite of session.InstanceMatches, the loose test the predecessor rule reads, where
+// an absent id on either side is a client predating the field and the claim goes through.
+func (c RoleClaim) HeldByProcess(instance string) bool {
+	return instance != "" && c.ClientInstanceID == instance
+}
+
 // ExpiredRoleClaimRelease reports the conditional-delete outcome for an
 // expired role claim.
 type ExpiredRoleClaimRelease uint8
@@ -380,7 +394,7 @@ func (a RoleReleaseAuthority) frees(claim RoleClaim, sessionID string) bool {
 	if claim.HolderSessionID != sessionID {
 		return false
 	}
-	return a.Force || (a.ClientInstanceID != "" && a.ClientInstanceID == claim.ClientInstanceID)
+	return a.Force || claim.HeldByProcess(a.ClientInstanceID)
 }
 
 // releaseRoleClaims releases the claim of each role topic in topics that release authorises
@@ -508,7 +522,7 @@ func (r *Registry) renewRoleClaim(ctx context.Context, role, sessionID, clientIn
 	if entry == nil || claim.HolderSessionID != sessionID {
 		return nil
 	}
-	if claim.ClientInstanceID != "" && claim.ClientInstanceID != clientInstanceID {
+	if claim.ClientInstanceID != "" && !claim.HeldByProcess(clientInstanceID) {
 		return nil
 	}
 	renewed := claim
