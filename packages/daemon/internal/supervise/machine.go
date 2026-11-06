@@ -816,9 +816,9 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 // event that is stale is logged once and dropped. A suspension of a claim whose agent is in a turn
 // answers ErrSuspendHeld (holdSuspension). A request the wake pacing never makes wait, reaching a
 // claim a paced wake parked with no process, drops that wake before the lookup and is then
-// decided against the state the gate found (dropWakeFor); an operator's task over a launch
-// parked above a process the claim still records runs that launch first, so the row that queues
-// the task is the row of the claim that launch leaves (runParkedLaunchNow).
+// decided against the state the gate found (dropWakeFor); an operator's task the claim can take,
+// over a launch parked above a process the claim still records, runs that launch first, so the
+// row that queues the task is the row of the claim that launch leaves (runParkedLaunchNow).
 //
 // Handle returns when the decision is made, which includes the runtime call it makes: a stop
 // waits out its grace, a resume waits out the previous incarnation. A caller feeding many claims
@@ -1640,19 +1640,21 @@ func (m *Machine) letGo() {
 //
 // Nothing is judged at all while a launch the pacing holds waits over the process the observation
 // is about (launchWaits): what happens to that process is already decided, and its turn replaces
-// it (wakeNow). A second report of the one death would otherwise be a second death — the sweep,
-// the connection-closed probe (closed), the boot interval (bootInterval), the probe timer
-// (reprobe) and the registration deadline (registrationDeadline) each reach this with a report of
-// their own — charging Deaths and LaunchFailures again (died, chargeDeath) and replacing the wake
-// with a fresh token at the back of the queue, so a claim with work outstanding would fail before
+// it (wakeNow). A second report of the one death would otherwise be a second death, charging
+// Deaths and LaunchFailures again (died, chargeDeath) and replacing the wake with a fresh token
+// at the back of the queue, so a claim with work outstanding would fail before
 // launch_failure_limit real failures. The same holds for every other verdict: a process found
 // stale, displaced, uncertain or alive says nothing the relaunch this wake holds does not already
-// answer. The guard sits here rather than in the fence because three of those paths are a timer
-// or a closed connection rather than a RuntimeObservation, and all of them pass through this one
-// judgement. What still arrives during the wait is the sweep's own observation and a closing
-// connection: the park disarms the four timers of the process it waits over (parkWake), and
-// probe makes no call and arms nothing while the launch waits, so no answer of the runtime's can
-// arm the probe interval inside it either.
+// answer.
+//
+// The report this guard answers is the runtime's sweep (observe), which observes the process
+// whatever the claim is doing. The four other paths that report one — a closed connection
+// (closed), the boot interval (bootInterval), the probe timer (reprobe) and the registration
+// deadline (registrationDeadline) — ask the runtime through probe, whose own guard stops each of
+// them inside the wait: no call is made, and nothing arms the probe interval there. So the pair
+// covers every path, one report here and four in probe. The guard stays in the judgement rather
+// than in the fence because it answers every verdict the sweep can carry — gone, stale,
+// displaced, uncertain, alive — where each of them is acted on.
 func (m *Machine) judge(ctx context.Context, observation runtime.Observation, alive func(context.Context) error, again TimerKind, after time.Duration) error {
 	if m.launchWaits() {
 		m.log.Info("supervise: an observation of the process a waiting launch replaces decides nothing; its turn replaces that process",

@@ -147,6 +147,11 @@ func pendingID(p *Delivery) string {
 // because its root had no architect to hear it never wedges the claim: the start of the root's
 // next run, retrying on its backoff, is what releases it, and the refusal that start is answered
 // with is over once the architect's turn on the held task has ended and the delivery retired.
+//
+// Of a task an operator gave the claim, which carries no id of its own and no outbox row
+// (operatorDelivery), neither thing accepted above can be true, so the refusal below is exactly
+// a claim that holds a pending delivery. That is the condition runParkedLaunchNow reads before
+// it runs a parked launch for such a task, so nothing runs for one this refuses.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	id, task := request.ID, request.Task
 	delivered := request.Row > 0 && slices.Contains(m.claim.DeliveredRows, request.Row)
@@ -228,7 +233,10 @@ func (c Claim) openRoundHoldsTask() bool {
 // holds before the row that queues it is reached (runParkedLaunchNow). A person is waiting on
 // that task and the paced turn is tens of minutes away in a wave, so the claim this sees is one
 // whose launch has run: it is launching over the process that launch let go, and the task is
-// queued for the process it started, which is where every task held here goes.
+// queued for the process it started, which is where every task held here goes. A task the claim
+// refuses is no such task — a claim already holding a delivery answers it "a delivery is already
+// pending" and no launch runs for it (queue) — and the send this refusal makes first reaches the
+// hold with the launch still waiting, so the task the claim is holding stays for that turn.
 //
 // An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
 // sent (Claim.LeftPodRound), the way the round's own end drops one (dropUpdateTask): the worker

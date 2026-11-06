@@ -180,10 +180,11 @@ func (m *Machine) reserveWake(ctx context.Context, kind WakeKind, exempt bool, r
 // its own at each one, which is a claim failing before launch_failure_limit real failures
 // (judge's own guard answers what they report, and this keeps them from reporting, as probe's
 // own guard keeps the probe interval from being armed again inside the wait). The turn replaces
-// the process and arms the new one's timers (launchNow, armBoot), and the runtime's sweep still
-// observes the process meanwhile. TimerSuspend is kept: a suspension held over this claim is
-// still bounded by the deadline its arrival set (holdSuspension), which the wake's turn does not
-// run.
+// the process and arms the new one's timers (launchNow, armBoot), a turn whose own lifecycle
+// recheck refuses keeps the process and arms these again for it (relaunchRefused, watchAgain),
+// and the runtime's sweep observes the process throughout. TimerSuspend is kept: a suspension
+// held over this claim is still bounded by the deadline its arrival set (holdSuspension), which
+// the wake's turn does not run.
 func (m *Machine) parkWake(ctx context.Context, waiting *wake, after time.Duration) error {
 	m.wake = waiting
 	m.arm(TimerWake, after, "")
@@ -225,14 +226,16 @@ func (m *Machine) parkWake(ctx context.Context, waiting *wake, after time.Durati
 //   - The tree lifecycle is rechecked (checkLaunch), because the turn can be tens of minutes after
 //     the check launchAfter made: an operator's close reserves its tree's cleanup before it stops
 //     the tree's claims, so a wake that fires between the two would launch into a tree whose
-//     cleanup is reserved. The refusal goes where launchAfter's own goes (relaunchRefused), and
-//     the retry it may leave waiting re-enters the gate (wake.again).
+//     cleanup is reserved. The refusal goes where launchAfter's own goes (relaunchRefused), which
+//     over the process this turn keeps arms again what the park disarmed to watch it, and the
+//     retry it may leave waiting re-enters the gate (wake.again).
 //   - A turn the process it replaces may have started is taken back first (interrupted), exactly
 //     as replaceProcess takes one back before it relaunches. The gate let this wake park over a
 //     live process, and that process can have confirmed a task since: letting it go without the
 //     take-back would leave a confirmed task in a launching claim, which settle retires as served
-//     though no turn of it ever finished (retirePending). The other half of that race is the
-//     delivery sent during the wait, which sendPending no longer makes (delivery.go).
+//     though no turn of it ever finished (retirePending). The other half of that race is a
+//     delivery sent inside the wait, which sendPending holds back for as long as a launch waits
+//     over the process it would reach (launchWaits, delivery.go).
 func wakeNow(m *Machine, ctx context.Context, _ Event) error {
 	waiting := m.wake
 	m.wake = nil
@@ -258,6 +261,21 @@ func wakeNow(m *Machine, ctx context.Context, _ Event) error {
 // (wakeRan): true of the turn, false of the launch a request pulled forward. The wait reported
 // is the whole of the hold either way — for the turn, the hold the pacing gave it; for a launch
 // a request pulled forward, how long it had been held when that request arrived.
+//
+// A take-back the store refuses ends the wake's work at the second step, with the process the
+// claim records kept and the wake spent, and nothing is armed again for that process — where
+// the lifecycle refusal at the first step arms what the park took (relaunchRefused, watchAgain).
+// The difference is what the store is reached for: only a delivery a turn has confirmed is
+// taken back (interrupted), a turn is confirmed in a ready or idle claim alone, and the
+// confirmation itself leaves that claim working — the table ignores a turn start in every state
+// a process is still coming up in (turnStarted, unready), and no live claim goes back to one of
+// them (helloed). So the claim at that return is working or idle, which calls for neither the
+// boot interval nor the registration deadline a park takes from a claim still coming up; its
+// confirmed task waits on no turn bound, because the confirmation disarms that bound where it
+// sets ConfirmedAt (confirm); and the probe interval an uncertain answer may have armed is one
+// the sweep's next observation arms again (observe, judge). What such a claim is left without
+// is the relaunch this wake held, which is what the lifecycle refusal leaves owing too: the
+// next report of the process, or the sweep's own stale-plugin pass, raises one again.
 func (m *Machine) runWake(ctx context.Context, waiting *wake, paced bool) error {
 	if waiting.kind == WakeLaunch {
 		if err := m.checkLaunch(ctx); err != nil {
@@ -364,14 +382,20 @@ func (m *Machine) dropWakeFor(ev Event) *wake {
 // nothing while no launch waits only because one does (judge). A death already charged would be
 // charged again at the next report of it (died, chargeDeath).
 //
-// Three things it does not touch. A plugin-task wake replaces no process and holds no send back,
+// Four things it does not touch. A plugin-task wake replaces no process and holds no send back,
 // so the claim it parks goes on taking work and the round opens at its own turn (launchWaits,
 // openPluginUpdateIfStale). A request the table refuses or ignores decides nothing, so it starts
 // no launch either: the row is read here, before anything runs, exactly as Handle reads it after.
-// And a claim holding a suspension is left to its hold: the turn of such a claim ends the
-// suspension rather than launching (wakeNow, endHeld), which is not what a task asks for, and the
-// task is queued and kept until the hold lifts whichever process the claim is running
-// (sendPending).
+// A task the row acts on but queue refuses decides nothing either, and the claim already holding
+// a delivery is the whole of that refusal for an operator's task: the deliver route sends it with
+// no id of its own and no outbox row (operatorDelivery, RequestDeliver.ID, Claim.DeliveredRows),
+// so neither of the two things queue accepts over a pending delivery — the repeat of that very
+// delivery under its id, and a row whose task the claim has already taken — can be what arrived,
+// and what is left is "a delivery is already pending" (queue, ErrDeliveryPending). Running the
+// launch for it would replace a live process for a request the claim answers with nothing. And a
+// claim holding a suspension is left to its hold: the turn of such a claim ends the suspension
+// rather than launching (wakeNow, endHeld), which is not what a task asks for, and the task is
+// queued and kept until the hold lifts whichever process the claim is running (sendPending).
 //
 // The launch takes no second token — the reservation was taken once, at the gate — so the wakes
 // behind it keep the turns they already hold, and the line it writes says the pacing did not
@@ -381,6 +405,9 @@ func (m *Machine) runParkedLaunchNow(ctx context.Context, ev Event) error {
 		return nil
 	}
 	if r, ok := table[key{m.claim.State, kindOf(ev)}]; !ok || r.act == nil {
+		return nil
+	}
+	if m.claim.Pending != nil {
 		return nil
 	}
 	waiting := m.wake

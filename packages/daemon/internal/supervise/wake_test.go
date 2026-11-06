@@ -7,6 +7,7 @@ package supervise
 // advanceable clock: nothing here sleeps.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -870,12 +871,15 @@ func TestASecondReportOfTheOneDeathOverAWaitingRelaunchChargesNothing(t *testing
 
 // The same death through the second path that reports one, and the order a restart wave makes:
 // the sweep reports the process gone, and the connection it held closes behind it (closed,
-// table.go), which probes the process and is told the same death. The guard the sweep's report
-// met is in the judgement itself (judge), so this path meets it too: the death is charged once,
-// and the wake keeps the turn the queue gave it rather than going to the back with a fresh token.
+// table.go). That path asks the runtime about the process before it judges anything, and while
+// the launch waits it asks nothing: probe answers it where it stands (launchWaits), so no call
+// is made and the one death stays charged once. The wake keeps the turn the queue gave it
+// rather than going to the back with a fresh token.
 //
-// The negative control is the guard reverted (judge's launchWaits): the budgets then read two
-// deaths and two launch failures and the wake is due a turn later, both of which this test reads.
+// The negative control is probe's guard reverted (probe's launchWaits): the closed connection
+// then probes the process, which this test reads at the runtime's probes. The budgets would not
+// read it — judge's guard answers whatever that probe reports — so the probes are where the two
+// guards are told apart.
 func TestAClosedConnectionAfterTheSweepsDeathChargesNothingMore(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	behind := h.machineFor(wakeClaim(secondToken, StateQueued))
@@ -886,11 +890,10 @@ func TestAClosedConnectionAfterTheSweepsDeathChargesNothingMore(t *testing.T) {
 	waiting := h.wantWaitingWake(WakeLaunch)
 	h.mustPostTo(behind, RequestSpawn{Claim: secondToken})
 
-	// The shim's connection closes behind the process the sweep found gone, and the runtime says
-	// of it what the sweep said.
-	h.rt.ScriptProbe(fake.ProbeResult{Kind: runtime.Gone})
+	// The shim's connection closes behind the process the sweep found gone.
 	h.must(StreamClosed{Claim: h.token})
 
+	h.wantCalls("Probe", 0)
 	h.wantBudgets(Budgets{LaunchFailures: 1, Deaths: 1})
 	h.wantWakeDueAt(waiting)
 	if got := h.claim(); got.Locator == nil || *got.Locator != dead {
@@ -908,15 +911,18 @@ func TestAClosedConnectionAfterTheSweepsDeathChargesNothingMore(t *testing.T) {
 }
 
 // A process that dies while it is booting is the common failure of a restart wave, and the park
-// keeps that dead process recorded until the launch's turn (parkWake). Its boot interval must not
-// fire into the wait: the probe it makes would report the one death again, where before this park
-// the death went straight to a launch and letGo disarmed the timer with the process it watched.
-// So the park disarms it, and the turn's launch arms the new process's own (armBoot).
+// keeps that dead process recorded until the launch's turn (parkWake). Its boot interval goes
+// with the rest of that process's timers at the park, so nothing of it falls inside the wait:
+// the probe a boot interval makes would be about a process whose fate the waiting relaunch has
+// already decided, and the turn is what replaces it and arms the new process's own (armBoot).
+// The test reads the timer gone for the whole of the wait and no probe made inside it.
 //
-// The negative control is the disarm reverted (parkWake's timers): the boot interval then probes
-// the process inside the wait, which this test reads at the runtime's probes. With the other half
-// of the same fix reverted as well (judge's launchWaits) that probe's answer is charged too, and
-// the budgets read a second launch failure this claim never had.
+// The negative control is the disarm reverted (parkWake's timers): the boot interval is then
+// armed over the dead process and fires inside the wait, which this test reads where it asks
+// the machine for that timer. Nothing else of the test moves with that one revert — the probe
+// such a timer makes is stopped by probe's own guard, and what a probe reported would be
+// stopped by judge's — so the disarm is what keeps the timer from firing at all, and those two
+// are what keep a timer that did fire from charging the one death a second time.
 func TestTheBootIntervalOfADeadProcessIsNotFiredWhileItsRelaunchWaits(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateShimConnected)
@@ -934,6 +940,9 @@ func TestTheBootIntervalOfADeadProcessIsNotFiredWhileItsRelaunchWaits(t *testing
 	h.wantBudgets(Budgets{LaunchFailures: 1})
 	waiting := h.wantWaitingWake(WakeLaunch)
 	h.wantCalls("Probe", 0)
+	if _, armed := h.m.timers[TimerBoot]; armed {
+		t.Fatal("the boot interval of the dead process is armed, want the park to have disarmed it with the process's other timers")
+	}
 
 	// The process really is gone, so that is what the runtime answers anything that probes it.
 	h.rt.ScriptProbe(fake.ProbeResult{Kind: runtime.Gone})
@@ -942,6 +951,9 @@ func TestTheBootIntervalOfADeadProcessIsNotFiredWhileItsRelaunchWaits(t *testing
 	h.wantBudgets(Budgets{LaunchFailures: 1})
 	h.wantCalls("Probe", 0)
 	h.wantWakeDueAt(waiting)
+	if _, armed := h.m.timers[TimerBoot]; armed {
+		t.Fatal("the boot interval is armed inside the wait, want nothing of the dead process watching it until the turn")
+	}
 
 	h.advance(wakePart)
 
@@ -949,17 +961,21 @@ func TestTheBootIntervalOfADeadProcessIsNotFiredWhileItsRelaunchWaits(t *testing
 	h.wantStarts(h.token, 2)
 }
 
-// The registration deadline is the other timer the dead process leaves armed: an agent that said
-// hello and registered has that long to say it is ready, and a claim whose process dies in the
-// middle of it is parked over the dead process with the deadline still to run. Fired inside the
-// wait it would probe the process, read the death a second time and retire a process already
-// gone, so the park disarms it with the boot interval; the launch at the turn arms the new
-// process's own (armRegistration).
+// The registration deadline is the other timer of a dead process the park takes: an agent that
+// said hello and registered has that long to say it is ready, and a claim whose process dies in
+// the middle of it is parked over the dead process with the deadline still to run. Fired inside
+// the wait it would be a deadline over a process the waiting relaunch has already decided — it
+// would read the death a second time and retire a process already gone — so the park disarms it
+// with the boot interval, and the launch at the turn arms the new process's own
+// (armRegistration). The test reads the timer gone for the whole of the wait and no probe made
+// inside it.
 //
-// The negative control is the disarm reverted (parkWake's timers): the deadline then probes the
-// process inside the wait and suspends it, which this test reads at the runtime's probes. With
-// the other half reverted as well (judge's launchWaits), what it reads of the process is charged
-// to the claim a second time.
+// The negative control is the disarm reverted (parkWake's timers): the deadline is then armed
+// over the dead process and fires inside the wait, which this test reads where it asks the
+// machine for that timer. Nothing else of the test moves with that one revert — the probe the
+// deadline makes is stopped by probe's own guard, and what a probe reported would be stopped by
+// judge's — so the disarm is what keeps the deadline from firing at all, and those two are what
+// keep one that did fire from retiring a process already gone.
 func TestTheRegistrationDeadlineOfADeadProcessIsNotFiredWhileItsRelaunchWaits(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateRegistered)
@@ -974,6 +990,9 @@ func TestTheRegistrationDeadlineOfADeadProcessIsNotFiredWhileItsRelaunchWaits(t 
 	waiting := h.wantWaitingWake(WakeLaunch)
 	h.wantBudgets(Budgets{LaunchFailures: 1})
 	h.wantCalls("Probe", 0)
+	if _, armed := h.m.timers[TimerRegistration]; armed {
+		t.Fatal("the registration deadline of the dead process is armed, want the park to have disarmed it with the process's other timers")
+	}
 
 	// The process really is gone, so that is what the runtime answers anything that probes it.
 	h.rt.ScriptProbe(fake.ProbeResult{Kind: runtime.Gone})
@@ -982,6 +1001,9 @@ func TestTheRegistrationDeadlineOfADeadProcessIsNotFiredWhileItsRelaunchWaits(t 
 	h.wantBudgets(Budgets{LaunchFailures: 1})
 	h.wantCalls("Probe", 0)
 	h.wantWakeDueAt(waiting)
+	if _, armed := h.m.timers[TimerRegistration]; armed {
+		t.Fatal("the registration deadline is armed inside the wait, want nothing of the dead process watching it until the turn")
+	}
 	if got := h.claim(); got.State == StateRetired {
 		t.Fatal("the claim was retired by a deadline inside the wait, want the launch's turn to decide it")
 	}
@@ -1080,6 +1102,189 @@ func TestAWakeWhoseTreeCleanupWasReservedWhileItWaitedLaunchesNothing(t *testing
 	if got := second.Claim(); got.Session == "" {
 		t.Fatal("the suspended claim records no session, want the one the tree's close reaps")
 	}
+}
+
+// unansweredCheckLaunchStore is a store whose lifecycle recheck fails while failing is set, with
+// a failure that is not the tree's — the store did not answer — which is the refusal a launch's
+// turn can meet over a process the claim still records and the one that clears by itself
+// (relaunchRefused, which answers a reserved cleanup differently). A test sets it after the
+// launch it means to refuse has parked, since every launch checks the lifecycle before the gate
+// as well (launchAfter).
+type unansweredCheckLaunchStore struct {
+	*memStore
+	failing bool
+}
+
+func (s *unansweredCheckLaunchStore) CheckLaunch(ctx context.Context, c Claim) error {
+	if s.failing {
+		return fmt.Errorf("check the launch of %s: the store did not answer", c.Token)
+	}
+	return s.memStore.CheckLaunch(ctx, c)
+}
+
+// A launch refused at its turn over a process the claim still records leaves that process
+// watched. The park disarmed the boot interval and the registration deadline of the process the
+// launch was to replace (parkWake), the wake is spent by the time the recheck refuses, and the
+// refusal keeps the claim exactly as it stands (relaunchRefused): without the timers armed again
+// (watchAgain) a process still booting would have nothing left to retire it, and a pod whose
+// agent never registers would sit in shim_connected for the rest of the tree's life. With them
+// armed, the deadline retires it and relaunches on the claim's own launch budget, which is what
+// an unpaced daemon's refusal left behind.
+//
+// The negative control is the arming reverted (relaunchRefused's watchAgain): the claim then
+// stands shim_connected over the booting process with no timer armed for it, and past the
+// deadline nothing has retired that process and nothing is charged, which this test reads at
+// the timers and at the runtime's suspends.
+func TestALaunchRefusedAtItsTurnLeavesItsBootingProcessWatched(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateShimConnected)
+	booting := h.locator()
+	store := &unansweredCheckLaunchStore{memStore: h.store}
+	h.m.deps.Store = store
+
+	// The runtime reports the process at another address, which relaunches it; the launch waits
+	// its turn over the process it is to replace, and the park takes that process's timers.
+	h.observe(runtime.StaleAddress)
+	waiting := h.wantWaitingWake(WakeLaunch)
+	for _, kind := range []TimerKind{TimerBoot, TimerRegistration} {
+		if _, armed := h.m.timers[kind]; armed {
+			t.Fatalf("the park left the %s timer of the process the launch replaces armed, want it disarmed", kind)
+		}
+	}
+
+	store.failing = true
+	h.advance(waiting.At.Sub(h.clock.Now()))
+
+	h.wantState(StateShimConnected)
+	h.wantStarts(h.token, 1)
+	h.wantBudgets(Budgets{})
+	if got := h.claim(); got.Locator == nil || *got.Locator != booting {
+		t.Fatalf("the claim records %+v, want the booting process the refused launch kept, %+v", got.Locator, booting)
+	}
+	if held := h.m.View().WakeWaiting; held != nil {
+		t.Fatalf("the claim names wake %+v, want none: the turn ran and its launch was refused", held)
+	}
+	for _, kind := range []TimerKind{TimerBoot, TimerRegistration} {
+		if _, armed := h.m.timers[kind]; !armed {
+			t.Fatalf("the %s timer of the kept process is not armed, want the refusal watching it again", kind)
+		}
+	}
+
+	// The store answers again, and the agent of that process never registers: its deadline
+	// retires the process and relaunches, which is the whole of what still watches the claim.
+	store.failing = false
+	h.advance(deadline)
+
+	h.wantCalls("Suspend", 1)
+	h.wantBudgets(Budgets{LaunchFailures: 1})
+	h.wantStarts(h.token, 2)
+}
+
+// The third timer the same refusal hands back: the bound a prompt the agent acknowledged waits
+// for its turn on (acked). The park takes it with the rest of the process's timers (parkWake)
+// because the turn would be cut off by the launch anyway, and a refusal at that turn keeps both
+// the process and the prompt — so without the bound armed again (watchAgain) an agent that
+// acknowledged a task and started no turn on it would leave that task pending for ever, where
+// an unpaced daemon's refusal leaves it charged and waiting (noTurn, promptFailed).
+//
+// The negative control is the arming reverted (relaunchRefused's watchAgain): nothing then
+// bounds the acknowledged prompt, so the task keeps its id past the wait and nothing is
+// charged, which this test reads at the pending task and the budgets.
+func TestALaunchRefusedAtItsTurnBindsTheTurnItsAcknowledgedPromptAwaits(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateReady)
+	h.m.deps.PluginContract = 25
+	h.m.deps.PluginRelaunchable = true
+	store := &unansweredCheckLaunchStore{memStore: h.store}
+	h.m.deps.Store = store
+
+	// The task is sent and the agent acknowledges it, which is what arms the bound; the sweep
+	// then finds the claim's plugin stale and relaunches it, and that launch waits its turn
+	// over the process the agent is on.
+	h.must(RequestDeliver{Claim: h.token, Task: "implement the plan", Row: 7})
+	acked := h.wantPrompts(1)[0].DeliveryID
+	if _, awaiting := h.m.timers[TimerTurn]; !awaiting {
+		t.Fatal("the acknowledged prompt waits for its turn on nothing, want the bound armed")
+	}
+
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+	waiting := h.wantWaitingWake(WakeLaunch)
+	if _, awaiting := h.m.timers[TimerTurn]; awaiting {
+		t.Fatal("the park left the turn bound of the process the launch replaces armed, want it disarmed")
+	}
+
+	store.failing = true
+	h.advance(waiting.At.Sub(h.clock.Now()))
+
+	h.wantState(StateReady)
+	h.wantStarts(h.token, 1)
+	if _, awaiting := h.m.timers[TimerTurn]; !awaiting {
+		t.Fatal("the acknowledged prompt the refusal kept waits for its turn on nothing, want the bound armed again")
+	}
+
+	// No turn starts within it, so the task goes back to waiting and the prompt is charged.
+	h.advance(testRPC)
+
+	h.wantBudgets(Budgets{PromptFailures: 1})
+	if p := h.pending(); p.ID == acked || p.DeliveredAt.IsZero() {
+		t.Fatalf("the task is %+v, want it back under a new id with its read mark, past the bound of prompt %s", p, acked)
+	}
+}
+
+// The other half of the same refusal: the mark a stale-plugin relaunch leaves goes with the
+// relaunch it names. PluginRelaunchFor says what contract the last relaunch was made for, and a
+// registration that still differs once it has run is the second in a row, charged toward failed
+// (relaunchStale, staleRegistration). A relaunch the lifecycle recheck refuses at its turn has
+// not run and nothing is left to run it — the error goes back to whoever asked — so the mark is
+// cleared where it names this daemon (relaunchRefused), and the old process registering
+// afterwards is relaunched for free, as the first stale registration of any claim is.
+//
+// The negative control is the clearing reverted (relaunchRefused's PluginRelaunchFor): the
+// claim then names this daemon's contract for a relaunch that never ran, and the
+// re-registration takes the charged path, which this test reads at the mark and at the budgets.
+func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateReady)
+	h.m.deps.PluginContract = 25
+	h.m.deps.PluginRelaunchable = true
+	store := &unansweredCheckLaunchStore{memStore: h.store}
+	h.m.deps.Store = store
+
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+	waiting := h.wantWaitingWake(WakeLaunch)
+	if got := h.claim(); got.PluginRelaunchFor != 25 {
+		t.Fatalf("the claim whose stale-plugin relaunch waits is marked for %d, want 25", got.PluginRelaunchFor)
+	}
+
+	store.failing = true
+	h.advance(waiting.At.Sub(h.clock.Now()))
+
+	h.wantState(StateReady)
+	h.wantStarts(h.token, 1)
+	if got := h.claim(); got.PluginRelaunchFor != 0 {
+		t.Fatalf("the claim is marked for %d after its relaunch was refused, want 0: no relaunch happened and none is owed", got.PluginRelaunchFor)
+	}
+
+	// The agent of the process that was never replaced registers again, on the contract it is
+	// still running. It is the first stale registration this claim has had relaunched, so it is
+	// relaunched and charged nothing, and refused as every stale registration is.
+	store.failing = false
+	err := h.handle(RequestRegister{Claim: h.token, Generation: h.generation(), Session: session,
+		SessionFile: sessionFile, CapabilityHash: []byte("capability"), PluginContract: 24})
+
+	var refusal claim.Refusal
+	if !errors.As(err, &refusal) || refusal != claim.StalePluginContract(24, 25) {
+		t.Fatalf("the re-registration after the refused relaunch = %v, want the stale-plugin refusal naming 24 and 25", err)
+	}
+	h.wantBudgets(Budgets{})
+
+	// That relaunch is paced like any other, so it waits its turn over the process it replaces
+	// and runs there, this time with nothing refusing it.
+	again := h.wantWaitingWake(WakeLaunch)
+	h.advance(again.At.Sub(h.clock.Now()))
+
+	h.wantStarts(h.token, 2)
+	h.wantBudgets(Budgets{})
 }
 
 // A plugin task's wake ends no held suspension. The task waits over a claim whose agent is in a
@@ -1264,31 +1469,32 @@ func TestAnOperatorsDeliveryOverAParkedLaunchRunsThatLaunchNow(t *testing.T) {
 	h.wantWakeLine(waveToken(0), "kind=launch", "waitedFor="+(2*(wakeInterval+wakePart)).String())
 }
 
-// The same park over a process that is already dead, which is what a restart wave is full of:
-// the sweep found the process gone, the death was charged once, and the relaunch it raised waits
-// its turn with that dead process still recorded (died, parkWake). An operator's task must not
-// leave that claim with no launch over it: the park disarmed the dead process's own timers, so
-// nothing else would retire it, and the next report of the same death — the sweep's next pass,
-// the connection closing behind it — would run the whole death again, charging a second death
-// and a second launch failure for the one that happened (judge's launchWaits). So the task runs
-// the relaunch instead, and the claim is left where the death alone would have left it.
+// The same park over a process that is already dead, met by a task the claim refuses. The claim
+// is working with a task the death took back, so the operator's own task is answered "a delivery
+// is already pending" (queue): a claim that already holds a delivery is the whole of that
+// refusal for a task sent with no id and no outbox row, which is what the operator's deliver
+// route sends. Nothing runs for a request the claim answers with nothing, so the parked launch
+// is left where it waits (runParkedLaunchNow) and the claim is left where the death alone left
+// it — working, recording the dead process, with the relaunch due at the moment the queue gave
+// it.
 //
-// The claim here is working with a task the death took back, so the operator's own task is
-// refused "a delivery is already pending" (queue). The refusal is the delivery's answer, not the
-// launch's: the row acts, so the launch runs, and the claim is launching over a new process when
-// the refusal is returned.
+// Leaving it parked loses nothing. The wake is what holds that process's whole fate, and while
+// it waits every report of the process is answered: the sweep's observation at judge's guard,
+// and the four timer and closed-connection paths at probe's, so the one death stays charged
+// once. The turn relaunches, and the task the claim is still holding goes to the process that
+// launch starts.
 //
-// The negative control is the launch dropped where it is run (dropWakeFor widened to a claim
-// that records a process, with no run in its place): the claim then stands working over the
-// dead process with no launch over it, which this test reads at the state, and the sweep's next
-// report of that same death charges a second death and a second launch failure.
-func TestAnOperatorsDeliveryRefusedOverAParkedRelaunchStillRunsIt(t *testing.T) {
+// The negative control is the refusal test reverted (runParkedLaunchNow's pending delivery): the
+// launch then runs for a task the row refuses, replacing a live claim's process unpaced for a
+// request that was answered with nothing, which this test reads at the state and the runtime's
+// starts.
+func TestAnOperatorsDeliveryTheClaimRefusesRunsNoParkedRelaunch(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateWorking)
 	dead := h.locator()
 
 	h.observe(runtime.Gone)
-	h.wantWaitingWake(WakeLaunch)
+	waiting := h.wantWaitingWake(WakeLaunch)
 	h.wantBudgets(Budgets{LaunchFailures: 1, Deaths: 1})
 	took := h.pending()
 
@@ -1297,22 +1503,30 @@ func TestAnOperatorsDeliveryRefusedOverAParkedRelaunchStillRunsIt(t *testing.T) 
 	if !errors.Is(err, ErrDeliveryPending) {
 		t.Fatalf("the operator's task over a claim already holding one = %v, want %v", err, ErrDeliveryPending)
 	}
-	h.wantState(StateLaunching)
-	h.wantStarts(h.token, 2)
+	h.wantState(StateWorking)
+	h.wantStarts(h.token, 1)
+	h.wantWakeDueAt(waiting)
 	h.wantBudgets(Budgets{LaunchFailures: 1, Deaths: 1})
-	if held := h.m.View().WakeWaiting; held != nil {
-		t.Fatalf("the claim names wake %+v, want none: its launch ran where the task arrived", held)
+	if got := h.claim(); got.Locator == nil || *got.Locator != dead {
+		t.Fatalf("the claim records %+v, want the process it found dead, %+v: a refused task replaces nothing", got.Locator, dead)
 	}
 	if p := h.pending(); p.ID != took.ID || p.Task != took.Task {
 		t.Fatalf("the pending task is %+v, want the one the death took back, %+v: the refused task queued nothing", p, took)
 	}
 
-	// The sweep's next pass reports the same death again. It names a process this claim no longer
-	// records, so nothing is charged for it.
+	// The sweep's next pass reports the same death again, and the wake still waiting over that
+	// process is what answers it: one death, charged once.
 	h.must(RuntimeObservation{Observation: runtime.Observation{Locator: dead, Kind: runtime.Gone, At: h.clock.Now()}})
 
 	h.wantBudgets(Budgets{LaunchFailures: 1, Deaths: 1})
+	h.wantStarts(h.token, 1)
+	h.wantWakeDueAt(waiting)
+
+	h.advance(waiting.At.Sub(h.clock.Now()))
+
+	h.wantState(StateLaunching)
 	h.wantStarts(h.token, 2)
+	h.wantBudgets(Budgets{LaunchFailures: 1, Deaths: 1})
 }
 
 // The same park over a dead process, reached by a claim that is ready and holds no task: the

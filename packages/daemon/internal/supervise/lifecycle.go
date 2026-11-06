@@ -50,16 +50,43 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 
 // relaunchRefused is a relaunch checkLaunch refused, relaunch the call that made it
 // (relaunchAfterFailure, launchAfter) and so the one to try again. A claim that records its
-// process, or runs none — a spawn, a resume, a retry — is left as it was. A live claim that records
-// none has already let its process go: a retirement's relaunch whose stop already ended the process
-// (the registration deadline and a prompt retirement check before they stop, so the check failed
-// while the stop waited out its grace), or a launch whose write failed, waiting (relaunchLater). A
-// claim left there would have nothing watching or relaunching it. A reserved cleanup suspends it
-// for the daemon, its session kept, for the tree's close to retire. Any other failure is not the
-// tree's — a store that did not answer — and ends nothing: the relaunch waits (relaunchLater), as
-// a stop that fails does.
+// process, or runs none — a spawn, a resume, a retry — is left as it was, once two things the
+// refused relaunch left on it are put right: the watch its park took off that process, and the
+// plugin mark it made.
+//
+// The process is watched again (watchAgain). The refusal can come at the turn of a launch the
+// pacing held over that process, and the park that held it disarmed the boot interval, the
+// registration deadline, the probe interval and the turn bound of the process it was to replace
+// (parkWake, runWake). The claim keeps that process and the wake is spent, so a booting process
+// whose agent never registers would meet no deadline and a prompt the agent acknowledged would
+// wait for its turn on nothing. A refusal met anywhere else disarmed none of them, and watchAgain
+// leaves an armed timer where it is.
+//
+// PluginRelaunchFor is cleared where it names this daemon's contract. The invariant the mark
+// carries is that it names a relaunch that has happened or is still owed, which is what lets
+// staleRegistration read a registration that still differs after it as the second stale one in a
+// row and charge the claim toward failed (relaunchStale, endPodUpdate). This relaunch neither
+// happened nor is owed — the error is returned to whoever asked for it and nothing retries it —
+// so a process that registers on the old contract afterwards must be relaunched for free, as the
+// first stale registration is. The two branches below keep the mark, because each keeps the
+// relaunch with it: the one that waits for the probe interval still owes it (relaunchLater), and
+// the suspension's process is stopped for the tree's close. Nothing is written here, and nothing
+// need be: a restart reads the claim as the store holds it, and the sweep's next stale-plugin
+// pass raises the relaunch again and marks it anew (refreshPlugin).
+//
+// A live claim that records none has already let its process go: a retirement's relaunch whose
+// stop already ended the process (the registration deadline and a prompt retirement check before
+// they stop, so the check failed while the stop waited out its grace), or a launch whose write
+// failed, waiting (relaunchLater). A claim left there would have nothing watching or relaunching
+// it. A reserved cleanup suspends it for the daemon, its session kept, for the tree's close to
+// retire. Any other failure is not the tree's — a store that did not answer — and ends nothing:
+// the relaunch waits (relaunchLater), as a stop that fails does.
 func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Context) error, err error) error {
 	if m.claim.Locator != nil || !slices.Contains(live, m.claim.State) {
+		if m.claim.PluginRelaunchFor == m.deps.PluginContract {
+			m.claim.PluginRelaunchFor = 0
+		}
+		m.watchAgain()
 		return err
 	}
 	if errors.Is(err, treelifecycle.ErrCleanupReserved) {
@@ -69,6 +96,49 @@ func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Con
 	m.log.Warn("supervise: the lifecycle check of the retired process's relaunch failed; trying it again at the probe interval", "error", err)
 	m.relaunchLater(relaunch)
 	return errors.Join(err, m.persist(ctx))
+}
+
+// watchAgain arms again what watches the process the claim records, where that is not armed: the
+// timers the claim's state calls for, which are the ones a restart reading this claim back from
+// the store would arm for it (NewMachine), and the bound an acknowledged prompt waits for its
+// turn on. Its one caller is the refusal above, over a claim that keeps its process with the
+// launch that was to replace it gone (relaunchRefused).
+//
+// A claim still coming up is watched by its boot interval and its registration deadline, a
+// registered one by the deadline alone, and a claim whose agent is ready by neither: a live
+// session is watched by the runtime's sweep (observe) and by its own connection, and the probe
+// interval is an uncertain answer's retry rather than a watch of the claim's — the sweep asks
+// again at its own pass. The turn bound goes with them for a prompt Oh My Pi acknowledged and no
+// turn has started on (acked, awaitingResult), for the same RPC wait that prompt was given, so
+// one the agent read and never turned on still fails rather than waiting for ever (noTurn).
+//
+// A timer already armed keeps the moment it already holds: a refusal the launch path meets
+// before the pacing's gate disarmed nothing (launchAfter), and arming again there would hand the
+// process a fresh boot interval and a fresh deadline at every refusal.
+func (m *Machine) watchAgain() {
+	if m.claim.Locator == nil {
+		return
+	}
+	armed := func(kind TimerKind) bool {
+		_, ok := m.timers[kind]
+		return ok
+	}
+	switch m.claim.State {
+	case StateLaunching, StateShimConnected:
+		if !armed(TimerBoot) {
+			m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
+		}
+		if !armed(TimerRegistration) {
+			m.armRegistration()
+		}
+	case StateRegistered:
+		if !armed(TimerRegistration) {
+			m.armRegistration()
+		}
+	}
+	if p := m.claim.Pending; p != nil && p.ID == m.awaitingResult && p.ConfirmedAt.IsZero() && !armed(TimerTurn) {
+		m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
+	}
 }
 
 // relaunchLater leaves a claim whose process is already let go waiting launching with no process,
