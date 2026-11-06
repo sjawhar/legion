@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -501,7 +503,7 @@ func resolveGitHubApp(app GitHubApp, field string) (GitHubApp, error) {
 	case app.PrivateKey != "", app.TokenCommand != "":
 		return app, nil
 	case app.PrivateKeyCommand != "":
-		key, err := executePrivateKeyCommand(app.PrivateKeyCommand, field+".private_key_command")
+		key, err := runKeyCommand(context.Background(), app.PrivateKeyCommand, field+".private_key_command")
 		if err != nil {
 			return GitHubApp{}, err
 		}
@@ -519,16 +521,26 @@ func resolveGitHubApp(app GitHubApp, field string) (GitHubApp, error) {
 	}
 }
 
-// executePrivateKeyCommand runs command and returns its trimmed stdout. Its stderr goes to the
-// daemon's own stderr as it is written, so an operator sees what `agent-secrets` prints while it
-// waits for a person's grant (the request's id), and is kept for the failure's message.
-func executePrivateKeyCommand(command, field string) (string, error) {
-	keyCommand := exec.Command("sh", "-c", command)
+// runKeyCommand runs command, a key command the operator wrote (`private_key_command`,
+// `api_key_command`), under sh with the daemon's environment less its NATS seeds, and answers what
+// it printed, trimmed; field names the key in every refusal, which carries the command's exit and
+// stderr and never what it printed. Its stderr also goes to the daemon's own stderr as it is
+// written, so an operator sees what `agent-secrets` prints while it waits for a person's grant
+// (the request's id). ctx's end kills the command, and once it has ended the call waits at most
+// keyCommandWaitDelay for a child the shell started to let go of its output.
+func runKeyCommand(ctx context.Context, command, field string) (string, error) {
+	keyCommand := exec.CommandContext(ctx, "sh", "-c", command)
 	keyCommand.Env = runtime.WithoutNATSSeeds(os.Environ())
+	if ctx.Done() != nil {
+		keyCommand.WaitDelay = keyCommandWaitDelay
+	}
 	var stderr strings.Builder
 	keyCommand.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	result, err := keyCommand.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%s did not finish: %w", field, ctx.Err())
+		}
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
 			exit.Stderr = []byte(stderr.String())
@@ -541,6 +553,10 @@ func executePrivateKeyCommand(command, field string) (string, error) {
 	}
 	return key, nil
 }
+
+// keyCommandWaitDelay is how long a key command whose context ended may hold its output open: sh
+// killed, a child it started (`sleep`, a token helper) keeps the pipe until it exits.
+const keyCommandWaitDelay = 2 * time.Second
 
 func resolvePrivateKeySecret(name, field string) (string, error) {
 	statusText, err := runAppSecretsGet(name, "--no-request", field)

@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, awaiting-person, parked-decision, held, worker-died, update-stalled), weekly-plan ranking, backlog stewardship, a clear defect or finding ask a role sends, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
+description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, awaiting-person, parked-decision, held, worker-died, update-stalled, agent-question, agent-decision), weekly-plan ranking, backlog stewardship, a clear defect or finding ask a role sends, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
 ---
 
 # Legion Controller
@@ -54,6 +54,10 @@ because Envoy keeps no copy of a wake sent while no controller ran.
    (`skill://legion-controller/references/finding-asks.md#catch-up-at-every-start`).
 4. Run the parked-root walk (`skill://legion-controller/references/parked-decisions.md#the-walk`),
    because a decision a person made on a parked tree while no controller ran reaches you only there.
+5. Handle each entry of `read_state`'s `questionsForController` you have not answered, as its
+   `agent-question` wake says: the questions to stopped agents the daemon passed to a controller in
+   the last seven days, newest first, each `{id, issue, role, session, asker, ref, reason,
+   passedAt}`.
 
 ## Wakes
 
@@ -70,6 +74,8 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 | `held on <KEY>` | Nothing, unless `reason: "escalated"`: then an escalation |
 | `worker-died on <KEY>` (`role: "architect"`) | Re-admit once its cause is gone, else park it |
 | `update-stalled on <KEY>` | `skill://legion-controller/references/escalation.md#an-update-round-that-is-not-finishing-update-stalled` |
+| `agent-question on <KEY>` | Answer the asker or route it to the owning architect; re-admit nothing for it |
+| `agent-decision on <KEY>` | Route it to the tree's architect if the tree runs; otherwise re-admit nothing for it |
 | An architect's escalation | `skill://legion-controller/references/escalation.md` |
 | A finding ask's reference, or its answer | `skill://legion-controller/references/finding-asks.md` |
 | A clear defect a role sends | `skill://legion-controller/references/finding-asks.md#hand-over-a-clear-defect` |

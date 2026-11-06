@@ -11,9 +11,18 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
+const (
+	tmuxKey               = "runtime.tmux"
+	tmuxSessionStoreKey   = tmuxKey + ".session_store"
+	tmuxSessionDSNFileKey = tmuxKey + ".session_dsn_file"
+	tmuxSessionFiles      = "files"
+	tmuxSessionPostgres   = "postgres"
+)
+
 // Tmux is the settled `runtime.tmux` block, the mapping form of `runtime: tmux`: what every pane
 // of the tmux runtime is told beyond what the runtime tells it itself. Nil when the file says
-// `runtime: tmux`, names no runtime, or names kubernetes.
+// `runtime: tmux`, names no runtime, or names kubernetes; a nil block is every key's default,
+// which is why each of this type's readers takes a nil receiver.
 type Tmux struct {
 	// PaneEnv is `runtime.tmux.pane_env`: plain variables added to every pane's environment, by
 	// name, for what a host's tools read and the daemon's allow-listed environment does not carry
@@ -40,26 +49,54 @@ type Tmux struct {
 	// is a refusal again. The operator stops every process
 	// of the other runtime first: nothing else keeps two daemons from driving one store.
 	TakeOver string
+	// SessionDSNFile is `runtime.tmux.session_dsn_file` resolved against the file's directory:
+	// under `session_store: postgres`, the file holding the postgres:// URL of the database every
+	// pane's Oh My Pi keeps its sessions in, which each pane is told as OMP_SESSION_SQL_DSN_FILE
+	// and the daemon reads its conversations through; "" under `session_store: files`.
+	SessionDSNFile string
 }
 
 // TakeOverKubernetes is `runtime.tmux.take_over: kubernetes`, the one runtime the tmux runtime
 // takes a project's claims over from.
 const TakeOverKubernetes = "kubernetes"
 
+// SessionDSN is the file holding the sessions database's URL, "" for a block that names none and
+// for no block at all.
+func (t *Tmux) SessionDSN() string {
+	if t == nil {
+		return ""
+	}
+	return t.SessionDSNFile
+}
+
+// InDatabase is whether every pane's Oh My Pi keeps its sessions as rows of the database
+// SessionDSNFile names rather than as files (`session_store: postgres`).
+func (t *Tmux) InDatabase() bool { return t.SessionDSN() != "" }
+
+// SessionStore is `runtime.tmux.session_store` as the file spells it: "postgres" or "files".
+func (t *Tmux) SessionStore() string {
+	if t.InDatabase() {
+		return tmuxSessionPostgres
+	}
+	return tmuxSessionFiles
+}
+
 // readTmux reads the `runtime.tmux` block: `pane_env`, a mapping of variable to plain value,
-// `pi_config_files`, a list of overlay paths, and `take_over`, the runtime whose claims the daemon
-// takes over, each optional. A path holding the list separator `:` is refused, since
-// PI_CONFIG_FILES could not name it, and a take_over other than kubernetes, the one runtime whose
-// claims the tmux runtime can take over.
+// `pi_config_files`, a list of overlay paths, `take_over`, the runtime whose claims the daemon
+// takes over, and `session_store`, files by default, with `session_dsn_file`, the one key postgres
+// carries and files refuses, as runtime.kubernetes' session keys do; each optional. A path holding
+// the list separator `:` is refused, since PI_CONFIG_FILES could not name it, and a take_over other
+// than kubernetes, the one runtime whose claims the tmux runtime can take over. The DSN file is
+// kept as written; resolve settles it against the file's directory.
 func readTmux(value *yaml.Node) (*Tmux, error) {
 	block := &Tmux{}
 	if value.Tag == "!!null" {
 		return block, nil
 	}
 	if value.Kind != yaml.MappingNode {
-		return nil, errors.New("runtime.tmux must be a mapping")
+		return nil, errors.New(tmuxKey + " must be a mapping")
 	}
-	fields, err := members(value, "runtime.tmux", "pane_env", "pi_config_files", "take_over")
+	fields, err := members(value, tmuxKey, "pane_env", "pi_config_files", "take_over", "session_store", "session_dsn_file")
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +127,38 @@ func readTmux(value *yaml.Node) (*Tmux, error) {
 			block.TakeOver = *takeOver
 		}
 	}
+	if err := readTmuxSessionStore(fields, block); err != nil {
+		return nil, err
+	}
 	return block, nil
+}
+
+// readTmuxSessionStore reads `session_store` and the one key it carries into the block being read.
+func readTmuxSessionStore(fields map[string]*yaml.Node, block *Tmux) error {
+	store, err := readString(fields["session_store"], tmuxSessionStoreKey)
+	if err != nil {
+		return err
+	}
+	kind := tmuxSessionFiles
+	if store != nil {
+		kind = *store
+	}
+	switch kind {
+	case tmuxSessionFiles:
+		if fields["session_dsn_file"] != nil {
+			return fmt.Errorf("%s is not used when %s is %s; remove it", tmuxSessionDSNFileKey, tmuxSessionStoreKey, kind)
+		}
+		return nil
+	case tmuxSessionPostgres:
+		file, err := requiredString(fields["session_dsn_file"], tmuxSessionDSNFileKey,
+			" with "+tmuxSessionStoreKey+" postgres: the file holding the postgres:// URL of the database every pane's Oh My Pi keeps its sessions in")
+		if err != nil {
+			return err
+		}
+		block.SessionDSNFile = file
+		return nil
+	}
+	return errors.New(tmuxSessionStoreKey + " must be 'files' or 'postgres'")
 }
 
 // readPaneEnv is `runtime.tmux.pane_env`: each name an environment variable's, PATH refused (the
@@ -129,13 +197,16 @@ func readPaneEnv(value *yaml.Node, key string) (map[string]string, error) {
 	return env, nil
 }
 
-// resolveTmux settles the file's `runtime.tmux` block: each overlay path resolved against the
-// file's directory, in file order, each once.
+// resolveTmux settles the file's `runtime.tmux` block: each overlay path and the sessions
+// database's DSN file resolved against the file's directory, the overlays in file order, each once.
 func resolveTmux(block *Tmux, configDir string) *Tmux {
 	if block == nil {
 		return nil
 	}
 	settled := &Tmux{PaneEnv: block.PaneEnv, TakeOver: block.TakeOver}
+	if block.SessionDSNFile != "" {
+		settled.SessionDSNFile = underConfig(block.SessionDSNFile, configDir)
+	}
 	for _, path := range block.PiConfigFiles {
 		if resolved := underConfig(path, configDir); !slices.Contains(settled.PiConfigFiles, resolved) {
 			settled.PiConfigFiles = append(settled.PiConfigFiles, resolved)

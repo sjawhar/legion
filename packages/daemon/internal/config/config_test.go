@@ -1180,8 +1180,8 @@ func TestLoadRefuses(t *testing.T) {
 		},
 		{
 			name: "an unknown member of runtime.tmux",
-			body: minimalFile + "runtime: {tmux: {session_store: pvc}}\n",
-			want: "unknown key runtime.tmux.session_store",
+			body: minimalFile + "runtime: {tmux: {session_stores: pvc}}\n",
+			want: "unknown key runtime.tmux.session_stores",
 		},
 		{
 			name: "runtime.tmux.pane_env a list",

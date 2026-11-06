@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,7 +20,7 @@ import (
 // an operator's first check. The example names no Postgres; the environment does, as its comment
 // offers.
 func TestShippedLegionYAMLExamplePassesCheckConfig(t *testing.T) {
-	checkShippedExample(t, func(example string) string { return example })
+	checkShippedExample(t, func(example string) string { return example }, nil)
 }
 
 // The example's commented role_config_files, uncommented with the operator-roles volume and mount
@@ -35,7 +36,7 @@ func TestShippedLegionYAMLExamplesRoleConfigFilesPassCheckConfig(t *testing.T) {
 			"        #   config_map: {name: legion-operator-roles}",
 			"        # - {volume: operator-roles, mount_path: /etc/legion-operator-roles}",
 		)
-	})
+	}, nil)
 	cfg, err := configpkg.LoadForValidation(config, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +66,7 @@ func TestShippedLegionYAMLExamplesMemoryPassesCheckConfig(t *testing.T) {
 		// on moves to the second, so this comments the first out, after the uncommenting above, to
 		// which a commented `WIDGETS: {}` would otherwise be the first `# WIDGETS:` line.
 		return strings.Replace(example, "\n  WIDGETS: {}", "\n  # WIDGETS: {}", 1)
-	})
+	}, nil)
 	cfg, err := configpkg.LoadForValidation(config, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -96,8 +97,9 @@ func uncommentExample(t *testing.T, example string, lines ...string) string {
 }
 
 // checkShippedExample runs `legion start --check-config` on the shipped example as edit leaves
-// it, beside the files it names, and answers the file's path.
-func checkShippedExample(t *testing.T, edit func(string) string) string {
+// it, beside the files it names and each of extra (a name under the configuration's own directory,
+// or an absolute path), and answers the file's path.
+func checkShippedExample(t *testing.T, edit func(string) string, extra map[string]string) string {
 	t.Helper()
 	legionState(t)
 	t.Setenv("LEGION_POSTGRES_DSN", "postgres://legion:legion@127.0.0.1:1/legion")
@@ -111,7 +113,7 @@ func checkShippedExample(t *testing.T, edit func(string) string) string {
 	}
 	dir := t.TempDir()
 	config := filepath.Join(dir, "legion.yaml")
-	for name, contents := range map[string]string{
+	files := map[string]string{
 		config:           edit(string(example)),
 		"operator-token": "operator\n",
 		"dispatch-token": "dispatch\n",
@@ -124,7 +126,9 @@ users: [{name: legion-daemon, user: {token: placeholder}}]
 contexts: [{name: legion-daemon, context: {cluster: example, user: legion-daemon, namespace: legion}}]
 current-context: legion-daemon
 `,
-	} {
+	}
+	maps.Copy(files, extra)
+	for name, contents := range files {
 		if !filepath.IsAbs(name) {
 			name = filepath.Join(dir, name)
 		}
@@ -142,4 +146,48 @@ current-context: legion-daemon
 		t.Fatalf("legion start --check-config on the shipped example = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 	}
 	return config
+}
+
+// The example's commented `answers` block, uncommented, passes the check too, on the postgres
+// session store the example already names: its gh found by LEGION_GH_PATH and its conversation
+// store's URL file read, and its placeholder api_key_command, which sh could not run, never run —
+// a key is read for each model call, never by the check.
+func TestTheShippedExamplesAnswersBlockPassesCheckConfig(t *testing.T) {
+	gh := filepath.Join(t.TempDir(), "gh")
+	if err := os.WriteFile(gh, []byte("\x7fELF\x02\x01\x01\x00"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_GH_PATH", gh)
+	config := checkShippedExample(t, uncommentAnswers, map[string]string{
+		"conversations-dsn": "postgres://legion-daemon:placeholder@conversations.internal.example:5432/omp_sessions\n",
+		"anthropic-key":     "placeholder\n",
+	})
+	cfg, err := configpkg.LoadForValidation(config, func(string) string { return "postgres://legion:legion@127.0.0.1:1/legion" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Answers == nil || len(cfg.Answers.Providers) != 2 || len(cfg.Answers.Prices) != 2 || cfg.Answers.ConversationStore.DSNFile == "" {
+		t.Fatalf("the uncommented answers block settled as %+v, want both providers, both prices and the store's file", cfg.Answers)
+	}
+}
+
+// uncommentAnswers is the example with its whole commented `answers` block, which runs from the
+// `# answers:` line to the blank line after it, uncommented: the block is commented line by line,
+// so turning it on is one `# ` removed per line. A line whose text is itself a comment stays one,
+// since what is left of it begins with spaces and a `#`: the block's own notes, and the `# user:`
+// line, the alternative to `dsn_file`.
+func uncommentAnswers(example string) string {
+	start := strings.Index(example, "\n# answers:")
+	if start < 0 {
+		return example
+	}
+	end := strings.Index(example[start+1:], "\n\n")
+	if end < 0 {
+		return example
+	}
+	var block strings.Builder
+	for _, line := range strings.SplitAfter(example[start+1:start+1+end+1], "\n") {
+		block.WriteString(strings.TrimPrefix(line, "# "))
+	}
+	return example[:start+1] + block.String() + example[start+1+end+1:]
 }

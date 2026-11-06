@@ -1627,6 +1627,7 @@ describe("Legion OMP extension", () => {
         },
         settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
         consumers: [],
+        questionsForController: [],
       };
       const booted = await bootPane({
         role: options.role ?? "implementer",

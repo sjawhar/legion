@@ -316,6 +316,24 @@ const legionHeldOutboxRow = z.object({
   waitsOn: z.number().int().positive(),
 });
 
+/** `api.QuestionForController` — one question to a stopped agent that the daemon's answer loop
+ * passed to the controller (its `agent-question` notice, contract 52): the question's id, the
+ * agent's issue, role and session, who asked (`user:<login>`, or `session:<id>` with the asking
+ * session's title when known), where (a `dispatch://` reference, or `envoy:<event id>`), why it was
+ * passed on (`not_answered`, `needs_work`, a bound or fault, `over_limit`, `unknown_format`,
+ * `no_provider`, `no_price`, `no_conversation`, `post_refused`), and when. `asker` and `ref` are
+ * empty for a question whose recorded hand-off no longer reads. */
+const legionQuestionForController = z.object({
+  id: nonEmptyString,
+  issue: issueKey,
+  role: z.enum(LEGION_ROLES),
+  session: nonEmptyString,
+  asker: z.string(),
+  ref: z.string(),
+  reason: nonEmptyString,
+  passedAt: timestamp,
+});
+
 /** `api.Issue` — `workers` is keyed by a plain string, not by the role names this build knows, so
  * a role a later daemon adds is read rather than refused; the key list is held by the golden test
  * in `legion-api.test.ts`, not by this schema. A phase that has not run has no entry, so the value
@@ -525,7 +543,10 @@ const legionConsumerLag = z.object({
  * credential source or credential file path, required, and loose like `payload` above, so a
  * legion.yaml key added later is no contract change (contract 35); being `z.looseObject` it keeps
  * the keys it does not name, where the shapes around it drop theirs; `consumers` is the lag
- * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43). */
+ * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43);
+ * `questionsForController` is every question the answer loop passed to the controller in the last
+ * seven days, newest first, at most 100, never null: the `agent-question` notice is a live wake
+ * only, so a controller that starts later reads here what it missed (contract 52). */
 export const LegionStateResponse = z.object({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -539,6 +560,7 @@ export const LegionStateResponse = z.object({
   repositories: legionRepositories,
   settings: legionSettings,
   consumers: z.array(legionConsumerLag),
+  questionsForController: z.array(legionQuestionForController).max(100),
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;

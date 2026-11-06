@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -245,6 +246,13 @@ type Notice struct {
 	// the legion.yaml line that records a decision; a gap is the operator's to close or decide, a
 	// live row's the session's environment to fix, and neither is the controller's.
 	OpenCapabilities []string `json:"openCapabilities,omitempty"`
+	// Question is an agent-question notice's account of the question the answer loop passed on,
+	// and absent from every other kind; the notice's Role is the agent's and its Reason why the
+	// question was passed on.
+	Question *AgentQuestion `json:"question,omitempty"`
+	// AgentDecision is an agent-decision notice's account of the person's decision the answer loop
+	// passed on, and absent from every other kind; the notice's Role is the agent's.
+	AgentDecision *AgentDecision `json:"agent_decision,omitempty"`
 	// Blocked is every issue Legion is waiting to start because it waits on a Dispatch issue
 	// nobody has finished (INFRA-225), with what each still waits on. Only a tick controller
 	// notice carries it, as OpenCapabilities does: the tick is the turn that posts the day's
@@ -267,6 +275,61 @@ type Notice struct {
 	// Update is an update-stalled notice's account of the round that is not finishing, and is
 	// absent from every other kind. Only an UpdateStalledNotice carries one.
 	Update *UpdateStalled `json:"update,omitempty"`
+}
+
+// AgentQuestion is a question to a stopped agent that the daemon's answer loop passed to the
+// controller (an agent-question notice): the question's id (answer_questions), the agent's issue
+// and session, who asked (`user:<login>`, or `session:<id>` with the asking session's title when
+// the listener stamped one), where it was asked (a dispatch:// reference, or `envoy:<event id>`),
+// and its text, cut at AgentQuestionTextLimit characters with a note saying so.
+type AgentQuestion struct {
+	ID      string `json:"id"`
+	Issue   string `json:"issue"`
+	Session string `json:"session"`
+	Asker   string `json:"asker"`
+	Ref     string `json:"ref"`
+	Text    string `json:"text"`
+}
+
+// AgentDecision is a person's decision on an ask a stopped agent opened, which the daemon's answer
+// loop passed on (an agent-decision notice): the decision's id (`dispatch:<event id>` of the ask's
+// answer, or `dispatch:<comment id>` of a reply that hands the ask back to the agent), the agent's
+// issue and session, the person who decided (`user:<login>`), where (`dispatch://<KEY>/ask/<id>`
+// or `dispatch://<KEY>/comment/<id>`), and what they decided (the options they selected and their
+// text), cut as AgentDecisionText cuts it.
+type AgentDecision struct {
+	ID      string `json:"id"`
+	Issue   string `json:"issue"`
+	Session string `json:"session"`
+	Asker   string `json:"asker"`
+	Ref     string `json:"ref"`
+	Text    string `json:"text"`
+}
+
+// AgentQuestionTextLimit is the most characters of a question's or a decision's text an
+// agent-question or agent-decision notice carries; the rest is left out, and a note says how long
+// the text was and where to read it.
+const AgentQuestionTextLimit = 2000
+
+// AgentQuestionText is text as an agent-question notice carries it: whole when it is at most
+// AgentQuestionTextLimit characters, otherwise its first AgentQuestionTextLimit characters and a
+// note naming its length and ref, where the whole question is.
+func AgentQuestionText(text, ref string) string { return cutNoticeText(text, ref, "question") }
+
+// AgentDecisionText is text as an agent-decision notice carries it, cut as AgentQuestionText cuts a
+// question's.
+func AgentDecisionText(text, ref string) string { return cutNoticeText(text, ref, "decision") }
+
+func cutNoticeText(text, ref, what string) string {
+	runes := 0
+	for i := range text {
+		if runes == AgentQuestionTextLimit {
+			return text[:i] + fmt.Sprintf("\n\n[cut: the %s is %d characters; the first %d are shown, the whole %s is at %s]",
+				what, utf8.RuneCountInString(text), AgentQuestionTextLimit, what, ref)
+		}
+		runes++
+	}
+	return text
 }
 
 // UpdateStalled is what an update-stalled controller notice carries: the update round the daemon
@@ -419,8 +482,11 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // names the status the root stood at. An update-stalled notice names an issue whose pod the
 // daemon opened an update round over and cannot replace: a worker has not answered within
 // `pod_update_notice_hours`, a turn that will not end holds the replacement, or the replacement
-// itself keeps failing (the daemon's reconcilePodUpdates). When admission sends each is its
-// rule (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
+// itself keeps failing (the daemon's reconcilePodUpdates). An agent-question notice names a
+// question to a stopped agent that the daemon's answer loop passed on, with its account
+// (Notice.Question), the agent's role and why (Reason), once per question (the daemon's PassOn).
+// When admission sends each of the others is its rule (admit.Admission.wakeController and its
+// callers, admit's releaseUnslotted).
 //
 // A parked-decision notice names a person's decision on a tree Legion is not running, which
 // nobody inside the tree will hear: a spec decision the notice executor could not deliver to the
@@ -439,7 +505,16 @@ const (
 	AwaitingPersonNotice NoticeKind = "awaiting-person"
 	ParkedDecisionNotice NoticeKind = "parked-decision"
 	UpdateStalledNotice  NoticeKind = "update-stalled"
+	AgentQuestionNotice  NoticeKind = "agent-question"
 )
+
+// AgentDecisionNotice names a person's decision on an ask a stopped agent opened — their answer to
+// it, or their reply that hands it back to the agent — which the daemon's answer loop passed on,
+// with its account (Notice.AgentDecision) and the agent's role, once per decision (the daemon's
+// Decide). It is an architect's notice, sent to the architect that owns the agent's issue while that
+// architect holds its role, and the controller's otherwise, in a controller notice row of the same
+// kind.
+const AgentDecisionNotice NoticeKind = "agent-decision"
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "release" stops its process and keeps
@@ -966,6 +1041,12 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if (value.Kind == "catch-up") != (value.CatchUp != nil) {
 			return fmt.Errorf("a %s notice carries a catch-up only when it is one", value.Kind)
 		}
+		if value.Question != nil {
+			return fmt.Errorf("a %s notice carries a question; only a controller's agent-question notice does", value.Kind)
+		}
+		if err := validAgentDecision(value.Kind, value.AgentDecision); err != nil {
+			return err
+		}
 		if _, spec := SpecDecision(value.Kind); !spec && (value.Actor != "" || value.Ref != "") {
 			return fmt.Errorf("a %s notice carries an actor or a ref; only a spec decision's does", value.Kind)
 		}
@@ -983,6 +1064,15 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	case ControllerNotice:
 		if !controllerOnlyNoticeKind(value.Kind) && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
+		}
+		if (value.Kind == AgentQuestionNotice) != (value.Question != nil) {
+			return fmt.Errorf("a %s controller notice carries a question only when it is an agent-question notice", value.Kind)
+		}
+		if value.Question != nil && value.Question.ID == "" {
+			return fmt.Errorf("an agent-question notice names its question's id")
+		}
+		if err := validAgentDecision(value.Kind, value.AgentDecision); err != nil {
+			return err
 		}
 		if value.Kind == ParkedDecisionNotice {
 			if !validDecisionKind(value.Decision) || value.Root == "" || value.Ref == "" || !PersonActor(value.Actor) {
@@ -1083,18 +1173,30 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "message-refused", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "children-first", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "message-refused", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "children-first", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted", AgentDecisionNotice:
 		return true
 	default:
 		return false
 	}
 }
 
+// validAgentDecision checks that a notice of kind carries a decision's account when, and only
+// when, it is an agent-decision notice, and that the account names its decision's id.
+func validAgentDecision(kind NoticeKind, decision *AgentDecision) error {
+	if (kind == AgentDecisionNotice) != (decision != nil) {
+		return fmt.Errorf("a %s notice carries a decision only when it is an agent-decision notice", kind)
+	}
+	if decision != nil && decision.ID == "" {
+		return fmt.Errorf("an agent-decision notice names its decision's id")
+	}
+	return nil
+}
+
 // controllerOnlyNoticeKind says whether kind is a notice for the controller alone, never an
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, ParkedDecisionNotice, UpdateStalledNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, ParkedDecisionNotice, UpdateStalledNotice, AgentQuestionNotice:
 		return true
 	default:
 		return false

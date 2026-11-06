@@ -118,6 +118,12 @@ type Options struct {
 	// 0600 file per key: every pane's shim is started with `--provider-env-dir` on it and exports
 	// each file into OMP's environment alone. "" is none. New reads the key names once.
 	ProviderEnvDir string
+	// SessionDSNFile is the file holding the postgres:// URL of the database every pane's Oh My Pi
+	// keeps its sessions in (runtime.tmux.session_store postgres, config.Tmux.SessionDSNFile), an
+	// absolute path: every pane is told OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming
+	// it, and a resume of an Oh My Pi session is held to the session table's row rather than to a
+	// file. "" keeps every session a file.
+	SessionDSNFile string
 	// PaneEnv is the operator's `runtime.tmux.pane_env`: plain variables added to every pane's
 	// environment, after the runtime's own and before the spec's. New refuses a name the runtime
 	// sets itself, the git identity a launch sets, a provider key or its pointer, a credential-shaped
@@ -186,6 +192,7 @@ type Runtime struct {
 	log              *slog.Logger
 	providerEnvDir   string
 	providerKeys     []string
+	sessionDSNFile   string
 	operatorEnv      map[string]string
 	piConfigFiles    []string
 	roleConfigFiles  map[claim.Role][]string
@@ -260,6 +267,8 @@ func New(opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("tmux runtime: the real gh a pane's `legion gh` runs is %q, not an absolute path", opts.GH)
 	case opts.GitHubCredential != nil && opts.RepositoryOwner == nil:
 		return nil, errors.New("tmux runtime: a GitHub credential function needs the daemon's record of each claim's repository owner (RepositoryOwner)")
+	case opts.SessionDSNFile != "" && !filepath.IsAbs(opts.SessionDSNFile):
+		return nil, fmt.Errorf("tmux runtime: session database URL file %q is not an absolute path", opts.SessionDSNFile)
 	case opts.TakeOver != "" && opts.TakeOver != TakeOverKubernetes:
 		return nil, fmt.Errorf("tmux runtime: take_over %q is not a runtime it takes claims over from (%s)", opts.TakeOver, TakeOverKubernetes)
 	}
@@ -336,6 +345,7 @@ func New(opts Options) (*Runtime, error) {
 		log:               opts.Log,
 		providerEnvDir:    opts.ProviderEnvDir,
 		providerKeys:      providerKeys,
+		sessionDSNFile:    opts.SessionDSNFile,
 		operatorEnv:       opts.PaneEnv,
 		piConfigFiles:     opts.PiConfigFiles,
 		roleConfigFiles:   opts.RoleConfigFiles,

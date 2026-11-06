@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
@@ -67,6 +68,7 @@ var runtimeOwned = map[string]bool{
 	"GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
 	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
 	"PI_SHELL_PREFIX": true, "PI_CONFIG_FILES": true,
+	ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
 }
 
 // controllerOwned are the variables a controller pane is told in place of a tree pane's
@@ -204,6 +206,12 @@ type PaneInputs struct {
 	// then told no gh variable at all: every pane of a runtime whose GitHubCredential function is
 	// nil.
 	GHOwnersDir, GHDefault, GH string
+	// SessionDSNFile is the file holding the session database's postgres:// URL under
+	// runtime.tmux.session_store postgres (Options.SessionDSNFile), and the pane is then told
+	// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming it, so its Oh My Pi keeps its
+	// session as a row of that database's session table; "" is the files store, and the pane is
+	// told neither.
+	SessionDSNFile string
 	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env), PiConfigFiles the
 	// operator's Oh My Pi overlays every pane names (runtime.tmux.pi_config_files),
 	// RoleConfigFiles the ones this pane's role alone names (role_config_files), and
@@ -222,15 +230,17 @@ type PaneInputs struct {
 // GH_CONFIG_DIR, its default owner's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST
 // set to the empty string, which gh ignores, so no token in the daemon's environment outranks the
 // file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
-// LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
+// LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs; under a
+// session database, Oh My Pi's two session variables, as a pod's role container is told them;
 // PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
 // agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, then the
 // project's memory overlays for a memory-group pane, and nothing of Legion's own, which names no
 // settings overlay at all — empty where none of the three names one), the
 // four XDG base directories under `<state_dir>/home`, the operator's pane variables sorted, the
 // spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among
-// them — tmux would replace it (LEGION-91) — and neither is any secret's value. No other tool path
-// is told: a pane's git and jj are whatever its PATH, the daemon's, gives.
+// them — tmux would replace it (LEGION-91) — and neither is any secret's value, the session
+// database's URL included. No other tool path is told: a pane's git and jj are whatever its PATH,
+// the daemon's, gives.
 func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
@@ -266,6 +276,10 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("GH_HOST", "")
 		add("LEGION_GH_OWNERS_DIR", in.GHOwnersDir)
 		add("LEGION_GH_PATH", in.GH)
+	}
+	if in.SessionDSNFile != "" {
+		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
+		add(ompsessions.DSNFileVariable, in.SessionDSNFile)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
 	add("PI_CONFIG_FILES", strings.Join(slices.Concat(in.PiConfigFiles, in.RoleConfigFiles, in.MemoryConfigFiles), ":"))
@@ -368,7 +382,9 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 // prev means no previous incarnation is known (a claim suspended across a daemon restart) and
 // there is nothing to wait for; under runtime.tmux.take_over, so does a prev of the runtime this
 // one takes over (foreign), whose process this runtime cannot see, and without the key such a prev
-// is refused, naming the key (paneOf). The session is resumed where it is: at its recorded path,
+// is refused, naming the key (paneOf). An Oh My Pi session under a session database is a row of
+// the session table rather than a file (sessionInDatabase), resumed where the table holds it or
+// not at all. Every other session is resumed where it is: at its recorded path,
 // or, by its name, in another working directory's folder of the recorded path's sessions directory
 // or of the pane's own (sessionFileOf), where a session carried over from a pod lands. One found
 // nowhere starts nothing. While take_over is set (takingOverSession), a session found nowhere
@@ -453,7 +469,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	}
 	if spec.ResumeSessionFile != "" {
 		harness := runtime.Backends[backend].Name
-		found, searched, err := sessionFileOf(spec.ResumeSessionFile, func() (string, error) {
+		sessionsDir := func() (string, error) {
 			env := maps.Clone(r.paneEnv)
 			maps.Copy(env, r.operatorEnv)
 			dir, err := launcher.SessionsDir(spec, Host{StateDir: r.stateDir, Legion: r.legion}, env, workDir)
@@ -461,10 +477,18 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 				return "", fmt.Errorf("the pane's %s sessions directory: %w", harness, err)
 			}
 			return dir, nil
-		})
+		}
+		found, searched, err := r.recordedSession(ctx, spec.ResumeSessionFile, backend, sessionsDir)
 		switch {
 		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+		case found == "" && r.sessionInDatabase(backend):
+			verb := "respawning"
+			if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
+				verb = "resurrecting"
+			}
+			return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded %s session is not in the session table: %s",
+				spec.Issue, verb, harness, spec.ResumeSessionFile)
 		case found == "" && r.takingOverSession():
 			return runtime.Locator{}, fmt.Errorf("resume %s: %w: no %s session at %s, and no other folder of %s holds that session",
 				spec.Claim, runtime.ErrSessionFileMissing, harness, spec.ResumeSessionFile, searchedIn(searched))
@@ -524,10 +548,56 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: credential.root, GHDefault: ghDefault, GH: r.gh,
+		SessionDSNFile: r.sessionDSNFile,
 		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
 		MemoryConfigFiles: memoryOverlays,
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
+}
+
+// sessionLookupTimeout bounds a resume's look-up of its session in the session table: connecting
+// to the database and reading the row.
+const sessionLookupTimeout = 30 * time.Second
+
+// sessionInDatabase is whether the session a resume of backend names is a row of the session table
+// rather than a file: an Oh My Pi session under a session database (Options.SessionDSNFile), keyed
+// by the path its file would have had, as a pod's launcher holds a resume (internal/launcher).
+// Every other session, a Claude Code transcript under either store, is a file.
+func (r *Runtime) sessionInDatabase(backend runtime.Backend) bool {
+	return r.sessionDSNFile != "" && backend == runtime.BackendOmp
+}
+
+// sessionWritten is whether the session table holds the session file names (ompsessions.Written).
+// An error is a look-up that could not say: a database it could not reach or read.
+func (r *Runtime) sessionWritten(ctx context.Context, file string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, sessionLookupTimeout)
+	defer cancel()
+	conn, err := ompsessions.Connect(ctx, r.sessionDSNFile)
+	if err != nil {
+		return false, fmt.Errorf("resume session %s: %w", file, err)
+	}
+	defer conn.Close(context.Background())
+	_, ok, err := ompsessions.Written(ctx, conn, file)
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+// recordedSession is where the session a resume names is, "" when it is nowhere, with the folders
+// searched for it. Under a session database an Oh My Pi session is a row of the session table
+// rather than a file (sessionInDatabase), so the row is the whole search: the session is at its
+// recorded path or nowhere, and no folder is searched. Every other session is searched for as a
+// file (sessionFileOf).
+func (r *Runtime) recordedSession(ctx context.Context, file string, backend runtime.Backend, sessionsDir func() (string, error)) (string, []string, error) {
+	if !r.sessionInDatabase(backend) {
+		return sessionFileOf(file, sessionsDir)
+	}
+	written, err := r.sessionWritten(ctx, file)
+	if err != nil || !written {
+		return "", nil, err
+	}
+	return file, nil, nil
 }
 
 // launchGitHubCredential is the GitHub credential a launch mints for its claim before the launch

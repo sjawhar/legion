@@ -2006,6 +2006,12 @@ jobs:
       # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
 
+      # internal/conversation/claude's contract tests run the pinned Claude Code against a stand-in
+      # Messages endpoint and refuse on GitHub Actions without one. The pin is read from
+      # .claude-code-pin, the repository's one copy of it
+      # (.github/actions/install-claude-code).
+      - uses: ./.github/actions/install-claude-code
+
       # internal/runtime/sandbox's uv link-mode test installs a wheel with the uv the worker image
       # ships (ARG UV_VERSION, checked against ARG UV_SHA256), and refuses on GitHub Actions
       # without one (.github/actions/install-uv).

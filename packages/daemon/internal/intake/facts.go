@@ -1,4 +1,17 @@
 // Package intake turns durable Envoy notifications and Go API observations into one transactional fact path.
+//
+// Hand-offs. The Envoy listener hands the Legion daemon every message for one of its agents that is
+// not running, in place of refusing or dropping it: a direct send to the agent's session, a publish
+// to its role, and a bus message on its agent topic that no listener delivers. It publishes each
+// one, wrapped as a Handoff, to the retained subject notifications.legion.<P>.agents.<session>
+// (HandoffSubject), P the Legion project token role tokens carry (claim.ProjectToken, not the
+// Dispatch project key) and session the agent session the message is for, with a JetStream message
+// id derived from the envelope's dedupe key, so the copies two listeners publish for one bus message
+// collapse. The notification stream retains notifications.legion.> (packages/envoy/internal/bus/
+// stream.go), and the daemon reads every hand-off of its project through one durable consumer on
+// notifications.legion.<P>.agents.> (OpenHandoffs), which hands each to the answer loop and
+// acknowledges it only once the loop has recorded it. The same shape is the TypeScript contract's
+// LegionAgentHandoffSchema (packages/contracts/src/legion-handoff.ts).
 package intake
 
 import (

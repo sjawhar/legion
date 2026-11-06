@@ -1,23 +1,31 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// A key command, and the secrets command a provider key runs, start without either raw NATS seed
-// the daemon holds.
+// A key command (an App's private_key_command, a model provider's api_key_command), and the secrets
+// command a provider key runs, start without either raw NATS seed the daemon holds.
 func TestTheDaemonsKeyCommandsGetNoNATSSeed(t *testing.T) {
 	t.Setenv("NATS_NKEY_SEED", "pane-seed-value")
 	t.Setenv("NATS_DAEMON_NKEY_SEED", "daemon-seed-value")
-	out, err := executePrivateKeyCommand("env", "github_apps.implement.private_key_command")
+	out, err := runKeyCommand(context.Background(), "env", "github_apps.implement.private_key_command")
 	if err != nil {
-		t.Fatalf("executePrivateKeyCommand: %v", err)
+		t.Fatalf("runKeyCommand: %v", err)
 	}
 	if strings.Contains(out, "seed-value") || !strings.Contains(out, "PATH=") {
 		t.Errorf("the key command's environment carries a NATS seed (or is not the daemon's):\n%s", out)
+	}
+	out, err = AnswerCredential{Command: "env", key: "answers.providers.anthropic"}.Read(context.Background())
+	if err != nil {
+		t.Fatalf("AnswerCredential.Read: %v", err)
+	}
+	if strings.Contains(out, "seed-value") || !strings.Contains(out, "PATH=") {
+		t.Errorf("the api_key_command's environment carries a NATS seed (or is not the daemon's):\n%s", out)
 	}
 
 	bin := t.TempDir()

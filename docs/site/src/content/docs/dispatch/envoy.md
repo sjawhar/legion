@@ -201,6 +201,10 @@ naming the reason: `no_holder`, `delivery_failed` (which a holder that is not `l
 `receipt_timeout`. Either way the forward to the live holder is
 stored on the holder's inbox, and it counts as delivered only once the stream has stored it, so a
 holder that restarts or loses its connection gets the forward once when it is back.
+A Legion daemon that answers for its stopped agents
+([Running Legion](/legion/legion/running-legion/#legionyaml), `answers`) reads such a message from
+`notifications.legion.<project>.agents.<session>`; the listener's hand-off of it there, in place of
+the `404`, the `202` keep or the exception, lands with its own change.
 
 ## Messages a session missed
 
@@ -361,8 +365,10 @@ Legion's daemon reads Dispatch and GitHub events from the stream through three d
 per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>` and the
 project's repository-mapping subject), `legion-go-<project>-dispatch-server` (filtering
 Dispatch's own start, `notifications.dispatch.server.started`) and `legion-go-<project>-github`
-(filtering each of the project's repositories). It sends its own notices to roles and to the
-controller through the listener's HTTP API, not over NATS.
+(filtering each of the project's repositories), and, with `answers` set, a fourth,
+`legion-go-<project>-answers` (filtering `notifications.legion.<project>.agents.>`, `<project>` the
+Legion project token), which reads the messages handed to it for its stopped agents. It sends its
+own notices to roles and to the controller through the listener's HTTP API, not over NATS.
 
 So the NATS user the daemon connects as needs these permissions:
 
@@ -387,7 +393,7 @@ message: context deadline exceeded`, its waiting count still shown and the other
 unchanged, and the daemon's log names the refused subject.
 
 The consumer subjects end in `>`, so the grant reaches every consumer of `ENVOY_NOTIFICATIONS`,
-not just the daemon's three: a holder of the daemon's seed can read, recreate with another filter,
+not just the daemon's own: a holder of the daemon's seed can read, recreate with another filter,
 and drain any consumer of the stream, every host's listener consumer and another project's daemon
 consumers included. It can also create a push consumer whose delivery subject is any subject at
 all, so it can send the stream's messages to subjects it may not publish to itself: role lanes,
@@ -399,7 +405,7 @@ included, such as the listener's `envoy_roles` and `envoy_sessions` watchers.
 When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
 `core.DaemonPermissions()` instead of a host's or an explicit user's grant.
 
-The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same three
+The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same
 consumers written against another client library ask for different ones. So a grant is proven by
 running the daemon's consumers under exactly that grant, against a real server, and watching for a
 refusal: create the three consumers, restart onto them, have Dispatch and GitHub events

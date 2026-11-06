@@ -1,4 +1,4 @@
-package main
+package ghroute
 
 import (
 	"fmt"
@@ -176,7 +176,7 @@ func ghUsageNamesSubcommands(args string) bool {
 }
 
 // ghHelpTarget reads the words of `gh help <words>` as the path of the command whose help it asks
-// for, refusing what ghTargetOf refuses running it directly (ghWalk.check): gh runs `gh help
+// for, refusing what TargetOf refuses running it directly (ghWalk.check): gh runs `gh help
 // <extension>` as `gh <extension> --help`, which runs the extension on gh's token. gh's own help, a
 // command's and a help topic's, sends nothing, and is not named. A word past a leaf is that leaf's
 // argument, which gh's help ignores; an option, which `gh help` takes none of, is an error.

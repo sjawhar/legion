@@ -1,5 +1,6 @@
 // Package notify is the daemon's client for the Envoy listener: it publishes persisted workflow
-// notices through its publish route, and ends a session's registration through its session route.
+// notices through its publish route, sends the answer loop's direct messages in a stopped agent's
+// name (Send), and ends a session's registration through its session route.
 package notify
 
 import (
@@ -148,8 +149,9 @@ const RoleTopicPrefix = "notifications.role."
 // the workflow because no tree of it runs and nothing would ever start it (`unslotted`, admit's
 // releaseUnslotted), a person's decision on a tree Legion is not running (`parked-decision`, the
 // outbox's parkDecision and workflow's relayParkedDecision), an issue whose pod an update round
-// cannot replace (`update-stalled`, the daemon's reconcilePodUpdates), and the slot wakes
-// admission sends through wakeController, `slot-free`, `todo` and `tick`
+// cannot replace (`update-stalled`, the daemon's reconcilePodUpdates), a question to a stopped
+// agent the daemon's answer loop passed on (`agent-question`, the daemon's controllerPassOn), and
+// the slot wakes admission sends through wakeController, `slot-free`, `todo` and `tick`
 // (admit.Admission.wakeController and its callers say when; the tick alone carries
 // `openCapabilities`, the deployment capabilities with no decision,
 // admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`,
@@ -187,6 +189,11 @@ func New(baseURL, token string) *HTTPPublisher {
 
 // Publish posts the listener envelope that preserves the outbox row's idempotent delivery key.
 //
+// Every publish carries `"handoff": false`: a role with no live holder whose agent the registry
+// names is one the listener hands a message off to its daemon for (handOffToLegion), and a daemon
+// notice is never such a message, so a notice to a stopped architect is still refused ErrNoHolder
+// and held and resent as it always was. A listener that predates the hand-off ignores the field.
+//
 // It sends keep: false, so the listener refuses a role nobody holds with its 404 (ErrNoHolder
 // below) instead of keeping the message for the role's next holder. The daemon keeps its own
 // queue of notices, which does more than a kept copy can: the outbox row is held and each
@@ -217,7 +224,8 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		Payload   string `json:"payload"`
 		DedupeKey string `json:"dedupe_key"`
 		Keep      bool   `json:"keep"`
-	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey, Keep: false})
+		Handoff   bool   `json:"handoff"`
+	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey, Keep: false, Handoff: false})
 	if err != nil {
 		return fmt.Errorf("encode notice for %s: %w", topic, err)
 	}
@@ -318,3 +326,56 @@ func (p *HTTPPublisher) DeleteSession(ctx context.Context, session string, goneA
 	body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
 	return SessionDeleted{}, fmt.Errorf("delete session %s: listener returned %s: %s", session, response.Status, strings.TrimSpace(string(body)))
 }
+
+// Message is a direct message sent in an agent's name: to Target's session, from SourceSession,
+// in reply to the envelope InReplyTo names, with IdempotencyKey the listener scopes its dedupe key
+// by (`agent.<target>.<key>`), so a re-send of the same message is a repeat the stream keeps once.
+type Message struct {
+	Target         string
+	SourceSession  string
+	Text           string
+	InReplyTo      string
+	IdempotencyKey string
+}
+
+// Send posts m through the listener's direct-message route (POST /v1/messages/send, sendHandler in
+// packages/envoy/cmd/listener/api.go) as source `agent`. A 4xx answer, such as the listener's 404
+// for a target with no live session, is ErrRefused: sending it again is refused again.
+func (p *HTTPPublisher) Send(ctx context.Context, m Message) error {
+	body, err := json.Marshal(struct {
+		TargetSession  string `json:"target_session"`
+		Source         string `json:"source"`
+		SourceSession  string `json:"source_session"`
+		Message        string `json:"message"`
+		InReplyTo      string `json:"in_reply_to,omitempty"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}{TargetSession: m.Target, Source: "agent", SourceSession: m.SourceSession, Message: m.Text, InReplyTo: m.InReplyTo, IdempotencyKey: m.IdempotencyKey})
+	if err != nil {
+		return fmt.Errorf("encode the message to %s: %w", m.Target, err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/messages/send", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build the message to %s: %w", m.Target, err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if p.token != "" {
+		request.Header.Set("Authorization", "Bearer "+p.token)
+	}
+	response, err := p.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("send the message to %s: %w", m.Target, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		refusal, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
+		err := fmt.Errorf("send the message to %s: listener returned %s: %s", m.Target, response.Status, strings.TrimSpace(string(refusal)))
+		if response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != http.StatusTooManyRequests {
+			return fmt.Errorf("%w: %w", err, ErrRefused)
+		}
+		return err
+	}
+	return nil
+}
+
+// ErrRefused is a message the listener refused for good (Send's 4xx).
+var ErrRefused = errors.New("the listener refused the message")

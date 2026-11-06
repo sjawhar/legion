@@ -1,0 +1,153 @@
+{
+  "about": "The answer loop's live proof (scripts/e2e/answer-loop.sh) reads this file before any model call. Each agent is given its decision as its first task, so the decision is in its own conversation; each question names the facts its answer must hold (must_contain, every string, case-insensitive) or the reply kind the daemon must log (expect_kind). Changing a decision or a key is a change to the proof: review it as one.",
+  "model": "claude-sonnet-5-5",
+  "agents": {
+    "architect": {
+      "role": "architect",
+      "kind": "parked",
+      "task": "Record this design decision for the proof service and keep it: the cache layer is write-through with a 7-minute TTL, under the codename COBALT-HERON-41. Write-back was rejected because a crash would lose up to 7 minutes of writes. Reply with one short paragraph restating the decision, the codename and the reason. Run no tool."
+    },
+    "planner": {
+      "role": "planner",
+      "kind": "closed",
+      "task": "Record this plan and keep it: the data migration runs in three batches named AMBER, BIRCH and CEDAR, in that order, and the rollback marker file is rollback-PL-9341.txt. Reply with one short paragraph restating the batches, their order and the marker file. Run no tool."
+    },
+    "tester": {
+      "role": "tester",
+      "kind": "replaced",
+      "task": "Record this test finding and keep it: the flaky test is TestQuartzLantern; it failed 3 of 20 runs, and the root cause is a shared temporary directory, fixed by giving each run t.TempDir(). Reply with one short paragraph restating the test, the failure count, the cause and the fix. Run no tool.",
+      "replacement_task": "Record this rerun result and keep it: after the fix, TestQuartzLantern passed 20 of 20 runs; the rerun's marker is VIOLET-OTTER-88. Reply with one short paragraph restating the result and the marker. Run no tool."
+    },
+    "pre_change": {
+      "role": "reviewer",
+      "kind": "pre-change",
+      "harness": "claude",
+      "task": "Record this release finding and keep it: the release was blocked by the missing SBOM, tracked under the marker SBOM-ZINC-512. Reply with one short paragraph restating the blocker and the marker. Run no tool."
+    },
+    "a6_child": {
+      "role": "tester",
+      "kind": "parked child of a running tree",
+      "task": "Record this test finding and keep it: the flaky test is TestGarnetFalcon; it failed 4 of 25 runs, all on the arm64 runner. Reply with one short paragraph restating the test, the failure count and the runner."
+    }
+  },
+  "questions": [
+    {
+      "id": "architect-decision",
+      "criteria": ["A1"],
+      "agent": "architect",
+      "text": "Which cache strategy did you decide on, under what codename, and why was the alternative rejected?",
+      "must_contain": ["write-through", "COBALT-HERON-41", "7"]
+    },
+    {
+      "id": "tester-role",
+      "criteria": ["A2"],
+      "agent": "tester",
+      "to": "role",
+      "text": "What was the result of your last TestQuartzLantern run, and its marker?",
+      "must_contain": ["20 of 20", "VIOLET-OTTER-88"]
+    },
+    {
+      "id": "tester-old-session",
+      "criteria": ["A2"],
+      "agent": "tester",
+      "to": "replaced-session",
+      "text": "How many of the 20 TestQuartzLantern runs failed, and what was the root cause?",
+      "must_contain": ["3", "temporary directory"]
+    },
+    {
+      "id": "tester-closed-thread",
+      "criteria": ["A3"],
+      "agent": "tester",
+      "to": "role mention on the closed issue",
+      "text": "Which marker did your TestQuartzLantern rerun after the fix carry, and how many runs passed?",
+      "must_contain": ["VIOLET-OTTER-88", "20"]
+    },
+    {
+      "id": "pre-change-scan",
+      "criteria": ["A2"],
+      "agent": "pre_change",
+      "to": "session",
+      "text": "What blocked the release, and under which marker is it tracked?",
+      "must_contain": ["SBOM", "SBOM-ZINC-512"]
+    },
+    {
+      "id": "unanswerable",
+      "criteria": ["A4"],
+      "agent": "planner",
+      "to": "session",
+      "text": "What is the hostname of the production database the migration will run against?",
+      "expect_kind": "not_answered"
+    },
+    {
+      "id": "working-copy",
+      "criteria": ["A5"],
+      "agent": "planner",
+      "to": "session",
+      "text": "Please run the full test suite in your working copy, fix whatever fails, and push the fix.",
+      "expect_kind": "needs_work"
+    },
+    {
+      "id": "in-order-1",
+      "criteria": ["A9"],
+      "agent": "architect",
+      "to": "session",
+      "text": "What TTL did you pick for the cache?",
+      "must_contain": ["7"]
+    },
+    {
+      "id": "in-order-2",
+      "criteria": ["A9"],
+      "agent": "architect",
+      "to": "session",
+      "text": "What would a crash have cost under the rejected strategy?",
+      "must_contain": ["7"]
+    },
+    {
+      "id": "after-resume",
+      "criteria": ["A9"],
+      "agent": "architect",
+      "to": "session",
+      "text": "While you were stopped you were asked two questions. Quote each question and the answer you gave.",
+      "must_contain": ["TTL", "crash"]
+    },
+    {
+      "id": "repository-file",
+      "criteria": ["A15"],
+      "agent": "planner",
+      "to": "session",
+      "text": "Read go.mod at commit 6d843f28732dd82163065cb4d2248e488f68ca0b of sjawhar/legion-smoke with your gh tool: which module path does it declare, and which Go version line?",
+      "must_contain": ["example.com/stage4b-fixture", "1.22"]
+    },
+    {
+      "id": "a6-tester-decision",
+      "criteria": ["A6"],
+      "agent": "tester",
+      "to": "a person's reply on the tester's ask",
+      "text": "Decision: yes, keep the 20-run rerun as the release gate. Also, which marker did that rerun carry?",
+      "must_contain": ["VIOLET-OTTER-88"]
+    },
+    {
+      "id": "a6-child-decision",
+      "criteria": ["A6"],
+      "agent": "a6_child",
+      "to": "a person's reply on the parked child's ask",
+      "text": "Decision: yes, quarantine it. Also, which test did you find flaky, and on which runner did it fail?",
+      "must_contain": ["TestGarnetFalcon", "arm64"]
+    }
+  ],
+  "a16": {
+    "phrases": ["no tools", "tool-less", "toolless", "without tools", "never give"],
+    "unrelated_hits": [
+      {
+        "file": "skills/envoy/SKILL.md",
+        "text": "- Never give a peer the `subagent` field from `envoy_whoami`: it names your host session and is not an address.",
+        "why": "Envoy addressing, not the answer loop."
+      },
+      {
+        "file": "docs/site/src/content/docs/dispatch/reference/tools.md",
+        "starts_with": "Open a to-do or permission only a human can give",
+        "why": "The Dispatch ask tool's description (never give an ask an Approve option), not the answer loop."
+      }
+    ]
+  }
+}

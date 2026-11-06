@@ -572,4 +572,14 @@ package api
 // since taken 50 on its own branch, so this change takes the number above them all, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
-const DaemonAPIVersion = 51
+//
+// 52: INFRA-204 -- api.State gains `questionsForController`, every question to a stopped agent
+// that the daemon's answer loop passed to the controller in the last seven days (id, issue, role,
+// session, asker, ref, reason, passedAt), newest first and at most 100: the controller's
+// `agent-question` notice is a live wake only, so a controller that starts later reads what it
+// missed here. Never null, so a 51 plugin's strict reader refuses the state, and the boot gate
+// and `legion probe-image` refuse the mixed pair. (This branch took 38 while it was open; main
+// has since reached 51, so this change takes the number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+const DaemonAPIVersion = 52

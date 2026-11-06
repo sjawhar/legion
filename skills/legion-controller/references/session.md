@@ -29,8 +29,10 @@ answer to your ask, a mention), Envoy or Slack. No `legion controller start` can
   `issues.<KEY>.holdReason`, `issues.<KEY>.architect`, `issues.<KEY>.tree` (the root of the
   issue's tree), `admission.cap`, `admission.active` (the issues holding a slot, roots and
   children), `admission.waiting` (the issues in the line, in its order), `admission.trees` (the
-  roots of the live trees), `admission.blocked`, `capabilities[]`, `daemon.project`, and
-  `settings` (the daemon's resolved `legion.yaml`, with no credential in it).
+  roots of the live trees), `admission.blocked`, `capabilities[]`, `daemon.project`, `settings`
+  (the daemon's resolved `legion.yaml`, with no credential in it) and `questionsForController`
+  (the questions to stopped agents the daemon's answer loop passed on in the last seven days:
+  `skill://legion-controller/references/wakes.md`, `agent-question`).
 - `op: "set_status"` with `issue` and `status` (`todo`, `backlog` or `icebox`) moves an issue. Each
   call mints its grant in-process from the secret the session registered with, so a stale secret
   fails it with a 403. You cannot set `done`: only an issue's architect or the daemon closes an

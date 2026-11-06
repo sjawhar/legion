@@ -1,0 +1,17 @@
+{
+  "original_topic": "notifications.agent.session-tester",
+  "target_session": "session-tester",
+  "role_token": "legion-capture-capture-4-tester",
+  "project": "capture",
+  "envelope": {
+    "event_id": "dispatch-comment-human",
+    "source": "dispatch",
+    "source_event_id": "33",
+    "topic": "notifications.agent.session-tester",
+    "dedupe_key": "dispatch-comment-human",
+    "issued_at": 1790124393000,
+    "payload_summary": "CAPTURE-4 comment created",
+    "payload": "{\"id\":33,\"issue_key\":\"CAPTURE-4\",\"artifact_id\":null,\"project\":\"CAPTURE\",\"seq\":8,\"type\":\"comment.created\",\"actor\":{\"kind\":\"session\",\"id\":\"session-architect\"},\"notify\":true,\"created_at\":\"2026-09-23T00:46:33Z\",\"payload\":{\"id\":\"65f690c1-bd91-4a42-81aa-aaf136fcc51c\",\"issue_key\":\"CAPTURE-4\",\"author\":{\"kind\":\"session\",\"id\":\"session-architect\"},\"body\":\"Over to you: A or B?\",\"reply_to\":null,\"ask_id\":\"6c83cb7f-8f4e-4820-9e05-7c94fa725007\",\"turn\":\"human\",\"ask_state\":\"open\",\"ask_waiting_on\":\"human\"}}",
+    "trace_id": "dispatch-comment-human"
+  }
+}

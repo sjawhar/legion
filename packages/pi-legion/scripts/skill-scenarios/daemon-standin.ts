@@ -71,11 +71,13 @@ const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, ["phase", r
  * (`workflow.RoleFor`, through daemon-pane.go), on the rig's one repository. `capabilities` is the
  * deployment's capability report, `strandedClaims` the claims nothing will wake, `heldOutboxRows`
  * the lifecycle rows held behind their issues' running ones, `consumers` the lag of the daemon's
- * durable consumers and `repositories` the project's mapping, each of which the reader
- * requires; the rig has no deployment to report on, its one claim runs, it has no outbox and no
- * NATS, so the first four are the empty lists the daemon's MarshalJSON emits when there is none.
- * `settings` is the daemon's resolved legion.yaml with no credential in it, also required; the rig
- * has no file, so it carries the two keys the reader types at the daemon's defaults. */
+ * durable consumers, `questionsForController` the questions the answer loop passed to the
+ * controller and `repositories` the project's mapping, each of which the reader requires; the rig
+ * has no deployment to report on, its one claim runs, it has no outbox, no NATS and no question
+ * was passed on, so the first five are the empty lists the daemon's MarshalJSON emits when there
+ * is none. `settings` is the daemon's resolved legion.yaml with no credential in it, also
+ * required; the rig has no file, so it carries the two keys the reader types at the daemon's
+ * defaults. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [], trees: [issue], blocked: [] },
@@ -104,6 +106,7 @@ const STATE = LegionStateResponse.parse({
   },
   settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
   consumers: [],
+  questionsForController: [],
 });
 
 interface LogLine {

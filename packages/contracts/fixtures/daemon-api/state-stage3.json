@@ -98,5 +98,6 @@
     "role_config_files": {},
     "repository_renames": []
   },
-  "consumers": []
+  "consumers": [],
+  "questionsForController": []
 }
