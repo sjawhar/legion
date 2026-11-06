@@ -411,7 +411,7 @@ const noRulesFile = "the broker reads each secret's owner and tier from the secr
 const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts 12 hours, or until the requesting session ends for a secret tagged default-grant=session"
 
 // noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
-const noMintTargets = "the broker no longer mints service account tokens; a secret's kind tag selects what it mints"
+const noMintTargets = "the broker no longer reads one list of mint targets; each secret's kind tag names the minter it is served by"
 
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
