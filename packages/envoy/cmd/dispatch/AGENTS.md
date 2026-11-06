@@ -251,10 +251,11 @@ against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, uploaded files' bytes live in that bucket under
 `files/sha256/<hash>` (`internal/dispatch/files`; `main.go`'s `openFileStore` builds the store
-with `files.Open`, the one place a value becomes a store, which `backfill-files` calls too:
-`gs://<bucket>` is `files.GCS`, a Cloud Storage bucket under Application Default Credentials
-needing only `storage.objects.create` and `storage.objects.get`, and a bare name is `files.S3`;
-it hands the store down as `api.Deps.Files`), one object however often the file is uploaded; a
+with `files.Open`, the one place a value becomes a store, which `backfill-files` and
+`backfill-dimensions` call too: `gs://<bucket>` is `files.GCS`, a Cloud Storage bucket under
+Application Default Credentials needing only `storage.objects.create` and
+`storage.objects.get`, and a bare name is `files.S3`; it hands the store down as
+`api.Deps.Files`), one object however often the file is uploaded; a
 document's markdown stays in Postgres. `storeArtifact` writes the object before it opens its
 transaction, so no issue lock or pooled connection waits on the bucket, and the row holds no
 bytes; `getArtifactVersion` serves a row still holding bytes from the row and any other from the
@@ -270,7 +271,13 @@ store's tests open it with `files.NewGCS` against `filestest.ServeGCS`, a loopba
 bucket that refuses an upload without `ifGenerationMatch=0` or the body's CRC32C and MD5.
 `envoy-dispatch backfill-files [--verify-only | --restore]` moves the rows uploaded before the
 bucket, checks them, or writes them back (the rollback); the README's "Moving uploaded files to
-the bucket" has its rules and the task role's grant. `/healthz` reports the bucket as `files`
+the bucket" has its rules and the task role's grant. `envoy-dispatch backfill-dimensions` fills
+the width and height of every picture version stored before Dispatch read a size, from the row
+while it still holds its bytes and from the bucket once `backfill-files` has moved them, with
+the one decode the upload path reads too (`files.PictureDimensions`, `files/dimensions.go`); it
+refuses to run without the bucket, holds an advisory lock of its own so `backfill-files` neither
+waits on it nor blocks it, writes only a row still missing the pair, and the README's "Recording
+the size of the pictures already stored" has its rules. `/healthz` reports the bucket as `files`
 and never fails on it. The bucket and its policies live in the deployment repository
 (LEGION-520).
 

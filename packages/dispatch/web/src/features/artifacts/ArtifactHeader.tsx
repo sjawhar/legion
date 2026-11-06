@@ -287,9 +287,14 @@ export function ArtifactBlobView({
               </Link>
             </p>
           }
+          // The version answer's own pair, never a summary's: this page draws the version the
+          // reader chose, and the summary answers for the latest alone. A version stored before
+          // Dispatch read a size carries neither and is drawn as it always was.
+          height={selected.height}
           kind={kind}
           src={drawn}
           variant="block"
+          width={selected.width}
         />
       )}
       <dl className="grid grid-cols-2 gap-3 text-sm">

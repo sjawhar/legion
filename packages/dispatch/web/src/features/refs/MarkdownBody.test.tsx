@@ -22,6 +22,7 @@ import {
   installFakeParseWorker,
   restoreParseWorker,
 } from "./parse-worker-fixture";
+import { pictureThumbnailClassName } from "./picture-classes";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -87,11 +88,11 @@ describe("Dispatch pictures", () => {
       const shot = await within(view.container).findByRole("img", { name: "shot.png" });
       expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
       expect(shot.getAttribute("loading")).toBe("lazy");
-      // At its own size scaled down to the column, with no cap on its height.
+      // At its own size scaled down to the column, with no cap on its height and no width of
+      // its own, which would override the box the size attributes reserve.
       const classes = shot.className.split(" ");
-      expect(classes).toEqual(
-        expect.arrayContaining(["max-w-full", "w-auto", "h-auto", "object-contain"])
-      );
+      expect(classes).toEqual(expect.arrayContaining(["max-w-full", "h-auto", "object-contain"]));
+      expect(classes).not.toContain("w-auto");
       expect(classes.some((name) => name.startsWith("max-h-"))).toBe(false);
       expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
       // A picture with no caption is named by its slug.
@@ -172,6 +173,99 @@ describe("Dispatch pictures", () => {
       expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
     } finally {
       getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  /** The same image document, whose latest version records its own 1600x900 shape. */
+  const sizedPicture: IssueReferenceSummaryDocument = { ...picture, height: 900, width: 1600 };
+
+  /** A video upload: a file artifact whose latest version is stored under a video type. */
+  const clip: IssueReferenceSummaryDocument = {
+    height: null,
+    id: "artifact-clip",
+    kind: "file",
+    latest_version: 1,
+    mime: "video/mp4",
+    name: "clip.mp4",
+    primary: false,
+    slug: "clip-mp4",
+    width: null,
+  };
+
+  // The box a reader's browser reserves before the bytes arrive: the version's own size, so the
+  // text below the picture does not move as it loads (INFRA-760 R12).
+  test("a picture drawn at the artifact's latest version carries that version's own box", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([sizedPicture])
+    );
+    const view = render(
+      withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />)
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2");
+      expect(shot.getAttribute("width")).toBe("1600");
+      expect(shot.getAttribute("height")).toBe("900");
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // Three drawings that carry no box: a version below the latest, whose shape no summary
+  // answers for; a player, which sizes itself; and the 40 px square, whose class fixes its box.
+  test("a pinned older version, a video and a thumbnail carry no box", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([sizedPicture, clip])
+    );
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={
+            "![shot.png](dispatch://CORE-1/artifact/shot-png@v1)\n\n![clip.mp4](dispatch://CORE-1/artifact/clip-mp4)"
+          }
+        />
+      )
+    );
+    const preview = render(
+      withQueries(
+        <MarkdownBody
+          markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)"
+          variant="inline"
+        />
+      )
+    );
+
+    try {
+      const pinned = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(pinned.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
+      );
+      expect(pinned.hasAttribute("width")).toBe(false);
+      expect(pinned.hasAttribute("height")).toBe(false);
+      const player = await waitFor(() => {
+        const element = view.container.querySelector("video");
+        if (element === null) throw new Error("the video line draws no player");
+        return element;
+      });
+      expect(player.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/1"
+      );
+      expect(player.hasAttribute("width")).toBe(false);
+      expect(player.hasAttribute("height")).toBe(false);
+      const thumbnail = await waitFor(() => {
+        const element = preview.container.querySelector("img");
+        if (element === null) throw new Error("the preview shows no thumbnail");
+        return element;
+      });
+      expect(thumbnail.className).toBe(pictureThumbnailClassName);
+      expect(thumbnail.hasAttribute("width")).toBe(false);
+      expect(thumbnail.hasAttribute("height")).toBe(false);
+    } finally {
+      getIssueSummary.mockRestore();
+      preview.unmount();
       view.unmount();
     }
   });

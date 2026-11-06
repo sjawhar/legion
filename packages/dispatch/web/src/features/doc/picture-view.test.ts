@@ -54,14 +54,17 @@ function fakeOpener(editable = false) {
 /** A past version's: the view every test below draws in unless it says otherwise. */
 const pastVersion = fakeOpener().opener;
 
-/** A watcher the test drives: `report` sends the latest picture to the view, `reportVideo` a
- *  video at that address, and `stopped` counts the view's unsubscribes. */
+/** A watcher the test drives: `report` sends the latest picture to the view, `sized` one whose
+ *  version records its own size, `reportVideo` a video at that address, and `stopped` counts
+ *  the view's unsubscribes. */
 function fakeWatch(initial?: string) {
   const fake = {
     asked: [] as string[],
     send: (_media: ReferenceMedia | undefined) => {},
     report: (src: string | undefined) =>
       fake.send(src === undefined ? undefined : { kind: "picture", src }),
+    sized: (src: string, width: number, height: number) =>
+      fake.send({ height, kind: "picture", src, width }),
     reportVideo: (src: string) => fake.send({ kind: "video", src }),
     stopped: 0,
     watch: (
@@ -477,4 +480,60 @@ test("a picture from elsewhere, or a reference the grammar refuses, is drawn by 
     expect(dom.hasAttribute("data-dispatch-doc-picture")).toBe(false);
     expect(view.stopEvent).toBeUndefined();
   }
+});
+
+// The box an editor reserves before the bytes arrive: the version's own size, so the paragraph
+// below the picture does not move as it loads (INFRA-760 R12).
+test("a version-less source draws the latest version with that version's own box", () => {
+  const latest = fakeWatch();
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
+    document,
+    noCaret,
+    latest.watch,
+    pastVersion
+  );
+  const dom = view.dom as HTMLElement;
+
+  latest.sized("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2", 1600, 900);
+  const img = pictureOf(dom);
+  expect(img.getAttribute("width")).toBe("1600");
+  expect(img.getAttribute("height")).toBe("900");
+  // A version whose size Dispatch never read is drawn as every picture was before it did.
+  latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
+  expect(pictureOf(dom).hasAttribute("width")).toBe(false);
+  expect(pictureOf(dom).hasAttribute("height")).toBe(false);
+  // A player sizes itself and takes neither.
+  latest.reportVideo("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+  const player = dom.querySelector("video");
+  expect(player?.hasAttribute("width")).toBe(false);
+  expect(player?.hasAttribute("height")).toBe(false);
+
+  view.destroy?.();
+});
+
+test("a pinned source takes its box from the report that brings it, without drawing again", () => {
+  const pinned = fakeWatch();
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png@v2", "shot.png"),
+    document,
+    noCaret,
+    pinned.watch,
+    pastVersion
+  );
+  const dom = view.dom as HTMLElement;
+  const src = "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2";
+
+  // It draws the address it names before any summary is read, with no box to go on.
+  const img = pictureOf(dom);
+  expect(img.getAttribute("src")).toBe(src);
+  expect(img.hasAttribute("width")).toBe(false);
+  // The summary lands and says that version is the latest, 1600x900: the picture already drawn
+  // takes the box, rather than being drawn again and loading its bytes a second time.
+  pinned.sized(src, 1600, 900);
+  expect(pictureOf(dom)).toBe(img);
+  expect(img.getAttribute("width")).toBe("1600");
+  expect(img.getAttribute("height")).toBe("900");
+
+  view.destroy?.();
 });

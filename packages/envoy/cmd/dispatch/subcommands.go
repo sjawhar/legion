@@ -46,6 +46,9 @@ var subcommands = []subcommand{
 	{"backfill-files", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return backfillFiles(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
 	}},
+	{"backfill-dimensions", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillDimensions(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
+	}},
 	{"stored-order", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return storedOrder(ctx, args, env.get("DATABASE_URL"), stdout)
 	}},
@@ -206,6 +209,50 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 	fmt.Fprintf(out, "backfill-files: %s=%d bytes=%d failed=%d\n", verb, report.Done, report.Bytes, len(report.Failed))
 	if err != nil {
 		fmt.Fprintf(out, "backfill-files: stopped: %v\n", err)
+		return 1
+	}
+	if len(report.Failed) > 0 {
+		return 1
+	}
+	return 0
+}
+
+// backfillDimensions records the own width and height of every picture version stored before
+// Dispatch read a size, oldest first and one row at a time (files.BackfillDimensions): it reads
+// each row's bytes, from the row while it still holds them and from the bucket
+// DISPATCH_FILE_STORE_BUCKET names once backfill-files has moved them, and reads the header with
+// the decode the upload path uses. The bucket is opened by files.Open as the server opens it, so
+// the two never read one value as two stores, and a run without it is refused: a moved row holds
+// no bytes to read a size from. The pass names the rows it could not read and goes on past them,
+// exits 1 when any failed, and can be run again at any time, since a row that already carries
+// its pair is left alone.
+func backfillDimensions(ctx context.Context, args []string, databaseURL, bucket string, out io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintf(out, "backfill-dimensions: unexpected argument %q; it takes no flags\n", args[0])
+		return 2
+	}
+	if bucket == "" {
+		fmt.Fprintln(out, "backfill-dimensions: DISPATCH_FILE_STORE_BUCKET is required")
+		return 1
+	}
+	database, ok := openMigrated(ctx, "backfill-dimensions", databaseURL, out)
+	if !ok {
+		return 1
+	}
+	defer database.Pool.Close()
+	fileStore, err := files.Open(ctx, bucket)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-dimensions: %v\n", err)
+		return 1
+	}
+	if err := fileStore.Healthy(ctx); err != nil {
+		fmt.Fprintf(out, "backfill-dimensions: the bucket is not reachable: %v\n", err)
+		return 1
+	}
+	report, err := files.BackfillDimensions(ctx, database.Pool, fileStore, out)
+	fmt.Fprintf(out, "backfill-dimensions: sized=%d bytes=%d failed=%d\n", report.Done, report.Bytes, len(report.Failed))
+	if err != nil {
+		fmt.Fprintf(out, "backfill-dimensions: stopped: %v\n", err)
 		return 1
 	}
 	if len(report.Failed) > 0 {

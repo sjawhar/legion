@@ -88,16 +88,29 @@ function surfacePictures(clicked: HTMLImageElement): HTMLImageElement[] {
 
 /** One picture of the set: the address the browser drew it from, its alt text, which the viewer
  *  gives its own `<img>` and so is the picture's accessible name there, and its size, which
- *  PhotoSwipe requires. A picture the page has drawn reports its size itself; one below the fold
- *  that lazy loading has not drawn reports 0, and is sized when the reader steps to it
- *  (`sizeOnStep`). */
+ *  PhotoSwipe requires. The size comes from the record the page already holds, the `width` and
+ *  `height` the drawing places write from the version's own recorded pair (`drawnBox`), so the
+ *  viewer measures no page. A picture drawn without them - a version stored before Dispatch
+ *  read a size, a reference pinned below the artifact's latest version - reports its own size
+ *  once the browser has drawn it; one below the fold that lazy loading has not drawn reports 0
+ *  with neither, and is sized when the reader steps to it (`sizeOnStep`). */
 function pictureData(picture: HTMLImageElement): SlideData {
+  const box = drawnBox(picture);
   return {
     alt: picture.alt,
-    height: picture.naturalHeight || undefined,
+    height: box?.height ?? (picture.naturalHeight || undefined),
     src: picture.currentSrc || picture.src,
-    width: picture.naturalWidth || undefined,
+    width: box?.width ?? (picture.naturalWidth || undefined),
   };
+}
+
+/** The size the page wrote on the drawn picture: both attributes or neither, since one of the
+ *  two names no shape. A picture with no `width` and `height` answers undefined, as every
+ *  picture did before a version recorded its size. */
+function drawnBox(picture: HTMLImageElement): { width: number; height: number } | undefined {
+  const width = Number(picture.getAttribute("width"));
+  const height = Number(picture.getAttribute("height"));
+  return width > 0 && height > 0 ? { height, width } : undefined;
 }
 
 async function draw(session: ViewerSession, dataSource: SlideData[], index: number): Promise<void> {
@@ -145,10 +158,12 @@ async function loadViewer() {
   }
 }
 
-/** Sizes a picture the page had not drawn when the view opened, at the moment the reader steps
- *  to it: PhotoSwipe requires predefined image dimensions and starts no load without them, so
- *  such a slide draws nothing until its size is known. `contentActivate` is the event for it -
- *  it fires for the slide the reader is on, at the open and at every step, and not for one the
+/** Sizes a picture that reached the viewer with no size at all, at the moment the reader steps
+ *  to it: one the page had not drawn when the view opened and whose element carries no recorded
+ *  pair either, which is the state of every picture stored before Dispatch read a size.
+ *  PhotoSwipe requires predefined image dimensions and starts no load without them, so such a
+ *  slide draws nothing until its size is known. `contentActivate` is the event for it - it
+ *  fires for the slide the reader is on, at the open and at every step, and not for one the
  *  viewer merely holds beside it - and `refreshSlideContent` draws that slide again from the
  *  item data this fills in. So opening the view fetches nothing the reader does not look at. */
 function sizeOnStep(viewer: PhotoSwipe): void {

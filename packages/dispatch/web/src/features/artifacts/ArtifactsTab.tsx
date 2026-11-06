@@ -173,7 +173,9 @@ function ArtifactRow({
   // The row's 40 px square, for an image artifact whose latest version is a picture. A video
   // keeps a text row: a frame of it is a decode this app does not do. A version the browser
   // refuses drops the square and leaves the row's own link to the artifact, never a broken
-  // glyph (`ArtifactMedia`).
+  // glyph (`ArtifactMedia`). The square takes no `width` and `height` of its own: its class
+  // fixes its box, so the version's recorded pair would reserve nothing the row does not
+  // already hold.
   const thumbnail =
     latestVersion === undefined || artifact.kind !== "image" || isStoredVideo(latestVersion.mime)
       ? undefined

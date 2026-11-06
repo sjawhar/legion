@@ -97,7 +97,7 @@ Each item below names a variable, then its purpose.
 - `DISPATCH_FILE_STORE_BUCKET`
 
   Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres.
-  The value chooses the store (`files.Open`), and the server and `backfill-files` both open it there, so they never read one value as two stores:
+  The value chooses the store (`files.Open`), and the server, `backfill-files` and `backfill-dimensions` all open it there, so they never read one value as two stores:
 
   - `gs://<bucket>` is a Google Cloud Storage bucket, reached through the JSON API with Application Default Credentials (on GKE, the pod's Workload Identity principal; elsewhere `GOOGLE_APPLICATION_CREDENTIALS` or a gcloud login).
     The principal needs `storage.objects.create` and `storage.objects.get` on the bucket and nothing more (`roles/storage.objectCreator` and `roles/storage.objectViewer`):
@@ -118,6 +118,7 @@ Each item below names a variable, then its purpose.
   `/healthz` reports `files`: null when unset, else whether the bucket answered within two seconds (S3: a `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, whose absence is a healthy answer, so `storage.objects.get` alone serves it, while a bucket that does not exist or a refused grant fails it);
   it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down.
   `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below).
+  `envoy-dispatch backfill-dimensions` reads the pictures stored before Dispatch recorded a picture's own size, from their rows and from the bucket ("Recording the size of the pictures already stored", below).
 
 - `DISPATCH_EMBEDDER`, `DISPATCH_AZURE_EMBED_*`, `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`
 
@@ -358,6 +359,25 @@ the table shrinks on disk only after `VACUUM FULL` or `pg_repack`, while the nig
 To run a local server against a bucket of your own, point the SDK at an S3-compatible server with `AWS_ENDPOINT_URL_S3=http://127.0.0.1:<port>` (an IP literal:
 with `localhost` the SDK addresses the bucket as a subdomain, which does not resolve), `AWS_REGION`, static `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, and `AWS_EC2_METADATA_DISABLED=true`.
 The Go tests start one (`internal/tests3`, SeaweedFS in a container, since MinIO's image left Docker Hub) and create the bucket with an anonymous `PUT /<bucket>`.
+
+## Recording the size of the pictures already stored
+
+A picture uploaded since INFRA-760 records its own width and height, read from its header where the upload already holds the bytes, so every place that draws it reserves its box and the text below it stops moving as the bytes arrive.
+The pictures stored before that record neither until `backfill-dimensions` reads them, oldest first and one row at a time:
+it reads each row's bytes, from the row while it still holds them and from the bucket once `backfill-files` has moved them, reads the header with the decode the upload path uses (`files.PictureDimensions`, the one declaration of it), and writes the pair in one statement that writes only a row still missing it.
+A row it cannot read (bytes the bucket does not hold, a header that does not decode) is printed as `FAILED version <id>` and passed over, so one bad row holds up no other;
+the run exits 1 when any row failed, and can be run again at any time, since a row already carrying its pair is left alone and a picture with no recorded size is drawn exactly as it was.
+A second pass at once is refused by an advisory lock of its own (`another backfill-dimensions pass holds the lock`), which `backfill-files` neither takes nor waits on:
+this pass moves no bytes and clears no row, so the two run side by side.
+
+```bash
+envoy-dispatch backfill-dimensions            # record the size of every picture stored without one; prints each one and a total; exit 1 if any failed
+```
+
+It takes no flags.
+It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, which it opens as the server does and probes as `backfill-files` does (the probe `/healthz` runs) before touching a row, and it refuses to run without the bucket:
+a row whose bytes have been moved holds none to read a size from.
+It reads nothing else of the server's configuration.
 
 ## Identity
 

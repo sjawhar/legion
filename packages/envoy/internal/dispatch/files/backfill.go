@@ -29,31 +29,32 @@ type Querier interface {
 // backfillLock is the advisory lock one pass of BackfillRows or RestoreRows holds for its run, so
 // two passes started together (a one-off task run twice) do not both move or restore the same
 // rows in lockstep. Session-scoped, so a pass that dies releases it with its connection.
+// BackfillDimensions holds a lock of its own (dimensionsLock), since it moves no bytes.
 const backfillLock = 0x4c45_4749_4f4e_3532 // "LEGION52"
 
 // ErrAnotherPassRunning is the refusal when the advisory lock is held by another run.
 var ErrAnotherPassRunning = errors.New("another backfill-files pass holds the lock; wait for it to finish")
 
-// acquire takes backfillLock on a connection of pool it holds for the pass, or answers
-// ErrAnotherPassRunning. The lock is the session's, so it lives on that one connection, which the
-// returned release unlocks and gives back (duty.FreeSessionLock). The pass's own statements run
-// through pool, not that connection, so the unlock is bounded by that call alone.
-func acquire(ctx context.Context, pool Querier) (func(), error) {
+// acquire takes lock on a connection of pool it holds for the pass, or answers refused. The lock
+// is the session's, so it lives on that one connection, which the returned release unlocks and
+// gives back (duty.FreeSessionLock). The pass's own statements run through pool, not that
+// connection, so the unlock is bounded by that call alone.
+func acquire(ctx context.Context, pool Querier, lock int64, refused error) (func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("take a connection for the backfill lock: %w", err)
 	}
 	var held bool
-	if err := conn.QueryRow(ctx, `select pg_try_advisory_lock($1)`, backfillLock).Scan(&held); err != nil {
+	if err := conn.QueryRow(ctx, `select pg_try_advisory_lock($1)`, lock).Scan(&held); err != nil {
 		conn.Release()
 		return nil, fmt.Errorf("take the backfill lock: %w", err)
 	}
 	if !held {
 		conn.Release()
-		return nil, ErrAnotherPassRunning
+		return nil, refused
 	}
 	return func() {
-		if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock($1)`, backfillLock); err != nil {
+		if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock($1)`, lock); err != nil {
 			slog.Warn("dispatch: free the backfill lock", "error", err)
 		}
 	}, nil
@@ -127,7 +128,7 @@ func (r *PassReport) fail(out io.Writer, id string, err error) {
 // serving a row from its bytes until they are cleared. A database failure, or a cancelled context,
 // stops the pass with that error.
 func BackfillRows(ctx context.Context, pool Querier, store Store, out io.Writer) (PassReport, error) {
-	release, err := acquire(ctx, pool)
+	release, err := acquire(ctx, pool, backfillLock, ErrAnotherPassRunning)
 	if err != nil {
 		return PassReport{}, err
 	}
@@ -193,7 +194,7 @@ func moveRow(ctx context.Context, pool Querier, store Store, id, sha, mime strin
 // the bucket, and a later BackfillRows moves the rows out once more. A row whose object is missing
 // or wrong is named and passed over.
 func RestoreRows(ctx context.Context, pool Querier, store Store, out io.Writer) (PassReport, error) {
-	release, err := acquire(ctx, pool)
+	release, err := acquire(ctx, pool, backfillLock, ErrAnotherPassRunning)
 	if err != nil {
 		return PassReport{}, err
 	}

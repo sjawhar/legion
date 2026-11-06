@@ -17,10 +17,8 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
-// seedFileVersion writes an issue, a file artifact and one version holding body in its row, as
-// an upload did before the store existed, and returns the version's id. Each call's row is
-// created later than the previous call's, so a pass visits them in the order they were seeded.
-func seedFileVersion(t *testing.T, database *store.Store, slug string, body []byte) string {
+// seedIssue writes the project and issue every seeded artifact hangs under, once per database.
+func seedIssue(t *testing.T, database *store.Store) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('FILES', 'Files') on conflict do nothing`); err != nil {
@@ -32,6 +30,15 @@ func seedFileVersion(t *testing.T, database *store.Store, slug string, body []by
 	`); err != nil {
 		t.Fatalf("seed issue: %v", err)
 	}
+}
+
+// seedFileVersion writes an issue, a file artifact and one version holding body in its row, as
+// an upload did before the store existed, and returns the version's id. Each call's row is
+// created later than the previous call's, so a pass visits them in the order they were seeded.
+func seedFileVersion(t *testing.T, database *store.Store, slug string, body []byte) string {
+	t.Helper()
+	ctx := context.Background()
+	seedIssue(t, database)
 	var artifactID string
 	if err := database.Pool.QueryRow(ctx, `
 		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)

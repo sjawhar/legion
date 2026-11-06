@@ -93,13 +93,18 @@ export function DispatchPicture({
       words={caption}
     />
   ) : (
+    // The pair the reference answers with, where it has one: the version's own size, which a
+    // picture at the artifact's latest version carries and a pinned older one does not
+    // (`ReferenceMedia`). The thumbnail above takes none: its class fixes its box.
     <ArtifactMedia
       caption={caption}
       fallback={link}
+      height={media.height}
       host={anchor}
       kind={media.kind}
       src={media.src}
       variant="block"
+      width={media.width}
     />
   );
 }

@@ -13,8 +13,15 @@ import { borderDefault } from "../../theme/classes";
  *  so a wide figure fills the column; a click opens it at full size (`openPictureViewer`).
  *  `not-prose` keeps Markdown's figure margins off it, so it sits in its line as a pasted picture
  *  is written. A video's player is drawn with the same string, so a picture in a spec, a picture
- *  in a comment and a player in either are one shape. */
-export const pictureClassName = `not-prose inline-block h-auto w-auto max-w-full cursor-zoom-in rounded border object-contain align-bottom ${borderDefault}`;
+ *  in a comment and a player in either are one shape.
+ *
+ *  It declares no width of its own, only `max-w-full` and `h-auto`: a picture's `width` and
+ *  `height` attributes, which every drawing place writes from the version's recorded size, are
+ *  presentational hints, and any author `width` - `w-auto` as much as a number - wins over them
+ *  in the cascade. With `w-auto` the element reserved nothing before its bytes arrived and the
+ *  paragraph under an 800x600 picture sat at the top of the column; without it that paragraph
+ *  sits 600 px down, where the loaded picture leaves it (INFRA-760 R12). */
+export const pictureClassName = `not-prose inline-block h-auto max-w-full cursor-zoom-in rounded border object-contain align-bottom ${borderDefault}`;
 
 /** The 40 px square a picture shows as beside its title, wherever a line holds it: a reference
  *  link's, an ask option's, a one-line preview's, the Artifacts tab's row. `not-prose` keeps

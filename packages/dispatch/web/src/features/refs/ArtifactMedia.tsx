@@ -27,10 +27,12 @@ export function ArtifactMedia({
   caption,
   className,
   fallback,
+  height,
   host,
   kind,
   src,
   variant,
+  width,
   words,
 }: {
   /** The element's own accessible name: an `<img>`'s `alt`, a player's label. A thumbnail that
@@ -44,6 +46,15 @@ export function ArtifactMedia({
   /** What is drawn once the browser refuses the address: a link to the artifact, never a broken
    *  element. */
   fallback: ReactNode;
+  /** The picture's own size in pixels, which the drawn `<img>` carries as its `width` and
+   *  `height` attributes, so the browser reserves its box before the bytes arrive and the text
+   *  below it does not move as they land. Handed together or not at all, and only for a picture
+   *  drawn at reading size: a player sizes itself, and the 40 px square's own class fixes its
+   *  box, so neither place hands them. Left out for a version whose size Dispatch has not read
+   *  (`backfill-dimensions` fills those) and for a reference pinned below the artifact's latest
+   *  version, where the element is sized by the bytes as it always was. */
+  height?: number;
+  width?: number;
   /** The element a rendered body portals this into, when it is one: the `<a>` to the artifact's
    *  page that holds a picture line or a plain reference. */
   host?: HTMLElement;
@@ -108,14 +119,19 @@ export function ArtifactMedia({
       />
     );
   }
+  // `width` and `height` are the version's own, where the place knows them: the box the browser
+  // reserves before the bytes arrive. A place that knows neither hands neither, and the element
+  // is drawn exactly as it was before Dispatch recorded a picture's size.
   const image = (
     <img
       alt={caption}
       className={classes}
+      height={height}
       loading="lazy"
       onError={() => setFailedSrc(src)}
       ref={picture}
       src={src}
+      width={width}
     />
   );
   return words === undefined ? (

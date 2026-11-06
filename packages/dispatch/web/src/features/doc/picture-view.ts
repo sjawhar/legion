@@ -125,15 +125,16 @@ export type WatchPicture = (
  * only this view's DOM differs, so a save writes the line it read.
  *
  * The picture is at its own size, scaled down to the column (`pictureClassName`, the reading
- * size the React places draw with too), and a plain click opens it at full size
- * (`openPictureViewer`), a view the node view closes when it is destroyed. A version the browser
- * cannot draw (a document, another file, a missing version) errors, and the element becomes
- * `fallbackLink`; a version-less source shows that link while no latest version is known, and a
- * source that names something other than an artifact is that link at once. `placeCaretAfter` puts
- * the editor's caret just after the node, which the link calls on a primary-button mousedown (the
- * comment in `fallbackLink` says why). Any other source - a picture on another website, a relative
- * path, a `dispatch://` string the reference grammar refuses - is drawn by the schema's own
- * `toDOM`, as today.
+ * size the React places draw with too), carrying the version's own width and height where the
+ * watch answers them (`setBox`), so the text below it does not move as the bytes arrive, and a
+ * plain click opens it at full size (`openPictureViewer`), a view the node view closes when it
+ * is destroyed. A version the browser cannot draw (a document, another file, a missing
+ * version) errors, and the element becomes `fallbackLink`; a version-less source shows that
+ * link while no latest version is known, and a source that names something other than an
+ * artifact is that link at once. `placeCaretAfter` puts the editor's caret just after the node,
+ * which the link calls on a primary-button mousedown (the comment in `fallbackLink` says why).
+ * Any other source - a picture on another website, a relative path, a `dispatch://` string the
+ * reference grammar refuses - is drawn by the schema's own `toDOM`, as today.
  */
 export function pictureView(
   node: ProseMirrorNode,
@@ -156,18 +157,34 @@ export function pictureView(
   let link: HTMLAnchorElement | undefined;
   let viewer: PictureViewer | undefined;
   // What the wrapper shows: the address drawn and whether it is drawn as a picture or played,
-  // both undefined while it shows the link. A report of what is already shown is skipped, and
-  // one after a failed load draws again.
+  // both undefined while it shows the link, and the picture itself while one is drawn, which a
+  // later report writes a size onto. A report of what is already shown is skipped, and one
+  // after a failed load draws again.
   let shown: string | undefined;
   let shownKind: ReferenceMedia["kind"] | undefined;
+  let drawn: HTMLImageElement | undefined;
   const showLink = () => {
     shown = undefined;
     shownKind = undefined;
+    drawn = undefined;
     link = fallbackLink(route, document, placeCaretAfter, opener);
     dom.replaceChildren(link);
   };
-  const showMedia = (kind: ReferenceMedia["kind"], src: string) => {
+  /** Writes the version's own size onto the drawn picture, so the editor reserves its box before
+   *  the bytes arrive and the paragraph below it does not move as they land. A reference that
+   *  answers no pair - a version stored before Dispatch read a size, a source pinned below the
+   *  artifact's latest version - leaves the element sized by its bytes, as it always was. The
+   *  pair can land after the picture is drawn, where a pinned source drew before its summary
+   *  was read, and sizes the element then rather than drawing it again and starting its load
+   *  over. */
+  const setBox = (media: ReferenceMedia | undefined) => {
+    if (drawn === undefined || media?.width === undefined || media.height === undefined) return;
+    drawn.setAttribute("width", String(media.width));
+    drawn.setAttribute("height", String(media.height));
+  };
+  const showMedia = (kind: ReferenceMedia["kind"], src: string, media?: ReferenceMedia) => {
     let element: HTMLImageElement | HTMLVideoElement;
+    drawn = undefined;
     if (kind === "video") {
       const player = document.createElement("video");
       player.setAttribute("controls", "");
@@ -187,6 +204,7 @@ export function pictureView(
         viewer = openPictureViewer(img) ?? viewer;
       });
       element = img;
+      drawn = img;
     }
     element.className = pictureClassName;
     // The listener and the element's place in the wrapper come before `src`, so an error the
@@ -198,6 +216,7 @@ export function pictureView(
     link = undefined;
     shown = src;
     shownKind = kind;
+    setBox(media);
     dom.replaceChildren(element);
     element.setAttribute("src", src);
   };
@@ -214,8 +233,13 @@ export function pictureView(
     const src = artifactVersionPath(named.owner, named.slug, named.version);
     stopWatching = watchPicture(route, (media) => {
       const kind = media?.kind ?? "picture";
-      if (kind === shownKind && src === shown) return;
-      showMedia(kind, src);
+      // A report that only brings the size - the summary landing behind a picture already drawn
+      // from the address the reference names - writes the box on it rather than drawing again.
+      if (kind === shownKind && src === shown) {
+        setBox(media);
+        return;
+      }
+      showMedia(kind, src, media);
     });
     if (shown === undefined) showMedia("picture", src);
   } else {
@@ -223,7 +247,7 @@ export function pictureView(
     stopWatching = watchPicture(route, (media) => {
       if (media?.src === shown && media?.kind === shownKind) return;
       if (media === undefined) showLink();
-      else showMedia(media.kind, media.src);
+      else showMedia(media.kind, media.src, media);
     });
   }
   return {
