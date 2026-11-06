@@ -292,7 +292,7 @@ jobs:
           # flattens into the list that names it.
           filters: |
             # A frozen Bun install and the Bun it runs: `bun install --frozen-lockfile` reads the
-            # root manifest, the lockfile, the patches package.json:45-49 applies, and the manifest
+            # root manifest, the lockfile, the patches package.json:50-59 applies, and the manifest
             # of every workspace package.json:19-31 lists; .github/actions/setup-bun installs the
             # Bun .bun-version pins.
             bun_install: &bun_install
@@ -394,6 +394,8 @@ jobs:
             # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
@@ -451,6 +453,7 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
@@ -547,6 +550,10 @@ jobs:
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
+              # going's own golden, which a test run of that package reads.
+              - 'packages/envoy/going/testdata/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
@@ -563,6 +570,7 @@ jobs:
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/ratelimit/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
@@ -578,6 +586,10 @@ jobs:
             # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_command_tests: &dispatch_command_tests
               - 'packages/envoy/cmd/dispatch/**'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
+              # going's own golden, which a test run of that package reads.
+              - 'packages/envoy/going/testdata/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/dispatch/**'
@@ -601,6 +613,7 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
@@ -672,6 +685,10 @@ jobs:
               # check-built, and the job puts it in place with release-push.sh extract-built.
               - '.github/scripts/check-private-names.sh'
               - '.github/scripts/release-push.sh'
+              # packages/claude-envoy/tests/build-inputs.test.ts:146-153 holds release.yaml's
+              # $CLAUDE_ENVOY_VERSION_ARGS equal to scripts/build-inputs.txt, so a change to either
+              # must run this job.
+              - '.github/workflows/release.yaml'
               # tests/answers-claude.test.ts runs the Claude Code release .claude-code-pin pins,
               # which install-claude-code installs.
               - '.claude-code-pin'
@@ -1004,6 +1021,15 @@ jobs:
               - 'packages/dispatch/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/src/**'
+              # web/src/features/delivery/lib/applyDelta.test.ts:2-4 and
+              # web/src/features/doc/decision-blocks.test.ts:10.
+              - 'packages/contracts/fixtures/live/**'
+              - 'packages/contracts/fixtures/decision-blocks/**'
+              # The answers packages/envoy/going's filter emitted for every probe of its own
+              # suite, which packages/proof-editor/tests/going-answer-no-link.test.ts:111-112
+              # reads and parses with the app's own remark pipeline: a filter change that moves
+              # them must run this job.
+              - 'packages/envoy/going/testdata/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
               # And @legion/broker-client with it, which that CLI's own closure holds
@@ -1075,6 +1101,11 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
+              # The answers packages/envoy/going's filter emitted for every probe of its own
+              # suite, which packages/proof-editor/tests/going-answer-no-link.test.ts:111-112
+              # reads and parses with the app's own remark pipeline: a filter change that moves
+              # them must run this job.
+              - 'packages/envoy/going/testdata/**'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
@@ -1397,6 +1428,7 @@ jobs:
               - 'packages/envoy/go.mod'
               - 'packages/envoy/go.sum'
               - 'packages/envoy/cmd/**'
+              - 'packages/envoy/going/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/migrationid/**'
@@ -1514,6 +1546,7 @@ jobs:
               - 'packages/envoy/dispatchbody/**'
               - 'packages/envoy/docker/**'
               - 'packages/envoy/docs/**'
+              - 'packages/envoy/going/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
@@ -1610,6 +1643,8 @@ jobs:
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
+              # ci_job_reads.py reads the workspace list from the root manifest.
+              - 'package.json'
               - '**/*.go'
               - '**/go.mod'
               - '**/go.sum'
@@ -1713,6 +1748,17 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      # The frozen install above does not refuse a workspace `version` the lockfile does not hold.
+      # --lockfile-only writes the lockfile the manifests imply and installs nothing, so a
+      # difference here is what a reader's own `bun install` would write.
+      - name: Check bun.lock agrees with the workspace manifests
+        run: |
+          bun install --lockfile-only
+          if ! git diff --exit-code bun.lock; then
+            echo "::error file=bun.lock::bun.lock disagrees with the workspace manifests; run bun install and commit bun.lock, and after a forward merge of main take one side's bun.lock whole before installing"
+            exit 1
+          fi
 
       # A package's `bun run lint` checks only the paths its recipe names. This is the command
       # AGENTS.md documents, over the whole tree, so a fixture, config or test file that Biome

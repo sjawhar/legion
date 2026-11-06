@@ -99,11 +99,14 @@ def envoy_top_level_but_infra():
 
 
 # ---------------------------------------------------------------- shared step reads
-WORKSPACES = [
-    "packages/broker-client", "packages/contracts", "packages/envoy-client", "packages/pi-envoy",
-    "packages/pi-legion", "packages/pi-shared", "packages/claude-envoy", "packages/proof-editor",
-    "packages/dispatch", "packages/envoy/internal/dispatch/pmdoc/gen", "docs/site",
-]
+def root_workspaces():
+    """Every workspace the root manifest's `workspaces` lists, relative to the repository root."""
+    return [workspace.removesuffix("/") for workspace in targets("package.json", "workspaces")]
+
+
+# The root manifest's own list: a workspace added to or deleted from package.json's workspaces
+# needs no edit here.
+WORKSPACES = root_workspaces()
 
 
 def bun_job(job, workflow=CI):
@@ -113,9 +116,9 @@ def bun_job(job, workflow=CI):
     return reads(
         (".github/actions/setup-bun/**", at(job, "./.github/actions/setup-bun", workflow)),
         (".bun-version", ".github/actions/setup-bun/action.yml:22 bun-version-file: .bun-version"),
-        ("package.json", f"{install} reads the root manifest (workspaces package.json:19-31, patchedDependencies :45-49)"),
-        ("bun.lock", f"{install} refuses a lock that disagrees with the manifests"),
-        ("patches/**", f"{install} applies package.json:45-49 patchedDependencies"),
+        ("package.json", f"{install} reads the root manifest (workspaces package.json:19-31, patchedDependencies :50-59)"),
+        ("bun.lock", f"{install} reads the lockfile to install the versions it records"),
+        ("patches/**", f"{install} applies package.json:50-59 patchedDependencies"),
         *[(f"{w}/package.json", f"{install}: package.json:19-31 lists {w}; a frozen install reads every workspace manifest")
           for w in WORKSPACES],
     )
@@ -199,6 +202,7 @@ CLAUDE_ENVOY_BUILD = reads(
         (".claude-plugin/marketplace.json", "packages/claude-envoy/tests/envoy-channel-server.test.ts:7"),
         (".github/scripts/check-private-names.sh", "packages/claude-envoy/scripts/verify-build.sh checks the build with it"),
         (".github/scripts/release-push.sh", "packages/claude-envoy/scripts/verify-build.sh runs its check-built; the job runs its extract-built"),
+        (".github/workflows/release.yaml", "packages/claude-envoy/tests/build-inputs.test.ts:146-153 holds its $CLAUDE_ENVOY_VERSION_ARGS equal to scripts/build-inputs.txt"),
 ) + envoy_client_dep("packages/claude-envoy/src/envoy-channel-server.ts:9-62, hooks/session-hook.ts:41-48 import @legion/envoy-client/*")
 
 
@@ -926,7 +930,8 @@ GATES = [
         (CONTRACTS_SRC, f"{at('dispatch', 'Build contracts for dispatch e2e')}; packages/dispatch/web/vite.config.ts:94-103 aliases"),
         ("packages/envoy-client/bin/dispatch.ts", "packages/dispatch/e2e/cli-body-cap.e2e.ts:17 runs it through e2e/dispatch-cli.ts:8"),
         # envoy-client's sources, and broker-client's with them, are the shared read below.
-        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/e2e/engine-reading.ts:10"),
+        (ENVOY_CLIENT_SRC, "imported by packages/envoy-client/bin/dispatch.ts, which cli-body-cap.e2e.ts:17 runs"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/web/src/__tests__/setup.ts:7, features/refs/markdown-engine.test.ts:3, e2e/engine-reading.ts:10"),
         (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch', 'Pull the file store image')} names it to the action, and "
          f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image; "
          f"{at('dispatch', 'Wait for the S3-compatible server')} waits for the container it started"),
@@ -949,6 +954,7 @@ GATES = [
         (f"{FIX}/decision-blocks/**", "packages/dispatch/web/src/features/doc/decision-blocks.test.ts:10, features/inbox/AskCard.test.tsx:411"),
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/**", "packages/dispatch/web/src/__tests__/setup.ts:7 and features/refs/markdown-engine.test.ts:3 read blocks.json; packages/proof-editor/tests/ask-concurrent-edit.test.ts:269-275 reads block-node-types.json of the same directory"),
         (f"{ENVOY}/scripts/fixtures/shell-quote.json", "packages/dispatch/e2e/__tests__/local-instance-support.test.ts:154-155"),
+        (f"{ENVOY}/going/testdata/**", "packages/proof-editor/tests/going-answer-no-link.test.ts:111-112"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + biome(at("dispatch-ui", "Lint dispatch dashboard")) + bun_job("dispatch-ui") + CI_SELF),
 
@@ -1171,6 +1177,7 @@ GATES = [
         (".github/scripts/ci_workflow_rules.py", "check-ci-filters.sh's rules about ci.yaml's conditions and "
                                                  "ci-caches.yaml, which ci_filter_coverage.main() runs"),
         (".github/scripts/workflow_paths.py", "ci_filter_coverage.py reads filters through it"),
+        ("package.json", "ci_job_reads.py reads the workspace list from the root manifest"),
         (GO_TARGETS, "ci_job_reads.py expands the notices and pack runs over it"),
         (CLIENT_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (INFRA_TARGETS, "ci_job_reads.py expands the notices runs over it"),

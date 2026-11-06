@@ -133,6 +133,8 @@ on:
       - 'packages/envoy/sessiontiming/*'
       # ci.yaml's *dispatch_server:
       - 'packages/envoy/cmd/dispatch/*'
+      - 'packages/envoy/going/*'
+      - 'packages/envoy/going/goingtest/*'
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/cistore/*'
       - 'packages/envoy/internal/contracts/*'
@@ -185,6 +187,7 @@ on:
       - 'packages/envoy/internal/pglisten/*'
       - 'packages/envoy/internal/pgmigrate/*'
       - 'packages/envoy/internal/redact/*'
+      - 'packages/envoy/internal/redirects/*'
       - 'packages/envoy/internal/roles/*'
       - 'packages/envoy/internal/routing/*'
       - 'packages/envoy/internal/session/*'

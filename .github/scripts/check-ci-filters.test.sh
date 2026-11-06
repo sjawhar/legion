@@ -1175,7 +1175,7 @@ check "names the entry and the manifest" \
   "$(contains "$out" "::error file=.github/scripts/ci_job_reads.py::WORKSPACES names packages/gone, which the root manifest's workspaces does not")"
 
 echo "case: every filter of a job that compiles or reads another package's files selects them"
-# Rule 14 holds the root manifest's workspaces equal to WORKSPACES, which makes every Bun job
+# Rule 13 holds the root manifest's workspaces equal to WORKSPACES, which makes every Bun job
 # declare a read of each workspace's manifest. It says nothing about a workspace's sources, so a
 # package can be compiled by a job whose filter never selects it, and a test can read a file of
 # another package that no filter of its job names. Rule 1 does not see either, because for the
