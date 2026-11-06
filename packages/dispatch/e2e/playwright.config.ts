@@ -159,6 +159,19 @@ if (process.env[laneCountVariable] === undefined && workerCount() > 1) {
 // timeout when that deadline is its observable contract (the keyboard chord-expiry test).
 const expectTimeout = 15_000;
 
+// The per-test budget, measured rather than inherited. Playwright's own default is 30 s, chosen
+// when this suite ran one row at a time; it now runs four lanes on a four-core runner, and the
+// slowest row of the whole suite finished 144 ms under that default. Read from the report.json
+// artifact of 201 ci.yaml runs between 2026-11-05T08:51:42Z and 2026-11-05T20:27:47Z (78
+// merge_group, 119 pull_request, 4 push), over the 324,871 results that passed on rows this tree
+// has: median 2,562 ms, 95th percentile 7,176 ms, 99th 11,272 ms, 99.9th 18,066 ms, maximum
+// 29,856 ms (deep-links.e2e.ts's "emitted document item hrefs select and scroll their anchored
+// quote" in WebKit). The budget is twice that maximum, so a healthy row has as long again as the
+// slowest one ever took, and a row that hangs still fails inside a minute: 3.3 times the suite's
+// 99.9th percentile and 23 times its median. It lengthens no row's work; a row that needs it has
+// already lost whatever it was waiting for. Raise it only from a measurement of the same shape.
+const testTimeout = 60_000;
+
 // Two-process mode's one project: the multiprocess specs, in Chromium, the sign-in spec alone under
 // DISPATCH_E2E_SIGNIN=oidc and every other one without it.
 const multiprocessProjects = [
@@ -349,6 +362,7 @@ export default defineConfig({
   reporter: measuring
     ? [["list"], [fileURLToPath(new URL("./measure-reporter.ts", import.meta.url))]]
     : "list",
+  timeout: testTimeout,
   expect: { timeout: expectTimeout },
   use: {
     ...devices["Desktop Chrome"],
