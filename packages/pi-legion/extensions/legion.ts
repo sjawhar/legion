@@ -58,7 +58,7 @@ import {
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
-import { createModelFallback, type ModelFallbackContext } from "../src/model-fallback";
+import { createModelFallback } from "../src/model-fallback";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
@@ -242,14 +242,7 @@ export default function legionExtension(pi: PiApi): void {
   // is registered — and only for a session that claim is on: the restore's own save appends an
   // entry to that session's transcript, and a person's own session, or a subagent's, that
   // happens to sit on a host fallback is no Legion role's to arm or to write into.
-  //
-  // A command's context is a `CommandContext`, whose `sessionManager` is the same live object a
-  // session hook's context carries, with only the members pi-shared reads typed on it
-  // (`@legion/pi-shared/pi-types`:460-467): the branch read is the optional one
-  // `ModelFallbackContext` declares, and the restore reads nothing else from the context.
-  const restoreModelFallback = (
-    context: (CommandContext | SessionContext) & ModelFallbackContext
-  ): void => {
+  const restoreModelFallback = (context: CommandContext | SessionContext): void => {
     if (!legionClaimSession(context)) return;
     modelFallback.restore(
       restoreFallbackCooldown(context.sessionManager.getBranch?.() ?? []),

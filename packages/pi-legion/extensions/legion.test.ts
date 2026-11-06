@@ -5977,4 +5977,52 @@ describe("the model fallback", () => {
     await controller.handlers.get("context")?.({ messages: [] }, session);
     expect(controller.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
   });
+
+  // What the host actually hands a command: a `CommandContext` and nothing of a session's — no
+  // `models`, no `modelRegistry`, no `setTimeout`. Arming a branch that already sits on a
+  // fallback reads the branch alone, so a claim command's own context is enough for it, and
+  // `CommandContext.sessionManager` types the branch read it makes
+  // (`@legion/pi-shared/pi-types`:464-467).
+  test("/legion-claim-controller arms the fallback from a context with a command's members alone", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_command" });
+    controller.models.current = SONNET;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    const context: CommandContext = {
+      cwd: "/tmp/legion-workspace",
+      sessionManager: {
+        getSessionId: () => "ses_controller_command",
+        getSessionFile: () => "/tmp/ses_controller_command.jsonl",
+        ensureOnDisk: async () => undefined,
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...controller.models.changes],
+      },
+      ui: { notify: () => undefined },
+      isIdle: () => true,
+    };
+
+    // Envoy's role bridge claims through the session it saw start, which a command context is
+    // never one of (`src/controller-session.ts:300`), and the operator's controller arms nothing
+    // at startup: the claim command below is the only read of this branch.
+    await controller.handlers.get("session_start")?.(
+      {},
+      controllerFallbackSession(controller, "ses_controller_command")
+    );
+    expect(armings(controller)).toEqual([]);
+
+    await claimCommand.handler("", context);
+
+    expect(armings(controller)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+  });
 });
