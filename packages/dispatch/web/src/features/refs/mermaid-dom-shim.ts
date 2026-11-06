@@ -777,10 +777,65 @@ function ctmOf(el: ShimElement): Matrix {
 // A constructable-stylesheet stand-in (`createCssStyles` builds mermaid's theme CSS through it)
 // ---------------------------------------------------------------------------------------------
 
+/** A rule's declarations, as much of `CSSStyleDeclaration` as mermaid reads: c4's
+ *  `elementFontStyles` inserts `.c4-shape.c4-person .label {}` and writes its font through
+ *  `rule.style.setProperty`, then keeps the rules whose `rule.style.length` is above zero and
+ *  serializes each one's `cssText`, so the write, the count and the serialization have to be the
+ *  same declarations. A value is kept verbatim, `!important` and all, because `cssImportantStyles`
+ *  writes one of those for every `classDef` a source declares. */
+class ShimCSSStyleDeclaration {
+  private readonly declarations = new Map<string, string>();
+  get length(): number {
+    return this.declarations.size;
+  }
+  get cssText(): string {
+    return Array.from(this.declarations, ([prop, value]) => `${prop}: ${value};`).join(" ");
+  }
+  getPropertyValue(prop: string): string {
+    return this.declarations.get(prop) ?? "";
+  }
+  setProperty(prop: string, value: string): void {
+    this.declarations.set(prop, value);
+  }
+  removeProperty(prop: string): string {
+    const had = this.getPropertyValue(prop);
+    this.declarations.delete(prop);
+    return had;
+  }
+  item(index: number): string {
+    return Array.from(this.declarations.keys())[index] ?? "";
+  }
+  /** The declarations of a `sel { ... }` block, as the sheet's own parser reads one. A `;` inside
+   *  a quoted value splits the block here, as it does in the cascade's `parseDeclarations`. */
+  load(block: string): void {
+    for (const part of block.split(";")) {
+      const colon = part.indexOf(":");
+      if (colon < 0) continue;
+      const prop = part.slice(0, colon).trim();
+      if (prop) this.declarations.set(prop, part.slice(colon + 1).trim());
+    }
+  }
+}
+
+/** One rule of the sheet. `cssText` is rebuilt from the declarations rather than kept as the text
+ *  the rule was inserted with, so a rule c4 wrote through `style` serializes with what it wrote. */
+class ShimCSSStyleRule {
+  readonly selectorText: string;
+  readonly style = new ShimCSSStyleDeclaration();
+  constructor(text: string) {
+    const open = text.indexOf("{");
+    this.selectorText = (open < 0 ? text : text.slice(0, open)).trim();
+    if (open >= 0) this.style.load(text.slice(open + 1, text.lastIndexOf("}")));
+  }
+  get cssText(): string {
+    return `${this.selectorText} { ${this.style.cssText} }`;
+  }
+}
+
 class ShimCSSStyleSheet {
-  cssRules: Array<{ cssText: string }> = [];
+  cssRules: ShimCSSStyleRule[] = [];
   insertRule(rule: string, index = this.cssRules.length): number {
-    this.cssRules.splice(index, 0, { cssText: rule });
+    this.cssRules.splice(index, 0, new ShimCSSStyleRule(rule));
     return index;
   }
   deleteRule(index: number): void {
@@ -789,7 +844,7 @@ class ShimCSSStyleSheet {
   replaceSync(text: string): void {
     this.cssRules = [];
     for (const match of text.matchAll(/([^{}]+\{[^{}]*\})/g)) {
-      this.cssRules.push({ cssText: match[1].trim() });
+      this.cssRules.push(new ShimCSSStyleRule(match[1].trim()));
     }
   }
   async replace(text: string): Promise<this> {
@@ -1097,6 +1152,12 @@ export function installDomShim(): ShimHandle {
   define("getComputedStyle", computedStyleOf);
   define("requestAnimationFrame", requestFrame);
   define("cancelAnimationFrame", cancelFrame);
+  // c4 wraps a row of boundaries at `screen.availWidth`, which no worker has: without this every
+  // C4 diagram dies with `screen is not defined`. The width is `gantt.useWidth` of
+  // `mermaid-upstream.ts`, the one width this worker already lays a self-sizing diagram out at,
+  // so a C4 drawing wraps the same way for every reader rather than by the monitor it was drawn
+  // on.
+  define("screen", { width: 1200, height: 800, availWidth: 1200, availHeight: 800 });
 
   // d3 and mermaid read these off `window` too.
   shimWindow.getComputedStyle = computedStyleOf;

@@ -56,11 +56,20 @@ function relativeLuminance([r, g, b]: Rgb8): number {
   return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
 }
 
-/** WCAG contrast ratio between two OKLCH colors, in the range [1, 21]. */
-export function contrastRatio(a: Oklch, b: Oklch): number {
-  const luminanceA = relativeLuminance(oklchToSrgb8(a));
-  const luminanceB = relativeLuminance(oklchToSrgb8(b));
+/** WCAG contrast ratio between two 8-bit sRGB colors, in the range [1, 21]. This is the one
+ * formula in the file: everything a browser or an SVG reports a colour as is 8-bit sRGB (the
+ * computed `fill` of a label, the `stroke` of a line), and so are the literals upstream Mermaid
+ * is configured with (`features/refs/mermaid-upstream.ts`), which are not in this app's OKLCH
+ * palette and cannot be checked through `contrastRatio`. */
+export function contrastRatioSrgb8(a: Rgb8, b: Rgb8): number {
+  const luminanceA = relativeLuminance(a);
+  const luminanceB = relativeLuminance(b);
   const lighter = Math.max(luminanceA, luminanceB);
   const darker = Math.min(luminanceA, luminanceB);
   return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** WCAG contrast ratio between two OKLCH colors, in the range [1, 21]. */
+export function contrastRatio(a: Oklch, b: Oklch): number {
+  return contrastRatioSrgb8(oklchToSrgb8(a), oklchToSrgb8(b));
 }
