@@ -262,7 +262,7 @@ func TestXidWindowSettlementVersionWrite(t *testing.T) {
 	if after := latestVersionNumber(t, service, artifactID); after != before+1 {
 		t.Fatalf("XID RIG PROBLEM (not a finding about the code): settlement left the document at version %d, want %d", after, before+1)
 	}
-	storetest.AssertXidWindows(t, report)
+	storetest.AssertXidWindows(t, report, storetest.XidBatchedWindow)
 }
 
 // The edit-notice sweep claims a due notice, then reads both versions it names, parses them to
@@ -290,7 +290,7 @@ func TestXidWindowEditNoticeSweep(t *testing.T) {
 	if sent != 1 {
 		t.Fatalf("XID RIG PROBLEM (not a finding about the code): the sweep sent %d notices, want 1", sent)
 	}
-	storetest.AssertXidWindows(t, report)
+	storetest.AssertXidWindows(t, report, storetest.XidWindowOf(2, "the notice's claiming delete and its COMMIT"))
 }
 
 // The task-progress reconciliation counts the tasks of each issue whose recorded count is not of
@@ -320,7 +320,8 @@ func TestXidWindowReconcileTaskProgress(t *testing.T) {
 	if drifted != 0 {
 		t.Fatalf("XID RIG PROBLEM (not a finding about the code): %d issues still have no count of their spec's latest version", drifted)
 	}
-	storetest.AssertXidWindows(t, report)
+	storetest.AssertXidWindows(t, report, storetest.XidWindowOf(issues+1,
+		"one task-count update per issue of the batch and its COMMIT"))
 }
 
 // The block-index tick's window arm gives windows to the owners whose blocks carry none: a
@@ -389,5 +390,6 @@ func TestXidWindowBlockIndexWindowArm(t *testing.T) {
 	if windows == 0 {
 		t.Fatalf("XID RIG PROBLEM (not a finding about the code): the arm left the document with no window")
 	}
-	storetest.AssertXidWindows(t, report)
+	storetest.AssertXidWindows(t, report, storetest.XidWindowOf(2,
+		"the one statement that writes the owner's windows and its COMMIT"))
 }

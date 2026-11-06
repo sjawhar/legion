@@ -89,7 +89,7 @@ func TestTheGrammarReindexTakesItsTransactionIdOnlyAtItsWritePhase(t *testing.T)
 	if reindexed != nil {
 		t.Fatalf("the re-index failed: %v", reindexed)
 	}
-	storetest.AssertXidWindows(t, report)
+	storetest.AssertXidWindows(t, report, storetest.XidBatchedWindow)
 	if len(report.Windows) != 1 {
 		t.Fatalf("windows = %d, unsighted = %d, unjudged = %d; want the re-index's one transaction",
 			len(report.Windows), len(report.Unsighted), len(report.Unjudged))

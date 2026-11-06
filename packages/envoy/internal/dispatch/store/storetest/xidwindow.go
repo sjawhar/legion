@@ -37,9 +37,11 @@ import (
 // own result says it wrote (xidAssigned). It runs to the end of its COMMIT. A transaction the
 // poller never saw - a write phase that is one batch can hold its xid for less than a poll
 // interval - is judged from its statements alone; one that wrote nothing by either source holds
-// no xid to judge (MayHoldNoXid). Inside the window the rig checks D6 of the INFRA-636 plan,
-// where the build judges a window's time at all (XidJudgesGaps): every statement-free gap is at
-// most XidMaxGap, and the gaps together take no longer than the statements do.
+// no xid to judge (MayHoldNoXid). Inside the window the rig checks two things. Its shape, in
+// every build: the window holds at most the statements the measurement declared (XidShape), and
+// nothing else. And, where the build judges a window's time at all (XidJudgesGaps), D6 of the
+// INFRA-636 plan: every statement-free gap is at most XidMaxGap, and the gaps together take no
+// longer than the statements do.
 //
 // Which transactions are judged is decided by context, not guessed from timing: the caller marks
 // the context its operation runs under (MarkXid) and the tracer marks every statement whose
@@ -668,15 +670,54 @@ func (r *XidReport) Err() error {
 	return nil
 }
 
+// XidShape is what the windows of a measured operation must hold, which every measurement
+// declares: the most statements one of its windows may run while it holds its transaction id,
+// and what those statements are, for a failure to quote. A count of statements is the one
+// reading of a window no scheduling can move, so the rig holds every window to it in every
+// build - it is the whole of what a race build judges (XidJudgesGaps), and it stands beside D6's
+// bound in a plain one.
+//
+// The declaration is a parameter rather than a default so that a window test cannot be written
+// without it: a measurement that declares no shape does not compile, and one that declares an
+// empty shape fails as a rig problem.
+type XidShape struct {
+	// Statements is the most statements one window may hold.
+	Statements int
+	// Want names them as the failure quotes them.
+	Want string
+}
+
+// XidBatchedWindow is the shape of a route whose write phase is one pipelined batch: that batch
+// and the COMMIT ending it, and nothing else. It is what the plan asks of every route that
+// queues its writes.
+var XidBatchedWindow = XidShape{Statements: 2, Want: "the write phase's one batch and its COMMIT"}
+
+// XidWindowOf is the shape of an operation whose window holds statements of its own beside that
+// commit - a route that writes a row inline, or a background pass that writes one row per item -
+// with statements the most it may hold and want naming them.
+func XidWindowOf(statements int, want string) XidShape {
+	return XidShape{Statements: statements, Want: want}
+}
+
 // AssertXidWindows logs every window the report judged, so a run quotes its window length and
-// largest gap whichever way it goes, then fails t when the rig could not judge the operation or a
-// window breaks D6.
-func AssertXidWindows(t testing.TB, report *XidReport) {
+// largest gap whichever way it goes, then fails t when the rig could not judge the operation,
+// a window holds more than shape allows, or a window breaks D6 in a build that judges a
+// window's time.
+func AssertXidWindows(t testing.TB, report *XidReport, shape XidShape) {
 	t.Helper()
 	t.Logf("xid rig: operation took %s, %d polls, longest poll interval %s, %d window(s), %d committed transaction(s) never seen with an xid, %d unjudged",
 		XidMillis(report.Duration), report.Polls, XidMillis(report.LongestPoll), len(report.Windows), len(report.Unsighted), len(report.Unjudged))
 	for _, window := range report.Windows {
 		t.Logf("xid rig: %s", window.Summary())
+	}
+	if shape.Statements < 1 || shape.Want == "" {
+		t.Fatalf("XID RIG PROBLEM (not a finding about the code): the measurement declared no window shape (%+v)", shape)
+	}
+	for _, window := range report.Windows {
+		if len(window.Statements) > shape.Statements {
+			t.Errorf("XID WINDOW VIOLATION (INFRA-636 D6) %s\n  the transaction ran %d statements inside its xid window, want at most %d, %s: a read it runs there holds back every reader's snapshot\n%s",
+				window.Summary(), len(window.Statements), shape.Statements, shape.Want, window.Detail())
+		}
 	}
 	if err := report.Err(); err != nil {
 		if len(report.problems()) > 0 {

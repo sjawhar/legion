@@ -19,14 +19,17 @@ import (
 // on a fixture the size of the load harness's large specs, and judge the transaction the request
 // ran with storetest's xid rig: from the statement that gave the transaction its xid to its
 // COMMIT, no statement-free gap over 5 ms, and no more time in gaps than in statements (plan D6).
-// A route that runs an advisory read in its transaction (write advice, the claim's Legion-managed
-// walk) is also held to running none inside the window (refuseAdvisoryReadsInXidWindow), and a
-// route whose writes are one queued batch to holding nothing else in it
-// (refuseStatementsBesideTheWriteBatch): those reads are queries, back to back, which D6 alone
-// would pass. Each request runs under a marked context (storetest.MarkXid), so only the
-// transactions the request itself ran are judged; the server's background work shares the pool
-// but not the verdict. The server settles documents after an hour, so no settlement races the
-// measured request, except where a route needs settlement to have run first (the block ask).
+// Every measurement declares the shape of the window it shows (storetest.XidShape): the most
+// statements that window may hold and what they are, which the rig holds it to in every build -
+// storetest.XidBatchedWindow for a route whose write phase is one queued batch, and
+// storetest.XidWindowOf for one whose window legitimately holds more. A route that runs an
+// advisory read in its transaction (write advice, the claim's Legion-managed walk) is also held
+// to running none inside the window (refuseAdvisoryReadsInXidWindow): those reads are queries,
+// back to back, which D6 alone would pass. Each request runs under a marked context
+// (storetest.MarkXid), so only the transactions the request itself ran are judged; the server's
+// background work shares the pool but not the verdict. The server settles documents after an
+// hour, so no settlement races the measured request, except where a route needs settlement to
+// have run first (the block ask).
 
 // xidProject is the fixture's project key.
 const xidProject = "XID"
@@ -120,9 +123,10 @@ func newXidFixture(t *testing.T, options testServerOptions, spec string) *xidFix
 }
 
 // measure runs one request through the fixture's handler under a marked context and judges the
-// transactions it ran. A request that does not answer want is the rig's failure, not a finding,
-// and stops the test before any verdict.
-func (f *xidFixture) measure(t *testing.T, want int, request func(http.Handler) *httptest.ResponseRecorder) *storetest.XidReport {
+// transactions it ran against shape, the window the route is declared to hold. A request that
+// does not answer want is the rig's failure, not a finding, and stops the test before any
+// verdict.
+func (f *xidFixture) measure(t *testing.T, want int, shape storetest.XidShape, request func(http.Handler) *httptest.ResponseRecorder) *storetest.XidReport {
 	t.Helper()
 	marked := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.handler.ServeHTTP(w, r.WithContext(storetest.MarkXid(r.Context())))
@@ -133,23 +137,23 @@ func (f *xidFixture) measure(t *testing.T, want int, request func(http.Handler) 
 		t.Fatalf("XID RIG PROBLEM (not a finding about the code): the measured request answered %d, want %d: %s", response.Code, want, response.Body.String())
 	}
 	report.MayHoldNoXid = f.mayHoldNoXid
-	storetest.AssertXidWindows(t, report)
+	storetest.AssertXidWindows(t, report, shape)
 	return report
 }
 
 // measureAdvised is measure for a write that runs an advisory read (advisoryStatement), which also
 // refuses that read inside the xid window.
-func (f *xidFixture) measureAdvised(t *testing.T, want int, request func(http.Handler) *httptest.ResponseRecorder) {
+func (f *xidFixture) measureAdvised(t *testing.T, want int, shape storetest.XidShape, request func(http.Handler) *httptest.ResponseRecorder) {
 	t.Helper()
-	refuseAdvisoryReadsInXidWindow(t, f.measure(t, want, request))
+	refuseAdvisoryReadsInXidWindow(t, f.measure(t, want, shape, request))
 }
 
 // measureBatched is measure for a write whose route runs the two phases as one batch
-// (write_queue.go): it also refuses every statement inside the window but that batch and the
-// COMMIT ending it.
+// (write_queue.go), so its window is the shape the plan asks of every route that queues its
+// writes: that batch and the COMMIT ending it (storetest.XidBatchedWindow).
 func (f *xidFixture) measureBatched(t *testing.T, want int, request func(http.Handler) *httptest.ResponseRecorder) {
 	t.Helper()
-	refuseStatementsBesideTheWriteBatch(t, f.measure(t, want, request))
+	f.measure(t, want, storetest.XidBatchedWindow, request)
 }
 
 // advisoryStatement opens the savepoint of each advisory read a write runs in its transaction: a
@@ -171,24 +175,6 @@ func refuseAdvisoryReadsInXidWindow(t *testing.T, report *storetest.XidReport) {
 				break
 			}
 		}
-	}
-}
-
-// refuseStatementsBesideTheWriteBatch fails t when a route that queues its writes ran anything
-// inside its xid window but the one batch its write phase sends and the COMMIT that ends it. A
-// read a route runs after its first write is what D6 cannot see on this fixture: each is a fast
-// query back to back with the next, so the window passes on timing while every reader's snapshot
-// waits for those reads all the same. A route whose writes are queued on a ledger sends them as
-// one batch, with the settlement credit's statements after them, and commits (Ledger.Commit), so
-// two statements are all such a window may hold.
-func refuseStatementsBesideTheWriteBatch(t *testing.T, report *storetest.XidReport) {
-	t.Helper()
-	for _, window := range report.Windows {
-		if len(window.Statements) <= 2 {
-			continue
-		}
-		t.Errorf("XID WINDOW VIOLATION (INFRA-636) %s\n  the transaction ran %d statements inside its xid window, want the write phase's one batch and its COMMIT: a read it runs there holds back every reader's snapshot\n%s",
-			window.Summary(), len(window.Statements), window.Detail())
 	}
 }
 
@@ -245,7 +231,7 @@ func awaitSettledDocuments(t *testing.T, database *store.Store) {
 
 func TestXidWindowCommentCreateAnchored(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
-	f.measureAdvised(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusCreated, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/comments", map[string]any{
 			"body": "Does this still hold once the outbox is sharded?", "anchor": map[string]any{"artifact": "spec", "quote": f.spare[0]},
 			"actor": sessionActor(),
@@ -255,7 +241,7 @@ func TestXidWindowCommentCreateAnchored(t *testing.T) {
 
 func TestXidWindowCommentCreateReplyOnAnchoredThread(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
-	f.measureAdvised(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusCreated, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/comments", map[string]any{
 			"body": "It does: the listener keeps its interests in the bucket.", "reply_to": f.comments[0], "actor": sessionActor(),
 		})
@@ -264,7 +250,7 @@ func TestXidWindowCommentCreateReplyOnAnchoredThread(t *testing.T) {
 
 func TestXidWindowAskCreateAnchored(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
-	f.measureAdvised(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusCreated, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/asks", map[string]any{
 			"question": "Which team signs off on this requirement?",
 			"options":  []map[string]string{{"label": "Platform"}, {"label": "Product"}},
@@ -291,7 +277,7 @@ func newBlockAskFixture(t *testing.T) (*xidFixture, string) {
 
 func TestXidWindowAskAnswerBlock(t *testing.T) {
 	f, askID := newBlockAskFixture(t)
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
 			"text": "REST first.",
 		}, "alice")
@@ -300,7 +286,7 @@ func TestXidWindowAskAnswerBlock(t *testing.T) {
 
 func TestXidWindowAskResolveBlock(t *testing.T) {
 	f, askID := newBlockAskFixture(t)
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/asks/"+askID+"/resolve", map[string]any{
 			"kind": "resolved", "reason": "Settled in the thread",
 		}, "alice")
@@ -309,7 +295,7 @@ func TestXidWindowAskResolveBlock(t *testing.T) {
 
 func TestXidWindowAskEditBlockText(t *testing.T) {
 	f, askID := newBlockAskFixture(t)
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
 			"question": "Which transport ships first?",
 		}, "alice")
@@ -319,7 +305,7 @@ func TestXidWindowAskEditBlockText(t *testing.T) {
 func TestXidWindowCommentReopen(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
 	f.resolveComment(t, f.comments[0])
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/comments/"+f.comments[0]+"/reopen", nil, "alice")
 	})
 }
@@ -333,14 +319,14 @@ func TestXidWindowCommentEdit(t *testing.T) {
 		t.Fatalf("create alice's anchored comment: status=%d body=%s", created.Code, created.Body.String())
 	}
 	comment := decodeBody[model.Comment](t, created)
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPatch, "/api/v1/comments/"+comment.ID, map[string]any{"body": "Second wording."}, "alice")
 	})
 }
 
 func TestXidWindowCommentResolve(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/comments/"+f.comments[0]+"/resolve", nil, "alice")
 	})
 }
@@ -348,7 +334,7 @@ func TestXidWindowCommentResolve(t *testing.T) {
 func TestXidWindowSuggestionAccept(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
 	suggestion := f.suggest(t)
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/comments/"+suggestion.ID+"/accept", map[string]any{}, "alice")
 	})
 }
@@ -356,14 +342,14 @@ func TestXidWindowSuggestionAccept(t *testing.T) {
 func TestXidWindowSuggestionReject(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
 	suggestion := f.suggest(t)
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/comments/"+suggestion.ID+"/reject", map[string]any{}, "alice")
 	})
 }
 
 func TestXidWindowSpecEdit(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
-	f.measureAdvised(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/artifacts/"+f.specID+"/edits", map[string]any{
 			"ops":   []map[string]string{{"op": "replace", "find": "Revision token r0", "with": "Revision token r1"}},
 			"actor": sessionActor(),
@@ -376,7 +362,7 @@ func TestXidWindowSpecEdit(t *testing.T) {
 func TestXidWindowUploadReplace(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
 	revised := strings.Replace(f.spec, "Revision token r0", "Revision token r1", 1)
-	f.measureAdvised(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusCreated, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/artifacts", map[string]any{
 			"name": "spec.md", "content": revised, "summary": "Bump the revision", "actor": sessionActor(),
 		})
@@ -421,7 +407,7 @@ func TestXidWindowNamedVersion(t *testing.T) {
 	}); edited.Code != http.StatusOK {
 		t.Fatalf("edit the spec before naming a version: status=%d body=%s", edited.Code, edited.Body.String())
 	}
-	f.measure(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusCreated, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/artifacts/"+f.specID+"/versions", map[string]any{
 			"summary": "Revision one", "actor": sessionActor(),
 		})
@@ -444,7 +430,7 @@ func TestXidWindowDocumentRebuild(t *testing.T) {
 	}
 	broken.failNextLoad(f.specID)
 	revised := strings.Replace(f.spec, "Revision token r0", "Revision token r1", 1)
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/artifacts/"+f.specID+"/rebuild", map[string]any{"markdown": revised}, "alice")
 	})
 }
@@ -557,7 +543,9 @@ func TestXidWindowPlanReview(t *testing.T) {
 func TestXidWindowIssueCreateWithSpec(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
 	spec, _ := xidSpec(2)
-	f.measureAdvised(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusCreated, storetest.XidWindowOf(10,
+		"the create's inline steering writes - the project's next number, the rank lock, the rank read, the issue row, its blocked_by links and its artifact row - "+
+			"the two reads that load the issue it answers with, the queued batch and its COMMIT"), func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/issues", map[string]any{
 			"project": xidProject, "title": "Second large spec for the reviewers", "spec": spec, "force": true,
 			"actor": sessionActor(),
@@ -580,14 +568,16 @@ func TestXidWindowExistingExternalIssue(t *testing.T) {
 		t.Fatalf("create the external issue: status=%d body=%s", created.Code, created.Body.String())
 	}
 	f.mayHoldNoXid = true
-	f.measureAdvised(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusOK, storetest.XidWindowOf(1,
+		"its COMMIT alone: the answer writes nothing and locks no row, so no statement of it holds a transaction id"), func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/issues", body)
 	})
 }
 
 func TestXidWindowIssuePatch(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
-	f.measureAdvised(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusOK, storetest.XidWindowOf(5,
+		"the issue row's own update, the two reads that load the issue it answers with, the queued batch and its COMMIT"), func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPatch, "/api/v1/issues/"+f.issueKey, map[string]any{
 			"title": "Large spec under review, second pass", "actor": sessionActor(),
 		})
@@ -596,7 +586,7 @@ func TestXidWindowIssuePatch(t *testing.T) {
 
 func TestXidWindowMessageCreate(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
-	f.measureAdvised(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusCreated, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return sessionRequest(t, h, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/messages", map[string]any{
 			"body":  "Status: the spec at dispatch://" + f.issueKey + " has twenty open anchors; replies welcome.",
 			"actor": sessionActor(),
@@ -606,7 +596,7 @@ func TestXidWindowMessageCreate(t *testing.T) {
 
 func TestXidWindowClaim(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
-	f.measureAdvised(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measureAdvised(t, http.StatusOK, storetest.XidBatchedWindow, func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/claim", map[string]any{}, "alice")
 	})
 }
@@ -617,7 +607,8 @@ func TestXidWindowClaim(t *testing.T) {
 // reads and rewrites the whole spec, so it is the close's read phase, before its first write.
 func TestXidWindowIssueCloseWithOpenAsks(t *testing.T) {
 	f, _ := newBlockAskFixture(t)
-	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+	f.measure(t, http.StatusOK, storetest.XidWindowOf(5,
+		"the issue row's own update, the two reads that load the issue it answers with, the batch withdrawing its asks and its COMMIT"), func(h http.Handler) *httptest.ResponseRecorder {
 		return dispatchRequest(t, h, http.MethodPatch, "/api/v1/issues/"+f.issueKey, map[string]any{"status": "done"}, "alice")
 	})
 }
