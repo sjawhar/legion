@@ -1,0 +1,5 @@
+kind: Changed
+body: Every role that pushes an issue branch now reads the pull request head after its push and pushes a new commit when the head is not the commit it pushed, so the commit that is tested, reviewed and merged is the one that was pushed.
+time: 2026-11-05T20:28:37.68927998Z
+custom:
+    Issue: pr2818
