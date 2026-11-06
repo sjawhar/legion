@@ -4917,22 +4917,38 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 		`, artifactID); err != nil {
 			t.Fatalf("age the document's pending settlement: %v", err)
 		}
-		// A period is a bucket of the clock (duty.Exclusive, migration 0115), and the row is owed
-		// through the whole of the first bucket that starts after it aged: no settlement runs
-		// inside the row. Each process's resumption ticks once a period from its own start, so
-		// each meets that bucket once; what this counts is how many of those meetings resumed it.
-		// The period is the one both processes were started with, shortSettlementResume, in place
-		// of docs.SettlementResumeInterval's minute, which this row would otherwise sleep out
-		// twice.
+		// A period is a bucket of the clock (duty.Exclusive, migration 0115), and the row stays
+		// owed through every bucket the window below covers: its settle delay is ten minutes, so
+		// no settlement it arms commits inside the row and every pass finds it owed again.
+		//
+		// Each process's resumption ticks once a period, from its own start, so each meets every
+		// whole bucket of the window once: without the lease the two together arm the row twice
+		// a bucket, with it once. One bucket is too few to tell those apart, because a tick's
+		// own scheduling, and the milliseconds a pass spends reading the row before it records
+		// the time counted here, can carry a pass over a bucket boundary and out of the window:
+		// counting a single bucket, the unleased pair came to one resumption in one run of six
+		// and the row passed while saying nothing. Over resumedPeriods whole buckets the two are
+		// a bucket apart at the nearest - at most one pass a bucket, and one more for a pass due
+		// just before the window that recorded itself just inside it, against two a bucket
+		// without the lease - so a straggling tick at either end cannot bring the unleased pair
+		// inside the bound.
+		const resumedPeriods = 6
 		period := shortSettlementResume
 		start := time.Now().Truncate(period).Add(period)
-		end := start.Add(period)
-		t.Logf("counting the resumptions of the document in the period from %s to %s", start.Format(time.TimeOnly), end.Format(time.TimeOnly))
+		end := start.Add(resumedPeriods * period)
+		t.Logf("counting the resumptions of the document in the %d periods from %s to %s",
+			resumedPeriods, start.Format(time.TimeOnly), end.Format(time.TimeOnly))
 		time.Sleep(time.Until(end) + 2*time.Second)
 		resumed := pair.resumedBetween(t, artifactID, start, end)
-		if len(resumed) != 1 {
-			t.Fatalf("the processes' settlement resumptions armed the document's owed settlement %d times in one %v period, want once across both processes:\n%s",
-				len(resumed), period, strings.Join(resumed, "\n"))
+		if len(resumed) > resumedPeriods+1 {
+			t.Fatalf("the processes' settlement resumptions armed the document's owed settlement %d times in %d %v periods, want at most one a period (and one for a pass due just before the window):\n%s",
+				len(resumed), resumedPeriods, period, strings.Join(resumed, "\n"))
+		}
+		// And the row is being resumed at all: a window that counted nothing would pass the
+		// bound above while saying nothing about the lease.
+		if len(resumed) < resumedPeriods-1 {
+			t.Fatalf("the processes' settlement resumptions armed the document's owed settlement %d times in %d %v periods, want one a period, bar one a loaded machine may lose:\n%s",
+				len(resumed), resumedPeriods, period, strings.Join(resumed, "\n"))
 		}
 	})
 

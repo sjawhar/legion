@@ -1497,6 +1497,15 @@ answer to that read is Dispatch refusing the upload: it counts as a refusal of t
 read's code and latency (`write errors non-2xx`, the write refusal columns and `write refusal ms`),
 not as a transport error.
 
+Each write also records the connection it rode, from the same trace (`GotConnInfo`): whether the
+transport dialled it or took it from its idle pool, and how long it had been idle. `run.log` names
+it on every failed write, after the error: `a new connection`, `a reused connection idle for
+412ms`, or `no connection`. An `EOF` with no answer is a connection the server closed without
+telling the client, and the server's own count of those closes is
+`dispatch_http_conns_closed_unanswered_total` (INFRA-592): the two together say whether a failed
+write took a pooled connection and how long that connection had sat there. The round-22 run threw
+the trace's connection away, so its four `EOF`s named no connection at all.
+
 **The below-target mark.** `(below 95%)` in `req/s target / sent` means that the step sent fewer
 than 95% of its target requests per second. Its request columns then describe a lighter load than
 its name says. `TABLES.md` repeats this under the table when a row has the mark.

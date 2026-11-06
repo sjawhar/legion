@@ -97,6 +97,7 @@ func TestTheMetricsEndpointListsEverySeriesForEveryOpenPool(t *testing.T) {
 		Admission:  admission.New(admission.DefaultLimits()),
 		Docs:       documents,
 		Logs:       logging.New(io.Discard, nil),
+		Conns:      newConns(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -149,6 +150,9 @@ func TestTheMetricsEndpointListsEverySeriesForEveryOpenPool(t *testing.T) {
 		"dispatch_doc_compactions_deferred_total 0\n", "dispatch_doc_compactions_forced_total 0\n",
 		"dispatch_doc_compactions_paced_total 0\n",
 		`dispatch_log_dropped_total{level="debug"} 0`, `dispatch_log_dropped_total{level="error"} 0`,
+		`dispatch_http_conns_closed_unanswered_total{reason="request_unanswered"} 0`,
+		`dispatch_http_conns_closed_unanswered_total{reason="handler_aborted"} 0`,
+		`dispatch_http_conns_closed_unanswered_total{reason="answer_not_closing"} 0`,
 	} {
 		requireLine(t, body, line)
 	}

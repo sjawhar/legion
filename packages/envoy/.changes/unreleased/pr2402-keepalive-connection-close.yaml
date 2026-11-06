@@ -1,0 +1,25 @@
+kind: Fixed
+body: |-
+  A keep-alive connection the server will not carry another request on now tells its client so,
+  and a close it cannot announce is counted and logged instead of leaving nothing behind. A
+  refusal that stands in for a handler's answer - the `429 OVERLOADED` of a write admission had no
+  room for, the `413` of a body past its route's limit - used to clear the whole response header,
+  which dropped the `Connection: close` the 60-second connection age limit had already set, so
+  that limit was silently off for the dominant answer of a loaded process and its connections
+  outlived their age. The refusal now keeps that header, and nothing else of the answer it
+  replaces. A read whose answer is cut - a write of it that failed or took less than it was given,
+  the flush of its last bytes included - is now aborted whatever the route, where only a file
+  version download was: the client cannot be told the connection is closing, because the header is
+  already on the wire, so the access line carries `aborted=true` and one INFO line names the path
+  and the bytes written, where an ordinary read returned from its failed write and was logged
+  `status=200` with every byte of its `Content-Length` counted while the connection went silently.
+  The server now also watches its connections: `dispatch_http_conns_closed_unanswered_total`
+  counts every connection it closes with the client told nothing, by cause (`request_unanswered`,
+  `handler_aborted`, `answer_not_closing`), each with a WARN line naming the cause, the requests
+  the connection carried and its age, and net/http's own errors go to the process's log at WARN
+  instead of the standard logger's stderr. The load generator keeps the connection each request
+  rode (reused or dialled, and how long it had been idle) on the request's record and in
+  `run.log`'s line for a failed write. Four writes of a 10x load run were answered with a bare
+  `EOF`: each had been written in full onto a keep-alive connection the server closed without
+  saying so, no handler ran for any of them, and neither side held a record of which connection
+  they took or why it went.

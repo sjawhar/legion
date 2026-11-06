@@ -19,8 +19,13 @@ type writeRec struct {
 	// request was in Dispatch's socket (httptrace WroteRequest), or Sent if it never got there
 	// (callResult.arrival); Response is when the response was read.
 	Sent, Arrival, Response int64
-	// ConnWait is the client's own wait for a connection (GetConn to GotConn).
+	// ConnWait is the client's own wait for a connection (GetConn to GotConn); Conn is the
+	// connection the write rode (callResult.conn), which a failed write's run.log line names
+	// too: a write answered with a bare EOF rode a connection the server closed without
+	// telling the client, and this says whether that connection came out of the idle pool and
+	// how long it had been idle (INFRA-592).
 	ConnWait     time.Duration
+	Conn         connInfo
 	Status       int
 	TransportErr string
 	// Code is the refusal code of an answer outside 2xx (callResult.code); ConnFailure the class

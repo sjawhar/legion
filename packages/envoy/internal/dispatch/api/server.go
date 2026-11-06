@@ -872,9 +872,15 @@ func admitted(limiter *admission.Limiter, weight int, lane admission.Lane, handl
 // handler returns, over a connection whose deadline was lifted and a server that sets no
 // WriteTimeout, so a reader that stopped just before the end held the goroutine and the
 // connection until TCP gave up and the access line read status=200 with every byte accounted
-// for. The flush sends them here instead, armed as every other write is (boundedAnswer.sent),
-// and a download whose last bytes are not taken is cut as one cut mid-stream is: logged at INFO
-// and aborted, so the access line carries aborted=true.
+// for. The flush sends them here instead, armed as every other write is (boundedAnswer.sent).
+//
+// An answer any of whose writes failed or fell short, the flush of its last bytes included, is
+// cut: the header is already on the wire, so the client cannot be told the connection is
+// closing, and net/http drops it after the response without a word (shouldReuseConnection), so
+// the next request a client writes onto that connection reads an EOF with no answer and leaves
+// no access line of its own (INFRA-592). The handler is aborted for it,
+// http.ErrAbortHandler, which logs at INFO and makes the line carry aborted=true rather than the
+// status=200 of an answer that went out whole, and leaves the connection to net/http to drop.
 //
 // It runs after the pin is given back, and only where the handler returned normally: a flush
 // can wait out the idle bound and the send buffer's drain, which the pinned request-pool
@@ -909,9 +915,10 @@ func (s *server) servedAsRead(deadline time.Duration, download bool, pin bool, h
 		}
 		handler(answer, r.WithContext(ctx))
 		unpin()
-		if err := answer.sent(); err != nil && download {
-			slog.Info("dispatch: a file version's download was cut: its reader did not take its last bytes",
-				"path", r.URL.Path, "written", answer.moved, "error", err)
+		answer.cut(answer.sent())
+		if answer.failure != nil {
+			slog.Info("dispatch: a read's answer was cut: its reader did not take all of it",
+				"path", r.URL.Path, "written", answer.moved, "download", download, "error", answer.failure)
 			panic(http.ErrAbortHandler)
 		}
 	}

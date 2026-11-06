@@ -835,7 +835,10 @@ func main() {
 	// through the background pool too.
 	go api.RunMaintenanceSweep(ctx, background, api.MaintenanceSweepInterval, leases, apiBackground.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, met, database, natsClient, outboxPublisher, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
-	server := newHTTPServer(handler, time.Now)
+	// The connection watch is built before the server, which counts through it, and read by the
+	// metrics endpoint below (dispatch_http_conns_closed_unanswered_total).
+	watchedConns := newConns()
+	server := newHTTPServer(handler, time.Now, watchedConns)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
 	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
 	// the process with 1: a supervisor must not read a port clash as a clean stop.
@@ -857,6 +860,7 @@ func main() {
 		Admission:  limiter,
 		Docs:       documentService,
 		Logs:       logs,
+		Conns:      watchedConns,
 	}); err != nil {
 		fatal("dispatch: metrics", "error", err)
 	}

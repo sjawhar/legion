@@ -446,6 +446,24 @@ func (b *drainedBody) complete() bool {
 	return b.length >= 0 && b.moved >= b.length
 }
 
+// offConnection reports whether the whole body is off the connection and the bound it arrived
+// under is lifted, which is what decides whether the connection may carry another request after
+// this one's answer. A body that ended without failing took the last byte its client sent off
+// the connection and lifted the bound there (end), whether it ended at the length its client
+// promised or at its own end; one that failed left the rest of itself on the connection and
+// keeps the bound, and one the drain stopped at the route's limit never reached either.
+func (b *drainedBody) offConnection() bool {
+	return b.ended && b.failure == nil
+}
+
+// arriving reports whether bytes of the body may still be on their way: the body neither ended
+// nor failed, and its client was not left waiting to be told to continue, having sent nothing
+// and being asked for nothing. What decides the answer's Connection is which of the two a body
+// still on the connection is (drainingWriter.sayTheConnectionCloses).
+func (b *drainedBody) arriving() bool {
+	return !b.ended && b.failure == nil && !(b.askedContinue && !b.touched)
+}
+
 // clientGone reports whether the read that failed this body failed because its client went away
 // rather than because the body itself could not be read. A client that went away cancels the
 // request's context, as does the bound's own deadline, since net/http cancels the request of any
@@ -629,6 +647,12 @@ type drainingWriter struct {
 // of the request ran, because the refusal cancelled the handler as well (drainedBody.resume),
 // and whatever that handler then tried to write - the refusal itself through
 // admission.WriteUnserved, or an answer to the error its own reader gave it - is this one 429.
+//
+// Every answer goes out saying whether the connection closes after it
+// (sayTheConnectionCloses), and a replaced answer keeps what the server already decided about
+// that connection where it keeps none of the rest of the layer's headers (replaceAnswer): a
+// client told nothing puts the connection back in its idle pool and reads an EOF with no answer
+// and no access line on the next request it writes onto it (INFRA-592).
 func (w *drainingWriter) begin(status int) {
 	if w.begun {
 		return
@@ -636,40 +660,88 @@ func (w *drainingWriter) begin(status int) {
 	w.begun = true
 	body := w.body
 	body.answered = true
+	tooLarge := w.drain(status)
+	w.sayTheConnectionCloses()
+	switch {
+	case body.refusal != nil:
+		w.replaceAnswer(func() { admission.WriteRefused(w.ResponseWriter, body.refusal) })
+	case tooLarge:
+		w.replaceAnswer(func() {
+			writeError(w.ResponseWriter, w.tooLarge.code, w.tooLarge.status, w.tooLarge.message)
+		})
+	}
+}
+
+// drain reads what is left of the body and discards it, and reports whether the route's own
+// answer to a body past its limit replaces the answer the layer gave, which is the 413 of a body
+// no layer below read (begin). It writes nothing: the answer follows the Connection the state the
+// drain leaves the connection in decides.
+func (w *drainingWriter) drain(status int) bool {
+	body := w.body
 	if body.refusal != nil {
-		clear(w.ResponseWriter.Header())
-		admission.WriteRefused(w.ResponseWriter, body.refusal)
-		w.replaced = true
-		return
+		return false
 	}
 	if body.spool != nil {
-		if body.oversize() && body.read == 0 && status != http.StatusUnauthorized {
-			w.answerTooLarge()
-		}
-		return
+		return body.oversize() && body.read == 0 && status != http.StatusUnauthorized
 	}
 	if body.ended || body.oversize() || (body.askedContinue && !body.touched) {
-		return
+		return false
 	}
 	_, err := io.CopyN(io.Discard, body, body.limit-body.moved+1)
 	switch {
 	case errors.Is(err, io.EOF):
 		// The body ended inside the limit: the answer stands.
-		return
+		return false
 	case err != nil:
-		w.ResponseWriter.Header().Set("Connection", "close")
-		return
+		// The read failed - the bound passed, the client gone, the connection broken - so what
+		// is left of the body stays on the connection, which closes after the answer.
+		return false
 	case status == http.StatusUnauthorized:
-		return
+		return false
 	}
-	w.answerTooLarge()
+	return true
 }
 
-// answerTooLarge replaces the answer a layer gave with the route's own answer to a body past its
-// limit, 413 and none of that layer's headers.
-func (w *drainingWriter) answerTooLarge() {
-	clear(w.ResponseWriter.Header())
-	writeError(w.ResponseWriter, w.tooLarge.code, w.tooLarge.status, w.tooLarge.message)
+// sayTheConnectionCloses puts Connection: close on the answer where the body is not off the
+// connection and nothing of it is still arriving (drainedBody.offConnection, arriving): a read
+// that failed - the bound passed, the client gone, the connection broken - and a client that
+// asked to be told to continue and was never told. net/http will not reuse such a connection,
+// and a client told nothing puts it back in its idle pool and reads an EOF with no answer and
+// no access line on the next request it writes onto it (INFRA-592). It runs before the answer
+// is written, because net/http reads the header the handler left when it writes the status
+// line (its closeAfterReply).
+//
+// A body still arriving is left to net/http, which says the same thing in a better way: after
+// the handler it discards up to 256 KiB of what the client has left to send and gives up on
+// more, setting Connection: close on the answer before it writes the status line and
+// half-closing the connection before it drops it, so a client still sending reads the answer
+// before the reset that follows (closeWriteAndWait, INFRA-258). That weighing runs only while
+// nothing has already said the connection closes, so a Connection: close set here would take
+// the half-close away and a 30 MiB upload's 413 would be lost to the reset again.
+func (w *drainingWriter) sayTheConnectionCloses() {
+	body := w.body
+	if body.offConnection() || body.arriving() {
+		return
+	}
+	w.ResponseWriter.Header().Set("Connection", "close")
+}
+
+// replaceAnswer writes answer in place of the one a layer gave, with none of that layer's headers
+// - a replaced answer carries neither the Idempotency-Key nor the Retry-After of the answer it
+// stands in for - but with the Connection the server already decided on: the connection-age limit
+// sets Connection: close before any layer runs (cmd/dispatch's maxConnAgeHandler), and the drain
+// sets it on a body still on the connection (sayTheConnectionCloses). Cleared with the rest, a
+// refusal left an aged connection open, since net/http reads the handler's header map when it
+// decides whether to close (closeAfterReply), and the connection age limit was silently off for
+// every refused write.
+func (w *drainingWriter) replaceAnswer(answer func()) {
+	header := w.ResponseWriter.Header()
+	closing := header.Values("Connection")
+	clear(header)
+	if len(closing) > 0 {
+		header["Connection"] = closing
+	}
+	answer()
 	w.replaced = true
 }
 
@@ -686,13 +758,17 @@ func (w *drainingWriter) answerTooLarge() {
 // written nothing, since nobody is left to read it, and its line carries 499 rather than the 200
 // of a handler that wrote nothing. A body that arrived and found no room to take its units back
 // is the 429 that refused it. A spool Dispatch could not write is none of these: the request was
-// good, the server was not, so it is the 500 a server fault always is.
+// good, the server was not, so it is the 500 a server fault always is. Each of these answers a
+// body that is not off the connection, so each carries Connection: close
+// (sayTheConnectionCloses), the one written to a client that is still there and the one net/http
+// writes for a client that has gone alike.
 func (w *drainingWriter) refuseUnreadBody() {
 	body := w.body
 	if w.begun || (body.failure == nil && body.refusal == nil && body.spoilt == nil) {
 		return
 	}
 	w.begun = true
+	w.sayTheConnectionCloses()
 	switch {
 	case body.refusal != nil:
 		admission.WriteRefused(w.ResponseWriter, body.refusal)
@@ -702,7 +778,6 @@ func (w *drainingWriter) refuseUnreadBody() {
 	case body.clientGone():
 		accesslog.ClientGone(body.ctx)
 	default:
-		w.ResponseWriter.Header().Set("Connection", "close")
 		writeError(w.ResponseWriter, "REQUEST_BODY_UNREADABLE", http.StatusBadRequest,
 			"the request's body did not arrive: nothing was run")
 	}
@@ -764,6 +839,13 @@ func (w *drainingWriter) Unwrap() http.ResponseWriter {
 // floor of its own (storeBody).
 // Only a read is wrapped (serveRoute), and the websockets are mounted outside it, so no
 // long-lived connection is bounded here.
+//
+// A write of the answer that fails, or that takes less than it was given, cuts the answer: its
+// header is already on the wire, so no Connection: close can be added to it, and net/http drops
+// the connection after a response it could not write whole (shouldReuseConnection's werr and
+// contentLength checks) without telling the client anything. The cut is recorded here and the
+// handler aborted for it (cut, servedAsRead), so the line carries aborted=true rather than the
+// status=200 of an answer that went out whole.
 type boundedAnswer struct {
 	http.ResponseWriter
 	movingDeadline
@@ -775,6 +857,18 @@ type boundedAnswer struct {
 	// how long the answer may take (servedAsRead, admission.WithDeadlineUntilAnswer). Nil for
 	// every other read, whose deadline runs for its whole length.
 	beginsAnswer func()
+	// failure is what cut the answer: the first write of it that failed or fell short, or the
+	// flush of its last bytes that did (sent). Nil for an answer written whole.
+	failure error
+}
+
+// cut records err as what cut the answer, keeping the first: a Write that fails is followed by
+// whatever the handler does with the error, and the flush after it fails for the same reason.
+// A nil err cuts nothing.
+func (a *boundedAnswer) cut(err error) {
+	if err != nil && a.failure == nil {
+		a.failure = err
+	}
 }
 
 // begin stops the read's deadline at the answer's first header or byte, once: from there the
@@ -841,8 +935,18 @@ func (a *boundedAnswer) Write(p []byte) (int, error) {
 		n, err := a.ResponseWriter.Write(slice)
 		written += n
 		a.moved += int64(n)
-		if err != nil || written >= len(p) {
+		switch {
+		case err != nil:
+			a.cut(err)
 			return written, err
+		case n < len(slice):
+			// A writer that took less than it was given and reported no error is a short
+			// write (io.Writer): the answer is incomplete, and net/http drops the
+			// connection over the Content-Length it promised.
+			a.cut(io.ErrShortWrite)
+			return written, io.ErrShortWrite
+		case written >= len(p):
+			return written, nil
 		}
 	}
 }

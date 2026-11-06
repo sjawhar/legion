@@ -110,6 +110,50 @@ func TestCallReadsTheRefusalCodeAndClassifiesConnectionFailures(t *testing.T) {
 	}
 }
 
+// INFRA-592. Every request records the connection it rode, so a write answered with a bare EOF
+// names whether that connection came out of the idle pool and how long it had sat there. The
+// round-22 run threw the trace's GotConnInfo away, so its four EOFs could not be told from a
+// dial that lost a race, and nothing on either side said which connection they had taken.
+func TestEachRequestRecordsTheConnectionItRode(t *testing.T) {
+	served := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer served.Close()
+	a := newAPI(served.URL, "token", 4)
+	ctx := context.Background()
+
+	first := a.call(ctx, "GET", "/ok", who{}, nil)
+	if !first.conn.got || first.conn.reused {
+		t.Fatalf("the first request's connection = %+v (%s), want one dialled for it", first.conn, first.conn)
+	}
+	// The first request read its whole answer, so its connection is back in the transport's
+	// idle pool and the second takes it from there.
+	idle := 50 * time.Millisecond
+	time.Sleep(idle)
+	second := a.call(ctx, "GET", "/ok", who{}, nil)
+	if !second.conn.got || !second.conn.reused || !second.conn.wasIdle {
+		t.Fatalf("the second request's connection = %+v (%s), want the first's, taken out of the idle pool", second.conn, second.conn)
+	}
+	if second.conn.idleTime < idle {
+		t.Fatalf("the reused connection had been idle %v, want at least the %v between the two requests", second.conn.idleTime, idle)
+	}
+	if !strings.Contains(second.conn.String(), "idle for") {
+		t.Fatalf("the connection names itself %q, want a reused one's idle time, which a failed request's line carries", second.conn)
+	}
+
+	// A request that never got a connection says so rather than naming one.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := listener.Addr().String()
+	_ = listener.Close()
+	refused := newAPI("http://"+closed, "token", 1).call(ctx, "GET", "/", who{}, nil)
+	if refused.conn.got || refused.conn.String() != "no connection" {
+		t.Fatalf("a refused dial recorded %+v (%s), want no connection", refused.conn, refused.conn)
+	}
+}
+
 func TestRefusalTallySplitsFailures(t *testing.T) {
 	tally := newRefusalTally()
 	tally.add(false, "", 200, "", 5)

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -621,6 +622,60 @@ func TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading(t *testing.T
 	}
 }
 
+// INFRA-592. An ordinary read whose answer is cut mid-write is aborted, so its access line says
+// so and its connection is dropped loudly. The header is already on the wire when a write
+// fails, so the client cannot be told the connection is closing, and net/http will not reuse a
+// connection whose response it could not write whole (shouldReuseConnection's werr and
+// contentLength checks). Where a download was already cut that way, an ordinary read returned
+// from its failed write as if it had answered: the line read status=200 with every byte of its
+// Content-Length counted, and the connection went with nothing said, so the next request a
+// client wrote onto it out of its idle pool read an EOF with no status and left no line of its
+// own - four writes of the round-22 load test ended exactly there.
+func TestAnOrdinaryReadWhoseAnswerIsCutIsAbortedAndLogged(t *testing.T) {
+	const idle, deadline = 500 * time.Millisecond, 30 * time.Second
+	logged := captureLog(t)
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle}
+	const pattern = "/api/v1/cut-ordinary-reader-test"
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, _ *http.Request) {
+		// Far past what the sockets hold between a handler and a client that reads none of
+		// it, and the failed write is swallowed, as a read's own writer swallows it
+		// (WriteJSON logs and returns).
+		chunk := make([]byte, 64<<10)
+		for written := 0; written < 64<<20; written += len(chunk) {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern,
+		accesslog.HandlerFunc(pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline)))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+
+	cut := awaitLineWith(t, logged, "a read's answer was cut: its reader did not take all of it", 10*time.Second)
+	if cut == "" {
+		t.Fatalf("the cut answer of an ordinary read was not logged; the log holds:\n%s", logged.String())
+	}
+	if !strings.Contains(cut, "level=INFO") || logField(cut, "download") != "false" {
+		t.Fatalf("the cut line is not the INFO line a reader's doing is, or names the read a download: %s", cut)
+	}
+	line := awaitAccessLineOfRoute(t, logged, pattern)
+	if !strings.Contains(line, "aborted=true") {
+		t.Fatalf("the cut read's access line is not marked aborted, so it reads as an answer that went out whole:\n%s", line)
+	}
+}
+
 // A client that reads a large answer slowly but steadily is answered all of it: the bound on an
 // answer is on the silence of each write, not on the answer's length, so a page or a download on
 // a slow downlink is served however long it takes, while one that stops reading is cut within the
@@ -883,8 +938,10 @@ func TestAReaderThatStopsReadingIsCutWithinTheSendBuffersDrain(t *testing.T) {
 // sets no WriteTimeout, so a reader that stopped just before the end held the goroutine and the
 // connection until TCP gave up, its access line reading status=200 with every byte of its
 // Content-Length counted. servedAsRead flushes them itself instead, armed as every other write
-// is, and a download whose last bytes are not taken is cut as one cut mid-stream is: one INFO
-// line and an abort, so the access line carries aborted=true.
+// is, and a read whose last bytes are not taken is cut as one cut mid-stream is: one INFO
+// line and an abort, so the access line carries aborted=true. A download and an ordinary read
+// alike: net/http reuses neither connection and tells neither client, so both are cut loudly
+// (INFRA-592).
 //
 // Only an answer past what net/http measures a Content-Length from is flushed (answerSniffed):
 // one that stays inside that buffer has nothing on the connection to block on, and flushing it
@@ -928,21 +985,26 @@ func TestTheLastBytesOfAnAnswerGoOutUnderItsBound(t *testing.T) {
 	if armed := cut.deadlines[cut.armedAtFlush-1]; !armed.After(time.Now().Add(-time.Minute)) || armed.IsZero() {
 		t.Fatalf("the flush ran under the deadline %v, want the bound armed before it", armed)
 	}
-	line := awaitLineWith(t, logged, "a file version's download was cut: its reader did not take its last bytes", time.Second)
+	line := awaitLineWith(t, logged, "a read's answer was cut: its reader did not take all of it", time.Second)
 	if line == "" {
 		t.Fatalf("the download cut at its last bytes was not logged; the log holds:\n%s", logged.String())
 	}
 	if !strings.Contains(line, "level=INFO") || logField(line, "written") != strconv.Itoa(len(answer)) {
 		t.Fatalf("the cut line is not the INFO line a reader's doing is, or does not say what it took: %s", line)
 	}
+	if logField(line, "download") != "true" {
+		t.Fatalf("the cut line does not name the read a download: %s", line)
+	}
 
-	// A flush that succeeds ends nothing, and a read that is no download is left to net/http
-	// whatever its flush says: only a download is cut here.
+	// A flush that succeeds ends nothing.
 	if whole, ended := run(true, nil, answer); ended != nil || whole.flushes != 1 {
 		t.Fatalf("a download whose last bytes went out ended with %v after %d flushes, want nothing after one", ended, whole.flushes)
 	}
-	if read, ended := run(false, os.ErrDeadlineExceeded, answer); ended != nil || read.flushes != 1 {
-		t.Fatalf("an ordinary read whose flush failed ended with %v after %d flushes, want nothing after one", ended, read.flushes)
+	// An ordinary read is cut the same way (INFRA-592): the connection carries no further
+	// request once its last bytes could not be written, and the client is never told, so the
+	// line must say the answer was cut rather than read status=200 with every byte counted.
+	if read, ended := run(false, os.ErrDeadlineExceeded, answer); ended != http.ErrAbortHandler || read.flushes != 1 {
+		t.Fatalf("an ordinary read whose flush failed ended with %v after %d flushes, want http.ErrAbortHandler after one", ended, read.flushes)
 	}
 	// A handler that wrote nothing is flushed nothing: flushing it would answer the 200 it did
 	// not write, where a client that went away is answered nothing at all (accesslog.ClientGone).

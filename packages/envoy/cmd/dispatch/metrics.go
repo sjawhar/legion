@@ -52,6 +52,9 @@ type metricsSources struct {
 	Admission  *admission.Limiter
 	Docs       *docs.Service
 	Logs       *logging.Handler
+	// Conns is the API server's connection watch (conn_age.go), nil in a test that serves no
+	// API, whose series is then absent as an unopened pool's is.
+	Conns *conns
 }
 
 // outboxLagInterval is how often the outbox lag is sampled: one query on the background pool every
@@ -307,6 +310,18 @@ func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registr
 		samples := make([]metrics.Sample, 0, len(logging.Levels))
 		for _, level := range logging.Levels {
 			samples = append(samples, metrics.Sample{Labels: [][2]string{{"level", strings.ToLower(level.String())}}, Value: float64(sources.Logs.Dropped(level))})
+		}
+		return samples
+	})
+
+	registry.NewCounterVecFunc(metricPrefix+"http_conns_closed_unanswered_total", "Connections closed with their client told nothing, by cause: a request read that no handler answered, a handler that aborted mid-answer, and an answer that did not say the connection was closing. Each costs a client that reuses the connection one request answered with no status and no access line.", func() []metrics.Sample {
+		if sources.Conns == nil {
+			return nil
+		}
+		counts := sources.Conns.ClosedUnanswered()
+		samples := make([]metrics.Sample, 0, len(counts))
+		for _, closed := range counts {
+			samples = append(samples, metrics.Sample{Labels: [][2]string{{"reason", closed.Reason}}, Value: float64(closed.Count)})
 		}
 		return samples
 	})

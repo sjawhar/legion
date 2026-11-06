@@ -58,9 +58,40 @@ type callResult struct {
 	start, wrote, end int64
 	// connWait is the client's own wait for a connection (httptrace GetConn to GotConn).
 	connWait time.Duration
-	err      error
+	// conn is the connection the request rode, as the trace reported it at GotConn.
+	conn connInfo
+	err  error
 	// connFailure classifies err (connFailureOf), "" when err is nil.
 	connFailure string
+}
+
+// connInfo is what the client's trace said about the connection a request rode (httptrace
+// GotConnInfo): whether the transport took it from its idle pool instead of dialing a new one,
+// whether it had been idle, and for how long. A request answered with a bare EOF rode a
+// connection the server had already closed, or closed in the same instant, and these three say
+// whether that connection came out of the pool and how long it had sat there (INFRA-592); the
+// round-22 run recorded none of it, so its four EOFs could not be told apart from a dial that
+// lost a race.
+type connInfo struct {
+	// got is set once the trace reported a connection; the rest mean nothing without it.
+	got      bool
+	reused   bool
+	wasIdle  bool
+	idleTime time.Duration
+}
+
+// String names the connection for a log line and a record: a request that never got one, a
+// connection dialled for it, or one out of the idle pool with how long it had been idle.
+func (c connInfo) String() string {
+	switch {
+	case !c.got:
+		return "no connection"
+	case !c.reused:
+		return "a new connection"
+	case !c.wasIdle:
+		return "a reused connection that was not idle"
+	}
+	return "a reused connection idle for " + c.idleTime.Round(time.Millisecond).String()
 }
 
 func (r callResult) ok() bool { return r.err == nil && r.status/100 == 2 }
@@ -232,9 +263,15 @@ func (a *api) callRaw(ctx context.Context, method, path string, w who, contentTy
 func (a *api) callRawKeyed(ctx context.Context, method, path string, w who, contentType string, payload []byte, key string) callResult {
 	var getConn, gotConn, wrote atomic.Int64
 	var connectErr atomic.Pointer[error]
+	var conn atomic.Pointer[connInfo]
 	trace := &httptrace.ClientTrace{
 		GetConn: func(string) { getConn.Store(time.Now().UnixNano()) },
-		GotConn: func(httptrace.GotConnInfo) { gotConn.Store(time.Now().UnixNano()) },
+		GotConn: func(info httptrace.GotConnInfo) {
+			gotConn.Store(time.Now().UnixNano())
+			// The latest, so a request the transport retried on a second connection names
+			// the one it was answered on.
+			conn.Store(&connInfo{got: true, reused: info.Reused, wasIdle: info.WasIdle, idleTime: info.IdleTime})
+		},
 		ConnectDone: func(_, _ string, err error) {
 			if err != nil {
 				connectErr.Store(&err)
@@ -277,6 +314,9 @@ func (a *api) callRawKeyed(ctx context.Context, method, path string, w who, cont
 	res.end = time.Now().UnixNano()
 	res.err = err
 	res.wrote = wrote.Load()
+	if got := conn.Load(); got != nil {
+		res.conn = *got
+	}
 	if g, h := getConn.Load(), gotConn.Load(); g != 0 && h >= g {
 		res.connWait = time.Duration(h - g)
 	}
