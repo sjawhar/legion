@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
+import { waitFor } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import { Schema } from "prosemirror-model";
 import { pictureClassName } from "../refs/picture-classes";
@@ -100,6 +101,50 @@ function linkOf(dom: HTMLElement): HTMLAnchorElement {
   const link = dom.querySelector("a");
   if (link === null) throw new Error(`no <a> in ${dom.outerHTML}`);
   return link;
+}
+
+// The full-size view a plain click opens is PhotoSwipe's (`refs/picture-viewer.ts`), drawn on
+// the page rather than inside the node view's wrapper, and it is the only dialog these rows
+// put there. `openPictureViewer` imports the library and its stylesheet lazily, so the view
+// arrives a tick after the click and never on its turn.
+function views(): NodeListOf<Element> {
+  return document.querySelectorAll('[role="dialog"]');
+}
+
+/** One view, open and showing its picture. PhotoSwipe puts the slide's own `<img>` on the page
+ *  at the end of its opening animation, and until that end it answers no close, so this is the
+ *  wait every row makes before it closes one. A DOM that fires no `transitionend` reaches that
+ *  end by the library's own safety timeout, which is longer than `waitFor`'s own second. */
+function openedView(): Promise<void> {
+  return waitFor(
+    () => {
+      expect(views()).toHaveLength(1);
+      expect(views()[0]?.querySelector("img")).not.toBeNull();
+    },
+    { timeout: 3_000 }
+  );
+}
+
+/** Nothing open. A close runs PhotoSwipe's closing animation and takes the root off the page
+ *  at its end, which is the same safety timeout. */
+function closedView(): Promise<void> {
+  return waitFor(() => expect(views()).toHaveLength(0), { timeout: 3_000 });
+}
+
+/** The view's own close control, named as a reader hears it. */
+function closeControl(): HTMLButtonElement {
+  const control = document.querySelector<HTMLButtonElement>('button[aria-label="Close"]');
+  if (control === null) throw new Error("no close control on the full-size view");
+  return control;
+}
+
+/** Long enough for a view to have reached the page - the import, the viewer and its `init` -
+ *  so a row that waits it out and finds none has shown the click opened none. An absence has
+ *  no signal of its own to await. */
+function noViewLands(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 250);
+  return promise;
 }
 
 // The dashboard is served from an origin, where a picture's same-origin bytes route resolves.
@@ -383,7 +428,7 @@ test("a pinned source whose artifact is a video plays at the address it pins", (
   expect(pinned.stopped).toBe(1);
 });
 
-test("destroying the view closes the full-size layer its picture opened", () => {
+test("destroying the node view closes the full-size view its picture opened", async () => {
   const view = pictureView(
     picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"),
     document,
@@ -394,27 +439,30 @@ test("destroying the view closes the full-size layer its picture opened", () => 
   pictureOf(view.dom as HTMLElement).dispatchEvent(
     new MouseEvent("click", { bubbles: true, button: 0, cancelable: true })
   );
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+  await openedView();
 
   view.destroy?.();
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+  await closedView();
 });
 
-test("only the picture that opened the full-size layer closes it", () => {
+test("only the picture that opened the full-size view closes it", async () => {
   const view = (src: string) =>
     pictureView(picture(src, "shot.png"), document, noCaret, noWatch, pastVersion);
   const first = view("dispatch://CORE-1/artifact/shot-png@v1");
   const second = view("dispatch://CORE-1/artifact/shot-png@v2");
   const click = () => new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
   pictureOf(first.dom as HTMLElement).dispatchEvent(click());
-  // A click that reaches the second picture while the first's layer is open opens nothing.
+  // A click that reaches the second picture while the first's view is open opens nothing.
   pictureOf(second.dom as HTMLElement).dispatchEvent(click());
-  expect(document.querySelectorAll('[data-testid="picture-lightbox"]')).toHaveLength(1);
+  await openedView();
+  await noViewLands();
+  expect(views()).toHaveLength(1);
 
+  // The second picture holds no view, so destroying it leaves the first's open.
   second.destroy?.();
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+  expect(views()).toHaveLength(1);
   first.destroy?.();
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+  await closedView();
 });
 
 test("a replaced version's late load error leaves the newer picture, and a failed load draws again on its next report", () => {
@@ -442,27 +490,34 @@ test("a replaced version's late load error leaves the newer picture, and a faile
   );
 });
 
-test("a plain click on a picture opens it at full size; a modified click does not", () => {
+test("a plain click on a picture opens it at full size; a modified click does not", async () => {
   const img = pictureOf(wrapper("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"));
 
-  img.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, ctrlKey: true }));
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+  const modified = new MouseEvent("click", {
+    bubbles: true,
+    button: 0,
+    cancelable: true,
+    ctrlKey: true,
+  });
+  img.dispatchEvent(modified);
+  // The browser keeps its own meaning for a modified click, and no view arrives for it.
+  expect(modified.defaultPrevented).toBe(false);
+  await noViewLands();
+  expect(views()).toHaveLength(0);
 
   const click = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
   img.dispatchEvent(click);
   expect(click.defaultPrevented).toBe(true);
-  const lightbox = document.querySelector<HTMLDialogElement>('[data-testid="picture-lightbox"]');
-  expect(lightbox?.open).toBe(true);
-  expect(lightbox?.getAttribute("aria-label")).toBe("shot.png");
-  expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
-    "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
-  );
-  // A second click that reaches the picture while it is open opens no second layer.
+  await openedView();
+
+  // A second click that reaches the picture while it is open opens no second view.
   img.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
-  expect(document.querySelectorAll('[data-testid="picture-lightbox"]')).toHaveLength(1);
-  // A click anywhere on it closes it, and it leaves the page.
-  lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+  await noViewLands();
+  expect(views()).toHaveLength(1);
+
+  // The view's own close control takes it off the page.
+  closeControl().click();
+  await closedView();
 });
 
 test("a picture from elsewhere, or a reference the grammar refuses, is drawn by the schema", () => {

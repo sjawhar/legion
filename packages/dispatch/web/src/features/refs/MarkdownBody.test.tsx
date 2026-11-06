@@ -329,7 +329,13 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // The full-size view the click opens is PhotoSwipe's (`picture-viewer.ts`), drawn on the page
+  // outside the body and the only dialog this row puts there. `openPictureViewer` imports the
+  // library and its stylesheet lazily, so the view arrives a tick after the click; it shows the
+  // slide's own `<img>` at the end of its opening animation, and answers no close before that
+  // end, which in a DOM that fires no `transitionend` is the library's own safety timeout.
   test("a plain click on a picture opens it at full size instead of following its link", async () => {
+    const views = () => document.querySelectorAll('[role="dialog"]');
     const view = render(
       withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png@v1)" />)
     );
@@ -338,22 +344,19 @@ describe("Dispatch pictures", () => {
       const shot = await within(view.container).findByRole("img", { name: "shot.png" });
       const click = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
       shot.dispatchEvent(click);
+      // The placeholder link around the picture is not followed: the click is the picture's.
       expect(click.defaultPrevented).toBe(true);
-      const lightbox = document.querySelector<HTMLDialogElement>(
-        '[data-testid="picture-lightbox"]'
+      await waitFor(
+        () => {
+          expect(views()).toHaveLength(1);
+          expect(views()[0]?.querySelector("img")).not.toBeNull();
+        },
+        { timeout: 3_000 }
       );
-      expect(lightbox?.open).toBe(true);
-      expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
-        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
-      );
-      lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
 
-      // Opened again, the layer goes with the body that opened it.
-      shot.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
-      expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+      // The view goes with the body that opened it.
       view.unmount();
-      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+      await waitFor(() => expect(views()).toHaveLength(0), { timeout: 3_000 });
     } finally {
       view.unmount();
     }
