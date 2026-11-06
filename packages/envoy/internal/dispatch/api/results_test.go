@@ -375,8 +375,23 @@ func issueInRepository(t *testing.T, handler http.Handler, project, repo, title 
 }
 
 // resultsGitHub is a Dispatch holding an App key whose GitHub answers `handler`, with the
-// installation lookup and token mint every read needs already served.
+// installation lookup and token mint every read needs already served. Its GitHub holds every
+// commit asked about: resultsGitHubHolding is the same fixture with the commits named.
 func resultsGitHub(t *testing.T, repos map[string]bool, compare func(base, head string) string) (http.Handler, *store.Store) {
+	t.Helper()
+	return resultsGitHubHolding(t, repos, nil, compare)
+}
+
+// resultsGitHubHolding is resultsGitHub with the commits the repositories hold seeded: held
+// drives `GET /repos/{owner}/{repo}/commits/{sha}`, the read refuseUnknownCommit turns on. A
+// commit held names is 200, and every other commit is the 422 GitHub answers for one no
+// repository holds — the one answer that proves absence. A nil held holds every commit, which
+// is what resultsGitHub passes and what every test that never seeded a commit takes.
+//
+// The route is served here rather than left to the mux's own 404, which this codebase reads as
+// "repository unreadable" and stores the result for: a test missing the route would prove
+// nothing.
+func resultsGitHubHolding(t *testing.T, repos, held map[string]bool, compare func(base, head string) string) (http.Handler, *store.Store) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -399,6 +414,15 @@ func resultsGitHub(t *testing.T, repos map[string]bool, compare func(base, head 
 	mux.HandleFunc("GET /repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"full_name":%q,"default_branch":"main"}`, r.PathValue("owner")+"/"+r.PathValue("repo"))
 	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		sha := r.PathValue("sha")
+		if held != nil && !held[sha] {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprintf(w, `{"message":"No commit found for SHA: %s"}`, sha)
+			return
+		}
+		fmt.Fprintf(w, `{"sha":%q}`, sha)
+	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/compare/{basehead}", func(w http.ResponseWriter, r *http.Request) {
 		base, head, _ := strings.Cut(r.PathValue("basehead"), "...")
 		fmt.Fprintf(w, `{"status":%q}`, compare(base, head))
@@ -410,6 +434,106 @@ func resultsGitHub(t *testing.T, repos map[string]bool, compare func(base, head 
 		githubAPIBase: upstream.URL,
 	})
 	return handler, database
+}
+
+// A result at a commit the repository of the check's issue does not hold is refused, and
+// nothing of it is stored. GitHub's 422 is the one answer that proves absence, so a commit of
+// the right shape that the repository never held — a mistyped head, a commit of a branch
+// nobody pushed — never becomes a row a reader takes for the real head.
+func TestResultAtACommitTheRepositoryDoesNotHoldIsRefused(t *testing.T) {
+	handler, database := resultsGitHubHolding(t, map[string]bool{"acme/widgets": true},
+		map[string]bool{headCommit: true}, func(string, string) string { return "diverged" })
+	issue := issueInRepository(t, handler, "RESQ", "acme/widgets", "Unknown commit")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	// nearHeadCommit is 40 hex characters the repository holds no commit at: the fixture's
+	// GitHub answers it 422, as GitHub itself does.
+	refused := recordResult(t, handler, issue.Key, resultBody("k1", "pass", nearHeadCommit, nil))
+	code, text := refusalOf(t, refused)
+	if refused.Code != http.StatusBadRequest || code != "RESULT_COMMIT_UNKNOWN" {
+		t.Fatalf("a result at a commit the repository does not hold: status=%d body=%s",
+			refused.Code, refused.Body.String())
+	}
+	if !strings.Contains(text, nearHeadCommit) || !strings.Contains(text, "acme/widgets") {
+		t.Fatalf("the refusal reads %q, want the commit %s and the repository acme/widgets named",
+			text, nearHeadCommit)
+	}
+
+	// Nothing stored, in both halves of the one transaction the record would have written. The
+	// row first: the check's results read empty.
+	if results := checkOf(t, readResults(t, handler, issue.Key), "k1").Results; len(results) != 0 {
+		t.Fatalf("the refused check holds %+v, want no result", results)
+	}
+	// Then the event. lastIssueEventPayload reads the newest event's payload alone, and a
+	// payload carries no type, so the absence is asked of the events table by type: that says
+	// the event was never appended, where the newest payload would say only that it is not the
+	// newest one.
+	if events := resultEventsOn(t, database, issue.Key); events != 0 {
+		t.Fatalf("the check's issue holds %d result.recorded events, want none", events)
+	}
+}
+
+// resultEventsOn counts the result.recorded events appended on one issue.
+func resultEventsOn(t *testing.T, database *store.Store, key string) int {
+	t.Helper()
+	var count int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from events where issue_key = $1 and type = 'result.recorded'
+	`, key).Scan(&count); err != nil {
+		t.Fatalf("count %s's result.recorded events: %v", key, err)
+	}
+	return count
+}
+
+// A result at a commit the repository does hold is stored, as every result was before the
+// commit was asked about at all: the row stands under its check and the event is on the
+// check's issue.
+func TestResultAtACommitTheRepositoryHoldsIsStored(t *testing.T) {
+	handler, database := resultsGitHubHolding(t, map[string]bool{"acme/widgets": true},
+		map[string]bool{headCommit: true}, func(string, string) string { return "diverged" })
+	issue := issueInRepository(t, handler, "RESY", "acme/widgets", "Held commit")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	recorded := recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit, nil))
+	if recorded.Code != http.StatusCreated {
+		t.Fatalf("a result at a commit the repository holds: status=%d body=%s",
+			recorded.Code, recorded.Body.String())
+	}
+	stored := decodeBody[recordedResult](t, recorded)
+	if stored.Result.CommitSHA != headCommit {
+		t.Fatalf("the stored result is at %s, want %s", stored.Result.CommitSHA, headCommit)
+	}
+	results := checkOf(t, readResults(t, handler, issue.Key), "k1").Results
+	if len(results) != 1 || results[0].ID != stored.Result.ID {
+		t.Fatalf("k1's results = %+v, want the one result %s", results, stored.Result.ID)
+	}
+	if events := resultEventsOn(t, database, issue.Key); events != 1 {
+		t.Fatalf("the check's issue holds %d result.recorded events, want one", events)
+	}
+}
+
+// A check whose issue resolves to a repository the App cannot read refuses nothing: GitHub
+// answers 404 there, which says only that Dispatch cannot tell whether the commit is held. The
+// result is stored although the fixture's GitHub holds no such commit anywhere, and it reads
+// unknown, since nothing can teach Dispatch that repository's heads either.
+func TestResultAtAnUnreadableRepositoryIsStoredAndReadsUnknown(t *testing.T) {
+	handler, database := resultsGitHubHolding(t, map[string]bool{"acme/widgets": true},
+		map[string]bool{headCommit: true}, func(string, string) string { return "diverged" })
+	hidden := issueInRepository(t, handler, "RESZ", "acme/hidden", "Unreadable")
+	uploadDocument(t, handler, "/api/v1/issues/"+hidden.Key, "verification.md", twoChecks)
+
+	recorded := recordResult(t, handler, hidden.Key, resultBody("k1", "pass", nearHeadCommit, nil))
+	if recorded.Code != http.StatusCreated {
+		t.Fatalf("a result of a repository the App cannot read: status=%d body=%s",
+			recorded.Code, recorded.Body.String())
+	}
+	stored := decodeBody[recordedResult](t, recorded)
+	if got := currencyOf(t, readResults(t, handler, hidden.Key), "k1", stored.Result.ID); got != model.CurrencyUnknown {
+		t.Fatalf("a result of a repository the App cannot read = %q, want unknown", got)
+	}
+	if events := resultEventsOn(t, database, hidden.Key); events != 1 {
+		t.Fatalf("the check's issue holds %d result.recorded events, want one", events)
+	}
 }
 
 // An after-merge result is current at a commit on the repository's default branch, older at a
