@@ -28,10 +28,11 @@ package pgmigrate
 // and our reading did not. The narrower one reads nothing of our reading at all, not its
 // refusal and not its spans, and asks only that redactedQuery covered the marker from the byte
 // the server's lexer stopped on, so no fault in the reading can quiet it. Measured on
-// 2026-11-06 with actParam's int32 check taken out of scanl.go, which loses the refusal
-// {param}'s number too large makes: over the sample that leg runs, the comparison of refusals
-// failed on 1,250 (text, setting) pairs and the coverage clause on 982. Both of them need the
-// server's message to be read as its lexer's own, which is what scanlErrors decides.
+// 2026-11-06, with ask reading its results and with actParam's int32 check taken out of
+// scanl.go, which loses the refusal {param}'s number too large makes: over the sample that
+// leg runs, the comparison of refusals failed on 1,250 (text, setting) pairs and the coverage
+// clause on 982. Both of them need the server's message to be read as its lexer's own, which
+// is what scanlErrors decides.
 //
 // TestRedactionAgainstServerOutcomes is the oracle, and it holds the transcription itself to a
 // real PostgreSQL by comparing OUTCOMES rather than parsing messages. For each text it asks the
@@ -332,21 +333,39 @@ func (a answer) agrees(b answer, aWord, bWord string) bool {
 // records, and reads what the server answers. It goes through pgconn rather than pgx because
 // pgx refuses a simple query on a connection whose standard_conforming_strings is off, and off
 // is half of what this test is for.
+//
+// Each result is read and closed before the next is asked for. A ResultReader left open holds
+// its statement's rows on the connection, and NextResult called over them answers "unexpected
+// DataRow message without preceding RowDescription" rather than the next result: that is one
+// bogus refusal for every statement the server answered a row to - select 1 among them - with
+// no SQLSTATE and no position, which this leg would read as a refusal the grammar made. It was
+// what this function did until 2026-11-06, and for as long as it did, the oracle compared
+// refusals with refusals and never once compared a statement the server ran.
 func ask(ctx context.Context, conn *pgconn.PgConn, sql string) answer {
 	var columns strings.Builder
+	var failure error
 	results := conn.Exec(ctx, sql)
 	for results.NextResult() {
-		for _, field := range results.ResultReader().FieldDescriptions() {
+		reader := results.ResultReader()
+		for _, field := range reader.FieldDescriptions() {
 			fmt.Fprintf(&columns, "%s:%d,", field.Name, field.DataTypeOID)
+		}
+		// The first error is the one the server gave: a later result's reader answers for a
+		// statement the server never reached.
+		if _, err := reader.Close(); err != nil && failure == nil {
+			failure = err
 		}
 	}
 	err := results.Close()
-	if err == nil {
+	if failure == nil {
+		failure = err
+	}
+	if failure == nil {
 		return answer{columns: columns.String()}
 	}
-	out := answer{failed: true, message: err.Error()}
+	out := answer{failed: true, message: failure.Error()}
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if errors.As(failure, &pgErr) {
 		out.sqlstate = pgErr.Code
 		out.position = pgErr.Position
 		out.message = pgErr.Message
@@ -382,13 +401,13 @@ type verdict struct {
 	// failed is true where the server refused the text; lexical is true where that refusal is
 	// one scan.l's own error rules make rather than the parser's, which scanlErrors decides by
 	// the words of the message and by the suffix scanner_yyerror gives them; and class is the
-	// refusal class those words name, or empty where the server did not refuse the text or
-	// refused it in words no rule of scan.l raises. The tally over the sample counts a hit for
-	// a class only where lexical is true, since a grammar refusal in the lexer's words is not
-	// the lexer's hit; the exception is a shared class, where no message tells the two apart
-	// and the count holds both.
+	// entry of scanlErrors whose words those are, or nil where the server did not refuse the
+	// text or refused it in words no rule of scan.l raises. The tally over the sample counts a
+	// hit for a class only where lexical is true, since a grammar refusal in the lexer's words
+	// is not the lexer's hit; the exception is a shared class, which the entry itself says it
+	// is, where no message tells the two apart and the count holds both.
 	failed, lexical bool
-	class           string
+	class           *scanlError
 }
 
 // scanlError is one of the refusals scan.l makes: the words its rule raises, how it raises them,
@@ -490,11 +509,13 @@ var scanlErrors = []scanlError{
 	{message: "invalid Unicode escape", shared: true, sample: `select E'\u12',` + marker},
 }
 
-// refusalClass returns the refusal class the server's message is one of - the longest of
-// scanlErrors' messages the answer begins with, since "invalid Unicode escape" is a prefix of
-// "invalid Unicode escape value" - and whether scan.l's own lexer is what raised it. An answer
-// in none of those words is the grammar's own and belongs to no class.
-func refusalClass(message string) (string, bool) {
+// refusalClass returns the entry of scanlErrors whose words the server's message is in - the
+// longest of their messages the answer begins with, since "invalid Unicode escape" is a prefix
+// of "invalid Unicode escape value" - and whether scan.l's own lexer is what raised it. It
+// returns the entry rather than its message so that a caller needs no second table of its own
+// to read what the class is: whether it is shared with the grammar, say. An answer in none of
+// those words is the grammar's own and belongs to no class, which is a nil entry.
+func refusalClass(message string) (*scanlError, bool) {
 	found := -1
 	for i := range scanlErrors {
 		if !strings.HasPrefix(message, scanlErrors[i].message) {
@@ -505,9 +526,9 @@ func refusalClass(message string) (string, bool) {
 		}
 	}
 	if found < 0 {
-		return "", false
+		return nil, false
 	}
-	return scanlErrors[found].message, scanlErrors[found].raisedByLexer(message)
+	return &scanlErrors[found], scanlErrors[found].raisedByLexer(message)
 }
 
 // raisedByLexer reports whether this answer, in this class's words, is one the lexer raised: the
@@ -633,20 +654,17 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	}
 	sample := serverSample()
 	var asked, leaked, lost, shape, inconclusive, named, refusedByUs, refusalMissing, refusalSpurious int
-	var covered, uncovered int
+	var covered, uncovered, ran int
 	leaks := map[string]bool{}
 	losses := map[string]bool{}
 	refusals := map[string]bool{}
-	// The tally, counted apart: generatedHits per class from the texts the corpus built,
-	// fixedHits from the fixed statements of scanlErrors, fixedRaised for a fixed statement
-	// seen to raise its own class, and fixedSaw for what it raised instead when it did not.
-	generatedHits := map[string]int{}
-	fixedHits := map[string]int{}
-	fixedRaised := map[string]bool{}
-	fixedSaw := map[string][]string{}
-	sharedClass := map[string]bool{}
+	// The tally, one entry per class of scanlErrors, counted apart: generated from the texts
+	// the corpus built, fixed from the class's own fixed statement, raised where that fixed
+	// statement was seen to raise its own class, and saw for what it raised instead where it
+	// did not.
+	tally := map[string]*classTally{}
 	for _, class := range scanlErrors {
-		sharedClass[class.message] = class.shared
+		tally[class.message] = &classTally{}
 	}
 	for _, entry := range sample {
 		text := entry.text
@@ -670,18 +688,23 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 			if ours.failure >= 0 {
 				refusedByUs++
 			}
-			if class := verdicts[i].class; class != "" && (verdicts[i].lexical || sharedClass[class]) {
+			if !verdicts[i].failed {
+				ran++
+			}
+			if class := verdicts[i].class; class != nil && (verdicts[i].lexical || class.shared) {
+				hits := tally[class.message]
 				if entry.class == "" {
-					generatedHits[class]++
+					hits.generated++
 				} else {
-					fixedHits[class]++
-					if class == entry.class {
-						fixedRaised[class] = true
+					hits.fixed++
+					if class.message == entry.class {
+						hits.raised = true
 					}
 				}
 			}
 			if entry.class != "" {
-				fixedSaw[entry.class] = append(fixedSaw[entry.class], "scs="+setting+": "+raisedWhat(verdicts[i]))
+				hits := tally[entry.class]
+				hits.saw = append(hits.saw, "scs="+setting+": "+raisedWhat(verdicts[i]))
 			}
 			switch {
 			case verdicts[i].coversFrom >= 0:
@@ -727,22 +750,36 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 		}
 	}
 	t.Logf("server: %d of %d (text, setting) pairs settled by outcome, %d settled by the byte the server's own lexer stopped on, %d inconclusive (refused at a byte of the marker or before it with its lexer unnamed, or refused with no position), %d where the marker is inside a quoted identifier", asked, len(settings)*len(sample), covered, inconclusive, named)
+	t.Logf("%d of those pairs are statements the server ran, the pairs whose answers this leg can compare a success over", ran)
 	// The floor the tally below stands on, and no replacement for it: the tally fails a class
 	// no text of the corpus reached, and this fails a sample that reached almost nothing at
 	// all, where the tally of a corpus that no longer builds texts would have nothing left to
 	// count. It is taken on asked+covered, the pairs this leg settles - by outcome, and by the
 	// byte the server's own lexer stopped on. Measured on 2026-11-06 with the alphabet as it
-	// stands: 43,918 pairs settled by outcome and 48,730 by the stop byte, 92,648 of 158,358
-	// pairs. The floor is about the corpus still forming the refusal classes rather than about
-	// its size, so a round that deliberately shrinks the corpus moves this number in the same
-	// commit and measures the two counts again.
+	// stands and with ask reading its results: 50,174 pairs settled by outcome and 48,730 by
+	// the stop byte, 98,904 of 158,358 pairs. The floor is about the corpus still forming the
+	// refusal classes rather than about its size, so a round that deliberately shrinks the
+	// corpus moves this number in the same commit and measures the two counts again.
 	if asked+covered < 10_000 {
 		t.Fatalf("the sample settled %d (text, setting) pairs by outcome and %d by the byte the server's own lexer stopped on, %d together: the corpus has collapsed and this leg has nothing left to fail on", asked, covered, asked+covered)
+	}
+	// The floor nothing else here stands in for: a pair the server RAN. A text whose answer
+	// the server gives twice is the only pair the token test compares anything over, and
+	// refusalSpurious - our reading refusing a text the server ran anyway - cannot fire
+	// without one. Until 2026-11-06 ask left each result unread, so every statement the
+	// server answered a row to came back as a refusal with no SQLSTATE, every pair was a
+	// refusal, and the leg went green over a sample it had compared no success in: this is
+	// the check that would have said so on the day it landed. Measured on 2026-11-06 with the
+	// alphabet as it stands: 6,258 of 158,358 pairs, where the same sample asked through the
+	// unread results answered 0.
+	if ran == 0 {
+		t.Fatalf("the server ran none of the %d (text, setting) pairs this leg asked about: every answer was a refusal, so this run compared no success at all and the half of the oracle that holds a reading which hides too much had nothing to fail on", len(settings)*len(sample))
 	}
 	var unformed, unraised, byName, byStride []string
 	t.Logf("a fixed statement is asked under both settings, so it contributes exactly two hits where it raises its class under both and one where only one setting raises it; a class whose hits are its fixed statement's alone is a class the corpus never formed, which is its generated count below reading 0")
 	t.Logf("refusals the server raised, by class, counting the hits of the texts the corpus built apart from the hits of the class's own fixed statement. A hit is one the lexer raised; a row marked shared is one the grammar raises in the same words in the same form, where no message tells the two apart and the count holds both:")
 	for _, class := range scanlErrors {
+		hits := tally[class.message]
 		label := class.message
 		if class.shared {
 			label += " (shared with the grammar)"
@@ -751,9 +788,9 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 			t.Logf("  %-62s not formed here: %s", label, class.unformable)
 			continue
 		}
-		t.Logf("  %-62s generated %d, fixed %d", label, generatedHits[class.message], fixedHits[class.message])
+		t.Logf("  %-62s generated %d, fixed %d", label, hits.generated, hits.fixed)
 		switch {
-		case generatedHits[class.message] == 0:
+		case hits.generated == 0:
 			// Said of the run rather than of the table: a class carrying a reaches test is one
 			// the stride was known to miss, but a class the stride covered today can stop being
 			// covered tomorrow, and reading these two lists off the table rather than off the
@@ -765,8 +802,8 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 		default:
 			byStride = append(byStride, class.message)
 		}
-		if class.sample != "" && !fixedRaised[class.message] {
-			unraised = append(unraised, fmt.Sprintf("%q, for %q: %s", class.sample, class.message, strings.Join(fixedSaw[class.message], "; ")))
+		if class.sample != "" && !hits.raised {
+			unraised = append(unraised, fmt.Sprintf("%q, for %q: %s", class.sample, class.message, strings.Join(hits.saw, "; ")))
 		}
 	}
 	t.Logf("%d classes the sample takes a text of the corpus for by name, the corpus forming too few of them for the stride to land on one: %s", len(byName), strings.Join(byName, "; "))
@@ -809,13 +846,24 @@ func raisedWhat(v verdict) string {
 	switch {
 	case !v.failed:
 		return "ran without error"
-	case v.class == "":
+	case v.class == nil:
 		return "refused in words no rule of scan.l raises"
 	case v.lexical:
-		return fmt.Sprintf("refused with %q from the lexer", v.class)
+		return fmt.Sprintf("refused with %q from the lexer", v.class.message)
 	default:
-		return fmt.Sprintf("refused with %q, which this message does not show the lexer raised", v.class)
+		return fmt.Sprintf("refused with %q, which this message does not show the lexer raised", v.class.message)
 	}
+}
+
+// classTally is what the sample found for one refusal class: the hits of the texts the corpus
+// built and the hits of the class's own fixed statement, counted apart since only a generated
+// hit says the alphabet reaches the class; whether that fixed statement was seen to raise the
+// class it stands for; and what it raised instead where it did not.
+type classTally struct {
+	generated int
+	fixed     int
+	raised    bool
+	saw       []string
 }
 
 // sampleText is one statement the oracle asks the server about, and where it came from: class
