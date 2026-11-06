@@ -297,6 +297,17 @@ func TestSettlementStagesSettleTheDocumentInOrder(t *testing.T) {
 	requireStageGoesOn(t, "applyStamp", step, outcome)
 	step, outcome = settle.planRepairs(ctx)
 	requireStageGoesOn(t, "planRepairs", step, outcome)
+	// What each of the two repair stages leaves, asserted between them rather than after both,
+	// because that is what holds their order: planRepairs reconciles and writes nothing, and
+	// commitRepairs is what puts the repair it planned into the room. Asserted only at the end,
+	// the pair passes in either order - run the other way round, commitRepairs finds no
+	// reconciliation and writes nothing, and planRepairs then fills the field it no longer reads.
+	if len(settle.reconciliation.repairs) != 1 {
+		t.Fatalf("planRepairs reconciled %d repairs, want the one the answered ask block needs", len(settle.reconciliation.repairs))
+	}
+	if len(settle.slots) != 0 {
+		t.Fatalf("planRepairs wrote %d updates into the room, want none: commitRepairs writes them", len(settle.slots))
+	}
 	step, outcome = settle.commitRepairs(ctx)
 	requireStageGoesOn(t, "commitRepairs", step, outcome)
 	if len(settle.slots) != 1 {
