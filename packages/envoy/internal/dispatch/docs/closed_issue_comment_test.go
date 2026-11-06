@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
@@ -18,12 +19,13 @@ import (
 
 // A closed issue still takes a comment, so its document still takes that comment's anchor under
 // WithCommentMarks (mutation_test.go, TestClosedIssueTakesOnlyCommentMarksUnderWithCommentMarks).
-// The tests here are the two rooms the anchor's write meets: none at all, where the write is
-// cold and its publish arms a settlement (publishLiveWrite), and a resident one holding an
-// update of its own that the store will never take, because the gate refuses a browser update
-// the room took more than closeMargin after the close (gateAppend). In both, the comment is
-// written, nothing is left failed, and the document still reads and still takes the next
-// comment.
+// The tests here are the rooms a comment's anchor meets: none at all, where the write is cold
+// and its publish arms a settlement (publishLiveWrite), and a resident one holding an update of
+// its own that the store will never take, because the gate refuses a browser update the room
+// took more than closeMargin after the close (gateAppend) - for the anchor that writes its own
+// mark, and for the one anchored to a mark already in the document, which writes nothing and
+// only pins a version. In each, the comment is written, nothing is left failed, and the document
+// still reads and still takes the next comment.
 
 // commentAnchor writes a comment's anchor on artifactID the way the comment's own request writes
 // it (api/anchors.go, resolveAnchor): one joined transaction under WithCommentMarks, holding the
@@ -154,36 +156,14 @@ func TestAnAnchoredCommentOnAClosedIssueWithNoRoomFailsNoRoom(t *testing.T) {
 func TestAnAnchoredCommentOnAClosedIssueIsWrittenWhileItsRoomHoldsAnUnstoredUpdate(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before the close")
-	held := &heldStore{
-		VersionedStore: NewPgVersioned(database),
-		room:           artifactID,
-		entered:        make(chan struct{}),
-		release:        make(chan struct{}),
-	}
-	defer held.let()
-	service := New(Deps{
-		Store: database, Persistence: held, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)},
-		Settle:   time.Hour,
-	})
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
+	service, held := closedIssueRoomService(t, database, artifactID)
 	seedServiceText(t, service, artifactID, "before the close")
 	waitForLandedAppends(t, service, artifactID)
 
-	// A browser's keystroke the room takes and its worker has not stored: the store holds the
-	// room's append until this test lets it go, so the update is the room's alone.
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	held.armed.Store(true)
-	browserReplaceText(t, service, artifactID, "before the close\n\ntyped in the room\n", alice)
-	select {
-	case <-held.entered:
-	case <-time.After(roomWait(t)):
-		t.Fatal("the room's own append of the browser's update never reached the store")
-	}
+	holdOneRoomUpdate(t, held, func() {
+		browserReplaceText(t, service, artifactID, "before the close\n\ntyped in the room\n", alice)
+	})
 	// The issue closed that long ago, and nothing told this process: the room took the keystroke
 	// above well past the margin the gate admits (observedBeforeClose).
 	closeIssueAgo(t, database, "DOC-1", closeMargin+30*time.Second)
@@ -214,5 +194,130 @@ func TestAnAnchoredCommentOnAClosedIssueIsWrittenWhileItsRoomHoldsAnUnstoredUpda
 	}
 	if _, err := commentAnchor(service, artifactID, "c2", "close", alice); err != nil {
 		t.Fatalf("a second comment's anchor on the closed issue: %v", err)
+	}
+}
+
+// A comment anchored to a mark already in the document - a reply or a comment the browser points
+// at an existing anchor (api/anchors.go, resolveAnchor's mark_id branch) - writes nothing to the
+// document: it verifies the mark and pins the version its anchor names (VerifyMark,
+// SnapshotVersion). With no write of its own, that version is captured from the room
+// (captureLiveTextAndAuthors), which stores the room's updates ahead of it - and the gate refuses
+// the one this room took after the close, which answered the comment 409 ISSUE_CLOSED. The
+// version is taken from the stored document instead (closedIssueCommentVersion), as a version of
+// a room behind the head is, and stores nothing of the room.
+func TestAnAnchoredCommentOnAClosedIssuePinsAStoredVersionWhileItsRoomHoldsAnUnstoredUpdate(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before the close")
+	service, held := closedIssueRoomService(t, database, artifactID)
+	seedServiceText(t, service, artifactID, "before the close")
+	waitForLandedAppends(t, service, artifactID)
+
+	// The mark the later comment anchors to, placed while the issue is open.
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := commentAnchor(service, artifactID, "c1", "before", alice); err != nil {
+		t.Fatalf("the comment's anchor while the issue is open: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	// A keystroke that leaves the first paragraph, and the comment mark in it, as they are: the
+	// room's alone, since the store holds its append.
+	holdOneRoomUpdate(t, held, func() {
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			tree.Children = append(tree.Children, &pmdoc.Node{
+				Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "typed in the room"}},
+			})
+			return tree
+		})
+	})
+	closeIssueAgo(t, database, "DOC-1", closeMargin+30*time.Second)
+
+	var failed atomic.Bool
+	service.beforeFailedEviction = func(string) { failed.Store(true) }
+	var anchored Anchored
+	var snapshot VersionResult
+	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+		ctx = WithCommentMarks(ctx)
+		if anchored, err = service.VerifyMark(ctx, artifactID, MarkComment, "c1"); err != nil {
+			return err
+		}
+		snapshot, err = service.SnapshotVersion(ctx, artifactID, alice)
+		return err
+	}); err != nil {
+		t.Fatalf("a comment anchored to a mark already in the closed issue's document: %v", err)
+	}
+	if anchored.Quote != "before" {
+		t.Fatalf("the verified mark anchored = %#v, want the quote it marks", anchored)
+	}
+	if snapshot.Version.Number == 0 {
+		t.Fatalf("the anchor pinned version %#v, want the version holding its mark", snapshot.Version)
+	}
+	if stored := storedDocumentWith(t, database, artifactID); strings.Contains(stored, "typed in the room") {
+		t.Fatalf("the stored document = %q, want the version to have stored none of the room's updates on the closed issue", stored)
+	}
+	if failed.Load() {
+		t.Fatal("the anchor's version failed the document's room")
+	}
+	// The version the anchor names is the stored document's: it holds the text the mark is in,
+	// and none of the room's update the store will never take.
+	markdown := versionMarkdown(t, database, artifactID, snapshot.Version.Number)
+	if !strings.Contains(markdown, "before the close") || strings.Contains(markdown, "typed in the room") {
+		t.Fatalf("the pinned version reads %q, want the stored document the mark is in", markdown)
+	}
+	if err := joinedWrite(service, func(ctx context.Context) error {
+		_, err := service.VerifyMark(WithCommentMarks(ctx), artifactID, MarkComment, "c1")
+		return err
+	}); err != nil {
+		t.Fatalf("the mark the pinned version names, read again: %v", err)
+	}
+
+	// Behind the comment, the document still reads and still takes the next comment.
+	text, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read the closed issue's document after its comment: %v", err)
+	}
+	if !strings.Contains(text, "before the close") {
+		t.Fatalf("the closed issue's document reads %q, want the text the comment was anchored in", text)
+	}
+	if _, err := commentAnchor(service, artifactID, "c2", "close", alice); err != nil {
+		t.Fatalf("a second comment's anchor on the closed issue: %v", err)
+	}
+}
+
+// closedIssueRoomService is a document service whose persistence holds the room's own append once
+// armed (heldStore), so a test can leave an update in the room that the store has not taken
+// (holdOneRoomUpdate). The hold is released before the service shuts down - cleanups run in
+// reverse, and Shutdown waits for the room's persistence worker this hold parks.
+func closedIssueRoomService(t *testing.T, database *store.Store, artifactID string) (*Service, *heldStore) {
+	t.Helper()
+	held := &heldStore{
+		VersionedStore: NewPgVersioned(database),
+		room:           artifactID,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	service := New(Deps{
+		Store: database, Persistence: held, Events: events.NewBroker(),
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)},
+		Settle:   time.Hour,
+	})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	t.Cleanup(held.let)
+	return service, held
+}
+
+// holdOneRoomUpdate runs write, a browser's change straight into the room, with the store holding
+// the room's own append of it: from the moment it returns, that update is the room's and no
+// stored row holds it.
+func holdOneRoomUpdate(t *testing.T, held *heldStore, write func()) {
+	t.Helper()
+	held.armed.Store(true)
+	write()
+	select {
+	case <-held.entered:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the room's own append of the browser's update never reached the store")
 	}
 }

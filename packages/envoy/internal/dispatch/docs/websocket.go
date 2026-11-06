@@ -89,6 +89,15 @@ func commentMarks(ctx context.Context) bool {
 	return marked
 }
 
+// commentMarkAnchor is whether ctx is one of the comment anchor operations WithCommentMarks
+// names, inside the operation that made it owner-verified (commentMarkOperation): the reads and
+// writes a closed issue's document takes for a comment, and no other caller's. The version a
+// comment's anchor is pinned to is taken from the stored document there
+// (closedIssueCommentVersion).
+func commentMarkAnchor(ctx context.Context) bool {
+	return commentMarks(ctx) && isOwnerVerified(ctx)
+}
+
 type shutdownLoadContextKey struct{}
 
 // withShutdownLoad marks the one injection allowInject lets through into a room Shutdown has
