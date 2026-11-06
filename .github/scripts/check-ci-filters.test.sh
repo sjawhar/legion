@@ -1602,4 +1602,37 @@ echo "case: the lane names a package that is not there"
 out=$(derived "$work/race-unattributable" "pkg/gone")
 check "refuses" "$(contains "$out" 'RAISED: the race lane names pkg/gone, which is no directory under ')"
 
+echo "case: the slow-suite list a reader is given names the jobs the label gates"
+# AGENTS.md's "The slow test suites run in the merge queue, not on a pull-request push" item is
+# the only place a person is told which suites the full-ci label holds back, and it names them
+# one by one. The set it must equal is derivable: a slow suite is a job whose selection output of
+# the changes job carries the `full-ci` term, and its job id is that output's name with
+# underscores for hyphens. Nothing else holds the two together, so a job the queue stops gating -
+# one another tree deletes, which a forward merge then brings here - leaves the guide naming a
+# job that does not exist, in the file every agent of this repository loads.
+mismatch=$(PYTHONDONTWRITEBYTECODE=1 python3 - "$script_dir/../workflows/ci.yaml" "$script_dir/../../AGENTS.md" <<'PY'
+import re, sys, yaml
+from pathlib import Path
+
+workflow = yaml.safe_load(Path(sys.argv[1]).read_text())
+gated = {name.replace("_", "-")
+         for name, value in workflow["jobs"]["changes"].get("outputs", {}).items()
+         if "full-ci" in str(value)}
+
+guide = Path(sys.argv[2]).read_text()
+line = next((l for l in guide.splitlines() if "jobs of `ci.yaml`" in l and "held back" in l), "")
+named = set(re.findall(r"`([a-z0-9-]+)`", line.split("(", 1)[1].rsplit(")", 1)[0])) if "(" in line else set()
+
+problems = [f"AGENTS.md names {job}, which no full-ci output of the changes job gates"
+            for job in sorted(named - gated)]
+problems += [f"the label gates {job}, which AGENTS.md's list does not name"
+             for job in sorted(gated - named)]
+if not line:
+    problems.append("AGENTS.md holds no slow-suite list to read")
+print("; ".join(problems))
+PY
+)
+check "the guide's list and the label's gates are the same set" \
+  "$(is "$mismatch" "")"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
