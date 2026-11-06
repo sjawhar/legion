@@ -78,13 +78,13 @@ type State struct {
 	// beside Settings so a reader of Settings keeps its shape (contract 4), and it is keyed by
 	// every settable path, Settings' own and the ones Settings withholds alike: a credential, the
 	// source of one and the path of a file holding one each carry their provenance here with no
-	// value anywhere, which is how a rotation is visible without the credential. Never null.
-	SettingSources map[string]SettingSource `json:"settingSources"`
-	// withheldBelowFifty is set on the copy served to a caller whose pod records a plugin
-	// contract below settingSourcesContract: the three fields that contract added are left off
-	// the wire entirely (MarshalJSON, api's withoutSettingSources). It is this struct's own and
-	// never read from the wire, so a state decoded from JSON carries it false.
-	withheldBelowFifty bool
+	// value anywhere, which is how a rotation is visible without the credential.
+	//
+	// Written whatever it holds, an empty object included, for every caller at
+	// settingSourcesContract and above, and nil — off the wire entirely, `omitzero` — on the copy
+	// served to a caller below it, which is one of the three fields that contract added
+	// (api's withoutSettingSources). Every producer of a state sets it.
+	SettingSources map[string]SettingSource `json:"settingSources,omitzero"`
 	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
 	// NATS at the request after the state's transaction commits, so no NATS read holds the
 	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
@@ -262,24 +262,19 @@ type AgentSecretsLoginView struct {
 	State string `json:"state"`
 }
 
-// MarshalJSON keeps `issues` and `settingSources` objects and `pendingStatusWrites`,
-// `heldOutboxRows`, `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go
-// map or slice is `null`, which the plugin's reader refuses.
+// MarshalJSON keeps the `issues` object and the `pendingStatusWrites`, `heldOutboxRows`,
+// `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
+// `null`, which the plugin's reader refuses.
 //
-// A withheld state (withheldBelowFifty) is the same body with the three fields contract 50 added
-// taken off it: `settingSources`, the `daemon` block's `commit`, and each pull request's
-// `requiresChecks`. They are dropped here rather than zeroed because each of the three is a
-// value a reader of this contract may read as it stands — an empty object, an unreleased build's
-// empty commit, a base that requires no check — so absence is the only way to say the daemon
-// does not report them to this caller.
+// `settingSources` is not one of them: it is nil on the copy served to a caller below
+// settingSourcesContract and written whatever it holds — an empty object included — for every
+// other, so a nil map there is the daemon saying it does not report that field to this caller
+// (api's withoutSettingSources, and the `commit` and `requiresChecks` it clears beside it).
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
 	if out.Issues == nil {
 		out.Issues = map[string]Issue{}
-	}
-	if out.SettingSources == nil {
-		out.SettingSources = map[string]SettingSource{}
 	}
 	if out.PendingStatusWrites == nil {
 		out.PendingStatusWrites = []PendingStatusWrite{}
@@ -296,70 +291,7 @@ func (s State) MarshalJSON() ([]byte, error) {
 	if out.Consumers == nil {
 		out.Consumers = []ConsumerLagView{}
 	}
-	encoded, err := json.Marshal(out)
-	if err != nil || !s.withheldBelowFifty {
-		return encoded, err
-	}
-	return withheldState(encoded)
-}
-
-// withheldState is an encoded state with the three fields contract 50 added removed from it: the
-// body a plugin of the contract before it describes. It works on the encoded body rather than on
-// the struct because each of the three fields is written whatever its value, which is what the
-// contract above 50 asks for.
-func withheldState(encoded []byte) ([]byte, error) {
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &body); err != nil {
-		return nil, err
-	}
-	delete(body, "settingSources")
-	if err := withoutKey(body, "daemon", "commit"); err != nil {
-		return nil, err
-	}
-	var issues map[string]json.RawMessage
-	if err := json.Unmarshal(body["issues"], &issues); err != nil {
-		return nil, err
-	}
-	for key, encodedIssue := range issues {
-		var issue map[string]json.RawMessage
-		if err := json.Unmarshal(encodedIssue, &issue); err != nil {
-			return nil, err
-		}
-		if err := withoutKey(issue, "pullRequest", "requiresChecks"); err != nil {
-			return nil, err
-		}
-		rewrittenIssue, err := json.Marshal(issue)
-		if err != nil {
-			return nil, err
-		}
-		issues[key] = rewrittenIssue
-	}
-	rewritten, err := json.Marshal(issues)
-	if err != nil {
-		return nil, err
-	}
-	body["issues"] = rewritten
-	return json.Marshal(body)
-}
-
-// withoutKey removes inner from the object body holds under outer, leaving body as it is when it
-// holds no such object.
-func withoutKey(body map[string]json.RawMessage, outer, inner string) error {
-	encoded, held := body[outer]
-	if !held || string(encoded) == "null" {
-		return nil
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &fields); err != nil {
-		return err
-	}
-	delete(fields, inner)
-	rewritten, err := json.Marshal(fields)
-	if err != nil {
-		return err
-	}
-	body[outer] = rewritten
-	return nil
+	return json.Marshal(out)
 }
 
 // DaemonInfo is the running daemon itself: which project it coordinates, the commit it was built
@@ -367,9 +299,13 @@ func withoutKey(body map[string]json.RawMessage, outer, inner string) error {
 type DaemonInfo struct {
 	Project string `json:"project"`
 	// Commit is the commit this daemon's binary was built from (daemon.Build.Revision), so a
-	// reader can tell which release runs (R7); "" in a build that is not a release, which stamps
-	// none.
-	Commit        string    `json:"commit"`
+	// reader can tell which release runs (R7); a pointer to "" in a build that is not a release,
+	// which stamps none.
+	//
+	// Written whatever it holds for every caller at settingSourcesContract and above, and nil —
+	// off the wire entirely, `omitzero` — on the copy served to a caller below it
+	// (api's withoutSettingSources). Every producer of a state sets it.
+	Commit        *string   `json:"commit,omitzero"`
 	SchemaVersion int       `json:"schemaVersion"`
 	Boots         int       `json:"boots"`
 	FirstBootAt   time.Time `json:"firstBootAt"`
@@ -657,11 +593,13 @@ type PullRequestView struct {
 	// reads this beside ChecksVerdict: a base that requires nothing never gives a head a verdict,
 	// and no wait there is a CI wait.
 	//
-	// It is false before the daemon has read those rules, exactly as it is for a base that
-	// requires nothing: nothing is known to be required, and the daemon's own judgement reads an
-	// unread base the same way.
-	RequiresChecks bool `json:"requiresChecks"`
-	FixAttempts    int  `json:"fixAttempts"`
+	// It is a pointer to false before the daemon has read those rules, exactly as it is for a
+	// base that requires nothing: nothing is known to be required, and the daemon's own
+	// judgement reads an unread base the same way. Written whatever it holds for every caller at
+	// settingSourcesContract and above, and nil — off the wire entirely, `omitzero` — on the copy
+	// served to a caller below it (api's withoutSettingSources). Every producer of a view sets it.
+	RequiresChecks *bool `json:"requiresChecks,omitzero"`
+	FixAttempts    int   `json:"fixAttempts"`
 }
 
 // GateView is the design gate: the spec document, the version Dispatch currently holds, and the

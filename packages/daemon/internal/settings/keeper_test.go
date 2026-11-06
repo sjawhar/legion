@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -177,6 +178,46 @@ func TestTheFileTakesBackACredentialTheRouteAppliedAndStoredNoRowFor(t *testing.
 	}
 }
 
+// A settle the loader refuses leaves the keeper's mark of a path no row backs standing. The
+// apply changes nothing, so the overlay the daemon is running on is still the route's; a mark
+// dropped before that apply would be gone with no overlay withdrawn, and no later settle of the
+// fixed file would ever take the key back — the daemon would run on the route's credential
+// until it restarted, whatever the operator wrote in `legion.yaml`.
+func TestAFailedSettleKeepsTheMarkOfAKeyNoRowBacks(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	path := configFile(t, minimalFile)
+	keeper := keeperOn(t, path, store)
+	const byRoute = "/route/operator-token"
+	if _, refused, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{
+		"operator_token_file": byRoute,
+	}); err != nil || len(refused) != 0 {
+		t.Fatalf("Route: %v, refused %+v", err, refused)
+	}
+
+	// The operator edits that key in the file and, in the same edit, writes a value the loader
+	// refuses: the whole settle fails, since every apply resolves the whole document.
+	const byFile = "/file/operator-token"
+	rewrite(t, path, minimalFile+"operator_token_file: "+byFile+"\nadmission_cap: -1\n")
+	if _, err := keeper.File(ctx); err == nil {
+		t.Fatal("the settle of a file the loader refuses: no error, want the refusal")
+	}
+	if file := keeper.Live().Snapshot().OperatorTokenFile; file != byRoute {
+		t.Fatalf("operator_token_file = %q after the failed settle, want the route's %q: a settle that fails changes nothing", file, byRoute)
+	}
+
+	// The operator fixes the value the loader refused, leaving the file's own value for the
+	// credential as it now reads it, and the settle succeeds.
+	rewrite(t, path, minimalFile+"operator_token_file: "+byFile+"\nadmission_cap: 5\n")
+	if _, err := keeper.File(ctx); err != nil {
+		t.Fatalf("the settle of the fixed file: %v", err)
+	}
+	if cfg := keeper.Live().Snapshot(); cfg.OperatorTokenFile != byFile || cfg.AdmissionCap != 5 {
+		t.Fatalf("the fixed file settled operator_token_file %q and admission_cap %d, want the file's own %q and 5: the file changed that key and takes it back",
+			cfg.OperatorTokenFile, cfg.AdmissionCap, byFile)
+	}
+}
+
 // The same holds for a change no row backs because nothing stored it: a keeper with no store,
 // which is what a daemon whose store write failed is left with for those paths (NotRecorded).
 // The route's value stands until the file's own value for that key moves, and then the file's
@@ -307,6 +348,61 @@ func TestARouteWithdrawalGivesTheKeyBackToTheFile(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("the store holds %+v after the withdrawal, want nothing", rows)
+	}
+}
+
+// A withdrawal whose store write fails leaves the row the store holds for that path, and the
+// next boot lays it back over the file. Nothing here can do better: the one act that would drop
+// the row is the write that failed, and the keeper's memory of the change does not outlive the
+// process. The caller is told the change is applied and not recorded (config.NotRecorded), and
+// that is what the answer means for a withdrawal — the daemon runs on the file's own value for
+// the key until it restarts, and on the kept row after it.
+func TestAWithdrawalWhoseStoreWriteFailedIsLaidBackAtTheNextBoot(t *testing.T) {
+	ctx := context.Background()
+	dsn := testpg.Database(t, "legion_settings_withdrawal")
+	st, err := store.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open the test database: %v", err)
+	}
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the test database: %v", err)
+	}
+	path := configFile(t, minimalFile)
+	keeper := keeperOn(t, path, NewStore(st.Pool(), testProject))
+	if _, _, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"admission_cap": 7}); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	// The store is gone by the time the withdrawal reaches it: the overlay goes, the row stays.
+	st.Close()
+	applied, refused, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"admission_cap": nil})
+	var notRecorded *config.NotRecorded
+	if !errors.As(err, &notRecorded) || len(refused) != 0 {
+		t.Fatalf("the withdrawal answered %v, refused %+v; want a NotRecorded", err, refused)
+	}
+	if len(applied) != 1 || applied[0].New != "4" {
+		t.Fatalf("the withdrawal applied %+v, want admission_cap back at the file's 4", applied)
+	}
+	if cap := keeper.Live().Snapshot().AdmissionCap; cap != 4 {
+		t.Fatalf("admission_cap = %d, want the file's own 4: the daemon is running on the withdrawal", cap)
+	}
+
+	// And the restart reads the row the store kept, which is what the answer says it will.
+	next, err := store.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("reopen the test database: %v", err)
+	}
+	t.Cleanup(next.Close)
+	restarted := keeperOn(t, path, NewStore(next.Pool(), testProject))
+	kept, err := restarted.Restore(ctx)
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if len(kept) != 1 || kept[0].Path != "admission_cap" {
+		t.Fatalf("Restore kept %+v, want the row the withdrawal could not drop", kept)
+	}
+	if cap := restarted.Live().Snapshot().AdmissionCap; cap != 7 {
+		t.Fatalf("admission_cap after the restart = %d, want the kept row's 7", cap)
 	}
 }
 

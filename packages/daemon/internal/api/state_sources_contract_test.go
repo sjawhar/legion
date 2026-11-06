@@ -50,9 +50,9 @@ func TestTheStateRouteWithholdsWhatContractFiftyAddedFromAnOlderPlugin(t *testin
 			}
 			if tc.whole {
 				// Nothing else of the body moves: the withheld state is the full one with the
-				// three keys gone, which is what the contract before 50 describes.
-				if diff := bodyWithout(t, full); diff != string(normalized(t, body)) {
-					t.Errorf("the withheld state differs from the full one with the three keys removed:\n got %s\nwant %s", body, diff)
+				// three fields cleared, which is what the contract before 50 describes.
+				if want := bodyWithout(t, populatedState(t)); want != string(normalized(t, body)) {
+					t.Errorf("the withheld state differs from the full one with the three fields cleared:\n got %s\nwant %s", body, want)
 				}
 			}
 		})
@@ -104,33 +104,18 @@ func decodedState(t *testing.T, body []byte) map[string]json.RawMessage {
 	return state
 }
 
-// bodyWithout is the full state body with the three fields contract 50 added removed from it,
-// normalized, which is what the withheld body must equal.
-func bodyWithout(t *testing.T, full []byte) string {
+// bodyWithout is the full state with the three fields contract 50 added cleared, encoded and
+// normalized, which is what the withheld body must equal. It reads the answer the daemon's own
+// withholding gives on the typed state, rather than deleting the three keys from the full body
+// by name: a rename of one of their tags moves this and the daemon together, and the three
+// readers above, which name the keys the contract names, are what would catch it.
+func bodyWithout(t *testing.T, state State) string {
 	t.Helper()
-	var body map[string]any
-	if err := json.Unmarshal(full, &body); err != nil {
-		t.Fatalf("decode state %s: %v", full, err)
-	}
-	delete(body, "settingSources")
-	if daemon, object := body["daemon"].(map[string]any); object {
-		delete(daemon, "commit")
-	}
-	issues, _ := body["issues"].(map[string]any)
-	for _, issue := range issues {
-		view, object := issue.(map[string]any)
-		if !object {
-			continue
-		}
-		if pullRequest, held := view["pullRequest"].(map[string]any); held {
-			delete(pullRequest, "requiresChecks")
-		}
-	}
-	encoded, err := json.Marshal(body)
+	encoded, err := json.Marshal(withoutSettingSources(state))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("marshal the withheld state: %v", err)
 	}
-	return string(encoded)
+	return string(normalized(t, encoded))
 }
 
 // normalized is body re-encoded through a map, so two bodies are compared by their content and

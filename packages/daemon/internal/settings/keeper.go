@@ -72,7 +72,13 @@ func (k *Keeper) Live() *config.Live { return k.live }
 //
 // The store is written after the holder has settled, so a change the loader refused is stored
 // nowhere, and a failed write answers NotRecorded: the change is applied, and the caller is told
-// it will not outlive the daemon rather than that nothing happened.
+// it will not outlive the daemon rather than that nothing happened. What the daemon's next
+// restart then reads is not one answer for every path of that change: a path this change laid
+// over the file is in the store nowhere, so the boot reads the file's own value for it, while a
+// path it withdrew — and a secret whose row it dropped — keeps the row the store would not
+// drop, and the boot lays that row's value back over the file (Restore). Nothing here can do
+// better, since the one act that would remove such a row is the write that failed, so the rows
+// left standing are logged by name.
 func (k *Keeper) Route(ctx context.Context, caller config.Caller, by string, changes map[string]any) ([]config.Change, []config.Refusal, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -121,10 +127,17 @@ func (k *Keeper) Route(ctx context.Context, caller config.Caller, by string, cha
 		return applied, refused, nil
 	}
 	if err := k.store.Write(ctx, rows, forget); err != nil {
-		// The change is applied and nothing holds it, so the file's digest of each path is the
-		// keeper's to hold instead: the file arm takes the key back when the file's own value
-		// for it moves, as it does for a path the store does hold a row for.
+		// The change is applied and the store holds none of it, so the file's digest of each
+		// path it laid is the keeper's to hold instead: the file arm takes the key back when the
+		// file's own value for it moves, as it does for a path the store does hold a row for.
 		k.remember(rows)
+		if len(forget) > 0 {
+			// The rows this change asked the store to drop are still there, and the next boot
+			// lays each one back over the file. That outlives the daemon where the change itself
+			// does not, so it is named rather than left inside the caller's NotRecorded.
+			k.log.Error("legion settings: the store kept the rows this change asked it to drop; the daemon runs on the change, and its next restart lays those rows back over the file",
+				"paths", forget, "by", by, "error", err)
+		}
 		return applied, refused, &config.NotRecorded{Paths: requested, Err: err}
 	}
 	return applied, refused, nil
@@ -147,21 +160,19 @@ func (k *Keeper) remember(rows []Change) {
 // store refused — is taken back the same way, from the digest this keeper holds for it in
 // memory (unstored): the overlay the daemon is running on is the same overlay whether or not a
 // row backs it, so the file's own value takes the key back either way.
+//
+// Nothing this settle reads is forgotten until the holder has settled: an apply runs the whole
+// loader, App key commands included, and the one that fails changes nothing, so the overlay it
+// left standing keeps both the stored row that backs it and the mark that backs an unstored one
+// — the next settle of the fixed file takes the key back exactly as this one would have.
 func (k *Keeper) File(ctx context.Context) ([]config.Change, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	_, taken, err := k.split(ctx)
-	if err != nil {
-		return nil, err
-	}
-	unstored, err := k.unstoredTaken()
+	_, taken, unstored, err := k.split(ctx)
 	if err != nil {
 		return nil, err
 	}
 	taken = append(taken, unstored...)
-	for _, path := range unstored {
-		delete(k.unstored, path)
-	}
 	withdraw := make(map[string]any, len(taken))
 	for _, path := range taken {
 		withdraw[path] = nil
@@ -169,6 +180,9 @@ func (k *Keeper) File(ctx context.Context) ([]config.Change, error) {
 	applied, _, err := k.live.Apply(config.SourceFile, "", withdraw)
 	if err != nil {
 		return nil, err
+	}
+	for _, path := range unstored {
+		delete(k.unstored, path)
 	}
 	if k.store != nil {
 		if err := k.store.Write(ctx, nil, taken); err != nil {
@@ -192,7 +206,9 @@ func (k *Keeper) File(ctx context.Context) ([]config.Change, error) {
 func (k *Keeper) Restore(ctx context.Context) ([]Change, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	kept, taken, err := k.split(ctx)
+	// The boot's keeper holds no mark of its own: unstored is memory, and this is the first
+	// thing the process does with the store.
+	kept, taken, _, err := k.split(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -270,57 +286,46 @@ func (k *Keeper) applyRoute(caller config.Caller, by string, overlay map[string]
 	return applied, append(refused, loader...), err
 }
 
-// split is the four steps both readings of the store share: its rows, what the file itself now
-// says for each of their paths, and the comparison that decides which rows still stand. kept is
-// the rows whose file value has not moved, in the store's own path order, and taken the paths
-// the file is taking back — a path whose file value has moved is the file taking the key back.
-// A keeper with no store, and a store holding no rows, split into nothing at all: kept is nil
-// for both, which is what tells a caller there is nothing to do.
-func (k *Keeper) split(ctx context.Context) (kept []Change, taken []string, err error) {
-	if k.store == nil {
-		return nil, nil, nil
-	}
-	stored, err := k.store.Rows(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(stored) == 0 {
-		return nil, nil, nil
-	}
-	values, err := k.fileValues(pathsOf(stored))
-	if err != nil {
-		return nil, nil, err
-	}
-	kept = make([]Change, 0, len(stored))
-	for _, row := range stored {
-		if Digest(values[row.Path]) != row.FileDigest {
-			taken = append(taken, row.Path)
-			continue
-		}
-		kept = append(kept, row)
-	}
-	return kept, taken, nil
-}
-
-// unstoredTaken is every path this keeper holds no row for whose own value in the file has
-// moved since the route applied it: the file taking that key back, which no stored row would
-// show (unstored). The caller holds mu, and withdraws what this answers.
-func (k *Keeper) unstoredTaken() ([]string, error) {
-	if len(k.unstored) == 0 {
-		return nil, nil
-	}
-	paths := slices.Sorted(maps.Keys(k.unstored))
-	values, err := k.fileValues(paths)
-	if err != nil {
-		return nil, err
-	}
-	var taken []string
-	for _, path := range paths {
-		if Digest(values[path]) != k.unstored[path] {
-			taken = append(taken, path)
+// split is the comparison every reading of what this keeper applied shares: the store's rows,
+// the digests the keeper holds for the paths no row backs (unstored), what the file itself now
+// says for all of their paths — read once, so a settle parses the file once however many paths
+// it is about — and the one decision both turn on, a file value that has moved since the change
+// was applied being the file taking that key back.
+//
+// kept is the stored rows whose file value has not moved, in the store's own path order; taken
+// the paths of the stored rows the file is taking back; and unstored the marked paths it is
+// taking back, in path order. A keeper with no store, and a store holding no rows, split into
+// no rows at all: kept is nil for both, which is what tells Restore there is nothing to lay
+// back over the file. The caller holds mu.
+func (k *Keeper) split(ctx context.Context) (kept []Change, taken, unstored []string, err error) {
+	var stored []Change
+	if k.store != nil {
+		if stored, err = k.store.Rows(ctx); err != nil {
+			return nil, nil, nil, err
 		}
 	}
-	return taken, nil
+	marked := slices.Sorted(maps.Keys(k.unstored))
+	values, err := k.fileValues(append(pathsOf(stored), marked...))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	moved := func(path, digest string) bool { return Digest(values[path]) != digest }
+	if len(stored) > 0 {
+		kept = make([]Change, 0, len(stored))
+		for _, row := range stored {
+			if moved(row.Path, row.FileDigest) {
+				taken = append(taken, row.Path)
+				continue
+			}
+			kept = append(kept, row)
+		}
+	}
+	for _, path := range marked {
+		if moved(path, k.unstored[path]) {
+			unstored = append(unstored, path)
+		}
+	}
+	return kept, taken, unstored, nil
 }
 
 // fileValues is what the file itself says for each path, by path, read from the document alone.

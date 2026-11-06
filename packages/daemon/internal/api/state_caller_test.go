@@ -162,43 +162,22 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 					}
 				}
 			}
-			// Nothing else of the body differs: it is the full state with the two claim keys gone,
-			// with the three memory keys gone too, since a pod below this contract's own reader
-			// refuses those as well (memory_test.go holds that half), and with the three fields
-			// contract 50 added gone, which such a pod refuses the same way
-			// (state_sources_contract_test.go holds that half).
-			var want, got map[string]any
-			if err := json.Unmarshal(full, &want); err != nil {
+			// Nothing else of the body differs: it is the full state with the two claim keys
+			// gone, with the three memory keys gone too, since a pod below this contract's own
+			// reader refuses those as well (memory_test.go holds that half), and with the three
+			// fields contract 50 added gone, which such a pod refuses the same way
+			// (state_sources_contract_test.go holds that half). What is expected of it is read
+			// from the state those three leave rather than by deleting the keys they write by
+			// name.
+			if carriesSettingSources(t, body) || carriesCommit(t, body) || carriesRequiresChecks(t, body) {
+				t.Errorf("the state %s carries a field contract 50 added, which a reader before it refuses", body)
+			}
+			wantJSON, err := json.Marshal(withoutSettingSources(withoutMemory(withoutUpdateRounds(populatedState(t)))))
+			if err != nil {
 				t.Fatal(err)
 			}
-			delete(want, "settingSources")
-			delete(want["daemon"].(map[string]any), "commit")
-			for _, issue := range want["issues"].(map[string]any) {
-				issue := issue.(map[string]any)
-				views := []any{issue["architect"]}
-				for _, worker := range issue["workers"].(map[string]any) {
-					views = append(views, worker.(map[string]any)["claim"])
-				}
-				for _, view := range views {
-					if view, ok := view.(map[string]any); ok {
-						delete(view, "updateRound")
-						delete(view, "updateHead")
-					}
-				}
-				delete(issue, "memoryGroup")
-				delete(issue, "memoryDrawMode")
-				delete(issue, "memoryDrawnAt")
-				if pullRequest, held := issue["pullRequest"].(map[string]any); held {
-					delete(pullRequest, "requiresChecks")
-				}
-			}
-			if err := json.Unmarshal(body, &got); err != nil {
-				t.Fatal(err)
-			}
-			wantJSON, _ := json.Marshal(want)
-			gotJSON, _ := json.Marshal(got)
-			if string(gotJSON) != string(wantJSON) {
-				t.Fatalf("state = %s, want the full state without those keys, %s", gotJSON, wantJSON)
+			if got := normalized(t, body); string(got) != string(normalized(t, wantJSON)) {
+				t.Fatalf("state = %s, want the full state without those keys, %s", got, normalized(t, wantJSON))
 			}
 		})
 	}

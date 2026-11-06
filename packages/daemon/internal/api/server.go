@@ -807,14 +807,26 @@ func withoutMemory(state State) State {
 	return state
 }
 
-// withoutSettingSources is state as a plugin below settingSourcesContract reads it: `settingSources`,
-// the `daemon` block's `commit` and each pull request's `requiresChecks` are left off the wire.
-// The three are dropped as the state is marshalled (State.MarshalJSON, withheldState) rather than
-// zeroed here, because each of them is a value this contract writes whatever it holds — an empty
-// object, an unreleased build's empty commit, a base that requires no check — so only absence
-// says the daemon does not report them to this caller.
+// withoutSettingSources is state as a plugin below settingSourcesContract reads it:
+// `settingSources`, the `daemon` block's `commit` and each pull request's `requiresChecks` are
+// left off the wire. The three are cleared rather than zeroed: each is a value this contract
+// writes whatever it holds — an empty object, an unreleased build's empty commit, a base that
+// requires no check — so each is nillable, and only the nil keeps it off the wire (`omitzero`,
+// api.State's three fields). The issue map is copied, so the state the source answered is left
+// as it was.
 func withoutSettingSources(state State) State {
-	state.withheldBelowFifty = true
+	state.SettingSources = nil
+	state.Daemon.Commit = nil
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		if issue.PullRequest != nil {
+			pullRequest := *issue.PullRequest
+			pullRequest.RequiresChecks = nil
+			issue.PullRequest = &pullRequest
+		}
+		issues[key] = issue
+	}
+	state.Issues = issues
 	return state
 }
 

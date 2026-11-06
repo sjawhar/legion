@@ -63,9 +63,11 @@ type Refusal struct {
 }
 
 // NotRecorded is a change the daemon applied and could not store: it is running on the new
-// value, and its next restart reads the file's own value for those paths again. The caller is
-// answered what happened — the change took effect, and nothing keeps it — rather than a refusal
-// of a change the daemon made.
+// value, and nothing keeps it. Its next restart reads what the store still holds for those
+// paths — the file's own value for a path the change laid over it, since nothing recorded the
+// change, and the kept row for a path the change withdrew, since the store would not drop it
+// (internal/settings' Keeper.Route). The caller is answered what happened — the change took
+// effect, and nothing keeps it — rather than a refusal of a change the daemon made.
 //
 // It is declared here, beside Change and Refusal, because it is a third thing an applied change
 // can be and both sides of the route read it: internal/settings returns it from the keeper's

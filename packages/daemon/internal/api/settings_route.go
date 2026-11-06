@@ -124,9 +124,11 @@ func (s *server) settingsChange(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.As(err, &notRecorded):
 		// The daemon applied the change and could not keep it: it is running on the new value,
-		// and its next restart reads the file's own value for those paths. Saying the change was
-		// refused would be false, so the answer names each key's verdict as it stands and the
-		// status says the daemon did not finish the work the caller asked for.
+		// and its next restart runs on what the store holds rather than on this — the file's own
+		// value for a path the change laid over it, and the row it could not drop for a path the
+		// change withdrew (config.NotRecorded). Saying the change was refused would be false, so
+		// the answer names each key's verdict as it stands and the status says the daemon did
+		// not finish the work the caller asked for.
 		s.log.Error("api: a settings change was applied and not recorded; the daemon runs on it and its next restart will not",
 			"by", by, "paths", slices.Sorted(maps.Keys(changes)), "error", err)
 		writeJSON(w, http.StatusInternalServerError, SettingsChangeResponse{Settings: settingResults(changes, applied, refused)})

@@ -209,12 +209,14 @@ func goldenSettingSources() map[string]SettingSource {
 func populatedState(t *testing.T) State {
 	t.Helper()
 	approvedVersion := 6
+	commit := "3f9c1a7e5b2d84c06f1a9e3b7d5c2a08e4f6b1d9"
+	requiresChecks, requiresNothing := true, false
 	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
 	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
 	state := State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
-			Commit:        "3f9c1a7e5b2d84c06f1a9e3b7d5c2a08e4f6b1d9",
+			Commit:        &commit,
 			SchemaVersion: 1,
 			Boots:         4,
 			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
@@ -312,7 +314,7 @@ func populatedState(t *testing.T) State {
 					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
 					// Its base branch requires a check, so the pending verdict is a CI wait.
-					RequiresChecks: true,
+					RequiresChecks: &requiresChecks,
 					FixAttempts:    1,
 				},
 				DesignGate: &GateView{
@@ -375,7 +377,7 @@ func populatedState(t *testing.T) State {
 					ReviewDecision: "approved",
 					// A base branch that requires nothing, or one whose rules the daemon has not
 					// read: either way it knows of no required check there.
-					RequiresChecks: false,
+					RequiresChecks: &requiresNothing,
 				},
 				Check: &CheckView{
 					Repo:        "acme/widgets",
@@ -512,15 +514,21 @@ func TestNoSessionFacingBodyCarriesSuspendedBy(t *testing.T) {
 }
 
 func TestStateStage3Golden(t *testing.T) {
+	// A build that is not a release stamps no commit, and a daemon whose settings nothing has
+	// changed reports the provenance of none: both are written all the same, as every caller at
+	// settingSourcesContract reads them (State.SettingSources, DaemonInfo.Commit).
+	unreleased := ""
 	golden(t, "state-stage3.json", State{
 		Daemon: DaemonInfo{
 			Project:       "LEGION",
+			Commit:        &unreleased,
 			SchemaVersion: 3,
 			Boots:         5,
 			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
 			StartedAt:     time.Date(2026, 9, 22, 17, 30, 0, 0, time.UTC),
 		},
-		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
+		SettingSources: map[string]SettingSource{},
+		Admission:      Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
 		Issues: map[string]Issue{
 			"LEGION-208": {
 				Key:           "LEGION-208",
@@ -548,15 +556,18 @@ func TestStateStage3Golden(t *testing.T) {
 // phase enum, so it refuses the whole document, over a row that is a legitimate state.
 // internal/projection's own test holds the producer to these values.
 func TestStateOperatorClaimGolden(t *testing.T) {
+	unreleased := ""
 	golden(t, "state-operator-claim.json", State{
 		Daemon: DaemonInfo{
 			Project:       "AC91849371",
+			Commit:        &unreleased,
 			SchemaVersion: 3,
 			Boots:         1,
 			FirstBootAt:   time.Date(2026, 9, 25, 5, 50, 0, 0, time.UTC),
 			StartedAt:     time.Date(2026, 9, 25, 5, 50, 0, 0, time.UTC),
 		},
-		Admission: Admission{Cap: 2, Active: []string{}, Waiting: []string{}},
+		SettingSources: map[string]SettingSource{},
+		Admission:      Admission{Cap: 2, Active: []string{}, Waiting: []string{}},
 		Issues: map[string]Issue{
 			"AC91849371-900": {
 				Key:     "AC91849371-900",

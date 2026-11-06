@@ -122,48 +122,27 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 				t.Errorf("the state %s carries an update round = %v, want %v", body, rounds, tc.rounds)
 			}
 
-			// Nothing else of the body differs: it is the full state with the stripped keys gone.
-			// A pod below memoryContract is below settingSourcesContract too, so the three fields
-			// that contract added are off its body as well (withoutSettingSources).
-			var want, got map[string]any
-			if err := json.Unmarshal(full, &want); err != nil {
-				t.Fatal(err)
+			// Nothing else of the body differs: it is the full state with the stripped keys
+			// gone. A pod below memoryContract is below settingSourcesContract too, so the three
+			// fields that contract added are off its body as well (withoutSettingSources), and
+			// what is expected of it is read from the state those two leave rather than by
+			// deleting the keys they write by name.
+			if !tc.memory && (carriesSettingSources(t, body) || carriesCommit(t, body) || carriesRequiresChecks(t, body)) {
+				t.Errorf("the state %s carries a field contract 50 added, which a reader before it refuses", body)
 			}
+			want := populatedState(t)
 			if !tc.memory {
-				delete(want, "settingSources")
-				delete(want["daemon"].(map[string]any), "commit")
+				want = withoutSettingSources(withoutMemory(want))
 			}
-			for _, issue := range want["issues"].(map[string]any) {
-				issue := issue.(map[string]any)
-				if !tc.memory {
-					delete(issue, "memoryGroup")
-					delete(issue, "memoryDrawMode")
-					delete(issue, "memoryDrawnAt")
-					if pullRequest, held := issue["pullRequest"].(map[string]any); held {
-						delete(pullRequest, "requiresChecks")
-					}
-				}
-				if tc.rounds {
-					continue
-				}
-				views := []any{issue["architect"]}
-				for _, worker := range issue["workers"].(map[string]any) {
-					views = append(views, worker.(map[string]any)["claim"])
-				}
-				for _, view := range views {
-					if view, ok := view.(map[string]any); ok {
-						delete(view, "updateRound")
-						delete(view, "updateHead")
-					}
-				}
+			if !tc.rounds {
+				want = withoutUpdateRounds(want)
 			}
-			if err := json.Unmarshal(body, &got); err != nil {
+			wantJSON, err := json.Marshal(want)
+			if err != nil {
 				t.Fatal(err)
 			}
-			wantJSON, _ := json.Marshal(want)
-			gotJSON, _ := json.Marshal(got)
-			if string(gotJSON) != string(wantJSON) {
-				t.Fatalf("state = %s, want the full state without the stripped keys, %s", gotJSON, wantJSON)
+			if got := normalized(t, body); string(got) != string(normalized(t, wantJSON)) {
+				t.Fatalf("state = %s, want the full state without the stripped keys, %s", got, normalized(t, wantJSON))
 			}
 		})
 	}

@@ -2154,9 +2154,10 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		return api.State{}, err
 	}
 	state.StrandedClaims = api.StrandedClaimsOf(stranded)
+	commit := s.commit
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
-		Commit:        s.commit,
+		Commit:        &commit,
 		SchemaVersion: version,
 		Boots:         boots,
 		FirstBootAt:   firstBootAt,
@@ -2165,6 +2166,10 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if s.settings != nil {
 		state.Settings = s.settings()
 	}
+	// Written whatever it holds for a caller at the contract that added it, so the map is never
+	// nil here: nil is what withoutSettingSources leaves on the copy served below that contract,
+	// and it is the only thing that takes the field off the wire (api.State's `omitzero`).
+	state.SettingSources = map[string]api.SettingSource{}
 	if s.sources != nil {
 		state.SettingSources = s.sources.Sources()
 	}

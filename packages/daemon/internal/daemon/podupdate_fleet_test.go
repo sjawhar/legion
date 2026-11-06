@@ -167,8 +167,8 @@ func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
 	sup := newSupervisor(ctx, st, podUpdateProject, t.TempDir(), quietLogger())
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: conns, Store: st, Specs: outboxSpecs{}, Clock: clock, Log: quietLogger(),
-		Limits:   supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond, PodUpdateRetask: podUpdateRetask},
+		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond, PodUpdateRetask: podUpdateRetask},
 		PluginContract: api.DaemonAPIVersion,
 	}
 	t.Cleanup(sup.stop)
