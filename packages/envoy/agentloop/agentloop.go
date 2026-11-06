@@ -10,10 +10,7 @@ import (
 	// package; until it does, these imports are what names each module a direct requirement
 	// of github.com/sjawhar/envoy, and they go as the real imports arrive.
 	_ "github.com/anthropics/anthropic-sdk-go"
-	_ "github.com/grafana/ai-sdk"
-	_ "github.com/grafana/ai-sdk/providers/anthropic"
 	_ "github.com/grafana/ai-sdk/providers/azure"
-	_ "github.com/grafana/ai-sdk/providers/openai"
 	_ "github.com/grafana/ai-sdk/providers/openai-compatible"
 	_ "github.com/openai/openai-go/v3"
 )
