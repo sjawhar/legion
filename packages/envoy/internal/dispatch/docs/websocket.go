@@ -211,7 +211,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		browser := &BrowserAppend{cursor: class.cursor, observed: class.observed}
 		if _, err := a.store.AppendUpdateWithCredit(withRoomCursor(ctx, class.cursor), room, update, class.contentChanged, class.credit, browser); err != nil {
 			if errors.Is(err, ErrIssueClosed) {
-				a.service.refuseClosedIssueAppend(room)
+				a.service.refuseClosedIssueAppend(room, class.instance)
 				return nil
 			}
 			a.service.failRoom(room, err)
@@ -229,7 +229,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	flush := &RoomFlush{service: a.service, room: room, cursor: class.cursor}
 	if _, err := a.store.AppendRoomFlush(ctx, room, flush, class.seq, class.credit); err != nil {
 		if errors.Is(err, ErrIssueClosed) {
-			a.service.refuseClosedIssueAppend(room)
+			a.service.refuseClosedIssueAppend(room, class.instance)
 			return nil
 		}
 		a.service.failRoom(room, err)

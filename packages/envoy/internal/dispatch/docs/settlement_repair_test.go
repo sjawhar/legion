@@ -498,7 +498,7 @@ func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.
 			return service.Evict(context.Background(), artifactID)
 		}, "before, edited\n\nadded\n", true},
 		{"an issue's close", func(service *Service, artifactID string) error {
-			service.setRoomIssueOpen(context.Background(), artifactID, false, true)
+			service.setRoomIssueOpen(context.Background(), artifactID, false, true, nil)
 			return nil
 		}, "before, edited\n\nadded\n", false},
 		{"Shutdown with an editor connected", func(service *Service, artifactID string) error {

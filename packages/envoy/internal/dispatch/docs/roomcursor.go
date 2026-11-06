@@ -4,6 +4,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
@@ -33,6 +34,18 @@ type roomInstance struct {
 	hold    roomHold
 	cursor  roomCursor
 	catchUp sync.Mutex
+
+	// issueCloseStarted is taken by the first append of this instance the gate refused because
+	// the document's issue is closed, and that refusal alone closes the room
+	// (Service.refuseClosedIssueAppend); every later refusal of this instance takes nothing and
+	// closes nothing. It is kept here rather than on the room's record because the record
+	// outlives the room: a room stores one update per keystroke, so a burst of refused
+	// keystrokes would start one close each, and every close after the first would wait on the
+	// room's close gate behind it and then close by name whatever room held the name by then -
+	// a room a browser reloaded in the gap among them (roomServer.closeOwned). A room that
+	// loads again is a new instance with its own mark, so nothing of a closed room's is left
+	// standing and no document load writes it.
+	issueCloseStarted atomic.Bool
 
 	unstoredMu sync.Mutex
 	unstored   []*queuedClass
