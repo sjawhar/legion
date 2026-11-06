@@ -1540,11 +1540,16 @@ func issueStatus(ctx context.Context, q queryer, key, lock string) (string, bool
 	return status, open, nil
 }
 
-// closedWrite says of one write of an owner's collaboration whether a closed issue takes it. A
-// closed issue still takes a comment that is not a suggestion, a message, their deliveries and an
-// agent's reply to one (takenWhenClosed); every other write of it -- an ask, a suggestion, a
-// document edit, an upload, a claim, a review, an action on an existing comment -- is
-// refusedWhenClosed.
+// closedWrite says, of one write that takes the owner's lock through ownerStatus, whether a
+// closed issue takes it. A closed issue still takes a comment that is not a suggestion, a
+// message, their deliveries and an agent's reply to one (takenWhenClosed); every other write that
+// asks here -- an ask, a suggestion, an upload, a review, an action on an existing comment -- is
+// refusedWhenClosed. The writes that read the issue row for themselves never reach this and
+// refuse on their own: a claim (issue_claim.go), a PATCH outside a closed issue's allow-list
+// (issue_patch.go), a check result, which a closed issue takes for an after_merge or
+// default_branch check (results.go), and a document mutation, which the document service refuses
+// under the owner's lock with docs.ErrIssueClosed (docs/mutation.go, writeHandlerError turns it
+// into the same 409 ISSUE_CLOSED).
 type closedWrite bool
 
 const (
@@ -1555,11 +1560,13 @@ const (
 // errIssueClosed is the refusal of a write that a closed issue does not take.
 var errIssueClosed error = errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
 
-// refuseClosed is the one place a closed owner refuses a write: every check of it decides here,
-// the locked ones each write makes for itself (requireOpenOwnerStatus, lockCommentOwner,
-// lockedComment) and the pooled one a comment makes before its transaction opens
-// (refuseOwnerBeforeResolving). open is what the owner's row read (ownerStatus, issueStatus): an
-// issue is open until it closed, and a project document always is.
+// refuseClosed is the one place the writes that take the owner's lock through ownerStatus refuse
+// a closed owner: the locked checks (requireOpenOwnerStatus, lockCommentOwner, lockedComment) and
+// the pooled pre-check a comment with mentions and an upload make before their transaction opens
+// (refuseOwnerBeforeResolving) all decide here. It is not every closed-issue refusal the API
+// makes: closedWrite names the writes that decide for themselves. open is what the owner's row
+// read (ownerStatus, issueStatus): an issue is open until it closed, and a project document
+// always is.
 func refuseClosed(open bool, write closedWrite) error {
 	if write == refusedWhenClosed && !open {
 		return errIssueClosed

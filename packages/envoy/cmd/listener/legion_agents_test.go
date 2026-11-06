@@ -371,10 +371,11 @@ authorization {
 // bucket however often it retries the open, and answers each registry route 503 naming the failed
 // open. The one registry ERROR is not the only ERROR a missing grant leaves: the server refuses
 // each open's publish to $JS.API.STREAM.INFO.KV_legion_agents, which the connection logs as one
-// `envoy nats async error` at ERROR per open, about one every 70 s once the backoff is capped
-// (1 min of backoff and the open's own 10 s JetStream timeout). Once the server applies the grant
-// and the listener reconnects, its reconnect hook wakes the retry, which opens the bucket, and the
-// routes serve.
+// `envoy nats async error` at ERROR per open -- six in the first two minutes, and about one every
+// 70 s only once the backoff has reached its 1 min cap (plus the open's own 10 s JetStream
+// timeout), since every reconnect wakes the retry at once and sets its backoff back to 1 s. Once
+// the server applies the grant and the listener reconnects, its reconnect hook wakes the retry,
+// which opens the bucket, and the routes serve.
 func TestAListenerWithoutTheRegistryGrantServesAndAnswersItsRoutes503(t *testing.T) {
 	bucket := "KV_" + bus.LegionAgentBucket
 	server, uri := testnats.StartConfig(t, listenerGrant(

@@ -32,5 +32,7 @@ body: |-
   registry logs that one ERROR however often it retries, but the missing grant has the server
   refuse each retried open's publish to `$JS.API.STREAM.INFO.KV_legion_agents`, which the
   connection logs as one `envoy nats async error` at ERROR per open, and the refused open then
-  waits out its 10 s JetStream timeout: six such lines in the first two minutes, then about one
-  every 70 s (1 min of backoff and the open's own 10 s) until the grant reaches the listener.
+  waits out its 10 s JetStream timeout: six such lines in the first two minutes, and about one
+  every 70 s only once the backoff has reached its 1 min cap (plus the open's own 10 s). Each
+  NATS reconnect wakes the retry at once and sets its backoff back to 1 s, so that burst starts
+  over on every reconnect until the grant reaches the listener.

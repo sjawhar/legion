@@ -2303,8 +2303,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   An anchored comment's document writes - its mark, the version its anchor is pinned to, its margin record, and the thread root's projection a reply adds itself to - run under `docs.WithCommentMarks`, owner-verified because the comment's transaction holds the owner row and decided there that the comment is written;
   a content edit, a suggestion's mark, a named version or a rebuild under the same context still waits for a reopen.
   Everything else is `409 ISSUE_CLOSED` until a reopen: a new ask, an ask's edit, answer or resolve, a suggestion (a proposed document edit, whose acceptance is its only outcome), a document edit, a named version, an upload, a review, an approval request, a claim, a PATCH field outside the closed allow-list above, and the comment actions resolve, reopen, edit, accept and reject on an existing comment (`lockedComment`).
-  One function makes that refusal, wherever it is asked for: `refuseClosed(open, write)` (`api/server.go`), where `write` is `takenWhenClosed` for a comment that is not a suggestion and `refusedWhenClosed` for every other write of an owner's collaboration.
+  The writes that take the owner's lock through `ownerStatus` make that refusal in one place, `refuseClosed(open, write)` (`api/server.go`), where `write` is `takenWhenClosed` for a comment that is not a suggestion and `refusedWhenClosed` for the rest: an ask, a suggestion, an upload, a review, an approval request and the comment actions.
   It is asked under the write's own lock (`requireOpenOwnerStatus`, `lockCommentOwner`, `lockedComment`) and, for the same answer before the work is spent, from the pool before a comment resolves its mentions and before an upload spools its body (`refuseOwnerBeforeResolving`).
+  The writes that read the issue row for themselves refuse for themselves, with the same 409: a claim (`issue_claim.go`), a PATCH field outside the allow-list above (`issue_patch.go`), a check result, which a closed issue takes only for an `after_merge` or `default_branch` check (`results.go`), and a document edit or named version, which the document service refuses under the owner's lock with `docs.ErrIssueClosed` (`docs/mutation.go`, `docs/rebuild.go`).
   A reopen (a PATCH to any status but `done`) lifts every refusal.
 
 - An issue's `updated_at` never moves backwards.
@@ -4126,11 +4127,14 @@ routes above with the listener's `/v1` credential; Dispatch reads it through
   missing grant leaves: the server refuses each open's publish to
   `$JS.API.STREAM.INFO.KV_legion_agents`, which the connection reports as one `envoy nats async error`
   at ERROR per open (`options`' async error callback, `internal/bus/connect.go`), and the refused
-  request then waits out its 10 s JetStream timeout (`legionagents`' `openTimeout`), so an outage
-  carries six of those lines in its first two minutes and about one every 70 s after that, 1 min of
-  backoff and the open's own 10 s. Once open, the reconnect hook moves the store's handle onto a
-  connection the bus replaced (`Store.Reopen`). Both live in `legionAgentRegistry`
-  (`cmd/listener/legion_agents.go`).
+  request then waits out its 10 s JetStream timeout (`legionagents`' `openTimeout`). So the opens
+  of one run come 11 s, 12 s, 14 s, 18 s, 26 s and 42 s apart and then every 70 s, 1 min of
+  backoff and the open's own 10 s: six of those ERROR lines in the first two minutes, and about
+  one every 70 s only once the backoff has reached its cap. Every NATS reconnect starts that run
+  over, because the event wakes the retry at once and sets its wait back to 1 s (`retry`), so a
+  connection that keeps dropping leaves the burst, not the capped rate. Once open, the reconnect
+  hook moves the store's handle onto a connection the bus replaced (`Store.Reopen`). Both live in
+  `legionAgentRegistry` (`cmd/listener/legion_agents.go`).
 
 ## Session consumers
 
