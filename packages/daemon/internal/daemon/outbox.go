@@ -855,8 +855,8 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // run forgets them here rather than let its ending release what the architect has already heard.
 //
 // A row the wake pacing held to its turn (record.Notice.PacedAt) writes the line a wake writes,
-// once, on the attempt that publishes it (deliverNotice's wakeRan): running the row is the wake
-// only if the architect is given the catch-up to read.
+// once, on the attempt that publishes it (noticeAnswered's wakeRan, notice_exceptions.go):
+// running the row is the wake only if the architect is given the catch-up to read.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if err := r.deliverNotice(ctx, row, payload); err != nil {
 		return err
@@ -882,23 +882,26 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 // counts every paced line and builds a window for each).
 //
 // How long the wake waited is the row's own record, not a clock and not its next_at: the engine
-// composed the row at the moment it reserved and carried that moment on the notice, so PacedAt
-// less created_at is what the pacing held this wake for, whatever a retry since has written into
-// next_at (record.Notice.PacedAt, the store's RetryOutbox). A row the burst let straight out —
-// the first wake of a wave — waited nothing and says so, as supervise's line does; reading the
-// wait from the runner's clock instead would call every such row held, by however long the lane
-// took to pick it up.
+// carried both the moment it reserved and the moment it reserved from, so PacedAt less PacedFrom
+// is what the pacing held this wake for, whatever a retry since has written into next_at
+// (record.Notice.PacedAt, PacedFrom, the store's RetryOutbox). The pair is one clock's: the row's
+// created_at is the database's now() at the start of the fact's transaction, so a wake read
+// against it would be the engine's clock less the database's, and a row the burst let straight
+// out — the first wake of a wave, reserved for the instant it was composed — would report the
+// transaction's own duration as a wait. It waited nothing and says so, as supervise's line does;
+// reading the wait from the runner's clock instead would call every such row held, by however
+// long the lane took to pick it up.
 //
 // The pace the line names is the one the daemon holds its machines to (supervise.WakePace, set in
 // openSupervision): the rate and the burst alone, never its Reserve — the reservation that
 // decided when this row was due is the workflow engine's (workflow.Config.Reserve), taken from
 // the same limiter. A test that builds the runner by hand over a supervisor with no pace reads
 // the pacing off, which is that line's own reading of it.
-func (r *outbox) wakeRan(row record.OutboxRow, pacedAt time.Time) {
+func (r *outbox) wakeRan(row record.OutboxRow, notice record.Notice) {
 	architect, _ := claim.NewToken(r.project, row.Issue, claim.RoleArchitect)
 	pace := r.supervisor.deps.WakePace
 	fields := append([]any{"claim", string(architect)},
-		supervise.WakeRanFields(supervise.WakeCatchUp, true, pacedAt.Sub(row.CreatedAt), pace.Rate, pace.Burst)...)
+		supervise.WakeRanFields(supervise.WakeCatchUp, true, notice.PacedAt.Sub(notice.PacedFrom), pace.Rate, pace.Burst)...)
 	r.log.Info(supervise.WakeRanMessage, fields...)
 }
 
@@ -965,7 +968,7 @@ func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payloa
 	}
 	if earlier, due := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
 		// The row the fence holds this one behind is due at a known moment when the wake pacing
-		// holds it (record.Notice.Paced): this row runs once, then, rather than climbing its
+		// holds it (record.Notice.PacedAt): this row runs once, then, rather than climbing its
 		// backoff to it — over a hold of tens of minutes that is a Warn every attempt from the
 		// seventh (settle), about one wake's worth of noise per architect in a wave. The hold
 		// itself is right: it keeps the architect to the one wake its catch-up is.

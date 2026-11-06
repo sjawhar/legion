@@ -686,7 +686,7 @@ func TestTheStateNamesTheWakeThePacingHoldsUntilItRuns(t *testing.T) {
 
 // The other lane of the same wave (api.State.WakesWaiting): a re-admission whose architect is
 // already running writes it a catch-up in place of a launch, and that wake waits on its outbox row
-// rather than in a machine (workflow.QueueCatchUp, record.Notice.Paced). The state names it like
+// rather than in a machine (workflow.QueueCatchUp, record.Notice.PacedAt). The state names it like
 // any other — the root architect's claim, its issue, architect, kind `catch-up` and the row's own
 // moment — and names it no longer once that moment has passed, since the wake the pacing was
 // holding is then out. Without this lane a state read during a re-admission wave would show an

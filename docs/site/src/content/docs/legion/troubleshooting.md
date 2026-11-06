@@ -493,7 +493,9 @@ process about to start; `plugin-task`, the update task a stale-plugin round queu
 that already runs; `catch-up`, the notice a start writes to an architect that is already running)
 and `dueAt`, the moment the pacing gave it, which is when it runs. An empty array says the wave has
 gone out; the last `dueAt` in it says when the last of the wave goes. A claim on that list needs
-nothing from you: its wake is reserved and nothing drops it.
+nothing from you: its wake is reserved and it runs at the moment named. Your own requests are what
+drop it — a resume, a retry or a task you send that claim is run at once, taking the reserved wake
+back, so nothing you ask for waits for a turn.
 
 A restart re-adopts every process still running, but a claim with no process runs again only when
 something starts it. A worker is started by the workflow when its phase begins, and a tree's

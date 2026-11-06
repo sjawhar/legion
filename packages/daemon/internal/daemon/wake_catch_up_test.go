@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -141,6 +142,18 @@ func pacedCatchUp(t *testing.T, pool *pgxpool.Pool, records record.Store, root s
 		t.Fatalf("stamp the paced catch-up of %s: %v", root, err)
 	}
 	return id
+}
+
+// stampCreated rewrites row id's created_at, which is the database's own clock at the start of
+// the transaction that wrote the row. A test of what a wake's line says it waited moves that
+// moment away from the reservation's, because the two are different clocks read at different
+// points of one transaction (record.Notice.PacedFrom, workflow's claimReady), and a line that
+// read the wait from created_at would report the distance between them.
+func stampCreated(t *testing.T, pool *pgxpool.Pool, id int64, at time.Time) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), "update outbox set created_at = $2 where id = $1", id, at); err != nil {
+		t.Fatalf("stamp row %d as written at %s: %v", id, at, err)
+	}
 }
 
 // Forty re-admissions whose architects are all still running write forty catch-ups in place of
@@ -437,6 +450,119 @@ func TestTheOutboxWritesTheWakeLineWhenItRunsAPacedNoticeRow(t *testing.T) {
 	delete(got, "time")
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("the wake line is %v, want %v", got, want)
+	}
+}
+
+// A catch-up the burst let straight out waited nothing, and its line says so. The wait is the
+// reservation's own — the moment it gave less the moment it was made, both read from the engine's
+// clock inside one transaction (record.Notice.PacedAt, PacedFrom) — rather than that moment less
+// the row's created_at, which is the database's clock at the start of that transaction. Read
+// against created_at, the first wake of every wave said it was held for as long as the
+// transaction took to reach the reservation, and under clock skew for a wait the other way
+// about; the operator's own check counts those lines and builds a window from each
+// (scripts/wake-windows.py).
+//
+// The negative control is the wait reverted (wakeRan reading row.CreatedAt): the line then reads
+// waited=true with a quarter of a second as its waitedFor, where this test wants a line that
+// names no wait at all.
+func TestABurstReleasedCatchUpWritesAWakeLineThatWaitedNothing(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.WakePace = supervise.WakePace{Reserve: pacedWakes().Reserve, Rate: testWakeRate, Burst: testWakeBurst}
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	now := wakeOrigin
+	var logged bytes.Buffer
+	runner := &outbox{log: slog.New(slog.NewJSONHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: &holderPublisher{}, supervisor: sup, project: "legion",
+		now: func() time.Time { return now }}
+
+	// The limiter's burst reserves the moment it is asked at, so this catch-up is due as it is
+	// written; the database stamped the row a quarter of a second earlier, when the transaction
+	// that wrote it began.
+	id := pacedCatchUp(t, pool, records, "LEGION-1", 1, now, now)
+	stampCreated(t, pool, id, now.Add(-250*time.Millisecond))
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the catch-up the burst let out: %v", err)
+	}
+
+	lines := wakeLines(t, logged.String())
+	if len(lines) != 1 {
+		t.Fatalf("wake lines = %d, want the one the catch-up wrote: %s", len(lines), logged.String())
+	}
+	want := map[string]any{
+		"level": "INFO", "msg": "supervise: wake ran", "claim": string(mustClaimToken(t, "LEGION-1", claim.RoleArchitect)),
+		"kind": "catch-up", "waited": false, "paced": true,
+		"rate": float64(testWakeRate), "burst": float64(testWakeBurst),
+	}
+	got := lines[0]
+	delete(got, "time")
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the wake line is %v, want %v: this wake waited nothing and says so", got, want)
+	}
+}
+
+// The wake a paced catch-up is can be the copy of its row rather than the row: a publish its
+// architect's session does not confirm (504 receipt_timeout) woke nobody, and the notice is
+// queued again as a copy (reholdNotice). The copy carries the moments the pacing gave the row it
+// copies, so the publish that does reach the architect writes the one line that wake owes — the
+// wire payload drops them either way (Notice.Published), and the copy's own next_at is the
+// re-send delay, not a reservation. Before, the copy was built from the published notice alone,
+// so a wake that reached its architect on the second attempt wrote no line at all, and the
+// operator's check neither counted it nor built its window (scripts/wake-windows.py).
+//
+// The negative control is the carry reverted (noticeAnswered's PacedAt and PacedFrom on the
+// copy): the copy then publishes with no line written, which this test reads at the wake lines.
+func TestAReHeldPacedCatchUpWritesItsOneWakeLineWhenItsCopyPublishes(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.WakePace = supervise.WakePace{Reserve: pacedWakes().Reserve, Rate: testWakeRate, Burst: testWakeBurst}
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateWorking, "ses_live")
+	now := wakeOrigin
+	var logged bytes.Buffer
+	// The architect's session is registered and takes no receipt: the listener forwards and waits
+	// for one that never comes, which is a session stopped inside its registration.
+	publisher := &outboxPublisher{err: confirmedAnswer(notify.ReasonReceiptTimeout, "ses_live")}
+	runner := &outbox{log: slog.New(slog.NewJSONHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: publisher, supervisor: sup, project: "legion", now: func() time.Time { return now }}
+
+	held := 3 * testWakeInterval
+	id := pacedCatchUp(t, pool, records, "LEGION-1", 1, now, now.Add(held))
+	now = now.Add(held)
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the paced catch-up at its moment: %v", err)
+	}
+	if lines := wakeLines(t, logged.String()); len(lines) != 0 {
+		t.Fatalf("the publish nobody confirmed wrote %d wake lines, want none: it woke no architect: %s", len(lines), logged.String())
+	}
+	copied := noticeRows(t, pool)
+	if len(copied) != 1 || copied[0].id == id || !copied[0].pacedAt.Equal(wakeOrigin.Add(held)) {
+		t.Fatalf("the rows after the unconfirmed publish are %+v, want one copy of row %d reserved for %s", copied, id, wakeOrigin.Add(held))
+	}
+
+	publisher.err = nil
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the copy: %v", err)
+	}
+
+	lines := wakeLines(t, logged.String())
+	if len(lines) != 1 {
+		t.Fatalf("wake lines over the two publishes = %d, want the one the copy wrote: %s", len(lines), logged.String())
+	}
+	if waitedFor := lines[0]["waitedFor"]; waitedFor != float64(held) {
+		t.Fatalf("the wake line waited for %v, want %v, the wait the reservation gave the row this copies", waitedFor, float64(held))
+	}
+	published := publisher.publishes()
+	if len(published) != 2 || !published[1].payload.(record.Notice).PacedAt.IsZero() {
+		t.Fatalf("the copy published %+v, want a notice carrying no reserved moment: the architect is told what the catch-up says, not what the pacing did", published)
+	}
+	if rows := outboxRows(t, pool); rows != 0 {
+		t.Fatalf("%d outbox rows left, want none: the copy published", rows)
 	}
 }
 

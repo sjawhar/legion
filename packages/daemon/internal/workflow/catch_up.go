@@ -78,8 +78,9 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 // the ready of a launch), is now, so a catch-up no pacing holds is due as it always was. The row
 // keeps the moment of its own because a failed attempt rewrites next_at to its backoff: the
 // moment is what keeps a ready from pulling the row forward before its turn (the daemon's
-// releaseWaiting) and what the outbox reads for the wait in the line that wake writes when it
-// runs (the daemon's wakeRan).
+// releaseWaiting), and with now beside it (record.Notice.PacedFrom) it is the wait in the line
+// that wake writes when it runs (the daemon's wakeRan). The pair is written only where the
+// pacing reserved something: a catch-up it held to no moment reports no wait, having had none.
 func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now, paced time.Time) error {
 	catchUp, awaiting, err := treeCatchUp(ctx, tx, store, gate, root)
 	if err != nil {
@@ -105,12 +106,12 @@ func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 		reason += fmt.Sprintf("; in accepting, waiting for your acceptance, which no worker gives: %s (read the evidence, then sign_off or request_backward_move)", strings.Join(awaiting, ", "))
 	}
 	at := now
+	notice := record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp}
 	if !paced.IsZero() {
 		at = paced
+		notice.PacedAt, notice.PacedFrom = paced, now
 	}
-	return EnqueueNaming(ctx, tx, store, root.Key, root.Key,
-		record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp, PacedAt: paced},
-		kept, at)
+	return EnqueueNaming(ctx, tx, store, root.Key, root.Key, notice, kept, at)
 }
 
 // treeCatchUp is root's tree as the record holds it: whether a hand-over created the root at this

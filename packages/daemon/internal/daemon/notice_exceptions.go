@@ -167,7 +167,7 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 		// the wake the pacing held the row for, and the line it writes is written here: once for
 		// the row, whatever the attempts before it met (wakeRan).
 		if !payload.PacedAt.IsZero() {
-			r.wakeRan(row, payload.PacedAt)
+			r.wakeRan(row, payload)
 		}
 		// The decisions the catch-up named and this row claims are told: the telling is recorded
 		// under the key it went out on, before anything forgets them, and the settle after this
@@ -180,6 +180,14 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
 		// The copy takes over this row's claims on the decisions it names (claims).
 		source := cmp.Or(payload.ResendOf, row.ID)
+		// Nothing woke the architect here — its session never took the notice — so the wake this
+		// row is waits for the copy, and the copy carries the moments the pacing gave this row to
+		// write that one line with (record.Notice.PacedFrom). The publish strips them again
+		// (Notice.Published), and the copy's own next_at stays the re-send delay: the reservation
+		// is spent, and what is carried over is the account of it the line reports. Without this
+		// the copy publishes and no "supervise: wake ran" is written at all, so the operator's
+		// own check neither counts that wake nor builds its window (scripts/wake-windows.py).
+		notice.PacedAt, notice.PacedFrom = payload.PacedAt, payload.PacedFrom
 		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect, claims: row.ID}
 		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
 			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
@@ -225,6 +233,10 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
 // the row it copies (Notice.Published), so a session that did get the forward recognises the copy.
+// A copy of a catch-up the pacing held carries that row's reserved moments, so that the publish
+// which does reach the architect writes the one wake line (noticeAnswered); a copy an earlier
+// listener's report queues carries none, and is owed none, because that publish was answered and
+// wrote the line already.
 // A copy is due at once when copyDueAtOnce says so, and otherwise after the next of
 // noticeReholdDelays. It is queued again once per delay; the failure of its last copy is logged
 // and queues nothing. Each published copy of a row is queued again once, marked processed under

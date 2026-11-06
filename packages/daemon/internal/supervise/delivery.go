@@ -224,6 +224,12 @@ func (c Claim) openRoundHoldsTask() bool {
 // PodUpdateEnded releases the round's held task once the round is over (endPodUpdate), and the
 // wake's turn is where the launch takes the other back.
 //
+// One task never meets that third hold: an operator's own, which drops the launch the pacing
+// holds before the row that queues it is reached, so the claim this sees has no waiting launch
+// and the task goes to the process it is running (dropWakeFor). A person is waiting on that task
+// and the paced turn is tens of minutes away in a wave; the launch the drop abandons is raised
+// again by the lane that raised it.
+//
 // An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
 // sent (Claim.LeftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
 // that reads it would be asked to push work that died with the pod the round was opened over,

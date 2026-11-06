@@ -276,7 +276,7 @@ type PodUpdateReask struct {
 type RequestSpawn struct {
 	Claim claim.Token
 	// Exempt is the caller saying this launch is not one the wake pacing may hold (reserveWake):
-	// the daemon's operator API, whose spawn a person is waiting on, and the controller keeper.
+	// the daemon's operator API, whose spawn a person is waiting on, and no other caller.
 	// The zero value is paced, so a caller that has not thought about it is paced: a flood of
 	// launches is the fault the pacing exists to fix, and a wake let through by default would
 	// put it back one caller at a time.

@@ -216,15 +216,27 @@ type Notice struct {
 	//
 	// The moment is kept here rather than read back from the row's next_at because the two part
 	// company: a failed attempt rewrites next_at to its backoff (RetryOutbox), while the turn the
-	// pacing gave this wake never moves. The outbox writes that wake's one line from it — how long
-	// the wake waited is PacedAt less CreatedAt, whichever attempt publishes (the daemon's
-	// wakeRan) — and a ready that releases the architect's waiting notices leaves the row where it
-	// stands only while the moment is still ahead (the daemon's releaseWaiting), so a catch-up
-	// whose turn has come is released like any other notice rather than waiting out a backoff the
-	// pacing never asked for. It is the daemon's own bookkeeping, so the publish drops it
-	// (Published) as it drops ResendOf, and a re-held copy carries none: that copy's next_at is
-	// the re-send delay, not a reservation.
+	// pacing gave this wake never moves. The outbox writes that wake's one line from it, on
+	// whichever attempt publishes (the daemon's wakeRan), and a ready that releases the
+	// architect's waiting notices leaves the row where it stands only while the moment is still
+	// ahead (the daemon's releaseWaiting), so a catch-up whose turn has come is released like any
+	// other notice rather than waiting out a backoff the pacing never asked for. It is the
+	// daemon's own bookkeeping, so the publish drops it (Published) as it drops ResendOf; a
+	// re-held copy keeps it for that one line alone, its next_at being the re-send delay rather
+	// than a reservation (the daemon's noticeAnswered).
 	PacedAt time.Time `json:"paced_at,omitzero"`
+	// PacedFrom is the moment the reservation above was made, on the clock that made it, and the
+	// two travel together: PacedAt less PacedFrom is how long the pacing held this wake, which is
+	// what the line it writes reports (the daemon's wakeRan).
+	//
+	// The wait is read from this pair rather than from PacedAt less the row's created_at, which
+	// is two clocks subtracted from each other: created_at is the database's now() at the start
+	// of the fact's transaction (store/migrations/0004_record.up.sql), while the reservation is
+	// made from the engine's clock later in that same transaction (workflow's claimReady). A
+	// catch-up the burst let straight through — PacedAt equal to PacedFrom, the first wake of a
+	// wave — would otherwise report the transaction's own duration as a wait, and under clock
+	// skew a wait the other way about.
+	PacedFrom time.Time `json:"paced_from,omitzero"`
 	// ResendOf is the outbox row a re-held copy copies. The copy is published under that row's
 	// dedupe key (OutboxKey), so the listener's report of a failed forward names the original row,
 	// whichever copy failed (exceptionNotice), and the listener's role lane drops a copy that
@@ -390,10 +402,11 @@ func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
 // Published is the notice the runner publishes for outbox row id, and the dedupe key it goes under:
 // a re-held copy goes under the key of the row it copies, and without ResendOf. The reserved
-// moment goes out with neither: both are the daemon's own bookkeeping of the row, and PacedAt says
-// nothing to the architect that reads the notice (the daemon's wakeRan writes what the pacing did).
+// moment and the moment it was reserved from go out with neither: all three are the daemon's own
+// bookkeeping of the row, and what the pacing did says nothing to the architect that reads the
+// notice (the daemon's wakeRan writes it to the log instead).
 func (n Notice) Published(id int64) (Notice, string) {
-	n.PacedAt = time.Time{}
+	n.PacedAt, n.PacedFrom = time.Time{}, time.Time{}
 	if n.ResendOf == 0 {
 		return n, OutboxKey(id)
 	}
