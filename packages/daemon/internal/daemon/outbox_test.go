@@ -2453,7 +2453,9 @@ func (t outboxTokens) ReadToken(context.Context, appauth.AppRole, string, []stri
 // it, and legionDirs the gh directories a bundle built over it holds.
 func legionRepos() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("legion/legion")} }
 
-func legionDirs(repo ghrepo.Repository) []string { return appauth.GitHubDirs(legionRepos, ghrepo.Renames{}, repo) }
+func legionDirs(repo ghrepo.Repository) []string {
+	return appauth.GitHubDirs(legionRepos, ghrepo.Renames{}, repo)
+}
 
 type outboxSpecs struct{}
 

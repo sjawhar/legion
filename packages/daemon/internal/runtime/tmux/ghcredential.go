@@ -40,14 +40,21 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // role's GitHub credential, so the pane's gh (the `legion gh` wrapper's real gh) and the clone's
 // `legion git-credential` helper read the tokens the daemon holds now. It walks a snapshot of the
 // watch (trackedProcesses), takes each pane's role from its claim token (claim.Token.Role),
-// skipping a token that names no role, and renders the credential for the pane's own repository:
-// the one its launch minted the write token for, recorded on the tracked entry, which is the zero
-// Repository for the controller, whose bundle is read-only throughout. For a tree pane adopted
-// after a restart, whose launch the runtime never saw, the repository is the one the claim's
-// issue works, read from the daemon's own state (Options.ClaimRepository); an adopted controller
-// asks nothing. Nothing under the pane's gh directory, which the pane's own user can write,
-// decides a repository, and a bundle's default owner, the directory GH_CONFIG_DIR names, is
-// never minting authority. It rewrites only the directories whose hosts.yml differs
+// skipping a token that names no role, and renders a tree pane's credential for the pane's own
+// repository: the one its launch minted the write token for, recorded on the tracked entry. For a
+// tree pane adopted after a restart, whose launch the runtime never saw, the repository is the one
+// the claim's issue works, read from the daemon's own state (Options.ClaimRepository).
+//
+// The controller's bundle is fetched by owner instead (Options.ControllerCredential), the default
+// its launch recorded: it works no repository, so a bundle asked for by repository would take its
+// default from the first owner the project serves, sorted, and a project that gained an owner
+// sorting before the recorded one would move the default away from the directory the pane's
+// GH_CONFIG_DIR was fixed at. An adopted controller, whose launch this runtime never saw, records
+// no owner and asks for none, which is the first owner, as its launch took it.
+//
+// Nothing under the pane's gh directory, which the pane's own user can write, decides a repository
+// or an owner, and a bundle's default owner, the directory GH_CONFIG_DIR names, is never minting
+// authority. It rewrites only the directories whose hosts.yml differs
 // (ghconfig.WriteBundle), recreating a root that is gone. A repository that cannot be read, a
 // render that fails, or a render whose default is not the owner of the pane's own repository is
 // logged and the pane keeps its last tokens until the next tick. A controller whose project has
@@ -78,7 +85,13 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 			}
 			repo = recorded
 		}
-		bundle, err := r.gitHubCredential(ctx, role, repo)
+		var bundle ghconfig.Bundle
+		var err error
+		if role == claim.RoleController {
+			bundle, err = r.controllerCredential(ctx, entry.ghDefault)
+		} else {
+			bundle, err = r.gitHubCredential(ctx, role, repo)
+		}
 		if role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner) {
 			continue
 		}

@@ -924,7 +924,9 @@ func treeMemoryGroup(st *store.Store) func(ctx context.Context, tree string) (bo
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
-// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), built over
+// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential) and the
+// controller pane's own (appauth.ControllerCredential), which its refresh asks by the default
+// owner its launch recorded, both built over
 // repos (the project's mapping's served repositories), with gh, the real gh boot resolved
 // (daemonTools), the one each pane's `legion gh` runs, and the repository each claim's issue
 // works (claimRepository over the workflow's repository), which a pane adopted after a restart
@@ -938,6 +940,7 @@ func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backen
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
 			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, repos, cfg.RepositoryRenames), gh
+			opts.ControllerCredential = appauth.ControllerCredential(tokens, repos, cfg.RepositoryRenames)
 			opts.ClaimRepository = claimRepository(st.ClaimIssue, repository)
 		}
 		rt, err := tmux.New(opts)

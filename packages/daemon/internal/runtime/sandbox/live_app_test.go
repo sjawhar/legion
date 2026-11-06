@@ -44,6 +44,26 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, repo ghre
 	return appauth.GitHubCredential(t.apps, t.repositories, ghrepo.Renames{})(ctx, claim.RoleImplementer, repo)
 }
 
+// ControllerCredential is the harness's ControllerCredential (Options.ControllerCredential): the
+// controller's own bundle by default owner (appauth.ControllerCredential), which a controller
+// pod's refresh asks for the owner its Secret records. It mints as the implement App, the one App
+// the harness holds, where the daemon's own mints as the review App (implementApp).
+func (t implementTokens) ControllerCredential(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+	return appauth.ControllerCredential(implementApp{t.apps}, t.repositories, ghrepo.Renames{})(ctx, defaultOwner)
+}
+
+// implementApp mints every lease as the implement App, whichever App role asks for one: the
+// harness holds that App alone.
+type implementApp struct{ apps appauth.Tokens }
+
+func (a implementApp) Token(ctx context.Context, _ appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return a.apps.Token(ctx, appauth.Implement, repo)
+}
+
+func (a implementApp) ReadToken(ctx context.Context, _ appauth.AppRole, owner string, repos []string) (appauth.Lease, error) {
+	return a.apps.ReadToken(ctx, appauth.Implement, owner, repos)
+}
+
 // ProjectDirs is the harness's GitHubDirs (Options.GitHubDirs): the directories a bundle built
 // now for repo would hold (appauth.GitHubDirs), which is what Credential renders, so the two
 // answers move together as the daemon's own do.

@@ -972,6 +972,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		AdoptTimeout:          liveAdoptTimeout,
 		Tokens:                r.tokens,
 		GitHubCredential:      r.tokens.Credential,
+		ControllerCredential:  r.tokens.ControllerCredential,
 		GitHubDirs:            r.tokens.ProjectDirs,
 		Conns:                 ln,
 		Log:                   r.log,

@@ -526,7 +526,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
 		MemoryConfigFiles: memoryOverlays,
 	}, files)
-	return r.openPane(ctx, spec, paneCommand(append(pairs, backendPairs...), command))
+	return r.openPane(ctx, spec, ghDefault, paneCommand(append(pairs, backendPairs...), command))
 }
 
 // launchGitHubCredential is the GitHub credential a launch mints for its claim before the launch
@@ -590,9 +590,11 @@ func (r *Runtime) writeGitHubCredential(spec runtime.SpawnSpec, credential launc
 // pane of the same issue — or, for the controller, of the controller's own window — that still
 // verifies as its recorded process, else into a new window named for it (windowKey). The pane is
 // recorded — its incarnation read, the process watched with the repository its launch minted the
-// gh bundle's write token for (the zero Repository for none) — before the lock is released, so
-// the next spawn on the issue can share its window and no orphan sweep mistakes it for one.
-func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []string) (runtime.Locator, error) {
+// gh bundle's write token for (the zero Repository for none) and ghDefault, the bundle's default
+// owner, whose directory is the pane's GH_CONFIG_DIR ("" for a pane holding no gh files) — before
+// the lock is released, so the next spawn on the issue can share its window and no orphan sweep
+// mistakes it for one.
+func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghDefault string, pane []string) (runtime.Locator, error) {
 	key := windowKey(spec)
 	window, err := r.issueWindow(ctx, key)
 	if err != nil {
@@ -625,7 +627,7 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 		Incarnation: incarnation{pid: report.pid, ticks: ticks}.String(),
 		Tmux:        &runtime.TmuxLocator{Window: report.window, Pane: report.pane},
 	}
-	r.track(loc, key, spec.Repository)
+	r.track(loc, key, spec.Repository, ghDefault)
 	return loc, nil
 }
 

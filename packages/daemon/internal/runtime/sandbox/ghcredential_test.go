@@ -148,6 +148,16 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 				owner:  ghconfig.Render("ghs_"+app+"_"+*lease.Load(), app, staticCredentialExpiry),
 			}}, nil
 		}
+		// The controller's bundle comes from the function that answers by owner, over the same
+		// lease: its refresh asks for the owner its Secret records.
+		o.ControllerCredential = func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+			bundle, err := o.GitHubCredential(ctx, claim.RoleController, ghrepo.Repository{})
+			if err != nil || defaultOwner == "" {
+				return bundle, err
+			}
+			bundle.Default = defaultOwner
+			return bundle, nil
+		}
 	}))
 	g.spawn(rootSpec(t))
 	g.spawn(controllerSpec(t))
@@ -195,6 +205,77 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 	}
 	if !strings.Contains(logged, "default owner acme is not the Secret's sjawhar") {
 		t.Errorf("the runtime logged %q, want the planner's render refused for its default", logged)
+	}
+}
+
+// A controller's refresh asks for its bundle by the owner its Secret records
+// (Options.ControllerCredential), so a project that gains an owner sorting before that one still
+// refreshes it: the controller works no repository, and a bundle asked for by repository takes
+// its default from the first owner the project serves, which would be another owner than the one
+// the pod's GH_CONFIG_DIR was fixed at and so refused at every tick until something replaced the
+// pod, its tokens expiring within the hour.
+func TestAControllerIsRefreshedForTheOwnerItsSecretRecords(t *testing.T) {
+	var gained atomic.Bool
+	logs := &lockedLog{}
+	app := string(appauth.AppRoleFor(claim.RoleController))
+	// The project served sjawhar alone when the controller's pod was launched, and has since
+	// gained acme, which sorts before it.
+	bundle := func(dflt string) ghconfig.Bundle {
+		rendered := ghconfig.Bundle{Default: dflt, Dirs: map[string]ghconfig.Rendered{
+			"sjawhar": ghconfig.Render("ghs_review_read_sjawhar", app, staticCredentialExpiry),
+		}}
+		if gained.Load() {
+			rendered.Dirs["acme"] = ghconfig.Render("ghs_review_read_acme", app, staticCredentialExpiry)
+		}
+		return rendered
+	}
+	first := func() string {
+		if gained.Load() {
+			return "acme"
+		}
+		return "sjawhar"
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		o.GitHubCredential = func(_ context.Context, _ claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+			owner := strings.ToLower(repo.Owner())
+			if owner == "" {
+				owner = first()
+			}
+			return bundle(owner), nil
+		}
+		o.ControllerCredential = func(_ context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+			if defaultOwner == "" {
+				defaultOwner = first()
+			}
+			return bundle(defaultOwner), nil
+		}
+	}))
+	g.spawn(controllerSpec(t))
+	name := roleSecretName(SandboxName(controllerToken), claim.RoleController)
+	if recorded := string(g.secret(name).Data[GitHubDefaultKey]); recorded != "sjawhar" {
+		t.Fatalf("the controller's Secret records the default %q, want the one owner its launch served, sjawhar", recorded)
+	}
+	gained.Store(true)
+	if asked, _ := g.r.gitHubCredential(g.ctx, claim.RoleController, ghrepo.Repository{}); asked.Default != "acme" {
+		t.Fatalf("a bundle asked for by repository defaults to %q, want the project's new first owner acme, which the Secret does not record", asked.Default)
+	}
+	g.clearActions()
+
+	g.r.refreshGitHubCredentials(g.ctx)
+
+	if updated := secretUpdates(g.writes()); !slices.Equal(updated, []string{name}) {
+		t.Fatalf("the refresher updated %v, want the controller's Secret %s", updated, name)
+	}
+	secret := g.secret(name)
+	if string(secret.Data[GitHubDefaultKey]) != "sjawhar" {
+		t.Errorf("the refresher wrote the default %q, want the recorded sjawhar untouched", secret.Data[GitHubDefaultKey])
+	}
+	if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey("acme")]); err != nil || token != "ghs_review_read_acme" {
+		t.Errorf("the controller's acme hosts.yml holds %q (%v), want the new owner's read token", token, err)
+	}
+	if logged := logs.String(); strings.Contains(logged, "github credential refresh failed") {
+		t.Errorf("the runtime logged %q, want the controller refreshed rather than refused", logged)
 	}
 }
 

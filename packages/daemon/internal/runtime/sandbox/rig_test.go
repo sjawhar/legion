@@ -94,6 +94,7 @@ func testOptions() Options {
 		AdoptTimeout:          time.Minute,
 		Tokens:                staticTokens{},
 		GitHubCredential:      staticCredential,
+		ControllerCredential:  staticControllerCredential,
 		GitHubDirs:            func(ghrepo.Repository) []string { return staticDirs },
 		Conns:                 fake.NewConns(),
 		RepositoryCache: RepositoryCache{
@@ -140,6 +141,19 @@ func staticCredential(_ context.Context, role claim.Role, repo ghrepo.Repository
 		"acme": ghconfig.Render(staticReadToken(role, "acme"), app, staticCredentialExpiry),
 		owner:  ghconfig.Render(staticCredentialToken(role), app, staticCredentialExpiry),
 	}}, nil
+}
+
+// staticControllerCredential is the runtime's ControllerCredential in every test: the bundle
+// staticCredential renders for the controller, whose default is the owner it is asked for — the
+// one the pod's Secret records — and sjawhar, the first owner, when it is asked for none, as
+// appauth.ControllerCredential answers a launch.
+func staticControllerCredential(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+	bundle, err := staticCredential(ctx, claim.RoleController, ghrepo.Repository{})
+	if err != nil || defaultOwner == "" {
+		return bundle, err
+	}
+	bundle.Default = strings.ToLower(defaultOwner)
+	return bundle, nil
 }
 
 // staticDirs are the directories of every bundle staticCredential renders for the test specs,

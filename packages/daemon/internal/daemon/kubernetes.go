@@ -477,7 +477,9 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
 // token source (the implement App's, minted for the repository's owner) and every tree role's gh
 // bundle (gitHubCredential, a directory for each owner of repos and for each repository the
-// pod's own owner serves beside the one it writes to) and the directory set those directories
+// pod's own owner serves beside the one it writes to), with the controller's own bundle beside it
+// (appauth.ControllerCredential), which a controller's refresh asks by the default owner its pod
+// was launched with, and the directory set those directories
 // are compared with (appauth.GitHubDirs), which the runtime reads a running pod's gh projection
 // against, with the workflow's mapping as the repositories its repository caches follow (mapped),
 // with the store's own workspace bundles as what a replacement pod's launcher is sent and what
@@ -502,6 +504,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, repos func() []ghrepo
 		if apps != nil {
 			opts.Tokens = implementTokens{apps: apps, serving: servingRepository(repos, renames)}
 			opts.GitHubCredential = appauth.GitHubCredential(apps, repos, renames)
+			opts.ControllerCredential = appauth.ControllerCredential(apps, repos, renames)
 			opts.GitHubDirs = func(repo ghrepo.Repository) []string { return appauth.GitHubDirs(repos, renames, repo) }
 		}
 		rt, err := sandbox.New(ctx, rc, opts)

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -229,6 +230,16 @@ type Options struct {
 	// controller's, which acts as the review App. Required: configure refuses nil as it refuses a
 	// nil Tokens.
 	GitHubCredential runtime.GitHubCredential
+	// ControllerCredential is the daemon's function for the controller's own gh bundle
+	// (appauth.ControllerCredential), which answers by default owner where GitHubCredential
+	// answers by repository: a controller works no repository, so a bundle rendered for one
+	// would take its default from the first owner the project serves, sorted, and a project that
+	// gains an owner sorting before it would leave every refresh of a running controller refused
+	// against the default its Secret records. The refresher asks it for the owner the Secret
+	// holds (refreshGitHubCredential); a launch asks for none, taking the first owner, which is
+	// the default the Secret then records. Required: configure refuses nil as it refuses a nil
+	// GitHubCredential.
+	ControllerCredential func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error)
 	// GitHubDirs are the directories the gh bundle of a pod created now for repo would hold
 	// (appauth.GitHubDirs), sorted: one per GitHub owner the daemon serves, lowercased and with
 	// every configured rename alias, and one more under the owner of repo for each other
