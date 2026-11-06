@@ -611,15 +611,16 @@ something to count.
   gVisor follows with no error. So code that walks a path one component at a time and opens each
   with `O_NOFOLLOW` is defeated there while every leaf check still passes, and its tests stay
   green on a developer's kernel. A whole block of such tests failing in a pod is that one
-  property of the environment, not one defect per test. The fix shape holds on both kernels: the
-  walk cannot trust the flag, so `lstat` the component, `fstat` the descriptor it opened, compare
-  `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`.
-  `openat2` is not the alternative there: a lane measured it returning `ENOSYS` under gVisor for
-  every flag combination it tried, so the `lstat` and `fstat` comparison above is the portable
-  check rather than a fallback. The question is not which tool to use but whether anything you
-  run calls `openat2`, which you can read off the binary (two builds of one tool reporting an
-  identical `--version` differed here, and only the package version and the checksum told them
-  apart):
+  property of the environment, not one defect per test. The fix shape holds on both kernels:
+  the walk cannot trust `O_DIRECTORY|O_NOFOLLOW` there, so it opens each component with
+  `O_PATH|O_NOFOLLOW|O_CLOEXEC`, which opens the entry itself on both kernels, and reads the
+  kind from fstat of that handle. The repository's own instance is `mountPointBeneath` in
+  `packages/daemon/internal/launcher/roleinit_linux.go`. `openat2` is not the alternative
+  there: a lane measured it returning `ENOSYS` under gVisor for every flag combination it
+  tried, so the handle rule above is the portable check rather than a fallback. The question
+  is not which tool to use but whether anything you run calls `openat2`, which you can read off
+  the binary (two builds of one tool reporting an identical `--version` differed here, and only
+  the package version and the checksum told them apart):
 
   ```sh
   b=$(readlink -f "$(command -v <tool>)")

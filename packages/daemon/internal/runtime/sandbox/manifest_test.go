@@ -727,6 +727,7 @@ func TestEveryRolesGitStartsNoPlantedFsmonitorOrHook(t *testing.T) {
 	// The init creates the clone, so it runs in the directory holding it rather than in the one
 	// the test process happens to have; every later command runs in the clone itself.
 	initialise.Dir = dir
+	initialise.Env = fixtureenv.Isolated(home)
 	if output, err := initialise.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, output)
 	}
