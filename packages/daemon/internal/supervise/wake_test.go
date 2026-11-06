@@ -886,11 +886,11 @@ func TestATakeBackTheStoreRefusesAtTheTurnRetiresNoTask(t *testing.T) {
 // for a relaunch that never ran (staleRegistration); with none, that registration is the first
 // this claim has had relaunched, so it is relaunched for free.
 //
-// The negative control is the mark written where the relaunch is decided again, as the shape
-// before this one wrote it (markPluginRelaunch's `m.claim.PluginRelaunchFor =
-// m.deps.PluginContract`): the claim then names this daemon's contract for a relaunch that
-// never ran and the re-registration takes the charged path, which this test reads at the mark
-// and at the budgets.
+// The negative control is the mark committed at the top of runWake, before its take-back
+// (`m.holdPluginRelaunch(waiting.pluginMark); m.commitPluginRelaunch()` ahead of checkLaunch):
+// the claim then names this daemon's contract for a relaunch whose take-back the store refused,
+// and the re-registration takes the charged path, which this test reads at the mark and at the
+// budgets.
 func TestATakeBackTheStoreRefusesAtTheTurnLeavesNoMarkBehind(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateReady)
@@ -1403,11 +1403,10 @@ func TestARefusalOutsideAWakeArmsNoTimerTheFenceHasFired(t *testing.T) {
 // at all, and the old process registering afterwards is relaunched for free, as the first stale
 // registration of any claim is.
 //
-// The negative control is the mark written where the relaunch is decided again, as the shape
-// before this one wrote it (markPluginRelaunch's `m.claim.PluginRelaunchFor =
-// m.deps.PluginContract`): the claim then names this daemon's contract for a relaunch that
-// never ran, and the re-registration takes the charged path, which this test reads at the mark
-// and at the budgets.
+// The negative control is the mark committed at the top of runWake, before its lifecycle
+// recheck (`m.holdPluginRelaunch(waiting.pluginMark); m.commitPluginRelaunch()` ahead of
+// checkLaunch): the claim then names this daemon's contract for a relaunch that started no
+// process, which this test reads at the mark.
 func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateReady)
@@ -2103,11 +2102,10 @@ func TestAStalePluginRelaunchThatRunsMarksTheClaim(t *testing.T) {
 // the claim exactly as the first relaunch found it, and the next stale registration is the first
 // this claim has had relaunched: relaunched for free rather than walked toward failed.
 //
-// The negative control is the mark written where the relaunch is decided again, as the shape
-// before this one wrote it (markPluginRelaunch's `m.claim.PluginRelaunchFor =
-// m.deps.PluginContract`): the second relaunch then marks the claim for this daemon's contract
-// and nothing takes it back, so the next stale registration takes the charged path, which this
-// test reads at the mark and at the budgets.
+// The negative control is the mark written where the relaunch is decided
+// (markPluginRelaunch setting `m.claim.PluginRelaunchFor = m.deps.PluginContract`): the second
+// relaunch then marks the claim for this daemon's contract and nothing takes it back, which this
+// test reads at the mark.
 func TestASecondStalePluginRelaunchOverAParkedOneLeavesNoMarkBehind(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateIdle)
@@ -2174,14 +2172,14 @@ func TestASecondStalePluginRelaunchOverAParkedOneLeavesNoMarkBehind(t *testing.T
 // still speaks another contract is relaunched once more for free before the mark that charges it
 // is there — one relaunch, since that one marks the claim where it starts its process.
 //
-// The suspension's own write is what the reviewer's reproduction failed: the claim is suspended
-// in memory whether or not it lands (suspended's letGo and persist), so the mark must read the
-// same either way, and here it does — none was written to put back or to leave standing.
+// The suspension's own write is the case this test drives failing: the claim is suspended in
+// memory whether or not it lands (suspended's letGo and persist), so the mark must read the same
+// either way, and here it does — none was written to put back or to leave standing.
 //
-// The negative control is the mark written where the relaunch is decided again, as the shape
-// before this one wrote it (markPluginRelaunch's `m.claim.PluginRelaunchFor =
-// m.deps.PluginContract`): the suspended claim then carries the mark of a relaunch that replaced
-// nothing, which this test reads at the mark.
+// The negative control is the mark written where the relaunch is decided
+// (markPluginRelaunch setting `m.claim.PluginRelaunchFor = m.deps.PluginContract`): the
+// suspended claim then carries the mark of a relaunch that replaced nothing, which this test
+// reads at the mark.
 func TestAStalePluginRelaunchAHeldSuspensionEndsMarksNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)

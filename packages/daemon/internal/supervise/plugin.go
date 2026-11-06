@@ -193,9 +193,9 @@ func (m *Machine) holdStaleRelaunch(trigger string) {
 // The relaunch marks the claim where its launch starts the process that replaces the stale one
 // (relaunchMarked, launchNow), which is what keeps the registration that follows a relaunch that
 // ran from being relaunched again for free (staleRegistration). A registration of the old
-// process that arrives while that launch still waits its turn meets no mark at all, because none
-// is written until the launch starts; staleRegistration's own guard is what answers it, and
-// stops a second relaunch being raised over the wake the first one parked.
+// process that arrives while that launch still waits its turn meets no mark of this relaunch,
+// because none is written until the launch starts; staleRegistration's own guard is what answers
+// it, and stops a second relaunch being raised over the wake the first one parked.
 func (m *Machine) relaunchStale(ctx context.Context, trigger string) error {
 	if m.held == nil {
 		if err := m.checkLaunch(ctx); err != nil {
@@ -281,8 +281,10 @@ func (m *Machine) holdPluginRelaunch(mark *int) {
 // PluginRelaunchFor names the contract that relaunch was made for, which is what lets
 // staleRegistration read the next registration that still differs as the second stale one in a
 // row and charge it toward failed. Its one caller is launchNow, before the write that records the
-// launch, so the mark reaches the store with that write and a restart reads a mark whose relaunch
-// did start a process. It writes nothing for a launch no stale-plugin relaunch raised.
+// launch, so the mark reaches the store with that write, which comes before the runtime starts
+// the process: a restart between the two, or a start the runtime refuses, can leave a mark whose
+// launch was recorded but whose process never ran. It writes nothing for a launch no stale-plugin
+// relaunch raised.
 func (m *Machine) commitPluginRelaunch() {
 	if mark := m.takePluginRelaunch(); mark != nil {
 		m.claim.PluginRelaunchFor = *mark
@@ -391,10 +393,14 @@ func refreshStalePlugin(m *Machine, ctx context.Context, ev Event) error {
 // of the answer: without it a process that reconnects and re-registers on the old contract
 // inside that wait would be relaunched here, which raises a second relaunch over the one still
 // waiting, replaces its wake and takes a second token for the launch that wake was already
-// going to make (reserveWake). The registration is still refused, as every stale one is, so the
-// agent exits rather than take work on a contract this daemon does not speak, and the launch's
-// turn replaces its process (wakeNow). It is the guard judge makes of every observation of that
-// same process, for the one report that reaches a decision of its own instead.
+// going to make (reserveWake). The same guard keeps a claim already marked by a relaunch that ran
+// from being charged twice: when that relaunch's process registers stale, the charged relaunch
+// parks a wake with the mark still set, and a re-registration of that process inside the wait
+// would otherwise meet the mark and be charged a second launch failure for the one registration
+// the claim was already charged for. The registration is still refused, as every stale one is,
+// so the agent exits rather than take work on a contract this daemon does not speak, and the
+// launch's turn replaces its process (wakeNow). It is the guard judge makes of every observation
+// of that same process, for the one report that reaches a decision of its own instead.
 func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 	if got == m.deps.PluginContract {
 		return m.endCurrentPluginRound(ctx)

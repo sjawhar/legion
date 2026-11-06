@@ -191,9 +191,10 @@ type Claim struct {
 	// (launchNow, commitPluginRelaunch), by that launch's own write, and cleared when a
 	// registration records the daemon's own contract, so a registration that still differs while
 	// it equals the daemon's contract is the one that is charged rather than relaunched again
-	// uncharged. A relaunch that was decided but never started a process — refused, abandoned at
-	// its turn, or ended in a suspension — writes nothing here, so the mark always names a
-	// relaunch that did run (relaunchMarked, staleRegistration).
+	// uncharged. A relaunch that was decided but never launched — refused, abandoned at its turn,
+	// or ended in a suspension — writes nothing here, so the mark always names a relaunch whose
+	// launch was recorded (relaunchMarked, staleRegistration); that write comes before the runtime
+	// starts the process (commitPluginRelaunch).
 	PluginRelaunchFor int
 	// UpdateRound is the update round this claim is in, and "" when none is open: the round's
 	// identity and its kind in one string. PodRoundPrefix and the pod's uid is the drift round of
@@ -1355,12 +1356,12 @@ func (m *Machine) launchAfter(ctx context.Context, charged, exempt bool) error {
 //
 // This is where a stale-plugin relaunch marks its claim (commitPluginRelaunch): the process the
 // relaunch replaces is let go here and the mark is written with the launch itself, so
-// PluginRelaunchFor names a relaunch that did start a process and reaches the store with the
-// write that records the launch. A relaunch abandoned anywhere before this line — refused by the
-// lifecycle recheck, cut off by a take-back the store refused, ended in a suspension, or dropped
-// with the wake a second launch replaced — never reaches it and marks nothing (relaunchMarked,
-// runWake). A try whose own write fails keeps the mark it has already written in memory, which
-// the retry's write then stores (relaunchLater).
+// PluginRelaunchFor names a relaunch whose launch was recorded and reaches the store with the
+// write that records it, before the runtime starts the process. A relaunch abandoned anywhere
+// before this line — refused by the lifecycle recheck, cut off by a take-back the store refused,
+// ended in a suspension, or dropped with the wake a second launch replaced — never reaches it
+// and marks nothing (relaunchMarked, runWake). A try whose own write fails keeps the mark it
+// has already written in memory, which the retry's write then stores (relaunchLater).
 func (m *Machine) launchNow(ctx context.Context, charged, exempt bool) error {
 	m.commitPluginRelaunch()
 	m.letGo()
