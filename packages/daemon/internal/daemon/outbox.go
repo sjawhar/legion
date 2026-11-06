@@ -719,6 +719,15 @@ const statusWriteReads = 3
 // with nothing, whichever path brought the row here.
 func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, rule statusRowRule, read dispatch.Issue) error {
 	for range statusWriteReads {
+		// A status Dispatch already shows is this row's work, done: the write is not made again,
+		// and the row counts as written. The repair queues a row on every turn while the record's
+		// own DispatchStatus is stale (status_repair.go), so without this the daemon would write
+		// a status Dispatch holds once a turn for as long as that staleness lasts.
+		if read.Status == payload.Status {
+			r.log.Info("outbox status write found Dispatch already at its status and wrote nothing",
+				"row", row.ID, "issue", row.Issue, "status", payload.Status)
+			return nil
+		}
 		_, err := r.dispatch.SetStatusAt(ctx, read, payload.Status)
 		if err == nil {
 			return nil

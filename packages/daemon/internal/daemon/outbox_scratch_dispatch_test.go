@@ -194,7 +194,7 @@ func TestOutboxSetsTheStatusOfAWriteWhoseReasonDispatchRefusesAgainstScratchDisp
 	now := time.Now().UTC()
 	reason := "Closed by its architect before its first phase: " + strings.Repeat("x", 32001)
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue,
-		record.StatusWrite{ObservedStatus: before.Status, Status: "done", Reason: reason}, now))
+		record.OrdinaryStatusWrite("done", before.Status, reason), now))
 	runner := &outbox{
 		dispatchProject: "LEGION", log: quietLogger(),
 		pool: pool, records: records, dispatch: dispatch.New(baseURL, token),

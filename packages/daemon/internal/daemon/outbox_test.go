@@ -732,7 +732,7 @@ func TestAStatusWriteWhoseReasonDispatchRefusesStillSetsTheStatusAndTellsTheArch
 	now := time.Now().UTC()
 	const reason = "Closed by its architect before its first phase: the human decided no change.\nThe rest of the reason."
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
-		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+		record.OrdinaryStatusWrite("done", "in_progress", reason), now))
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
 		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
 	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}, postErr: refusal}
@@ -775,7 +775,7 @@ func TestAStatusWriteWhoseReasonDispatchRefusesStillSetsTheStatusAndTellsTheArch
 // disagree from here on.
 func TestAStatusWriteDispatchRefusesTellsTheArchitectTheStatusDidNotLand(t *testing.T) {
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "INVALID_STATUS", Message: "no such status"}
-	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done"},
+	notice := statusWriteRefused("LEGION-208", record.OrdinaryStatusWrite("done", "", ""),
 		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal), statusWrites{})
 	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
 		!strings.Contains(notice.Reason, "The status done is not set, so the issue keeps the status it has") ||
@@ -795,7 +795,7 @@ func TestAStatusWriteDispatchRefusesTellsTheArchitectTheStatusDidNotLand(t *test
 func TestAStatusRefusedAfterItsReasonPostedTellsTheArchitectTheReasonStands(t *testing.T) {
 	const reason = "Closed by its architect before its first phase: the human decided no change."
 	refusal := &dispatch.Error{Status: http.StatusNotFound, Code: "ISSUE_NOT_FOUND", Message: "no such issue"}
-	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done", Reason: reason},
+	notice := statusWriteRefused("LEGION-208", record.OrdinaryStatusWrite("done", "", reason),
 		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal), statusWrites{reason: true})
 	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
 		!strings.Contains(notice.Reason, "The status done is not set") ||
@@ -819,7 +819,7 @@ func TestAStatusWriteRetriesUntilTheStatusLandsAfterItsReasonIsRefused(t *testin
 	now := time.Now().UTC()
 	const reason = "Closed by its architect before its first phase: the human decided no change."
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
-		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+		record.OrdinaryStatusWrite("done", "in_progress", reason), now))
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
 		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
 	outage := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
@@ -884,7 +884,7 @@ func TestAStatusWriteWhoseAnswerWasLostStillTellsTheArchitectItsRefusedReason(t 
 	now := time.Now().UTC()
 	const reason = "Closed by its architect before its first phase: the human decided no change."
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
-		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+		record.OrdinaryStatusWrite("done", "in_progress", reason), now))
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
 		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
 	lost := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
