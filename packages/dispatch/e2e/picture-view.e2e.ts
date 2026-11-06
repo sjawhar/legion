@@ -210,14 +210,28 @@ async function expectOwnPixels(picture: Locator): Promise<void> {
     .toBe(PICTURE.width);
 }
 
-/** Waits until the viewer draws the picture fitted to the window again, which is every zoom
- *  level below its own pixels. */
-async function expectFittedAgain(picture: Locator): Promise<void> {
+/** Waits until the viewer draws the picture fitted inside the window again, the state a row
+ *  then measures: no wider and no taller than the window, no further out than its edges, and
+ *  below its own pixels. The zoom out is animated, and the box passes below the picture's own
+ *  width while it is still wider than the window, so every part of the fit is polled together.
+ */
+async function expectFittedAgain(page: Page, picture: Locator): Promise<void> {
+  const window = windowOf(page);
   await expect
-    .poll(async () => Math.round((await boxOf(picture)).width), {
-      message: "the picture never came back to the size that fits the window",
-    })
-    .toBeLessThan(PICTURE.width);
+    .poll(
+      async () => {
+        const box = await boxOf(picture);
+        return (
+          box.width <= window.width + 1 &&
+          box.height <= window.height + 1 &&
+          box.x >= -1 &&
+          box.y >= -1 &&
+          Math.round(box.width) < PICTURE.width
+        );
+      },
+      { message: "the picture never came back to the size that fits the window" }
+    )
+    .toBe(true);
 }
 
 /** The counter the viewer shows while a set has more than one picture: `2 of 3`. */
@@ -358,7 +372,7 @@ test("a picture in a rendered body opens at full size, a click on it zooms, and 
     await expectOwnPixels(shown);
     const window = windowOf(page);
     await page.mouse.click(window.width / 2, window.height / 2);
-    await expectFittedAgain(shown);
+    await expectFittedAgain(page, shown);
 
     // A click on the backdrop beside the picture closes the view, and the link has the focus
     // back.
