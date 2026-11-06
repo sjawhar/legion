@@ -21,7 +21,7 @@
 # roles uses Oh My Pi's tools and the image's toolchain as its own App (full-agent-tools). Tree 2
 # runs through its planner beside tree 1, carrying the repository-configuration fixture, whose
 # skills, language servers, CodeGraph index and settings its planner uses in its checkout
-# (repository-tools), supplies the capability report every session sends at its start (full-agent),
+# (repository-tools), supplies the capability report measured at an idle tick (full-agent, INFRA-927),
 # and is then moved to backlog. Tree 3 is admitted when tree 2 leaves the line, supplies the held
 # phase the controller checkpoint needs and, held, the planner whose workspace turns a capability off
 # and on (full-agent-negative), and is taken out from an operator shell (controller-walk). Tree 4 is

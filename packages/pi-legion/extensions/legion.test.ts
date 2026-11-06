@@ -3348,8 +3348,11 @@ describe("Legion OMP extension", () => {
       let hosts = 0;
       const session = await capabilitySession({
         sessionId: "ses_capability_no_host",
-        // The host is built once per measurement: the first measurement has none at all, as a
-        // pane whose Oh My Pi modules are missing is, and the second measures as every other.
+        // The host is built once per measurement, and this factory throws at the first: a
+        // measurement that rejects outright, which no production host makes — `ompCapabilityHost`
+        // imports each Oh My Pi module lazily inside its own check and `measureCapabilities`
+        // catches every check, so a module that is missing is a failing row rather than a host
+        // that throws. The second measurement measures as every other.
         capabilityHost: (calls) => {
           hosts += 1;
           if (hosts === 1) throw new Error("no capability host in this pane");
@@ -3387,6 +3390,40 @@ describe("Legion OMP extension", () => {
       expect(measurements(session.calls)).toBe(1);
       expect(session.reports).toHaveLength(1);
       expect(session.reports[0]?.rows.every((row) => row.ok)).toBe(true);
+      expect(session.pane.exits).toEqual([]);
+    });
+
+    test("a measurement that fails outright at every attempt is spent three times in all, and no later tick measures again", async () => {
+      let hosts = 0;
+      const session = await capabilitySession({
+        sessionId: "ses_capability_no_host_ever",
+        // Every measurement's host throws, so every attempt rejects outright: the three attempts
+        // are what ends the measuring, since no report is ever made to settle it.
+        capabilityHost: () => {
+          hosts += 1;
+          throw new Error("no capability host in this pane");
+        },
+      });
+
+      const { warnings } = await loggedWarnings(async () => {
+        // Past the last attempt's due tick: the first comes due at `IMPLEMENTER_DUE_TICK`, and
+        // each failure leaves the next due `CAPABILITY_RETRY_TICKS` later.
+        await ticks(
+          session.pane,
+          IMPLEMENTER_DUE_TICK + CAPABILITY_ATTEMPTS * CAPABILITY_RETRY_TICKS
+        );
+        await drain();
+      });
+
+      // The attempts are spent, and a host that keeps throwing is not measured a fourth time.
+      expect(hosts).toBe(CAPABILITY_ATTEMPTS);
+      expect(
+        warnings.filter(
+          (warning) => warning.message === "legion: this session's capability measurement failed"
+        )
+      ).toHaveLength(CAPABILITY_ATTEMPTS);
+      // Nothing reached the daemon, and the failures cost the session nothing else.
+      expect(session.reports).toEqual([]);
       expect(session.pane.exits).toEqual([]);
     });
 
@@ -3446,7 +3483,12 @@ describe("Legion OMP extension", () => {
       expect(String((hung?.reason as Error | undefined)?.message)).toContain(
         "claims/ready did not answer within 50 ms"
       );
-      // The send the daemon took ends its own bound: its request is never aborted.
+      // The send the daemon took ends its own bound: its request is never aborted. The wait is
+      // what makes that an assertion — the second send answered at once, well before its own
+      // 50 ms bound, so only a wait past that bound tells a cleared timer from one still armed.
+      // It is a real wait on purpose: the bound is a real `setTimeout` inside the schedule, and
+      // a timer that was cleared fires nothing there is to await.
+      await Bun.sleep(150);
       expect(session.readySignals[1]?.aborted).toBe(false);
     });
   });

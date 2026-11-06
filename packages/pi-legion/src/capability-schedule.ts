@@ -31,7 +31,7 @@ import { budgetLabel } from "./capability-report";
  * exists to end.
  *
  * Every collaborator is injected — the claim, the idle answer, the measurement, the send and the
- * log — so the only module this one reaches is `./capability-report`, for the label the bound's
+ * log — so the only local module it reaches is `./capability-report`, for the label the bound's
  * message shares with the checks' own budgets, and a test drives the machine tick by tick on its
  * own clock.
  */
