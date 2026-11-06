@@ -251,6 +251,7 @@ const decideValue = "the-real-value"
 func decideRequest() *Request {
 	return &Request{
 		ConnectHost: "api.example.com",
+		ConnectPort: 443,
 		SNI:         "api.example.com",
 		HostHeader:  "api.example.com",
 		Method:      "GET",
@@ -380,6 +381,95 @@ func TestDecide(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTheConnectPortAndTheDotSegmentRefusals covers the two refusals that are about the
+// request rather than about the entry, and the near misses on each side of the line each of
+// them draws: the ports a CONNECT may name beside 443, the segments a reader resolves
+// against the ones that only look like them, and a path with no segment at all.
+func TestTheConnectPortAndTheDotSegmentRefusals(t *testing.T) {
+	// decide runs one request through Decide and Rewrite and answers the refusal, "" for an
+	// allowed one. anyPath drops the entry's allow list, which is what isolates the
+	// dot-segment refusal: with no allow list the only thing left to refuse a path is that.
+	decide := func(t *testing.T, anyPath bool, port uint16, path string) string {
+		t.Helper()
+		rules, r := decideRules(), decideRequest()
+		if anyPath {
+			rules.Secrets[0].Allow = nil
+		}
+		r.ConnectPort, r.Path = port, path
+		ok, why := Decide(rules, decideGrant(), decideValue, r)
+		if ok != (why == "") {
+			t.Errorf("Decide ok = %v with reason %q", ok, why)
+		}
+		if got := Rewrite(rules, decideGrant(), decideValue, r); (got == nil) == ok {
+			t.Errorf("Rewrite = %v, but Decide ok = %v", got, ok)
+		}
+		return why
+	}
+
+	t.Run("the connect port", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			port uint16
+			want string
+		}{
+			{"443, the one port the rules speak about", 443, ""},
+			{"8443, another service of the same name", 8443, "connect port is not 443"},
+			{"80, where no value may travel at all", 80, "connect port is not 443"},
+			{"0, the port of a request that names none", 0, "connect port is not 443"},
+			{"65535", 65535, "connect port is not 443"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				if got := decide(t, false, c.port, "/v1/things"); got != c.want {
+					t.Errorf("Decide on port %d = %q, want %q", c.port, got, c.want)
+				}
+			})
+		}
+	})
+
+	t.Run("a dot segment, whatever the entry allows", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			path string
+			want string
+		}{
+			{"a dot-dot segment inside the prefix", "/v1/../admin", "path has a dot segment"},
+			{"a dot-dot segment after a deeper path", "/v1/things/../../admin", "path has a dot segment"},
+			{"a dot-dot segment alone", "/..", "path has a dot segment"},
+			{"a dot segment alone", "/.", "path has a dot segment"},
+			{"a dot segment in the middle", "/a/./b", "path has a dot segment"},
+			{"..foo is no dot segment", "/v1/..foo", ""},
+			{"... is no dot segment", "/v1/.../x", ""},
+			{"a path with no segment at all", "", ""},
+			{"a path a reader resolves to itself", "/v1/things", ""},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				// With no allow list the entry allows any path, so a refusal here is the
+				// dot-segment one and nothing else: it is unconditional.
+				if got := decide(t, true, 443, c.path); got != c.want {
+					t.Errorf("Decide on %q with no allow list = %q, want %q", c.path, got, c.want)
+				}
+			})
+		}
+	})
+
+	t.Run("a dot segment is read before the allow list", func(t *testing.T) {
+		// The first path is inside the entry's "/v1/" prefix as it is written and outside it
+		// as a reader resolves it, which is the defect this refusal closes; the second is
+		// outside it either way, and is still refused for the dot segment rather than by the
+		// rule, because the dot-segment test is read first.
+		for _, c := range []struct{ name, path string }{
+			{"a path the allow list would have allowed", "/v1/../admin"},
+			{"a path the allow list refuses anyway", "/admin/../v1/things"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				if got := decide(t, false, 443, c.path); got != "path has a dot segment" {
+					t.Errorf("Decide on %q = %q, want %q", c.path, got, "path has a dot segment")
+				}
+			})
+		}
+	})
 }
 
 // rewritten runs Rewrite over one entry and one set of headers, and answers the headers it

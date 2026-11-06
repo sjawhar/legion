@@ -34,6 +34,7 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -185,9 +186,13 @@ type Server struct {
 // grant the target is bound to, which are the same for every request on the connection.
 type connInfo struct {
 	// target is the CONNECT authority, always with a port; host is its host alone, ASCII
-	// lower-cased, which is the airlock.Request's ConnectHost.
+	// lower-cased, which is the airlock.Request's ConnectHost, and port is that authority's
+	// port as a number, which is its ConnectPort. A bound connection is opened on port 443
+	// alone (boundHost), and the port travels here all the same so that the decision reads
+	// the port the CONNECT named rather than taking it on trust.
 	target string
 	host   string
+	port   uint16
 	grant  requests.AirlockConnection
 	// candidates is Server.candidates for this grant and this host, read once when the
 	// connection was opened: the grant, the host and the rules are all fixed for its life.
@@ -389,19 +394,32 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request, grant requ
 		http.Error(w, "airlock: this connection cannot be taken over", http.StatusInternalServerError)
 		return
 	}
-	if s.boundHost(grant, host) {
-		s.connectBound(hijacker, grant, target, host)
+	connectPort := connectPortOf(port)
+	if s.boundHost(grant, host, connectPort) {
+		s.connectBound(hijacker, grant, target, host, connectPort)
 		return
 	}
 	s.connectTunnel(w, r, hijacker, target)
 }
 
-// connectBound answers a CONNECT to a host one of the grant's names is bound to: the proxy
-// opens the TLS itself, with a certificate of its own authority, and hands the decrypted
-// connection to the inner server. The grant's candidate (name, slot) pairs for this host are
-// read here, once, and carried into every request on the connection (connInfo.candidates).
-func (s *Server) connectBound(hijacker http.Hijacker, grant requests.AirlockConnection, target, host string) {
-	candidates := s.candidates(grant, host)
+// connectPortOf is a CONNECT authority's port as a number, and 0 for a port that is no
+// number at all ("https") or does not fit in 16 bits. Only 443 is a bound host's port, so a
+// port this cannot read is a tunnel's.
+func connectPortOf(port string) uint16 {
+	number, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0
+	}
+	return uint16(number)
+}
+
+// connectBound answers a CONNECT to a host one of the grant's names is bound to, on port 443:
+// the proxy opens the TLS itself, with a certificate of its own authority, and hands the
+// decrypted connection to the inner server. The grant's candidate (name, slot) pairs for this
+// host and port are read here, once, and carried into every request on the connection
+// (connInfo.candidates).
+func (s *Server) connectBound(hijacker http.Hijacker, grant requests.AirlockConnection, target, host string, port uint16) {
+	candidates := s.candidates(grant, host, port)
 	client, err := hijack(hijacker)
 	if err != nil {
 		return
@@ -426,7 +444,7 @@ func (s *Server) connectBound(hijacker http.Hijacker, grant requests.AirlockConn
 		},
 	})
 	connection := net.Conn(decrypted)
-	s.conns.Store(connection, connInfo{target: target, host: host, grant: grant, candidates: candidates})
+	s.conns.Store(connection, connInfo{target: target, host: host, port: port, grant: grant, candidates: candidates})
 	s.track(connection)
 	if !s.innerLn.hand(connection) {
 		// The drain closed the listener between the hijack and here.
@@ -481,7 +499,7 @@ func (s *Server) connectTunnel(w http.ResponseWriter, r *http.Request, hijacker 
 // for http:// rather than https://.
 func (s *Server) servePlain(w http.ResponseWriter, r *http.Request, grant requests.AirlockConnection) {
 	host := airlock.ASCIILower(r.URL.Hostname())
-	if s.boundHost(grant, host) {
+	if s.boundName(grant, host) {
 		// Plain HTTP to a bound host is refused rather than swapped into: the value would
 		// cross the network in the clear, and no rule of the airlock says a secret may. The
 		// command asks again over https, where the proxy's own certificate covers it.
@@ -516,10 +534,25 @@ func (s *Server) badGateway(host, path string) func(http.ResponseWriter, *http.R
 	}
 }
 
-// boundHost reports whether host is one this connection's grant may carry a secret to: at least
-// one of its names has an entry in the rules file whose hosts bind it. A host no name binds is
-// a tunnel, whatever the file says about other secrets.
-func (s *Server) boundHost(grant requests.AirlockConnection, host string) bool {
+// boundHost reports whether this CONNECT may be decrypted and read: the host is one a name of
+// the grant binds, and the port it was named on is 443. A host no name binds is a tunnel,
+// whatever the file says about other secrets, and so is another port of a name that is bound:
+// every name the decision compares - the CONNECT host, the TLS name and the Host header -
+// carries no port, so 443 is the only port the entry's hosts speak about, and another port of
+// one name is another service.
+//
+// Such a CONNECT is tunnelled rather than refused because the airlock blocks nothing it does
+// not bind (R3): the proxy reads nothing on it, puts nothing into it, and the command reaches
+// that service exactly as it reaches every host the rules say nothing about.
+func (s *Server) boundHost(grant requests.AirlockConnection, host string, port uint16) bool {
+	return port == 443 && s.boundName(grant, host)
+}
+
+// boundName reports whether host is a name this connection's grant may carry a secret to: at
+// least one of its names has an entry in the rules file whose hosts bind it. It says nothing
+// about a port, so it is the test for plain HTTP, where the refusal is that the value may not
+// cross in the clear at all, whatever port it was asked for on.
+func (s *Server) boundName(grant requests.AirlockConnection, host string) bool {
 	for name := range grant.Names {
 		if entry := s.rules.Lookup(name); entry != nil && airlock.HostBound(entry.Hosts, host) {
 			return true

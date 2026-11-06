@@ -48,6 +48,10 @@ structure Grant where
 
 structure Request where
   connectHost : String
+  /-- The port the CONNECT named. Only 443 may carry a value: the three names the decision
+  compares carry no port, so 443 is the only port the rules speak about, and another port of
+  one name is another service. -/
+  connectPort : Nat
   sni : String
   hostHeader : String
   method : String
@@ -194,6 +198,16 @@ def allowOK : Option (List Allow) → Request → Bool
   | none, _ => true
   | some l, r => l.any fun a => a.method == r.method && a.pathPrefix.toList.isPrefixOf r.path.toList
 
+/-- The path holds a segment that is `.` or `..`: the path split on `"/"`, each segment
+compared whole, so `"/v1/../admin"` and `"/a/./b"` hold one while `"/v1/..foo"` and
+`"/v1/.../x"` hold none.
+
+`String.splitOn "/"` and Go's `strings.Split(path, "/")` answer alike on every input - the
+empty path is one empty segment on both sides, and a leading or trailing slash is an empty
+segment at that end on both - so the two sides refuse the same paths. -/
+def hasDotSegment (path : String) : Bool :=
+  (path.splitOn "/").any fun s => s == "." || s == ".."
+
 def namesUnique : List String → Bool
   | [] => true
   | n :: ns => !ns.contains n && namesUnique ns
@@ -219,6 +233,22 @@ def validate (rules : Rules) : Bool :=
 carry, or the reason it may not. The reasons and the order they are reported in are the
 contract with Go's `check`.
 
+Two of the ten refusals are about the request rather than about the entry. The CONNECT
+port must be 443: every name the decision compares - the CONNECT host, the TLS name and the
+Host header - carries no port, so 443 is the only port the rules speak about, and another
+port of one name is another service. It is read above the two name comparisons because the
+port is part of what the CONNECT named.
+
+A path that holds a dot segment is refused whatever the entry's `allow` says, an entry with
+no `allow` included: an entry's path prefix bounds the path the service will read, and a
+reader that resolves dot segments first - which is what RFC 3986 section 5.2.4 says a path
+means - reads `"/v1/../admin"` as `"/admin"`, outside a `"/v1/"` prefix the literal path is
+inside. A path two readers resolve differently is a path neither can be held to, so it is
+refused rather than resolved here, which keeps one path in the decision and in what is
+forwarded, and lets this model prove the bound in a line where `remove_dot_segments` would
+be a page. It is read directly above the `allow` test because it is what makes that rule
+mean what it says.
+
 The last test reads **every** header of the request, not only the ones the entry names,
 and an entry with a `kind` is not exempt: a request that already carries the real value
 learnt it somewhere other than this swap, so the airlock refuses it. -/
@@ -230,8 +260,10 @@ def check (rules : Rules) (g : Grant) (value : String) (r : Request) :
   | some sr =>
     if sr.hosts.isEmpty then .error "secret not behind airlock"
     else if !hostBound sr.hosts r.connectHost then .error "host not bound"
+    else if r.connectPort != 443 then .error "connect port is not 443"
     else if r.sni != r.connectHost then .error "sni mismatch"
     else if r.hostHeader != r.connectHost then .error "host header mismatch"
+    else if hasDotSegment r.path then .error "path has a dot segment"
     else if !allowOK sr.allow r then .error "not allowed by rule"
     else if r.headers.any (fun h => carries value h.2) then
       .error "request already carries the value"

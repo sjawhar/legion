@@ -579,7 +579,9 @@ file when it starts (`BROKER_AIRLOCK_RULES_FILE`, an `airlock.json`), which name
 secret it covers, the hosts that secret's value may reach, the request headers that may carry it
 (`authorization`, unless the entry names others) and, where the entry gives them, the methods and
 path prefixes it may travel on
-(`packages/envoy/internal/broker/airlock`). A secret the file names is **behind the airlock**,
+(`packages/envoy/internal/broker/airlock`). Those hosts carry no port, so an entry binds a name
+on port 443 alone, and another port of that name is another service the proxy tunnels unread.
+A secret the file names is **behind the airlock**,
 and the broker never releases its value to anyone: a read of a grant of it leaves the name out of
 `values` and answers an `airlock` object instead, which carries the proxy's URL, the certificate
 authority to trust that proxy by, a proxy password, and, for each name, a placeholder, the
@@ -606,7 +608,10 @@ header; then the entry's hosts, headers, methods and paths decide whether the sw
 refusal is an HTTP error from the proxy naming the rule that refused it, such as `host not bound`
 or `not allowed by rule`, and the broker logs one line for each call to a bound host: the
 enrollment, the grant, the secret, the host, the method, the path, the answer's status and that
-reason, never a value. Each entry's own fingerprint is part of what a grant was decided under, so
+reason, never a value. A path that holds a `.` or `..` segment is refused outright
+(`path has a dot segment`), whatever the entry's paths allow, because a reader that resolves
+such a path first — which is what RFC 3986 says it means — reads it as a path the prefix does
+not bound. Each entry's own fingerprint is part of what a grant was decided under, so
 an edit to one secret's entry ends the grants that entry affects and no others.
 
 What the airlock does not stop is as much of the design as what it does:

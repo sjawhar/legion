@@ -176,12 +176,28 @@ func (s *src) pick(pool []string) string {
 	return pool[(i/8)%len(pool)] // i%8 picked the escape; i/8 reaches every entry
 }
 
+// port returns a portPool entry, or (1 in 8) a free 16-bit draw, so the comparison covers
+// every port and not only the ones named here.
+func (s *src) port() uint16 {
+	i := int(s.u8())
+	if i%8 == 7 {
+		return uint16(s.u8())<<8 | uint16(s.u8())
+	}
+	return portPool[(i/8)%len(portPool)] // i%8 picked the escape; i/8 reaches every entry
+}
+
 var (
 	hostPool   = []string{"api.github.com", "*.github.com", "github.com", "*.com", "*.", "API.GitHub.com", "*.GitHub.COM", "uploads.github.com", "a.b.github.com", ".github.com", "githu\u212a.com", "githuk.com", "\u0130.github.com", ""}
 	namePool   = []string{"gh", "aws", "GH", ""}
 	hdrPool    = []string{"authorization", "Authorization", "AUTHORIZATION", "x-api-key", "X-Api-Key", "x-api-\u212aey", "proxy-authorization", "cookie"}
 	methodPool = []string{"GET", "POST", "get"}
-	pathPool   = []string{"/", "/repos/x", "/repos", "/admin", ""}
+	// pathPool holds paths with no dot segment, paths that carry one (so check's "path has a
+	// dot segment" refusal is reached), and two near misses - "..foo" and "..." are segments
+	// no reader resolves - so the comparison covers where each side draws that line.
+	pathPool = []string{"/", "/repos/x", "/repos", "/admin", "", "/v1/../admin", "/a/./b", "/..", "/.", "/v1/things/../../admin", "/v1/..foo", "/v1/.../x"}
+	// portPool is the CONNECT port: 443 five times in eight, so a case reaches the refusals
+	// below the port, and otherwise a port the rules say nothing about.
+	portPool   = []uint16{443, 443, 443, 443, 443, 80, 8443, 0}
 	prefixPool = []string{"/", "/repos", "", "/r", "/admin/"}
 	phPool     = []string{"PH_gh_1", "ph", "", "a", "=", "user"}
 	valuePool  = []string{"REAL", "ghp_secret", "", "PH_gh_1", "a:b", "\u00e9"}
@@ -300,7 +316,7 @@ func genCase(data []byte) wireCase {
 	}
 	g := Grant{Secret: s.pick(namePool), Placeholder: s.pick(phPool)}
 	value := s.pick(valuePool)
-	r := &Request{ConnectHost: s.pick(hostPool), Method: s.pick(methodPool), Path: s.pick(pathPool), Headers: [][2]string{}}
+	r := &Request{ConnectHost: s.pick(hostPool), ConnectPort: s.port(), Method: s.pick(methodPool), Path: s.pick(pathPool), Headers: [][2]string{}}
 	r.SNI, r.HostHeader = r.ConnectHost, r.ConnectHost
 	if s.u8()%4 == 0 {
 		r.SNI = s.pick(hostPool)

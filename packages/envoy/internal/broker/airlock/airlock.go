@@ -61,7 +61,11 @@ type Grant struct {
 
 // Request is one request on the proxy port, as much of it as the decision and the swap read.
 type Request struct {
-	ConnectHost string      `json:"connectHost"`
+	ConnectHost string `json:"connectHost"`
+	// ConnectPort is the port the CONNECT named. Only 443 may carry a value: the three
+	// names the decision compares carry no port, so 443 is the only port the rules speak
+	// about, and another port of one name is another service.
+	ConnectPort uint16      `json:"connectPort"`
 	SNI         string      `json:"sni"`
 	HostHeader  string      `json:"hostHeader"`
 	Method      string      `json:"method"`
@@ -172,9 +176,43 @@ func allowOK(allow []Allow, r *Request) bool {
 	return false
 }
 
+// hasDotSegment reports whether the path holds a segment that is "." or "..". The path is
+// split on "/" and each segment is compared whole, so "/v1/../admin" and "/a/./b" hold one
+// while "/v1/..foo" and "/v1/.../x" hold none.
+//
+// strings.Split is narrower than path.Clean or net/url's resolution, and deliberately: it
+// decides nothing about what the path means, it only says whether it holds a segment a
+// reader would resolve. It is also the one split the model can make the same way, because
+// Go's strings.Split and Lean's String.splitOn answer alike on every input - the empty path
+// is one empty segment on both sides, and a leading or trailing slash is an empty segment at
+// that end on both - so the two sides refuse the same paths.
+func hasDotSegment(path string) bool {
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // check is the one decision both Decide and Rewrite take: the entry the request may carry,
 // or the reason it may not. The reasons, and the order they are reported in, are the Lean
 // model's.
+//
+// Two of the ten refusals are about the request rather than about the entry. The CONNECT
+// port must be 443: every name the decision compares - the CONNECT host, the TLS name and
+// the Host header - carries no port, so 443 is the only port the rules speak about, and
+// another port of one name is another service. It is read above the two name comparisons
+// because the port is part of what the CONNECT named.
+//
+// A path that holds a dot segment is refused whatever the entry's allow list says, an entry
+// with no allow list included: an entry's path prefix bounds the path the service will read,
+// and a reader that resolves dot segments first - which is what RFC 3986 section 5.2.4 says
+// a path means - reads "/v1/../admin" as "/admin", outside a "/v1/" prefix the literal path
+// is inside. A path two readers resolve differently is a path neither can be held to, so it
+// is refused rather than resolved here, which keeps one path in the decision and in what is
+// forwarded. It is read directly above the allow list because it is what makes that rule
+// mean what it says.
 func check(rules Rules, g Grant, value string, r *Request) (*SecretRule, string) {
 	if g.Placeholder == "" {
 		return nil, "empty placeholder"
@@ -187,10 +225,14 @@ func check(rules Rules, g Grant, value string, r *Request) (*SecretRule, string)
 		return nil, "secret not behind airlock"
 	case !HostBound(sr.Hosts, r.ConnectHost):
 		return nil, "host not bound"
+	case r.ConnectPort != 443:
+		return nil, "connect port is not 443"
 	case r.SNI != r.ConnectHost:
 		return nil, "sni mismatch"
 	case r.HostHeader != r.ConnectHost:
 		return nil, "host header mismatch"
+	case hasDotSegment(r.Path):
+		return nil, "path has a dot segment"
 	case !allowOK(sr.Allow, r):
 		return nil, "not allowed by rule"
 	}

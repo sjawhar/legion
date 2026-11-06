@@ -192,6 +192,10 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 	}
 	request := &airlock.Request{
 		ConnectHost: info.host,
+		// The port the CONNECT named, which is 443 for every connection the proxy decrypts
+		// (boundHost). The decision reads it all the same, so a connection that ever reached
+		// here on another port carries no value off it.
+		ConnectPort: info.port,
 		// The three names the decision compares are ASCII lower-cased, as the entry's hosts
 		// are: host names are case-insensitive and the model compares them exactly, so a
 		// client that wrote "API.example.com" in one of the three is not a mismatch. The fold
@@ -413,15 +417,23 @@ func (s *Server) callFields(info connInfo, r *http.Request, chosen pair, status 
 // chosen for needs no second Lookup of the name.
 type pair struct{ name, slot, kind string }
 
-// candidates is every (name, slot) pair of the grant whose name's entry binds the CONNECT host,
-// sorted by name and then by slot. Sorted because the choice below takes the first of them, and
-// a map's order would make which value a request is handled for depend on the run.
+// candidates is every (name, slot) pair of the grant whose name's entry binds the CONNECT host
+// on the port the CONNECT named, sorted by name and then by slot. Sorted because the choice
+// below takes the first of them, and a map's order would make which value a request is handled
+// for depend on the run.
 //
-// It is a pure function of the grant, the host and the rules, every one of them fixed for the
-// life of a decrypted connection, so it runs once per connection (connectBound) and its answer
-// travels in connInfo rather than being built again - a map walk, a Lookup and a HostBound per
-// name, and a sort - for each request on it.
-func (s *Server) candidates(grant requests.AirlockConnection, host string) []pair {
+// The port is read here for the reason boundHost reads it: the entry's hosts carry no port, so
+// an entry binds a name on 443 and nowhere else, and another port of that name is another
+// service, which no name of this grant is a candidate for.
+//
+// It is a pure function of the grant, the host, the port and the rules, every one of them
+// fixed for the life of a decrypted connection, so it runs once per connection (connectBound)
+// and its answer travels in connInfo rather than being built again - a map walk, a Lookup and
+// a HostBound per name, and a sort - for each request on it.
+func (s *Server) candidates(grant requests.AirlockConnection, host string, port uint16) []pair {
+	if port != 443 {
+		return nil
+	}
 	var pairs []pair
 	for name, held := range grant.Names {
 		entry := s.rules.Lookup(name)

@@ -1,0 +1,17 @@
+# go-any-port: check drops the refusal of a CONNECT on a port other than 443, so a bound name
+# on any port - another service of that name - takes the swap. Caught by the comparison fuzz
+# test: the model still answers "connect port is not 443". Applied with patch -p1 from a copy.
+
+--- a/packages/envoy/internal/broker/airlock/airlock.go
++++ b/packages/envoy/internal/broker/airlock/airlock.go
+@@ -225,8 +225,8 @@
+ 		return nil, "secret not behind airlock"
+ 	case !HostBound(sr.Hosts, r.ConnectHost):
+ 		return nil, "host not bound"
+-	case r.ConnectPort != 443:
+-		return nil, "connect port is not 443"
++	// MUTANT: the port the CONNECT named is no longer read, so a name the entry binds
++	// carries the value on every port of it and not on 443 alone.
+ 	case r.SNI != r.ConnectHost:
+ 		return nil, "sni mismatch"
+ 	case r.HostHeader != r.ConnectHost:

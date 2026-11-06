@@ -4,16 +4,16 @@
 
 --- a/packages/envoy/internal/broker/airlock/airlock.go
 +++ b/packages/envoy/internal/broker/airlock/airlock.go
-@@ -151,10 +151,8 @@
- 		return nil, "secret not behind airlock"
+@@ -226,10 +226,8 @@
  	case !HostBound(sr.Hosts, r.ConnectHost):
  		return nil, "host not bound"
+ 	case r.ConnectPort != 443:
+ 		return nil, "connect port is not 443"
 -	case r.SNI != r.ConnectHost:
 -		return nil, "sni mismatch"
 -	case r.HostHeader != r.ConnectHost:
 -		return nil, "host header mismatch"
 +	// MUTANT: the TLS name and the Host header are no longer compared with the CONNECT
 +	// target, so a request on one connection may carry the secret to another name.
- 	case !allowOK(sr.Allow, r):
- 		return nil, "not allowed by rule"
- 	}
+ 	case hasDotSegment(r.Path):
+ 		return nil, "path has a dot segment"

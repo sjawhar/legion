@@ -10,12 +10,15 @@ what buys that, so a theorem about the rewrite needs no freshness hypothesis.
 
 namespace Airlock
 
-/-- Everything `check` establishes when it accepts, including that no header of the
-incoming request carries the value. -/
+/-- Everything `check` establishes when it accepts: the entry, that it binds the CONNECT
+host, that the CONNECT port is 443, that the TLS name and the Host header are that host,
+that the path holds no dot segment, that the entry's `allow` covers the request, and that
+no header of the incoming request carries the value. -/
 theorem check_ok {rules : Rules} {g : Grant} {value : String} {r : Request} {sr : SecretRule}
     (h : check rules g value r = .ok sr) :
     lookup rules g.secret = some sr ∧ sr.hosts ≠ [] ∧ hostBound sr.hosts r.connectHost = true ∧
-      r.sni = r.connectHost ∧ r.hostHeader = r.connectHost ∧ allowOK sr.allow r = true ∧
+      r.connectPort = 443 ∧ r.sni = r.connectHost ∧ r.hostHeader = r.connectHost ∧
+      hasDotSegment r.path = false ∧ allowOK sr.allow r = true ∧
       ∀ hd ∈ r.headers, carries value hd.2 = false := by
   unfold check at h
   split at h
@@ -24,6 +27,10 @@ theorem check_ok {rules : Rules} {g : Grant} {value : String} {r : Request} {sr 
   | none => simp [hl] at h
   | some sr' =>
     simp only [hl] at h
+    split at h
+    · cases h
+    split at h
+    · cases h
     split at h
     · cases h
     split at h
@@ -96,7 +103,7 @@ theorem T1 {rules : Rules} {g : Grant} {value : String} {r r' : Request}
     unfold rewriteReq at h
     split at h
     · rename_i sr' hc
-      exact (check_ok hc).2.2.2.2.2.2
+      exact (check_ok hc).2.2.2.2.2.2.2.2
     · cases h
   obtain ⟨sr, hl, hq, hb, -, hh⟩ := T1_structure h
   refine ⟨sr, hl, hq, hb, ?_⟩
@@ -109,22 +116,32 @@ theorem T1 {rules : Rules} {g : Grant} {value : String} {r r' : Request}
     cases hcar
   · rw [hname]; exact hc
 
-/-- T2: a rewrite happens only on a CONNECT host the entry binds, and only when the TLS
-name and the Host header both equal that host.
+/-- T2: a rewrite happens only on a CONNECT host the entry binds, only on port 443 of that
+host, only when the TLS name and the Host header both equal that host, and only on a path
+that holds no dot segment.
+
+The port is part of the statement because every name compared here carries none, so 443 is
+the only port the rules speak about and another port of one name is another service. The
+path is part of it because the entry's `allow` prefix is a bound on the path the service
+will read: a path with a dot segment is one a reader resolves into another path
+(RFC 3986 section 5.2.4), so the airlock carries none, and the path the swap answers is the
+path that was decided.
 
 The statement holds for every entry, an entry with a `kind` included, so it holds in
 particular for the entries without a kind that requirement R8 names. -/
 theorem T2 {rules : Rules} {g : Grant} {value : String} {r r' : Request}
     (h : rewriteReq rules g value r = some r') :
     ∃ sr, lookup rules g.secret = some sr ∧ hostBound sr.hosts r.connectHost = true ∧
-      r.sni = r.connectHost ∧ r.hostHeader = r.connectHost ∧
-      r'.connectHost = r.connectHost ∧ r'.sni = r.sni ∧ r'.hostHeader = r.hostHeader := by
+      r.connectPort = 443 ∧ r.sni = r.connectHost ∧ r.hostHeader = r.connectHost ∧
+      hasDotSegment r.path = false ∧
+      r'.connectHost = r.connectHost ∧ r'.connectPort = r.connectPort ∧ r'.sni = r.sni ∧
+      r'.hostHeader = r.hostHeader ∧ r'.path = r.path := by
   unfold rewriteReq at h
   split at h
   · rename_i sr hc
     cases h
-    obtain ⟨hl, -, hb, hs, hh, -⟩ := check_ok hc
-    exact ⟨sr, hl, hb, hs, hh, rfl, rfl, rfl⟩
+    obtain ⟨hl, -, hb, hp, hs, hh, hd, -⟩ := check_ok hc
+    exact ⟨sr, hl, hb, hp, hs, hh, hd, rfl, rfl, rfl, rfl, rfl⟩
   · cases h
 
 /-- T3: a valid rules file gives every entry at least one host, and a judge a lifetime of

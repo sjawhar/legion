@@ -768,6 +768,73 @@ func TestABoundHostOnAnotherPortCarriesNoValue(t *testing.T) {
 	}
 }
 
+// TestABoundNameOnAnotherPortIsTunnelled: the entry binds a name, and every name the decision
+// compares carries no port, so 443 is the only port those rules speak about and another port
+// of that name is another service. Such a CONNECT is the plain tunnel any unbound host gets -
+// the proxy opens no TLS of its own, reads nothing and logs no call - rather than a refusal,
+// because the airlock blocks nothing it does not bind.
+func TestABoundNameOnAnotherPortIsTunnelled(t *testing.T) {
+	r := newRig(t, Options{})
+	r.dialTo[net.JoinHostPort(boundHost, "8443")] = r.service.Addr()
+	target := net.JoinHostPort(boundHost, "8443")
+
+	// What answers the handshake inside the tunnel is the stand-in service's own certificate:
+	// the bytes reached that service untouched.
+	answer, conn, _ := r.connectRaw(target, basic(workerPlaceholder))
+	if answer.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT %s answered %d %q; want 200, the tunnel any host the rules say nothing about gets", target, answer.StatusCode, bodyOf(t, answer))
+	}
+	service := tls.Client(conn, &tls.Config{ServerName: boundHost, RootCAs: r.service.Authority().Pool()})
+	if err := service.Handshake(); err != nil {
+		t.Fatalf("the TLS handshake inside the tunnel on port 8443: %v; want the stand-in service's own certificate", err)
+	}
+
+	// And on a second tunnel, the proxy's own authority is not what answered: a proxy that had
+	// decrypted this connection would have served a leaf of it, as it does on port 443.
+	second, conn2, _ := r.connectRaw(target, basic(workerPlaceholder))
+	if second.StatusCode != http.StatusOK {
+		t.Fatalf("the second CONNECT %s answered %d; want 200", target, second.StatusCode)
+	}
+	proxyOnly := x509.NewCertPool()
+	proxyOnly.AddCert(r.authority.Certificate())
+	if err := tls.Client(conn2, &tls.Config{ServerName: boundHost, RootCAs: proxyOnly}).Handshake(); err == nil {
+		t.Fatal("the connection on port 8443 was answered by a certificate of the proxy's own authority; want a tunnel the proxy does not read")
+	}
+	if calls := r.logs.calls(); len(calls) != 0 {
+		t.Errorf("the proxy logged %d call(s) to a bound host for a tunnelled port; want none: it read no request", len(calls))
+	}
+}
+
+// TestTheLogLineOfARefusedDotSegmentRequestNamesTheReason: every call to a bound host logs one
+// line, allowed or refused, and the reason on a refused one is the decision's own words. An
+// operator reading the line has to see that it was the dot segment that refused the call,
+// since the path as written is inside the entry's prefix.
+func TestTheLogLineOfARefusedDotSegmentRequestNamesTheReason(t *testing.T) {
+	r := newRig(t, Options{})
+	client := r.client(workerPlaceholder)
+	answer, body := r.get(client, "https://"+boundHost+"/v1/../admin/things", "Authorization", "Bearer "+workerPlaceholder)
+	if answer.StatusCode != http.StatusForbidden || !strings.Contains(body, "path has a dot segment") {
+		t.Fatalf("the call answered %d %q; want 403 naming the dot segment", answer.StatusCode, strings.TrimSpace(body))
+	}
+	calls := r.logs.callsAtLeast(t, 1)
+	if len(calls) != 1 {
+		t.Fatalf("the proxy logged %d call lines; want exactly one", len(calls))
+	}
+	line := calls[0]
+	if reason, _ := line.fields["reason"].(string); reason != "path has a dot segment" {
+		t.Errorf("the refused call logged the reason %q; want the decision's own words", reason)
+	}
+	if line.fields["allowed"] != false || line.fields["status"] != int64(403) {
+		t.Errorf("the refused call logged %v; want allowed false and status 403", line.fields)
+	}
+	if path, _ := line.fields["path"].(string); path != "/v1/../admin/things" {
+		t.Errorf("the refused call logged the path %q; want the path the command wrote", path)
+	}
+	if seen := r.requests(); len(seen) != 0 {
+		t.Fatalf("the service was sent %d requests; want none", len(seen))
+	}
+}
+
 // TestARequestThatAlreadyCarriesTheValueIsRefused: a command that holds the real value learnt it
 // somewhere other than this swap, so the airlock refuses the request rather than carrying it.
 func TestARequestThatAlreadyCarriesTheValueIsRefused(t *testing.T) {

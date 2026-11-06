@@ -4,9 +4,10 @@
 
 --- a/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
 +++ b/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
-@@ -233,8 +233,7 @@
+@@ -264,8 +264,7 @@
      else if r.sni != r.connectHost then .error "sni mismatch"
      else if r.hostHeader != r.connectHost then .error "host header mismatch"
+     else if hasDotSegment r.path then .error "path has a dot segment"
      else if !allowOK sr.allow r then .error "not allowed by rule"
 -    else if r.headers.any (fun h => carries value h.2) then
 -      .error "request already carries the value"
