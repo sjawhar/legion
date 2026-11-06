@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -126,14 +125,13 @@ func (p *dispatchProcess) postMention(key, body string, targets ...string) (stri
 	if err != nil {
 		return "", fmt.Errorf("encode the comment: %w", err)
 	}
-	response, err := p.send(http.MethodPost, "/api/v1/issues/"+key+"/comments", string(input))
+	answer, err := p.trySend(http.MethodPost, "/api/v1/issues/"+key+"/comments", string(input), asUser(dispatchTestLogin))
 	if err != nil {
 		return "", err
 	}
-	defer response.Body.Close()
-	created, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("status %d, want %d: %s", response.StatusCode, http.StatusCreated, created)
+	created := answer.body
+	if answer.status != http.StatusCreated {
+		return "", fmt.Errorf("status %d, want %d: %s", answer.status, http.StatusCreated, created)
 	}
 	var comment struct {
 		ID string `json:"id"`
