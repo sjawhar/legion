@@ -133,3 +133,18 @@ func waitForLane(t *testing.T, limiter *Limiter, lane Lane, queued int) {
 	}
 	t.Fatalf("the %s lane never queued %d waiters", lane, queued)
 }
+
+// A lane is one request wide a processor, so the three-processor box the width was measured on
+// keeps three and a sixteen-processor server is not held to that box's three, and it stops at the
+// read class's cap over the four lanes, so the heavy reads together never exceed the reads a
+// process admits.
+func TestALaneIsOneRequestWideAProcessorUpToTheReadClassesShare(t *testing.T) {
+	for _, c := range []struct{ procs, want int }{{1, 1}, {3, 3}, {7, 7}, {16, MaxHeavyReadLane}} {
+		if got := heavyReadLaneLimit(c.procs); got != c.want {
+			t.Errorf("heavyReadLaneLimit(%d) = %d, want %d", c.procs, got, c.want)
+		}
+	}
+	if lanes := len(HeavyReadLanes()); lanes*MaxHeavyReadLane > MaxReadLimit {
+		t.Errorf("%d lanes of %d hold more than the read class's %d", lanes, MaxHeavyReadLane, MaxReadLimit)
+	}
+}

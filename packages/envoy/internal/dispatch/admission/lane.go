@@ -22,8 +22,7 @@ const (
 	NoLane Lane = iota
 	// Search is GET /api/v1/search, the full-text union.
 	Search
-	// References is the reference closure: GET /api/v1/issues/{key}/references and
-	// GET /api/v1/references.
+	// References is the reference closure, GET /api/v1/issues/{key}/references.
 	References
 	// IssueArtifacts is GET /api/v1/issues/{key}/artifacts, an issue's documents and files.
 	IssueArtifacts
@@ -46,11 +45,13 @@ func (l Lane) String() string {
 // endpoint).
 func HeavyReadLanes() []Lane { return []Lane{Search, References, IssueArtifacts, IssueList} }
 
-// HeavyReadLaneLimit is how many requests of one heavy read route may run at once in a process.
+// heavyReadLaneLimit is how many requests of one heavy read route may run at once in a process
+// of procs processors: heavyReadsPerCPU a processor, at most MaxHeavyReadLane.
 //
-// It is measured rather than chosen. On the load test's recovery step (packages/envoy/loadtest,
-// 0.5x:60s,10x:60s,0.5x:120s) the windows that fail the recovery criterion are 3 to 4 second
-// stalls in which Postgres, sampled every 250 ms, has three to five of these statements running at
+// The width per processor is measured rather than chosen. On the load test's recovery step
+// (packages/envoy/loadtest, 0.5x:60s,10x:60s,0.5x:120s) the windows that fail the recovery
+// criterion are 3 to 4 second stalls in which Postgres, sampled every 250 ms, has three to five of
+// these statements running at
 // once and waiting on nothing - the search union at 283 to 983 ms of statement age, the issue list
 // at 104 to 558 ms, the references closure, an issue's artifacts at 165 to 449 ms - while
 // everything else on the box queues behind them. Over the two minutes after the drop those four
@@ -62,8 +63,9 @@ func HeavyReadLanes() []Lane { return []Lane{Search, References, IssueArtifacts,
 //	an issue's artifacts                      15.0 s over  52 calls, 288 ms each
 //	the issue list (recursive, filtered)      14.1 s over  95 calls, 149 ms each
 //
-// Three is measured too, against one and two on that step, three runs each (INFRA-592, j-report
-// Step 5). The three answer the same load differently and the difference is where the cost shows:
+// Three - one a processor on that box - is measured too, against one and two, three runs each
+// (INFRA-592, j-report Step 5). The three answer the same load differently and the difference is
+// where the cost shows:
 //
 //	lane limit  2xx served  what the recovery windows failed on
 //	1           8,300       the refusals: 85 to 98% of the requests of a window succeeded
@@ -76,9 +78,24 @@ func HeavyReadLanes() []Lane { return []Lane{Search, References, IssueArtifacts,
 // four, four searches at 327 ms each are more database processor than the box has. Three serves
 // about 8% more requests than the same tree without lanes (7,161 to 7,541), so the lane is not
 // costing throughput; what it buys is that one route cannot hold the database while everything
-// else waits. It is a per-process limit, like every other limit here: two processes serve twice
-// as many, and each is held to what one box can serve.
-const HeavyReadLaneLimit = 3
+// else waits.
+//
+// It grows with the processors because the measurement that fixed it at three was of a
+// three-processor box: on the full-size copy (packages/envoy/loadtest/cluster, a 16-processor
+// Dispatch on a 16 vCPU database), a lane held at three refused requests at half the load, after
+// the burst had gone, that the copy had the processors to serve, and failed the recovery's 99%
+// on those refusals alone (INFRA-592, cluster run lt-20261105t223939-4a7a). MaxHeavyReadLane is
+// the read class's own cap shared among the four lanes, so the heavy reads together can never hold
+// more than the reads a process admits at all (MaxReadLimit).
+func heavyReadLaneLimit(procs int) int {
+	return perCPULimit(procs, heavyReadsPerCPU, MaxHeavyReadLane)
+}
+
+// heavyReadsPerCPU is each heavy read lane's width per processor (heavyReadLaneLimit).
+const heavyReadsPerCPU = 1
+
+// MaxHeavyReadLane is the widest a heavy read lane grows: the read class's cap over the four lanes.
+const MaxHeavyReadLane = MaxReadLimit / int(laneCount-1)
 
 // laneGate is one lane's limit and its queue: as a class's gate, but with a lane's own mutex,
 // since a lane is taken before the classes and holds none of their units while it waits. Its

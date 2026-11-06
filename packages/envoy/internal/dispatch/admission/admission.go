@@ -223,9 +223,9 @@ type Limits struct {
 	// to Total.
 	ReservedReads int
 	// HeavyReadLane is how many requests of one heavy read route may run at once
-	// (HeavyReadLaneLimit, lane.go); zero and below are one. The lanes are the same width:
-	// each of them is one route's hold on the database, and the measurement that sized them
-	// sized them together.
+	// (heavyReadLaneLimit, lane.go: one a processor, at most MaxHeavyReadLane); zero and below
+	// are one. The lanes are the same width: each of them is one route's hold on the database,
+	// and the measurement that sized them sized them together.
 	HeavyReadLane int
 }
 
@@ -238,7 +238,7 @@ func DefaultLimits() Limits {
 	return Limits{
 		Read: readLimit(procs), Write: writeLimit(procs), Total: MaxAdmittedUnits,
 		ReservedReads: ReservedReadUnits, ReadWait: DefaultReadWait, WriteWait: DefaultWriteWait,
-		HeavyReadLane: HeavyReadLaneLimit,
+		HeavyReadLane: heavyReadLaneLimit(procs),
 	}
 }
 

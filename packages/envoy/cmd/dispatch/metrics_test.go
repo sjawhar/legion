@@ -136,7 +136,7 @@ func TestTheMetricsEndpointListsEverySeriesForEveryOpenPool(t *testing.T) {
 		`dispatch_http_in_flight{class="read"} 0`, `dispatch_http_in_flight{class="write"} 0`,
 		`dispatch_http_queued{class="read"} 0`, `dispatch_http_queued{class="write"} 0`,
 		`dispatch_http_lane_in_flight{lane="search"} 0`, `dispatch_http_lane_queued{lane="references"} 0`,
-		`dispatch_http_lane_limit{lane="issue_list"} ` + strconv.Itoa(admission.HeavyReadLaneLimit) + "\n",
+		`dispatch_http_lane_limit{lane="issue_list"} ` + strconv.Itoa(admission.DefaultLimits().HeavyReadLane) + "\n",
 		`dispatch_http_lane_refused_total{lane="issue_artifacts",reason="queue_full"} 0`,
 		`dispatch_http_lane_refused_total{lane="search",reason="wait_exceeded"} 0`,
 		`dispatch_http_refused_total{class="read",reason="queue_full"} 0`, `dispatch_http_refused_total{class="write",reason="wait_exceeded"} 0`,

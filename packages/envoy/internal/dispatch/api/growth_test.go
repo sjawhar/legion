@@ -687,15 +687,18 @@ func TestAnchorMarksCannotGrowALiveDocumentPastWhatItsMarksMayCarry(t *testing.T
 }
 
 // A settlement that withholds returned answers from their blocks still completes: the document
-// stops owing a settlement. Twenty-four asks answered with 900 KB each have their blocks deleted,
-// then all return in one edit; the document has no room for the answers, so settlement writes back
-// who answered each and withholds the text. Its own write must not read as the document moving
+// stops owing a settlement. Forty asks answered at the answer bound (contracts.DispatchEventBodyMax,
+// about 32 KB of prose each, 1.25 MB together) have their blocks deleted, then all return in one
+// edit; the document has no room for every answer, so settlement writes back who answered each and
+// withholds the text of those that do not fit. Its own write must not read as the document moving
 // under it: a settlement that re-reads for its own write until its re-read bound leaves the
-// document owed for good, and every later trigger does the same.
+// document owed for good, and every later trigger does the same. (The test once answered 24 asks
+// with 900 KB each; the answer bound main has carried since #2679 refuses that, and 40 at the bound
+// are still more than the 1 MiB document can take back.)
 func TestASettlementThatWithholdsReturnedAnswersCompletes(t *testing.T) {
 	handler, database := blockAskHandler(t)
-	const asks = 24
-	prose := strings.Repeat("word ", 180_000)
+	const asks = 40
+	prose := answerAtBound()
 	var spec, blocks strings.Builder
 	spec.WriteString("Before sentinel.\n")
 	for index := range asks {
