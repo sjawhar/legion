@@ -96,10 +96,10 @@ type Runtime interface {
 	ProvisionsWorkspaces() bool
 	// ProvisionBound is how much longer a launch may run before its agent's own process has even
 	// started: zero for a runtime whose process starts the agent at once (tmux), and the Sandbox
-	// runtime's own init-container budget (its two clones' bounds together) for a launch whose pod runs
-	// provisioning first, which that runtime's wait for the pod's launcher allows past its boot
-	// timeout. The supervisor also adds it to the registration deadline's base
-	// Boot×RegistrationIntervals bound while a claim is still StateLaunching.
+	// runtime's own init-container budget (its two clones' and the issue's checkout's bounds
+	// together) for a launch whose pod runs provisioning first, which that runtime's wait for the
+	// pod's launcher allows past its boot timeout. The supervisor also adds it to the registration
+	// deadline's base Boot×RegistrationIntervals bound while a claim is still StateLaunching.
 	ProvisionBound() time.Duration
 	// LaunchBound is the longest one launch try — one Spawn or Resume call — may run on the
 	// runtime's own account before the runtime ends it with an error, so a try that never answers
