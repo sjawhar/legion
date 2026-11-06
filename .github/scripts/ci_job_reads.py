@@ -176,8 +176,6 @@ CLAUDE_ENVOY_BUILD = reads(
         (".claude-plugin/marketplace.json", "packages/claude-envoy/tests/envoy-channel-server.test.ts:7"),
         (".github/scripts/check-private-names.sh", "packages/claude-envoy/scripts/verify-build.sh checks the build with it"),
         (".github/scripts/release-push.sh", "packages/claude-envoy/scripts/verify-build.sh runs its check-built; the job runs its extract-built"),
-        (".github/workflows/claude-envoy-rebuild.yaml",
-         "packages/claude-envoy/tests/build-inputs.test.ts holds its on.push.paths to the files scripts/build-inputs.txt matches"),
 )
 
 
@@ -662,6 +660,7 @@ STALL = "envoy-session-stall"
 STALL_CLIENT = "Stall test of envoy-client's NATS connection options"
 LOADTEST_RUN_STEP = "One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)"
 LOADTEST_LOCK = "Lock test for loadtest/common.sh (inherited lock, refusals, holders in another PID namespace; no stack)"
+FOLD_CHECK_STEP = "Check every changelog fragment renders"
 CHECK_STEP = "Check every CI filter matches every file its job reads"
 COPY_STEP = "Copy every image the package does not hold"
 PACKAGE_STEP = "Check the package holds every row of .github/ci-images.yaml"
@@ -722,8 +721,10 @@ GATES = [
         (".github/actions/install-uv/**", at("test", "./.github/actions/install-uv")),
         (f"{DAEMON}/docker/worker.Dockerfile", ".github/actions/install-uv/action.yml:16-17 ARG UV_VERSION/UV_SHA256"),
         (".github/actions/install-changie/**", at("test", "./.github/actions/install-changie")),
-        ("packages/pi-legion/.changie.yaml", ".github/scripts/changelog-fold.test.sh:56 copies it"),
-        ("packages/pi-legion/CHANGELOG.md", ".github/scripts/changelog-fold.test.sh:56 copies it"),
+        ("packages/pi-legion/.changie.yaml", ".github/scripts/release-push.test.sh's \"Case: fold-notes renders a package with the shipped packages/pi-legion/.changie.yaml\" copies it"),
+        (".github/changelog-packages", f"{at('test', FOLD_CHECK_STEP)}: the step reads it as the package list"),
+        ("packages/*/.changie.yaml", f"{at('test', FOLD_CHECK_STEP)}: fold-check renders each listed package's fragments with that package's own changie configuration"),
+        ("packages/*/.changes/unreleased/**", f"{at('test', FOLD_CHECK_STEP)}: fold-check renders every fragment a listed package holds"),
         (".github/actions/pull-test-images/**", at("test", "Pull the NATS test container images")),
         (f"{DAEMON}/internal/testnats/nats.go", f"{at('test', 'Pull the NATS test container images')} const Image"),
         (f"{ENVOY}/internal/testnats/nats.go", f"{at('test', 'Pull the NATS test container images')} const HubImage"),

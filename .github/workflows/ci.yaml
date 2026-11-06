@@ -565,7 +565,8 @@ jobs:
               - 'packages/daemon/**'
               - *daemon_envoy_deps
             # The claude-envoy job, and the test job's verify-build step, which runs the same
-            # command (packages/claude-envoy/scripts/verify-build.sh).
+            # command (packages/claude-envoy/scripts/verify-build.sh), as release.yaml's
+            # claude_envoy_build does.
             claude_envoy: &claude_envoy
               - '.github/workflows/ci.yaml'
               # .bun-version is also read by scripts/build.ts:23: the build depends on the Bun it
@@ -593,11 +594,10 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
               - 'skills/**'
               - 'scripts/third-party-notices.ts'
-              # tests/envoy-channel-server.test.ts:7 holds the marketplace entry to no version.
+              # tests/envoy-channel-server.test.ts holds the marketplace entry to this package's
+              # own name, to no `version` of its own, and to a source range that leaves out the
+              # 0.0.0 placeholder and admits the first release.
               - '.claude-plugin/marketplace.json'
-              # tests/build-inputs.test.ts holds the rebuild's on.push.paths to the files
-              # scripts/build-inputs.txt matches.
-              - '.github/workflows/claude-envoy-rebuild.yaml'
             # The daemon's tests (every package once: the four concurrent packages under the race
             # detector, the rest in the plain step, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
@@ -606,7 +606,7 @@ jobs:
               - *bun_install
               - *biome
               - *daemon_go_tests
-              # Its verify-build step builds and checks the Claude Code plugin as main's rebuild does.
+              # Its verify-build step builds and checks the Claude Code plugin as the release does.
               - *claude_envoy
               # scripts/e2e/lib/held-port.test.ts:45 builds the real envoy-listener.
               - *listener_command
@@ -634,9 +634,13 @@ jobs:
               - '.github/actions/install-uv/**'
               - '.github/actions/install-changie/**'
               - '.github/actions/pull-test-images/**'
-              # changelog-fold.test.sh copies pi-legion's changie config and changelog (its line 53).
-              - 'packages/pi-legion/.changie.yaml'
-              - 'packages/pi-legion/CHANGELOG.md'
+              # The fold-check step renders every fragment of every package
+              # .github/changelog-packages lists, each with its own changie configuration;
+              # release-push.test.sh's "Case: fold-notes renders a package with the shipped
+              # packages/pi-legion/.changie.yaml" copies that configuration and renders it.
+              - '.github/changelog-packages'
+              - 'packages/*/.changie.yaml'
+              - 'packages/*/.changes/unreleased/**'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read. docs-site.yaml holds those steps, and
             # both the docs job here and docs-pages.yaml's build job call it. docs-pages.yaml
@@ -1352,8 +1356,8 @@ jobs:
               - '!packages/envoy/infra/**'
               # Changelog fragments, which the packages above match and no build reads: .dockerignore
               # leaves them out of the context, so a pull request that only writes a changelog entry
-              # builds no worker image, and the fold that removes a package's last fragment leaves
-              # no pattern here matching nothing.
+              # builds no worker image, and a fragment stays where it was written, so no pattern
+              # here matches nothing.
               - '!packages/*/.changes/**'
             # lint's notices step: the Go packages it loads for every release target (`legion`,
             # the listener, the agent-secrets binaries and client, every envoy-infra command), the
@@ -1524,12 +1528,12 @@ jobs:
       - name: Check the release workflows keep credentials out of jobs that run dependency code
         run: .github/scripts/check-release-credentials.sh
 
-      # Every package the fold folds is a line of .github/changelog-packages, which the fold reads
-      # too: a fragment of any other package would stay on main unfolded, so it is refused here,
-      # on every pull request, rather than only warned about by the fold on main.
-      - name: Check every changelog fragment belongs to a package the fold folds
+      # Every package whose fragments a release renders is a line of .github/changelog-packages,
+      # which this check reads: a fragment of any other package is rendered nowhere and nothing
+      # would report it, so it is refused here, on every pull request.
+      - name: Check every changelog fragment belongs to a listed package
         run: |
-          # shellcheck disable=SC2046 # the file is the spec list, split on purpose
+          # shellcheck disable=SC2046 # the file is the package list, split on purpose
           .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)
 
       # No setup-go cache: gofmt needs none, and the notices step below keeps its own (go-notices),
@@ -1797,26 +1801,37 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # The very command main's Rebuild Claude Envoy plugin workflow runs in its build job, so a pull
-      # request whose source main's push job would refuse fails this job, and with it the required
-      # ci-ok, instead of merging and then failing every rebuild on main. What it builds and checks:
+      # The very command release.yaml's claude_envoy_build runs, so a pull request whose source
+      # that job would refuse fails this job, and with it the required ci-ok, instead of merging
+      # and then failing every release. What it builds and checks:
       # packages/claude-envoy/scripts/verify-build.sh.
-      - name: Build, check and pack the Claude Code plugin as main's rebuild does
+      - name: Build, check and pack the Claude Code plugin as the release does
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
 
-      # Main's push job decides from scripts/build-inputs.txt whether a moved main changed the build.
+      # release.yaml's $CLAUDE_ENVOY_VERSION_ARGS covers scripts/build-inputs.txt, so a build input
+      # missing from it is one no release bumps a version for.
       - name: Check the Claude Code plugin's build input list covers what the build reads
         run: bun test tests/build-inputs.test.ts
         working-directory: packages/claude-envoy
 
-      - name: Test release scripts
-        run: .github/scripts/release-push.test.sh
-
+      # release-push.test.sh renders its fold-notes cases with the real changie, and the step
+      # below renders this checkout's own fragments with it; where changie is absent, as on a
+      # developer's machine, those cases print a SKIP line and count nothing.
       - uses: ./.github/actions/install-changie
 
-      - name: Test the changelog fold with changie
-        run: .github/scripts/changelog-fold.test.sh
+      # Nothing renders a changelog fragment between the merge and the release that first ships
+      # it, so a fragment changie refuses would fail that release's build job, and every run
+      # after it, until a fix merges. This renders every fragment of every listed package here
+      # instead, inside a required check. It runs in this job rather than beside fold-orphans in
+      # lint because this is the job that installs changie.
+      - name: Check every changelog fragment renders
+        run: |
+          # shellcheck disable=SC2046 # the file is the package list, split on purpose
+          .github/scripts/release-push.sh fold-check $(<.github/changelog-packages)
+
+      - name: Test release scripts
+        run: .github/scripts/release-push.test.sh
 
       - name: Test the release version bump
         run: .github/scripts/release-bump.test.sh
@@ -2975,10 +2990,10 @@ jobs:
       - name: Typecheck Claude Envoy plugin
         run: bun run typecheck
         working-directory: packages/claude-envoy
-      # A pull request never commits dist/ or legion/ (main's Rebuild Claude Envoy plugin workflow
-      # does), so this builds and checks them from the head's source as that workflow's build job
-      # does: packages/claude-envoy/scripts/verify-build.sh.
-      - name: Build, check and pack the plugin as main's rebuild does
+      # Nothing commits dist/ or legion/: release.yaml's claude_envoy_build builds them and packs
+      # them into the tarball it publishes to npm. So this builds and checks them from the head's
+      # source as that job does: packages/claude-envoy/scripts/verify-build.sh.
+      - name: Build, check and pack the plugin as the release does
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
       # The pack step packs the package's own dist/ and legion/ (release-push.sh extract-built).
