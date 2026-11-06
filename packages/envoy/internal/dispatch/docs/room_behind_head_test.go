@@ -1577,13 +1577,34 @@ type recordedClasses struct {
 	classes []recordedClass
 }
 
-// recordedClass is the class the room recorded for one update and the origin the room applied
-// that update with; found is false when the room recorded none for it.
+// recordedClass is what the room recorded for one update, kept as the six facts its readers
+// decide on: origin, a label for the origin the room applied the update with -
+// publishedWriteClass for a *liveWriteOrigin, the string itself for a string origin, and the
+// origin's type otherwise; marginOnly, that *liveWriteOrigin's own tag (false for every other
+// origin); found, false when the room recorded no class for the update; and contentChanged,
+// durable and credited (class.credit != nil) from the class it recorded.
+//
+// The record keeps no pointer into the write or the room. An origin kept would keep the write's
+// forked document (liveWriteOrigin.shadow.doc), and a documentUpdateClass kept would keep two
+// *UpdateCredit values, each of which holds a *Service, along with a cursor and the update's
+// bytes. The slice grows for the whole life of each side's flows, so every pointer in it is
+// memory the test binary never gives back (dispatch://INFRA-1085).
 type recordedClass struct {
-	origin any
-	class  documentUpdateClass
-	found  bool
+	origin         string
+	marginOnly     bool
+	found          bool
+	contentChanged bool
+	durable        bool
+	credited       bool
 }
+
+// publishedWriteClass is the label recordedClass.origin carries for a *liveWriteOrigin, written
+// by the recorder and read by every matcher that asks for a published write, so a rewording moves
+// all of them at once. It is this wording rather than describeOrigin's "live write"
+// (nil_origin_credit_test.go) because margin_equivalence_compare_test.go builds each class's text
+// from recordedClass.origin, and that text is compared against fixtures this change leaves byte
+// for byte unchanged.
+const publishedWriteClass = "a published write"
 
 // recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
 // have loaded before the recorder was there, so the room it returns is read.
@@ -1597,11 +1618,22 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 			return err
 		}
 		doc.OnUpdate(func(update []byte, origin any) {
-			read := recordedClass{origin: origin}
+			var read recordedClass
+			switch published := origin.(type) {
+			case *liveWriteOrigin:
+				read.origin, read.marginOnly = publishedWriteClass, published.marginOnly
+			case string:
+				read.origin = published
+			default:
+				read.origin = fmt.Sprintf("%T", origin)
+			}
 			if state := service.lockExistingState(room); state != nil {
 				for _, class := range state.updateClasses {
 					if bytes.Equal(class.update, update) {
-						read.class, read.found = class.documentUpdateClass, true
+						read.found = true
+						read.contentChanged = class.contentChanged
+						read.durable = class.durable
+						read.credited = class.credit != nil
 						break
 					}
 				}
@@ -1622,23 +1654,23 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 	return recorded, service.srv.GetDoc(artifactID)
 }
 
-// latest is the class the room recorded for the latest update it applied with an origin matches
-// accepts, failing the test when it applied none or recorded no class for it.
-func (r *recordedClasses) latest(t *testing.T, what string, matches func(origin any) bool) documentUpdateClass {
+// latest is the record the room left for the latest update it applied that matches accepts,
+// failing the test when it applied none or recorded no class for it.
+func (r *recordedClasses) latest(t *testing.T, what string, matches func(recordedClass) bool) recordedClass {
 	t.Helper()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for index := len(r.classes) - 1; index >= 0; index-- {
-		if !matches(r.classes[index].origin) {
+		if !matches(r.classes[index]) {
 			continue
 		}
 		if !r.classes[index].found {
 			t.Fatalf("the room recorded no class for %s", what)
 		}
-		return r.classes[index].class
+		return r.classes[index]
 	}
 	t.Fatalf("the room never applied %s", what)
-	return documentUpdateClass{}
+	return recordedClass{}
 }
 
 // keptAndFreshRendering is the markdown the resident room's rendered replica keeps for the room's
@@ -1713,9 +1745,8 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 		t.Fatal("task A's room was replaced, so the publish did not reach the room this test arranged")
 	}
 
-	published := classes.latest(t, "the published margin write", func(origin any) bool {
-		_, ok := origin.(*liveWriteOrigin)
-		return ok
+	published := classes.latest(t, "the published margin write", func(c recordedClass) bool {
+		return c.origin == publishedWriteClass
 	})
 	if published.contentChanged {
 		t.Error("the room recorded the margin write's publish as a content change, though it changed no text in the room")
@@ -1744,7 +1775,7 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 	if err := crdt.ApplyUpdateV1(room, note, "peer"); err != nil {
 		t.Fatalf("apply the browser's margin note to the room: %v", err)
 	}
-	if class := classes.latest(t, "the browser's margin note", func(origin any) bool { return origin == "peer" }); class.contentChanged {
+	if class := classes.latest(t, "the browser's margin note", func(c recordedClass) bool { return c.origin == "peer" }); class.contentChanged {
 		t.Error("the room recorded a browser's margin note as a content change: it measured the note against a rendering that was not the room's")
 	}
 }
@@ -1803,16 +1834,14 @@ func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *t
 	if kept != fresh {
 		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
 	}
-	margin := classes.latest(t, "the margin write's publish", func(origin any) bool {
-		published, ok := origin.(*liveWriteOrigin)
-		return ok && published.marginOnly
+	margin := classes.latest(t, "the margin write's publish", func(c recordedClass) bool {
+		return c.origin == publishedWriteClass && c.marginOnly
 	})
 	if margin.contentChanged {
 		t.Error("the room recorded the margin write's publish as a content change")
 	}
-	edit := classes.latest(t, "the text edit's publish", func(origin any) bool {
-		published, ok := origin.(*liveWriteOrigin)
-		return ok && !published.marginOnly
+	edit := classes.latest(t, "the text edit's publish", func(c recordedClass) bool {
+		return c.origin == publishedWriteClass && !c.marginOnly
 	})
 	if !edit.contentChanged {
 		t.Error("the room recorded the text edit's publish, which deleted \"Second.\", as no content change")
