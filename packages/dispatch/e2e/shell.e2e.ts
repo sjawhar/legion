@@ -19,9 +19,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a transient whoami failure shows a retry banner and keeps the app, not the sign-in page @phone", async ({
+test("a transient whoami failure shows a retry banner and keeps the app, not the sign-in page", async ({
   browser,
-}, testInfo) => {
+}) => {
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
@@ -42,9 +42,6 @@ test("a transient whoami failure shows a retry banner and keeps the app, not the
   await page.unroute("**/auth/whoami");
   await page.getByRole("button", { name: "Retry" }).click();
 
-  if (testInfo.project.name === "iphone") {
-    await page.getByRole("button", { name: "Open navigation" }).click();
-  }
   await expect(page.getByText("Signed in as alice")).toBeVisible();
 
   await context.close();
@@ -59,7 +56,7 @@ test("a transient whoami failure shows a retry banner and keeps the app, not the
 // page asks again while whoami answers that code, and opens once it answers.
 test("a page asks whoami again while it answers EVENT_HEAD_UNAVAILABLE, and opens once it answers", async ({
   browser,
-}, testInfo) => {
+}) => {
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   // The page asks again on a timer of its own - 500 ms doubling to the ceiling
@@ -89,9 +86,7 @@ test("a page asks whoami again while it answers EVENT_HEAD_UNAVAILABLE, and open
     await expect.poll(() => refused).toBeGreaterThanOrEqual(ask);
     await page.clock.fastForward(EVENT_HEAD_RETRY_CEILING_MS);
   }
-  if (testInfo.project.name === "iphone") {
-    await page.getByRole("button", { name: "Open navigation" }).click();
-  }
+
   await expect(page.getByText("Signed in as alice")).toBeVisible();
   expect(refused).toBe(refusals);
 
@@ -141,15 +136,12 @@ test("a page stops on Couldn't reach Dispatch. while whoami answers EVENT_HEAD_R
   await context.close();
 });
 
-test("signing out revokes the session on the server and returns to the sign-in page @phone", async ({
+test("signing out revokes the session on the server and returns to the sign-in page", async ({
   browser,
-}, testInfo) => {
+}) => {
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   await page.goto("/");
-  if (testInfo.project.name === "iphone") {
-    await page.getByRole("button", { name: "Open navigation" }).click();
-  }
   await expect(page.getByText("Signed in as alice")).toBeVisible();
   const session = (await context.cookies()).find((cookie) => cookie.name === sessionCookieName);
   if (session === undefined) {
@@ -753,31 +745,23 @@ async function seedManyProjects(count: number): Promise<void> {
 // The sidebar's footer holds Sign out, and the navigation above it grows with the project list.
 // A column that is only as tall as the viewport at its minimum pushes the footer and the lower
 // links off the bottom of the screen, where a reader reaches them only by scrolling to the end
-// of the page - or, on a phone, not at all, because the drawer is fixed to the viewport.
-test("the sidebar scrolls, so Sign out is reachable with a navigation taller than the viewport @phone", async ({
+// of the page.
+test("the sidebar scrolls, so Sign out is reachable with a navigation taller than the viewport", async ({
   browser,
-}, testInfo) => {
+}) => {
   await seedManyProjects(17);
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  const compact = testInfo.project.name !== "chromium";
 
   try {
-    if (compact) {
-      await page.setViewportSize({ height: 390, width: 844 });
-    } else {
-      await page.setViewportSize({ height: 720, width: 1280 });
-    }
+    await page.setViewportSize({ height: 720, width: 1280 });
     await page.goto("/");
 
-    if (compact) {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
     const signOut = page.getByRole("button", { name: "Sign out" });
     await expect(signOut).toBeAttached();
     // The rail is its own scroll container: the footer comes into view by scrolling the rail,
     // and the page itself never moves, so the footer is never left past the end of a long
-    // issue, reachable only by scrolling the document to its end - or, in the drawer, not at all.
+    // issue, reachable only by scrolling the document to its end.
     await signOut.scrollIntoViewIfNeeded();
     await expect(signOut).toBeInViewport();
     expect(await page.evaluate(() => window.scrollY)).toBe(0);

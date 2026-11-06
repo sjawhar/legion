@@ -1481,8 +1481,8 @@ comment covers, and on a comment whose every row came in well under that. Run it
 over a one-worker report of the files you changed, since four workers inflate a
 row by the contention of its neighbours rather than by its own work. A marker is
 earned by a row that reached three quarters of the threshold, not only by one
-that crossed it: four of the eight rows of `coverage.e2e.ts`, `plan-tab.e2e.ts`
-and `verification.e2e.ts` sit between 1.5 and 2.7 seconds, where the machine
+that crossed it: rows of `coverage.e2e.ts`, `plan-tab.e2e.ts` and
+`verification.e2e.ts` sit between 1.5 and 2.7 seconds, where the machine
 decides which side of the bar they land, and without that band such a row fails
 the check bare on a slow run and marked on a fast one. A row's own cost is what
 it proves: most of a short row is the floor every row pays, measured in an issue
@@ -1499,7 +1499,10 @@ clear-on-send check). Second, when something other than the assertion decides wh
 a login's casing - make that selector an assertion too, then lapse the property once and confirm the assertion
 fires, since a selector check that cannot fire only looks like a guard. The one exception is a Playwright
 project's `grep`: `webkit-iphone`'s title `grep` falls back on the one-time manual check beside that project
-below, and `iphone`'s `@phone` tag `grep` on the `--list` check under "Phone acceptance".
+below, and the `@phone`, `@webkit` and `@firefox` tag `grep`s of `iphone`, `webkit` and `firefox` on the
+`--list` check under "Phone acceptance", on the comment beside each tagged row naming the behaviour it
+exercises, and on `e2e/__tests__/row-configurations.test.ts`, which refuses a row that runs twice in one
+engine, viewport, origin and server-process count.
 
 `run-server.sh` builds the server with the caller's `go`, in the caller's
 environment, and execs the binary with every server
@@ -1984,18 +1987,19 @@ and holds the body it applies to `after.json`. It also checks that the probe reo
 after a 4001, its second subscribe arriving within 500 ms of the close, and within the first
 attempt's spread after a 1012 (`RECONNECT_SPREAD_MS`, two seconds).
 
-The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
-`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Every row of
-the live-socket spec runs in every project that lists
-the spec - `chromium`, `iphone`, `firefox` and, in CI, `webkit`: the APIs its rows need
-(`routeWebSocket`, the request events it counts navigations with, `page.clock`) exist in all three
-engines, and what they prove - one socket per tab, an idle page holding no request, a rotation that
-loses no event, a resume from the sign-in check's event head, and a live view keeping the reader's
-place - is each engine's own connection and timer behaviour, so it is proven in each rather than
-once. A reload is counted as a navigation request of the main frame, not a `load` event, since
-Playwright's Firefox fires one for the page's initial `about:blank` and Chromium none. The
-`webkit-iphone` project still takes the one-socket row alone, by title. Where a caret lands beside
+The `webkit` Playwright project runs the rows tagged `@webkit` (`webkitTagged` in
+`e2e/playwright.config.ts`) of `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
+`e2e/heavy-streamed-turn.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
+`e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`, `e2e/keyed-writes.e2e.ts`,
+`e2e/live-socket.e2e.ts`, `e2e/mermaid.e2e.ts` and `e2e/offline-edits.e2e.ts`, 33 rows; the comment
+above the project names each engine behaviour and the rows that exercise it, and a comment above
+each tagged row names which. Every row of the live-socket spec runs in `chromium`, and its one-socket
+row also runs in `firefox`, `webkit` and `webkit-iphone`: a tab holds one live socket in every
+engine, which is the one live-socket behaviour the config documents per engine. The APIs its rows
+need (`routeWebSocket`, the request events it counts navigations with, `page.clock`) exist in all
+three engines. A reload is counted as a navigation request of the main frame, not a `load` event,
+since Playwright's Firefox fires one for the page's initial `about:blank` and Chromium none. The
+`webkit-iphone` project takes the one-socket row alone, by title. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`), which holds only because every engine
@@ -2004,27 +2008,30 @@ its arrows and type-ahead rows, each committed by Enter and driven through `page
 step commit at once in an engine that moved to the queued task, so it runs here and in `firefox` as well as in
 Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a click run in the same engines,
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
-send still name one issue. So do its rows on a message in flight (the picker and Reply held, no sent text back in
-the composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still
-named, marked closed). `e2e/keyboard-session-pickers.e2e.ts` runs here and in `firefox` for the same
+send still name one issue. Its rows on a message in flight (the picker and Reply held, no sent text back in the
+composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still named,
+marked closed) carry no engine tag and run in Chromium alone: the config's clause names only the rows that step a
+select from the keyboard or leave one without Enter. All five rows of `e2e/keyboard-session-pickers.e2e.ts` run
+here and in `firefox` for the same
 reason: the live view's header model and thinking pickers keep the same rule (`useKeySteps` in
 `SessionSettings.tsx`), and its arrows, type-ahead, Tab, click and held-picker rows would see a step
 switch the session at once in an engine that moved `change` to the queued task. The project selects
-every listed spec by file name, not title, so renaming
-a row cannot drop it. The offline-edits rows exercise browser-held IndexedDB updates and the
+by the tag in the title, so a row that loses the tag drops out with no failure: after writing or
+renaming one, run `bunx playwright test --config e2e/playwright.config.ts --project=webkit --list`
+and check that it is listed. The three tagged offline-edits rows exercise browser-held IndexedDB updates and the
 WebSocket acknowledgement flow in WebKit as they do in Firefox and Chromium. The keyed write path
-(`e2e/keyed-writes.e2e.ts`, `e2e/keyed-send.e2e.ts`) runs here and in `firefox` as well: each engine
-fails a request whose network is down, aborts one the page gives up on, reads an upload's answer (an
-answer Dispatch wrote with the body still coming, then closed on, reached WebKit as `Error sending
-data: Broken pipe` and Firefox as `NS_ERROR_NET_RESET` until Dispatch drained the body first, which
-the 20 MB in-flight upload row holds), keeps a tab's `sessionStorage` across a reload, asks before it
-unloads and tells its other tabs of a sign-out in its own way, and a write has to land once through
-every one of them. Its throttled-upload row skips outside Chromium, the one engine whose DevTools
-protocol paces a page's own upload; the in-flight upload row runs everywhere and is throttled only
-there.
+(five rows of `e2e/keyed-writes.e2e.ts`, two of `e2e/keyed-send.e2e.ts`) runs here and in `firefox`
+as well: each engine fails a request whose network is down, aborts one the page gives up on, reads an
+upload's answer (an answer Dispatch wrote with the body still coming, then closed on, reached WebKit
+as `Error sending data: Broken pipe` and Firefox as `NS_ERROR_NET_RESET` until Dispatch drained the
+body first, which the 20 MB in-flight upload row holds), keeps a tab's `sessionStorage` across a
+reload and asks before it unloads in its own way, and a write has to land once through every one of
+them. Its throttled-upload row carries no engine tag and skips outside Chromium, the one engine
+whose DevTools protocol paces a page's own upload; the in-flight upload row runs in all three
+engines and is throttled only in Chromium.
 CI installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
 
-The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for two
+The `webkit` and `firefox` projects run six rows of `e2e/deep-links.e2e.ts`, tagged for two
 reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
 before it is still loading its document has to open the link rather than reload that page
 (`installChunkFailureRecovery`); the row that holds the first page's `yjs` chunk makes that case deterministic in
@@ -2034,8 +2041,9 @@ events and Suspense reveals. It reads a press in the document as the reader only
 margin shows has reported a visible layout: the previous route's editor stays mounted, hidden behind the next page's
 loading view, with its own layout reported, until that page's code arrives; and an issue's Spec editor or live editor
 stays registered while Conversation or a historical version hides it, but withdraws its report until it is shown
-again. The cross-document row runs once with `IssuePage`'s chunk held and once with the issue page shown while the
-document transport is held, so each state is pinned rather than raced. The hold tells a relayout's own scroll from the
+again. The cross-document row, which runs in Chromium alone, runs once with `IssuePage`'s chunk held and once with the
+issue page shown while the document transport is held, so each state is pinned rather than raced. The hold tells a
+relayout's own scroll from the
 reader's by counting rendering frames, not milliseconds, since a busy page can deliver a clamp's scroll after a long
 task (CI's WebKit did), and a text change in the margin opens that window too: a `dispatch://` reference resolving to
 its title can resize an ask card and make Firefox or WebKit anchor the margin's scroll.
@@ -2044,17 +2052,17 @@ The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four row
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
-The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
-`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`, and
-`e2e/picture-link-click.e2e.ts`: Firefox's native editing puts text
+The `firefox` Playwright project runs the rows tagged `@firefox` (`firefoxTagged` in
+`e2e/playwright.config.ts`), 33 rows: the same rows of the same specs as `webkit` but
+`e2e/collab-cursor.e2e.ts`'s, and the rows of `e2e/code-line-replace.e2e.ts` and
+`e2e/picture-link-click.e2e.ts`. Firefox's native editing puts text
 typed over a code block's last line before that line's newline, and deletes a paragraph's hard break
 along with the text after it, which Chromium and WebKit never do, so that spec is the one that needs
-a second engine; the two picker specs, the deep-links spec, the two keyed specs and the live-socket
-spec run for the reasons given under `webkit` above; and a click on a link inside the editor meets
-the engine's focus rule — Firefox focuses the editing host, not the link — so the picture view's
-fallback link is clicked there too. CI installs Firefox beside Chromium for them (`bun run
-e2e:install` does the same locally).
+a second engine; the picker, deep-link, keyed, live-socket, offline-edits, mermaid and streamed-turn
+rows run for the reasons given under `webkit` above and in the comment above the project; and a
+click on a link inside the editor meets the engine's focus rule — Firefox focuses the editing host,
+not the link — so the picture view's fallback link is clicked there too. CI installs Firefox beside
+Chromium for them (`bun run e2e:install` does the same locally).
 
 The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and
 `e2e/plain-http-proxy.e2e.ts`, selected by file name: Chromium maps `dispatch-e2e.test` to
@@ -2126,63 +2134,82 @@ review panel, and answer an open ask in Waiting on you.
 
 A phone width here is one under 768 px, where `PHONE_VIEWPORT_QUERY`
 (`(max-width: 767px)`, `web/src/features/shell/useDialog.ts`) matches; a desktop
-width is 768 px or wider, the compact layout below 1280 px included. The rules
-below apply only to a test that `iphone` can run at its own viewport. A test
-stays untagged, whatever its title says, when it:
+width is 768 px or wider, the compact layout below 1280 px included.
+
+**The tag follows the assertion, not the branch.** A test takes `@phone` when
+the phone viewport can change what the test asserts. A test that only reaches
+the same control by another route under `iphone` — opening the drawer to click
+a link the desktop layout shows outright — asserts the same thing in both
+projects, so the second run proves nothing and the tag goes. The tag costs a
+whole second execution of the row: 291 of the suite's 1,609 executions were
+`iphone` repeats, 932 of its 5,362 row-seconds, measured in run 42109191535.
+An untagged row that should carry the tag costs the one claim the phone
+viewport would have broken. So where the two readings differ, write the row
+that asserts the phone claim rather than tagging the row that does not.
+
+A test takes the tag when it:
+
+- **R1** asserts a layout, overflow or wrap claim the viewport decides:
+  `assertPageFits`, a `scrollWidth`/`clientWidth` overflow check,
+  `viewportSize()`, `innerWidth`/`innerHeight`, a width or a count of lines it
+  reads off the page — unless it first sets a fixed viewport for every project,
+  where `iphone` would only repeat that same width.
+- **R2** asserts a touch claim: `tap()`, `page.touchscreen`, `e2e/touch.ts`,
+  `hasTouch`, `isMobile`, or a 44 px touch target.
+- **R3** asserts a phone-only surface as the thing it checks — the navigation
+  drawer, the margin's bottom sheet, the phone Thread dialog — rather than
+  passing through it to reach a control.
+- **R4** runs only on the phone (it skips every project but `iphone`), or is in
+  a file named for the phone (`phone*.e2e.ts`).
+
+A test stays untagged, whatever its title says, when it:
 
 - skips every project but `chromium`
   (`test.skip(project.name !== "chromium", …)`) or every project but
   `webkit-iphone`;
-- sets a desktop width for every project before it checks anything and never
-  reaches a phone width, so `iphone` would only repeat the desktop run, and a
-  phone branch (`setSheet`, `openedThreadCard`) would find no phone layout; or
+- sets a desktop width, or any fixed width, for every project before it checks
+  anything, so `iphone` would only repeat that run;
 - starts at the project's own width expecting a desktop one and then narrows
-  the window itself, so under `iphone` it would start from the wrong layout.
+  the window itself, so under `iphone` it would start from the wrong layout; or
+- branches on the project only to reach a control — `setSheet`,
+  `openedThreadCard` (`e2e/editor.ts`), a drawer opened on the way to a link —
+  and then asserts what both layouts assert.
 
 Such a test passes `"chromium"` rather than the project name to a helper that
-branches on it. A test that skips every project but `iphone` is always tagged
-(R5), whatever widths it sets. Any other test takes the tag when, under
-`iphone`, it takes a phone-only path. That is, it:
+branches on it.
 
-- **R1** chooses what to do by which project runs it, and `iphone` takes
-  another branch than `chromium`, directly, in a hook, or in a helper it calls:
-  `=== "iphone"`, `!== "iphone"`, a `"chromium"` test used as a layout switch
-  (an empty desktop-only block included), `PHONE_PROJECTS` or
-  `READING_PROJECTS` membership, a project-dependent value (`1280 : 390`,
-  `44 : 32`), `setSheet` and `openedThreadCard` (`e2e/editor.ts`), or a
-  file-local helper that takes the project or `isPhone`. The project name used
-  only in a file name, attachment name or seed namespace does not count.
-- **R2** branches on what the page shows where the phone layout decides it: the
-  Thread dialog or the margin card, a drawer menu button's visibility.
-- **R3** reads the window's size or checks the page against it
-  (`viewportSize()`, `innerWidth`/`innerHeight`, a `scrollWidth`/`clientWidth`
-  overflow check, `assertPageFits`), unless it first sets a fixed viewport for
-  every project.
-- **R4** uses touch: `tap()`, `page.touchscreen`, `e2e/touch.ts`, `hasTouch`,
-  `isMobile`.
-- **R5** runs only on the phone (it skips `chromium`), or is in a file named for
-  the phone (`phone*.e2e.ts`).
-- **R6** says in its title or its own comments that it covers the phone layout
-  (a phone, the drawer, the bottom sheet, 390 px).
+When a row walks a data table and makes one narrow-screen claim at the end,
+split that claim into a row of its own and tag that row, rather than tagging
+the walk: the walk is the same work in both projects.
 
-Once the exceptions above are ruled out, when unsure, tag it: an extra phone
-test costs CI minutes, and a missing one loses the phone coverage. Write the
-tag at the end of the title,
-`test("a reply opens the Thread dialog @phone", …)`, or at the end of a
+When unsure, do not tag: read what the row asserts, and write the phone claim
+as its own row where the phone can break it. Write the tag at the end of the
+title, `test("a reply opens the Thread dialog @phone", …)`, or at the end of a
 `test.describe` title when every test inside it qualifies. Playwright reads an
 `@word` in a title as a tag; the title form keeps the call at two arguments, so
 Biome does not re-indent the body as it does for a `{ tag }` details argument.
-A user-agent path (the Mac keymap that the iPhone user agent also takes) is not
-a phone-only path. An untagged test needs no
-`test.skip(project.name === "iphone", …)`, since `iphone` no longer runs it:
-drop the skip. A `!== "chromium"` skip stays: it marks a test that one project
-covers (it sets its own viewport, or does not depend on the layout), and it
-keeps that test out of the tag under the first exception above.
+
+A user-agent path is not a phone path. The Mac keymap that the iPhone user
+agent also takes is one: `web/src/features/shell/keymap.ts` reads
+`navigator.userAgent`, so such a row runs in `chromium` with
+`test.use({ userAgent: devices["iPhone 13"].userAgent })` and carries neither
+the tag nor a project skip (`e2e/keyboard-document.e2e.ts`).
+
+An untagged test needs no `test.skip(project.name === "iphone", …)`, since
+`iphone` no longer runs it: drop the skip. Dropping a tag while leaving a
+`test.skip(project.name !== "iphone", …)` leaves a row that runs in no project
+at all — green, and proving nothing — so when a tag goes, every `iphone` branch
+of that row goes with it: the project tests, `PHONE_PROJECTS` and
+`READING_PROJECTS` membership, project-dependent values (`1280 : 390`,
+`44 : 32`), `setSheet` and `openedThreadCard`, and both skips. A `!== "chromium"`
+skip stays: it marks a test that one project covers.
 
 Nothing fails when a phone test lacks the tag: it silently drops out of
 `iphone` and runs only on `chromium`. So after writing or renaming one, run
 `bunx playwright test --config e2e/playwright.config.ts --project=iphone --list`
-and check that it is listed.
+and check that it is listed. `e2e/__tests__/row-configurations.test.ts` is the
+other half: it refuses a row that runs twice in one engine, viewport, origin
+and server-process count.
 
 A retracted ask is withdrawn history: the Inbox and the open-ask badges drop it, and the margin folds it into the `Resolved (N)` toggle beside resolved comment threads. The Conversation lists it like every other conversation, under `All` and under `Closed`; the tab has no `Show retracted` or `Show activity` control of its own. Ask event payloads carry `options` as an array (the server never emits `null`), so the Activity tab and the margin's Pinned tab render `event.payload` as the `Ask` it is.
 

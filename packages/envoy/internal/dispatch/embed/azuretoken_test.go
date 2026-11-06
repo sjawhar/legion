@@ -59,6 +59,7 @@ func testEntra(t *testing.T, fake http.Handler, assertion string) (*EntraTokenSo
 		TenantID:   "test-tenant",
 		ClientID:   "test-client",
 		TokenFile:  tokenFile,
+		Scope:      DefaultEntraScope,
 		Authority:  server.URL + "/",
 		HTTPClient: server.Client(),
 	})
@@ -98,6 +99,35 @@ func TestEntraTokenSourceSendsTheClientCredentialsForm(t *testing.T) {
 		if got := form[field]; len(got) != 1 || got[0] != value {
 			t.Errorf("form %s = %v, want [%s]", field, got, value)
 		}
+	}
+}
+
+// The scope is the caller's: one Azure AI Foundry resource answers on endpoints that accept
+// different scopes, so a source built for one of them asks for that one and not the default.
+func TestEntraTokenSourceAsksForTheScopeItWasGiven(t *testing.T) {
+	fake := &fakeEntra{expiresIn: "3599"}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("assertion"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	source, err := NewEntraTokenSource(EntraConfig{
+		TenantID:   "test-tenant",
+		ClientID:   "test-client",
+		TokenFile:  tokenFile,
+		Scope:      "https://ai.azure.com/.default",
+		Authority:  server.URL,
+		HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewEntraTokenSource: %v", err)
+	}
+	if _, err := source.Token(context.Background()); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if got := fake.form(0)["scope"]; len(got) != 1 || got[0] != "https://ai.azure.com/.default" {
+		t.Errorf("form scope = %v, want [https://ai.azure.com/.default]", got)
 	}
 }
 
@@ -268,7 +298,7 @@ func TestEntraTokenSourceRefusesAnAnswerWithoutALifetime(t *testing.T) {
 }
 
 func TestNewEntraTokenSourceRefusesAMissingSetting(t *testing.T) {
-	valid := EntraConfig{TenantID: "t", ClientID: "c", TokenFile: "/var/run/token"}
+	valid := EntraConfig{TenantID: "t", ClientID: "c", TokenFile: "/var/run/token", Scope: DefaultEntraScope}
 	if _, err := NewEntraTokenSource(valid); err != nil {
 		t.Fatalf("NewEntraTokenSource(a valid config): %v", err)
 	}
@@ -276,6 +306,7 @@ func TestNewEntraTokenSourceRefusesAMissingSetting(t *testing.T) {
 		"no tenant":          func(c *EntraConfig) { c.TenantID = "" },
 		"no client":          func(c *EntraConfig) { c.ClientID = "" },
 		"no token file":      func(c *EntraConfig) { c.TokenFile = "" },
+		"no scope":           func(c *EntraConfig) { c.Scope = "" },
 		"relative authority": func(c *EntraConfig) { c.Authority = "login.example" },
 	} {
 		cfg := valid
@@ -283,5 +314,33 @@ func TestNewEntraTokenSourceRefusesAMissingSetting(t *testing.T) {
 		if _, err := NewEntraTokenSource(cfg); err == nil {
 			t.Errorf("NewEntraTokenSource(%s): want an error, got nil", name)
 		}
+	}
+}
+
+// TestEntraExchangeNeverFollowsARedirect: the exchange posts the federated assertion, which is
+// a credential like any other, so an authority answering 3xx must not have this process send it
+// to another host. The redirect is refused and the exchange fails on the 302; the other host is
+// never called.
+func TestEntraExchangeNeverFollowsARedirect(t *testing.T) {
+	var calls int
+	var gotAssertion string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = r.ParseForm()
+		gotAssertion = r.PostFormValue("client_assertion")
+		_, _ = w.Write([]byte(`{"access_token":"stolen","expires_in":3599}`))
+	}))
+	defer other.Close()
+	redirecting := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/test-tenant/oauth2/v2.0/token", http.StatusFound)
+	})
+	source, _, _ := testEntra(t, redirecting, "federated-assertion")
+
+	_, err := source.Token(context.Background())
+	if calls != 0 {
+		t.Fatalf("the other host served %d exchanges (assertion %q), want none: no redirect is followed", calls, gotAssertion)
+	}
+	if err == nil {
+		t.Fatal("the exchange followed the redirect and answered no error, want the 302 refused")
 	}
 }

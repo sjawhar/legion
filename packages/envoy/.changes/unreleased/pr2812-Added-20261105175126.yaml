@@ -1,0 +1,11 @@
+kind: Added
+body: |-
+  Dispatch's server can be given a text-generation model, and one route answers a question from what Dispatch already holds.
+  `DISPATCH_ANSWERER` chooses where it generates text: `azure`, a chat deployment of an Azure AI Foundry resource, which takes its own endpoint, API version and token scope and shares the tenant, the client id and the federated token file with the embedder, so a deployment may embed on Bedrock and answer on Azure; or `endpoint`, any OpenAI-shaped chat completions service with the bearer token a file holds.
+  With neither configured the server starts and says it cannot answer, and `GET /api/v1/going/capability` says so to any caller it admits, naming no endpoint, deployment or credential.
+  `POST /api/v1/going/requests` records a question and `GET /api/v1/going/requests/{id}/stream` carries the answer's frames as server-sent events; the run's frames are rows, so any pod serves any reader and a reader that drops resumes with `Last-Event-ID`. A run belongs to the credential that asked it, so a credential that names nobody - the deployment's shared token - is refused and records nothing.
+  The answer is at most 120 words and its text carries no link at all: the links of an answer are the `item` frames, each naming something the model was given to read; every link the model wrote reaches the reader as its own visible text, escaped, with the target dropped; and a word a reader's renderer would link on its own - a bare URL, host or email address - is dropped from the answer whole, since escaping closes markdown's own constructs and closes nothing of the links a renderer makes out of plain words. The stream says the answer was changed either way.
+  The `gcp:Dispatch` Pulumi component gains the inputs that name all of it.
+time: 2026-11-05T17:51:26.846865739Z
+custom:
+    Issue: pr2812

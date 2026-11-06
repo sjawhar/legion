@@ -668,7 +668,7 @@ func reconcileGateOff(t *testing.T, pool *pgxpool.Pool) bool {
 	seedRecord(t, pool, func(tx pgx.Tx) error {
 		scoped, _ := intake.WithCommitHooks(context.Background())
 		var err error
-		_, changed, err = engine.ReconcileAwaiting(scoped, tx, "LEGION", []record.Issue{recordedRoot(t, pool)}, nil, nil)
+		_, changed, err = engine.ReconcileAwaiting(scoped, tx, "LEGION", []record.Issue{recordedRoot(t, pool)}, nil)
 		return err
 	})
 	return changed
